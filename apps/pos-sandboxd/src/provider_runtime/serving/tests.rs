@@ -202,16 +202,61 @@ fn assert_refused(
 }
 
 /// Replace the execute leaf with a foreign socket, then wake the acceptor
-/// through the control socket: the next connection gets zero bytes and both
-/// listeners close (invariant 10).
-fn replace_execute_leaf() -> TestResult<UnixListener> {
+/// through the control socket: the acceptor finds the replaced leaf before
+/// it accepts, and both listeners close (invariant 10). The replacement and
+/// the waking connection, which [`assert_unanswered`] checks once the
+/// listeners are gone.
+fn replace_execute_leaf() -> TestResult<(UnixListener, UnixStream)> {
     fs::remove_file(EXECUTE)?;
     let replacement = UnixListener::bind(EXECUTE)?;
-    let mut woken = UnixStream::connect(CONTROL)?;
-    woken.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    let woken = UnixStream::connect(CONTROL)?;
+    Ok((replacement, woken))
+}
+
+/// Assert that `stream` ends with zero bytes: it is closed or reset, and
+/// does not merely wait.
+fn assert_unanswered(mut stream: UnixStream) -> TestResult {
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
     let mut byte = [0; 1];
-    assert!(!matches!(woken.read(&mut byte), Ok(read) if read > 0));
-    Ok(replacement)
+    match stream.read(&mut byte) {
+        Ok(read) => assert_eq!(read, 0),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+    }
+    Ok(())
+}
+
+/// Assert that `endpoint` answers `bytes` with nothing: a connection closed
+/// with input still unread is reset rather than ended.
+fn assert_silent(endpoint: &str, bytes: &[u8]) -> TestResult {
+    let mut stream = UnixStream::connect(endpoint)?;
+    stream.write_all(bytes)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    assert_unanswered(stream)
+}
+
+/// Bind both endpoints, serve them through `responder` with `pool` while
+/// `check` runs, then end serving through a replaced execute leaf.
+fn while_serving(
+    responder: &Responder<'_>,
+    pool: usize,
+    check: impl FnOnce() -> TestResult,
+) -> TestResult {
+    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
+    let woken = std::thread::scope(|scope| -> TestResult<UnixStream> {
+        let serving = scope.spawn(|| responder.serve(&execute, &control, pool));
+        check()?;
+        let (replacement, woken) = replace_execute_leaf()?;
+        assert_eq!(
+            serving.join().map_err(|_| "the runtime panicked")?,
+            ProviderRuntimeError::UnsafeEndpoint
+        );
+        drop(replacement);
+        Ok(woken)
+    })?;
+    drop((execute, control));
+    assert_unanswered(woken)?;
+    fs::remove_file(EXECUTE)?;
+    Ok(())
 }
 
 /// Steps 1 to 6 for describe, cancel and reconcile.
@@ -605,7 +650,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
     refuses_execute_while_starting(&key, &staged)?;
     // A root control connection is closed with zero bytes.
-    assert!(exchange_at(CONTROL, b"\0\0\0\x01x")?.is_empty());
+    assert_silent(CONTROL, b"\0\0\0\x01x")?;
     // An unfinished frame is cut at the initial control deadline (BHC1
     // limit 16, 2 s in the fixture) and still answered: SPE1 0 with no
     // identities, then EOF (journal 22582).
@@ -625,12 +670,13 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     let trailing = exchange(&[&describe([3; 16], retained)?, b"trailing"])?;
     SandboxDescribeResponse::from_canonical_cbor(unframe(&trailing)?)?.verify_signature(&key)?;
     let runtime = serves_open_without_an_execute_port(&key, retained, &staged, &reconciled)?;
-    let replacement = replace_execute_leaf()?;
+    let (replacement, woken) = replace_execute_leaf()?;
     let replaced = fs::symlink_metadata(EXECUTE)?.ino();
     assert_eq!(
         served.join().map_err(|_| "the runtime panicked")?,
         ProviderRuntimeError::UnsafeEndpoint
     );
+    assert_unanswered(woken)?;
     // Only the leaf that kept its own identity is removed.
     assert_eq!(fs::symlink_metadata(EXECUTE)?.ino(), replaced);
     assert!(!Path::new(CONTROL).exists());
@@ -694,9 +740,7 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     // for the life of the process (invariant 13).
     let failed = OnceLock::from(AdmissionState::ReconcileFailed);
     let responder = Responder::new(&admitted, &signer, &failed);
-    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
-    std::thread::scope(|scope| -> TestResult {
-        let serving = scope.spawn(|| responder.serve(&execute, &control, 4));
+    while_serving(&responder, 4, || {
         answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
         let bytes = describe([6; 16], retained)?;
         SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
@@ -712,41 +756,19 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
                 Some(execute.attempt_id),
             ),
             SandboxProviderErrorCode::SandboxUnavailable,
-        )?;
-        let replacement = replace_execute_leaf()?;
-        assert_eq!(
-            serving.join().map_err(|_| "the runtime panicked")?,
-            ProviderRuntimeError::UnsafeEndpoint
-        );
-        drop(replacement);
-        Ok(())
+        )
     })?;
-    drop((execute, control));
-    fs::remove_file(EXECUTE)?;
     // A full pool of one: the next connection is accepted and refused with
     // SPE1 12 at once (journal 22582).
-    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
-    std::thread::scope(|scope| -> TestResult {
-        let serving = scope.spawn(|| responder.serve(&execute, &control, 1));
+    while_serving(&responder, 1, || {
         let mut holder = UnixStream::connect(EXECUTE)?;
         assert_busy(&mut UnixStream::connect(EXECUTE)?, &key, 2, retained)?;
-        assert_expired(&mut holder, &key)?;
-        let replacement = replace_execute_leaf()?;
-        assert_eq!(
-            serving.join().map_err(|_| "the runtime panicked")?,
-            ProviderRuntimeError::UnsafeEndpoint
-        );
-        drop(replacement);
-        Ok(())
+        assert_expired(&mut holder, &key)
     })?;
-    drop((execute, control));
-    fs::remove_file(EXECUTE)?;
     // Pool 0 (ELM1 exact deny-all) refuses every connection with 12. One
     // refusal runs at a time: while it waits, the next connection stays
     // unanswered, and is refused once the first ends.
-    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
-    std::thread::scope(|scope| -> TestResult {
-        let serving = scope.spawn(|| responder.serve(&execute, &control, 0));
+    while_serving(&responder, 0, || {
         assert_busy(&mut UnixStream::connect(EXECUTE)?, &key, 4, retained)?;
         let mut holder = UnixStream::connect(EXECUTE)?;
         let mut waiting = UnixStream::connect(EXECUTE)?;
@@ -754,14 +776,7 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
         let mut early = [0; 1];
         assert!(waiting.read(&mut early).is_err());
         assert_expired(&mut holder, &key)?;
-        assert_busy(&mut waiting, &key, 5, retained)?;
-        let replacement = replace_execute_leaf()?;
-        assert_eq!(
-            serving.join().map_err(|_| "the runtime panicked")?,
-            ProviderRuntimeError::UnsafeEndpoint
-        );
-        drop(replacement);
-        Ok(())
+        assert_busy(&mut waiting, &key, 5, retained)
     })?;
     drop(staged);
     Ok(())
@@ -773,41 +788,6 @@ fn only_a_root_peer_is_answered() -> TestResult {
     // isolated container it is.
     let (local, _) = UnixStream::pair()?;
     assert_eq!(root_peer(&local), rustix::process::geteuid().is_root());
-    Ok(())
-}
-
-/// Assert that `endpoint` answers `bytes` with nothing: the connection
-/// ends, or is reset, with zero bytes written.
-fn assert_silent(endpoint: &str, bytes: &[u8]) -> TestResult {
-    let mut stream = UnixStream::connect(endpoint)?;
-    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
-    stream.write_all(bytes)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
-    let mut byte = [0; 1];
-    match stream.read(&mut byte) {
-        Ok(read) => assert_eq!(read, 0),
-        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
-    }
-    Ok(())
-}
-
-/// Serve `responder` with a pool of four while `check` runs, then end
-/// serving through a replaced execute leaf.
-fn while_serving(responder: &Responder<'_>, check: impl FnOnce() -> TestResult) -> TestResult {
-    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
-    std::thread::scope(|scope| -> TestResult {
-        let serving = scope.spawn(|| responder.serve(&execute, &control, 4));
-        check()?;
-        let replacement = replace_execute_leaf()?;
-        assert_eq!(
-            serving.join().map_err(|_| "the runtime panicked")?,
-            ProviderRuntimeError::UnsafeEndpoint
-        );
-        drop(replacement);
-        Ok(())
-    })?;
-    drop((execute, control));
-    fs::remove_file(EXECUTE)?;
     Ok(())
 }
 
@@ -830,7 +810,7 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
     // An acknowledged update fences the runtime for good; describe still
     // answers and execute is refused with 11 (invariant 24).
     let fenced = Responder::new(&admitted, &signer, &starting);
-    while_serving(&fenced, || {
+    while_serving(&fenced, 4, || {
         let (update, _) = revocation_update(&admitted, &[], 1)?;
         let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
             .to_canonical_cbor()?;
@@ -849,7 +829,7 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
     // connection gets zero bytes, and only the retained RCA1 is resent
     // (invariant 25).
     let revoked = Responder::new(&admitted, &signer, &starting);
-    while_serving(&revoked, || {
+    while_serving(&revoked, 4, || {
         let manifest = admitted.provider().manifest().manifest_digest;
         let (update, _) = revocation_update(&admitted, &[manifest], 2)?;
         let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
