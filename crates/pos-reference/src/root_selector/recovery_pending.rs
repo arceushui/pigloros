@@ -132,7 +132,7 @@ mod tests {
     use super::*;
     use crate::control_framing;
     use crate::evaluator_protocol::{array, decode_canonical, uint};
-    use crate::selector::installation::tests::updates::UpdateFixture;
+    use crate::selector::installation::tests::updates::{SuccessorRevocation, UpdateFixture};
 
     const RECOVERY_NAME: &str = "installation-update.cbor";
 
@@ -196,8 +196,11 @@ mod tests {
     #[test]
     fn the_pending_update_starts_one_operation_and_stays_closed() -> TestResult {
         let fixture = UpdateFixture::new()?;
-        let (_committed, request) =
-            fixture.commit_pending_update(vec![[41; 16]], vec![[41; 16]], false)?;
+        let (_committed, request) = fixture.commit_pending_update(
+            vec![[41; 16]],
+            vec![[41; 16]],
+            SuccessorRevocation::Nothing,
+        )?;
         let recovery = pending(&fixture, own_uid(fixture.path())?)?;
 
         let (result, challenge, reply) = exchange(&recovery, Some(&request))?;
@@ -217,7 +220,8 @@ mod tests {
     #[test]
     fn any_other_update_or_peer_is_rejected_without_a_reply() -> TestResult {
         let fixture = UpdateFixture::new()?;
-        let (_committed, request) = fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+        let (_committed, request) =
+            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
         let uid = own_uid(fixture.path())?;
         let recovery = pending(&fixture, uid)?;
 
@@ -246,7 +250,8 @@ mod tests {
     #[test]
     fn an_operation_requires_the_same_pending_transaction() -> TestResult {
         let fixture = UpdateFixture::new()?;
-        let (_committed, request) = fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+        let (_committed, request) =
+            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
         let recovery = pending(&fixture, own_uid(fixture.path())?)?;
         let recovery_path = fixture.path().join(RECOVERY_NAME);
 
@@ -255,7 +260,7 @@ mod tests {
         assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
 
         // Another transaction over the same previous SIC1.
-        fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+        fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
         let (result, _, _) = exchange(&recovery, Some(&request))?;
         assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
 

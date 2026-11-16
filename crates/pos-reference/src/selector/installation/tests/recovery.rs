@@ -11,7 +11,7 @@ use std::path::Path;
 
 use ciborium::value::Value;
 
-use super::updates::UpdateFixture;
+use super::updates::{SuccessorRevocation, UpdateFixture};
 use super::TestResult;
 use crate::evaluator_protocol::{array, array_values, decode_canonical, encode_with_limit};
 use crate::selector::installation::authority::VerifiedPendingRecovery;
@@ -21,6 +21,7 @@ use crate::selector::installation::{
 use crate::selector::SelectorBoundaryError;
 
 const RECOVERY_LIMIT: usize = 48 * 1024 * 1024;
+const EMBEDDED_RECORD_LIMIT: usize = 16 * 1024 * 1024;
 
 fn load(
     fixture: &UpdateFixture,
@@ -86,8 +87,11 @@ fn the_loader_rebuilds_the_exact_committed_transaction() -> TestResult {
         .installed()
         .manifest()
         .digest();
-    let (committed, request) =
-        fixture.commit_pending_update(vec![[41; 16], [42; 16]], vec![[42; 16]], false)?;
+    let (committed, request) = fixture.commit_pending_update(
+        vec![[41; 16], [42; 16]],
+        vec![[42; 16]],
+        SuccessorRevocation::Nothing,
+    )?;
     let loaded = load(&fixture)??;
     let context = committed.cancellation_context()?;
     assert_eq!(loaded.sir1_digest, committed.sir1_digest());
@@ -117,32 +121,51 @@ fn the_loader_rebuilds_the_exact_committed_transaction() -> TestResult {
 fn the_loader_accepts_a_published_successor_and_a_revoked_provider() -> TestResult {
     // Crash row 7: the next SIC1 is installed, SIR1 is not yet removed.
     let fixture = UpdateFixture::new()?;
-    let (committed, request) = fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+    let (committed, request) =
+        fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
     replace_immutable(
         &fixture.path().join(MANIFEST_NAME),
         &record_field(&request, 3)?,
     )?;
     assert_eq!(load(&fixture)??.sir1_digest, committed.sir1_digest());
 
-    // The next RVS1 revokes the previous provider: its runtime key still
-    // authenticates the recovery, resolved from the previous state.
-    let revoking = UpdateFixture::new()?;
-    let (committed, request) = revoking.commit_pending_update(Vec::new(), Vec::new(), true)?;
-    let loaded = load(&revoking)??;
-    assert_eq!(loaded.sir1_digest, committed.sir1_digest());
-    assert_eq!(loaded.pending_update, request);
-    replace_immutable(
-        &revoking.path().join(MANIFEST_NAME),
-        &record_field(&request, 3)?,
-    )?;
-    assert_eq!(load(&revoking)??.sir1_digest, committed.sir1_digest());
+    // The next RVS1 revokes the previous provider (field 5) or its role-3
+    // runtime key (field 4, R12 I10): the key is still resolved from the
+    // previous state, both before and after the next SIC1 is installed.
+    for revocation in [
+        SuccessorRevocation::SelectedProvider,
+        SuccessorRevocation::RuntimeKey,
+    ] {
+        let revoking = UpdateFixture::new()?;
+        let (committed, request) =
+            revoking.commit_pending_update(Vec::new(), Vec::new(), revocation)?;
+        let loaded = load(&revoking)??;
+        assert_eq!(
+            loaded.sir1_digest,
+            committed.sir1_digest(),
+            "{revocation:?}"
+        );
+        assert_eq!(
+            loaded.previous_provider_binding_digest,
+            committed
+                .cancellation_context()?
+                .previous_provider_binding_digest
+        );
+        assert_eq!(loaded.pending_update, request);
+        replace_immutable(
+            &revoking.path().join(MANIFEST_NAME),
+            &record_field(&request, 3)?,
+        )?;
+        assert_eq!(load(&revoking)??.sir1_digest, committed.sir1_digest());
+    }
     Ok(())
 }
 
 #[test]
 fn the_loader_requires_the_previous_or_next_installation() -> TestResult {
     let fixture = UpdateFixture::new()?;
-    let (_committed, request) = fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+    let (_committed, request) =
+        fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
     // A SIR1 naming the real successor as its previous SIC1, and another
     // next SIC1: the current SIC1 is neither of them.
     let path = fixture.path().join(RECOVERY_NAME);
@@ -170,7 +193,7 @@ fn the_loader_requires_the_previous_or_next_installation() -> TestResult {
 #[test]
 fn the_loader_rejects_an_altered_or_malformed_envelope() -> TestResult {
     let fixture = UpdateFixture::new()?;
-    fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+    fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
     let path = fixture.path().join(RECOVERY_NAME);
     let original = fs::read(&path)?;
 
@@ -197,9 +220,40 @@ fn the_loader_rejects_an_altered_or_malformed_envelope() -> TestResult {
 }
 
 #[test]
+fn the_loader_bounds_each_embedded_record_and_the_whole_file() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
+    let path = fixture.path().join(RECOVERY_NAME);
+    let original = fs::read(&path)?;
+
+    // One byte over the 16 MiB embedded-record bound, inside the 48 MiB
+    // SIR1 bound; an empty record is outside it too.
+    for oversized in [vec![0; EMBEDDED_RECORD_LIMIT + 1], Vec::new()] {
+        rewrite_sir1(&fixture, |unsigned| unsigned[4] = Value::Bytes(oversized))?;
+        assert_eq!(
+            load(&fixture)?.err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        replace_immutable(&path, &original)?;
+    }
+
+    // One byte over the 48 MiB SIR1 bound.
+    let mut over_file = original.clone();
+    over_file.resize(RECOVERY_LIMIT + 1, 0);
+    replace_immutable(&path, &over_file)?;
+    assert_eq!(
+        load(&fixture)?.err(),
+        Some(SelectorBoundaryError::ArtifactInvalid)
+    );
+    replace_immutable(&path, &original)?;
+    assert!(load(&fixture)?.is_ok());
+    Ok(())
+}
+
+#[test]
 fn the_loader_rejects_each_malformed_field() -> TestResult {
     let fixture = UpdateFixture::new()?;
-    fixture.commit_pending_update(vec![[41; 16]], vec![[41; 16]], false)?;
+    fixture.commit_pending_update(vec![[41; 16]], vec![[41; 16]], SuccessorRevocation::Nothing)?;
     let path = fixture.path().join(RECOVERY_NAME);
     let original = fs::read(&path)?;
     for index in 2..9 {
@@ -239,7 +293,7 @@ fn the_loader_rejects_each_malformed_field() -> TestResult {
 #[test]
 fn the_loader_rebinds_every_identity_and_attempt_set() -> TestResult {
     let fixture = UpdateFixture::new()?;
-    fixture.commit_pending_update(vec![[41; 16]], vec![[41; 16]], false)?;
+    fixture.commit_pending_update(vec![[41; 16]], vec![[41; 16]], SuccessorRevocation::Nothing)?;
     let path = fixture.path().join(RECOVERY_NAME);
     let original = fs::read(&path)?;
     let alterations: [fn(&mut Vec<Value>); 6] = [

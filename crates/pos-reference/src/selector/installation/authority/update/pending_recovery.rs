@@ -24,6 +24,8 @@ use crate::sandbox_provider_protocol::{RecoveryCancellationContext, RevocationUp
 use crate::selector::installation::{InstalledSelectorState, RECOVERY_NAME};
 use crate::selector::SelectorBoundaryError;
 
+const EMBEDDED_RECORD_LIMIT: usize = 16 * 1024 * 1024;
+
 /// The SIR1 fields the loader cannot derive from the installed objects.
 struct RecordedRecovery {
     previous: Vec<u8>,
@@ -209,9 +211,13 @@ impl RecordedRecovery {
     }
 }
 
+/// One embedded SIC1 or RCU1: 1 byte to 16 MiB, independently of the
+/// 48 MiB SIR1 bound (ADR-069 §4.1 CDDL).
 fn record_bytes(value: &Value) -> Result<Vec<u8>, ProtocolError> {
     match value {
-        Value::Bytes(bytes) => Ok(bytes.clone()),
+        Value::Bytes(bytes) if (1..=EMBEDDED_RECORD_LIMIT).contains(&bytes.len()) => {
+            Ok(bytes.clone())
+        }
         _ => Err(ProtocolError::InvalidEncoding),
     }
 }

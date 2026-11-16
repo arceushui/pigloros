@@ -4025,8 +4025,11 @@ mod tests {
         drop(crate::selector::installation::tests::materialize_root_selector_state(root)?);
         let update_fixture =
             crate::selector::installation::tests::updates::UpdateFixture::at(root)?;
-        let (_committed, pending_update) =
-            update_fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+        let (_committed, pending_update) = update_fixture.commit_pending_update(
+            Vec::new(),
+            Vec::new(),
+            crate::selector::installation::tests::updates::SuccessorRevocation::Nothing,
+        )?;
         let recovery_record = root.join("installation-update.cbor");
         let evaluator = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
         let administrator = Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET);
@@ -4089,7 +4092,11 @@ mod tests {
         let root = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT);
         drop(crate::selector::installation::tests::materialize_root_selector_state(root)?);
         crate::selector::installation::tests::updates::UpdateFixture::at(root)?
-            .commit_pending_update(Vec::new(), Vec::new(), false)?;
+            .commit_pending_update(
+                Vec::new(),
+                Vec::new(),
+                crate::selector::installation::tests::updates::SuccessorRevocation::Nothing,
+            )?;
         let recovery_record = root.join("installation-update.cbor");
         let evaluator = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
         let administrator = Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET);

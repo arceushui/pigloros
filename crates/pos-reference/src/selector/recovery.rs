@@ -187,16 +187,34 @@ pub struct RecoveryTransactionIdentity {
     recovery_peer_slot: [[u8; 16]; 3],
 }
 
-// Written out, not derived, so that each element of the base ADR tuple is
-// compared by name (R12 I3).
+// Written out, not derived: the derived impl does not count as a read of the
+// fields, which nothing else reads in this slice. Both sides are destructured
+// exhaustively, so a new element fails to compile until it is compared
+// (R12 I3).
 impl PartialEq for RecoveryTransactionIdentity {
     fn eq(&self, other: &Self) -> bool {
-        self.sir1_digest == other.sir1_digest
-            && self.previous_provider_binding_digest == other.previous_provider_binding_digest
-            && self.previous_runtime_instance_id == other.previous_runtime_instance_id
-            && self.previous_lifecycle_scope_id == other.previous_lifecycle_scope_id
-            && self.previous_live_attempt_ids == other.previous_live_attempt_ids
-            && self.recovery_peer_slot == other.recovery_peer_slot
+        let Self {
+            sir1_digest,
+            previous_provider_binding_digest,
+            previous_runtime_instance_id,
+            previous_lifecycle_scope_id,
+            previous_live_attempt_ids,
+            recovery_peer_slot,
+        } = self;
+        let Self {
+            sir1_digest: other_sir1_digest,
+            previous_provider_binding_digest: other_previous_provider_binding_digest,
+            previous_runtime_instance_id: other_previous_runtime_instance_id,
+            previous_lifecycle_scope_id: other_previous_lifecycle_scope_id,
+            previous_live_attempt_ids: other_previous_live_attempt_ids,
+            recovery_peer_slot: other_recovery_peer_slot,
+        } = other;
+        sir1_digest == other_sir1_digest
+            && previous_provider_binding_digest == other_previous_provider_binding_digest
+            && previous_runtime_instance_id == other_previous_runtime_instance_id
+            && previous_lifecycle_scope_id == other_previous_lifecycle_scope_id
+            && previous_live_attempt_ids == other_previous_live_attempt_ids
+            && recovery_peer_slot == other_recovery_peer_slot
     }
 }
 
@@ -206,7 +224,7 @@ mod tests {
     use std::fs::File;
 
     use super::*;
-    use crate::selector::installation::tests::updates::UpdateFixture;
+    use crate::selector::installation::tests::updates::{SuccessorRevocation, UpdateFixture};
     use crate::selector::installation::FixedInstallation;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -223,8 +241,11 @@ mod tests {
     #[test]
     fn a_reloaded_target_names_the_same_transaction() -> TestResult {
         let fixture = UpdateFixture::new()?;
-        let (committed, request) =
-            fixture.commit_pending_update(vec![[41; 16], [42; 16]], vec![[42; 16]], false)?;
+        let (committed, request) = fixture.commit_pending_update(
+            vec![[41; 16], [42; 16]],
+            vec![[42; 16]],
+            SuccessorRevocation::Nothing,
+        )?;
         let first = pending_target(&fixture)?;
         let second = pending_target(&fixture)?;
         assert_eq!(first.identity(), second.identity());
@@ -246,7 +267,11 @@ mod tests {
     #[test]
     fn identity_equality_compares_every_element() -> TestResult {
         let fixture = UpdateFixture::new()?;
-        fixture.commit_pending_update(vec![[41; 16]], vec![[41; 16]], false)?;
+        fixture.commit_pending_update(
+            vec![[41; 16]],
+            vec![[41; 16]],
+            SuccessorRevocation::Nothing,
+        )?;
         let reference = pending_target(&fixture)?.identity;
         let mutations: [fn(&mut RecoveryTransactionIdentity); 6] = [
             |identity| identity.sir1_digest[0] ^= 1,
@@ -268,7 +293,8 @@ mod tests {
     #[test]
     fn the_mode_one_challenge_names_the_pending_transaction() -> TestResult {
         let fixture = UpdateFixture::new()?;
-        let (_committed, request) = fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+        let (_committed, request) =
+            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
         let target = pending_target(&fixture)?;
         let challenge =
             crate::evaluator_protocol::decode_canonical(&target.challenge().to_canonical_cbor()?)?;
