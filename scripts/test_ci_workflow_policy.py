@@ -980,11 +980,26 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             ]
             return completed, apt_dir, written, apt_calls
 
-    def test_ubuntu_mirror_lists_no_third_party_mirror(self) -> None:
+    def test_ubuntu_mirror_lists_only_runner_and_ubuntu_hosts(self) -> None:
         # Hosted runners have no IPv6 route to mirrors.edge.kernel.org and its
-        # IPv4 address timed out on 2026-11-16; only Ubuntu-run hosts are listed.
-        script = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
-        self.assertNotIn("kernel.org", script.split("\nUBUNTU_FALLBACKS=", 1)[1])
+        # IPv4 address timed out on 2026-11-16; no attempt may list a mirror
+        # that neither the runner image nor Ubuntu runs.
+        for runner_lists, apt_results in (({}, (124,)), (self.AZURE_LIST, (0, 100))):
+            with self.subTest(runner_lists=runner_lists):
+                completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
+                    self.SIMPLE_SOURCES, runner_lists, apt_results=apt_results,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                hosts = {
+                    entry.split("\t", 1)[0]
+                    for _, mirror_list in apt_calls
+                    for entry in mirror_list.splitlines()
+                }
+                self.assertLessEqual(hosts, {
+                    self.AZURE_MIRROR,
+                    "http://archive.ubuntu.com/ubuntu",
+                    "http://security.ubuntu.com/ubuntu",
+                })
 
     def test_ubuntu_mirror_lists_runner_mirrors_first_then_ubuntu_fallbacks(self) -> None:
         # The GitHub-hosted image's own list (actions/runner-images
@@ -1177,6 +1192,23 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         )
         self.assertEqual([mirror_list for _, mirror_list in apt_calls], [fallbacks] * 4)
         self.assertEqual(apt_calls[1][0], self.apt_command(apt_dir, "update --error-on=any"))
+
+    def test_ubuntu_mirror_keeps_the_archive_when_the_runner_lists_it_first(self) -> None:
+        # A runner list that starts with the Ubuntu archive has no in-region
+        # mirror to skip; dropping the archive would leave no main-suite mirror.
+        completed, _, written, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES,
+            {"apt-mirrors.txt": "http://archive.ubuntu.com/ubuntu/\tpriority:1\n"},
+            apt_results=(124,),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("; retrying once with the mirror list\n", completed.stdout)
+        fallbacks = (
+            "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:2\n"
+        )
+        self.assertEqual(written["pigloros-mirrors.txt"], fallbacks)
+        self.assertEqual([mirror_list for _, mirror_list in apt_calls], [fallbacks] * 4)
 
     def test_ubuntu_mirror_fails_closed_when_the_retry_fails(self) -> None:
         cases = {

@@ -7,8 +7,8 @@ set -euo pipefail
 # list: the runner's own in-region mirrors first (the image's apt-mirrors.txt,
 # for example azure.archive.ubuntu.com), then the Ubuntu archive and security
 # hosts. The network phases (index refresh and package download) are bounded;
-# if either fails or exceeds the bound, the list is rewritten without the
-# runner's first mirror and both run once more. Installation then uses only the
+# if either fails or exceeds the bound, both run once more, with the list
+# rewritten without the runner's first mirror when the runner has a list. Installation then uses only the
 # downloaded packages. Every caller goes through this script; none runs
 # apt-get itself.
 #
