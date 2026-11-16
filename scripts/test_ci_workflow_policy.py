@@ -730,7 +730,7 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
         if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
     }
     crap = jobs.get("cargo-crap", {})
-    if "strategy" in crap or crap.get("timeout-minutes") != 135 or "core-gate" not in job_needs(crap):
+    if "strategy" in crap or crap.get("timeout-minutes") != 140 or "core-gate" not in job_needs(crap):
         raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
     if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != CARGO_CRAP_CONSUMERS:
         raise AssertionError("only ci-gate and the main-only reports may wait for cargo-crap")
@@ -989,6 +989,19 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             written["sources.list.d/ubuntu.sources"],
             f"Types: deb\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\nSuites: noble\n",
         )
+
+    def test_ubuntu_mirror_keeps_a_runner_entry_without_a_trailing_newline(self) -> None:
+        original = "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble\n"
+        completed, _, written = self.run_ubuntu_mirror_preparation(original, {
+            "apt-mirrors.txt": "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1",
+        })
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(written["pigloros-mirrors.txt"], (
+            "https://mirrors.edge.kernel.org/ubuntu\tpriority:1\n"
+            "http://azure.archive.ubuntu.com/ubuntu\tpriority:2\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:3\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:4\n"
+        ))
 
     def test_ubuntu_mirror_fails_when_the_runner_sources_have_no_mirror_list(self) -> None:
         original = "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\n"

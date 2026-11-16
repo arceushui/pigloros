@@ -14,7 +14,7 @@ mirror_list="${apt_dir}/pigloros-mirrors.txt"
 mirrors=(https://mirrors.edge.kernel.org/ubuntu)
 for runner_list in "${apt_dir}/apt-mirrors.txt" "${apt_dir}/apt-security-mirrors.txt"; do
   [[ -r "${runner_list}" ]] || continue
-  while read -r uri _; do
+  while read -r uri _ || [[ -n "${uri}" ]]; do
     if [[ "${uri}" =~ ^https?:// ]]; then
       mirrors+=("${uri%/}")
     fi

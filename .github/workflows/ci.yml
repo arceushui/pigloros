@@ -994,7 +994,7 @@ jobs:
     runs-on: ubuntu-24.04
     # 10 minutes of scoring plus the resolver step's bounded wait for main's
     # trusted baseline (see that step).
-    timeout-minutes: 135
+    timeout-minutes: 140
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1036,12 +1036,13 @@ jobs:
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
       # Polls up to 120 minutes while main's ci.yml run for the trusted base is
-      # still queued or in progress, then falls back to the nearest first-parent
-      # main ancestor's baseline (fetch-depth 0 above provides that history),
-      # then fails closed as before.
+      # still producing its cargo-crap baseline, then falls back to the nearest
+      # first-parent main ancestor's baseline (fetch-depth 0 above provides that
+      # history), then fails closed as before. The extra minutes cover the last
+      # poll, GitHub API retry backoff and the ancestor walk.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
-        timeout-minutes: 125
+        timeout-minutes: 130
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
