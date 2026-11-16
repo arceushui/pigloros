@@ -730,7 +730,7 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
         if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
     }
     crap = jobs.get("cargo-crap", {})
-    if "strategy" in crap or crap.get("timeout-minutes") != 140 or "core-gate" not in job_needs(crap):
+    if "strategy" in crap or crap.get("timeout-minutes") != 150 or "core-gate" not in job_needs(crap):
         raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
     if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != CARGO_CRAP_CONSUMERS:
         raise AssertionError("only ci-gate and the main-only reports may wait for cargo-crap")

@@ -459,7 +459,7 @@ def check_workflow(
         "cargo-crap must skip documentation-only pull requests",
     )
     require(job.get("runs-on") == "ubuntu-24.04", "cargo-crap runner changed")
-    require(job.get("timeout-minutes") == 140, "cargo-crap timeout changed")
+    require(job.get("timeout-minutes") == 150, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
     require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
