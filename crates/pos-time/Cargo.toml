@@ -26,7 +26,10 @@ ulid = { workspace = true }
 ed25519-dalek = { workspace = true }
 pos-crypto = { path = "../pos-crypto" }
 tempfile = { workspace = true }
-pos-core = { path = "../pos-core", features = ["test-support"] }
+pos-core = { path = "../pos-core", features = [
+  "authority-trust-root",
+  "test-support",
+] }
 pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 pos-plugin-world = { path = "../../plugins/world" }
 pos-store = { path = "../pos-store", features = ["sqlite", "test-support"] }

@@ -141,7 +141,10 @@ fn own_events(lineage: &Lineage, timeline: TimelineId) -> usize {
 #[must_use]
 pub fn frozen_ancestor_fails_pass_and_read() -> Capture {
     let mut capture = Capture::default();
-    let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok();
     for mut lineage in lineages() {
         let store = lineage.store;
         let authority = ConsentAuthority::new();
@@ -320,7 +323,10 @@ fn record_export_and_projection(capture: &mut Capture, scope: &str, lineage: &Li
 #[must_use]
 pub fn unanchored_step_all_fails_closed() -> Capture {
     let mut capture = Capture::default();
-    let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok();
     for mut lineage in lineages() {
         let store = lineage.store;
         let authority = ConsentAuthority::new();
