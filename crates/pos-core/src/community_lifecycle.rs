@@ -145,8 +145,9 @@ pub use native_node::{
 };
 pub use original_provenance::{CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1};
 pub use owner_binding::{
-    CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
-    CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
+    community_catalogue_owner_reference_v1, CommunityMetadataAnchorInputV1,
+    CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1,
+    CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
 };
 pub use prepared::{
     CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,

@@ -176,6 +176,14 @@ fn assert_framing(
     assert!(header.record_kind == kind);
     assert_eq!(header.scope_cover_digest, hash(7));
     assert_eq!(header.evidence_not_after_micros, HORIZON);
+    // The AAD is BLAKE3("EnvelopeContext" || 0 || COH1), per ADR-128 §2.
+    assert_eq!(
+        content.header().associated_data_digest(),
+        domain(
+            b"PiglorOS.Community.EnvelopeContext.v1\0",
+            &[&content.header().to_canonical_cbor()]
+        )
+    );
     let proof = CommunityEncryptedEnvelopeV1::from_canonical_cbor(object.proof_envelope())?;
     assert!(proof.header().as_input().record_kind == Kind::ClassificationProof);
     assert_ne!(proof.nonce(), content.nonce());
@@ -192,7 +200,7 @@ fn assert_framing(
 /// COA1 takes its object, ARD1, COB1, scope-cover and horizon fields from
 /// the record, and the CAU1 digest and inventory generation from its caller.
 fn assert_admission(record: &CommunityProtectedRecordV1) -> TestResult {
-    let admission = record.admission(42, hash(30))?;
+    let admission = record.admission(&SEAL, 42, hash(30))?;
     let bound = admission.as_input();
     assert_eq!(bound.protected_object_address, record.object_address());
     assert_eq!(
@@ -206,7 +214,7 @@ fn assert_admission(record: &CommunityProtectedRecordV1) -> TestResult {
     assert_eq!(bound.admission_inventory_generation, 42);
     assert_eq!(bound.authority_evidence_digest, hash(30));
     assert_eq!(
-        record.admission(42, Hash::zero()).err(),
+        record.admission(&SEAL, 42, Hash::zero()).err(),
         Some(Error::InvalidBinding)
     );
     Ok(())
@@ -352,6 +360,17 @@ fn protection_refuses_records_it_cannot_protect() -> TestResult {
             evidence(&[child(20, 21), child(22, 21)]),
             Error::InvalidBinding,
         ),
+        // A zero child digest or registration address.
+        (
+            Kind::StateContent,
+            evidence(&[child(0, 21)]),
+            Error::InvalidBinding,
+        ),
+        (
+            Kind::StateContent,
+            evidence(&[child(20, 0)]),
+            Error::InvalidBinding,
+        ),
     ] {
         assert_eq!(
             protector.protect(kind, b"record", evidence).err(),
@@ -366,7 +385,7 @@ fn protection_refuses_records_it_cannot_protect() -> TestResult {
                 evidence(&none)
             )
             .err(),
-        Some(Error::CapacityExhausted)
+        Some(Error::BoundsExceeded)
     );
     assert!(protector
         .protect(
@@ -376,6 +395,39 @@ fn protection_refuses_records_it_cannot_protect() -> TestResult {
         )
         .is_ok());
 
+    Ok(())
+}
+
+/// ADR-128 §3 child bound: 2048 direct children are protected, 2049 are
+/// refused.
+#[test]
+fn protection_holds_the_child_bound() -> TestResult {
+    let mut protector = CommunityArtifactProtectorV1::provision(
+        &SEAL,
+        cohort(Purpose::ExecutionState, Kind::StateContent)?,
+    )?;
+    // 2049 children, strictly ordered, exceed the ARD1/CAR1 child bound.
+    let many = (0..2049_u64)
+        .map(|index| {
+            let mut digest = [1; 32];
+            digest[24..].copy_from_slice(&index.to_be_bytes());
+            ArtifactChildEdgeV1 {
+                artifact_class: Class::TimelineReplay,
+                artifact_digest: Hash::from_bytes(digest),
+                registration_address: Hash::from_bytes(digest),
+                required: false,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        protector
+            .protect(Kind::StateContent, b"record", evidence(&many))
+            .err(),
+        Some(Error::BoundsExceeded)
+    );
+    assert!(protector
+        .protect(Kind::StateContent, b"record", evidence(&many[..2048]))
+        .is_ok());
     Ok(())
 }
 
