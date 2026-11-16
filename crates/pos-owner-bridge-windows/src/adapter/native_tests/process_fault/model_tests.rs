@@ -908,6 +908,54 @@ fn modeled_early_renderer_observer_enforces_deadline() -> TestResult {
 }
 
 #[test]
+fn modeled_load_phase_absence_resamples_until_the_renderer_or_deadline() -> TestResult {
+    use crate::RendererPresence::{Absent, Unique};
+    let _port = crate::Native::fixed_port_fixture();
+    for (presence, seconds, expected) in [
+        (None, 5, Err(super::EARLY_SNAPSHOT_REFUSED)),
+        (Some(Unique), 5, Ok(Unique)),
+        (Some(Absent), 0, Ok(Absent)),
+        (Some(Absent), 5, Ok(Absent)),
+    ] {
+        let _observation = ModeledRendererObservation::new();
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model) = fixture(&root)?;
+        model.preload_owners.set(true);
+        model.renderer_presence.set(presence);
+        let selected = fixed_competing_spec(MODEL_CASE);
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(fixture.surface.open(&selected).is_pending());
+        let Poll::Ready(Ok(browser)) = fixture.surface.open(&selected) else {
+            return Err("missing browser".into());
+        };
+        let clock = TickingClock(FakeClock::start());
+        fixture.deadline = clock.0.now() + Duration::from_secs(seconds);
+        let driver =
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+        let result = fixture
+            .settled_early_presence(super::EarlyRendererPhase::AwaitingLoad, &clock)
+            .map_err(|error| error.to_string());
+        assert_eq!(result, expected.map_err(str::to_owned));
+        fixture
+            .surface
+            .close_controller()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let sink = model.sink.borrow().clone().ok_or("missing sink")?;
+        sink.event(NativeEvent::BrowserExited {
+            pid: browser.browser_pid,
+        });
+        fixture
+            .surface
+            .finish()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        drop(sink);
+        fixture.retire(driver, Err(ERROR), None);
+        root.remove()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn modeled_consuming_control_requires_timely_completed_cas() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     for (elapsed, accepted) in [
