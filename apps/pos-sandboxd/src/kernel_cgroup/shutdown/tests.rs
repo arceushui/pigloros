@@ -143,6 +143,20 @@ mod cases {
         async fn kill(self, _unit: TransientServiceUnitName) {}
     }
 
+    /// The shutdown host never starts a unit, so it has no RQE1.
+    impl crate::RequestedConfiguration for () {
+        fn requested_configuration_evidence(
+            &self,
+            _attempt_id: [u8; 16],
+            _agr1_digest: [u8; 32],
+        ) -> Result<
+            pos_reference::sandbox_provider_protocol::RequestedConfigurationEvidence,
+            pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError,
+        > {
+            Err(pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError::InconsistentFields)
+        }
+    }
+
     impl UnitHost for Host {
         type Started = ();
         type Cgroup = BoundAttemptCgroup;
