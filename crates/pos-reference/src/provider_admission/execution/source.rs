@@ -839,6 +839,29 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_or_overflowing_clock_time_is_invalid_data() {
+        let at = |tv_sec: i64, tv_nsec: i64| {
+            super::super::timespec_ns(rustix::time::Timespec { tv_sec, tv_nsec })
+                .map_err(|error| error.kind())
+        };
+        assert_eq!(at(0, 0), Ok(0));
+        assert_eq!(at(1, 5), Ok(1_000_000_005));
+        assert_eq!(at(18_446_744_073, 709_551_615), Ok(u64::MAX));
+        for (seconds, nanoseconds) in [
+            (-1, 0),
+            (0, -1),
+            (i64::MAX, 0),
+            (18_446_744_073, 709_551_616),
+        ] {
+            assert_eq!(
+                at(seconds, nanoseconds),
+                Err(std::io::ErrorKind::InvalidData),
+                "{seconds} s {nanoseconds} ns"
+            );
+        }
+    }
+
+    #[test]
     fn source_turn_rejects_queued_extra_bytes_and_early_eof_without_consuming() -> TestResult {
         let (mut provider, mut selector) = UnixStream::pair()?;
         require_grant_turn(&provider)?;

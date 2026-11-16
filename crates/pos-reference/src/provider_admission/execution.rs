@@ -272,7 +272,16 @@ type Clock = fn() -> io::Result<u64>;
 /// `InvalidData` for a time the clock cannot report in unsigned
 /// nanoseconds, such as a negative one.
 fn monotonic_ns() -> io::Result<u64> {
-    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    timespec_ns(rustix::time::clock_gettime(
+        rustix::time::ClockId::Monotonic,
+    ))
+}
+
+/// `now` in nanoseconds.
+///
+/// # Errors
+/// `InvalidData` for a negative time or one beyond `u64` nanoseconds.
+fn timespec_ns(now: rustix::time::Timespec) -> io::Result<u64> {
     u64::try_from(now.tv_sec)
         .ok()
         .zip(u64::try_from(now.tv_nsec).ok())

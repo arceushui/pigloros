@@ -77,7 +77,17 @@ type BootInstant = ([u8; 16], std::time::Duration);
 /// nanoseconds, such as a negative one.
 #[cfg(target_os = "linux")]
 fn monotonic_ns() -> std::io::Result<u64> {
-    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    timespec_ns(rustix::time::clock_gettime(
+        rustix::time::ClockId::Monotonic,
+    ))
+}
+
+/// `now` in nanoseconds.
+///
+/// # Errors
+/// `InvalidData` for a negative time or one beyond `u64` nanoseconds.
+#[cfg(target_os = "linux")]
+fn timespec_ns(now: rustix::time::Timespec) -> std::io::Result<u64> {
     u64::try_from(now.tv_sec)
         .ok()
         .zip(u64::try_from(now.tv_nsec).ok())
@@ -649,4 +659,31 @@ pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::proc
 fn report(message: &str) {
     use std::io::Write;
     writeln!(std::io::stderr(), "{message}").ok();
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod clock_tests {
+    #[test]
+    fn a_negative_or_overflowing_clock_time_is_invalid_data() {
+        let at = |tv_sec: i64, tv_nsec: i64| {
+            super::timespec_ns(rustix::time::Timespec { tv_sec, tv_nsec })
+                .map_err(|error| error.kind())
+        };
+        assert_eq!(at(0, 0), Ok(0));
+        assert_eq!(at(1, 5), Ok(1_000_000_005));
+        assert_eq!(at(18_446_744_073, 709_551_615), Ok(u64::MAX));
+        for (seconds, nanoseconds) in [
+            (-1, 0),
+            (0, -1),
+            (i64::MAX, 0),
+            (18_446_744_073, 709_551_616),
+        ] {
+            assert_eq!(
+                at(seconds, nanoseconds),
+                Err(std::io::ErrorKind::InvalidData),
+                "{seconds} s {nanoseconds} ns"
+            );
+        }
+    }
 }
