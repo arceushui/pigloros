@@ -1,7 +1,7 @@
 //! Native-graph assembly of one code-0 initialization (ADR-129 §2/§4,
 //! #560 A3c-2b′) through its public seam: the per-member COW1 records and
 //! their ARD1 children, the initial CMS1/CST1/CSH1, the CGR1 root and
-//! counts, the CGA1 result, the CMI1 builder and every input refusal.
+//! counts, the CGA1 result and every input refusal.
 //!
 //! The graph shape is the owner decision on #560, note 22661. Every
 //! expected digest is computed independently with `blake3` from the ADR
