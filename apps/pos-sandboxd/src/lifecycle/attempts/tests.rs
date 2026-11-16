@@ -371,6 +371,23 @@ mod cases {
         }
     }
 
+    /// A private runtime tree and the registry over it.
+    fn registry_tree() -> TestResult<(tempfile::TempDir, SystemdAttemptRegistry)> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        for child in ["registry", "attempts"] {
+            fs::create_dir(directory.path().join(child))?;
+            fs::set_permissions(
+                directory.path().join(child),
+                fs::Permissions::from_mode(0o700),
+            )?;
+        }
+        let parent = File::open(directory.path())?;
+        let registry =
+            SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
+        Ok((directory, registry))
+    }
+
     /// A private runtime tree and its registry.
     struct Runtime {
         directory: tempfile::TempDir,
@@ -380,18 +397,7 @@ mod cases {
 
     impl Runtime {
         fn new() -> TestResult<Self> {
-            let directory = tempfile::tempdir()?;
-            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
-            for child in ["registry", "attempts"] {
-                fs::create_dir(directory.path().join(child))?;
-                fs::set_permissions(
-                    directory.path().join(child),
-                    fs::Permissions::from_mode(0o700),
-                )?;
-            }
-            let parent = File::open(directory.path())?;
-            let registry =
-                SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
+            let (directory, registry) = registry_tree()?;
             let ledger = crate::StagingLedger::new(crate::StagingLimits {
                 aggregate_bytes: 1024,
             });
@@ -528,12 +534,12 @@ mod cases {
         for id in 1..=8 {
             let fixture = manager(id).await?;
             let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-            let before = monotonic_ns();
+            let before = crate::monotonic_ns()?;
             let ended = runtime.run(FakeInput::new(id), &steps).await?;
             assert_eq!(ended.attempt_id(), [id; 16]);
             // Stamped once the cleanup returned; the unit's cgroup was
             // proved empty.
-            assert!(ended.cleanup_finished_at() >= before);
+            assert!(ended.cleanup_finished_at() >= Some(before));
             assert!(cleaned(&ended)?.empty_basis().is_some());
             assert_eq!(ended.cancel_source(), None);
             assert!(matches!(
@@ -590,13 +596,13 @@ mod cases {
     #[tokio::test(start_paused = true)]
     async fn an_input_failed_after_its_grant_ends_with_nothing_committed() -> TestResult {
         let runtime = Runtime::new()?;
-        let before = monotonic_ns();
+        let before = crate::monotonic_ns()?;
         let ended: EndedAttempt<()> = runtime.lifecycle.record_failed(&FakeFailed(1))?;
         assert_eq!(ended.attempt_id(), [1; 16]);
         assert_eq!(ended.cancel_source(), None);
         assert!(matches!(ended.progress(), AttemptProgress::InputFailed));
         assert!(matches!(ended.cleanup(), Ok(None)));
-        assert!(ended.cleanup_finished_at() >= before);
+        assert!(ended.cleanup_finished_at() >= Some(before));
         // The attempt is admitted: it is never recorded or launched again.
         assert!(matches!(
             runtime.lifecycle.record_failed::<(), _>(&FakeFailed(1)),
@@ -631,6 +637,33 @@ mod cases {
             runtime.lifecycle.cancel(&cancel_request(1, grant(1))).await,
             Err(AttemptLifecycleError::UnknownAttempt)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_production_lifecycle_records_a_failed_input_and_reconciles_it() -> TestResult {
+        let (_directory, registry) = registry_tree()?;
+        let ledger = crate::StagingLedger::new(crate::StagingLimits {
+            aggregate_bytes: 1024,
+        });
+        let lifecycle: AttemptLifecycle =
+            AttemptLifecycle::new(registry, ledger, &crate::ReconciledRestart::for_test());
+        let failed = FailedInput::fixture([7; 16], grant(7));
+        let ended = lifecycle.record_failed_input(&failed)?;
+        assert_eq!(ended.attempt_id(), [7; 16]);
+        assert!(matches!(ended.progress(), AttemptProgress::InputFailed));
+        assert!(matches!(ended.cleanup(), Ok(None)));
+        assert!(ended.cleanup_finished_at().is_some());
+        assert!(matches!(
+            lifecycle.record_failed_input(&failed),
+            Err(AttemptLifecycleError::AttemptKnown)
+        ));
+        assert_eq!(
+            lifecycle.cancel(&cancel_request(7, grant(7))).await?,
+            SandboxCancellationResult::AlreadyTerminal
+        );
+        let reconciled = lifecycle.reconcile(&reconcile_request(7, grant(7)))?;
+        assert_eq!(reconciled.intent(), None);
         Ok(())
     }
 
@@ -1762,7 +1795,7 @@ mod cases {
             assert_eq!(ended.attempt_id(), failed.attempt_id());
             assert!(matches!(ended.progress(), AttemptProgress::InputFailed));
             assert!(matches!(ended.cleanup(), Ok(None)));
-            assert!(ended.cleanup_finished_at() >= transfer.finish);
+            assert!(ended.cleanup_finished_at() >= Some(transfer.finish));
             assert!(matches!(
                 lifecycle.record_failed_input(&failed),
                 Err(AttemptLifecycleError::AttemptKnown)

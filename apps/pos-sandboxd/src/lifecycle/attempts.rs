@@ -56,7 +56,6 @@ use pos_reference::sandbox_provider_protocol::{
     CancelSource, NetworkCaptureStore, SandboxCancelRequest, SandboxCancellationResult,
     SandboxReconcileRequest,
 };
-use rustix::time::{clock_gettime, ClockId};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -226,7 +225,7 @@ pub struct EndedAttempt<S> {
     cancel_source: Option<CancelSource>,
     progress: AttemptProgress<S>,
     cleanup: AttemptCleanup,
-    cleanup_finished_at: u64,
+    cleanup_finished_at: Option<u64>,
 }
 
 impl<S> EndedAttempt<S> {
@@ -258,9 +257,9 @@ impl<S> EndedAttempt<S> {
 
     /// TME1 `cleanup.finished-at`: when the terminal cleanup returned,
     /// proved or not, or when the attempt ended with nothing committed, in
-    /// `CLOCK_MONOTONIC` nanoseconds.
+    /// `CLOCK_MONOTONIC` nanoseconds; `None` if the clock could not be read.
     #[must_use]
-    pub const fn cleanup_finished_at(&self) -> u64 {
+    pub const fn cleanup_finished_at(&self) -> Option<u64> {
         self.cleanup_finished_at
     }
 
@@ -420,13 +419,10 @@ impl FailedAdmission for FailedInput {
     }
 }
 
-/// The current `CLOCK_MONOTONIC` time in nanoseconds.
-fn monotonic_ns() -> u64 {
-    let now = clock_gettime(ClockId::Monotonic);
-    u64::try_from(now.tv_sec)
-        .unwrap_or_default()
-        .saturating_mul(1_000_000_000)
-        .saturating_add(u64::try_from(now.tv_nsec).unwrap_or_default())
+/// The current `CLOCK_MONOTONIC` time in nanoseconds, if the clock could
+/// report it; TME1 records an unreadable time as missing evidence.
+fn finished_at() -> Option<u64> {
+    crate::monotonic_ns().ok()
 }
 
 /// The recheck an execution runs immediately before its unit starts.
@@ -807,7 +803,10 @@ enum Slot<I> {
 enum Cleaned {
     /// Cleanup was not proved; the lifecycle is quarantined.
     Unproved,
-    /// The attempt ended before anything was committed.
+    /// The attempt ended before anything was committed: TME1
+    /// `cleanup.result = 2`. R9 §4.6.1 names only a withdrawal; the owner
+    /// decision of 2026-11-16 (Redmine #443, journal 22592) also uses it for
+    /// a post-AGR1 input failure.
     NothingCommitted,
     /// Cleanup was proved and this intent removed.
     Proved(PlannedAttemptIntent),
@@ -1219,7 +1218,7 @@ impl<I> AttemptLifecycle<I> {
             cancel_source: None,
             progress: AttemptProgress::InputFailed,
             cleanup: Ok(None),
-            cleanup_finished_at: monotonic_ns(),
+            cleanup_finished_at: finished_at(),
         })
     }
 
@@ -1447,7 +1446,7 @@ impl<I> OwnedAttempt<'_, I> {
                 cancel_source: claim.state.cancel.source(),
                 progress: AttemptProgress::Withdrawn,
                 cleanup: Ok(None),
-                cleanup_finished_at: monotonic_ns(),
+                cleanup_finished_at: finished_at(),
             };
         };
         let run = Run { claim, input };
@@ -1465,7 +1464,7 @@ impl<I> OwnedAttempt<'_, I> {
             Err(error) => (AttemptProgress::NotPrepared, Err(error.into())),
         };
         // The cleanup returned, proved or not (R9 §4.6.6).
-        let cleanup_finished_at = monotonic_ns();
+        let cleanup_finished_at = finished_at();
         let (progress, cleanup) = ended;
         let cleaned = cleanup.as_ref().map_or(Cleaned::Unproved, |done| {
             Cleaned::Proved(done.intent().clone())

@@ -70,6 +70,26 @@ mod transient_unit;
 #[cfg(target_os = "linux")]
 type BootInstant = ([u8; 16], std::time::Duration);
 
+/// The current `CLOCK_MONOTONIC` time in nanoseconds.
+///
+/// # Errors
+/// `InvalidData` for a time the clock cannot report in unsigned
+/// nanoseconds, such as a negative one.
+#[cfg(target_os = "linux")]
+fn monotonic_ns() -> std::io::Result<u64> {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    u64::try_from(now.tv_sec)
+        .ok()
+        .zip(u64::try_from(now.tv_nsec).ok())
+        .and_then(|(seconds, nanoseconds)| {
+            seconds
+                .checked_mul(1_000_000_000)
+                .and_then(|whole| whole.checked_add(nanoseconds))
+        })
+        .ok_or(std::io::ErrorKind::InvalidData)
+        .map_err(std::io::Error::from)
+}
+
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
 

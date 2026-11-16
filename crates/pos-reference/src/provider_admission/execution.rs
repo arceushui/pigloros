@@ -179,6 +179,37 @@ impl FailedInput {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl FailedInput {
+    /// A failed input of `attempt_id` under the AGR1 digest `grant_digest`,
+    /// with filler grant bytes and an empty, incomplete transfer, for tests
+    /// that authenticate nothing.
+    #[must_use]
+    pub fn fixture(attempt_id: [u8; 16], grant_digest: [u8; 32]) -> Self {
+        Self {
+            error: StagingError::Incomplete,
+            attempt_id,
+            grant: IssuedGrant {
+                bytes: Arc::from([0xa6_u8].as_slice()),
+                digest: grant_digest,
+                admission: AdmissionLedger {
+                    active_attempts: 1,
+                    incomplete_inputs: 1,
+                },
+                issued_at: 2,
+            },
+            transfer: TransferRecord {
+                start: 1,
+                deadline: 4,
+                finish: 3,
+                expected_bytes: 1,
+                accepted_bytes: 0,
+                complete: false,
+            },
+        }
+    }
+}
+
 /// Why staged input was not admitted.
 #[derive(Debug, thiserror::Error)]
 pub enum InputRefusal {
@@ -190,23 +221,42 @@ pub enum InputRefusal {
     Failed(Box<FailedInput>),
 }
 
-impl InputRefusal {
-    /// Why the input was refused.
-    #[must_use]
-    pub fn error(&self) -> &StagingError {
-        match self {
-            Self::NotGranted(error) => error,
-            Self::Failed(failed) => &failed.error,
-        }
-    }
-}
-
-/// The input-transfer window: its start once the complete SPX1 frame was
-/// read and its ELM1 ID 16 deadline, in `CLOCK_MONOTONIC` nanoseconds.
+/// The input-transfer window in `CLOCK_MONOTONIC` nanoseconds: its start
+/// once the complete SPX1 frame was read, and the enforced input deadline,
+/// the ELM1 ID 16 window from that same instant under any stricter
+/// transport bound.
 #[derive(Clone, Copy, Debug)]
 struct TransferWindow {
     start: u64,
     deadline: u64,
+}
+
+impl TransferWindow {
+    /// The window that started at `started`, sampled as `start`
+    /// nanoseconds at or after that instant, and is enforced until
+    /// `deadline`. Sampling the clock after the instant keeps the recorded
+    /// deadline at or after the enforced one.
+    fn new(started: Instant, start: u64, deadline: Instant) -> Self {
+        let length = u64::try_from(deadline.saturating_duration_since(started).as_nanos())
+            .unwrap_or(u64::MAX);
+        Self {
+            start,
+            deadline: start.saturating_add(length),
+        }
+    }
+
+    /// The transfer as far as it got: `accepted` of `expected` bytes,
+    /// finished at `finish` (R9 §6 rule 9).
+    const fn record(self, expected: u64, accepted: u64, finish: u64) -> TransferRecord {
+        TransferRecord {
+            start: self.start,
+            deadline: self.deadline,
+            finish,
+            expected_bytes: expected,
+            accepted_bytes: accepted,
+            complete: accepted == expected && finish <= self.deadline,
+        }
+    }
 }
 
 /// The current `CLOCK_MONOTONIC` time in nanoseconds.

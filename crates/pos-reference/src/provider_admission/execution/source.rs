@@ -282,10 +282,7 @@ pub(super) fn receive(
     require_grant_turn(reader.stream)?;
     let (slot, input) = ledger.prepare(authority, &policy)?;
     drop(control);
-    let window = TransferWindow {
-        start: input_start,
-        deadline: input_start.saturating_add(policy.limit(16).saturating_mul(1_000_000)),
-    };
+    let window = TransferWindow::new(spx_completed, input_start, input_deadline);
     Ok(PreparedProviderExecution {
         source: Arc::new(ExecutionSource {
             snapshot,
@@ -482,12 +479,13 @@ impl PreparedProviderExecution {
                     stream,
                     until: self.initial_deadline.min(self.input_deadline),
                 };
+                // Once completely written, the selector holds AGR1: the attempt
+                // is admitted, and an expiry from here on fails its input.
                 writer
                     .write_all(&length.to_be_bytes())
                     .and_then(|()| writer.write_all(&grant))
                     .map_err(StagingError::from)
-                    .and_then(|()| remaining(self.initial_deadline.min(self.input_deadline)))
-                    .map(|_| {
+                    .map(|()| {
                         self.grant = GrantState::Granted(IssuedGrant {
                             bytes: grant.into(),
                             digest: grant_digest,
@@ -555,18 +553,9 @@ impl PreparedProviderExecution {
         }
     }
 
-    /// The input transfer as far as it got: `accepted` bytes, finished at
-    /// `finish` (R9 §6 rule 9).
     fn transfer(&self, accepted: u64, finish: u64) -> TransferRecord {
-        let expected = self.policy().input.byte_length;
-        TransferRecord {
-            start: self.window.start,
-            deadline: self.window.deadline,
-            finish,
-            expected_bytes: expected,
-            accepted_bytes: accepted,
-            complete: accepted == expected && finish <= self.window.deadline,
-        }
+        self.window
+            .record(self.policy().input.byte_length, accepted, finish)
     }
 
     fn verify_input(
@@ -814,6 +803,35 @@ mod tests {
             remaining(unrestricted.input(spx_completed, 1_000)?),
             Err(StagingError::Expired)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn the_recorded_window_is_the_enforced_one_and_its_last_instant_is_complete() -> TestResult {
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(Duration::from_millis(5))
+            .ok_or("clock range")?;
+        let window = super::super::TransferWindow::new(started, 100, deadline);
+        assert_eq!((window.start, window.deadline), (100, 5_000_100));
+        // Admitted at the very end of the enforced window: complete.
+        let last = window.record(7, 7, window.deadline);
+        assert!(last.complete);
+        assert_eq!(
+            (
+                last.start,
+                last.deadline,
+                last.finish,
+                last.expected_bytes,
+                last.accepted_bytes
+            ),
+            (100, 5_000_100, 5_000_100, 7, 7)
+        );
+        assert!(!window.record(7, 7, window.deadline + 1).complete);
+        assert!(!window.record(7, 6, window.start).complete);
+        // A deadline that is already past leaves an empty window.
+        let empty = super::super::TransferWindow::new(deadline, 100, started);
+        assert_eq!(empty.deadline, 100);
         Ok(())
     }
 
@@ -1121,6 +1139,41 @@ mod tests {
             assert_eq!(ledger.usage().attempts, 0);
             assert_eq!(ledger.usage().reserved_bytes, 0);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn an_input_window_that_expires_after_a_complete_grant_fails_the_admitted_input() -> TestResult
+    {
+        if !isolated(
+            "an_input_window_that_expires_after_a_complete_grant_fails_the_admitted_input",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let ledger = StagingLedger::new(super::super::StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        });
+        let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+        send_grant(&mut prepared, &mut provider)?;
+        let sent = frame(&mut selector, &ledger)?.bytes;
+        // The window ends right after AGR1 was completely written: the
+        // selector holds the grant, so the attempt is admitted and fails.
+        prepared.input_deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .ok_or("clock range")?;
+        staged.write_input(&mut selector)?;
+        selector.shutdown(std::net::Shutdown::Write)?;
+        let file = tempfile::tempfile()?;
+        let failed = failed_input(prepared.receive_input(&mut provider, &file))?;
+        assert!(
+            matches!(failed.error(), StagingError::Io(_)),
+            "{:?}",
+            failed.error()
+        );
+        assert_eq!(failed.grant().bytes(), sent.as_slice());
+        assert!(!failed.transfer().complete);
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         Ok(())
     }
 
