@@ -240,17 +240,24 @@ impl CommunityArtifactProtectorV1 {
         fresh_envelope: bool,
         evidence: CommunityRecordEvidenceV1<'_>,
     ) -> Result<CommunityProtectedRecordV1, Error> {
-        let header = self.header(kind)?;
-        let identity = header.key_identity();
-        let content = self.key.seal_envelope(header, plaintext)?;
-        let claimed_content = if fresh_envelope {
-            let header = self.header(kind)?;
-            self.key.seal_envelope(header, plaintext)?
-        } else {
-            content.clone()
-        };
-        let proof = self.seal_proof(kind, claimed, &claimed_content, evidence)?;
-        self.object(&content, &proof, evidence, identity)
+        self.header(kind).and_then(|header| {
+            let identity = header.key_identity();
+            self.key
+                .seal_envelope(header, plaintext)
+                .and_then(|content| {
+                    let claimed_content = if fresh_envelope {
+                        self.header(kind)
+                            .and_then(|header| self.key.seal_envelope(header, plaintext))
+                    } else {
+                        Ok(content.clone())
+                    };
+                    claimed_content
+                        .and_then(|claimed_content| {
+                            self.seal_proof(kind, claimed, &claimed_content, evidence)
+                        })
+                        .and_then(|proof| self.object(&content, &proof, evidence, identity))
+                })
+        })
     }
 
     fn header(&self, kind: CommunityArtifactKindV1) -> Result<CommunityArtifactHeaderV1, Error> {

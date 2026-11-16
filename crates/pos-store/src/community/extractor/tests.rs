@@ -417,6 +417,8 @@ struct Spec {
     initial_cites_other_producer: bool,
     revision_producer: u64,
     revision_ordinal: u32,
+    /// The node ordinal the `StateRevision` cites, if not the real one.
+    cited_ordinal: Option<u32>,
     extra: Extra,
     root_is_initial: bool,
 }
@@ -435,6 +437,7 @@ impl Spec {
         initial_cites_other_producer: false,
         revision_producer: 1,
         revision_ordinal: 1,
+        cited_ordinal: None,
         extra: Extra::None,
         root_is_initial: false,
     };
@@ -543,7 +546,11 @@ fn forge(spec: &Spec) -> Fallible<Result<(), Error>> {
         &initial_bytes,
         &[initial_child],
     )?;
-    let native = [CommunityTypedInputRefV1::Native(initial_reference)];
+    let cited = CommunityNativeNodeReferenceV1 {
+        node_ordinal: spec.cited_ordinal.unwrap_or(initial_reference.node_ordinal),
+        ..initial_reference
+    };
+    let native = [CommunityTypedInputRefV1::Native(cited)];
     let (revision_node, revision_reference) = node(Node {
         kind: CommunityNativeNodeKindV1::StateRevision,
         producer: spec.revision_producer,
@@ -649,6 +656,13 @@ fn every_node_shape_violation_is_refused() -> TestResult {
         },
         Spec {
             extra: Extra::SameOrdinal,
+            ..base
+        },
+        // A `StateRevision` 2·slot+1 citing the `InitialState`'s digest at
+        // another ordinal than the node's own.
+        Spec {
+            revision_ordinal: 3,
+            cited_ordinal: Some(2),
             ..base
         },
         // The `InitialState` cites another CIS1 than the CSR1's producer.
@@ -913,4 +927,115 @@ fn the_closure_walk_refuses_a_cycle() {
         diamond.map(|heights| heights.into_iter().collect::<Vec<_>>()),
         Ok(vec![(0, 3), (1, 2), (2, 2), (3, 1)])
     );
+}
+
+/// Forge a two-member graph, slots 0 and 1. With `swap`, each
+/// `StateRevision` cites the other member's `InitialState` digest at its
+/// own `InitialState`'s ordinal. With `same_member`, both members' CIS1 and
+/// CSR1 name one member.
+fn forge_pair(swap: bool, same_member: bool) -> Fallible<Result<(), Error>> {
+    let mut key = protector(GENERATION)?;
+    let members = if same_member {
+        [MEMBER, MEMBER]
+    } else {
+        [MEMBER, hash(6)]
+    };
+    let mut owned = Vec::new();
+    let mut initials = Vec::new();
+    for slot in 0..2_u16 {
+        let state_bytes = state(&[b'a' + u8::try_from(slot)?])?;
+        let initializer = producer(&state_bytes, hash(4), members[usize::from(slot)])?;
+        let state_record = protect(&mut key, Kind::StateContent, &state_bytes, &[])?;
+        let producer_record = protect(
+            &mut key,
+            Kind::ExecutionProvenance,
+            &initializer.to_canonical_cbor(),
+            &[],
+        )?;
+        let revision_bytes = revision(Revision {
+            origin: INITIALIZATION,
+            member: members[usize::from(slot)],
+            state: adr_h("CSC1", &state_bytes),
+            producer: initializer.digest(),
+            owner: COB,
+        })?;
+        let revision_record = protect(
+            &mut key,
+            Kind::StateRevisionOrHead,
+            &revision_bytes,
+            &[&state_record, &producer_record],
+        )?;
+        let metadata = [cmb1(OPERATION, 11, slot, 0x60 + u8::try_from(slot)?)];
+        let (initial_bytes, initial_reference) = node(Node::initial(
+            1,
+            u32::from(slot) * 2,
+            initializer.digest(),
+            direct(&metadata),
+        ))?;
+        let initial_record = protect(
+            &mut key,
+            Kind::ExecutionProvenance,
+            &initial_bytes,
+            &[&producer_record],
+        )?;
+        initials.push(initial_reference);
+        owned.push((
+            state_record,
+            producer_record,
+            revision_record,
+            initial_record,
+            revision_bytes,
+        ));
+    }
+    let mut revision_nodes = Vec::new();
+    let mut roots = Vec::new();
+    for slot in 0..2 {
+        let target = if swap { 1 - slot } else { slot };
+        let cited = CommunityNativeNodeReferenceV1 {
+            node_ordinal: initials[slot].node_ordinal,
+            ..initials[target]
+        };
+        let native = [CommunityTypedInputRefV1::Native(cited)];
+        let (state_record, _, revision_record, _, revision_bytes) = &owned[slot];
+        let (bytes, reference) = node(Node {
+            kind: CommunityNativeNodeKindV1::StateRevision,
+            ordinal: initials[slot].node_ordinal + 1,
+            content: content(*b"CSR1", adr_h("CSR1", revision_bytes)),
+            ..Node::initial(1, 0, hash(7), direct(&native))
+        })?;
+        revision_nodes.push(protect(
+            &mut key,
+            Kind::ExecutionProvenance,
+            &bytes,
+            &[revision_record, state_record, &owned[target].3],
+        )?);
+        roots.push(reference);
+    }
+    let mut records = Vec::new();
+    for ((state_record, producer_record, revision_record, initial_record, _), revision_node) in
+        owned.iter().zip(&revision_nodes)
+    {
+        records.extend([
+            state_record,
+            producer_record,
+            revision_record,
+            initial_record,
+            revision_node,
+        ]);
+    }
+    let mut head_members = members.to_vec();
+    head_members.sort();
+    head_members.dedup();
+    roots.sort();
+    prepare(&records, &head_members, &roots, &key)
+}
+
+/// Review M on #1180 at 5c0311385: two members cannot swap their
+/// `InitialState` nodes or share one member binding.
+#[test]
+fn two_members_cannot_swap_initial_nodes_or_share_a_member() -> TestResult {
+    assert_eq!(forge_pair(false, false)?, Ok(()));
+    assert_eq!(forge_pair(true, false)?, Err(Error::InvalidBinding));
+    assert_eq!(forge_pair(false, true)?, Err(Error::InvalidBinding));
+    Ok(())
 }

@@ -128,6 +128,8 @@ struct Extracted {
     /// zero otherwise.
     producer: Hash,
     node: Option<(CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1)>,
+    /// A `StateRevision` node's cited `InitialState` reference.
+    cited: Option<CommunityNativeNodeReferenceV1>,
     children: Vec<Child>,
     record: CommunityProtectedRecordV1,
 }
@@ -249,6 +251,9 @@ fn extract(
                         )
                 })
                 .ok_or(Error::EvidenceUnavailable)?;
+            // `protect` refuses to seal under a key whose intent does not
+            // allow ClassificationProof, so every authenticated record's key
+            // allows its kind-8 proof.
             let intent = key.key_intent().as_input();
             let kinds = intent.allowed_record_kinds;
             let bound = header.timeline == intent.timeline
@@ -257,8 +262,7 @@ fn extract(
                 && header.generation == root.generation
                 && header.purpose == intent.purpose
                 && header.evidence_not_after_micros == intent.evidence_not_after_micros
-                && kinds.contains(header.record_kind)
-                && kinds.contains(CommunityArtifactKindV1::ClassificationProof);
+                && kinds.contains(header.record_kind);
             if !bound {
                 return Err(Error::InvalidBinding);
             }
@@ -321,6 +325,7 @@ fn read_record(
         state: Hash::zero(),
         producer: Hash::zero(),
         node: None,
+        cited: None,
         children,
         record,
     };
@@ -366,24 +371,25 @@ fn read_record(
                 }
             })
         }
-        CommunityArtifactKindV1::ExecutionProvenance => {
-            read_node(header, provenance, plaintext, batch).map(|(node, producer, children)| {
-                Extracted {
-                    producer,
-                    node: Some(node),
-                    ..extracted(*b"CPN1", node.1.node_digest, children)
-                }
-            })
-        }
+        CommunityArtifactKindV1::ExecutionProvenance => read_node(
+            header, provenance, plaintext, batch,
+        )
+        .map(|(node, producer, cited, children)| Extracted {
+            producer,
+            node: Some(node),
+            cited,
+            ..extracted(*b"CPN1", node.1.node_digest, children)
+        }),
         _ => Err(Error::InvalidBinding),
     }
 }
 
-/// A CPN1's kind and reference, its content CIS1 (for `InitialState`) and
-/// its logical children.
+/// A CPN1's kind and reference, its content CIS1 (for `InitialState`), the
+/// node it cites (for `StateRevision`) and its logical children.
 type NodeFacts = (
     (CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1),
     Hash,
+    Option<CommunityNativeNodeReferenceV1>,
     Vec<Child>,
 );
 
@@ -445,12 +451,11 @@ fn read_node(
         && fields.evidence_not_after_micros == header.evidence_not_after_micros;
     match shape {
         Some(children) if bound => {
-            let producer = if fields.kind == CommunityNativeNodeKindV1::InitialState {
-                content.logical_digest
-            } else {
-                Hash::zero()
+            let (producer, cited) = match inputs.as_slice() {
+                [CommunityTypedInputRefV1::Native(initial)] => (Hash::zero(), Some(*initial)),
+                _ => (content.logical_digest, None),
             };
-            Ok(((fields.kind, node.reference()), producer, children))
+            Ok(((fields.kind, node.reference()), producer, cited, children))
         }
         _ => Err(Error::InvalidBinding),
     }
@@ -520,9 +525,9 @@ fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
 
 /// Check the cross-record shape (note 22661, items 2 and 3): every node
 /// shares one producer ordinal at a distinct node ordinal; each
-/// `StateRevision` node's `InitialState` input cites the CIS1 its CSR1
-/// names; each CSR1 names its CIS1's member; and the CSR1 members are
-/// exactly the CSH1 members.
+/// `StateRevision` node's `InitialState` input is exactly the cited node
+/// and cites the CIS1 its CSR1 names; each CSR1 names its CIS1's member;
+/// and the CSR1 members are exactly the CSH1 members.
 ///
 /// A `StateRevision` input sits at an even ordinal, where only an
 /// `InitialState` node can, so its kind needs no separate check.
@@ -538,7 +543,10 @@ fn check_shape(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> Re
     for (record, children) in extracted.iter().zip(edges) {
         match (record.magic, record.node, children.as_slice()) {
             (_, Some((CommunityNativeNodeKindV1::StateRevision, _)), [revision, _, initial]) => {
-                linked &= extracted[*initial].producer == extracted[*revision].producer;
+                // The resolved node is exactly the cited one, coordinates
+                // included, not just a node with the cited digest.
+                linked &= extracted[*initial].producer == extracted[*revision].producer
+                    && extracted[*initial].node.map(|(_, reference)| reference) == record.cited;
             }
             (magic, None, [_, producer]) if magic == *b"CSR1" => {
                 linked &=
