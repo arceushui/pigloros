@@ -290,6 +290,7 @@ async fn a_run_stops_at_the_first_step_that_fails() -> TestResult {
 
 #[test]
 fn the_runtime_has_a_time_driver() -> TestResult {
-    runtime()?.block_on(tokio::time::sleep(std::time::Duration::ZERO));
+    // The timer is created inside the runtime, which must drive it.
+    runtime()?.block_on(async { tokio::time::sleep(std::time::Duration::ZERO).await });
     Ok(())
 }
