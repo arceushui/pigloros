@@ -1386,20 +1386,28 @@ fn registry_digest(
     for operation in operations {
         framed(&mut hasher, operation.name().as_bytes());
     }
-    if let Some(consent) = consent {
-        hasher.update(&consent.subject.inner().to_bytes());
-        hasher.update(&consent.grantee.inner().to_bytes());
-        hasher.update(&(consent.grants.len() as u64).to_be_bytes());
-        for grant in &consent.grants {
-            framed(&mut hasher, grant.purpose.as_bytes());
-            hasher.update(&(grant.data_categories.len() as u64).to_be_bytes());
-            for category in &grant.data_categories {
-                framed(&mut hasher, category.as_bytes());
-            }
-            hasher.update(&[u8::from(grant.export_permitted)]);
-        }
-    }
+    framed_consent(&mut hasher, consent);
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Commit the registry digest to the document's consent draft, if any: its
+/// subject, grantee and every grant's purpose, data categories and export
+/// permission. A document without consents adds nothing.
+fn framed_consent(hasher: &mut blake3::Hasher, consent: Option<&LocalConsentDraftV1>) {
+    let Some(consent) = consent else {
+        return;
+    };
+    hasher.update(&consent.subject.inner().to_bytes());
+    hasher.update(&consent.grantee.inner().to_bytes());
+    hasher.update(&(consent.grants.len() as u64).to_be_bytes());
+    for grant in &consent.grants {
+        framed(hasher, grant.purpose.as_bytes());
+        hasher.update(&(grant.data_categories.len() as u64).to_be_bytes());
+        for category in &grant.data_categories {
+            framed(hasher, category.as_bytes());
+        }
+        hasher.update(&[u8::from(grant.export_permitted)]);
+    }
 }
 
 fn framed(hasher: &mut blake3::Hasher, value: &[u8]) {
