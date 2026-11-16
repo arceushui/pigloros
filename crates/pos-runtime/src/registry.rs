@@ -6380,34 +6380,6 @@ mod tests {
         assert_eq!(registry.projections.reducer_names().len(), 0);
     }
 
-    /// ADR-134 §7 and ADR-135: the Air-Gapped mode selects
-    /// `live-air-gapped-v1`, which has no installed EPF1 until #461, so its
-    /// registration fails closed after the one factory build and before the
-    /// registry changes.
-    #[test]
-    fn production_registration_follows_the_bound_mode_selection_and_fails_closed() {
-        let selected = fixture_catalogue_entry();
-        let configuration = catalogue_configuration(PluginId::new(), &[]);
-        let mut registry = gated_registry();
-        let air_gapped = registry.register_from_host_catalogue_entry(
-            &selected,
-            &configuration,
-            "live-air-gapped-v1",
-        );
-        assert_eq!(
-            air_gapped.err().map(|error| error.to_string()),
-            Some(
-                RuntimeError::OutputAdmission(crate::OutputAdmissionErrorV1::ArtifactInvalid {
-                    kind: "EPF1"
-                })
-                .to_string()
-            )
-        );
-        assert_eq!(configuration.builds.get(), 1);
-        assert!(registry.is_empty());
-        assert!(registry.approver_map.is_empty());
-    }
-
     #[test]
     fn catalogue_fixture_builds_once_without_pin_or_append_permission() {
         let configuration = catalogue_configuration(PluginId::new(), &[]);

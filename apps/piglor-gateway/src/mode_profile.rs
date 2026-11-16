@@ -393,9 +393,11 @@ pub(crate) fn installed_gateway_mode_profile_v1(
     .and_then(|()| GatewayModeProfileV1::decode(id, bytes))
 }
 
-/// Run startup predicates 1 to 4, the pure configuration checks, and, for a
+/// Run the step-2 startup predicates of `id` before any lock or store.
+///
+/// These are predicates 1 to 4, the pure configuration checks, and, for a
 /// profile that declares it, predicate 6 `air-gapped-no-route` over this
-/// process's `/proc/self` facts, for `id` before any lock, store, ledger or
+/// process's `/proc/self` facts; they run before any lock, store, ledger or
 /// listener (ADR-134 §4, ADR-135 §4).
 ///
 /// # Errors

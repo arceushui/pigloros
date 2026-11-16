@@ -277,24 +277,38 @@ fn fib_trie(text: &str) -> Result<(), AirGappedNoRouteDenialV1> {
     lines(text)
         .map(str::trim)
         .try_fold(None::<Ipv4Addr>, |leaf, line| {
-            if let Some(address) = line.strip_prefix("|-- ") {
-                address
-                    .parse::<Ipv4Addr>()
-                    .map(Some)
-                    .map_err(|_| unreadable)
-            } else if line.starts_with('/') && line.ends_with(" LOCAL") {
-                leaf.ok_or(unreadable).and_then(|address| {
-                    deny(
-                        address.octets()[0] != 127,
-                        AirGappedNoRouteDenialV1::Address,
-                    )
-                    .map(|()| Some(address))
-                })
-            } else {
-                Ok(leaf)
-            }
+            line.strip_prefix("|-- ").map_or_else(
+                || local_entry(line, leaf, unreadable),
+                |address| {
+                    address
+                        .parse::<Ipv4Addr>()
+                        .map(Some)
+                        .map_err(|_| unreadable)
+                },
+            )
         })
         .map(drop)
+}
+
+/// A `fib_trie` line other than a leaf: a `LOCAL` entry belongs to the
+/// current `leaf`, which must lie inside `127.0.0.0/8`; any other line keeps
+/// the leaf.
+fn local_entry(
+    line: &str,
+    leaf: Option<Ipv4Addr>,
+    unreadable: AirGappedNoRouteDenialV1,
+) -> Result<Option<Ipv4Addr>, AirGappedNoRouteDenialV1> {
+    if line.starts_with('/') && line.ends_with(" LOCAL") {
+        leaf.ok_or(unreadable).and_then(|address| {
+            deny(
+                address.octets()[0] != 127,
+                AirGappedNoRouteDenialV1::Address,
+            )
+            .map(|()| Some(address))
+        })
+    } else {
+        Ok(leaf)
+    }
 }
 
 /// `igmp`: its header line, then a `index name : count …` line per device
