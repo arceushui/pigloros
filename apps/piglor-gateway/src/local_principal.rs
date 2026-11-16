@@ -1444,8 +1444,6 @@ fn registry_digest(
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// Commit the registry digest to the document's consent draft, if any: its
-/// subject, grantee and every grant's purpose, data categories and export
 /// Commit the registry digest to the document's governance record, if it
 /// names one.
 fn framed_governance(hasher: &mut blake3::Hasher, governance_record: Option<EntityId>) {
@@ -1454,6 +1452,8 @@ fn framed_governance(hasher: &mut blake3::Hasher, governance_record: Option<Enti
     }
 }
 
+/// Commit the registry digest to the document's consent draft, if any: its
+/// subject, grantee and every grant's purpose, data categories and export
 /// permission. A document without consents adds nothing.
 fn framed_consent(hasher: &mut blake3::Hasher, consent: Option<&LocalConsentDraftV1>) {
     let Some(consent) = consent else {
