@@ -10,7 +10,8 @@
 //! - the initial CST1, the CSH1 that selects them, the CGR1 root and CGA1.
 //!
 //! The graph shape follows the owner decisions on #560, note 22661, which
-//! fill the ADR-129 gaps for initialization (items 1 to 7). Nothing here
+//! fill the ADR-129 gaps for initialization (items 1 to 6; the item-7 CMI1
+//! builder lands with its first caller, the 2c commit). Nothing here
 //! publishes a registration, commits a record or selects a head: the
 //! community extractor and the atomic commit do that (#560 A3c-2b′-2, 2c).
 
@@ -24,15 +25,14 @@ use pos_core::community_lifecycle::{
     CommunityHostProgressV1, CommunityInitializationProducerInputV1,
     CommunityInitializationProducerV1, CommunityInitializationRequestV1,
     CommunityInitializationSourceV1, CommunityInputIndexV1, CommunityLifecycleErrorV1 as Error,
-    CommunityLocatorProducerV1, CommunityMaterializationInputV1,
-    CommunityMaterializationReferenceV1, CommunityMaterializationV1, CommunityMemberBindingV1,
-    CommunityMemberHeadV1, CommunityMemberHeadsV1, CommunityMemberProgressInputV1,
-    CommunityMemberProgressV1, CommunityMetadataLocatorV1, CommunityMetadataSchemaV1,
-    CommunityNativeNodeInputV1, CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1,
-    CommunityNativeNodeReferencesV1, CommunityNativeNodeV1, CommunityPassFrontierV1,
-    CommunityProducerBindingV1, CommunityProgressReferenceV1, CommunitySelectedHeadInputV1,
-    CommunitySelectedHeadV1, CommunityStateProducerV1, CommunityStateRevisionInputV1,
-    CommunityStateRevisionV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1,
+    CommunityLocatorProducerV1, CommunityMemberBindingV1, CommunityMemberHeadV1,
+    CommunityMemberHeadsV1, CommunityMemberProgressInputV1, CommunityMemberProgressV1,
+    CommunityMetadataLocatorV1, CommunityMetadataSchemaV1, CommunityNativeNodeInputV1,
+    CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1, CommunityNativeNodeReferencesV1,
+    CommunityNativeNodeV1, CommunityPassFrontierV1, CommunityProgressReferenceV1,
+    CommunitySelectedHeadInputV1, CommunitySelectedHeadV1, CommunityStateProducerV1,
+    CommunityStateRevisionInputV1, CommunityStateRevisionV1, CommunityTypedInputRefV1,
+    CommunityTypedInputRefsV1,
 };
 use pos_core::{
     ArtifactChildEdgeV1, AuthorityTrustRootSealV1, Hash, RecordedDependencyClassV1, Seq, TimelineId,
@@ -99,14 +99,10 @@ struct Context {
     evidence_not_after_micros: u64,
 }
 
-/// One protected logical record of the graph and its CMI1 facts.
+/// One protected logical record of the graph.
 pub struct CommunityAssembledRecordV1 {
     record_magic: [u8; 4],
-    logical_record_digest: Hash,
-    plaintext_length: u64,
-    producer: CommunityProducerBindingV1,
     height: u64,
-    context: Context,
     protected: CommunityProtectedRecordV1,
 }
 
@@ -121,42 +117,6 @@ impl CommunityAssembledRecordV1 {
     #[must_use]
     pub const fn protected(&self) -> &CommunityProtectedRecordV1 {
         &self.protected
-    }
-
-    /// The CMI1 of this record, built at the trusted composition root once
-    /// its COA1 exists (owner decision on #560, note 22661, item 7).
-    ///
-    /// The COA1 address comes from the caller; every other field comes from
-    /// the record itself. CMI1 is historical binding metadata, never a read
-    /// permit; the extractor checks the COA1 independently.
-    ///
-    /// # Errors
-    /// Returns `InvalidBinding` for a zero COA1 address.
-    pub fn materialization(
-        &self,
-        _seal: &'static AuthorityTrustRootSealV1,
-        attestation_address: Hash,
-    ) -> Result<CommunityMaterializationV1, Error> {
-        let registration = self.protected.registration().fields();
-        CommunityMaterializationV1::new(CommunityMaterializationInputV1 {
-            store_incarnation: self.context.store_incarnation,
-            timeline: self.context.timeline,
-            generation: self.context.generation,
-            record_magic: self.record_magic,
-            logical_record_digest: self.logical_record_digest,
-            plaintext_length: self.plaintext_length,
-            materialization: CommunityMaterializationReferenceV1 {
-                owner_reference: registration.owner_reference,
-                artifact_class: registration.artifact_class,
-                object_address: self.protected.object_address(),
-                artifact_digest: registration.artifact_digest,
-                registration_address: self.protected.registration().address(),
-                attestation_address,
-            },
-            producer: self.producer,
-            scope_binding_digest: self.context.scope_binding_digest,
-            evidence_not_after_micros: self.context.evidence_not_after_micros,
-        })
     }
 
     /// The exact required ARD1 child edge naming this record.
@@ -182,27 +142,17 @@ pub struct CommunityInitializationGraphV1 {
     generation_admission: Zeroizing<Vec<u8>>,
 }
 
-/// One record to protect: its kind, plaintext, magic, logical digest, CMI1
-/// producer and the indices of its earlier ARD1 children.
-type Step<'p> = (
-    CommunityArtifactKindV1,
-    &'p [u8],
-    [u8; 4],
-    Hash,
-    CommunityProducerBindingV1,
-    &'static [usize],
-);
+/// One record to protect: its kind, plaintext, magic and the indices of its
+/// earlier ARD1 children.
+type Step<'p> = (CommunityArtifactKindV1, &'p [u8], [u8; 4], &'static [usize]);
 
 /// One member's plaintext records, minted before any encryption.
 struct MemberPlan<'a> {
     state: &'a [u8],
-    state_digest: Hash,
     producer: Zeroizing<Vec<u8>>,
-    producer_digest: Hash,
     revision: Zeroizing<Vec<u8>>,
     revision_digest: Hash,
     initial_node: Zeroizing<Vec<u8>>,
-    initial_reference: CommunityNativeNodeReferenceV1,
     revision_node: Zeroizing<Vec<u8>>,
     revision_reference: CommunityNativeNodeReferenceV1,
     member_binding_digest: Hash,
@@ -258,7 +208,7 @@ impl CommunityInitializationGraphV1 {
                 .and_then(|plans| {
                     plans
                         .iter()
-                        .map(|plan| protect_member(plan, context, &input, protector))
+                        .map(|plan| protect_member(plan, &input, protector))
                         .collect::<Result<Vec<_>, Error>>()
                         .and_then(|members| finish(&input, context, &plans, members))
                 })
@@ -459,13 +409,10 @@ fn plan_member<'a>(
                 )
                 .map(|(revision_node, revision_reference)| MemberPlan {
                     state,
-                    state_digest,
                     producer: producer.to_canonical_cbor(),
-                    producer_digest,
                     revision,
                     revision_digest,
                     initial_node,
-                    initial_reference,
                     revision_node,
                     revision_reference,
                     member_binding_digest,
@@ -525,29 +472,21 @@ fn node(
 /// children of note 22661, item 4, all required.
 fn protect_member(
     plan: &MemberPlan<'_>,
-    context: Context,
     input: &CommunityInitializationGraphInputV1<'_>,
     protector: &mut CommunityArtifactProtectorV1,
 ) -> Result<Vec<CommunityAssembledRecordV1>, Error> {
-    let initial = CommunityProducerBindingV1::Native(plan.initial_reference);
-    let revision = CommunityProducerBindingV1::Native(plan.revision_reference);
-    let control = CommunityProducerBindingV1::Control(context.request_digest);
     let steps: [Step<'_>; 5] = [
         // CSC1 and CIS1 have no children.
         (
             CommunityArtifactKindV1::StateContent,
             plan.state,
             *b"CSC1",
-            plan.state_digest,
-            revision,
             &[],
         ),
         (
             CommunityArtifactKindV1::ExecutionProvenance,
             plan.producer.as_slice(),
             *b"CIS1",
-            plan.producer_digest,
-            initial,
             &[],
         ),
         // CSR1 -> CSC1, CIS1.
@@ -555,8 +494,6 @@ fn protect_member(
             CommunityArtifactKindV1::StateRevisionOrHead,
             plan.revision.as_slice(),
             *b"CSR1",
-            plan.revision_digest,
-            revision,
             &[0, 1],
         ),
         // `InitialState` CPN1 -> CIS1.
@@ -564,8 +501,6 @@ fn protect_member(
             CommunityArtifactKindV1::ExecutionProvenance,
             plan.initial_node.as_slice(),
             *b"CPN1",
-            plan.initial_reference.node_digest,
-            control,
             &[1],
         ),
         // `StateRevision` CPN1 -> CSR1, CSC1, `InitialState` CPN1.
@@ -573,15 +508,13 @@ fn protect_member(
             CommunityArtifactKindV1::ExecutionProvenance,
             plan.revision_node.as_slice(),
             *b"CPN1",
-            plan.revision_reference.node_digest,
-            control,
             &[2, 0, 3],
         ),
     ];
     steps.into_iter().try_fold(
         Vec::with_capacity(5),
         |mut records: Vec<CommunityAssembledRecordV1>,
-         (kind, plaintext, record_magic, logical_record_digest, producer, children)| {
+         (kind, plaintext, record_magic, children)| {
             let mut edges: Vec<ArtifactChildEdgeV1> = children
                 .iter()
                 .map(|child| records[*child].child_edge())
@@ -611,11 +544,7 @@ fn protect_member(
                 .map(|protected| {
                     records.push(CommunityAssembledRecordV1 {
                         record_magic,
-                        logical_record_digest,
-                        plaintext_length: plaintext.len() as u64,
-                        producer,
                         height,
-                        context,
                         protected,
                     });
                     records
@@ -648,10 +577,11 @@ fn finish(
 ) -> Result<CommunityInitializationGraphV1, Error> {
     let profile_digest = input.request.as_input().profile_digest;
     let records: Vec<CommunityAssembledRecordV1> = members.into_iter().flatten().collect();
-    // Item 5: one `StateRevision` root per member, in native order.
-    let mut roots: Vec<CommunityNativeNodeReferenceV1> =
+    // Item 5: one `StateRevision` root per member. Slot order is native
+    // order: every root shares the producer ordinal and node 2·slot+1
+    // ascends with the slot.
+    let roots: Vec<CommunityNativeNodeReferenceV1> =
         plans.iter().map(|plan| plan.revision_reference).collect();
-    roots.sort_unstable();
     let graph_counts = counts(&records);
     plans
         .iter()
