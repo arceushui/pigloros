@@ -4529,10 +4529,18 @@ impl Attempted {
     /// Complete request 1: every owner result positive, and the receipt
     /// finalized at 2 + the obligations.
     fn completed(&self) -> TestResult {
+        self.completed_under(&self.case)
+    }
+
+    /// As [`Self::completed`], with every step on a host of `case`.
+    fn completed_under(&self, case: &Case) -> TestResult {
         let acknowledgements = self.owner_results(&self.obligations, |_| None)?;
-        self.acknowledged(&acknowledgements)?;
+        self.acknowledged_under(case, &acknowledgements)?;
         let issue = 2 + u64::try_from(self.obligations.len())?;
-        let body = self.receipt_body(&receipt_input(&self.obligations, issue, reference(0xee)))?;
+        let body = self.receipt_body_under(
+            case,
+            &receipt_input(&self.obligations, issue, reference(0xee)),
+        )?;
         let signed = signature_record(
             LocalErasureSignaturePurposeV1::ReceiptBody,
             body,
@@ -4540,10 +4548,14 @@ impl Attempted {
             1,
         )?;
         self.store.retain(&[signed.clone()])?;
-        let receipt = self.host()?.command_sender()?.finalize_erasure_request(
-            self.request,
-            &receipt_input(&self.obligations, issue, signature_address(&signed)?),
-        )?;
+        let receipt = self
+            .store
+            .host(case, 4_096)?
+            .command_sender()?
+            .finalize_erasure_request(
+                self.request,
+                &receipt_input(&self.obligations, issue, signature_address(&signed)?),
+            )?;
         assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
         Ok(())
     }
@@ -4638,4 +4650,39 @@ fn an_unreadable_rejected_request_never_holds_its_subject() -> TestResult {
         assert_eq!(state.lifecycle(), ErasureLifecycleV1::Rejected);
     }
     assert_unread_terminal_frees_subject(&store, &case, request_of(1)?, 2)
+}
+
+#[test]
+fn attempt_0_completes_after_the_bundle_expires() -> TestResult {
+    let mut expiring = owned_bundle(&ALL_CLASSES)?;
+    expiring.expiry = BUNDLE_EXPIRY;
+    let attempted = Attempted::new(vec![actor()], expiring)?;
+    attempted.completed_under(&attempted.case_at(after_bundle_expiry)?)?;
+    let mut host = attempted.host()?;
+    assert_eq!(
+        lifecycle(&mut host, attempted.request)?,
+        ErasureLifecycleV1::Complete
+    );
+    Ok(())
+}
+
+#[test]
+fn attempt_0_is_refused_once_its_bundle_is_revoked_and_rotated() -> TestResult {
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    let revoked = attempted.bundle.signer_key_id.clone();
+    let mut new = rotated_bundle(&attempted.store)?;
+    new.issued_by = OTHER_ROOT.to_owned();
+    let case = Case::signed(&new, &other_root(), &[revoked.as_str()])?;
+    // Attempt 0 pins the bundle current at admission: after the compromise
+    // the frozen request's attempt 0 cannot pin the revoked bundle.
+    assert_eq!(
+        attempted
+            .store
+            .host(&case, 4_096)?
+            .command_sender()?
+            .dispatch_erasure_destruction(attempted.request, &attempted.attempt)
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    Ok(())
 }
