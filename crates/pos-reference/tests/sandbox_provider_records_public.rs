@@ -481,3 +481,31 @@ fn the_decoders_refuse_correctly_digested_records_with_bad_fields() -> TestResul
     }
     Ok(())
 }
+
+#[test]
+fn the_sdy1_decoder_refuses_an_unbound_digest_and_a_zero_signature() -> TestResult {
+    // Fields the decoder accepts, but a digest that does not bind them, and
+    // then a zero signature: only the record validation refuses either.
+    let response = SandboxDescribeResponse::new(
+        sign(SandboxDescribeResponse::self_digested(describe_fields())?)?,
+        &signing_key().verifying_key(),
+    )?;
+    let Value::Array(mut wrapper) =
+        ciborium::from_reader(response.to_canonical_cbor()?.as_slice())?
+    else {
+        return Err("an SDY1 is an array".into());
+    };
+    wrapper[1] = bytes(&[9; 32]);
+    assert_eq!(
+        SandboxDescribeResponse::from_canonical_cbor(&encode(&Value::Array(wrapper.clone()))?)
+            .err(),
+        Some(SandboxProviderProtocolError::DigestMismatch)
+    );
+    wrapper[1] = bytes(&response.response_digest());
+    wrapper[2] = bytes(&[0; 64]);
+    assert_eq!(
+        SandboxDescribeResponse::from_canonical_cbor(&encode(&Value::Array(wrapper))?).err(),
+        Some(SandboxProviderProtocolError::SignatureInvalid)
+    );
+    Ok(())
+}
