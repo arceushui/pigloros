@@ -4,7 +4,7 @@
 use crate::{
     operation::{
         AppendSignalOperation, CreatePredictionOperation, CreateTimelineOperation,
-        OperationAuthority,
+        OperationAuthority, ReadSessionOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -154,6 +154,7 @@ fn loopback_routes() -> Router<AppState> {
         .route("/v1/timelines/{timeline_id}/events", get(list_events))
         .route("/v1/timelines/{timeline_id}/actions", post(post_action))
         .route("/v1/timelines/{timeline_id}/signals", post(post_signal))
+        .route("/v1/session", get(get_session))
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
@@ -172,12 +173,13 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
 }
 
 /// The protected loopback routes, by method and route template.
-const PROTECTED_ROUTES: [(&str, &str); 5] = [
+const PROTECTED_ROUTES: [(&str, &str); 6] = [
     ("POST", "/v1/ledger/predictions"),
     ("POST", "/v1/timelines"),
     ("GET", "/v1/timelines/{timeline_id}/events"),
     ("POST", "/v1/timelines/{timeline_id}/actions"),
     ("POST", "/v1/timelines/{timeline_id}/signals"),
+    ("GET", "/v1/session"),
 ];
 
 /// Answer every protected route of an unprovisioned host `401` before its
@@ -617,6 +619,19 @@ async fn post_signal(
         })
         .await?;
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
+}
+
+/// `GET /v1/session` (#1362): the acting Principal's own Session, derived
+/// under the permit of its `session.read` decision.
+async fn get_session(
+    State(state): State<AppState>,
+    authority: OperationAuthority<ReadSessionOperation>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    authority
+        .authorize(&state.gateway, None)
+        .await
+        .and_then(|permit| state.gateway.session_v1(&permit))
+        .map(Json)
 }
 
 async fn post_ledger_prediction(
