@@ -1,7 +1,10 @@
 //! Backend-specific components of the ADR-069 systemd Sandbox Provider Adapter.
 //!
 //! This library does not implement the provider daemon or grant admission. Its
-//! binary currently runs only the closed launcher mode ([`launcher`]).
+//! binary currently runs only the closed launcher mode ([`launcher`]). It also
+//! holds the root selector's provider-runtime lifecycle adapter,
+//! `SystemdProviderLifecycle` (ADR-069 R11 §5.0), which only the
+//! `pos-root-selector` binary composes.
 //! The existing signed admission boundary must supply the selected SCS1 digest
 //! and architecture before these requested-state components are used.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
@@ -40,14 +43,20 @@ mod namespace_network;
 mod provider_barrier;
 #[cfg(target_os = "linux")]
 mod provider_installation;
+// Public module reachability lets the provider-unit types that `system_bus`
+// shares with the lifecycle adapter stay `pub(crate)` without Clippy's
+// `redundant_pub_crate` lint.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod provider_lifecycle;
 #[cfg(target_os = "linux")]
 mod release_barrier;
-#[cfg(target_os = "linux")]
-mod release_signer;
 #[cfg(target_os = "linux")]
 mod restart;
 #[cfg(target_os = "linux")]
 mod root_attachment;
+#[cfg(target_os = "linux")]
+mod runtime_signer;
 #[cfg(target_os = "linux")]
 mod staging;
 mod system_bus;
@@ -284,10 +293,12 @@ pub use execute::{
     UnitCgroup, UnitHost, UnitKiller, UnitState,
 };
 #[cfg(target_os = "linux")]
+pub use kernel_observation::observation_evidence;
+#[cfg(target_os = "linux")]
 pub use kernel_observation::{
     BlockDevice, CgroupView, DeviceNumber, KernelIdentity, KernelObservation,
-    KernelObservationError, KernelObservedReadback, NamespaceSet, ObservationContext,
-    ObservedStateDigest, ObservedUnit, ProviderNamespaces, RootIdentity, WorkMount, WorkUsage,
+    KernelObservationError, KernelObservedReadback, NamespaceSet, ObservationContext, ObservedUnit,
+    ProviderNamespaces, RootIdentity, WorkMount, WorkUsage,
 };
 #[cfg(target_os = "linux")]
 pub use lifecycle::{
@@ -347,12 +358,16 @@ pub use provider_barrier::{
 };
 #[cfg(target_os = "linux")]
 pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};
+pub use provider_lifecycle::SystemdProviderLifecycle;
 #[cfg(target_os = "linux")]
 pub use release_barrier::{
     release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
 };
 #[cfg(target_os = "linux")]
-pub use release_signer::{issue_release, KeyFileReleaseSigner, ReleaseSigner, ReleaseSignerError};
+pub use runtime_signer::{
+    issue_release, sign_verified, AdmittedRuntimeKey, KeyFileRuntimeSigner,
+    RuntimeAttestationSigner, RuntimeSignerError,
+};
 #[cfg(target_os = "linux")]
 pub use staging::{
     AdmittedEntry, ControlFloor, StagedInput, StagingCharge, StagingDirectory, StagingError,
@@ -382,13 +397,16 @@ pub use system_bus::{
 #[cfg(target_os = "linux")]
 pub use system_bus::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 pub use transient_unit::{
+    verified_requested_configuration, RequestedConfiguration, RequestedConfigurationProperty,
+    RequestedConfigurationValue,
+};
+pub use transient_unit::{
     ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,
     SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdServiceLimits,
     SystemdServiceLimitsError, SystemdTransientUnitNumericValue, SystemdTransientUnitProperty,
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
     TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
 };
-pub use transient_unit::{RequestedConfigurationProperty, RequestedConfigurationValue};
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

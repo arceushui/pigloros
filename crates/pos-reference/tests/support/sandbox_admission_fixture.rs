@@ -873,7 +873,8 @@ fn provider_receipt_for_lifecycle(
             release.map_or(Value::Null, bytes),
             bytes([43; 32]),
             bytes([44; 32]),
-            bytes([45; 32]),
+            // ADR-069 R9 §4.5: the admitted HCP1's negative-probe evidence.
+            bytes([21; 32]),
             bytes([46; 32]),
             bytes(audit_digest),
             Value::Text("runtime".to_owned()),
@@ -2818,6 +2819,8 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
     for (field, replacement) in [
         (14, bytes([99; 32])),
+        // ADR-069 R9 §4.5: ordinal 21 must be the admitted HCP1 ordinal 7.
+        (21, bytes([22; 32])),
         (24, Value::Text("other-runtime".to_owned())),
     ] {
         let changed = resign_unsigned_field(
