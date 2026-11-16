@@ -717,10 +717,12 @@ pub(crate) fn room_catalogue() -> ScenarioRoomCatalogueV1 {
         .unwrap_or_default()
 }
 
-/// The `provenance.digest` of one `ScenarioRoomRevision`: BLAKE3 of the
-/// domain separator `PiglorOS.GatewayScenarioRoomRevision.v1\0`, the
-/// revision's `descriptor_hash` and the 16 bytes of the `EventId` that
-/// committed it, in lower-case hex.
+/// The `provenance.digest` of one `ScenarioRoomRevision`.
+///
+/// It is BLAKE3 of the domain separator
+/// `PiglorOS.GatewayScenarioRoomRevision.v1\0`, the revision's
+/// `descriptor_hash` and the 16 bytes of the `EventId` that committed it,
+/// in lower-case hex.
 #[must_use]
 pub fn revision_provenance_digest_v1(descriptor_hash: &Hash, event_id: EventId) -> String {
     let mut hasher = blake3::Hasher::new();
