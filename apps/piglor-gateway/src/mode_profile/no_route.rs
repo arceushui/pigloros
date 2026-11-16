@@ -191,8 +191,8 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
     text.lines().filter(|line| !line.trim().is_empty())
 }
 
-/// `dev`: two header lines, then `name: counters` per interface; every name
-/// is `lo` or a fallback tunnel device.
+/// `dev`: two header lines, then `name: counters` per interface; `lo` is
+/// listed, and every other name is a fallback tunnel device.
 fn devices(text: &str) -> Result<(), AirGappedNoRouteDenialV1> {
     let unreadable = AirGappedNoRouteDenialV1::Unreadable(AirGappedHostFactV1::Dev);
     let mut rows = text.lines();
@@ -203,8 +203,9 @@ fn devices(text: &str) -> Result<(), AirGappedNoRouteDenialV1> {
     )
     .and_then(|()| {
         rows.filter(|line| !line.trim().is_empty())
-            .try_for_each(|line| {
-                line.split_once(':')
+            .try_fold(false, |listed_lo, line| {
+                // A name may itself hold `:`; the counters never do.
+                line.rsplit_once(':')
                     .map(|(name, _)| name.trim())
                     .filter(|name| !name.is_empty())
                     .ok_or(unreadable)
@@ -213,8 +214,10 @@ fn devices(text: &str) -> Result<(), AirGappedNoRouteDenialV1> {
                             name != "lo" && !FALLBACK_DEVICES.contains(&name),
                             AirGappedNoRouteDenialV1::Interface,
                         )
+                        .map(|()| listed_lo || name == "lo")
                     })
             })
+            .and_then(|listed_lo| deny(!listed_lo, unreadable))
     })
 }
 
@@ -309,7 +312,7 @@ fn igmp(text: &str) -> Result<(), AirGappedNoRouteDenialV1> {
             if line.starts_with(char::is_whitespace) {
                 deny(!device, unreadable).map(|()| true)
             } else {
-                line.split_once(':')
+                line.rsplit_once(':')
                     .map(|(head, _)| head.split_whitespace().collect::<Vec<_>>())
                     .filter(|head| head.len() == 2 && head[0].parse::<u32>().is_ok())
                     .ok_or(unreadable)

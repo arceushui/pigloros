@@ -61,6 +61,10 @@ def example(name: str) -> dict:
     return checker.load(checker.EXAMPLES / f"{name}.json")  # type: ignore[return-value]
 
 
+# Keywords whose value is data, compared verbatim rather than as a schema.
+DATA_KEYWORDS = {"enum", "const", "default"}
+
+
 def without_annotations(value: object) -> object:
     """`value` without its annotation keywords (`checker.ANNOTATIONS`). The compatibility
     comparison ignores them, and a description may be updated within v1 (ADR-135 §6), while
@@ -68,7 +72,7 @@ def without_annotations(value: object) -> object:
     in everything but those annotations. A schema map keyed by a property name is kept."""
     if isinstance(value, dict):
         return {
-            key: without_annotations(item)
+            key: item if key in DATA_KEYWORDS else without_annotations(item)
             for key, item in value.items()
             if key not in checker.ANNOTATIONS or isinstance(item, dict)
         }
@@ -403,8 +407,9 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_profile_identifiers_are_open_but_namespaced(self) -> None:
         """The servable sets of README rule 3 are a server invariant, not a schema rule: the
-        identifiers are open so a later family (#1372) stays within v1, but the Gateway mode
-        and ADR-058 namespaces stay disjoint and a known mode profile keeps its mode."""
+        identifiers are open so a later family (`live-air-gapped-v1`) stays within v1, but the
+        Gateway mode and ADR-058 namespaces stay disjoint and a known mode profile keeps its
+        mode."""
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
         body = example("draft-preference-get")["response"]["body"]
@@ -1068,6 +1073,9 @@ class CheckGatewayContractTest(unittest.TestCase):
         )
         self.assertNotEqual(without_annotations({"type": "string"}),
                             without_annotations({"type": "integer"}))
+        # Data is compared verbatim, annotation-named keys inside it included.
+        self.assertNotEqual(without_annotations({"const": {"description": "a"}}),
+                            without_annotations({"const": {"description": "b"}}))
 
     def test_a_new_problem_code_stays_in_v1_and_freezes(self) -> None:
         document, registry = with_problem_code("quota-exhausted")

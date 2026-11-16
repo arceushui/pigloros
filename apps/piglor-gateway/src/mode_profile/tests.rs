@@ -988,8 +988,13 @@ fn the_handle_owns_the_verified_listeners_and_its_host() -> TestResult {
             pos_core::GatewayModeBindingErrorV1::Unbound
         ))
     );
+    // Another host bound to the other mode; its startup predicates are not
+    // under test here.
     let mut other = memory_host()?;
-    bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut other)?;
+    bind_test_store(
+        other.gateway_mode_binding(),
+        GatewayModeProfileIdV1::AirGapped,
+    )?;
     assert_eq!(
         mode.verify_host(&mut other),
         Err(GatewayModeErrorV1::ModeMismatch)

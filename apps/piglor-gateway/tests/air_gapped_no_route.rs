@@ -11,7 +11,7 @@ use std::{net::SocketAddr, path::Path, process::Command};
 use piglor_gateway::mode_profile::{
     bind_gateway_mode_v1, check_air_gapped_no_route_v1, verify_gateway_serve_composition_v1,
     AirGappedHostFactV1 as Fact, AirGappedHostFactsV1, AirGappedNoRouteDenialV1 as Denial,
-    GatewayModeProfileIdV1, GatewayServeCompositionV1,
+    GatewayModeErrorV1, GatewayModeProfileIdV1, GatewayServeCompositionV1,
 };
 use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
@@ -156,7 +156,7 @@ fn every_absent_fact_denies() {
 #[test]
 fn unparsable_facts_deny() {
     type Change = fn(&mut AirGappedHostFactsV1);
-    let cases: [(Fact, Change); 17] = [
+    let cases: [(Fact, Change); 20] = [
         (Fact::Dev, |facts| facts.dev = Some("lo: 0\n".to_owned())),
         (Fact::Dev, |facts| facts.dev = Some("a|b\n".to_owned())),
         (Fact::Dev, |facts| {
@@ -165,8 +165,19 @@ fn unparsable_facts_deny() {
         (Fact::Dev, |facts| {
             facts.dev = appended(facts.dev.as_deref(), "   : 0 0")
         }),
+        // `lo` must be listed (ADR-135 §4 item 1).
+        (Fact::Dev, |facts| {
+            facts.dev = replaced(facts.dev.as_deref(), "    lo:", "  sit0:");
+        }),
         (Fact::Route, |facts| {
             facts.route = Some("Destination\n".to_owned())
+        }),
+        // A row with more fields than its format is unparsable too.
+        (Fact::Ipv6Route, |facts| {
+            facts.ipv6_route = Some(IPV6_ROUTE.replace("       lo", " extra lo"));
+        }),
+        (Fact::Igmp6, |facts| {
+            facts.igmp6 = Some(IGMP6.replace(" 0\n", " 0 extra\n"));
         }),
         (Fact::Route, |facts| facts.route = Some(String::new())),
         (Fact::Ipv6Route, |facts| {
@@ -234,9 +245,16 @@ fn unparsable_facts_deny() {
 #[test]
 fn every_network_path_denies() {
     type Change = fn(&mut AirGappedHostFactsV1);
-    let cases: [(Denial, Change); 10] = [
+    let cases: [(Denial, Change); 12] = [
         (Denial::Interface, |facts| {
             facts.dev = appended(facts.dev.as_deref(), "  eth0: 0 0 0 0 0 0 0 0 0");
+        }),
+        // A device whose name holds a colon is never read as `lo`.
+        (Denial::Interface, |facts| {
+            facts.dev = appended(facts.dev.as_deref(), "  lo:x: 0 0 0 0 0 0 0 0 0");
+        }),
+        (Denial::Membership, |facts| {
+            facts.igmp = appended(facts.igmp.as_deref(), "2\tlo:x      :     1      V3");
         }),
         (Denial::Route, |facts| {
             facts.route = appended(
@@ -387,9 +405,14 @@ fn the_air_gapped_mode_is_refused_where_a_network_capability_is_held() -> TestRe
     }
     let refused =
         verify_gateway_serve_composition_v1(GatewayModeProfileIdV1::AirGapped, &loopback());
+    // The fresh namespace holds only `lo`, so the held capability is the refusal.
     let refusal = refused
         .err()
         .ok_or("the Air-Gapped composition was not refused")?;
+    assert_eq!(
+        refusal,
+        GatewayModeErrorV1::NetworkPathPresent(Denial::Capability)
+    );
     assert!(
         refusal
             .to_string()
