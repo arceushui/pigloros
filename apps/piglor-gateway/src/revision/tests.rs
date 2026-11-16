@@ -180,7 +180,9 @@ fn revision_uri(collection: &str, body: &Value) -> String {
 }
 
 fn preference(weights: Value) -> Value {
-    json!({"schema_version": 1, "weights": weights})
+    let mut body = json!({"schema_version": 1});
+    body["weights"] = weights;
+    body
 }
 
 fn option(key: &str) -> Value {
@@ -188,7 +190,9 @@ fn option(key: &str) -> Value {
 }
 
 fn option_spec(options: Value) -> Value {
-    json!({"schema_version": 1, "options": options})
+    let mut body = json!({"schema_version": 1});
+    body["options"] = options;
+    body
 }
 
 fn two_options() -> Value {
@@ -513,6 +517,8 @@ async fn a_revision_survives_a_restart_of_its_store() -> TestResult {
     .await?;
     assert_eq!(read, (StatusCode::OK, created));
     gateway.shutdown().await?;
+    drop(app);
+    drop(gateway);
     drop(served);
     Ok(())
 }
@@ -805,6 +811,8 @@ async fn a_composition_without_a_principal_or_a_store_fails_closed() -> TestResu
         );
     }
     open.shutdown().await?;
+    drop(app);
+    drop(open);
     // A store without the revision port answers unavailable.
     let generic = Gateway::new(pos_store::open_store(StoreConfig::Memory)?);
     let key = GatewayRevisionKeyV1::new(PreferenceFamily::KIND, [1; 16], NonZeroU64::MIN);
@@ -817,6 +825,7 @@ async fn a_composition_without_a_principal_or_a_store_fails_closed() -> TestResu
         Err(GatewayRevisionErrorV1::Unavailable)
     );
     generic.shutdown().await?;
+    drop(generic);
     Ok(())
 }
 
