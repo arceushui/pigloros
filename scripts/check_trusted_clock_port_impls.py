@@ -36,6 +36,12 @@ IMPL = re.compile(
 ALIAS = re.compile(r"\buse\b[^;]*?\b(?:" + "|".join(PORTS) + r")\s+as\b", re.DOTALL)
 RAW_STRING = re.compile(r'b?r(#*)"')
 SKIPPED_PARTS = {"target", ".git", ".trunk", "node_modules"}
+# Equivalence of the prefilter: comment stripping only removes text (each comment
+# becomes one space), so a token absent from the raw file is absent from the
+# stripped code, and every finding below needs one of these tokens to match.
+# IMPL and ALIAS both name a port; a file naming neither is skipped before the
+# character-level comment stripper runs.
+GUARDS = PORTS
 
 
 def _identifier_char(text: str, index: int) -> bool:
@@ -139,6 +145,8 @@ def violations(root: Path) -> list[str]:
             continue
         relative = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
+        if not any(token in text for token in GUARDS):
+            continue
         code = strip_comments(text)
         if allowed(relative, code):
             continue
