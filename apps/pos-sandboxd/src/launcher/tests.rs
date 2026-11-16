@@ -591,7 +591,16 @@ fn release_fields(ready: &LauncherReady) -> ExecutionReleaseFields {
 }
 
 fn signed(fields: ExecutionReleaseFields) -> Result<Vec<u8>, Box<dyn Error>> {
-    Ok(ExecutionRelease::sign(fields, |_| [1; 64])?.to_canonical_cbor()?)
+    // The launcher never verifies a release; any verified signature does.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+    Ok(ExecutionRelease::self_digested(fields)
+        .and_then(|record| {
+            let signature =
+                ed25519_dalek::Signer::sign(&key, &record.signature_message()).to_bytes();
+            record.verify(signature, &key.verifying_key())
+        })
+        .and_then(|verified| ExecutionRelease::new(verified, &key.verifying_key()))
+        .and_then(|release| release.to_canonical_cbor())?)
 }
 
 fn release_with(
