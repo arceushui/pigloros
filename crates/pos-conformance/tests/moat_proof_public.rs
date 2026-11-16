@@ -1701,6 +1701,31 @@ fn non_interference_execution_status_cannot_turn_missing_or_placeholder_results_
 }
 
 #[test]
+fn public_evidence_decoder_maps_each_non_interference_status_code_to_its_variant() {
+    let encoded = decode_value(ok(public_evidence_fixture().to_canonical_cbor()));
+    for (code, expected) in [
+        (
+            0_u64,
+            NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable,
+        ),
+        (1_u64, NonInterferenceExecutionStatusV1::Executed),
+    ] {
+        let mut evidence_fields =
+            cloned_array_fields(&encoded, "decode evidence fixture structure");
+        let mut contract_fields = cloned_array_fields(
+            &evidence_fields[EvidenceField::Contract.index()],
+            "decode proof-contract fixture structure",
+        );
+        contract_fields[6] = ciborium::Value::Integer(code.into());
+        evidence_fields[EvidenceField::Contract.index()] = ciborium::Value::Array(contract_fields);
+        let decoded = ok(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+            &ciborium::Value::Array(evidence_fields),
+        )));
+        assert_eq!(decoded.contract.non_interference_status, expected);
+    }
+}
+
+#[test]
 fn public_evidence_decoder_closes_scalar_and_length_boundaries_even_structural_paths() {
     let evidence = evidence_with_optional_record_variants();
     let value = decode_value(ok(evidence.to_canonical_cbor()));

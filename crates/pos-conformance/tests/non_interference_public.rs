@@ -805,6 +805,18 @@ fn typed_normalizers_reject_wrong_shape_and_invalid_allowed_values() {
         Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
     );
 
+    let mut zero_padding = raw_capture_for("NI-OBS-004", b"captured");
+    zero_padding.operational[0] = NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+        category: 1,
+        count: 1,
+        padded_length: 0,
+        excluded_sensitive: Vec::new(),
+    };
+    assert_eq!(
+        normalize_non_interference_capture_v1("NI-OBS-004", zero_padding),
+        Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+    );
+
     let mut empty_exact = raw_capture_for("NI-EVAL-007", b"captured");
     empty_exact.operational[0] = NonInterferenceRawOperationalV1::ByteExact(Vec::new());
     assert_eq!(
@@ -1102,4 +1114,152 @@ fn complete_matrix_reports_the_first_cross_mode_surface_difference() {
 
     assert!(cases[2].first_cross_mode_divergence.is_none());
     assert!(cases[3].first_cross_mode_divergence.is_none());
+}
+
+fn hex32(hex: &str) -> [u8; 32] {
+    let mut bytes = [0_u8; 32];
+    assert_eq!(hex.len(), 64);
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = test_ok(u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16));
+    }
+    bytes
+}
+
+fn tool_pair(
+    permitted_input: &[u8],
+    control: &[u8],
+    canary: &[u8],
+) -> Result<NonInterferenceFixturePairV1, NonInterferenceExecutionErrorV1> {
+    NonInterferenceFixturePairV1::try_new(
+        "NI-TOOL-001",
+        NonInterferenceVariantV1::Success,
+        ExecutionModeV1::Local,
+        permitted_input.to_vec(),
+        control.to_vec(),
+        canary.to_vec(),
+    )
+}
+
+#[test]
+fn unauthorized_values_of_exactly_the_published_bound_are_admitted() {
+    let at_bound = vec![b'x'; 1024 * 1024];
+    let control = test_ok(tool_pair(b"input", &at_bound, b"canary"));
+    assert_eq!(control.control_unauthorized_value.len(), 1024 * 1024);
+    let canary = test_ok(tool_pair(b"input", b"control", &at_bound));
+    assert_eq!(canary.canary_unauthorized_value.len(), 1024 * 1024);
+}
+
+/// Each row is `(permitted_input, control_unauthorized_value, contained)`.
+/// The rows defeat a wrong length shortcut (needle as long as the haystack)
+/// and a wrong prefix table or fallback in the linear-time search: periodic
+/// needles whose near matches a broken failure function would accept or miss.
+/// The canary is longer than every permitted input, so only the control
+/// placement decides admission. Rows that would make a broken fallback loop
+/// forever come after a row that already exposes that fallback.
+#[test]
+fn unauthorized_value_containment_is_exact_for_periodic_and_full_length_needles() {
+    let canary = b"canary-longer-than-every-permitted-input";
+    let rows: [(&[u8], &[u8], bool); 10] = [
+        (b"abc", b"abc", true),
+        (b"abba", b"aba", false),
+        (b"ccbacbbacbbc", b"cbacbbc", false),
+        (b"ababbabbb", b"ababbb", false),
+        (b"aababaa", b"aabaa", false),
+        (b"aba", b"aa", false),
+        (b"aaab", b"aab", true),
+        (b"aaaab", b"aaab", true),
+        (b"ab", b"abc", false),
+        (b"xxabcabdxx", b"abcabd", true),
+    ];
+    for (permitted, control, contained) in rows {
+        let admitted = tool_pair(permitted, control, canary);
+        if contained {
+            assert_eq!(
+                admitted,
+                Err(NonInterferenceExecutionErrorV1::FixtureInvalid),
+                "{permitted:?} contains {control:?}"
+            );
+        } else {
+            assert_eq!(
+                test_ok(admitted).control_unauthorized_value,
+                control,
+                "{permitted:?} does not contain {control:?}"
+            );
+        }
+    }
+}
+
+/// Known answers computed independently (pure-Python BLAKE3 checked against
+/// the published empty and `abc` vectors) from the canonical encoding:
+/// `BLAKE3(domain || 0x00 || fields)`, each byte field prefixed by its u64
+/// big-endian length and the variant as its one-byte code (Denial = 1).
+#[test]
+fn fixture_and_input_digests_match_known_answers() {
+    let pair = fixture();
+    assert_eq!(
+        pair.fixture_digest,
+        hex32("698555684cc3cd7592530d4e0372f8e181c4eadc727825b46522daa3e805f59d")
+    );
+    let case = test_ok(execute_non_interference_pair(&pair, |_| {
+        Ok(capture(b"captured"))
+    }));
+    assert_eq!(case.fixture_digest, pair.fixture_digest);
+    assert_eq!(
+        case.control_input_digest,
+        hex32("5842fbe1b9beea96daf84e0931b7558223cdc9cdaf087e2b157531cb5a02f71e")
+    );
+    assert_eq!(
+        case.canary_input_digest,
+        hex32("5a5329252e02b404a183bb0b0f824dbe6108bed46ce5f405c673e6c5d730e434")
+    );
+}
+
+#[test]
+fn inventory_mismatch_is_reported_before_network_access() {
+    let mut missing_public = raw_capture_for("NI-TOOL-001", b"captured");
+    missing_public.public.pop();
+    missing_public.unexpected_network_accesses = 1;
+    let mut renamed_surface = raw_capture_for("NI-TOOL-001", b"captured");
+    renamed_surface.surface_names[0] = "renamed surface".to_owned();
+    renamed_surface.unexpected_network_accesses = 1;
+    for raw in [missing_public, renamed_surface] {
+        assert_eq!(
+            normalize_non_interference_capture_v1("NI-TOOL-001", raw),
+            Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+        );
+    }
+}
+
+#[test]
+fn post_normalization_byte_or_inventory_tampering_fails_closed() {
+    for tampered_member in [
+        NonInterferenceMatrixMemberV1::Control,
+        NonInterferenceMatrixMemberV1::Canary,
+    ] {
+        // Same inventory lengths, different bytes: only the digest notices.
+        assert_eq!(
+            execute_non_interference_pair(&fixture(), |run| {
+                let mut normalized = capture(b"captured");
+                if run.member == tampered_member {
+                    normalized.authoritative[0][0] ^= 1;
+                }
+                Ok(normalized)
+            }),
+            Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+        );
+
+        // Moving a surface across the chained vectors keeps the digested byte
+        // sequence: only the per-vector inventory length notices.
+        assert_eq!(
+            execute_non_interference_pair(&fixture(), |run| {
+                let mut normalized = capture(b"captured");
+                if run.member == tampered_member {
+                    let moved = normalized.public.remove(0);
+                    normalized.authoritative.push(moved);
+                }
+                Ok(normalized)
+            }),
+            Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+        );
+    }
 }
