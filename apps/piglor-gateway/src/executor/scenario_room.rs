@@ -2,10 +2,10 @@
 //!
 //! Each operation runs as one command on the store worker, so the head
 //! check of a derive and its append are one serialized step. A room is one
-//! root Timeline named [`ROOM_TIMELINE_PREFIX`] followed by the room ID;
-//! each revision is one `room.revision.v1` Event whose payload is the
-//! admitted ADR-041 descriptor, appended under its ADR-041 append identity
-//! (ADR-041 section 7).
+//! root Timeline named `scenario-room/` (`ROOM_TIMELINE_PREFIX`) followed
+//! by the room ID; each revision is one `room.revision.v1` Event whose
+//! payload is the admitted ADR-041 descriptor, appended under its ADR-041
+//! append identity (ADR-041 section 7).
 //!
 //! An `Idempotency-Key` is claimed on the host's request Timeline as one
 //! Event whose entity is derived from the key and whose payload is the
