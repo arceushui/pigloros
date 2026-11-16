@@ -144,6 +144,15 @@ composes the attempt:
 The live dm-verity table is #444 evidence, not a runtime check. Lifecycle
 cleanup (#1199/#1200) and packaged-build conformance (#444) remain separate.
 
+With the `test-support` feature, the `packaged_conformance` module and the
+`pos-sandboxd-conformance` binary drive this path in the #444 QEMU evidence
+guest only (`deploy/nixos/qemu-evidence`). The binary stages the dev/test
+installation around one image, admits it, registers and prepares one attempt,
+and calls `activate_admitted_root`. While its standard input stays open, it
+holds the mounted root so the guest can record the live kernel state. It then
+detaches the root and removes the directory. The feature is never enabled in
+deployable builds.
+
 `/work`, the sole writable mount, is requested as
 `TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read
 back as a typed `a(ss)` value. A zero ceiling requests no mount at all, because

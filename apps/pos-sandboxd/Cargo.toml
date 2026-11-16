@@ -6,6 +6,28 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Builds the #444 QEMU evidence guest's driver around the pos-reference
+# installation-staging fixture. Never enabled in deployable builds
+# (scripts/check_test_support_features.py); its test-only keys grant nothing.
+test-support = ["pos-reference/test-support"]
+
+# The provider binary, `src/main.rs`.
+[[bin]]
+name = "pos-sandboxd"
+path = "src/main.rs"
+
+# The evidence guest's driver (#444): only wiring of the tested
+# `packaged_conformance` library calls; the evidence lane runs its mounted path.
+[[bin]]
+name = "pos-sandboxd-conformance"
+path = "conformance/main.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "packaged_conformance_public"
+required-features = ["test-support"]
+
 [dependencies]
 blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }

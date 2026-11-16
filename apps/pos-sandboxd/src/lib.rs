@@ -44,6 +44,9 @@ mod release_barrier;
 mod release_signer;
 #[cfg(target_os = "linux")]
 mod restart;
+// The #444 QEMU evidence guest's driver, compiled only with `test-support`.
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+pub mod packaged_conformance;
 #[cfg(target_os = "linux")]
 mod root_attachment;
 #[cfg(target_os = "linux")]

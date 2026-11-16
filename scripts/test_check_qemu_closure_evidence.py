@@ -27,7 +27,12 @@ CERTIFICATE = CERTIFICATE_PATH.read_text(encoding="utf-8")
 FLAKE_LOCK = json.loads(FLAKE_LOCK_PATH.read_text(encoding="utf-8"))
 # Independent oracle: `openssl x509 -noout -subject -ext subjectKeyIdentifier`
 # on the committed certificate, formatted by ADR-087 Part C.2.
-DESCRIPTION = "PiglorOS public dev-test root-hash signing: bfe242fa5e161b8499d08a5bbe21d46726836d74"
+DESCRIPTION = "PiglorOS public dev-test root-hash signing: 0539d5095cd5ea12c02ab66d7328aa1351b9fe0d"
+UNTRUSTED_PATH = ROOT / "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt"
+UNTRUSTED = UNTRUSTED_PATH.read_text(encoding="utf-8")
+UNTRUSTED_DESCRIPTION = (
+    "PiglorOS public dev-test untrusted root-hash signing: 681f6802dd22c3b9ec796fa30fa238c18d8e857d"
+)
 HASH = "0123456789abcdfghijklmnpqrsvwxyz"
 
 
@@ -46,6 +51,8 @@ PATHS = {
     "kernelConfig": store("linux-config-6.12.117"),
     "collector": store("piglor-qemu-evidence"),
     "collectorUnit": store("unit-piglor-qemu-evidence.service"),
+    "conformance": store("pos-sandboxd-conformance-0"),
+    "images": store("piglor-qemu-evidence-images"),
 }
 COMMIT_SHA = "1" * 40
 PR_HEAD_SHA = "2" * 40
@@ -77,7 +84,7 @@ NET_DEV = (
 NS = "pid\tpid:[4026531836]\nuser\tuser:[4026531837]\nmnt\tmnt:[4026531841]\n"
 
 
-CLOSURE = ("toplevel", "kernel", "systemd", "collector", "collectorUnit")
+CLOSURE = ("toplevel", "kernel", "systemd", "collector", "collectorUnit", "conformance", "images")
 
 
 INITRD = store("initrd-linux-6.12.117", "c")
@@ -201,6 +208,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         "guest/pid1-namespaces": NS,
     }
     files["host/kernel-config"] = files["guest/kernel-config"]
+    files.update(case_files())
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
         ("311", WORKER, b"LANG=C.UTF-8\0MOUNTFS_FIXED_WORKER=1\0"),
@@ -208,6 +216,100 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         files[f"guest/processes/{pid}/exe"] = exe + "\n"
         files[f"guest/processes/{pid}/environ"] = environ
         files[f"guest/processes/{pid}/namespaces"] = NS
+    return files
+
+
+# --- Part (b) case records -------------------------------------------------------
+
+ROOT_HASH, SALT = "ab" * 32, "cd" * 32
+IMAGES = PATHS["images"]
+ATTEMPT = "/run/pigloros/sandbox/attempts/" + "e" * 32 + "/root"
+BACKING = "/var/lib/pigloros/sandbox/images/" + "f" * 64
+MAPPER = "root-8a5cfdc4b2c35aa0"
+HELD_DEVICES = (
+    f"loop\tloop0\t{BACKING}\t{BACKING}\tloop0p1,loop0p2,loop0p3\n"
+    f"dm\tdm-0\t{MAPPER}\tCRYPT-VERITY-8a5cfdc4b2c35aa0-{MAPPER}\tloop0p1,loop0p2\n"
+)
+TABLE = (f"{MAPPER}: 0 1136 verity 1 7:1 7:2 4096 4096 142 1 sha256 {ROOT_HASH} {SALT} "
+         "2 root_hash_sig_key_desc cryptsetup:8a5cfdc4\n")
+READBACK = checker.readback_bytes()
+RUNTIME_AFTER = ("\td\t700\nsandbox\td\t700\nsandbox/attempts\td\t700\n"
+                 "sandbox/registry\td\t700\nsandbox/registry/activation\tf\t600\n")
+REPLY = json.dumps({
+    "partitions": [{"designator": "root", "writable": False, "growFileSystem": False,
+                    "partitionNumber": 1, "architecture": "x86-64", "fileSystemType": "erofs",
+                    "size": 581632, "offset": 20480, "mountFileDescriptor": 0, "mountPoint": ["/"]}],
+    "singleFileSystem": False, "imagePolicy": "root=signed+erofs:=absent",
+    "imageSize": 1683456, "sectorSize": 512, "imageName": "piglor-evidence-image",
+}, indent=4) + "\n"
+
+
+def ddi(root_hash: str = ROOT_HASH, salt: str = SALT) -> bytes:
+    """A minimal three-partition GPT image: data, a verity superblock and the
+    root-verity-sig JSON, at 512-byte sectors."""
+    image = bytearray(512 * 8)
+    header = bytearray(92)
+    header[:8] = b"EFI PART"
+    struct.pack_into("<QII", header, 72, 2, 3, 128)
+    image[512:604] = header
+    for index, (first, last) in enumerate(((5, 5), (6, 6), (7, 7))):
+        entry = bytearray(128)
+        entry[:16] = bytes([index + 1]) * 16
+        struct.pack_into("<QQ", entry, 32, first, last)
+        image[1024 + 128 * index:1024 + 128 * (index + 1)] = entry
+    superblock = bytearray(512)
+    superblock[:8] = b"verity\0\0"
+    struct.pack_into("<H", superblock, 80, 32)
+    superblock[88:120] = bytes.fromhex(salt)
+    image[6 * 512:7 * 512] = superblock
+    signature = json.dumps({"rootHash": root_hash, "signature": "AA=="}).encode()
+    image[7 * 512:7 * 512 + len(signature)] = signature
+    return bytes(image)
+
+
+def case_files() -> dict[str, bytes | str]:
+    files: dict[str, bytes | str] = {
+        "host/images/positive.raw": ddi(),
+        "host/images/positive.der": checker.pem_certificate(CERTIFICATE),
+        "host/images/wrong-key.der": checker.pem_certificate(UNTRUSTED),
+        "host/images/root-hash.txt": ROOT_HASH,
+        "guest/cases/verity-d-planted": "/run/verity.d/piglor-untrusted.crt\tf\n",
+        "guest/cases/kernel-log": "device-mapper: verity: 7:1: data block 7 is corrupted\n",
+        "guest/cases/mountfsd-reply/devices-before": "",
+        "guest/cases/mountfsd-reply/reply": REPLY,
+        "guest/cases/mountfsd-reply/stderr": "",
+        "guest/cases/mountfsd-reply/status": "0\n",
+        "guest/cases/mountfsd-reply/devices-after": "",
+    }
+    for case, image, signer, description in (
+        ("positive", "positive", "positive", DESCRIPTION),
+        ("tampered", "tampered", "tampered", DESCRIPTION),
+        ("wrong-key", "wrong-key", "wrong-key", UNTRUSTED_DESCRIPTION),
+        ("verity-d", "wrong-key", "wrong-key", UNTRUSTED_DESCRIPTION),
+    ):
+        base = f"guest/cases/{case}"
+        files.update({
+            f"{base}/arguments": f"{IMAGES}/{image}.raw\n{IMAGES}/{signer}.der\n{description}\n",
+            f"{base}/driver-stderr": "",
+            f"{base}/driver-status": "0\n",
+            f"{base}/devices-before": "",
+            f"{base}/devices-after": "",
+            f"{base}/runtime-after": RUNTIME_AFTER,
+        })
+        if case in checker.MOUNTED_CASES:
+            whole = (f"0\t{hashlib.sha256(READBACK).hexdigest()}" if case == "positive"
+                     else "1\tsha256sum: -: Input/output error")
+            files.update({
+                f"{base}/report": f"activation\tmounted\t1234\t{ATTEMPT}\nrelease\tdetached\nremoval\tremoved\n",
+                f"{base}/devices-held": HELD_DEVICES,
+                f"{base}/mountinfo-held": MOUNTINFO + (
+                    f"90 22 253:0 / {ATTEMPT} ro,relatime shared:50 - erofs /dev/mapper/{MAPPER} ro\n"),
+                f"{base}/dm-table-held": TABLE,
+                f"{base}/readback": (f"file\t{whole}\n"
+                                     f"block-0\t0\t{hashlib.sha256(READBACK[:4096]).hexdigest()}\n"),
+            })
+        else:
+            files[f"{base}/report"] = "activation\trefused\tMethodRejected\nrelease\tnone\nremoval\tremoved\n"
     return files
 
 
@@ -422,7 +524,8 @@ class EvidenceTests(unittest.TestCase):
         return root
 
     def verdict(self, architecture: str = "x86_64", change=None) -> dict:
-        return checker.check(self.evidence(architecture, change), architecture, CERTIFICATE, FLAKE_LOCK)
+        return checker.check(self.evidence(architecture, change), architecture, CERTIFICATE, FLAKE_LOCK,
+                             untrusted_certificate=UNTRUSTED)
 
     def refuses(self, change, architecture: str = "x86_64") -> None:
         with self.assertRaises(checker.EvidenceError):
@@ -517,7 +620,7 @@ class EvidenceTests(unittest.TestCase):
         root = self.evidence(change=without_status)
         os.symlink("/etc/hostname", root / "guest/status")
         with self.assertRaises(checker.EvidenceError):
-            checker.check(root, "x86_64", CERTIFICATE, FLAKE_LOCK)
+            checker.check(root, "x86_64", CERTIFICATE, FLAKE_LOCK, untrusted_certificate=UNTRUSTED)
 
     def test_identity_fabrication_is_refused(self):
         other = store("nixos-system-other", "b")
@@ -569,10 +672,12 @@ class EvidenceTests(unittest.TestCase):
             for other in checker.PROVENANCE_FILES:
                 (repository / other).parent.mkdir(parents=True, exist_ok=True)
                 (repository / other).write_bytes((ROOT / other).read_bytes())
-            checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository)
+            checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
+                          untrusted_certificate=UNTRUSTED)
             (repository / name).write_bytes(b"# edited after the run\n")
             with self.assertRaises(checker.EvidenceError):
-                checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository)
+                checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository,
+                          untrusted_certificate=UNTRUSTED)
 
     def test_the_compiled_in_list_must_be_exactly_the_certificate(self):
         der = checker.pem_certificate(CERTIFICATE)
@@ -700,7 +805,7 @@ class EvidenceTests(unittest.TestCase):
             lock = json.loads(json.dumps(FLAKE_LOCK))
             change(lock)
             with self.subTest(change=change), self.assertRaises(checker.EvidenceError):
-                checker.check(root, "x86_64", CERTIFICATE, lock)
+                checker.check(root, "x86_64", CERTIFICATE, lock, untrusted_certificate=UNTRUSTED)
 
     def test_runner_accelerator_and_network_are_verified(self):
         changes = [
@@ -932,11 +1037,97 @@ class EvidenceTests(unittest.TestCase):
         mount_namespace = NS.replace("4026531841", "4026532111")
         self.verdict(change=lambda f: f.update({"guest/processes/310/namespaces": mount_namespace}))
 
+    def test_mount_image_cases_hold_and_report_the_live_state(self):
+        verdict = self.verdict()["mount_image_cases"]
+        self.assertEqual((verdict["root_hash"], verdict["salt"]), (ROOT_HASH, SALT))
+        held = verdict["positive"]["held"]
+        self.assertEqual((held["loop"], held["partitions"], held["dm"]), ("loop0", "loop0p1,loop0p2,loop0p3", "dm-0"))
+        self.assertEqual(held["root_hash_sig_key_desc"], "cryptsetup:8a5cfdc4")
+        self.assertEqual(verdict["tampered"]["readback"]["file"][0], "1")
+        self.assertEqual(verdict["wrong-key"]["report"][0], ["activation", "refused", "MethodRejected"])
+        self.assertEqual((verdict["mountfsd_reply"]["imageSize"], verdict["mountfsd_reply"]["sectorSize"]),
+                         (1683456, 512))
+
+    def test_mount_image_case_fabrication_fails_closed(self):
+        positive, tampered = "guest/cases/positive", "guest/cases/tampered"
+        refused, reply = "guest/cases/wrong-key", "guest/cases/mountfsd-reply"
+        leftover = f"loop\tloop1\t{BACKING}\t{BACKING}\tloop1p1,loop1p2,loop1p3\n"
+        changes = [
+            # Inventory: a missing case, file, or extra case.
+            lambda f: [f.pop(name) for name in list(f) if name.startswith("guest/cases/verity-d/")],
+            lambda f: f.pop(f"{positive}/readback"),
+            lambda f: f.update({"guest/cases/extra/report": ""}),
+            lambda f: f.pop("host/images/root-hash.txt"),
+            lambda f: f.update({f"{reply}/extra": ""}),
+            # Inputs: other signers, descriptions or images.
+            lambda f: f.update({"host/images/positive.der": checker.pem_certificate(UNTRUSTED)}),
+            lambda f: f.update({"host/images/wrong-key.der": checker.pem_certificate(CERTIFICATE)}),
+            lambda f: f.update({"host/images/root-hash.txt": "ef" * 32}),
+            lambda f: f.update({"host/images/positive.raw": b"not a disk"}),
+            lambda f: f.update({"host/images/positive.raw": ddi(root_hash="AB" * 32)}),
+            lambda f: f.update({f"{positive}/arguments": f[f"{positive}/arguments"].replace(
+                DESCRIPTION, UNTRUSTED_DESCRIPTION)}),
+            lambda f: f.update({f"{refused}/arguments": f[f"{refused}/arguments"].replace(
+                "wrong-key.der", "positive.der")}),
+            lambda f: f.update({"guest/cases/verity-d/arguments": f["guest/cases/positive/arguments"]}),
+            # Outcomes: refusals, failed releases, unfinished protocols.
+            lambda f: f.update({f"{positive}/driver-status": "1\n"}),
+            lambda f: f.update({f"{positive}/report": "activation\trefused\tMethodRejected\n"}),
+            lambda f: f.update({f"{positive}/report": f[f"{positive}/report"].replace("detached", "failed\tTeardownFailure")}),
+            lambda f: f.update({f"{positive}/report": f[f"{positive}/report"].replace("\tremoved", "\tfailed\tUnsafeRegistry")}),
+            lambda f: f.update({f"{positive}/report": f[f"{positive}/report"].replace(ATTEMPT, "/tmp/root")}),
+            lambda f: f.update({f"{refused}/report": f"activation\tmounted\t1\t{ATTEMPT}\nrelease\tdetached\nremoval\tremoved\n"}),
+            lambda f: f.update({f"{refused}/report": "activation\trefused\tTransport\nrelease\tnone\nremoval\tremoved\n"}),
+            lambda f: f.update({"guest/cases/verity-d/report": ""}),
+            # Live state: topology, table, mount and readback.
+            lambda f: f.update({f"{positive}/devices-held": HELD_DEVICES.replace(BACKING + "\t" + BACKING, BACKING + "\t-")}),
+            lambda f: f.update({f"{positive}/devices-held": HELD_DEVICES.replace(",loop0p3", "")}),
+            lambda f: f.update({f"{positive}/devices-held": HELD_DEVICES.replace("CRYPT-VERITY-", "CRYPT-PLAIN-")}),
+            lambda f: f.update({f"{positive}/devices-held": HELD_DEVICES.replace("\tloop0p1,loop0p2\n", "\tloop0p1\n")}),
+            lambda f: f.update({f"{positive}/devices-held": HELD_DEVICES + leftover}),
+            lambda f: f.update({f"{positive}/dm-table-held": TABLE.replace(ROOT_HASH, "ef" * 32)}),
+            lambda f: f.update({f"{positive}/dm-table-held": TABLE.replace(SALT, "-")}),
+            lambda f: f.update({f"{positive}/dm-table-held": TABLE.replace(" 2 root_hash_sig_key_desc cryptsetup:8a5cfdc4", "")}),
+            lambda f: f.update({f"{positive}/dm-table-held": TABLE.replace(" 2 root_hash", " 3 root_hash")}),
+            lambda f: f.update({f"{positive}/dm-table-held": TABLE.replace("sha256", "sha1")}),
+            lambda f: f.update({f"{positive}/dm-table-held": TABLE + TABLE}),
+            lambda f: f.update({f"{positive}/mountinfo-held": f[f"{positive}/mountinfo-held"].replace(" ro,relatime", " rw,relatime")}),
+            lambda f: f.update({f"{positive}/mountinfo-held": f[f"{positive}/mountinfo-held"].replace("- erofs", "- squashfs")}),
+            lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO}),
+            lambda f: f.update({f"{positive}/readback": f[f"{tampered}/readback"]}),
+            lambda f: f.update({f"{tampered}/readback": f[f"{positive}/readback"]}),
+            lambda f: f.update({f"{tampered}/readback": f[f"{tampered}/readback"].replace("block-0\t0", "block-0\t1")}),
+            lambda f: f.update({f"{tampered}/readback": "file\t1\tsha256sum: -: Input/output error\n"}),
+            lambda f: f.update({"guest/cases/kernel-log": "device-mapper: verity: loaded\n"}),
+            # Cleanup: devices or attempt directories that remain.
+            lambda f: f.update({f"{positive}/devices-after": leftover}),
+            lambda f: f.update({f"{refused}/devices-after": HELD_DEVICES}),
+            lambda f: f.update({f"{refused}/devices-before": leftover}),
+            lambda f: f.update({f"{positive}/runtime-after": RUNTIME_AFTER + "sandbox/attempts/x\td\t700\n"}),
+            lambda f: f.update({"guest/cases/verity-d-planted": ""}),
+            # The raw reply.
+            lambda f: f.update({f"{reply}/status": "1\n"}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace('"imageSize": 1683456,', "")}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": true')}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace('"erofs"', '"ext4"')}),
+            lambda f: f.update({f"{reply}/reply": "[]\n"}),
+            lambda f: f.update({f"{reply}/devices-after": f"loop\tloop2\t/run/piglor-evidence-image.raw\t-\t\n"}),
+            lambda f: f.update({f"{reply}/devices-after": "dm\tdm-1\tx\tCRYPT-VERITY-x\tloop2p1\n"}),
+            lambda f: f.update({f"{reply}/devices-before": "garbage\n"}),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
+        # Unrelated loop devices may remain after the raw reply's devices go away.
+        unrelated = "loop\tloop5\t/var/lib/other.img\t/var/lib/other.img\t\n"
+        self.verdict(change=lambda f: f.update({f"{reply}/devices-after": unrelated}))
+
     def test_cli_writes_one_verdict_and_refuses_bad_input(self):
         root = self.evidence()
         verdict = self.base / "verdict.json"
         command = [sys.executable, str(pathlib.Path(checker.__file__)), "--architecture", "x86_64",
-                   "--certificate", str(CERTIFICATE_PATH), "--flake-lock", str(FLAKE_LOCK_PATH),
+                   "--certificate", str(CERTIFICATE_PATH), "--untrusted-certificate", str(UNTRUSTED_PATH),
+                   "--flake-lock", str(FLAKE_LOCK_PATH),
                    "--verdict", str(verdict), str(root)]
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -945,6 +1136,7 @@ class EvidenceTests(unittest.TestCase):
         for arguments in (
             ["--architecture", "riscv64"],
             ["--certificate", str(root / "missing.pem")],
+            ["--untrusted-certificate", str(CERTIFICATE_PATH)],
             ["--flake-lock", str(CERTIFICATE_PATH)],
         ):
             changed = list(command[2:])

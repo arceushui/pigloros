@@ -36,14 +36,18 @@ PRODUCER_SHA256 = {
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "d87e1b027174070441483c29bc0526cfbbf8d0fcbd73d034a44479361c822711",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
-    "scripts/qemu-closure-evidence.sh": "455e2ca6659529e25d37114edf5a32ad75b60263cadf7e972e5ac8e5e4679d6a",
-    "scripts/check_qemu_closure_evidence.py": "930edbeeea10f494a0a8a197e59c44fa9d9039a8472dde08dc682f935bc004a6",
-    "deploy/nixos/flake.nix": "80e23ef4cc0a171f6ad0cb9f39104cd6e540653f7ee555162682201ef2a82368",
+    "scripts/qemu-closure-evidence.sh": "4c511ab5c37d64d841b0da6bcf49fa8aad06da719f6866654fcd7b7d700787fa",
+    "scripts/check_qemu_closure_evidence.py": "ca831dd524cfc577c116150259bf5c80d702eba0c801f680c678f19c77b06f62",
+    "deploy/nixos/flake.nix": "cfd9e71e22b18412dab4e3bc4d8a10ff702dcab3284f41c542a83947bce85e69",
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
-    "deploy/nixos/qemu-evidence/guest.nix": "4b4105786ce137ac28e5833fabc0c8143615aaed4159acbc5b87a5b8fa18bfa3",
-    "deploy/nixos/qemu-evidence/collect-evidence.sh": "58c97456e2eada6aa360b8659ee1ecf698bee9e32a41aa71f8443f8f9bc99dfa",
-    "deploy/nixos/dev-trust/root-hash-dev-test.crt": "d755a5f97a8c7865bc3f5f73b731098df03382577f02ae7087a3596ef8f5a5a7",
+    "deploy/nixos/qemu-evidence/guest.nix": "0a25e8d378f27a0cb6e425a836324255189b0d01b049f7475cb51f6faf491652",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh": "76165c71d8a904057cabe1ab980b13d8b6c84d60d059dec098bde72db87e4bf9",
+    "deploy/nixos/qemu-evidence/build-images.sh": "e96e580741d0cb23565234522b6219f7b6cc1cb3e613ad737b0d0ea520abf274",
+    "deploy/nixos/dev-trust/root-hash-dev-test.crt": "418702f8e3af31e90ec317776153beeeda4be61e489366379cab3a4a76455896",
+    "deploy/nixos/dev-trust/root-hash-dev-test.key": "ca6cdbcf2f58cc20de6e45e63e387be37fc9d46e21d0e6e1212e6c9a0cd0dcd8",
+    "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt": "baf9bb141cf6c289964a6bf0e07cb5490be7ecc78bba27cdca484c3a73ba547d",
+    "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.key": "c1dd51e8357097ba31db0a1cc8c125cc3c7b95235c23ae49b82f74a76db61271",
 }
 CHECKOUT_STEP = {"uses": CHECKOUT, "with": {"persist-credentials": False}}
 EXPECTED = {
@@ -52,6 +56,10 @@ EXPECTED = {
         "pull_request": {"paths": [
             WORKFLOW,
             "deploy/nixos/**",
+            "Cargo.lock",
+            "Cargo.toml",
+            "apps/pos-sandboxd/**",
+            "crates/pos-reference/**",
             "scripts/check_qemu_closure_evidence.py",
             "scripts/test_check_qemu_closure_evidence.py",
             "scripts/check_qemu_closure_workflow_policy.py",
@@ -105,6 +113,7 @@ EXPECTED = {
                  "run": "python scripts/check_qemu_closure_evidence.py"
                         ' --architecture "${EVIDENCE_ARCHITECTURE}"'
                         " --certificate deploy/nixos/dev-trust/root-hash-dev-test.crt"
+                        " --untrusted-certificate deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt"
                         " --flake-lock deploy/nixos/flake.lock"
                         ' --verdict "${RUNNER_TEMP}/qemu-closure-evidence/checker-verdict.json"'
                         f" {EVIDENCE}\n"},

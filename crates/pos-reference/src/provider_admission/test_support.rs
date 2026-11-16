@@ -3,9 +3,10 @@
 //! [`StagedInstallation::stage`] writes the signed test installation at the
 //! fixed `/var/lib/pigloros/sandbox` path that [`super::ProviderImageSnapshot::open`]
 //! reads, and returns a canonical SPX1 request naming its authority. It must
-//! run as root inside the repository's isolated, disposable test container.
-//! Every record is signed with fixed test-only keys and grants no authority
-//! outside such a test.
+//! run as root inside the repository's isolated, disposable test container,
+//! or inside the disposable #444 QEMU evidence guest
+//! ([`StagedInstallation::stage_image`]). Every record is signed with fixed
+//! test-only keys and grants no authority outside such a test.
 
 use std::error::Error;
 use std::fs;
@@ -13,13 +14,34 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use crate::sandbox_provider_protocol::{
-    ExecuteAuthority, PayloadDescriptor, RequestAuthority, SandboxExecuteRequest,
+    ExecuteAuthority, PartitionDescriptor, PartitionRole, PayloadDescriptor, RequestAuthority,
+    SandboxArchitecture, SandboxExecuteRequest,
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
-use crate::selector::installation::fixture::{admitted_state, materialize_state};
+use crate::selector::installation::fixture::{
+    admitted_state, admitted_state_with_salt, ddi_fixture, materialize_state, ImageSigning,
+};
 use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
 
 const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
+
+/// A caller-built SIM1 DDI and the DER certificate whose key signed its root hash.
+///
+/// [`StagedInstallation::stage_image`] reads the partitions, the verity salt
+/// and the signed root hash from the image itself, and names `certificate`
+/// with `key_description` in the staged TRS1 and SIM1. Nothing checks that
+/// the description is the kernel's description of the certificate.
+#[derive(Clone, Copy, Debug)]
+pub struct StagedImage<'a> {
+    /// The architecture of the image's root partitions and of every staged record.
+    pub architecture: SandboxArchitecture,
+    /// The raw GPT image: root, root-verity and root-verity-sig partitions.
+    pub image: &'a [u8],
+    /// The DER signer certificate the TRS1 and SIM1 bind.
+    pub certificate: &'a [u8],
+    /// The kernel key description the TRS1 and SIM1 carry for the certificate.
+    pub key_description: &'a str,
+}
 
 /// The staged fixed installation, removed again when dropped.
 #[derive(Debug)]
@@ -37,7 +59,29 @@ impl StagedInstallation {
     /// Fails when the fixed installation parent already exists, so a host
     /// installation is never adopted or replaced, and on any write failure.
     pub fn stage() -> Result<Self, Box<dyn Error>> {
-        Self::stage_with_source(false)
+        let (image, _) = ddi_fixture("x86-64")?;
+        let signing = ImageSigning::ddi("x86-64")?;
+        Self::stage_image(&StagedImage {
+            architecture: signing.architecture,
+            image: &image,
+            certificate: &signing.certificate,
+            key_description: &signing.key_description,
+        })
+    }
+
+    /// [`Self::stage`], but around a caller-built image and its signer.
+    ///
+    /// # Errors
+    /// Refuses an existing fixed installation, an image without exactly three
+    /// GPT partitions, a root-verity-sig partition without a JSON `rootHash`
+    /// and base64 `signature`, and any record the staged authority rejects.
+    pub fn stage_image(image: &StagedImage<'_>) -> Result<Self, Box<dyn Error>> {
+        let (partitions, signing, salt) = described(image)?;
+        let state = admitted_state_with_salt(image.image, b"adapter", &partitions, &signing, salt)?;
+        let mut staged = Self::create_parent()?;
+        let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
+        staged.request = request_for(&admitted)?;
+        Ok(staged)
     }
 
     /// Stage a complete authenticated EVR1/CFB1/TPS1 source and canonical input.
@@ -45,17 +89,45 @@ impl StagedInstallation {
     /// # Errors
     /// Refuses an existing fixed installation and invalid fixture material.
     pub fn stage_execution() -> Result<Self, Box<dyn Error>> {
-        Self::stage_with_source(true)
+        let mut staged = Self::create_parent()?;
+        let corpus = crate::selector_test_support::air_gapped_corpus()?;
+        let (evaluation, state) =
+            crate::selector::installation::fixture::execution_state(admitted_state()?, &corpus)?;
+        let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
+        let resolved = admitted
+            .bootstrap()
+            .resolve_installed_case(&evaluation, 0)?;
+        crate::adapter_transport::write_attempt(&mut staged.input, resolved.attempt())?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
+        hasher.update(&staged.input);
+        let input = PayloadDescriptor {
+            byte_length: staged.input.len() as u64,
+            digest: *hasher.finalize().as_bytes(),
+        };
+        let request = crate::selector_protocol::execute_request_for_case(
+            &admitted,
+            &evaluation,
+            &resolved,
+            input,
+            0,
+            [2; 16],
+        )?;
+        staged.request = request.to_canonical_cbor()?;
+        staged.evaluation = evaluation.to_canonical_cbor()?;
+        Ok(staged)
     }
 
-    fn stage_with_source(execution: bool) -> Result<Self, Box<dyn Error>> {
+    /// Create the fixed, private installation directories, never adopting
+    /// existing ones. The returned value removes them again when dropped.
+    fn create_parent() -> Result<Self, Box<dyn Error>> {
         let parent = Path::new(INSTALLATION_PARENT);
         if parent.exists() {
             return Err("the fixed installation parent already exists".into());
         }
         fs::create_dir(parent)?;
         let metadata = fs::symlink_metadata(parent)?;
-        let mut staged = Self {
+        let staged = Self {
             request: Vec::new(),
             evaluation: Vec::new(),
             input: Vec::new(),
@@ -64,38 +136,6 @@ impl StagedInstallation {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         fs::create_dir(SANDBOX_ARTIFACT_ROOT)?;
         fs::set_permissions(SANDBOX_ARTIFACT_ROOT, fs::Permissions::from_mode(0o700))?;
-        if execution {
-            let corpus = crate::selector_test_support::air_gapped_corpus()?;
-            let (evaluation, state) = crate::selector::installation::fixture::execution_state(
-                admitted_state()?,
-                &corpus,
-            )?;
-            let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
-            let resolved = admitted
-                .bootstrap()
-                .resolve_installed_case(&evaluation, 0)?;
-            crate::adapter_transport::write_attempt(&mut staged.input, resolved.attempt())?;
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
-            hasher.update(&staged.input);
-            let input = PayloadDescriptor {
-                byte_length: staged.input.len() as u64,
-                digest: *hasher.finalize().as_bytes(),
-            };
-            let request = crate::selector_protocol::execute_request_for_case(
-                &admitted,
-                &evaluation,
-                &resolved,
-                input,
-                0,
-                [2; 16],
-            )?;
-            staged.request = request.to_canonical_cbor()?;
-            staged.evaluation = evaluation.to_canonical_cbor()?;
-        } else {
-            let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), admitted_state()?)?;
-            staged.request = request_for(&admitted)?;
-        }
         Ok(staged)
     }
 
@@ -284,6 +324,147 @@ fn request_for(admitted: &AdmittedSelectorProvider) -> Result<Vec<u8>, Box<dyn E
         Vec::new(),
     )?;
     Ok(request.to_canonical_cbor()?)
+}
+
+/// The partitions, signing material and verity salt a systemd-repart DDI carries.
+///
+/// The GPT entries are taken in table order, which systemd-repart writes as
+/// root, root-verity and root-verity-sig; admission rejects any other order.
+/// A DDI's partitions, its signing material and its verity salt.
+type DescribedImage = ([PartitionDescriptor; 3], ImageSigning, [u8; 32]);
+
+fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> {
+    let bytes = image.image;
+    let sector = [512_usize, 4096]
+        .into_iter()
+        .find(|sector| bytes.get(*sector..*sector + 8) == Some(b"EFI PART".as_slice()))
+        .ok_or("the image has no GPT header")?;
+    let first_entry = usize::try_from(le64(bytes, sector + 72)?)? * sector;
+    let count = usize::try_from(le32(bytes, sector + 80)?)?;
+    let entry_size = usize::try_from(le32(bytes, sector + 84)?)?;
+    let mut partitions = Vec::new();
+    for index in 0..count {
+        let entry = range(bytes, first_entry + index * entry_size, entry_size)?;
+        if entry[..16] == [0; 16] {
+            continue;
+        }
+        let start = le64(entry, 32)?;
+        let length = (le64(entry, 40)? + 1 - start) * sector as u64;
+        let start = start * sector as u64;
+        let content = range(bytes, usize::try_from(start)?, usize::try_from(length)?)?;
+        partitions.push(PartitionDescriptor {
+            role: [
+                PartitionRole::RootData,
+                PartitionRole::RootVerity,
+                PartitionRole::RootVeritySignature,
+            ]
+            .get(partitions.len())
+            .copied()
+            .ok_or("the image has more than three partitions")?,
+            partition_type_uuid: guid(&entry[..16]),
+            partition_instance_uuid: guid(&entry[16..32]),
+            start_bytes: start,
+            length_bytes: length,
+            content_blake3_digest: *blake3::hash(content).as_bytes(),
+        });
+    }
+    let partitions: [PartitionDescriptor; 3] = partitions
+        .try_into()
+        .map_err(|_| "the image does not have exactly three partitions")?;
+    // The format-1 verity superblock's 32-byte salt (cryptsetup `verity_sb`).
+    let salt = extent(bytes, &partitions[1])?
+        .get(88..120)
+        .ok_or("the root-verity partition has no superblock")?
+        .try_into()?;
+    let signature = extent(bytes, &partitions[2])?;
+    let json = signature
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or(signature, |end| &signature[..end]);
+    let json: serde_json::Value = serde_json::from_slice(json)?;
+    let root_hash = json["rootHash"]
+        .as_str()
+        .ok_or("the root-verity-sig JSON has no rootHash")?;
+    let root_hash = (0..root_hash.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(root_hash.get(index..index + 2).unwrap_or(""), 16))
+        .collect::<Result<Vec<u8>, _>>()?
+        .try_into()
+        .map_err(|_| "the root-verity-sig rootHash is not 32 bytes")?;
+    let proof = base64_decode(
+        json["signature"]
+            .as_str()
+            .ok_or("the root-verity-sig JSON has no signature")?,
+    )?;
+    Ok((
+        partitions,
+        ImageSigning {
+            architecture: image.architecture,
+            root_hash,
+            proof,
+            certificate: image.certificate.to_vec(),
+            key_description: image.key_description.to_owned(),
+        },
+        salt,
+    ))
+}
+
+fn extent<'a>(
+    bytes: &'a [u8],
+    partition: &PartitionDescriptor,
+) -> Result<&'a [u8], Box<dyn Error>> {
+    range(
+        bytes,
+        usize::try_from(partition.start_bytes)?,
+        usize::try_from(partition.length_bytes)?,
+    )
+}
+
+fn range(bytes: &[u8], start: usize, length: usize) -> Result<&[u8], Box<dyn Error>> {
+    start
+        .checked_add(length)
+        .and_then(|end| bytes.get(start..end))
+        .ok_or_else(|| "a GPT extent lies outside the image".into())
+}
+
+fn le32(bytes: &[u8], offset: usize) -> Result<u32, Box<dyn Error>> {
+    Ok(u32::from_le_bytes(range(bytes, offset, 4)?.try_into()?))
+}
+
+fn le64(bytes: &[u8], offset: usize) -> Result<u64, Box<dyn Error>> {
+    Ok(u64::from_le_bytes(range(bytes, offset, 8)?.try_into()?))
+}
+
+/// A GPT GUID's mixed-endian bytes in RFC 4122 order, as SIM1 records them.
+fn guid(bytes: &[u8]) -> [u8; 16] {
+    let mut result: [u8; 16] = std::array::from_fn(|index| bytes[index]);
+    result[..4].reverse();
+    result[4..6].reverse();
+    result[6..8].reverse();
+    result
+}
+
+/// Standard padded base64, as systemd writes the root-verity-sig signature.
+fn base64_decode(text: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if !text.len().is_multiple_of(4) {
+        return Err("base64 length is not a multiple of four".into());
+    }
+    let mut output = Vec::with_capacity(text.len() / 4 * 3);
+    for chunk in text.as_bytes().chunks(4) {
+        let padding = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
+        let mut value = 0_u32;
+        for byte in &chunk[..4 - padding] {
+            let digit = ALPHABET
+                .iter()
+                .position(|candidate| candidate == byte)
+                .ok_or("invalid base64 digit")?;
+            value = (value << 6) | u32::try_from(digit)?;
+        }
+        value <<= 6 * padding;
+        output.extend_from_slice(&value.to_be_bytes()[1..4 - padding]);
+    }
+    Ok(output)
 }
 
 fn fixture_frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
