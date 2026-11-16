@@ -207,7 +207,10 @@ fn pass(
     timeline: TimelineId,
     token: &ConsentCapabilityToken,
 ) -> Vec<String> {
-    let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok();
     let revisions = host.observe(registry, &mut *store, timeline).test_ok();
     let head = store.logical_head(timeline).test_ok();
     let prefix = events(&*store, timeline);
