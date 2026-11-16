@@ -3973,6 +3973,18 @@ pub trait ErasureRecordedAttemptReadV1: recorded_scope_sealed::Sealed {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1>;
+
+    /// The trust revision the request's frozen obligation set pins,
+    /// `Ok(None)` before freeze. Core recovery requires every attempt of
+    /// the request to pin this revision.
+    ///
+    /// # Errors
+    /// Once the manifest records an obligation set, a closed read or
+    /// decoding error of it.
+    fn recorded_obligation_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
 }
 
 mod recorded_scope_sealed {
@@ -3999,6 +4011,13 @@ impl<P: ErasurePersistencePortV1 + ?Sized> ErasureRecordedAttemptReadV1 for P {
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
         persistence::recorded_active_attempt(self, request)
+    }
+
+    fn recorded_obligation_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        persistence::recorded_obligation_trust(self, request)
     }
 }
 

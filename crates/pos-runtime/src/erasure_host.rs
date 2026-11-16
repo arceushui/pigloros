@@ -45,10 +45,9 @@ use pos_core::{
 };
 use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
-    local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureLifecycleV1,
-    ErasureRequestInputV1, ErasureScopeV1, LocalErasureAuthorizationV1, LocalErasureIdempotencyV1,
-    LocalErasureSelectorV1, PrincipalRefV1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
-    LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureRequestInputV1,
+    ErasureScopeV1, LocalErasureAuthorizationV1, LocalErasureIdempotencyV1, LocalErasureSelectorV1,
+    PrincipalRefV1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 #[cfg(target_os = "linux")]
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
@@ -871,20 +870,6 @@ pub(crate) enum LocalSubjectRefusalV1 {
     QuotaExhausted,
 }
 
-/// Whether a request of this lifecycle has not reached its first receipt
-/// (ADR-136 §6). A `partial-failure` request with an active retry attempt
-/// also holds its subject, through the authority's active-attempt read.
-pub(crate) const fn is_pre_terminal(lifecycle: ErasureLifecycleV1) -> bool {
-    matches!(
-        lifecycle,
-        ErasureLifecycleV1::Submitted
-            | ErasureLifecycleV1::Authorized
-            | ErasureLifecycleV1::AccessFrozen
-            | ErasureLifecycleV1::DestructionDispatched
-            | ErasureLifecycleV1::AwaitingAcknowledgements
-    )
-}
-
 /// The ADR-136 §6 admission checks of one more request of `subject`.
 ///
 /// Over the installed requests, no request of the subject may `hold` it
@@ -1042,6 +1027,18 @@ impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
             .ok_or(ErasureErrorV1::ProvenanceMissing)
             .and_then(|store| {
                 pos_core::ErasureRecordedAttemptReadV1::recorded_active_attempt(&**store, request)
+            })
+    }
+
+    fn frozen_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.try_borrow()
+            .ok()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|store| {
+                pos_core::ErasureRecordedAttemptReadV1::recorded_obligation_trust(&**store, request)
             })
     }
 

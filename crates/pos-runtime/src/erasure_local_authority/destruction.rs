@@ -23,8 +23,21 @@ use pos_core::{
 use super::authority::LocalErasureAuthorityV1;
 use super::freeze::{verified_signature, LOCAL_FREEZE_POSITION};
 use super::LOCAL_ERASURE_QUOTA_ATTEMPTS_V1;
-use crate::erasure_host::is_pre_terminal;
 use crate::ErasureAuthorityReadViewV1;
+
+/// Whether a request of this lifecycle has not reached its first receipt
+/// (ADR-136 §6). A `partial-failure` request with an active retry attempt
+/// also holds its subject, through its active-attempt read.
+const fn is_pre_terminal(lifecycle: ErasureLifecycleV1) -> bool {
+    matches!(
+        lifecycle,
+        ErasureLifecycleV1::Submitted
+            | ErasureLifecycleV1::Authorized
+            | ErasureLifecycleV1::AccessFrozen
+            | ErasureLifecycleV1::DestructionDispatched
+            | ErasureLifecycleV1::AwaitingAcknowledgements
+    )
+}
 
 /// The position attempt 0 is admitted at, one past the freeze (ADR-136 §6).
 const FIRST_ATTEMPT_POSITION: u64 = LOCAL_FREEZE_POSITION + 1;
@@ -148,8 +161,8 @@ impl LocalErasureAuthorityV1 {
         erq1: &ErasureRequestV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Option<(u64, u64)> {
-        admission.source_receipt().map_or(
-            Some((FIRST_ATTEMPT_POSITION, erq1.horizon_position())),
+        admission.source_receipt().map_or_else(
+            || Some((FIRST_ATTEMPT_POSITION, erq1.horizon_position())),
             |source| {
                 view.retained_object(source)
                     .and_then(|bytes| ErasureReceiptV1::from_canonical_cbor(&bytes).ok())
@@ -170,6 +183,9 @@ impl LocalErasureAuthorityV1 {
     /// pinned `CA(ELB1)`, so recovery can resolve it after a rotation. The
     /// erasure object store is content-addressed, so a retained object
     /// equal to this bundle also proves the pinned digest is `CA(ELB1)`.
+    /// Core recovery requires every attempt to pin the trust of the frozen
+    /// obligation set, so the pin must also be that one: after a rotation
+    /// a request admits no further attempt.
     fn binds_attempt(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -183,6 +199,7 @@ impl LocalErasureAuthorityV1 {
                 .retained_object(admission.trust())
                 .and_then(|bytes| LocalErasureBundleV1::from_canonical_cbor(&bytes).ok())
                 .is_some_and(|bundle| bundle == self.bundle)
+            && view.frozen_trust(erq1.reference()) == Ok(Some(admission.trust()))
             && Self::attempt_positions(view, erq1, admission)
                 == Some((admission.admitted_position(), admission.deadline_position()))
     }

@@ -470,6 +470,30 @@ pub(super) fn recorded_active_attempt<P: ErasurePersistencePortV1 + ?Sized>(
         })
 }
 
+/// Read the trust revision of a request's frozen obligation set through its
+/// current manifest, without validating the record.
+pub(super) fn recorded_obligation_trust<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+    port.read_manifest(request)
+        .and_then(|stored| {
+            stored
+                .map(|stored| ManifestV1::decode(stored.canonical_cbor()))
+                .transpose()
+        })
+        .and_then(|manifest| {
+            manifest
+                .and_then(|manifest| manifest.obligation_set)
+                .map(|set| {
+                    port.read_object(set)
+                        .and_then(|bytes| ErasureObligationSetV1::from_canonical_cbor(&bytes))
+                        .map(|set| set.trust())
+                })
+                .transpose()
+        })
+}
+
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(domain_digest(tag, bytes))
 }
