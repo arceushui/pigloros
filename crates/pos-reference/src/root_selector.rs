@@ -4768,11 +4768,14 @@ mod tests {
         AdmissionRejected,
     }
 
-    /// The in-process port with one injected fault; counts stale terminations.
+    /// When each stale termination was called, and the deadline it was given.
+    type StaleCalls = Arc<Mutex<Vec<(std::time::Instant, std::time::Instant)>>>;
+
+    /// The in-process port with one injected fault; records stale terminations.
     struct FaultyPort {
         inner: Arc<InProcessProviderPort>,
         fault: ReplacementFault,
-        stale_calls: Arc<AtomicUsize>,
+        stale_calls: StaleCalls,
     }
 
     impl ProviderLifecyclePort for FaultyPort {
@@ -4781,7 +4784,10 @@ mod tests {
             challenge: ObservationChallenge,
             deadline: std::time::Instant,
         ) -> Result<StaleUnitsObservation, ProviderLifecycleError> {
-            self.stale_calls.fetch_add(1, Ordering::SeqCst);
+            self.stale_calls
+                .lock()
+                .map_err(|_| ProviderLifecycleError::Unavailable)?
+                .push((std::time::Instant::now(), deadline));
             if self.fault == ReplacementFault::StaleRefused {
                 return Err(ProviderLifecycleError::ResidualResource);
             }
@@ -4866,7 +4872,7 @@ mod tests {
             let inner = Arc::new(InProcessProviderPort::starting(vec![replacement_start(
                 fault,
             )?]));
-            let stale_calls = Arc::new(AtomicUsize::new(0));
+            let stale_calls = StaleCalls::default();
             let admitted = InstalledSelectorState::open()?
                 .authenticate_bootstrap()?
                 .admit_provider()?;
@@ -4918,11 +4924,15 @@ mod tests {
                 fault != ReplacementFault::AdmissionRejected,
                 "{fault:?}"
             );
-            assert_eq!(
-                stale_calls.load(Ordering::SeqCst),
-                stale_calls_expected,
-                "{fault:?}"
-            );
+            let stale_calls = stale_calls.lock().map_err(|_| "poisoned")?.clone();
+            assert_eq!(stale_calls.len(), stale_calls_expected, "{fault:?}");
+            // The stop after a started runtime takes a fresh 10 s bound at the
+            // moment it is called, never what remains of the 32 s start
+            // deadline: that remainder may be spent (a hung `describe`).
+            if let [_, (called, deadline)] = stale_calls[..] {
+                assert!(deadline <= called + Duration::from_secs(10), "{fault:?}");
+                assert!(deadline > called + Duration::from_secs(9), "{fault:?}");
+            }
             inner.finish()?;
         }
         Ok(())
