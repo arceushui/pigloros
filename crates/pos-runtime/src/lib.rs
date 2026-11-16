@@ -72,7 +72,7 @@ pub use driver::{
     ObservationView, ProjectionKey, RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput,
     TimelineHistorySegment,
 };
-pub use erasure_authority_view::ErasureAuthorityReadViewV1;
+pub use erasure_authority_view::{ErasureAuthorityReadViewV1, ErasureRecordedScopeV1};
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,

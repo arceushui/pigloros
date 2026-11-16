@@ -393,6 +393,45 @@ impl ScopeNodeV1 {
     }
 }
 
+/// The committed ERSC1 and ERSE1 chain of one request, read through its
+/// current manifest and scope index without validating the record.
+///
+/// `None` when the request has no committed scope or any object cannot be
+/// read or decoded. A caller uses it only as a hint: core recovery verifies
+/// the record and checks every observation built from it.
+pub(super) fn recorded_scope<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+) -> Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)> {
+    port.read_manifest(request)
+        .ok()
+        .flatten()
+        .and_then(|stored| ManifestV1::decode(stored.canonical_cbor()).ok())
+        .and_then(|manifest| manifest.scope)
+        .and_then(|scope| port.read_object(scope).ok())
+        .and_then(|bytes| ErasureScopeCommitmentV1::from_canonical_cbor(&bytes).ok())
+        .and_then(|scope| {
+            port.scope_index_count(request)
+                .ok()
+                .and_then(|count| {
+                    (0..count)
+                        .map(|ordinal| {
+                            port.scope_node_ref(request, ordinal)
+                                .ok()
+                                .flatten()
+                                .and_then(|node| port.read_object(node).ok())
+                                .and_then(|bytes| ScopeNodeV1::decode(&bytes).ok())
+                                .and_then(|node| port.read_object(node.extension).ok())
+                                .and_then(|bytes| {
+                                    ErasureScopeExtensionV1::from_canonical_cbor(&bytes).ok()
+                                })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .map(|extensions| (scope, extensions))
+        })
+}
+
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(domain_digest(tag, bytes))
 }

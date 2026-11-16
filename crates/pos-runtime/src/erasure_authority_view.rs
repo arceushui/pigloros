@@ -3,9 +3,14 @@
 use std::{rc::Rc, sync::Arc};
 
 use pos_core::{
-    ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureReferenceV1,
-    ErasureVerifiedInventoryV1, ErasureVerifiedStateV1, Hash, PersistedAuthorityV1, TimelineId,
+    ArtifactRegistrationCatalogRowV1, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1,
+    ErasureErrorV1, ErasureReferenceV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
+    ErasureVerifiedInventoryV1, ErasureVerifiedStateV1, Hash, KeyIdentityV1, OwnerIdV1,
+    PersistedAuthorityV1, RecipientExportPublicationRowV1, TimelineId,
 };
+
+/// The committed ERSC1 of one request and its ERSE1 chain in ordinal order.
+pub type ErasureRecordedScopeV1 = (ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>);
 
 /// Read-only, snapshot-bound evidence an execution host passes into every
 /// [`crate::ErasureCoordinatorAuthorityV1`] method.
@@ -54,7 +59,50 @@ pub trait ErasureAuthorityReadViewV1: view_sealed::Sealed {
     /// The recorded delegation chain whose leaf grant is `grant`, read
     /// inside the host command that built this view.
     fn local_principal_authority(&self, grant: Hash) -> Option<PersistedAuthorityV1>;
+
+    /// The committed ERSC1 and ERSE1 chain of one request, read inside the
+    /// host command that built this view (companion §2.6
+    /// `scope_commitment` and `scope_extensions`). `None` when the request
+    /// has no committed scope or it cannot be read; core recovery checks
+    /// every observation built from it.
+    fn recorded_scope(&self, request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1>;
+
+    /// Every ARD1 registration bound to `timeline`, in registration-address
+    /// order (companion §2.6 `artifact_registrations`).
+    ///
+    /// # Errors
+    /// [`ErasureErrorV1::ScopeInvalid`] above the per-category closure bound
+    /// of 4,096 rows, otherwise [`ErasureErrorV1::ProvenanceMissing`] when
+    /// the rows cannot be read.
+    fn artifact_registrations(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1>;
+
+    /// Every visible recipient-export publication of `timelines`, sorted by
+    /// `(timeline, export_id)`.
+    ///
+    /// # Errors
+    /// [`ErasureErrorV1::ScopeInvalid`] above 4,096 publications, or the
+    /// closed read error.
+    fn recipient_export_publications(
+        &self,
+        timelines: &[TimelineId],
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
+
+    /// Every key-registry identity of `owner`, in every role and epoch,
+    /// including destroyed ones (companion §2.6 `key_identities`).
+    ///
+    /// # Errors
+    /// [`ErasureErrorV1::ScopeInvalid`] above 4,096 identities, otherwise
+    /// [`ErasureErrorV1::ProvenanceMissing`] when the registry cannot be
+    /// read.
+    fn key_identities(&self, owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1>;
 }
+
+/// The most rows one bounded view list returns: the ADR-060 V1
+/// per-category obligation bound.
+pub(crate) const VIEW_LIST_MAX: usize = pos_core::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY;
 
 mod view_sealed {
     /// Keeps the view closed: only the execution host's view implements it.
@@ -68,6 +116,25 @@ pub(crate) trait ErasureAuthorityStoreReadsV1 {
 
     /// The recorded delegation chain whose leaf grant is `grant`.
     fn local_principal_authority(&self, grant: Hash) -> Option<PersistedAuthorityV1>;
+
+    /// The committed ERSC1 and ERSE1 chain of one request.
+    fn recorded_scope(&self, request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1>;
+
+    /// The ARD1 rows bound to one Timeline, at most [`VIEW_LIST_MAX`].
+    fn artifact_registrations(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1>;
+
+    /// The recipient-export publications of `timelines`, at most
+    /// [`VIEW_LIST_MAX`].
+    fn recipient_export_publications(
+        &self,
+        timelines: &[TimelineId],
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
+
+    /// The key-registry identities of one owner, at most [`VIEW_LIST_MAX`].
+    fn key_identities(&self, owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1>;
 }
 
 /// The reads of a view handed out of its host command: none.
@@ -80,6 +147,28 @@ impl ErasureAuthorityStoreReadsV1 for DetachedStoreReadsV1 {
 
     fn local_principal_authority(&self, _grant: Hash) -> Option<PersistedAuthorityV1> {
         None
+    }
+
+    fn recorded_scope(&self, _request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1> {
+        None
+    }
+
+    fn artifact_registrations(
+        &self,
+        _timeline: TimelineId,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn recipient_export_publications(
+        &self,
+        _timelines: &[TimelineId],
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn key_identities(&self, _owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
     }
 }
 
@@ -184,5 +273,27 @@ impl ErasureAuthorityReadViewV1 for HostAuthorityViewV1<'_> {
 
     fn local_principal_authority(&self, grant: Hash) -> Option<PersistedAuthorityV1> {
         self.reads.local_principal_authority(grant)
+    }
+
+    fn recorded_scope(&self, request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1> {
+        self.reads.recorded_scope(request)
+    }
+
+    fn artifact_registrations(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1> {
+        self.reads.artifact_registrations(timeline)
+    }
+
+    fn recipient_export_publications(
+        &self,
+        timelines: &[TimelineId],
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
+        self.reads.recipient_export_publications(timelines)
+    }
+
+    fn key_identities(&self, owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1> {
+        self.reads.key_identities(owner)
     }
 }

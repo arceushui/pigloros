@@ -1392,3 +1392,88 @@ fn the_submission_values_are_domain_tagged_digests_of_their_inputs() -> TestResu
     }
     Ok(())
 }
+
+#[test]
+fn the_target_and_fork_values_are_domain_tagged_digests_of_their_inputs() -> TestResult {
+    let store = [0x71; 32];
+    let store_identity = ErasureReferenceV1::from_digest(store);
+    let one_digest = [vec![0x81], bstr32(store)].concat();
+    assert_eq!(
+        pos_core::local_erasure_replica_set_v1(store_identity)?,
+        content_address("ELRS1", &one_digest)
+    );
+    assert_eq!(
+        pos_core::local_erasure_replica_id_v1(store_identity)?,
+        content_address("ELRID1", &one_digest)
+    );
+    assert_eq!(
+        pos_core::local_erasure_store_target_v1(store_identity)?,
+        content_address("ELST1", &one_digest)
+    );
+
+    // ELKEY1 = [owner_id bytes, role code, epoch]: "subject:x" is a 9-byte
+    // string, role 7 and epoch 24 the smallest two-byte unsigned integer.
+    let identity = pos_core::KeyIdentityV1::new(
+        "subject:x",
+        pos_core::KeyRoleV1::CommunityArtifactEncryption,
+        24,
+    );
+    let key = [
+        vec![0x83, 0x49],
+        b"subject:x".to_vec(),
+        vec![0x07, 0x18, 0x18],
+    ]
+    .concat();
+    assert_eq!(
+        pos_core::local_erasure_key_digest_v1(&identity)?,
+        content_address("ELKEY1", &key)
+    );
+
+    let timeline = [0x72; 16];
+    let timeline_id = pos_core::TimelineId::from_ulid(Ulid::from_bytes(timeline));
+    let one_timeline = [vec![0x81], bstr16(timeline)].concat();
+    assert_eq!(
+        pos_core::local_erasure_timeline_payload_v1(timeline_id)?,
+        content_address("ELTP1", &one_timeline)
+    );
+    assert_eq!(
+        pos_core::local_erasure_fork_scope_v1(timeline_id)?,
+        content_address("ELFS1", &one_timeline)
+    );
+
+    let export = [0x73; 16];
+    let grantee = pos_core::OwnerIdV1::new("recipient:y").map_err(|error| error.to_string())?;
+    let recipient = [
+        vec![0x82],
+        bstr16(export),
+        vec![0x4b],
+        b"recipient:y".to_vec(),
+    ]
+    .concat();
+    assert_eq!(
+        pos_core::local_erasure_export_recipient_v1(export, &grantee)?,
+        content_address("ELXR1", &recipient)
+    );
+
+    let request = [0x74; 32];
+    let parent = [0x75; 16];
+    let rule = [0x76; 32];
+    let admission = [
+        vec![0x84],
+        bstr32(request),
+        bstr16(parent),
+        bstr16(timeline),
+        bstr32(rule),
+    ]
+    .concat();
+    assert_eq!(
+        pos_core::local_erasure_fork_admission_v1(
+            ErasureReferenceV1::from_digest(request),
+            pos_core::TimelineId::from_ulid(Ulid::from_bytes(parent)),
+            timeline_id,
+            ErasureReferenceV1::from_digest(rule),
+        )?,
+        content_address("ELFX1", &admission)
+    );
+    Ok(())
+}

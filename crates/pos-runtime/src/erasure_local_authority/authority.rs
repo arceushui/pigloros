@@ -6,22 +6,28 @@
 //! holds no signing key and no write capability.
 
 use pos_core::{
-    local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
-    local_erasure_requester_v1, local_erasure_subject_v1, CapabilityGrantV1, EntityId,
-    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
-    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    local_erasure_body_digest_v1, local_erasure_fork_admission_v1, local_erasure_fork_scope_v1,
+    local_erasure_id_v1, local_erasure_request_v1, local_erasure_requester_v1,
+    local_erasure_subject_v1, CapabilityGrantV1, EntityId, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionV1, ErasureAtomicFreezeResultV1,
+    ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureReceiptInputV1, ErasureReferenceV1,
-    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateTransitionV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureLifecycleV1, ErasureReceiptInputV1,
+    ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
     ErasureVerifiedTopologyObservationV1, Hash, LocalErasureAuthorizationV1, LocalErasureBundleV1,
     LocalErasureIdempotencyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
     PersistedAuthorityV1, TimelineId, TimelineMeta, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 
+use super::freeze::{
+    extension_admitted, observation, overflow, FreezeDraftV1, LOCAL_FREEZE_POSITION,
+};
 use super::{LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1};
 use crate::erasure_host::{
-    local_principal_reference, local_subject_admission, LOCAL_ERASURE_REQUEST_OPERATION,
+    local_principal_reference, local_subject_admission, LocalErasurePreparationV1,
+    LOCAL_ERASURE_REQUEST_OPERATION,
 };
 use crate::{ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1};
 
@@ -119,7 +125,7 @@ impl LocalErasureAuthorityV1 {
     /// chain. A fresh submission binds the chain's current head and
     /// revocation epoch; an admitted request keeps its bound position, and a
     /// later revocation never invalidates it.
-    fn verified_authorization(
+    pub(super) fn verified_authorization(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         request: &ErasureRequestV1,
@@ -175,22 +181,60 @@ impl LocalErasureAuthorityV1 {
     }
 }
 
-impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
-    fn validate_freeze_authorization_with_view(
+impl LocalErasureAuthorityV1 {
+    /// The parent the view records for an extension's child Timeline.
+    fn recorded_parent(
+        view: &dyn ErasureAuthorityReadViewV1,
+        extension: &ErasureScopeExtensionV1,
+    ) -> Option<TimelineId> {
+        view.timeline_meta(extension.child_timeline())
+            .and_then(|row| row.fork_point)
+            .map(|(parent, _)| parent)
+    }
+}
+
+impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
+    fn closure_fits(
         &self,
-        _view: &dyn ErasureAuthorityReadViewV1,
-        _admission: &ErasureFreezeAdmissionEvidenceV1,
-        _authorization: &ErasureFreezeAuthorizationEvidenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        view: &dyn ErasureAuthorityReadViewV1,
+        actor: EntityId,
+        scope: ErasureScopeV1,
+    ) -> Result<bool, ErasureErrorV1> {
+        Self::closure_fits(self, view, actor, scope)
     }
 
+    fn prepare_freeze(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        request: ErasureReferenceV1,
+    ) -> Result<(ErasureReferenceV1, Vec<Vec<u8>>), ErasureErrorV1> {
+        self.admits_new_work()
+            .and_then(|()| self.freeze_draft(view, request))
+            .map(|draft| (draft.body_digest, draft.retained))
+    }
+}
+
+impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
+    /// Committed freeze evidence must be a purpose-0 ELS1 over its exact
+    /// ERFA1 body by the signer of the bundle it pins, the retained one
+    /// after a rotation.
+    fn validate_freeze_authorization_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.verified_freeze_evidence(view, admission, authorization)
+    }
+
+    /// A recovered ERSE1 must recompute from its child's recorded
+    /// `fork_point` (decision 4A).
     fn validate_scope_extension_with_view(
         &self,
-        _view: &dyn ErasureAuthorityReadViewV1,
-        _extension: &ErasureScopeExtensionV1,
+        view: &dyn ErasureAuthorityReadViewV1,
+        extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        extension_admitted(extension, Self::recorded_parent(view, extension))
     }
 
     /// Administrative resolution is not served in v1 (owner decision Q4).
@@ -202,36 +246,31 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         Err(ErasureErrorV1::PolicyConflict)
     }
 
-    /// Before freeze every Timeline is unaffected. Core refuses this
-    /// observation for a request with a committed scope, which must bind its
-    /// ERSC1 Timelines.
+    /// Bind every ERSC1 Timeline to the subject and every ERSE1 child to
+    /// its Fork scope; every other Timeline is unaffected, so before freeze
+    /// all of them are. Core checks the partition against the recovered
+    /// record and the adapter topology.
     fn verified_topology_observation(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
-        _request: ErasureReferenceV1,
+        request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        Ok(Some(ErasureVerifiedTopologyObservationV1::new(
-            manifest_digest,
-            Vec::new(),
-            view.topology().to_vec(),
-        )))
+        Ok(Some(observation(view, request, manifest_digest, None)))
     }
 
     fn verified_topology_observation_for_candidate(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
-        _request: ErasureReferenceV1,
+        request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
         candidate: &TimelineMeta,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        let mut unaffected = view.topology().to_vec();
-        unaffected.push(candidate.id);
-        unaffected.sort_unstable();
-        Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+        Ok(Some(observation(
+            view,
+            request,
             manifest_digest,
-            Vec::new(),
-            unaffected,
+            Some(candidate.id),
         )))
     }
 
@@ -311,48 +350,119 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         Err(ErasureErrorV1::PolicyConflict)
     }
 
+    /// Recompute the closure, ERSC1, EROS1 and ERFA1 from the view under
+    /// the compiled ELP1 and the bundle (ADR-136 §5). The freeze must name
+    /// `AccessFrozen` at position 1, and its provenance must name the
+    /// retained purpose-0 ELS1 over the ERFA1 body. A bound overflow, and an
+    /// eligible cell without an ELP1 row, commit `Rejected(ScopeInvalid)`
+    /// and need no signature.
     fn admit_atomic_freeze(
         &self,
-        _view: &dyn ErasureAuthorityReadViewV1,
-        _request: ErasureReferenceV1,
-        _requested: &ErasureStateTransitionV1,
+        view: &dyn ErasureAuthorityReadViewV1,
+        request: ErasureReferenceV1,
+        requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        self.admits_new_work()
+            .and_then(|()| {
+                (requested.lifecycle == ErasureLifecycleV1::AccessFrozen
+                    && requested.freeze_position == Some(LOCAL_FREEZE_POSITION))
+                .then_some(())
+                .ok_or(ErasureErrorV1::PolicyConflict)
+            })
+            .and_then(|()| {
+                self.freeze_draft(view, request)
+                    .map(Some)
+                    .or_else(overflow::<Option<FreezeDraftV1>>)
+            })
+            .and_then(|draft| {
+                draft.map_or_else(
+                    || {
+                        Self::freeze_refusal(view, request)
+                            .map(ErasureAtomicFreezeResultV1::Rejected)
+                    },
+                    |draft| {
+                        self.signed_admission(view, draft, requested.provenance)
+                            .map(|admission| {
+                                ErasureAtomicFreezeResultV1::Admitted(Box::new(admission))
+                            })
+                    },
+                )
+            })
     }
 
+    /// A Fork scope extension outside the Fork admission path is admitted
+    /// exactly as recovery validates it.
     fn admit_scope_extension(
         &self,
-        _view: &dyn ErasureAuthorityReadViewV1,
-        _extension: &ErasureScopeExtensionV1,
+        view: &dyn ErasureAuthorityReadViewV1,
+        extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        extension_admitted(extension, Self::recorded_parent(view, extension))
     }
 
+    /// The ERSE1 of an identified Fork must name the child the host
+    /// allocated, its `ELFS1` scope and the `ELFX1` provenance of its
+    /// parent.
     fn admit_fork_scope_extension(
         &self,
         _view: &dyn ErasureAuthorityReadViewV1,
-        _extension: &ErasureScopeExtensionV1,
-        _input: &ErasureForkAdmissionInputV1,
+        extension: &ErasureScopeExtensionV1,
+        input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        (extension.child_timeline() == input.child.id && extension.fork() == input.child_scope)
+            .then_some(())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|()| {
+                extension_admitted(extension, input.child.fork_point.map(|(parent, _)| parent))
+            })
     }
 
+    /// A Fork child's scope is `ELFS1(child)`: request-independent and
+    /// unique per child (decision 4A). The child must be a Fork of `parent`.
     fn resolve_fork_child_scope(
         &self,
         _view: &dyn ErasureAuthorityReadViewV1,
-        _parent: TimelineId,
-        _child: &TimelineMeta,
+        parent: TimelineId,
+        child: &TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        (child.fork_point.map(|(fork_parent, _)| fork_parent) == Some(parent))
+            .then_some(child.id)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(local_erasure_fork_scope_v1)
     }
 
+    /// The ERSE1 a Fork of an affected parent appends: the child's `ELFS1`
+    /// scope and the pure `ELFX1` admission provenance over the request,
+    /// parent, child and lineage rule. No key is needed.
     fn resolve_fork_scope_extension(
         &self,
         _view: &dyn ErasureAuthorityReadViewV1,
-        _requirement: ErasureForkScopeRequirementV1,
-        _input: &ErasureForkAdmissionInputV1,
+        requirement: ErasureForkScopeRequirementV1,
+        input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        input
+            .child
+            .fork_point
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|(parent, _)| {
+                local_erasure_fork_admission_v1(
+                    requirement.request(),
+                    parent,
+                    input.child.id,
+                    requirement.lineage_rule(),
+                )
+            })
+            .and_then(|admission_provenance| {
+                ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+                    request: requirement.request(),
+                    scope_commitment: requirement.scope_commitment(),
+                    fork: input.child_scope,
+                    child_timeline: input.child.id,
+                    lineage_rule: requirement.lineage_rule(),
+                    predecessor_extension: requirement.predecessor_extension(),
+                    admission_provenance,
+                })
+            })
     }
 
     /// Administrative resolution is not served in v1 (owner decision Q4).

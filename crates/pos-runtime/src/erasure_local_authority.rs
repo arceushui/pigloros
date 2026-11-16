@@ -8,6 +8,7 @@
 //! slices of the same module.
 
 mod authority;
+mod freeze;
 mod policy;
 
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use pos_core::{
 use pos_crypto::signing::{verify, verifying_key_from_public_key};
 use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
 
-use crate::erasure_host::LocalErasureSubmissionBindingV1;
+use crate::erasure_host::{LocalErasurePreparationV1, LocalErasureSubmissionBindingV1};
 use crate::ErasureCoordinatorCompositionV1;
 use authority::LocalErasureAuthorityV1;
 
@@ -152,21 +153,23 @@ impl ErasureCoordinatorCompositionV1 {
                 local_erasure_coordinator_v1(bundle.store_identity)
                     .ok()
                     .and_then(|coordinator| {
-                        let binding = LocalErasureSubmissionBindingV1 {
-                            principal_grant: inputs.principal_grant,
-                            authority_timeline: inputs.authority_timeline,
-                            authority_registry_digest: bundle.authority_registry_digest,
-                            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-                            store_request_reserve: LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
-                        };
-                        let authority = LocalErasureAuthorityV1 {
+                        let authority = Arc::new(LocalErasureAuthorityV1 {
                             bundle,
                             trust_expiry: inputs.trust.expiry(),
                             clock: inputs.clock,
                             principal_grant: inputs.principal_grant,
                             authority_timeline: inputs.authority_timeline,
+                        });
+                        let binding = LocalErasureSubmissionBindingV1 {
+                            principal_grant: inputs.principal_grant,
+                            authority_timeline: inputs.authority_timeline,
+                            authority_registry_digest: authority.bundle.authority_registry_digest,
+                            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                            store_request_reserve: LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
+                            preparation: Arc::clone(&authority)
+                                as Arc<dyn LocalErasurePreparationV1>,
                         };
-                        Self::new(Arc::new(authority), coordinator)
+                        Self::new(authority, coordinator)
                             .ok()
                             .map(|composition| composition.with_local_submission(binding))
                     })

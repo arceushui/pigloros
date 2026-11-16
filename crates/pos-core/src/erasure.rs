@@ -3916,19 +3916,38 @@ pub use authority_snapshot::{
 };
 pub use local_records::{
     local_erasure_body_digest_v1, local_erasure_bundle_signing_message_v1,
-    local_erasure_coordinator_v1, local_erasure_id_v1, local_erasure_owner_ref_v1,
+    local_erasure_coordinator_v1, local_erasure_export_recipient_v1,
+    local_erasure_fork_admission_v1, local_erasure_fork_scope_v1, local_erasure_id_v1,
+    local_erasure_key_digest_v1, local_erasure_owner_ref_v1,
     local_erasure_receipt_body_reference_v1, local_erasure_receipt_body_v1,
-    local_erasure_request_v1, local_erasure_requester_v1, local_erasure_signature_message_v1,
-    local_erasure_signer_key_id_v1, local_erasure_subject_v1, LocalErasureAuthorizationV1,
-    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureClassificationV1,
-    LocalErasureDisclosureV1, LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1,
-    LocalErasureLineageRuleV1, LocalErasureOwnerResultV1, LocalErasureOwnerRowV1,
-    LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
+    local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_request_v1,
+    local_erasure_requester_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
+    local_erasure_store_target_v1, local_erasure_subject_v1, local_erasure_timeline_payload_v1,
+    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
+    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
+    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
     LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
     LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1,
     LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
     LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
+/// The committed ERSC1 and ERSE1 chain of one request, read through its
+/// current manifest and scope index without validating the record
+/// (ADR-136 companion §2.6, `scope_commitment` and `scope_extensions`).
+///
+/// It returns `None` when the request has no committed scope or any object
+/// cannot be read or decoded. The result is evidence, not authority: core
+/// recovery verifies the record itself and checks every topology
+/// observation an authority builds from it.
+#[must_use]
+pub fn local_erasure_recorded_scope_v1<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+) -> Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)> {
+    persistence::recorded_scope(port, request)
+}
+
 mod receipt;
 pub use receipt::target_closure_digest;
 mod artifact;

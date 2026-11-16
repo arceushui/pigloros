@@ -1683,58 +1683,135 @@ fn local_authority() -> TestResult<(
 }
 
 #[test]
-fn the_local_authority_admits_no_freeze_or_scope_extension_yet() -> TestResult {
+fn the_local_authority_refuses_an_unbound_freeze() -> TestResult {
     let (_store, composition, mut host, _owner) = local_authority()?;
     let view = host.authority_view()?;
     let authority = composition.authority();
     let request = reference(0x90);
-    let child = TimelineMeta::root("local-authority-child");
-    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
-        request,
-        scope_commitment: reference(0x91),
-        fork: reference(0x92),
-        child_timeline: child.id,
-        lineage_rule: reference(0x93),
-        predecessor_extension: None,
-        admission_provenance: reference(0x94),
-    })?;
-    let fork_input = ErasureForkAdmissionInputV1 {
-        operation: reference(0x95),
-        expected_inventory_generation: reference(0x96),
-        child_scope: reference(0x97),
-        child: child.clone(),
-    };
-    let transition = ErasureStateTransitionV1 {
-        lifecycle: ErasureLifecycleV1::AccessFrozen,
-        freeze_position: Some(1),
+    let transition = |lifecycle, freeze_position| ErasureStateTransitionV1 {
+        lifecycle,
+        freeze_position,
         pending_owners: Vec::new(),
         failed_owners: Vec::new(),
         acknowledged_targets: Vec::new(),
         replay_claim: ErasureReplayClaimV1::Exact,
         provenance: reference(0x98),
     };
+    // Only `AccessFrozen` at the Local freeze position is admitted, and only
+    // for a request the installed inventory holds.
+    for (lifecycle, position) in [
+        (ErasureLifecycleV1::AccessFrozen, Some(2)),
+        (ErasureLifecycleV1::AccessFrozen, None),
+        (ErasureLifecycleV1::Authorized, Some(1)),
+        (ErasureLifecycleV1::AccessFrozen, Some(1)),
+    ] {
+        assert_eq!(
+            authority
+                .admit_atomic_freeze(&view, request, &transition(lifecycle, position))
+                .map(drop),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+    }
+    // Before any freeze, every Timeline is unaffected.
+    let observation = authority
+        .verified_topology_observation(&view, request, reference(0x99))?
+        .ok_or("no observation")?;
+    assert!(observation.bindings().is_empty());
+    assert_eq!(observation.unaffected(), view.topology());
+    // The view built outside a host command reads no scope, ARD1 row,
+    // publication or key.
     let missing = Err(ErasureErrorV1::ProvenanceMissing);
+    assert!(view.recorded_scope(request).is_none());
+    assert_eq!(view.artifact_registrations(authority_timeline()), missing);
     assert_eq!(
-        authority
-            .admit_atomic_freeze(&view, request, &transition)
-            .map(drop),
-        missing
-    );
-    assert_eq!(authority.admit_scope_extension(&view, &extension), missing);
-    assert_eq!(
-        authority.validate_scope_extension_with_view(&view, &extension),
+        view.recipient_export_publications(&[authority_timeline()]),
         missing
     );
     assert_eq!(
-        authority.admit_fork_scope_extension(&view, &extension, &fork_input),
+        view.key_identities(&pos_core::OwnerIdV1::from_static("subject:owner")),
         missing
     );
+    Ok(())
+}
+
+#[test]
+fn the_local_authority_recomputes_every_fork_scope_extension() -> TestResult {
+    let (_store, composition, mut host, _owner) = local_authority()?;
+    let view = host.authority_view()?;
+    let authority = composition.authority();
+    let request = reference(0x90);
+    let parent = TimelineMeta::root("local-authority-parent");
+    let root_child = TimelineMeta::root("local-authority-child");
+    let fork_child = TimelineMeta::forked_from(parent.id, Seq::ZERO, "local-authority-fork");
+    let child_scope = pos_core::local_erasure_fork_scope_v1(fork_child.id)?;
+    let extension = |child: &TimelineMeta, fork| {
+        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: reference(0x91),
+            fork,
+            child_timeline: child.id,
+            lineage_rule: reference(0x93),
+            predecessor_extension: None,
+            admission_provenance: pos_core::local_erasure_fork_admission_v1(
+                request,
+                parent.id,
+                child.id,
+                reference(0x93),
+            )?,
+        })
+    };
+    let fork_input = |child: &TimelineMeta, child_scope| ErasureForkAdmissionInputV1 {
+        operation: reference(0x95),
+        expected_inventory_generation: reference(0x96),
+        child_scope,
+        child: child.clone(),
+    };
+    let missing = Err(ErasureErrorV1::ProvenanceMissing);
+    // A child the view does not record has no parent to recompute from.
+    let recorded = extension(&fork_child, child_scope)?;
+    assert_eq!(authority.admit_scope_extension(&view, &recorded), missing);
     assert_eq!(
-        authority
-            .resolve_fork_child_scope(&view, child.id, &child)
-            .map(drop),
+        authority.validate_scope_extension_with_view(&view, &recorded),
         missing
     );
+    // An identified Fork recomputes `ELFS1` and `ELFX1` from its own child.
+    assert_eq!(
+        authority.admit_fork_scope_extension(
+            &view,
+            &recorded,
+            &fork_input(&fork_child, child_scope)
+        ),
+        Ok(())
+    );
+    for (candidate, input) in [
+        (recorded, fork_input(&fork_child, reference(0x97))),
+        (recorded, fork_input(&root_child, child_scope)),
+        (
+            extension(&fork_child, reference(0x97))?,
+            fork_input(&fork_child, reference(0x97)),
+        ),
+        (
+            extension(&root_child, child_scope)?,
+            fork_input(&root_child, child_scope),
+        ),
+    ] {
+        assert_eq!(
+            authority.admit_fork_scope_extension(&view, &candidate, &input),
+            missing
+        );
+    }
+    assert_eq!(
+        authority.resolve_fork_child_scope(&view, parent.id, &fork_child),
+        Ok(child_scope)
+    );
+    for (fork_parent, child) in [(root_child.id, &fork_child), (parent.id, &root_child)] {
+        assert_eq!(
+            authority
+                .resolve_fork_child_scope(&view, fork_parent, child)
+                .map(drop),
+            missing
+        );
+    }
     Ok(())
 }
 
@@ -1796,9 +1873,10 @@ fn the_local_authority_admits_no_attempt_or_acknowledgement_yet() -> TestResult 
             trust: reference(0xc2),
         })?;
     let missing = Err(ErasureErrorV1::ProvenanceMissing);
+    // Freeze evidence must name the bundle it pins; this one names none.
     assert_eq!(
         authority.validate_freeze_authorization_with_view(&view, &admission, &freeze_authorization),
-        missing
+        Err(ErasureErrorV1::Unauthorized)
     );
     assert_eq!(authority.admit_attempt(&view, &attempt).map(drop), missing);
     assert_eq!(
@@ -1917,5 +1995,559 @@ fn destruction_goes_only_to_an_owner_the_bundle_names() -> TestResult {
     assert_eq!(view.maximum_requests(), 4_096);
     assert!(view.verified_requests().is_empty());
     assert!(view.verified_request(request).is_none());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Freeze and Fork scope extension at the public seams (ADR-136 amendment
+// decisions 1B, 4A and 5A; acceptance tests 2, 3, 3b, 5 and 6).
+// ---------------------------------------------------------------------------
+
+use pos_core::erasure::target_closure_digest;
+use pos_core::{
+    local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_signature_message_v1,
+    local_erasure_store_target_v1, local_erasure_timeline_payload_v1, CanonicalBytes,
+    LocalErasureLineageRuleV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, OwnerIdV1,
+};
+use pos_crypto::key_roles::sign_for_registered_role;
+
+/// The signer key of a rotated bundle.
+fn rotated_signer() -> SigningKey {
+    SigningKey::from_bytes(&[0x66; 32])
+}
+
+impl LocalStore {
+    fn sqlite(&self) -> TestResult<SqliteStore> {
+        let mut store = SqliteStore::open(&self.path)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        Ok(store)
+    }
+
+    /// Create `count` root Timelines owned by `owner`.
+    fn owned_roots(&self, owner: EntityId, count: usize) -> TestResult<Vec<TimelineId>> {
+        let mut store = self.sqlite()?;
+        let mut roots = Vec::with_capacity(count);
+        for index in 0..count {
+            let meta = TimelineMeta::root_owned(format!("owned-{index}"), owner);
+            roots.push(store.create_timeline_with_meta(meta)?.id());
+        }
+        Ok(roots)
+    }
+
+    /// Add `registration` to the store's key registry.
+    fn register(&self, registration: KeyRegistrationV1) -> TestResult {
+        let mut store = self.sqlite()?;
+        let mut registry = store.load_key_registry()?.ok_or("no key registry")?;
+        registry.register_key(registration).map_err(fail)?;
+        store.save_key_registry(&registry)?;
+        Ok(())
+    }
+}
+
+/// The actor's ADR-091 role-0 subject key at `epoch`.
+fn subject_key(epoch: u64) -> TestResult<KeyIdentityV1> {
+    let owner = pos_crypto::subject_key::subject_owner_id(actor()).map_err(fail)?;
+    Ok(KeyIdentityV1::from_parts(
+        OwnerIdV1::new(owner).map_err(fail)?,
+        KeyRoleV1::SubjectDataEncryption,
+        epoch,
+    ))
+}
+
+/// ELS1 of `purpose` over `digest`, signed for the signer identity at
+/// `epoch` with `key`.
+fn signature_record(
+    purpose: LocalErasureSignaturePurposeV1,
+    digest: ErasureReferenceV1,
+    key: &SigningKey,
+    epoch: u64,
+) -> TestResult<Vec<u8>> {
+    let material = SigningKeyMaterial::new(key.clone());
+    let mut registry = KeyRegistryStateV1::new();
+    registry
+        .register_key(KeyRegistrationV1::new(
+            signer_identity(epoch),
+            material.material_digest(),
+            Some(material.public_verification_key()),
+        ))
+        .map_err(fail)?;
+    let message = local_erasure_signature_message_v1(purpose, digest)?;
+    let signature = sign_for_registered_role(
+        &mut registry,
+        &material,
+        signer_identity(epoch),
+        &CanonicalBytes::from_vec(message),
+    )
+    .map_err(fail)?;
+    Ok(LocalErasureSignatureV1 {
+        purpose,
+        signed_digest: digest,
+        signer_identity: LocalErasureSignerIdentityV1 {
+            owner_id: SIGNER_OWNER.as_bytes().to_vec(),
+            epoch,
+        },
+        signature: *signature.as_bytes(),
+    }
+    .to_canonical_cbor()?)
+}
+
+/// The address an ELS1 is retained under.
+fn signature_address(record: &[u8]) -> TestResult<ErasureReferenceV1> {
+    Ok(LocalErasureSignatureV1::from_canonical_cbor(record)?.reference()?)
+}
+
+fn freeze(provenance: ErasureReferenceV1) -> ErasureStateTransitionV1 {
+    ErasureStateTransitionV1 {
+        lifecycle: ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(1),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        provenance,
+    }
+}
+
+/// One Local target of the bundle's store (decision 1B).
+fn local_target(
+    artifact_class: ErasureArtifactClassV1,
+    artifact_digest: ErasureReferenceV1,
+    key_digest: ErasureReferenceV1,
+) -> TestResult<ErasureRequiredTargetV1> {
+    let store = ErasureReferenceV1::from_digest(STORE_IDENTITY);
+    Ok(ErasureRequiredTargetV1 {
+        artifact_class,
+        artifact_digest,
+        key_role: ErasureKeyRoleV1::DataEncryption,
+        key_digest,
+        replica_set: local_erasure_replica_set_v1(store)?,
+        replica_id: local_erasure_replica_id_v1(store)?,
+    })
+}
+
+/// The one store target every request carries.
+fn store_target() -> TestResult<ErasureRequiredTargetV1> {
+    local_target(
+        ErasureArtifactClassV1::TimelineReplay,
+        local_erasure_store_target_v1(ErasureReferenceV1::from_digest(STORE_IDENTITY))?,
+        reference(0),
+    )
+}
+
+/// Submit and authorize request `key` for `scope`, and prepare its freeze.
+fn prepared(
+    store: &LocalStore,
+    host: &mut ErasureExecutionHostV1,
+    key: u8,
+    scope: ErasureScopeV1,
+) -> TestResult<ErasureReferenceV1> {
+    let mut sender = host.command_sender()?;
+    sender
+        .submit_local_erasure(&submission(key, scope)?)
+        .map_err(fail)?;
+    let request = request_of(key)?;
+    sender.authorize_erasure_request(request, authorization(key, store.head)?.reference()?)?;
+    Ok(sender.prepare_local_freeze(request)?)
+}
+
+fn lifecycle(
+    host: &mut ErasureExecutionHostV1,
+    request: ErasureReferenceV1,
+) -> TestResult<ErasureLifecycleV1> {
+    Ok(host
+        .read_sender()?
+        .erasure_state(request)?
+        .ok_or("request missing")?
+        .lifecycle())
+}
+
+fn assert_frozen(
+    host: &mut ErasureExecutionHostV1,
+    frozen: &[TimelineId],
+    open: TimelineId,
+) -> TestResult {
+    let mut reads = host.read_sender()?;
+    for timeline in frozen {
+        assert_eq!(
+            reads.timeline(*timeline).map(drop),
+            Err(ErasureHostErrorV1::AccessFrozen)
+        );
+    }
+    assert!(reads.timeline(open)?.is_some());
+    Ok(())
+}
+
+/// A store whose actor owns one root Timeline and holds a role-0 subject
+/// key, beside a root Timeline of another actor.
+struct OwnedStore {
+    store: LocalStore,
+    owned: TimelineId,
+    other: TimelineId,
+}
+
+impl OwnedStore {
+    fn new() -> TestResult<Self> {
+        let store = LocalStore::new(&GrantShape::standard())?;
+        let owned = store.owned_roots(actor(), 1)?[0];
+        let other = store.owned_roots(other_actor(), 1)?[0];
+        store.register(KeyRegistrationV1::new(
+            subject_key(1)?,
+            Hash::from_bytes([0x81; 32]),
+            None,
+        ))?;
+        Ok(Self {
+            store,
+            owned,
+            other,
+        })
+    }
+}
+
+/// Freeze request `key` for `scope` with a purpose-0 ELS1 over the
+/// prepared body, after `before` ran on the open host; the freeze runs on
+/// a restarted host, which first refuses every ELS1 of `refused`.
+fn signed_freeze(
+    store: &LocalStore,
+    key: u8,
+    scope: ErasureScopeV1,
+    before: impl FnOnce(&mut ErasureExecutionHostV1) -> TestResult,
+    refused: impl FnOnce(ErasureReferenceV1) -> TestResult<Vec<Vec<u8>>>,
+) -> TestResult<ErasureExecutionHostV1> {
+    let digest = {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        before(&mut host)?;
+        let digest = prepared(store, &mut host, key, scope)?;
+        // The body is a pure function of the snapshot.
+        assert_eq!(
+            host.command_sender()?
+                .prepare_local_freeze(request_of(key)?)?,
+            digest
+        );
+        digest
+    };
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::FreezeAuthorization,
+        digest,
+        &erasure_signer(),
+        1,
+    )?;
+    let refused = refused(digest)?;
+    store.retain(&[signed.clone()])?;
+    store.retain(&refused)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let request = request_of(key)?;
+    let mut sender = host.command_sender()?;
+    for record in &refused {
+        assert_eq!(
+            sender
+                .freeze_access(request, &freeze(signature_address(record)?))
+                .map(drop),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+    }
+    assert_eq!(
+        sender
+            .freeze_access(request, &freeze(signature_address(&signed)?))?
+            .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    drop(sender);
+    Ok(host)
+}
+
+/// A forged key, purpose confusion, a stale body: none freezes.
+fn refused_signatures(digest: ErasureReferenceV1) -> TestResult<Vec<Vec<u8>>> {
+    let purpose = LocalErasureSignaturePurposeV1::FreezeAuthorization;
+    Ok(vec![
+        signature_record(purpose, digest, &other_root(), 1)?,
+        signature_record(
+            LocalErasureSignaturePurposeV1::OwnerResult,
+            digest,
+            &erasure_signer(),
+            1,
+        )?,
+        signature_record(purpose, reference(0x77), &erasure_signer(), 1)?,
+    ])
+}
+
+/// The committed ERSC1 of `request`: the subject bound to `affected` under
+/// ELLR1, over exactly `targets`.
+fn assert_scope(
+    host: &mut ErasureExecutionHostV1,
+    request: ErasureReferenceV1,
+    mut affected: Vec<TimelineId>,
+    mut targets: Vec<ErasureRequiredTargetV1>,
+) -> TestResult {
+    let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
+    let state = host
+        .read_sender()?
+        .erasure_state(request)?
+        .ok_or("request missing")?;
+    let scope = state.scope().ok_or("no committed scope")?;
+    affected.sort_unstable();
+    targets.sort_unstable();
+    assert_eq!(scope.scope_members(), [subject]);
+    assert_eq!(scope.scope_timeline_ids(), affected.as_slice());
+    assert_eq!(
+        scope.lineage_rule(),
+        Some(LocalErasureLineageRuleV1 { subject }.reference()?)
+    );
+    assert_eq!(scope.target_closure(), target_closure_digest(&targets));
+    Ok(())
+}
+
+#[test]
+fn a_signed_private_freeze_commits_the_subject_closure() -> TestResult {
+    let owned = OwnedStore::new()?;
+    let mut descendant = None;
+    let mut host = signed_freeze(
+        &owned.store,
+        1,
+        ErasureScopeV1::PrivateSubjectData,
+        |host| {
+            // A Fork of the owned Timeline before freeze is a descendant.
+            descendant = Some(
+                host.command_sender()?
+                    .fork_timeline(owned.owned, Seq::ZERO, "existing-descendant")?
+                    .id(),
+            );
+            Ok(())
+        },
+        refused_signatures,
+    )?;
+    let descendant = descendant.ok_or("no descendant")?;
+    let request = request_of(1)?;
+    assert_eq!(
+        host.command_sender()?
+            .freeze_access(request, &freeze(reference(0x78)))?
+            .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert_frozen(&mut host, &[owned.owned, descendant], owned.other)?;
+    let payload = |timeline| {
+        local_target(
+            ErasureArtifactClassV1::TimelineReplay,
+            local_erasure_timeline_payload_v1(timeline)?,
+            reference(0),
+        )
+    };
+    assert_scope(
+        &mut host,
+        request,
+        vec![owned.owned, descendant],
+        vec![
+            store_target()?,
+            payload(owned.owned)?,
+            payload(descendant)?,
+            local_target(
+                ErasureArtifactClassV1::TimelineReplay,
+                reference(0),
+                pos_core::local_erasure_key_digest_v1(&subject_key(1)?)?,
+            )?,
+        ],
+    )
+}
+
+#[test]
+fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestResult {
+    let owned = OwnedStore::new()?;
+    let request = request_of(1)?;
+    let mut host = signed_freeze(
+        &owned.store,
+        1,
+        ErasureScopeV1::PrivateSubjectData,
+        |_| Ok(()),
+        |_| Ok(Vec::new()),
+    )?;
+    // An identified Fork of an affected parent extends the scope under
+    // ELFS1/ELFX1, and its exact retry returns the same child.
+    let child = {
+        let mut sender = host.command_sender()?;
+        let child = sender
+            .fork_timeline_identified(reference(0x45), owned.owned, Seq::ZERO, "late-fork")?
+            .id();
+        assert_eq!(
+            sender
+                .fork_timeline_identified(reference(0x45), owned.owned, Seq::ZERO, "late-fork")?
+                .id(),
+            child
+        );
+        child
+    };
+    assert_frozen(&mut host, &[owned.owned, child], owned.other)?;
+    drop(host);
+    // Recovery re-verifies the ELS1, ERSC1 and every ERSE1.
+    let mut host = owned.store.host(&local_case()?, 4_096)?;
+    assert_frozen(&mut host, &[owned.owned, child], owned.other)?;
+    assert_eq!(
+        lifecycle(&mut host, request)?,
+        ErasureLifecycleV1::AccessFrozen
+    );
+    drop(host);
+    // After a routine bundle rotation, recovery verifies the old freeze
+    // against the bundle it pinned, retained at prepare.
+    let rotated_key = rotated_signer().verifying_key().to_bytes();
+    let material = SigningKeyMaterial::new(rotated_signer());
+    owned.store.register(KeyRegistrationV1::new(
+        signer_identity(2),
+        material.material_digest(),
+        Some(material.public_verification_key()),
+    ))?;
+    let mut rotated = bundle();
+    rotated.signer_identity.epoch = 2;
+    rotated.signer_public_key = rotated_key;
+    rotated.signer_key_id = local_erasure_signer_key_id_v1(&rotated_key);
+    let mut host = owned
+        .store
+        .host(&Case::signed(&rotated, &bundle_root(), &[])?, 4_096)?;
+    assert_frozen(&mut host, &[owned.owned, child], owned.other)
+}
+
+/// Publish one recipient export of the actor's `timeline` to `grantee`
+/// under the actor's export consent, and return its export id.
+fn publish_export(
+    store: &LocalStore,
+    timeline: TimelineId,
+    grantee: EntityId,
+) -> TestResult<[u8; 16]> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir()?;
+    let private = directory.path().join("recipient-private");
+    std::fs::create_dir(&private)?;
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))?;
+    let mut sqlite = store.sqlite()?;
+    sqlite.append(
+        timeline,
+        &[pos_core::EventDraft::new(
+            EntityId::new(),
+            pos_core::Kind::new("recipient.export.public.v1"),
+            CanonicalBytes::from_static(b"encrypted-recipient-export"),
+        )],
+    )?;
+    let consent = pos_core::ConsentAuthority::new();
+    sqlite.bind_consent_authority(consent.append_permit())?;
+    let token = consent.record_grant_on_timeline(
+        timeline,
+        &pos_core::ConsentGrantedV1 {
+            subject_id: actor(),
+            grantee_id: grantee,
+            purpose: "local-erasure-export".to_owned(),
+            modalities: pos_core::MODALITY_EXPORT,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: true,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    let owner = pos_store::sqlite::RecipientKeyOwnerV1::open(&private, grantee)?;
+    let recipient = sqlite.enroll_recipient_key(&owner)?;
+    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                reference(0xf1),
+                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                reference(0xf2),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .map_err(fail)?;
+    let publication = sqlite.publish_recipient_export(
+        &consent,
+        &owner,
+        &pos_store::sqlite::RecipientExportRequestV1 {
+            timeline_id: timeline,
+            recipient,
+            artifact_digest: reference(0xf1),
+            evaluation: &evaluation,
+            token: &token,
+            now_secs: 1,
+        },
+    )?;
+    Ok(publication.export_id)
+}
+
+#[test]
+fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestResult {
+    let owned = OwnedStore::new()?;
+    let export_id = publish_export(&owned.store, owned.owned, other_actor())?;
+    let mut host = signed_freeze(
+        &owned.store,
+        2,
+        ErasureScopeV1::ConsentedSharedData,
+        |_| Ok(()),
+        |_| Ok(Vec::new()),
+    )?;
+    assert_frozen(&mut host, &[owned.owned], owned.other)?;
+    // Role-0 keys and Timeline payloads are private-subject-data targets;
+    // the export to the grantee is one `export-recipient` target.
+    let grantee = pos_core::recipient_owner_id_from_grantee(other_actor()).map_err(fail)?;
+    assert_scope(
+        &mut host,
+        request_of(2)?,
+        vec![owned.owned],
+        vec![
+            store_target()?,
+            local_target(
+                ErasureArtifactClassV1::Export,
+                pos_core::local_erasure_export_recipient_v1(export_id, &grantee)?,
+                reference(0),
+            )?,
+        ],
+    )
+}
+
+#[test]
+fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    // 4,095 `timeline-payload` targets and the store target: exactly the
+    // 4,096-target bound.
+    let roots = store.owned_roots(actor(), 4_095)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    prepared(&store, &mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let request = request_of(1)?;
+    // Growth after submission: a Fork of an affected Timeline is one more
+    // target, so the freeze commits `Rejected` without a signature.
+    let mut sender = host.command_sender()?;
+    sender.fork_timeline(roots[0], Seq::ZERO, "growth")?;
+    assert_eq!(
+        sender.prepare_local_freeze(request).map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(
+        sender
+            .freeze_access(request, &freeze(reference(0x78)))?
+            .lifecycle(),
+        ErasureLifecycleV1::Rejected
+    );
+    // A new request over the bound is refused before any ERQ1 exists; a
+    // consented one, whose closure holds no Timeline payload, fits.
+    assert_eq!(
+        sender
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+            .map(drop),
+        Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
+    );
+    assert_eq!(
+        sender
+            .submit_local_erasure(&submission(3, ErasureScopeV1::ConsentedSharedData)?)
+            .map_err(fail)?
+            .lifecycle(),
+        ErasureLifecycleV1::Submitted
+    );
+    drop(sender);
+    assert!(host.read_sender()?.erasure_state(request_of(2)?)?.is_none());
+    drop(host);
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Rejected);
     Ok(())
 }
