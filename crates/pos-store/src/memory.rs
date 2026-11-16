@@ -5509,6 +5509,15 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
     }
 }
 
+/// A `MemoryStore` has no store file, and freed heap memory is not zeroed, so
+/// nothing can prove that deleted bytes are gone. The `local-replica`
+/// acknowledgement is therefore always negative (ADR-136 F1).
+impl pos_core::LocalReplicaResidualPortV1 for MemoryStore {
+    fn purge_local_replica_residue(&mut self) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ReplicaNegativeAcknowledgement)
+    }
+}
+
 impl EventStore for MemoryStore {
     fn commit_artifact_registration_batch(
         &mut self,

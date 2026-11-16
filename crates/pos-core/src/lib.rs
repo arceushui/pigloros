@@ -415,6 +415,7 @@ pub use counterfactual_store::{
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
+pub use erasure::LocalReplicaResidualPortV1;
 #[cfg(any(test, feature = "test-support"))]
 pub use erasure::NonInvokingErasureGateForTest;
 pub use erasure::{
