@@ -20,8 +20,10 @@ type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 /// Set only for a test re-executed inside the Air-Gapped test shape.
 const INSIDE: &str = "PIGLOROS_AIR_GAPPED_TEST_NAMESPACE";
-/// Set only for a test re-executed in a user namespace holding its capabilities.
+/// Set only for a test re-executed in the shape that holds `CAP_NET_ADMIN`.
 const CAPABLE: &str = "PIGLOROS_CAPABLE_TEST_NAMESPACE";
+/// `CAP_NET_ADMIN` alone, as `/proc/self/status` reports a capability set.
+const NET_ADMIN_ONLY: &str = "0000000000001000";
 
 const DEV: &str = "Inter-|   Receive                            |  Transmit\n \
     face |bytes    packets errs drop fifo frame compressed multicast|bytes\n    \
@@ -392,16 +394,27 @@ fn the_air_gapped_mode_binds_inside_the_test_shape() -> TestResult {
     Ok(())
 }
 
-/// ADR-135 §4 and the owner decision of 2026-11-16: in a user namespace that
-/// still holds `CAP_NET_ADMIN`, the Air-Gapped composition is refused in
-/// step 2, before any store, while the Local one is not.
+/// ADR-135 §4 and the owner decisions of 2026-11-16 and 2026-11-17: in the
+/// test shape's `--hold-network-capability` mode, a loopback-only namespace whose
+/// process holds exactly `CAP_NET_ADMIN`, the Air-Gapped composition is
+/// refused in step 2, before any store, while the Local one is not.
 #[test]
 fn the_air_gapped_mode_is_refused_where_a_network_capability_is_held() -> TestResult {
     const TEST: &str = "the_air_gapped_mode_is_refused_where_a_network_capability_is_held";
     if std::env::var_os(CAPABLE).is_none() {
-        let mut unshare = Command::new("unshare");
-        unshare.args(["--user", "--map-root-user", "--net"]);
-        return reexecute(&mut unshare, CAPABLE, TEST);
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/air-gapped-namespace.sh");
+        let mut runner = Command::new(script);
+        runner.arg("--hold-network-capability");
+        return reexecute(&mut runner, CAPABLE, TEST);
+    }
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    for set in ["CapEff", "CapPrm", "CapAmb", "CapBnd"] {
+        let value = status
+            .lines()
+            .find_map(|line| line.strip_prefix(set)?.strip_prefix(':'))
+            .map(str::trim);
+        assert_eq!(value, Some(NET_ADMIN_ONLY), "{set}");
     }
     let refused =
         verify_gateway_serve_composition_v1(GatewayModeProfileIdV1::AirGapped, &loopback());
