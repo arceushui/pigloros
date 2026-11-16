@@ -203,6 +203,15 @@ fn acknowledges_once_and_resends(
     )?;
     assert_eq!(outcome, ExchangeOutcome::Refused { fenced: false });
     assert!(read.is_empty());
+    // A pair that differs in only one frame is no resend either.
+    for frames in [
+        [context_bytes.as_slice(), other_update.as_slice()],
+        [other_bytes.as_slice(), update.as_slice()],
+    ] {
+        let (outcome, read) = exchange(&responder, &frames, true)?;
+        assert_eq!(outcome, ExchangeOutcome::Refused { fenced: false });
+        assert!(read.is_empty());
+    }
     assert_eq!(source.taken.load(Ordering::SeqCst), 1);
     let (outcome, again) = exchange(&responder, &pair, true)?;
     assert_eq!(outcome, ExchangeOutcome::Resent);
@@ -230,7 +239,10 @@ fn refuses_unclean_views(
         assert_eq!(outcome, ExchangeOutcome::Refused { fenced: true });
         assert!(read.is_empty());
     }
+    // A running attempt is cut at the deadline, not waited for.
+    let started = Instant::now();
     let (outcome, read) = exchange(&responder(admitted, signer, Running, Quiet), &pair, true)?;
+    assert!(started.elapsed() < BOUND * 10);
     assert_eq!(outcome, ExchangeOutcome::Refused { fenced: true });
     assert!(read.is_empty());
     Ok(())

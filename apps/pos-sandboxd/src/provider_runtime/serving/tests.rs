@@ -909,5 +909,8 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
     control.acknowledging(bootstrap.trust(), &next(&[manifest], 8)?);
     assert!(control.revoked());
     assert_eq!(state(), REVOKED);
+    // A later acknowledgement that revokes nothing cannot undo it.
+    control.acknowledging(bootstrap.trust(), &next(&[], 9)?);
+    assert_eq!(state(), REVOKED);
     Ok(())
 }
