@@ -1435,8 +1435,6 @@ fn provider_error_validation_precedence_agrees() -> TestResult {
 
     producer.operation = None;
     producer.signature = [0; 64];
-    // The decoded record keeps its signature private; the identity check
-    // fails before the signature is read.
     reference.operation = None;
     assert_eq!(
         producer.validate(),
@@ -1445,6 +1443,22 @@ fn provider_error_validation_precedence_agrees() -> TestResult {
     assert_eq!(
         reference.verify_signature(&key.verifying_key()),
         Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    // The reference keeps its signature private, so the same pair of faults
+    // (no operation and a zero signature) is fed to its decoder as bytes:
+    // the identity check wins over the signature check there too.
+    let mut document: Value = ciborium::from_reader(bytes.as_slice())?;
+    if let Value::Array(wrapper) = &mut document {
+        if let Some(Value::Array(unsigned)) = wrapper.first_mut() {
+            unsigned[2] = Value::Null;
+        }
+        wrapper[2] = Value::Bytes(vec![0; 64]);
+    }
+    let mut faulted = Vec::new();
+    ciborium::into_writer(&document, &mut faulted)?;
+    assert_eq!(
+        independent::SandboxProviderError::from_canonical_cbor(&faulted).err(),
+        Some(independent::SandboxProviderProtocolError::InconsistentFields)
     );
     Ok(())
 }
