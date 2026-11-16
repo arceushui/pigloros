@@ -8,13 +8,16 @@
 //! signing oracle.
 //!
 //! [`RuntimeSigned`] is sealed. Its kinds are a subset of the R9 §5 set, and
-//! a kind joins only when its encoder does: RLS1 now, SAU1, SPR1 and SPY1
-//! with their emission. RQE1, KOE1, TME1 and RDY1 never do.
+//! a kind joins only when its encoder does: RLS1, SAU1, SPR1 and SPY1 now.
+//! RQE1, KOE1, TME1 and RDY1 never do.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
 use super::codec::signature_message;
-use super::{ExecutionReleaseFields, SandboxProviderProtocolError};
+use super::{
+    ExecutionReleaseFields, SandboxAuditRecordFields, SandboxProviderProtocolError,
+    SandboxProviderReceiptFields, SandboxProviderResultFields,
+};
 
 mod runtime_signed_sealed {
     /// Only this crate names the record kinds the runtime key signs.
@@ -41,6 +44,51 @@ impl runtime_signed_sealed::Sealed for Rls1 {}
 impl RuntimeSigned for Rls1 {
     const MAGIC: &'static str = "RLS1";
     type Body = ExecutionReleaseFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// SAU1, one lifecycle audit event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sau1 {}
+
+impl runtime_signed_sealed::Sealed for Sau1 {}
+
+impl RuntimeSigned for Sau1 {
+    const MAGIC: &'static str = "SAU1";
+    type Body = SandboxAuditRecordFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// SPR1, the attempt receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Spr1 {}
+
+impl runtime_signed_sealed::Sealed for Spr1 {}
+
+impl RuntimeSigned for Spr1 {
+    const MAGIC: &'static str = "SPR1";
+    type Body = SandboxProviderReceiptFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// SPY1, the terminal execute result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Spy1 {}
+
+impl runtime_signed_sealed::Sealed for Spy1 {}
+
+impl RuntimeSigned for Spy1 {
+    const MAGIC: &'static str = "SPY1";
+    type Body = SandboxProviderResultFields;
 
     fn key_id(body: &Self::Body) -> &str {
         &body.runtime_attestation_key_id

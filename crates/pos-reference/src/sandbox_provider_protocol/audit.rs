@@ -1,12 +1,34 @@
-//! Authentication of the immutable SAU1 lifecycle audit chain.
+//! The immutable SAU1 lifecycle audit chain: its encoder and its
+//! authentication.
 
 use ciborium::value::Value;
 
 use super::codec::{
-    bounded_array, decode_document, digest32, id16, key_id, optional_digest, signed, uint,
-    verify_digest, verify_signature,
+    bounded_array, bytes_value, decode_document, digest32, digest_list_value, encode, id16, key_id,
+    optional_digest, optional_digest_value, record_digest, require_signature, signed, text_value,
+    uint, uint_value, valid_key_id, verify_digest, verify_signature,
 };
-use super::{SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult};
+use super::{
+    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult, Sau1,
+    SelfDigested, Verified,
+};
+
+/// The signed body of one SAU1 event before its digest and signature exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxAuditRecordFields {
+    /// Attempt whose lifecycle produced this event.
+    pub attempt_id: [u8; 16],
+    /// Zero-based position in the immutable chain.
+    pub sequence: u64,
+    /// Closed ADR-069 event code.
+    pub event_code: u8,
+    /// Event-specific authority digests.
+    pub authority_digests: Vec<[u8; 32]>,
+    /// Previous SAU1 digest, absent only at sequence zero.
+    pub previous_digest: Option<[u8; 32]>,
+    /// Provider runtime-attestation key ID.
+    pub runtime_attestation_key_id: String,
+}
 
 /// One authenticated selector-consumed SAU1 event.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,6 +51,68 @@ pub struct SandboxAuditRecord {
 }
 
 impl SandboxAuditRecord {
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an SAU1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects an unknown event code, an authority-digest count other than
+    /// the event's, a zero digest, a chain link inconsistent with the
+    /// sequence, and an invalid key ID, as the decoder does.
+    pub fn self_digested(
+        fields: SandboxAuditRecordFields,
+    ) -> Result<SelfDigested<Sau1>, SandboxProviderProtocolError> {
+        validate_audit_fields(&fields)
+            .and_then(|()| {
+                record_digest(
+                    "SAU1",
+                    &Value::Array(audit_unsigned_value(&fields).to_vec()),
+                )
+            })
+            .map(|digest| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Sau1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, record_digest, signature) = verified.into_parts();
+            Ok(Self {
+                attempt_id: fields.attempt_id,
+                sequence: fields.sequence,
+                event_code: fields.event_code,
+                authority_digests: fields.authority_digests,
+                previous_digest: fields.previous_digest,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                record_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        }
+    }
+
+    /// Exact canonical SAU1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed error when the fields no longer match the
+    /// self-digest, and an encoding error if they cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = audit_unsigned_value(&self.fields());
+        self.validate(&unsigned).and_then(|()| {
+            encode(&Value::Array(vec![
+                Value::Array(unsigned.to_vec()),
+                bytes_value(&self.record_digest),
+                bytes_value(&self.signature),
+            ]))
+        })
+    }
+
     /// Decode and validate one exact canonical SAU1 record.
     ///
     /// # Errors
@@ -55,6 +139,12 @@ impl SandboxAuditRecord {
         record.validate(fields).map(|()| record)
     }
 
+    /// The runtime-attestation signature over the self-digest.
+    #[must_use]
+    pub const fn signature(&self) -> [u8; 64] {
+        self.signature
+    }
+
     pub(super) fn verify_signature(
         &self,
         key: &ed25519_dalek::VerifyingKey,
@@ -62,21 +152,58 @@ impl SandboxAuditRecord {
         verify_signature("SAU1", &self.record_digest, &self.signature, key)
     }
 
-    fn validate(&self, unsigned: &[Value; 8]) -> Result<(), SandboxProviderProtocolError> {
-        let expected_authority_count = match self.event_code {
-            0..=11 | 13 => 3,
-            12 => 4,
-            _ => return Err(SandboxProviderProtocolError::FieldOutOfBounds),
-        };
-        if self.authority_digests.len() != expected_authority_count
-            || self.authority_digests.contains(&[0; 32])
-            || (self.sequence == 0) != self.previous_digest.is_none()
-            || self.previous_digest == Some([0; 32])
-        {
-            return Err(SandboxProviderProtocolError::InconsistentFields);
+    fn fields(&self) -> SandboxAuditRecordFields {
+        SandboxAuditRecordFields {
+            attempt_id: self.attempt_id,
+            sequence: self.sequence,
+            event_code: self.event_code,
+            authority_digests: self.authority_digests.clone(),
+            previous_digest: self.previous_digest,
+            runtime_attestation_key_id: self.runtime_attestation_key_id.clone(),
         }
+    }
+
+    fn validate(&self, unsigned: &[Value; 8]) -> Result<(), SandboxProviderProtocolError> {
+        validate_audit_fields(&self.fields())?;
+        require_signature(&self.signature)?;
         verify_digest("SAU1", unsigned, self.record_digest)
     }
+}
+
+/// The SAU1 event shapes: the authority-digest count of each closed event
+/// code, nonzero digests and a link present exactly after sequence zero.
+fn validate_audit_fields(
+    fields: &SandboxAuditRecordFields,
+) -> Result<(), SandboxProviderProtocolError> {
+    let expected_authority_count = match fields.event_code {
+        0..=11 | 13 => 3,
+        12 => 4,
+        _ => return Err(SandboxProviderProtocolError::FieldOutOfBounds),
+    };
+    if fields.attempt_id == [0; 16] || !valid_key_id(&fields.runtime_attestation_key_id) {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    if fields.authority_digests.len() != expected_authority_count
+        || fields.authority_digests.contains(&[0; 32])
+        || (fields.sequence == 0) != fields.previous_digest.is_none()
+        || fields.previous_digest == Some([0; 32])
+    {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    Ok(())
+}
+
+fn audit_unsigned_value(fields: &SandboxAuditRecordFields) -> [Value; 8] {
+    [
+        text_value("SAU1"),
+        uint_value(1),
+        bytes_value(&fields.attempt_id),
+        uint_value(fields.sequence),
+        uint_value(u64::from(fields.event_code)),
+        digest_list_value(&fields.authority_digests),
+        optional_digest_value(fields.previous_digest.as_ref()),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
 }
 
 pub(super) fn authenticate_audit_chain(
@@ -157,11 +284,14 @@ fn event_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProvide
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
+
     use super::*;
-    use crate::sandbox_provider_protocol::ReceiptAuthority;
+    use crate::sandbox_provider_protocol::{ReceiptAuthority, SandboxProviderReceiptFields};
 
     #[test]
-    fn audit_authority_rejects_an_unsupported_event_code() {
+    fn audit_authority_rejects_an_unsupported_event_code(
+    ) -> Result<(), SandboxProviderProtocolError> {
         let record = SandboxAuditRecord {
             attempt_id: [1; 16],
             sequence: 0,
@@ -172,7 +302,8 @@ mod tests {
             record_digest: [2; 32],
             signature: [0; 64],
         };
-        let receipt = SandboxProviderReceipt {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let unsigned = SandboxProviderReceipt::self_digested(SandboxProviderReceiptFields {
             attempt_id: [1; 16],
             authority: ReceiptAuthority {
                 agr1_digest: [3; 32],
@@ -198,10 +329,12 @@ mod tests {
             termination_evidence: [16; 32],
             sau1_digest: [17; 32],
             runtime_attestation_key_id: "runtime-key".to_owned(),
-            receipt_digest: [18; 32],
-            signature: [0; 64],
-        };
+        })?;
+        let signature = key.sign(&unsigned.signature_message()).to_bytes();
+        let public = key.verifying_key();
+        let receipt = SandboxProviderReceipt::new(unsigned.verify(signature, &public)?, &public)?;
 
         assert!(!event_authority_matches(&record, &receipt));
+        Ok(())
     }
 }

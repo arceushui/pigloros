@@ -918,7 +918,7 @@ fn terminal_result_for_outcome(
                 Value::Null
             },
             bytes(grant.grant_digest),
-            bytes(receipt.receipt_digest),
+            bytes(receipt.receipt_digest()),
             Value::Array(
                 events
                     .iter()
@@ -1924,7 +1924,7 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         &grant,
         &receipt,
     )?;
-    assert_eq!(result.spr1_digest, Some(receipt.receipt_digest));
+    assert_eq!(result.spr1_digest, Some(receipt.receipt_digest()));
     assert_eq!(result.attempt_id, request.attempt_id);
     assert_eq!(
         admitted
