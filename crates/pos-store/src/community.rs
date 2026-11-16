@@ -9,6 +9,7 @@
 //! records, State or the backing store.
 
 mod attestation;
+mod initializer;
 mod lifecycle_authority;
 mod memory_domain;
 mod metadata_authority;
@@ -16,6 +17,7 @@ mod private_hash;
 mod sealer;
 mod vault;
 
+pub use initializer::CommunityInitializerOwnerV1;
 pub use lifecycle_authority::{
     CommunityAdministrativeActionV1, CommunityAdministrativeOperationV1,
     CommunityAdministrativeRequestV1, CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1,
