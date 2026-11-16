@@ -12447,14 +12447,10 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         if rows.len() > max {
             return Err(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds);
         }
-        // Every bound row's closure is validated as its own root, as
-        // `read_artifact_registration` does, so a bound MRM1 always gets its
-        // operation-index and recorder checks. The cost is at most `max`
-        // closure walks, each bounded by the ADR-093 graph limits.
-        let validated = rows.iter().try_for_each(|row| {
-            self.validate_artifact_registration_closure(row.registration_address())
-        });
-        validated.map(|()| rows.into_iter().cloned().collect())
+        crate::validate_bound_closures_once(&rows, |address| {
+            self.validate_artifact_registration_closure_visiting(address)
+        })
+        .map(|()| rows.into_iter().cloned().collect())
     }
 }
 
@@ -13834,6 +13830,15 @@ impl MemoryStore {
         &self,
         root: Hash,
     ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        self.validate_artifact_registration_closure_visiting(root)
+            .map(|_| ())
+    }
+
+    /// Validate the closure of `root` and return every address it visited.
+    fn validate_artifact_registration_closure_visiting(
+        &self,
+        root: Hash,
+    ) -> Result<BTreeSet<Hash>, ArtifactRegistrationPersistenceErrorV1> {
         let mut pending = vec![root];
         let mut seen = BTreeSet::new();
         let mut catalog_rows = Vec::new();
@@ -13865,9 +13870,7 @@ impl MemoryStore {
             .artifact_registrations
             .get(&root)
             .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-        if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
-            && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
-        {
+        if root_row.is_repro_manifest_root() {
             let root_record =
                 ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
                     .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
@@ -13882,7 +13885,7 @@ impl MemoryStore {
                 find_memory_root_transcript_bytes(catalog_rows.iter(), &root_record)?;
             self.validate_root_adapter_recording(&root_record, transcript_bytes)?;
         }
-        Ok(())
+        Ok(seen)
     }
 }
 

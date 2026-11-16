@@ -176,6 +176,14 @@ impl ArtifactRegistrationCatalogRowV1 {
         &self.owner_id
     }
 
+    /// Return whether this row is an MRM1 repro-manifest root, whose closure
+    /// validation also checks its operation index and adapter recording.
+    #[must_use]
+    pub fn is_repro_manifest_root(&self) -> bool {
+        self.artifact_class == ErasureArtifactClassV1::ReproManifest
+            && self.artifact_bytes.get(2..6) == Some(b"MRM1")
+    }
+
     /// Return the closed artifact class.
     #[must_use]
     pub const fn artifact_class(&self) -> ErasureArtifactClassV1 {

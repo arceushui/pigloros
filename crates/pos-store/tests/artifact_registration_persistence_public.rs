@@ -1517,7 +1517,8 @@ fn graph_errors_take_precedence_over_a_missing_source_timeline(
     // A second WCR1 outside the root closure makes the graph invalid.
     let (_, _, other) = prepare_repro_manifest_inputs(0x61, timeline(2), &PRIVATE_OWNER)?;
     inputs.push(other[2].clone());
-    for source_timeline in [None, Some(timeline(2))] {
+    // A missing or mismatched source Timeline never hides the graph error.
+    for source_timeline in [None, Some(timeline(2)), Some(timeline(9))] {
         assert_eq!(
             prepare_artifact_registration_batch_v1(
                 owner_id,
@@ -1819,9 +1820,9 @@ fn sqlite_timeline_reads_require_the_complete_catalog_schema(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_timeline_reads_refuse_a_cyclic_child_edge() -> Result<(), Box<dyn std::error::Error>> {
-    // ARD1 addresses hash the exact bytes that name each child, so a cycle
-    // can only be forged by rewriting a row, which its address then refuses.
+fn sqlite_timeline_reads_refuse_a_row_rewritten_with_a_forged_child_edge(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // A rewritten ARD1 row no longer hashes to its stored address.
     let (_database, path, root_address) = committed_bound_sqlite_store()?;
     let batch = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
     let root = batch
@@ -1850,6 +1851,40 @@ fn sqlite_timeline_reads_refuse_a_cyclic_child_edge() -> Result<(), Box<dyn std:
             recording.registration_address().as_bytes().as_slice(),
         ],
     )?;
+    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+    assert_eq!(
+        reopened.artifact_registrations_for_timeline(timeline(2), 8),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_timeline_reads_validate_bound_rows_outside_any_bound_root(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // With the root and MAA1 unbound and the MAA1 row gone, the bound MAT1 is
+    // in no bound root's closure; its own walk must find the missing child.
+    let (_database, path, root_address) = committed_bound_sqlite_store()?;
+    let batch = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
+    let admission = batch
+        .records()
+        .iter()
+        .find(|record| record.artifact_bytes().get(2..6) == Some(b"MAA1"))
+        .ok_or("MAA1 record is missing")?
+        .registration_address();
+    let connection = rusqlite::Connection::open(&path)?;
+    for address in [root_address, admission] {
+        connection.execute(
+            "DELETE FROM artifact_registration_timelines WHERE registration_address = ?1",
+            [address.as_bytes().as_slice()],
+        )?;
+    }
+    connection.execute(
+        "DELETE FROM artifact_registrations WHERE registration_address = ?1",
+        [admission.as_bytes().as_slice()],
+    )?;
+    drop(connection);
     let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
     assert_eq!(
         reopened.artifact_registrations_for_timeline(timeline(2), 8),

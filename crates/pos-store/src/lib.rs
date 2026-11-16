@@ -205,6 +205,33 @@ const COUNTERFACTUAL_SEAL: pos_core::CounterfactualAdapterSealV1 =
 /// never a cached subject classification. Records include every lifecycle state
 /// and are retained permanently; validation also requires a record for each
 /// epoch high-water entry.
+/// Validate every row bound to one Timeline in a single pass (ADR-136 §2.6).
+///
+/// Each bound MRM1 root is validated as its own root first, so each gets its
+/// operation-index and recorder checks. Every other bound row is then
+/// validated as a root unless an earlier walk already visited it, so every
+/// row is validated and each closure is walked once.
+fn validate_bound_closures_once(
+    rows: &[&pos_core::ArtifactRegistrationCatalogRowV1],
+    mut validate: impl FnMut(
+        pos_core::Hash,
+    ) -> Result<
+        std::collections::BTreeSet<pos_core::Hash>,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    >,
+) -> Result<(), pos_core::ArtifactRegistrationPersistenceErrorV1> {
+    let mut visited = std::collections::BTreeSet::new();
+    for row in rows.iter().filter(|row| row.is_repro_manifest_root()) {
+        visited.extend(validate(row.registration_address())?);
+    }
+    for row in rows.iter().filter(|row| !row.is_repro_manifest_root()) {
+        if !visited.contains(&row.registration_address()) {
+            visited.extend(validate(row.registration_address())?);
+        }
+    }
+    Ok(())
+}
+
 fn ensure_plaintext_preference_allowed(
     registry: Option<&pos_core::KeyRegistryStateV1>,
     entity: EntityId,

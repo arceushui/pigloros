@@ -9544,16 +9544,13 @@ fn sqlite_artifact_registrations_for_timeline(
     })
 }
 
-/// Validate every bound row's closure as its own root, as
-/// `sqlite_read_artifact_registration` does, so a bound MRM1 always gets its
-/// operation-index and recorder checks. The read costs at most `max` closure
-/// walks, each bounded by the ADR-093 graph limits.
 fn sqlite_validate_bound_closures(
     connection: &Connection,
     rows: Vec<ArtifactRegistrationCatalogRowV1>,
 ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
-    let validated = rows.iter().try_for_each(|row| {
-        sqlite_validate_artifact_registration_closure(connection, row.registration_address())
+    let bound: Vec<&ArtifactRegistrationCatalogRowV1> = rows.iter().collect();
+    let validated = crate::validate_bound_closures_once(&bound, |address| {
+        sqlite_validate_artifact_registration_closure_visiting(connection, address)
     });
     validated.map(|()| rows)
 }
@@ -9708,6 +9705,14 @@ fn sqlite_validate_artifact_registration_closure(
     connection: &Connection,
     root: Hash,
 ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    sqlite_validate_artifact_registration_closure_visiting(connection, root).map(|_| ())
+}
+
+/// Validate the closure of `root` and return every address it visited.
+fn sqlite_validate_artifact_registration_closure_visiting(
+    connection: &Connection,
+    root: Hash,
+) -> Result<BTreeSet<Hash>, ArtifactRegistrationPersistenceErrorV1> {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
     let mut catalog_rows = Vec::new();
@@ -9746,9 +9751,7 @@ fn sqlite_validate_artifact_registration_closure(
     validate_artifact_registration_catalog_graph_v1(root, &catalog_rows)?;
     let root_row = sqlite_load_artifact_registration_by_address(connection, root)?
         .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
-        && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
-    {
+    if root_row.is_repro_manifest_root() {
         let root_record = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
             .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
         let stored_root = sqlite_artifact_registration_operation_root(
@@ -9762,7 +9765,7 @@ fn sqlite_validate_artifact_registration_closure(
         let transcript_bytes = find_sqlite_root_transcript_bytes(&catalog_rows, &root_record)?;
         sqlite_validate_root_adapter_recording(connection, &root_record, transcript_bytes)?;
     }
-    Ok(())
+    Ok(seen)
 }
 
 fn find_sqlite_root_transcript_bytes<'a>(
