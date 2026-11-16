@@ -87,8 +87,9 @@ the final filename itself is protected atomically with create-new semantics.
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.97.1**).
 
 ```bash
-# One-time per clone — enable the versioned pre-commit hook
-# (fmt, rust-test-policy, lockfile generation, and targeted Clippy):
+# One-time per clone — enable the versioned pre-commit and pre-push hooks
+# (pre-commit: cargo fmt, full staged Trunk check, lockfile check, targeted
+# Clippy; pre-push: full Trunk check over the pushed commits):
 git config core.hooksPath .githooks
 ```
 
@@ -185,7 +186,7 @@ CI runs the same tests through cargo-nextest (`cargo nextest run --workspace
 --include-ignored`, coverage via `cargo llvm-cov nextest`). The libtest commands
 above run the same tests locally without installing nextest.
 
-CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny** (all features), **cargo-shear**, **cargo-crap** (no existing-score regressions; new functions at most 30), **fmt**, **rustdoc** (`-D warnings`), **test** (cargo-nextest `--run-ignored all` + doctests with `--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io), plus pull-request diff mutation testing, scheduled fuzzing, ThreadSanitizer, and CodeQL. See `.github/workflows/` and [`CONTRIBUTING.md`](CONTRIBUTING.md). Pull requests run a changed-file Trunk preflight before `fmt`, `feature-matrix`, `test`, the three `test-shard` runners, `clippy`, and `coverage` start together. The required `feature-matrix` job runs both supported compile configurations, no-default-feature Memory vectors, and evaluator independence checks; the test shards run the complete workspace suite exactly once, with doctests retained in `test`. `cargo-crap` and the normal checks wait for that complete core set; mutation waits for every cheaper blocking check and proves a separate workspace baseline using the same pinned nightly and libtest arguments as its shards; ASan runs last. The main staged workflow is capped at eight concurrent heavy runners. The changed production diff is checked with `covgate` before the full workspace coverage floor. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job; its completed LCOV artifact feeds a separate visible `cargo-crap` check without a second instrumented build. Green `main` runs publish per-commit baseline artifacts, and the protected `ci-gate` requires every stage. When local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering either threshold.
+CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny** (all features), **cargo-shear**, **cargo-crap** (no existing-score regressions; new functions at most 30), **fmt**, **rustdoc** (`-D warnings`), **test** (cargo-nextest `--run-ignored all` + doctests with `--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io), plus pull-request diff mutation testing, scheduled fuzzing, ThreadSanitizer, and CodeQL. See `.github/workflows/` and [`CONTRIBUTING.md`](CONTRIBUTING.md). Pull requests run a changed-file Trunk preflight before `fmt`, `feature-matrix`, `test`, the three `test-shard` runners, `clippy`, and `coverage` start together. The required `feature-matrix` job runs both supported compile configurations, no-default-feature Memory vectors, and evaluator independence checks; the test shards run the complete workspace suite exactly once, with doctests retained in `test`. `cargo-crap` and the normal checks wait for that complete core set (`cargo-crap` also waits for the native Windows owner lane's LCOV and is required directly by `ci-gate`); mutation waits for every normal check and proves a separate workspace baseline using the same pinned nightly and libtest arguments as its shards; the ASan shards run beside it as the last stage. The native Windows owner lane runs beside the core and standard stages, on pull requests only for Windows-owner changes and on every push to `main`. The main staged workflow is capped at eight concurrent heavy runners. The changed production diff is checked with `covgate` before the full workspace coverage floor. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job; its completed LCOV artifact feeds a separate visible `cargo-crap` check without a second instrumented build. Green `main` runs publish per-commit baseline artifacts, and the protected `ci-gate` requires every stage. When local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering either threshold.
 
 Quality floor: **800+ tests · 0 failures · at least 99% line and 99% region coverage · no CRAP regressions · new-function CRAP ≤30 · clippy pedantic clean**
 
@@ -196,7 +197,7 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 | Gate | Tool | What it bans / enforces |
 |---|---|---|
 | `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
-| Local git hook | Versioned `.githooks/pre-commit` + Trunk **`rust-test-policy`** | Blocks a commit if the staged Rust policy fails |
+| Local git hooks | Versioned `.githooks/pre-commit` and `.githooks/pre-push` running the full **Trunk check** | Block a commit or push that adds an issue from any enabled Trunk linter or formatter (check-only, nothing rewritten) |
 | Runtime `#[ignore]` | CI `cargo nextest run --run-ignored all` (local `cargo test -- --include-ignored`) + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report no ignored or skipped test |
 | Change risk | pinned **cargo-crap** + `scripts/check_cargo_crap_report.py` | Existing scores cannot regress; new functions must score ≤30 |
 | Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
@@ -204,17 +205,21 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 #### Git hooks (local)
 
 Git does not activate repository hooks automatically on clone. Enable the
-versioned pre-commit hook once:
+versioned hooks once:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-The hook fails closed if Trunk is unavailable, then runs `rust-test-policy` on
-the staged files before its Cargo checks:
+Both hooks fail closed if Trunk is unavailable whenever there is something to
+check. Trunk's own git-hook actions are disabled in `.trunk/trunk.yaml` so that
+Trunk never repoints `core.hooksPath`.
 
-- **pre-commit:** `cargo fmt`, Trunk `rust-test-policy`, `Cargo.lock`
-  regeneration/staging after manifest changes, and targeted Clippy.
+- **pre-commit:** `cargo fmt --check`, the full Trunk check of the staged
+  changes (every enabled linter and formatter, check-only), a staged
+  `Cargo.lock` check after manifest changes, and targeted Clippy.
+- **pre-push:** the full Trunk check over the commits being pushed (check-only);
+  branch deletions and pushes with no new commits are skipped.
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions
 and code inside `#[cfg(test)]` modules. CI requires **at least 99% lines and 99% regions**.

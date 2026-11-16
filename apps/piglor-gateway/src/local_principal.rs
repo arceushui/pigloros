@@ -12,7 +12,7 @@
 //! principal_id = "01JC0GATEWAYQ0CA1PR1NC1PA1"
 //! trust_domain = "local"
 //! actor_entity_ids = ["01JC0GATEWAYQ0CA1ACT0R0000"]
-//! operations = ["timeline.create", "timeline.events.read"]
+//! operations = ["session.read", "timeline.create", "timeline.events.read"]
 //! ```
 //!
 //! Provisioning persists one root capability grant through
@@ -253,14 +253,65 @@ pub fn provision_local_principal_from_credentials(
             .and_then(|text| LocalPrincipalProvisionV1::from_toml(text).map_err(io::Error::other))
     })
     .and_then(|provision| {
-        pos_store::sqlite::SqliteStore::open(sqlite_path)
+        // An offline writer (ADR-134 §8): under the shared mode lock, attach
+        // the store's binding before writing; it never binds.
+        crate::mode_profile::GatewayModeStoreLockV1::shared(sqlite_path)
             .map_err(io::Error::other)
-            .and_then(|mut store| {
-                provision_local_principal(&mut store, &provision)
-                    .map(|_| ())
+            .and_then(|lock| {
+                let provisioned = pos_store::sqlite::SqliteStore::open(sqlite_path)
                     .map_err(io::Error::other)
+                    .and_then(|mut store| {
+                        crate::mode_profile::attach_offline_writer_v1(&mut store)
+                            .and_then(|mode| admit_in_mode(&provision, mode))
+                            .map_err(io::Error::other)
+                            .and_then(|()| {
+                                provision_local_principal(&mut store, &provision)
+                                    .map(|_| ())
+                                    .map_err(io::Error::other)
+                            })
+                    });
+                drop(lock);
+                provisioned
             })
     })
+}
+
+/// ADR-134 §4 and D6: a store bound to a mode without network refuses a
+/// Principal grant that names the network capability.
+#[cfg(target_os = "linux")]
+fn admit_in_mode(
+    provision: &LocalPrincipalProvisionV1,
+    mode: crate::mode_profile::GatewayModeProfileIdV1,
+) -> Result<(), crate::mode_profile::GatewayModeErrorV1> {
+    crate::mode_profile::refuse_principal_network_v1(
+        mode,
+        crate::authorization::scope_names(provision.grant.scope(), GatewayOperationV1::NETWORK),
+    )
+}
+
+/// Whether the Local Principal recorded in `store` holds the network
+/// capability. A store that records no Local Principal holds none.
+///
+/// # Errors
+/// Returns the unavailable store error when the authority records cannot be
+/// read or decoded, so a caller fails closed instead of treating an
+/// unreadable store as one without the capability.
+pub(crate) fn names_network_capability<S>(
+    store: &S,
+) -> Result<bool, crate::mode_profile::GatewayModeErrorV1>
+where
+    S: AuthorityPersistencePortV1 + ?Sized,
+{
+    match store.load_authority(local_principal_grant_id()) {
+        // The store resolves no chain for an absent leaf grant.
+        Err(AuthorityPersistenceErrorV1::Conflict) => Ok(false),
+        Err(_) => Err(crate::mode_profile::GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unavailable,
+        )),
+        Ok(persisted) => Ok(persisted.chain().grants().iter().any(|grant| {
+            crate::authorization::scope_names(grant.scope(), GatewayOperationV1::NETWORK)
+        })),
+    }
 }
 
 /// Compose the Local Principal recorded in `store` as the Gateway
@@ -299,29 +350,42 @@ where
 /// unavailable.
 pub fn load_host_local_principal(
     host: &mut ErasureExecutionHostV1,
+    mode: &crate::mode_profile::GatewayModeBindingV1,
 ) -> io::Result<Option<GatewayAuthorization>> {
-    host.command_sender()
-        .and_then(|mut sender| {
-            sender.with_scheduled_admission(|ports| load_local_principal(&*ports))
+    mode.verify_host(host)
+        .map_err(io::Error::other)
+        .and_then(|()| {
+            host.command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| load_local_principal(&*ports))
+                })
+                .map_err(erasure_host_failure)
         })
-        .map_err(erasure_host_failure)
         .and_then(|loaded| loaded.map_err(io::Error::other))
+        .and_then(|authorization| {
+            authorization
+                .map(|authorization| authorization.with_mode_binding(mode))
+                .transpose()
+                .map_err(io::Error::other)
+        })
 }
 
-/// The production serve composition (D1) of the Gateway over `host`.
+/// The production serve composition (D1) of the Gateway over `host`, bound
+/// to the execution mode `mode` the host's store records.
 ///
 /// It accepts authenticated local `OwnTracks` ingress when
 /// `owntracks_owner_key` is given, and every protected operation requires
 /// the Local Principal recorded in the host's store.
 ///
 /// # Errors
-/// Returns an error when the authority records are unavailable or the
-/// Gateway cannot bind the host.
+/// Returns an error when the host's store is not bound to `mode`, the
+/// authority records are unavailable, or the Gateway cannot bind the host.
 pub fn local_gateway(
     mut host: ErasureExecutionHostV1,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+    mode: &crate::mode_profile::GatewayModeBindingV1,
 ) -> io::Result<Gateway> {
-    load_host_local_principal(&mut host).and_then(|authorization| {
+    load_host_local_principal(&mut host, mode).and_then(|authorization| {
         match (owntracks_owner_key, host) {
             (Some(owner_key), host) => {
                 Gateway::new_with_owntracks_erasure_host(host, owner_key, authorization)
@@ -679,6 +743,20 @@ mod tests {
             .to_owned())
     }
 
+    /// Bind the empty store at `path` to `id`, as the first `serve` does, and
+    /// return the handle `serve` composes with.
+    fn bind_mode(
+        path: &str,
+        id: crate::mode_profile::GatewayModeProfileIdV1,
+    ) -> TestResult<crate::mode_profile::GatewayModeBindingV1> {
+        crate::mode_profile::bind_test_store(&mut SqliteStore::open(path)?, id)?;
+        Ok(crate::mode_profile::test_binding(id, []))
+    }
+
+    fn bind_local(path: &str) -> TestResult<crate::mode_profile::GatewayModeBindingV1> {
+        bind_mode(path, crate::mode_profile::GatewayModeProfileIdV1::Local)
+    }
+
     fn sqlite_host(path: &str) -> TestResult<ErasureExecutionHostV1> {
         Ok(open_recovered_erasure_host(
             StoreConfig::Sqlite {
@@ -711,8 +789,13 @@ mod tests {
     fn served_store(provision: &LocalPrincipalProvisionV1) -> TestResult<Served> {
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
+        let mode = bind_local(&path)?;
         provision_local_principal(&mut SqliteStore::open(&path)?, provision)?;
-        let gateway = local_gateway(sqlite_host(&path)?, None)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )?;
         Ok(Served {
             _directory: directory,
             path,
@@ -896,6 +979,17 @@ mod tests {
             GatewayOperationV1::READ_EVENTS,
         ])?;
         assert_eq!(parsed, built);
+        // The Session read and the network capability are granted by name too.
+        assert_eq!(
+            LocalPrincipalProvisionV1::from_toml(&document(
+                &format!("\"{ACTOR}\""),
+                "\"session.read\", \"gateway.network.v1\"",
+            ))?,
+            provision([
+                GatewayOperationV1::NETWORK,
+                GatewayOperationV1::READ_SESSION
+            ])?
+        );
         let scope = built.grant.scope();
         assert_eq!(scope.resources(), ["timeline", "timeline.events"]);
         assert_eq!(scope.actions(), ["create", "read"]);
@@ -996,6 +1090,43 @@ mod tests {
     }
 
     #[test]
+    fn the_network_capability_check_fails_closed_on_an_unreadable_store() -> TestResult {
+        use crate::mode_profile::GatewayModeErrorV1;
+        let unavailable = Err(GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unavailable,
+        ));
+        // No Principal recorded: no capability, and a migration may proceed.
+        assert_eq!(names_network_capability(&MemoryStore::new()), Ok(false));
+        assert_eq!(
+            names_network_capability(&FailingStore(AuthorityPersistenceErrorV1::Conflict)),
+            Ok(false)
+        );
+        for error in [
+            AuthorityPersistenceErrorV1::Unavailable,
+            AuthorityPersistenceErrorV1::InvalidRecord,
+            AuthorityPersistenceErrorV1::StaleEpoch,
+            AuthorityPersistenceErrorV1::TimelineOrder,
+        ] {
+            assert_eq!(names_network_capability(&FailingStore(error)), unavailable);
+        }
+        for (operations, names) in [
+            (
+                vec![
+                    GatewayOperationV1::READ_SESSION,
+                    GatewayOperationV1::NETWORK,
+                ],
+                true,
+            ),
+            (vec![GatewayOperationV1::READ_SESSION], false),
+        ] {
+            let mut store = MemoryStore::new();
+            provision_local_principal(&mut store, &provision(operations)?)?;
+            assert_eq!(names_network_capability(&store), Ok(names));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn store_faults_map_to_closed_failures() -> TestResult {
         let provision = served_provision()?;
         for (error, expected) in [
@@ -1088,6 +1219,7 @@ mod tests {
                 Some(action(actor)),
             ),
             ("GET", format!("/v1/timelines/{timeline}/events"), None),
+            ("GET", "/v1/session".to_owned(), None),
         ] {
             let (status, problem) = send(&app, method, &uri, Some(actor), body).await?;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
@@ -1207,6 +1339,275 @@ mod tests {
         drop(permit);
         gateway.shutdown().await?;
         drop(gateway);
+        Ok(())
+    }
+
+    const LOCAL_MODE_DIGEST: &str =
+        "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f";
+    const AIR_GAPPED_MODE_DIGEST: &str =
+        "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
+
+    /// `actor`'s answer to `GET /v1/session` from the production composition
+    /// over a store bound to `mode` with its operator network grants and
+    /// provisioned with `provision`, whose grant is revoked when `revoked`.
+    async fn read_session(
+        provision: &LocalPrincipalProvisionV1,
+        mode: (
+            crate::mode_profile::GatewayModeProfileIdV1,
+            &[crate::mode_profile::GatewayNetworkGrantV1],
+        ),
+        revoked: bool,
+        actor: Option<EntityId>,
+    ) -> TestResult<(StatusCode, Value)> {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        crate::mode_profile::bind_test_store(&mut SqliteStore::open(&path)?, mode.0)?;
+        let binding = crate::mode_profile::test_binding(mode.0, mode.1.iter().copied());
+        provision_local_principal(&mut SqliteStore::open(&path)?, provision)?;
+        if revoked {
+            record_revocation(&path, provision)?;
+        }
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &binding),
+            None,
+            &binding,
+        )?;
+        let answer = send(&app_of(gateway.clone()), "GET", "/v1/session", actor, None).await?;
+        gateway.shutdown().await?;
+        drop(gateway);
+        Ok(answer)
+    }
+
+    /// The Session the v1 contract prescribes for the test Principal at
+    /// generation and binding epoch 1, its provenance recomputed here.
+    fn expected_session(
+        mode: (&str, &str, &str),
+        grants: &[&str],
+        network_grants: &[&str],
+        network: &str,
+    ) -> TestResult<Value> {
+        let (mode_profile_id, mode_name, digest) = mode;
+        let mut record = b"PiglorOS.GatewaySession.v1\0".to_vec();
+        record.extend_from_slice(&Ulid::from_string(PRINCIPAL)?.to_bytes());
+        record.extend_from_slice(&1_u64.to_be_bytes());
+        record.extend_from_slice(digest.as_bytes());
+        record.extend_from_slice(&1_u64.to_be_bytes());
+        Ok(json!({
+            "schema_id": "urn:pigloros:gateway:v1:schema:session",
+            "id": PRINCIPAL,
+            "generation": 1,
+            "provenance": {
+                "digest": blake3::hash(&record).to_hex().to_string(),
+                "origin": "host-derived",
+            },
+            "mode_profile": {
+                "profile_kind": "gateway-mode-v1",
+                "mode_profile_id": mode_profile_id,
+                "mode": mode_name,
+                "mode_profile_digest": digest,
+                "binding_epoch": 1,
+                "network_grants": network_grants,
+                "network": network,
+            },
+            "execution_profile": {
+                "profile_kind": "epf1",
+                "state": "unavailable",
+                "reason": "not-installed",
+            },
+            "availability": {"state": "available", "withheld": []},
+            "principal": {"principal_id": PRINCIPAL, "entity_ids": [ACTOR]},
+            "grants": grants,
+            "consents": [],
+            "contract": {"api_major": "v1", "contract_version": "1.0.0-draft"},
+        }))
+    }
+
+    /// #1362: the Session is derived from the recorded grant, the evaluator
+    /// and the bound mode only; the request names nothing but its actor.
+    #[tokio::test]
+    async fn the_session_discloses_the_recorded_principal_grants_and_bound_mode() -> TestResult {
+        use crate::mode_profile::{GatewayModeProfileIdV1, GatewayNetworkGrantV1};
+        let reader = provision([
+            GatewayOperationV1::CREATE_TIMELINE,
+            GatewayOperationV1::READ_EVENTS,
+            GatewayOperationV1::READ_SESSION,
+        ])?;
+        let granted = ["session.read", "timeline.create", "timeline.events.read"];
+        let local = read_session(
+            &reader,
+            (GatewayModeProfileIdV1::Local, &[]),
+            false,
+            Some(actor()?),
+        )
+        .await?;
+        assert_eq!(local.0, StatusCode::OK);
+        assert_eq!(
+            local.1,
+            expected_session(
+                ("gateway-mode-local-v1", "local", LOCAL_MODE_DIGEST),
+                &granted,
+                &[],
+                "denied",
+            )?
+        );
+        let air_gapped = read_session(
+            &reader,
+            (GatewayModeProfileIdV1::AirGapped, &[]),
+            false,
+            Some(actor()?),
+        )
+        .await?;
+        assert_eq!(air_gapped.0, StatusCode::OK);
+        assert_eq!(
+            air_gapped.1,
+            expected_session(
+                (
+                    "gateway-mode-air-gapped-v1",
+                    "air-gapped",
+                    AIR_GAPPED_MODE_DIGEST
+                ),
+                &granted,
+                &[],
+                "absent",
+            )?
+        );
+        // Only an explicitly provisioned network capability is granted
+        // network; the operator grants are disclosed beside it.
+        let networked = provision([
+            GatewayOperationV1::READ_SESSION,
+            GatewayOperationV1::NETWORK,
+        ])?;
+        let operator = [
+            GatewayNetworkGrantV1::PublicReadOnly,
+            GatewayNetworkGrantV1::OwnTracks,
+        ];
+        let (status, session) = read_session(
+            &networked,
+            (GatewayModeProfileIdV1::Local, &operator),
+            false,
+            Some(actor()?),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            session,
+            expected_session(
+                ("gateway-mode-local-v1", "local", LOCAL_MODE_DIGEST),
+                &["gateway.network.v1", "session.read"],
+                &["owntracks", "public-read-only"],
+                "capability-granted",
+            )?
+        );
+        Ok(())
+    }
+
+    /// ADR-134 §4 and D6: an Air-Gapped store refuses a Principal network
+    /// grant when it is provisioned and when a Gateway composes over it, so
+    /// an Air-Gapped Session never lists it.
+    #[tokio::test]
+    async fn an_air_gapped_store_refuses_the_principal_network_capability() -> TestResult {
+        use crate::mode_profile::GatewayModeProfileIdV1::{AirGapped, Local};
+        let networked = provision([
+            GatewayOperationV1::READ_SESSION,
+            GatewayOperationV1::NETWORK,
+        ])?;
+        let reader = provision([GatewayOperationV1::READ_SESSION])?;
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                admit_in_mode(&networked, AirGapped),
+                Err(crate::mode_profile::GatewayModeErrorV1::PrincipalNetworkRefused)
+            );
+            assert_eq!(admit_in_mode(&networked, Local), Ok(()));
+            assert_eq!(admit_in_mode(&reader, AirGapped), Ok(()));
+        }
+        let refused = read_session(&networked, (AirGapped, &[]), false, Some(actor()?)).await;
+        assert!(
+            refused.is_err_and(|error| error.to_string().contains("gateway.network.v1")),
+            "an Air-Gapped composition refuses a networked Principal"
+        );
+        let (status, session) =
+            read_session(&networked, (Local, &[]), false, Some(actor()?)).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            session["grants"],
+            json!(["gateway.network.v1", "session.read"])
+        );
+        let (status, session) =
+            read_session(&reader, (AirGapped, &[]), false, Some(actor()?)).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(session["grants"], json!(["session.read"]));
+        Ok(())
+    }
+
+    /// A Session read is a protected operation: no actor is `401`, an actor
+    /// or a grant that does not cover it is `403 unauthorized`, a revoked
+    /// grant `403 revoked`, and a composition with no Principal or no bound
+    /// mode has nothing to disclose.
+    #[tokio::test]
+    async fn a_session_read_is_authorized_like_every_operation() -> TestResult {
+        use crate::mode_profile::GatewayModeProfileIdV1::Local;
+        let reader = provision([GatewayOperationV1::READ_SESSION])?;
+        for (provision, revoked, actor, status, code) in [
+            (
+                &reader,
+                false,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated",
+            ),
+            (
+                &reader,
+                false,
+                Some(EntityId::new()),
+                StatusCode::FORBIDDEN,
+                "unauthorized",
+            ),
+            (
+                &served_provision()?,
+                false,
+                Some(actor()?),
+                StatusCode::FORBIDDEN,
+                "unauthorized",
+            ),
+            (
+                &reader,
+                true,
+                Some(actor()?),
+                StatusCode::FORBIDDEN,
+                "revoked",
+            ),
+        ] {
+            let (answered, problem) = read_session(provision, (Local, &[]), revoked, actor).await?;
+            assert_eq!(answered, status, "{code}");
+            assert_eq!(problem["code"], code);
+            assert_eq!(problem["instance"], "/v1/session");
+        }
+        // A store-backed authorizer that is bound to no execution mode.
+        let mut host = memory_host()?;
+        let authorization = host
+            .command_sender()?
+            .with_scheduled_admission(|ports| {
+                provision_local_principal(&mut *ports, &reader)
+                    .and_then(|_| load_local_principal(&*ports))
+            })??
+            .ok_or("a provisioned store recomposes")?;
+        let unbound = Gateway::new_with_erasure_host(host, Some(authorization))?;
+        let unprotected = Gateway::unprotected_for_harness(memory_host()?)?;
+        for gateway in [unbound, unprotected] {
+            let (status, problem) = send(
+                &app_of(gateway.clone()),
+                "GET",
+                "/v1/session",
+                Some(actor()?),
+                None,
+            )
+            .await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(problem["code"], "unauthenticated");
+            gateway.shutdown().await?;
+            drop(gateway);
+        }
         Ok(())
     }
 
@@ -1483,6 +1884,7 @@ mod tests {
         let provision = served_provision()?;
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
+        let mode = bind_local(&path)?;
         // A foreign grant revoked on the Local Principal's authority
         // Timeline before a Local Principal grant was recorded after it.
         let foreign = reissued(&provision.grant, Hash::from_bytes([9; 32]), 1, 0)?;
@@ -1507,9 +1909,13 @@ mod tests {
             Some(LocalPrincipalErrorV1::Corrupt)
         );
         drop(store);
-        let error = local_gateway(sqlite_host(&path)?, None)
-            .err()
-            .ok_or("a conflicting record never serves")?;
+        let error = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )
+        .err()
+        .ok_or("a conflicting record never serves")?;
         assert!(error.to_string().contains("restore the store"));
         Ok(())
     }
@@ -1528,14 +1934,67 @@ mod tests {
         }
     }
 
+    /// ADR-134 §6 and D10: every serve composition binds the authorizer to
+    /// the mode it serves, so its admissions carry that mode's revision and
+    /// Air-Gapped revocation state is current by construction.
+    #[tokio::test]
+    async fn every_serve_composition_binds_the_served_mode() -> TestResult {
+        use crate::mode_profile::GatewayModeProfileIdV1;
+        for id in [
+            GatewayModeProfileIdV1::Local,
+            GatewayModeProfileIdV1::AirGapped,
+        ] {
+            for owner_key in [None, Some(OwnTracksOwnerKey([7; 32]))] {
+                let directory = tempfile::tempdir()?;
+                let path = sqlite_path(&directory)?;
+                let mode = bind_mode(&path, id)?;
+                provision_local_principal(&mut SqliteStore::open(&path)?, &served_provision()?)?;
+                let store = owner_key
+                    .as_ref()
+                    .map_or(GatewayHostStoreV1::Standard, |_| {
+                        GatewayHostStoreV1::OwnTracks
+                    });
+                let host = open_recovered_erasure_host(
+                    StoreConfig::Sqlite { path: path.clone() },
+                    store,
+                    &ErasureCoordinatorCompositionV1::closed(),
+                )?;
+                let gateway = local_gateway(
+                    crate::mode_profile::test_attach_host(host, &mode),
+                    owner_key.as_ref(),
+                    &mode,
+                )?;
+                let authorization = gateway
+                    .authorization
+                    .clone()
+                    .ok_or("a provisioned host has an authorizer")?;
+                let (_, revocation_current, revision) = authorization.execution_profile();
+                assert_eq!(revision, Some(&mode.revision_input()));
+                assert_eq!(
+                    mode.revision_input().revocation_current_by_construction(),
+                    id == GatewayModeProfileIdV1::AirGapped
+                );
+                assert!(revocation_current);
+                gateway.shutdown().await?;
+                drop(gateway);
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_recorded_revocation_is_answered_revoked() -> TestResult {
         let provision = served_provision()?;
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
+        let mode = bind_local(&path)?;
         provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
         record_revocation(&path, &provision)?;
-        let gateway = local_gateway(sqlite_host(&path)?, None)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )?;
         let app = app_of(gateway.clone());
         let (status, problem) = create(&app, Some(actor()?)).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1563,7 +2022,12 @@ mod tests {
         };
 
         // Unprovisioned: protected routes fail closed and nothing is written.
-        let gateway = local_gateway(open_host()?, None)?;
+        let mode = bind_local(&path)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(open_host()?, &mode),
+            None,
+            &mode,
+        )?;
         assert!(gateway.has_authorization());
         gateway.shutdown().await?;
         drop(gateway);
@@ -1571,7 +2035,11 @@ mod tests {
 
         provision_local_principal(&mut SqliteStore::open(&path)?, &served_provision()?)?;
         let recorded = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
-        let gateway = local_gateway(open_host()?, None)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(open_host()?, &mode),
+            None,
+            &mode,
+        )?;
         let app = router(AppState {
             gateway: gateway.clone(),
             ledger_view: LedgerView::default(),
@@ -1613,6 +2081,17 @@ mod tests {
         install(b"principal_id = ")?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
         install(document(&actor, "\"timeline.create\"").as_bytes())?;
+        // ADR-134 §8: an offline writer refuses an unbound store and a store
+        // `migrate-mode` holds; the first `serve` binds it.
+        assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+        crate::mode_profile::bind_test_store(
+            &mut SqliteStore::open(path)?,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+        )?;
+        let migrating = crate::mode_profile::GatewayModeStoreLockV1::exclusive(path)?;
+        assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+        drop(migrating);
+        assert!(load_local_principal(&SqliteStore::open(path)?)?.is_none());
         assert!(provision_local_principal_from_credentials(
             directory
                 .path()
@@ -1642,6 +2121,24 @@ mod tests {
         provision_local_principal_from_credentials(path, &credentials)?;
         install(&padded(MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES + 1)?)?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+
+        // ADR-134 §4: an Air-Gapped store refuses a Principal network grant
+        // at provisioning, and records nothing.
+        let air_gapped = directory.path().join("air-gapped.db");
+        let air_gapped = air_gapped.to_str().ok_or("temporary path is not UTF-8")?;
+        crate::mode_profile::bind_test_store(
+            &mut SqliteStore::open(air_gapped)?,
+            crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
+        )?;
+        install(document(&actor, "\"session.read\", \"gateway.network.v1\"").as_bytes())?;
+        assert!(
+            provision_local_principal_from_credentials(air_gapped, &credentials)
+                .is_err_and(|error| error.to_string().contains("gateway.network.v1"))
+        );
+        assert!(load_local_principal(&SqliteStore::open(air_gapped)?)?.is_none());
+        install(document(&actor, "\"session.read\"").as_bytes())?;
+        provision_local_principal_from_credentials(air_gapped, &credentials)?;
+        assert!(load_local_principal(&SqliteStore::open(air_gapped)?)?.is_some());
 
         install(document(&actor, "\"timeline.events.read\"").as_bytes())?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());

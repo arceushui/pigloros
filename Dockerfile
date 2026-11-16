@@ -8,6 +8,7 @@ COPY crates/ crates/
 COPY plugins/ plugins/
 COPY apps/ apps/
 COPY fixtures/ fixtures/
+COPY contracts/gateway/v1/execution-mode-profiles.json contracts/gateway/v1/execution-mode-profiles.json
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -44,4 +45,4 @@ USER appuser
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:8080/health || exit 1
-ENTRYPOINT ["piglor-gateway", "serve", "0.0.0.0:8080"]
+ENTRYPOINT ["piglor-gateway", "serve", "--profile", "gateway-mode-local-v1", "--network-grant", "public-read-only", "0.0.0.0:8080"]

@@ -153,6 +153,54 @@ mod lifecycle_coverage_tests {
         assert_eq!(final_state, LifecycleState::Closed);
     }
 
+    /// The exhaustive oracle of the host error table: a new host error fails
+    /// to compile here until it is routed.
+    fn oracle_core(error: ErasureHostErrorV1) -> CoreError {
+        match error {
+            ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
+                CoreError::ErasureContainmentUnavailable
+            }
+            ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
+            ErasureHostErrorV1::AuthorizationDenied
+            | ErasureHostErrorV1::Conflict
+            | ErasureHostErrorV1::AdapterFailure => crate::executor::host_command_rejected(),
+            ErasureHostErrorV1::ModeBindingStale => CoreError::ModeBindingStale,
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_host_error(variant: ErasureHostErrorV1) -> Option<ErasureHostErrorV1> {
+        match variant {
+            ErasureHostErrorV1::RecoveryUnavailable => Some(ErasureHostErrorV1::AccessFrozen),
+            ErasureHostErrorV1::AccessFrozen => Some(ErasureHostErrorV1::StaleGeneration),
+            ErasureHostErrorV1::StaleGeneration => Some(ErasureHostErrorV1::AuthorizationDenied),
+            ErasureHostErrorV1::AuthorizationDenied => Some(ErasureHostErrorV1::Conflict),
+            ErasureHostErrorV1::Conflict => Some(ErasureHostErrorV1::AdapterFailure),
+            ErasureHostErrorV1::AdapterFailure => Some(ErasureHostErrorV1::ModeBindingStale),
+            ErasureHostErrorV1::ModeBindingStale => None,
+        }
+    }
+
+    #[test]
+    fn every_host_error_routes_through_the_core_table() {
+        let mut walked = 0;
+        let mut last = ErasureHostErrorV1::RecoveryUnavailable;
+        let mut current = Some(ErasureHostErrorV1::RecoveryUnavailable);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(
+                format!("{:?}", host_error_to_core(variant)),
+                format!("{:?}", oracle_core(variant))
+            );
+            last = variant;
+            walked += 1;
+            current = next_host_error(variant);
+        }
+        assert_eq!(walked, ErasureHostErrorV1::COUNT);
+        assert_eq!(last as usize, ErasureHostErrorV1::COUNT - 1);
+    }
+
     #[test]
     fn test_gate_binding_and_host_error_mapping_cover_every_variant(
     ) -> Result<(), ErasureHostErrorV1> {
@@ -196,6 +244,10 @@ mod lifecycle_coverage_tests {
                 std::mem::discriminant(&CoreError::Storage(String::new())),
             );
         }
+        assert_eq!(
+            std::mem::discriminant(&host_error_to_core(ErasureHostErrorV1::ModeBindingStale)),
+            std::mem::discriminant(&CoreError::ModeBindingStale),
+        );
 
         assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
         Ok(())
@@ -737,18 +789,37 @@ impl ExecutorStore {
     }
 }
 
+/// The store error of each erasure host error, indexed by its stable code
+/// (`ErasureHostErrorV1::code`). The oracle test
+/// `every_host_error_routes_through_the_core_table` fails to compile until a
+/// new host error is routed here.
+const HOST_ERROR_TO_CORE: [fn() -> CoreError; ErasureHostErrorV1::COUNT] = [
+    host_containment_unavailable,
+    || CoreError::ErasureAccessFrozen,
+    host_containment_unavailable,
+    host_command_rejected,
+    host_command_rejected,
+    host_command_rejected,
+    || CoreError::ModeBindingStale,
+];
+
+const _: () = assert!(HOST_ERROR_TO_CORE.len() == ErasureHostErrorV1::COUNT);
+
+/// The store error of `error`; a host error past the table fails closed as
+/// unavailable containment.
 fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
-    match error {
-        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
-        ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
-            CoreError::ErasureContainmentUnavailable
-        }
-        ErasureHostErrorV1::AuthorizationDenied
-        | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
-            CoreError::Storage("erasure host command rejected".to_owned())
-        }
-    }
+    HOST_ERROR_TO_CORE
+        .get(error as usize)
+        .copied()
+        .unwrap_or(host_containment_unavailable)()
+}
+
+const fn host_containment_unavailable() -> CoreError {
+    CoreError::ErasureContainmentUnavailable
+}
+
+fn host_command_rejected() -> CoreError {
+    CoreError::Storage("erasure host command rejected".to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3444,7 +3515,8 @@ pub(crate) const fn commit_fence_authority(
         | PipelineOutcomeV1::Committed(_)
         | PipelineOutcomeV1::RecoveredDuplicate(_)
         | PipelineOutcomeV1::InvalidDependencyDeclaration
-        | PipelineOutcomeV1::DependencySetExhausted => None,
+        | PipelineOutcomeV1::DependencySetExhausted
+        | PipelineOutcomeV1::ModeBindingStale => None,
     }
 }
 

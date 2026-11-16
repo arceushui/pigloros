@@ -15,7 +15,7 @@ Shared reference for humans and agents.
 | Layer | Tool | Notes |
 |---|---|---|
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
-| Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
+| Git hooks | Versioned `.githooks/pre-commit` runs `cargo fmt --check`, the full Trunk check of the staged changes (every enabled linter and formatter, including `rust-test-policy`; check-only), a staged `Cargo.lock` check for manifest changes, and targeted Clippy; versioned `.githooks/pre-push` runs the full Trunk check over the pushed commits | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | CI: `cargo nextest run --run-ignored all` in three `--partition slice:k/3` shards plus `cargo test --doc -- --include-ignored`; locally `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches libtest `test result:` and nextest `Summary` lines only (no log prose FP); outside `--partitioned=N` mode fails on any ignored or skipped test or a missing summary; `--partitioned=N` instead proves the N shards ran every test exactly once (partitioning itself causes skips) |
 | Coverage | `cargo llvm-cov nextest` with `--run-ignored all` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
@@ -56,8 +56,28 @@ same 99% line and 99% region thresholds to changed production Rust files under
 `**/src/**/*.rs`, except `crates/pos-owner-bridge-windows`, which is excluded from
 the root gate. That crate has its own thresholds (99% lines and regions for `src`
 outside `src/ffi`, 95% lines and 80% regions for `src/ffi`) in its crate-local
-`covgate.toml`, read by the Windows-only owner-bridge CI job (not yet landed), so
+`covgate.toml`, read by the Windows-only `owner-bridge-windows` CI job, so
 the Linux coverage job intentionally does not evaluate them.
+
+That job runs on every push to `main` and on pull requests whose changes touch
+the paths in the `owner_windows` filter of `.github/rust-scope.yml` (the owner
+crates, `pos-crypto`, `fixtures/owner-bridge`, workspace manifests, toolchain
+and root Cargo, lint, format and coverage configuration, the workflows and the
+scripts the lane or its consumers run), read from the trusted base revision.
+Failed detection, a base revision without that filter, a pull request at the
+3000-file listing limit, any renamed file, or a failure to list renames runs
+it. Only `cargo-crap` waits for the lane, and `ci-gate` requires both results
+directly; `standard-gate`, mutation and ASan never wait for it, so a failed lane
+does not hide or delay their findings. When a pull
+request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
+`crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
+`ci-gate` requires the lane's success whenever it is in scope.
+
+The Windows job runs the complete native test suite, including all 1,000 real
+readiness cases, once under coverage instrumentation. Portable bridge and owner
+executable tests run separately, along with native doctests. The retained runtime
+is prepared before these tests. No test-exclusion filters are used; the complete
+native suite executes once while producing its coverage evidence.
 
 `covgate` reads the detailed LLVM JSON report produced by the completed
 `cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test
@@ -231,7 +251,7 @@ require an unsuppressed audit and removal review for both rules.
 ## Local setup
 
 ```bash
-# One-time per clone (enables the versioned pre-commit hook):
+# One-time per clone (enables the versioned pre-commit and pre-push hooks):
 git config core.hooksPath .githooks
 
 # Full CI parity:
