@@ -708,6 +708,27 @@ async fn extreme_values_pass_and_a_missing_key_or_a_bad_path_fails() -> TestResu
         created["options"][0]["coordinates"]["z_micro"],
         9_007_199_254_740_991_i64
     );
+    // After a lower-case first letter, a digit alone or `_`, `.` and `-`
+    // alone keep a key canonical.
+    let (status, created) = post(
+        &served,
+        PREFERENCES,
+        SUBJECT,
+        "canonical-keys",
+        &preference(json!([
+            {"dimension": "season2", "weight_micro": 1},
+            {"dimension": "a_b.c-d", "weight_micro": -1},
+        ])),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        created["weights"],
+        json!([
+            {"dimension": "a_b.c-d", "weight_micro": -1},
+            {"dimension": "season2", "weight_micro": 1},
+        ])
+    );
     // A missing Idempotency-Key and a non-canonical path are invalid.
     let (status, problem) = send(
         &served.app,

@@ -596,7 +596,7 @@ mod tests {
     fn draft(parent: Option<u64>, subject: EntityId) -> GatewayRevisionDraftV1 {
         GatewayRevisionDraftV1::try_new(
             GatewayRevisionIdempotencyV1::new(
-                [1; 16],
+                [9; 16],
                 GatewayRevisionKindV1::Preference,
                 [2; 32],
                 [3; 32],
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(first.revision(), NonZeroU64::MIN);
         assert_eq!(first.parent_key(), None);
         assert_eq!(first.resource_id(), [4; 16]);
-        assert_eq!(first.idempotency().principal_id(), [1; 16]);
+        assert_eq!(first.idempotency().principal_id(), [9; 16]);
         assert_eq!(first.idempotency().key_digest(), [2; 32]);
         assert_eq!(first.idempotency().request_digest(), [3; 32]);
         let next = draft(Some(4), subject);
@@ -658,7 +658,7 @@ mod tests {
         );
         assert_eq!(record.tombstone().subject(), subject);
         assert_eq!(record.tombstone().digest(), [5; 32]);
-        assert_eq!(record.principal_id(), [1; 16]);
+        assert_eq!(record.principal_id(), [9; 16]);
         assert_eq!(record.mode(), &mode(1));
         assert_eq!(record.content(), [6]);
         let present = GatewayRevisionStateV1::Present(record.clone());

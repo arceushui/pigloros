@@ -6,7 +6,7 @@
 use std::{num::NonZeroU64, path::Path, sync::Arc};
 
 use pos_core::{
-    EntityId, ErasureContainmentGateV1, EventStore, GatewayModeBindingHostV1,
+    CoreError, EntityId, ErasureContainmentGateV1, EventStore, GatewayModeBindingHostV1,
     GatewayModeBindingPortV1, GatewayModeBindingRecordV1, GatewayModeProfileRefV1,
     GatewayRevisionCommitV1, GatewayRevisionDraftV1, GatewayRevisionErasureHostV1,
     GatewayRevisionErrorV1, GatewayRevisionIdempotencyV1, GatewayRevisionKeyV1,
@@ -22,6 +22,8 @@ impl<T: EventStore + GatewayModeBindingPortV1 + GatewayRevisionPortV1> Store for
 
 const LOCAL: &str = "gateway-mode-local-v1";
 const KIND: GatewayRevisionKindV1 = GatewayRevisionKindV1::Preference;
+/// The authoring Principal of [`draft`].
+const PRINCIPAL: [u8; 16] = [0xa5; 16];
 
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -70,8 +72,24 @@ fn draft(
     key: u8,
     request: u8,
 ) -> GatewayRevisionDraftV1 {
+    draft_of(
+        GatewayRevisionIdempotencyV1::new(PRINCIPAL, KIND, [key; 32], [request; 32]),
+        resource,
+        parent,
+        subject,
+    )
+}
+
+/// A draft under `idempotency` of `subject` for `resource` after `parent`.
+fn draft_of(
+    idempotency: GatewayRevisionIdempotencyV1,
+    resource: u8,
+    parent: Option<u64>,
+    subject: EntityId,
+) -> GatewayRevisionDraftV1 {
+    let request = idempotency.request_digest()[0];
     ok(GatewayRevisionDraftV1::try_new(
-        GatewayRevisionIdempotencyV1::new([1; 16], KIND, [key; 32], [request; 32]),
+        idempotency,
         [resource; 16],
         parent.map(revision),
         subject,
@@ -110,7 +128,7 @@ fn a_revision_commits_once_with_its_binding_and_replays_exactly() {
         assert_eq!(first.tombstone().key(), key(1, 1), "{name}");
         assert_eq!(first.tombstone().subject(), subject, "{name}");
         assert_eq!(first.tombstone().digest(), [0; 32], "{name}");
-        assert_eq!(first.principal_id(), [1; 16], "{name}");
+        assert_eq!(first.principal_id(), PRINCIPAL, "{name}");
         assert_eq!(first.mode(), &binding(), "{name}");
         assert_eq!(first.content(), [1, 1], "{name}");
         let present = GatewayRevisionStateV1::Present(first.clone());
@@ -180,6 +198,49 @@ fn a_next_revision_names_the_available_head_of_its_subject() {
             3,
             3,
         ))));
+    }
+}
+
+#[test]
+fn heads_and_requests_are_scoped_to_their_kind_resource_and_principal() {
+    let subject = EntityId::new();
+    let other_principal = [0x3c; 16];
+    let option_spec = GatewayRevisionKindV1::OptionSpec;
+    for (name, mut store) in stores() {
+        committed(ok(
+            store.commit_gateway_revision(draft(1, None, subject, 1, 1))
+        ));
+        // The same kind with another resource starts at revision 1.
+        let other_resource = committed(ok(
+            store.commit_gateway_revision(draft(2, None, subject, 2, 2))
+        ));
+        assert_eq!(other_resource.tombstone().key(), key(2, 1), "{name}");
+        // The same resource ID under the other kind starts at revision 1.
+        let other_kind = committed(ok(store.commit_gateway_revision(draft_of(
+            GatewayRevisionIdempotencyV1::new(PRINCIPAL, option_spec, [3; 32], [3; 32]),
+            1,
+            None,
+            subject,
+        ))));
+        assert_eq!(
+            other_kind.tombstone().key(),
+            GatewayRevisionKeyV1::new(option_spec, [1; 16], revision(1)),
+            "{name}"
+        );
+        // Another Principal's request under the same key is its own.
+        let other = committed(ok(store.commit_gateway_revision(draft_of(
+            GatewayRevisionIdempotencyV1::new(other_principal, KIND, [1; 32], [4; 32]),
+            3,
+            None,
+            subject,
+        ))));
+        assert_eq!(other.tombstone().key(), key(3, 1), "{name}");
+        assert_eq!(other.principal_id(), other_principal, "{name}");
+        assert_eq!(
+            ok(store.load_gateway_revision(key(3, 1))),
+            Some(GatewayRevisionStateV1::Present(other)),
+            "{name}"
+        );
     }
 }
 
@@ -442,10 +503,42 @@ fn sqlite_an_untrustworthy_or_unreadable_revision_fails_closed() {
     );
 }
 
-#[test]
-fn sqlite_an_incompatible_revision_table_refuses_to_open() {
+/// The refusal of opening a new store whose `gateway_revisions` table was
+/// created by `ddl`.
+fn open_refusal(ddl: &str) -> String {
     let directory = ok(tempdir());
     let path = directory.path().join("incompatible.db");
-    execute(&path, "CREATE TABLE gateway_revisions (kind INTEGER)");
-    assert!(SqliteStore::open(path.to_str().unwrap_or_default()).is_err());
+    execute(&path, ddl);
+    match SqliteStore::open(path.to_str().unwrap_or_default()) {
+        Err(CoreError::Storage(message)) => message,
+        other => {
+            std::panic::resume_unwind(Box::new(format!("unexpected open: {:?}", other.map(drop))))
+        }
+    }
+}
+
+#[test]
+fn sqlite_an_incompatible_revision_table_refuses_to_open() {
+    assert_eq!(
+        open_refusal("CREATE TABLE gateway_revisions (kind INTEGER)"),
+        "SQLite gateway_revisions table has an incompatible schema"
+    );
+    // Every constraint holds, but the content column is TEXT.
+    assert_eq!(
+        open_refusal(
+            "CREATE TABLE gateway_revisions (
+                 kind INTEGER NOT NULL, resource_id BLOB NOT NULL,
+                 revision INTEGER NOT NULL, subject BLOB NOT NULL, digest BLOB NOT NULL,
+                 principal_id BLOB NOT NULL, mode_profile_id TEXT NOT NULL,
+                 mode_profile_digest BLOB NOT NULL, binding_epoch INTEGER NOT NULL,
+                 content TEXT NOT NULL,
+                 CHECK (kind IN (1, 2)), CHECK (length(resource_id) = 16),
+                 CHECK (revision >= 1), CHECK (length(subject) = 16),
+                 CHECK (length(digest) = 32), CHECK (length(principal_id) = 16),
+                 CHECK (length(mode_profile_digest) = 32), CHECK (binding_epoch >= 1),
+                 CHECK (length(content) BETWEEN 1 AND 65536),
+                 PRIMARY KEY (kind, resource_id, revision))"
+        ),
+        "SQLite gateway_revisions table has an incompatible schema: columns or key constraints"
+    );
 }
