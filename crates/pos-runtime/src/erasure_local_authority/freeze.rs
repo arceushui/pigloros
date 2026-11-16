@@ -799,3 +799,117 @@ pub(super) fn extension_admitted(
         .map(drop)
         .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use pos_core::{
+        ArtifactKeyDependencyV1, ArtifactOptionalityV1, ArtifactRegistrationFieldsV1,
+        ArtifactRegistrationV1, ArtifactTransitionRuleV1, Hash,
+    };
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn target(
+        artifact_class: ErasureArtifactClassV1,
+        artifact_digest: ErasureReferenceV1,
+        key_digest: ErasureReferenceV1,
+    ) -> ErasureRequiredTargetV1 {
+        ErasureRequiredTargetV1 {
+            artifact_class,
+            artifact_digest,
+            key_role: ErasureKeyRoleV1::DataEncryption,
+            key_digest,
+            replica_set: ErasureReferenceV1::from_digest([0x01; 32]),
+            replica_id: ErasureReferenceV1::from_digest([0x02; 32]),
+        }
+    }
+
+    fn dependency(owner: &'static str, role: KeyRoleV1) -> ArtifactKeyDependencyV1 {
+        ArtifactKeyDependencyV1 {
+            identity: KeyIdentityV1::new(owner, role, 1),
+            material_digest: Hash::from_bytes([0x03; 32]),
+            private_material_required: true,
+        }
+    }
+
+    /// A catalog row of `class` with `dependencies`, sorted by identity.
+    fn row(
+        class: ErasureArtifactClassV1,
+        dependencies: Vec<ArtifactKeyDependencyV1>,
+    ) -> TestResult<ArtifactRegistrationCatalogRowV1> {
+        let owner = OwnerIdV1::from_static("community-owner");
+        let bytes = format!("{class:?}").into_bytes();
+        let digest = ArtifactRegistrationV1::artifact_digest(class, &bytes);
+        let registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+            artifact_class: class,
+            artifact_digest: digest,
+            owner_reference: ArtifactRegistrationV1::owner_reference(&owner),
+            data_class: ArtifactDataClassV1::PrivateSubjectData,
+            optionality: ArtifactOptionalityV1::Required,
+            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+            required_key_roles: dependencies
+                .iter()
+                .map(|dependency| dependency.identity.role)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            key_dependencies: dependencies,
+            child_artifacts: Vec::new(),
+        })
+        .map_err(|error| format!("{error:?}"))?;
+        Ok(ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner,
+            class,
+            digest,
+            registration.address(),
+            bytes,
+            registration.canonical_cbor(),
+        )
+        .map_err(|error| format!("{error:?}"))?)
+    }
+
+    #[test]
+    fn an_ard1_row_is_an_owner_cell_and_one_key_target_per_role_7_dependency() -> TestResult {
+        let community = dependency("community:x", KeyRoleV1::CommunityArtifactEncryption);
+        // A role-0 dependency is reached through the subject's own keys,
+        // never through ARD1 (ADR-136 §3, key mapping).
+        let subject = dependency("subject:y", KeyRoleV1::SubjectDataEncryption);
+        let report = row(CalibrationReport, vec![community, subject])?;
+        let replay = row(TimelineReplay, Vec::new())?;
+        let as_reference = |row: &ArtifactRegistrationCatalogRowV1| {
+            ErasureReferenceV1::from_digest(*row.artifact_digest().as_bytes())
+        };
+        let key = local_erasure_key_digest_v1(&community.identity)?;
+        assert_eq!(
+            registration_cells(&[report.clone(), replay.clone()], target)?,
+            vec![
+                (
+                    target(CalibrationReport, as_reference(&report), NO_COMPONENT),
+                    Artifact,
+                    "managed-report"
+                ),
+                (
+                    target(CalibrationReport, as_reference(&report), key),
+                    Key,
+                    "key-registry"
+                ),
+                (
+                    target(CalibrationReport, as_reference(&report), key),
+                    Backup,
+                    "local-backup-inventory"
+                ),
+                (
+                    target(TimelineReplay, as_reference(&replay), NO_COMPONENT),
+                    Artifact,
+                    "artifact-store"
+                ),
+            ]
+        );
+        // D5: both report classes are managed reports.
+        assert_eq!(artifact_ack_class(ConformanceReport), "managed-report");
+        assert_eq!(artifact_ack_class(Export), "artifact-store");
+        Ok(())
+    }
+}
