@@ -607,7 +607,10 @@ mod tests {
     /// Admit the staged pass through the local host's atomic admission and
     /// return the committed Event count.
     fn admit_staged(fixture: &mut DriverFixture) -> usize {
-        let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+        let host = LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        )
+        .test_ok();
         let revisions = host
             .observe(&fixture.registry, &mut fixture.store, fixture.timeline)
             .test_ok();
