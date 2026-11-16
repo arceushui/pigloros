@@ -358,6 +358,7 @@ pub use provider_barrier::{
 };
 #[cfg(target_os = "linux")]
 pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};
+#[cfg(target_os = "linux")]
 pub use provider_lifecycle::SystemdProviderLifecycle;
 #[cfg(target_os = "linux")]
 pub use release_barrier::{
