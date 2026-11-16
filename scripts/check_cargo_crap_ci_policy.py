@@ -268,7 +268,7 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver must inspect repository artifacts directly",
         ),
         (
-            '-f name="${BASELINE_ARTIFACT_NAME}"',
+            '-f name="cargo-crap-baseline-${sha}"',
             "baseline resolver must request the exact baseline artifact",
         ),
         (
@@ -288,8 +288,8 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver must name the trusted main artifact",
         ),
         (
-            'select(.workflow_run.head_sha == \\"${TRUSTED_BASE_SHA}\\")',
-            "baseline resolver must require the exact trusted main commit",
+            'select(.workflow_run.head_sha == \\"${sha}\\")',
+            "baseline resolver must require the exact main commit of the artifact",
         ),
         (
             "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
@@ -300,8 +300,12 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline bootstrap must reject Rust or Cargo-policy changes",
         ),
         (
-            'echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"',
-            "baseline resolver must publish the trusted artifact commit",
+            'echo "baseline-sha=${sha}" >> "${GITHUB_OUTPUT}"',
+            "baseline resolver must publish the artifact commit",
+        ),
+        (
+            'publish_baseline_if_available() {\n  publish_baseline_of "${TRUSTED_BASE_SHA}"\n}\n',
+            "baseline resolver must look up the trusted main commit first",
         ),
         ("ANCESTOR_BASELINE_WALK_LIMIT=30\n", "ancestor baseline walk bound changed"),
         (
@@ -310,16 +314,8 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "ancestor baseline fallback must walk a bounded first-parent main history",
         ),
         (
-            '-f name="cargo-crap-baseline-${ancestor}"',
-            "ancestor baseline fallback must request that ancestor's exact artifact",
-        ),
-        (
-            'select(.workflow_run.head_sha == \\"${ancestor}\\")',
-            "ancestor baseline fallback must require the exact ancestor commit",
-        ),
-        (
-            'echo "baseline-sha=${ancestor}" >> "${GITHUB_OUTPUT}"',
-            "ancestor baseline fallback must publish the ancestor artifact commit",
+            '    publish_baseline_of "${ancestor}" \\\n',
+            "ancestor baseline fallback must look up each ancestor's exact artifact",
         ),
         (
             "  publish_baseline_if_available\ndone\n\npublish_ancestor_baseline\n",
@@ -328,15 +324,6 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
     )
     for fragment, message in required_fragments:
         require(fragment in resolver, message)
-    for fragment, message in (
-        ("select(.expired == false)", "baseline resolver must reject expired artifacts"),
-        ('select(.workflow_run.head_branch == \\"main\\")', "baseline resolver must require a main-branch artifact"),
-        (
-            "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
-            "baseline resolver must reject fork artifacts",
-        ),
-    ):
-        require(resolver.count(fragment) == 2, f"{message} for the trusted base and its ancestors")
     require(
         resolver.count("publish_ancestor_baseline\n") == 1,
         "ancestor baseline fallback must run exactly once, after the wait",

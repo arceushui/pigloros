@@ -16,6 +16,10 @@ BASELINE_WAIT_LIMIT_SECONDS=7200
 # before it. An older baseline is never weaker: every main commit already
 # passed the no-existing-function-grows rule against its own base, so changes
 # made after the ancestor are charged to this pull request, never hidden.
+# First-parent history is main's own history because main lands only squash
+# and merge-queue commits, so the trusted base is always on its mainline. The
+# walk adds at most this many sequential artifact queries after the wait
+# bound; the resolver step's 125-minute timeout keeps 5 minutes for them.
 ANCESTOR_BASELINE_WALK_LIMIT=30
 
 if [[ "${EVENT_NAME}" != "pull_request" ]]; then
@@ -27,15 +31,19 @@ TRUSTED_BASE_SHA="$(git merge-base "${BASE_SHA}" origin/main)"
 BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${TRUSTED_BASE_SHA}"
 WAIT_STARTED_AT="$(date +%s)"
 
-publish_baseline_if_available() {
-  local run_ids run_id='' candidate
+# Publishes the baseline of main commit $1 and exits when a non-expired
+# same-repository main artifact cargo-crap-baseline-$1 exists for exactly that
+# commit; returns otherwise. A non-empty $2 is printed as a notice first. A
+# failed gh call aborts the resolver (set -e) instead of reading as "missing".
+publish_baseline_of() {
+  local sha="$1" run_ids run_id='' candidate
   run_ids="$(gh api --method GET --paginate \
     "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
-    -f name="${BASELINE_ARTIFACT_NAME}" -f per_page=100 \
+    -f name="cargo-crap-baseline-${sha}" -f per_page=100 \
     --jq ".artifacts[] |
       select(.expired == false) |
       select(.workflow_run.head_branch == \"main\") |
-      select(.workflow_run.head_sha == \"${TRUSTED_BASE_SHA}\") |
+      select(.workflow_run.head_sha == \"${sha}\") |
       select(.workflow_run.head_repository_id == .workflow_run.repository_id) |
       .workflow_run.id")"
   while IFS= read -r candidate; do
@@ -44,11 +52,16 @@ publish_baseline_if_available() {
     break
   done <<< "${run_ids}"
   if [[ -n "${run_id}" ]]; then
+    [[ -z "${2:-}" ]] || echo "::notice::$2"
     echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
-    echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"
+    echo "baseline-sha=${sha}" >> "${GITHUB_OUTPUT}"
     echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
     exit 0
   fi
+}
+
+publish_baseline_if_available() {
+  publish_baseline_of "${TRUSTED_BASE_SHA}"
 }
 
 # Sets MAIN_RUN to "<id> <status> <conclusion>" for the same-repository main
@@ -77,33 +90,17 @@ read_main_run() {
 }
 
 # Publishes the baseline of the nearest of the ANCESTOR_BASELINE_WALK_LIMIT
-# first-parent ancestors of the trusted base that has a non-expired
-# same-repository main artifact for that exact commit. Returns when none has
-# one. A failed git or gh call aborts the resolver (set -e) instead of being
-# read as "no baseline".
+# first-parent ancestors of the trusted base that has one, and returns when
+# none has. A failed git call aborts the resolver (set -e) instead of being
+# read as "no ancestors".
 publish_ancestor_baseline() {
-  local ancestors ancestor run_ids candidate
+  local ancestors ancestor
   ancestors="$(git rev-list --first-parent --skip=1 \
     --max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" "${TRUSTED_BASE_SHA}")"
   while IFS= read -r ancestor; do
     [[ -n "${ancestor}" ]] || continue
-    run_ids="$(gh api --method GET --paginate \
-      "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
-      -f name="cargo-crap-baseline-${ancestor}" -f per_page=100 \
-      --jq ".artifacts[] |
-        select(.expired == false) |
-        select(.workflow_run.head_branch == \"main\") |
-        select(.workflow_run.head_sha == \"${ancestor}\") |
-        select(.workflow_run.head_repository_id == .workflow_run.repository_id) |
-        .workflow_run.id")"
-    while IFS= read -r candidate; do
-      [[ -n "${candidate}" ]] || continue
-      echo "::notice::Using the cargo-crap baseline of main ancestor ${ancestor} because ${reason}"
-      echo "run-id=${candidate}" >> "${GITHUB_OUTPUT}"
-      echo "baseline-sha=${ancestor}" >> "${GITHUB_OUTPUT}"
-      echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
-      exit 0
-    done <<< "${run_ids}"
+    publish_baseline_of "${ancestor}" \
+      "Using the cargo-crap baseline of main ancestor ${ancestor} because ${reason}"
   done <<< "${ancestors}"
 }
 

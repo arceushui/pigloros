@@ -917,7 +917,12 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             self.gh_calls(logs),
             ["artifacts"] * 30 + ["runs", "artifacts", f"ancestor:{'c' * 40}", f"ancestor:{'d' * 40}"],
         )
-        self.assertIn("because main ci.yml run 777 for trusted base", result.stdout)
+        self.assertIn(
+            f"::notice::Using the cargo-crap baseline of main ancestor {'d' * 40} because "
+            f"main ci.yml run 777 for trusted base {EXAMPLE_BASE_SHA} completed with conclusion "
+            f"failure without publishing cargo-crap-baseline-{EXAMPLE_BASE_SHA}\n",
+            result.stdout,
+        )
         self.assertEqual(logs["sleep_calls"], "10\n" * 29)
 
     def test_resolver_falls_back_to_an_ancestor_when_main_has_no_run(self) -> None:
@@ -1046,7 +1051,6 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_rejects_weakened_ancestor_baseline_fallback(self) -> None:
         resolver = RESOLVER_PATH.read_text(encoding="utf-8")
-        ancestor_query = resolver[resolver.index("publish_ancestor_baseline() {"):]
         mutations = {
             "longer walk": ("ANCESTOR_BASELINE_WALK_LIMIT=30", "ANCESTOR_BASELINE_WALK_LIMIT=300"),
             "any parent": ("git rev-list --first-parent --skip=1", "git rev-list --skip=1"),
@@ -1055,11 +1059,19 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 '--max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" "${TRUSTED_BASE_SHA}")"',
                 '--max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" HEAD)"',
             ),
-            "any artifact name": ('-f name="cargo-crap-baseline-${ancestor}"', '-f name="cargo-crap-baseline"'),
-            "any commit": ('select(.workflow_run.head_sha == \\"${ancestor}\\") |', ""),
+            "any artifact name": ('-f name="cargo-crap-baseline-${sha}"', '-f name="cargo-crap-baseline"'),
+            "any commit": ('select(.workflow_run.head_sha == \\"${sha}\\") |', ""),
             "wrong baseline commit": (
-                'echo "baseline-sha=${ancestor}" >> "${GITHUB_OUTPUT}"',
+                'echo "baseline-sha=${sha}" >> "${GITHUB_OUTPUT}"',
                 'echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"',
+            ),
+            "ancestor looked up as the trusted base": (
+                '    publish_baseline_of "${ancestor}" \\\n',
+                '    publish_baseline_of "${TRUSTED_BASE_SHA}" \\\n',
+            ),
+            "trusted base looked up as something else": (
+                '  publish_baseline_of "${TRUSTED_BASE_SHA}"\n}',
+                '  publish_baseline_of "${BASE_SHA}"\n}',
             ),
             "skips the wait": (
                 "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do\n",
@@ -1067,24 +1079,17 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do\n",
             ),
             "no fallback": ("\npublish_ancestor_baseline\nreason=", "\nreason="),
+            "expired artifacts": ("      select(.expired == false) |\n", ""),
+            "other branches": ('      select(.workflow_run.head_branch == \\"main\\") |\n', ""),
+            "fork artifacts": (
+                "      select(.workflow_run.head_repository_id == .workflow_run.repository_id) |\n",
+                "",
+            ),
         }
         for name, (old, new) in mutations.items():
             with self.subTest(name):
                 self.assertEqual(resolver.count(old), 1, old)
                 self.assert_resolver_rejected(lambda text: text.replace(old, new))
-        for name, fragment in {
-            "expired artifacts": "        select(.expired == false) |\n",
-            "other branches": '        select(.workflow_run.head_branch == \\"main\\") |\n',
-            "fork artifacts": (
-                "        select(.workflow_run.head_repository_id == .workflow_run.repository_id) |\n"
-            ),
-        }.items():
-            with self.subTest(name):
-                self.assertEqual(ancestor_query.count(fragment), 1, fragment)
-                self.assert_resolver_rejected(
-                    lambda text: text[: text.index("publish_ancestor_baseline() {")]
-                    + text[text.index("publish_ancestor_baseline() {"):].replace(fragment, "", 1)
-                )
 
     def test_rejects_unpinned_cargo_crap(self) -> None:
         self.assert_rejected(
