@@ -86,7 +86,6 @@ let
       pkgs.coreutils
       pkgs.findutils
       pkgs.gawk
-      pkgs.gnugrep
       pkgs.gzip
       pkgs.keyutils
       pkgs.lvm2

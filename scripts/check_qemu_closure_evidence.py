@@ -22,8 +22,11 @@ packaged NixOS 26.05 closure and on both architectures:
 Part (b) runs the production admission, registry and activation path
 (`pos-sandboxd-conformance`) against the packaged mountfsd and kernel:
 
-- positive: an image signed by the trusted key mounts as read-only EROFS on
-  a dm-verity device whose live table carries the image's root hash and
+- the images: wrong-key carries the positive image's root hash and salt,
+  and tampered differs from positive in exactly one root data byte;
+- positive: an image signed by the trusted key mounts as read-only EROFS
+  from /dev/mapper/<name> of a dm-verity device (same major:minor) whose
+  live table carries the image's root hash and
   salt and a non-empty root_hash_sig_key_desc, over the three loopNpK
   partitions of one loop device whose backing file resolves in the
   provider's namespace; the file reads back byte for byte; detach and
@@ -32,8 +35,9 @@ Part (b) runs the production admission, registry and activation path
   a dm-verity corruption message, and is released the same way;
 - wrong-key, alone and with its certificate in /run/verity.d: mountfsd
   refuses, and no device remains;
-- one raw MountImage reply carries imageSize and sectorSize, and its
-  devices go away once its descriptors close.
+- one raw MountImage reply carries the image's size, 512-byte sectors and
+  the requested image policy, and its devices go away once its descriptors
+  close.
 
 scripts/qemu-closure-evidence.sh only records. This checker owns every
 judgement and derives the expected key description from the certificate
@@ -138,7 +142,8 @@ HOST_FILES = {
     "vm-cleanup", "system-certificate-list", "images",
 }
 # Part (b): the images the guest ran, copied from the recorded store path.
-HOST_IMAGE_FILES = {"positive.raw", "positive.der", "wrong-key.der", "root-hash.txt"}
+HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-offset", "positive.der",
+                    "wrong-key.der", "root-hash.txt"}
 GUEST_FILES = {
     "status", "collector", "boot-id", "mountinfo", "uname-machine", "uname-release", "systemctl-version", "current-system",
     "booted-system", "booted-kernel", "systemd-package", "detect-virt-vm",
@@ -155,8 +160,10 @@ HELD_FILES = {"devices-held", "mountinfo-held", "dm-table-held", "readback"}
 REPLY_FILES = {"devices-before", "reply", "stderr", "status", "devices-after"}
 CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
-REPLY_IMAGE = "/run/piglor-evidence-image.raw"
 PLANTED_CERTIFICATE = "/run/verity.d/piglor-untrusted.crt"
+# The effective policies the provider accepts from systemd v260.2: the request,
+# or the request without its filesystem flags (ADR-087 Part A.1).
+REPLY_POLICIES = {"root=signed+erofs:=absent", "root=signed:=absent"}
 READBACK_BLOCKS = 16
 PROCESS_FILES = {"exe", "environ", "namespaces"}
 OID_COMMON_NAME = "2.5.4.3"
@@ -850,14 +857,14 @@ def readback_bytes() -> bytes:
     return b"".join(blocks)
 
 
-def image_verity(image: bytes) -> tuple[str, str]:
-    """(root hash, salt) of a systemd-repart DDI: the salt from the verity
-    superblock of its second GPT partition, the root hash from the JSON in
-    its third, both as lowercase hex."""
+def image_verity(image: bytes) -> tuple[str, str, range]:
+    """(root hash, salt, root partition byte range) of a systemd-repart DDI:
+    the salt from the verity superblock of its second GPT partition, the root
+    hash from the JSON in its third, both as lowercase hex."""
     if image[512:520] != b"EFI PART":
         raise EvidenceError("the recorded image has no 512-byte-sector GPT")
     first, count, size = struct.unpack_from("<QII", image, 512 + 72)
-    entries = []
+    entries, extents = [], []
     for index in range(count):
         entry = image[first * 512 + index * size:first * 512 + (index + 1) * size]
         if len(entry) < 48:
@@ -865,6 +872,7 @@ def image_verity(image: bytes) -> tuple[str, str]:
         if entry[:16] != bytes(16):
             start, last = struct.unpack_from("<QQ", entry, 32)
             entries.append(image[start * 512:(last + 1) * 512])
+            extents.append(range(start * 512, (last + 1) * 512))
     if len(entries) != 3:
         raise EvidenceError("the recorded image does not have exactly three partitions")
     verity, signature = entries[1], entries[2]
@@ -876,14 +884,14 @@ def image_verity(image: bytes) -> tuple[str, str]:
         raise EvidenceError("the recorded image's signature partition has no rootHash") from error
     if not isinstance(root_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", root_hash):
         raise EvidenceError("the recorded image's rootHash is not 64 lowercase hex digits")
-    return root_hash, verity[88:120].hex()
+    return root_hash, verity[88:120].hex(), extents[0]
 
 
 def device_records(evidence: Evidence, name: str) -> tuple[list[list[str]], list[list[str]]]:
     loops, mappers = [], []
     for line in evidence.text(name).splitlines():
         fields = line.split("\t")
-        if len(fields) != 5 or fields[0] not in ("loop", "dm"):
+        if len(fields) != 6 or fields[0] not in ("loop", "dm"):
             raise EvidenceError(f"malformed {name} line: {line!r}")
         (loops if fields[0] == "loop" else mappers).append(fields[1:])
     return loops, mappers
@@ -913,7 +921,9 @@ def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]
     loops, mappers = device_records(evidence, f"{base}/devices-held")
     if len(loops) != 1 or len(mappers) != 1:
         raise EvidenceError(f"the held {case} root is not exactly one loop and one dm device")
-    (loop, backing, resolved, partitions), (mapper, dm_name, dm_uuid, slaves) = loops[0], mappers[0]
+    (loop, backing, resolved, _, partitions), (mapper, dm_name, dm_uuid, device, slaves) = loops[0], mappers[0]
+    if not re.fullmatch(r"\d+:\d+", device):
+        raise EvidenceError(f"the {case} dm device number {device!r} is malformed")
     if not re.fullmatch(r"/var/lib/pigloros/sandbox/images/[0-9a-f]{64}", backing) or resolved != backing:
         raise EvidenceError(f"the {case} loop backing file {backing!r} does not resolve in this namespace")
     if partitions != ",".join(f"{loop}p{index}" for index in (1, 2, 3)):
@@ -942,11 +952,14 @@ def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]
         left, _, right = line.partition(" - ")
         fields, tail = left.split(), right.split()
         if len(fields) >= 6 and unescape_mount_field(fields[4]) == root:
-            mounts.append((fields[5].split(","), tail[:1]))
-    if len(mounts) != 1 or "ro" not in mounts[0][0] or mounts[0][1] != ["erofs"]:
-        raise EvidenceError(f"the {case} root is not mounted once as read-only EROFS: {mounts}")
+            mounts.append((fields[2], fields[5].split(","), tail[:1],
+                           unescape_mount_field(tail[1]) if len(tail) > 1 else None))
+    if len(mounts) != 1 or mounts[0][0] != device or "ro" not in mounts[0][1] \
+            or mounts[0][2] != ["erofs"] or mounts[0][3] != f"/dev/mapper/{dm_name}":
+        raise EvidenceError(f"the {case} root is not mounted once as read-only EROFS from its "
+                            f"dm-verity device {device}: {mounts}")
     return {"loop": loop, "backing_file": backing, "partitions": partitions, "dm": mapper,
-            "dm_name": dm_name, "dm_uuid": dm_uuid, "table": " ".join(table),
+            "dm_name": dm_name, "dm_uuid": dm_uuid, "dm_device": device, "table": " ".join(table),
             "root_hash_sig_key_desc": signature_key}
 
 
@@ -1002,26 +1015,27 @@ def check_runtime_after(evidence: Evidence, case: str) -> None:
             raise EvidenceError(f"the {case} attempt directory remains: {path}")
 
 
-def check_mountfsd_reply(evidence: Evidence) -> dict:
+def check_mountfsd_reply(evidence: Evidence, image_size: int) -> dict:
     base = "guest/cases/mountfsd-reply"
     if evidence.line(f"{base}/status") != "0":
         raise EvidenceError("the raw MountImage call failed")
     reply = evidence.json(f"{base}/reply")
     if not isinstance(reply, dict):
         raise EvidenceError("the raw MountImage reply is not an object")
-    for key in ("imageSize", "sectorSize"):
-        if not isinstance(reply.get(key), int) or isinstance(reply.get(key), bool) or reply[key] <= 0:
-            raise EvidenceError(f"the raw MountImage reply has no positive {key}")
+    for key, expected in (("imageSize", image_size), ("sectorSize", 512)):
+        if not isinstance(reply.get(key), int) or isinstance(reply.get(key), bool) or reply[key] != expected:
+            raise EvidenceError(f"the raw MountImage reply's {key} is not {expected}")
+    if reply.get("imagePolicy") not in REPLY_POLICIES:
+        raise EvidenceError(f"the raw MountImage reply's imagePolicy {reply.get('imagePolicy')!r} is not "
+                            "the requested one")
     partitions = reply.get("partitions")
     if not isinstance(partitions, list) or [
         (partition.get("designator"), partition.get("fileSystemType"))
         for partition in partitions if isinstance(partition, dict)
     ] != [("root", "erofs")]:
         raise EvidenceError("the raw MountImage reply does not describe exactly one EROFS root")
-    require_no_devices(evidence, f"{base}/devices-before")
-    loops, mappers = device_records(evidence, f"{base}/devices-after")
-    if mappers or any(loop[1] == REPLY_IMAGE for loop in loops):
-        raise EvidenceError("the raw MountImage devices remain after its descriptors closed")
+    for name in ("devices-before", "devices-after"):
+        require_no_devices(evidence, f"{base}/{name}")
     return {"imageSize": reply["imageSize"], "sectorSize": reply["sectorSize"],
             "imagePolicy": reply.get("imagePolicy")}
 
@@ -1032,9 +1046,19 @@ def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
     if evidence.raw("host/images/positive.der") != trusted[0] \
             or evidence.raw("host/images/wrong-key.der") != untrusted[0]:
         raise EvidenceError("the images were not signed with the committed dev/test certificates")
-    verity = image_verity(evidence.raw("host/images/positive.raw"))
-    if evidence.text("host/images/root-hash.txt") != verity[0]:
+    positive = evidence.raw("host/images/positive.raw")
+    root_hash, salt, root_extent = image_verity(positive)
+    verity = (root_hash, salt)
+    if evidence.text("host/images/root-hash.txt") != root_hash:
         raise EvidenceError("root-hash.txt differs from the image's signed root hash")
+    if image_verity(evidence.raw("host/images/wrong-key.raw"))[:2] != verity:
+        raise EvidenceError("the wrong-key image does not carry the positive image's root hash and salt")
+    tampered = evidence.raw("host/images/tampered.raw")
+    offset = evidence.line("host/images/tampered-offset")
+    if not offset.isdigit() or len(tampered) != len(positive) or int(offset) not in root_extent \
+            or [index for index in range(len(positive)) if positive[index] != tampered[index]] != [int(offset)]:
+        raise EvidenceError("the tampered image does not differ from the positive one in exactly one "
+                            "root data byte at the recorded offset")
     images = paths["images"]
     for case, signer, description in (
         ("positive", "positive", trusted[1]), ("tampered", "tampered", trusted[1]),
@@ -1047,10 +1071,10 @@ def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
                      evidence.text("guest/cases/kernel-log")):
         raise EvidenceError("the kernel log shows no dm-verity data block corruption")
     return {
-        "root_hash": verity[0], "salt": verity[1],
+        "root_hash": root_hash, "salt": salt, "tampered_offset": int(offset),
         **{case: check_mounted_case(evidence, case, verity) for case in MOUNTED_CASES},
         **{case: check_refused_case(evidence, case) for case in ("wrong-key", "verity-d")},
-        "mountfsd_reply": check_mountfsd_reply(evidence),
+        "mountfsd_reply": check_mountfsd_reply(evidence, len(positive)),
     }
 
 

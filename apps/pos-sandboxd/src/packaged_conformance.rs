@@ -3,16 +3,17 @@
 //! Only the disposable QEMU TCG evidence guest runs it, through the
 //! `pos-sandboxd-conformance` binary. One run is one case:
 //!
-//! 1. [`ConformanceCase::stage`] stages the signed test installation around
+//! 1. `ConformanceCase::stage` stages the signed test installation around
 //!    one caller-built SIM1 DDI and its signer certificate
 //!    (`StagedInstallation::stage_image`, dev/test trust domain).
 //! 2. [`activate`] admits that image through the production
 //!    `ProviderImageSnapshot`, commits a planned attempt in the fixed
 //!    registry, prepares its directory and calls the production
 //!    [`activate_admitted_root`] against the packaged mountfsd and kernel.
-//! 3. [`exercise`] reports the outcome on one line, holds a mounted root
+//! 3. [`run`] then reports the outcome on one line, holds a mounted root
 //!    until its control input closes, so the guest collector can record the
-//!    live kernel state, and then releases it with the production detach.
+//!    live kernel state, releases it with the caller's [`Release`] (the
+//!    production detach) and removes the attempt directory.
 //!
 //! The guest collector provisions the fixed runtime directories, records the
 //! kernel state and passes everything to the host checker, which owns every
@@ -22,6 +23,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
 use std::io::{self, Read, Write};
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -40,6 +42,10 @@ const ATTEMPT_ID: [u8; 16] = *b"pigloros-444-evd";
 
 /// The absolute cleanup deadline a held root's detach gets after release.
 pub const RELEASE_DEADLINE: Duration = Duration::from_mins(1);
+
+/// The release of a held root from the attempt directory it is attached to.
+pub type Release<'directory> =
+    Pin<Box<dyn Future<Output = Result<(), ImageActivationError>> + Send + 'directory>>;
 
 #[cfg(target_arch = "x86_64")]
 const HOST_ARCHITECTURE: SandboxArchitecture = SandboxArchitecture::X86_64;
@@ -68,7 +74,7 @@ pub enum ConformanceError {
 
 /// One case's image, signer certificate and kernel key description.
 #[derive(Debug)]
-pub struct ConformanceCase {
+struct ConformanceCase {
     image: Vec<u8>,
     certificate: Vec<u8>,
     key_description: String,
@@ -81,11 +87,8 @@ impl ConformanceCase {
     /// Returns [`ConformanceError::Usage`] for another argument count or a
     /// description that is not UTF-8, and [`ConformanceError::Io`] when a
     /// file cannot be read.
-    pub fn from_arguments(
-        arguments: impl IntoIterator<Item = OsString>,
-    ) -> Result<Self, ConformanceError> {
-        let arguments: Vec<OsString> = arguments.into_iter().collect();
-        let [image, certificate, description] = arguments.as_slice() else {
+    fn from_arguments(arguments: &[OsString]) -> Result<Self, ConformanceError> {
+        let [image, certificate, description] = arguments else {
             return Err(ConformanceError::Usage);
         };
         let key_description = description.to_str().ok_or(ConformanceError::Usage)?;
@@ -103,7 +106,7 @@ impl ConformanceCase {
     /// Returns [`ConformanceError::Stage`] when the image is not a three
     /// partition systemd-repart DDI, the fixed installation already exists,
     /// or the staged records are refused.
-    pub fn stage(&self) -> Result<StagedInstallation, ConformanceError> {
+    fn stage(&self) -> Result<StagedInstallation, ConformanceError> {
         StagedInstallation::stage_image(&StagedImage {
             architecture: HOST_ARCHITECTURE,
             image: &self.image,
@@ -161,26 +164,67 @@ fn prepare(
         })
 }
 
-/// Report one activation outcome, hold a mounted root until `control`
-/// reaches end of input, then release it and report the release.
-///
-/// `describe` names a mounted root on its report line; `release` detaches
-/// it. A refused activation is reported, waits for `control` the same way
-/// and is reported as having nothing to release.
+/// The tokio runtime the driver runs on: one thread, with I/O and timers.
 ///
 /// # Errors
-/// Returns [`ConformanceError::Io`] when `control` cannot be read or the
-/// report cannot be written.
-pub async fn exercise<R, F>(
-    outcome: Result<R, ImageActivationError>,
-    describe: impl FnOnce(&R) -> String + Send,
-    release: impl FnOnce(R) -> F + Send,
+/// Returns [`ConformanceError::Io`] when the runtime cannot be built.
+pub fn runtime() -> Result<tokio::runtime::Runtime, ConformanceError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(ConformanceError::Io)
+}
+
+/// Run one case from `IMAGE CERTIFICATE_DER KEY_DESCRIPTION`.
+///
+/// Its report lines are, in order: the activation (`mounted` with
+/// `describe`'s text, or `refused` with the error), the release (`detached`,
+/// `failed` or `none`) and the attempt directory's removal. A mounted root is
+/// held until `control` reaches end of input and then released by `release`.
+///
+/// # Errors
+/// Returns the first [`ConformanceError`] that keeps the case from reaching
+/// activation, or from reading `control` and writing `report`.
+pub async fn run<Describe, Detach>(
+    arguments: Vec<OsString>,
+    control: impl Read + Send,
+    report: &mut (impl Write + Send),
+    describe: Describe,
+    release: Detach,
+) -> Result<(), ConformanceError>
+where
+    Describe: FnOnce(&VerifiedRootMount) -> String + Send,
+    Detach: for<'directory> FnOnce(
+            VerifiedRootMount,
+            &'directory PreparedAttemptDirectory,
+        ) -> Release<'directory>
+        + Send,
+{
+    let case = ConformanceCase::from_arguments(&arguments)?;
+    let staged = case.stage()?;
+    let ActivatedCase { directory, outcome } = activate(&staged).await?;
+    exercise(outcome, describe, release, &directory, control, report).await?;
+    report_line(report, &removal_line(&directory.remove_unmounted()))
+}
+
+/// Report one activation outcome, hold a mounted root until `control`
+/// reaches end of input, then release it from `held` and report the release.
+///
+/// A refused activation is reported, waits for `control` the same way and
+/// is reported as having nothing to release.
+async fn exercise<Root, Held, Describe, Detach>(
+    outcome: Result<Root, ImageActivationError>,
+    describe: Describe,
+    release: Detach,
+    held: &Held,
     control: impl Read + Send,
     report: &mut (impl Write + Send),
 ) -> Result<(), ConformanceError>
 where
-    R: Send,
-    F: Future<Output = Result<(), ImageActivationError>> + Send,
+    Root: Send,
+    Held: Sync,
+    Describe: FnOnce(&Root) -> String + Send,
+    Detach: for<'held> FnOnce(Root, &'held Held) -> Release<'held> + Send,
 {
     let activation = outcome.as_ref().map_or_else(
         |error| format!("activation\trefused\t{error:?}"),
@@ -189,7 +233,7 @@ where
     report_line(report, &activation)?;
     hold(control)?;
     let released = match outcome {
-        Ok(root) => Some(release(root).await),
+        Ok(root) => Some(release(root, held).await),
         Err(_) => None,
     };
     report_line(report, &release_line(released))
@@ -212,8 +256,7 @@ fn release_line(released: Option<Result<(), ImageActivationError>>) -> String {
 }
 
 /// The report line for the attempt directory's removal.
-#[must_use]
-pub fn removal_line(removed: &Result<(), SystemdAttemptRegistryError>) -> String {
+fn removal_line(removed: &Result<(), SystemdAttemptRegistryError>) -> String {
     removed.as_ref().map_or_else(
         |error| format!("removal\tfailed\t{error:?}"),
         |()| "removal\tremoved".to_owned(),
@@ -221,10 +264,7 @@ pub fn removal_line(removed: &Result<(), SystemdAttemptRegistryError>) -> String
 }
 
 /// Write one report line and flush it, so the collector sees it at once.
-///
-/// # Errors
-/// Returns [`ConformanceError::Io`] when the write or the flush fails.
-pub fn report_line(report: &mut impl Write, line: &str) -> Result<(), ConformanceError> {
+fn report_line(report: &mut impl Write, line: &str) -> Result<(), ConformanceError> {
     writeln!(report, "{line}")
         .and_then(|()| report.flush())
         .map_err(ConformanceError::Io)

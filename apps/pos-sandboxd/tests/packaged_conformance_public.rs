@@ -6,19 +6,24 @@
 //! command line lacks `systemd.allow_userspace_verity=0`, so activation is
 //! refused before mountfsd is called; the packaged positive cases run only in
 //! the QEMU evidence guest (`.github/workflows/qemu-closure-evidence.yml`).
-#![cfg(target_os = "linux")]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 
 use std::{
     error::Error,
+    ffi::OsString,
     fs,
+    io::{self, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::Path,
     process::{Command, Stdio},
 };
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_sandboxd::packaged_conformance::{activate, exercise, removal_line, ConformanceError};
-use pos_sandboxd::ImageActivationError;
+use pos_sandboxd::packaged_conformance::{activate, run, ConformanceError, Release};
+use pos_sandboxd::{ImageActivationError, PreparedAttemptDirectory, VerifiedRootMount};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -63,6 +68,30 @@ fn provision(components: &[&str]) -> TestResult {
     Ok(())
 }
 
+/// Never called: activation is refused on the container's kernel.
+fn describe(mount: &VerifiedRootMount) -> String {
+    mount.mount_id().to_string()
+}
+
+/// Never called: activation is refused on the container's kernel.
+fn release(mount: VerifiedRootMount, _: &PreparedAttemptDirectory) -> Release<'_> {
+    drop(mount);
+    Box::pin(async { Ok(()) })
+}
+
+/// A report that refuses every write.
+struct Broken;
+
+impl Write for Broken {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("broken report"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::other("broken report"))
+    }
+}
+
 #[tokio::test]
 async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> TestResult {
     if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
@@ -71,15 +100,28 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
     if fs::metadata("/proc/self")?.uid() != 0 {
         return Err("the isolated conformance child is not root".into());
     }
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/pos-reference/tests/vectors/sim1-ddi/x86-64");
+    let image = Path::new("/tmp/conformance-image.raw");
+    let expanded = Command::new("gzip")
+        .arg("-dc")
+        .arg(vectors.join("image.raw.gz"))
+        .stdout(fs::File::create(image)?)
+        .status()?;
+    assert!(expanded.success());
+    let arguments = || -> Vec<OsString> {
+        vec![
+            image.into(),
+            vectors.join("signer.der").into(),
+            VECTOR_KEY_DESCRIPTION.into(),
+        ]
+    };
 
-    // Without the provider's runtime directories the registry refuses.
-    {
-        let staged = StagedInstallation::stage()?;
-        assert!(matches!(
-            activate(&staged).await,
-            Err(ConformanceError::Registry(_))
-        ));
-    }
+    // Without the provider's runtime directories the registry refuses, and
+    // the staged installation is removed again.
+    let refused = run(arguments(), io::empty(), &mut Vec::new(), describe, release).await;
+    assert!(matches!(refused, Err(ConformanceError::Registry(_))));
+    assert!(!Path::new("/var/lib/pigloros").exists());
 
     // An installation changed after staging fails production admission.
     {
@@ -105,44 +147,31 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
             .read_dir()?
             .next()
             .is_some());
-        let mut report = Vec::new();
-        exercise(
-            case.outcome,
-            |root| root.mount_id().to_string(),
-            |_| async { Ok(()) },
-            std::io::empty(),
-            &mut report,
-        )
-        .await?;
-        assert_eq!(
-            String::from_utf8(report)?,
-            "activation\trefused\tHostFeatureUnavailable\nrelease\tnone\n"
-        );
-        assert_eq!(
-            removal_line(&case.directory.remove_unmounted()),
-            "removal\tremoved"
-        );
-        assert!(Path::new("/run/pigloros/sandbox/attempts")
-            .read_dir()?
-            .next()
-            .is_none());
     }
 
-    // The binary composes the same steps from its three arguments.
+    // A report that cannot be written fails the run after activation.
     provision(&RUNTIME)?;
-    let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/pos-reference/tests/vectors/sim1-ddi/x86-64");
-    let image = Path::new("/tmp/conformance-image.raw");
-    let expanded = Command::new("gzip")
-        .arg("-dc")
-        .arg(vectors.join("image.raw.gz"))
-        .stdout(fs::File::create(image)?)
-        .status()?;
-    assert!(expanded.success());
+    let broken = run(arguments(), io::empty(), &mut Broken, describe, release).await;
+    assert!(matches!(broken, Err(ConformanceError::Io(_))));
+
+    // The whole case: refused, nothing to release, directory removed.
+    provision(&RUNTIME)?;
+    let mut report = Vec::new();
+    run(arguments(), io::empty(), &mut report, describe, release).await?;
+    assert_eq!(
+        String::from_utf8(report)?,
+        "activation\trefused\tHostFeatureUnavailable\nrelease\tnone\nremoval\tremoved\n"
+    );
+    assert!(Path::new("/run/pigloros/sandbox/attempts")
+        .read_dir()?
+        .next()
+        .is_none());
+    assert!(!Path::new("/var/lib/pigloros").exists());
+
+    // The binary wires the same run to its arguments and standard streams.
+    provision(&RUNTIME)?;
     let output = Command::new(env!("CARGO_BIN_EXE_pos-sandboxd-conformance"))
-        .arg(image)
-        .arg(vectors.join("signer.der"))
-        .arg(VECTOR_KEY_DESCRIPTION)
+        .args(arguments())
         // The child's coverage profile must not replace this process's.
         .env("LLVM_PROFILE_FILE", "/tmp/conformance-binary-%p.profraw")
         .stdin(Stdio::null())

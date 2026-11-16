@@ -227,8 +227,8 @@ ATTEMPT = "/run/pigloros/sandbox/attempts/" + "e" * 32 + "/root"
 BACKING = "/var/lib/pigloros/sandbox/images/" + "f" * 64
 MAPPER = "root-8a5cfdc4b2c35aa0"
 HELD_DEVICES = (
-    f"loop\tloop0\t{BACKING}\t{BACKING}\tloop0p1,loop0p2,loop0p3\n"
-    f"dm\tdm-0\t{MAPPER}\tCRYPT-VERITY-8a5cfdc4b2c35aa0-{MAPPER}\tloop0p1,loop0p2\n"
+    f"loop\tloop0\t{BACKING}\t{BACKING}\t7:0\tloop0p1,loop0p2,loop0p3\n"
+    f"dm\tdm-0\t{MAPPER}\tCRYPT-VERITY-8a5cfdc4b2c35aa0-{MAPPER}\t253:0\tloop0p1,loop0p2\n"
 )
 TABLE = (f"{MAPPER}: 0 1136 verity 1 7:1 7:2 4096 4096 142 1 sha256 {ROOT_HASH} {SALT} "
          "2 root_hash_sig_key_desc cryptsetup:8a5cfdc4\n")
@@ -240,7 +240,7 @@ REPLY = json.dumps({
                     "partitionNumber": 1, "architecture": "x86-64", "fileSystemType": "erofs",
                     "size": 581632, "offset": 20480, "mountFileDescriptor": 0, "mountPoint": ["/"]}],
     "singleFileSystem": False, "imagePolicy": "root=signed+erofs:=absent",
-    "imageSize": 1683456, "sectorSize": 512, "imageName": "piglor-evidence-image",
+    "imageSize": 4096, "sectorSize": 512, "imageName": "piglor-evidence-image",
 }, indent=4) + "\n"
 
 
@@ -267,9 +267,21 @@ def ddi(root_hash: str = ROOT_HASH, salt: str = SALT) -> bytes:
     return bytes(image)
 
 
+TAMPERED_OFFSET = 5 * 512 + 10
+
+
+def tampered_ddi() -> bytes:
+    image = bytearray(ddi())
+    image[TAMPERED_OFFSET] ^= 0x01
+    return bytes(image)
+
+
 def case_files() -> dict[str, bytes | str]:
     files: dict[str, bytes | str] = {
         "host/images/positive.raw": ddi(),
+        "host/images/tampered.raw": tampered_ddi(),
+        "host/images/wrong-key.raw": ddi(),
+        "host/images/tampered-offset": f"{TAMPERED_OFFSET}\n",
         "host/images/positive.der": checker.pem_certificate(CERTIFICATE),
         "host/images/wrong-key.der": checker.pem_certificate(UNTRUSTED),
         "host/images/root-hash.txt": ROOT_HASH,
@@ -1046,12 +1058,18 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(verdict["tampered"]["readback"]["file"][0], "1")
         self.assertEqual(verdict["wrong-key"]["report"][0], ["activation", "refused", "MethodRejected"])
         self.assertEqual((verdict["mountfsd_reply"]["imageSize"], verdict["mountfsd_reply"]["sectorSize"]),
-                         (1683456, 512))
+                         (4096, 512))
+        self.assertEqual(verdict["tampered_offset"], TAMPERED_OFFSET)
+        self.assertEqual(verdict["positive"]["held"]["dm_device"], "253:0")
 
     def test_mount_image_case_fabrication_fails_closed(self):
         positive, tampered = "guest/cases/positive", "guest/cases/tampered"
         refused, reply = "guest/cases/wrong-key", "guest/cases/mountfsd-reply"
-        leftover = f"loop\tloop1\t{BACKING}\t{BACKING}\tloop1p1,loop1p2,loop1p3\n"
+        leftover = f"loop\tloop1\t{BACKING}\t{BACKING}\t7:32\tloop1p1,loop1p2,loop1p3\n"
+        def without(key):
+            return json.dumps({name: value for name, value in json.loads(REPLY).items() if name != key})
+        held_mount = f"90 22 253:0 / {ATTEMPT} ro,relatime shared:50 - erofs /dev/mapper/{MAPPER} ro\n"
+        other_mount = f"90 22 0:44 / {ATTEMPT} ro,relatime shared:50 - erofs /dev/loop0p1 ro\n"
         changes = [
             # Inventory: a missing case, file, or extra case.
             lambda f: [f.pop(name) for name in list(f) if name.startswith("guest/cases/verity-d/")],
@@ -1065,6 +1083,15 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/images/root-hash.txt": "ef" * 32}),
             lambda f: f.update({"host/images/positive.raw": b"not a disk"}),
             lambda f: f.update({"host/images/positive.raw": ddi(root_hash="AB" * 32)}),
+            lambda f: f.update({"host/images/wrong-key.raw": ddi(root_hash="ef" * 32)}),
+            lambda f: f.update({"host/images/wrong-key.raw": ddi(salt="ef" * 32)}),
+            lambda f: f.update({"host/images/tampered.raw": ddi()}),
+            lambda f: f.update({"host/images/tampered.raw": tampered_ddi()[:-1]}),
+            lambda f: f.update({"host/images/tampered-offset": f"{TAMPERED_OFFSET + 1}\n"}),
+            lambda f: f.update({"host/images/tampered-offset": "x\n"}),
+            lambda f: f.update({"host/images/tampered.raw": bytes(b ^ (i == 600) for i, b in enumerate(ddi())),
+                                "host/images/tampered-offset": "600\n"}),
+            lambda f: f.pop("host/images/wrong-key.raw"),
             lambda f: f.update({f"{positive}/arguments": f[f"{positive}/arguments"].replace(
                 DESCRIPTION, UNTRUSTED_DESCRIPTION)}),
             lambda f: f.update({f"{refused}/arguments": f[f"{refused}/arguments"].replace(
@@ -1094,6 +1121,12 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({f"{positive}/mountinfo-held": f[f"{positive}/mountinfo-held"].replace(" ro,relatime", " rw,relatime")}),
             lambda f: f.update({f"{positive}/mountinfo-held": f[f"{positive}/mountinfo-held"].replace("- erofs", "- squashfs")}),
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO}),
+            lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + other_mount}),
+            lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace(
+                f"/dev/mapper/{MAPPER}", "/dev/loop0p1")}),
+            lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace("253:0", "253:1")}),
+            lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount + held_mount}),
+            lambda f: f.update({f"{positive}/devices-held": HELD_DEVICES.replace("253:0", "dm-0")}),
             lambda f: f.update({f"{positive}/readback": f[f"{tampered}/readback"]}),
             lambda f: f.update({f"{tampered}/readback": f[f"{positive}/readback"]}),
             lambda f: f.update({f"{tampered}/readback": f[f"{tampered}/readback"].replace("block-0\t0", "block-0\t1")}),
@@ -1107,20 +1140,24 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"guest/cases/verity-d-planted": ""}),
             # The raw reply.
             lambda f: f.update({f"{reply}/status": "1\n"}),
-            lambda f: f.update({f"{reply}/reply": REPLY.replace('"imageSize": 1683456,', "")}),
+            lambda f: f.update({f"{reply}/reply": without("imageSize")}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": true')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"erofs"', '"ext4"')}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace('"imageSize": 4096', '"imageSize": 4097')}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": 4096')}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed+erofs:=absent", "root=verity:=absent")}),
+            lambda f: f.update({f"{reply}/reply": without("imagePolicy")}),
             lambda f: f.update({f"{reply}/reply": "[]\n"}),
-            lambda f: f.update({f"{reply}/devices-after": f"loop\tloop2\t/run/piglor-evidence-image.raw\t-\t\n"}),
-            lambda f: f.update({f"{reply}/devices-after": "dm\tdm-1\tx\tCRYPT-VERITY-x\tloop2p1\n"}),
+            lambda f: f.update({f"{reply}/devices-after": "loop\tloop2\t/run/piglor-evidence-image.raw\t-\t7:64\t\n"}),
+            lambda f: f.update({f"{reply}/devices-after": "dm\tdm-1\tx\tCRYPT-VERITY-x\t253:1\tloop2p1\n"}),
+            lambda f: f.update({f"{reply}/devices-after": "loop\tloop5\t/var/lib/other.img\t/var/lib/other.img\t7:80\t\n"}),
             lambda f: f.update({f"{reply}/devices-before": "garbage\n"}),
         ]
         for change in changes:
             with self.subTest(change=change):
                 self.refuses(change)
-        # Unrelated loop devices may remain after the raw reply's devices go away.
-        unrelated = "loop\tloop5\t/var/lib/other.img\t/var/lib/other.img\t\n"
-        self.verdict(change=lambda f: f.update({f"{reply}/devices-after": unrelated}))
+        # Either effective policy the provider accepts from systemd v260.2 holds.
+        self.verdict(change=lambda f: f.update({f"{reply}/reply": REPLY.replace("signed+erofs", "signed")}))
 
     def test_cli_writes_one_verdict_and_refuses_bad_input(self):
         root = self.evidence()

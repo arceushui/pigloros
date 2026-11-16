@@ -72,8 +72,8 @@ record_process() { # PID
 # --- Part (b): MountImage cases -------------------------------------------
 
 # Every loop device with a backing file, and every device-mapper device:
-#   loop NAME BACKING_FILE RESOLVED_PATH PARTITIONS
-#   dm NAME DM_NAME DM_UUID SLAVES
+#   loop NAME BACKING_FILE RESOLVED_PATH MAJOR:MINOR PARTITIONS
+#   dm NAME DM_NAME DM_UUID MAJOR:MINOR SLAVES
 # RESOLVED_PATH is the backing file resolved in this namespace, or "-".
 devices() {
   local block name backing resolved
@@ -84,11 +84,11 @@ devices() {
       [[ -e ${block}/loop/backing_file ]] || continue
       backing="$(cat "${block}/loop/backing_file")"
       resolved="$(readlink -e -- "${backing}" || printf -- '-')"
-      printf 'loop\t%s\t%s\t%s\t%s\n' "${name}" "${backing}" "${resolved}" \
+      printf 'loop\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${backing}" "${resolved}" "$(cat "${block}/dev")" \
         "$(find "${block}" -mindepth 1 -maxdepth 1 -name "${name}p*" -printf '%f\n' | sort | paste -sd, -)"
     else
-      printf 'dm\t%s\t%s\t%s\t%s\n' "${name}" "$(cat "${block}/dm/name")" "$(cat "${block}/dm/uuid")" \
-        "$(find "${block}/slaves" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | paste -sd, -)"
+      printf 'dm\t%s\t%s\t%s\t%s\t%s\n' "${name}" "$(cat "${block}/dm/name")" "$(cat "${block}/dm/uuid")" \
+        "$(cat "${block}/dev")" "$(find "${block}/slaves" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | paste -sd, -)"
     fi
   done
 }
@@ -110,6 +110,18 @@ readback() { # ROOT
       digest="${digest//[$'\t\n']/ }"
     fi
     printf '%s\t%s\t%s\n' "${what}" "${status}" "${digest}"
+  done
+}
+
+# Snapshot the devices into FILE until no loop device and no device-mapper
+# device remain, for at most 60 s: their removal can lag the unmount.
+settled_devices() { # FILE
+  for _ in $(seq 60); do
+    devices >"$1"
+    if [[ ! -s $1 ]]; then
+      return 0
+    fi
+    sleep 1
   done
 }
 
@@ -155,7 +167,7 @@ driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   wait "${pid}" || status=$?
   rm -- "${fifo}"
   printf '%s\n' "${status}" >"${dir}/driver-status"
-  devices >"${dir}/devices-after"
+  settled_devices "${dir}/devices-after"
   find /run/pigloros -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-after"
   rm -rf /run/pigloros
 }
@@ -164,22 +176,19 @@ driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
 # reply mountfsd sends is recorded verbatim. varlinkctl exits with the reply,
 # closing the returned mount descriptor; the devices must then go away.
 mountfsd_reply_case() { # IMAGE
-  local dir=cases/mountfsd-reply image=/run/piglor-evidence-image.raw status=0
+  local dir=cases/mountfsd-reply image=/run/piglor-evidence-image.raw status=0 fd
   mkdir -p "${dir}"
   cp -- "$1" "${image}"
   devices >"${dir}/devices-before"
-  varlinkctl call --push-fd="${image}" /run/systemd/io.systemd.MountFileSystem \
+  # Pass a read-only descriptor, as the provider does, not a path.
+  exec {fd}<"${image}"
+  varlinkctl call --push-fd="${fd}" /run/systemd/io.systemd.MountFileSystem \
     io.systemd.MountFileSystem.MountImage \
     '{"imageFileDescriptor":0,"readOnly":true,"growFileSystems":false,"imagePolicy":"root=signed+erofs:=absent","relaxExtensionReleaseChecks":false,"veritySharing":false,"allowInteractiveAuthentication":false}' \
     >"${dir}/reply" 2>"${dir}/stderr" || status=$?
+  exec {fd}<&-
   printf '%s\n' "${status}" >"${dir}/status"
-  for _ in $(seq 60); do
-    devices >"${dir}/devices-after"
-    if ! grep -q -F -- "${image}" "${dir}/devices-after"; then
-      break
-    fi
-    sleep 1
-  done
+  settled_devices "${dir}/devices-after"
   rm -- "${image}"
 }
 

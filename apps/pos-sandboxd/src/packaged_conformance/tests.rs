@@ -4,8 +4,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStringExt as _;
 
 use super::{
-    exercise, exit_status, removal_line, report_line, ConformanceCase, ConformanceError,
-    ImageActivationError, SystemdAttemptRegistryError,
+    exercise, exit_status, removal_line, report_line, run, runtime, ConformanceCase,
+    ConformanceError, ImageActivationError, PreparedAttemptDirectory, Release,
+    SystemdAttemptRegistryError, VerifiedRootMount,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -46,6 +47,30 @@ fn arguments(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+fn detached(root: u64, _: &()) -> Release<'_> {
+    Box::pin(async move {
+        assert_eq!(root, 7);
+        Ok(())
+    })
+}
+
+fn unverified((): (), _: &()) -> Release<'_> {
+    Box::pin(async { Err(ImageActivationError::ResourceAbsenceUnverified) })
+}
+
+fn never_released((): (), _: &()) -> Release<'_> {
+    Box::pin(async { Ok(()) })
+}
+
+fn describe(_: &VerifiedRootMount) -> String {
+    String::new()
+}
+
+fn release(mount: VerifiedRootMount, _: &PreparedAttemptDirectory) -> Release<'_> {
+    drop(mount);
+    Box::pin(async { Ok(()) })
+}
+
 #[test]
 fn arguments_are_exactly_image_certificate_and_utf8_description() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -58,7 +83,7 @@ fn arguments_are_exactly_image_certificate_and_utf8_description() -> TestResult 
         certificate.to_str().ok_or("temporary path")?,
     );
 
-    let case = ConformanceCase::from_arguments(arguments(&[image, certificate, "CN: 01"]))?;
+    let case = ConformanceCase::from_arguments(&arguments(&[image, certificate, "CN: 01"]))?;
     assert_eq!(case.image, b"image bytes");
     assert_eq!(case.certificate, b"certificate bytes");
     assert_eq!(case.key_description, "CN: 01");
@@ -74,7 +99,7 @@ fn arguments_are_exactly_image_certificate_and_utf8_description() -> TestResult 
         ],
     ] {
         assert!(matches!(
-            ConformanceCase::from_arguments(wrong),
+            ConformanceCase::from_arguments(&wrong),
             Err(ConformanceError::Usage)
         ));
     }
@@ -82,7 +107,7 @@ fn arguments_are_exactly_image_certificate_and_utf8_description() -> TestResult 
     let missing = missing.to_str().ok_or("temporary path")?;
     for unreadable in [[missing, certificate], [image, missing]] {
         assert!(matches!(
-            ConformanceCase::from_arguments(arguments(&[unreadable[0], unreadable[1], "CN: 01"])),
+            ConformanceCase::from_arguments(&arguments(&[unreadable[0], unreadable[1], "CN: 01"])),
             Err(ConformanceError::Io(_))
         ));
     }
@@ -109,10 +134,8 @@ async fn a_mounted_root_is_held_until_control_closes_then_released() -> TestResu
     exercise(
         Ok::<_, ImageActivationError>(7_u64),
         |root| format!("{root}\t/run/pigloros/sandbox/attempts/a/root"),
-        |root| async move {
-            assert_eq!(root, 7);
-            Ok(())
-        },
+        detached,
+        &(),
         b"collector done\n".as_slice(),
         &mut report,
     )
@@ -126,7 +149,8 @@ async fn a_mounted_root_is_held_until_control_closes_then_released() -> TestResu
     exercise(
         Ok::<_, ImageActivationError>(()),
         |()| "root".to_owned(),
-        |()| async { Err(ImageActivationError::ResourceAbsenceUnverified) },
+        unverified,
+        &(),
         io::empty(),
         &mut report,
     )
@@ -144,7 +168,8 @@ async fn a_refused_activation_has_nothing_to_release() -> TestResult {
     exercise(
         Err::<(), _>(ImageActivationError::MethodRejected),
         |()| String::new(),
-        |()| async { Ok(()) },
+        never_released,
+        &(),
         io::empty(),
         &mut report,
     )
@@ -162,7 +187,8 @@ async fn a_broken_report_or_control_input_fails_the_case() {
     let broken_report = exercise(
         refused(),
         |()| String::new(),
-        |()| async { Ok(()) },
+        never_released,
+        &(),
         io::empty(),
         &mut Broken,
     )
@@ -171,7 +197,8 @@ async fn a_broken_report_or_control_input_fails_the_case() {
     let broken_control = exercise(
         refused(),
         |()| String::new(),
-        |()| async { Ok(()) },
+        never_released,
+        &(),
         Broken,
         &mut Vec::new(),
     )
@@ -237,4 +264,32 @@ fn every_error_names_its_stage() {
     ] {
         assert!(error.to_string().starts_with(expected), "{error}");
     }
+}
+
+#[tokio::test]
+async fn a_run_stops_at_the_first_step_that_fails() -> TestResult {
+    let usage = run(Vec::new(), io::empty(), &mut Vec::new(), describe, release).await;
+    assert!(matches!(usage, Err(ConformanceError::Usage)));
+
+    let directory = tempfile::tempdir()?;
+    let image = directory.path().join("image.raw");
+    std::fs::write(&image, b"not a disk image")?;
+    let mut report = Vec::new();
+    let staging = run(
+        vec![image.clone().into(), image.into(), "CN: 01".into()],
+        io::empty(),
+        &mut report,
+        describe,
+        release,
+    )
+    .await;
+    assert!(matches!(staging, Err(ConformanceError::Stage(_))));
+    assert!(report.is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_runtime_has_a_time_driver() -> TestResult {
+    runtime()?.block_on(tokio::time::sleep(std::time::Duration::ZERO));
+    Ok(())
 }

@@ -31,6 +31,11 @@ const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
 /// and the signed root hash from the image itself, and names `certificate`
 /// with `key_description` in the staged TRS1 and SIM1. Nothing checks that
 /// the description is the kernel's description of the certificate.
+///
+/// The staged SIM1 names the executable `/adapter` with the BLAKE3 digest of
+/// exactly the 7 bytes `adapter`, and activation reads it back through the
+/// mounted root. An image that is to be activated must hold `/adapter` as a
+/// regular file with exactly those bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct StagedImage<'a> {
     /// The architecture of the image's root partitions and of every staged record.
@@ -326,31 +331,47 @@ fn request_for(admitted: &AdmittedSelectorProvider) -> Result<Vec<u8>, Box<dyn E
     Ok(request.to_canonical_cbor()?)
 }
 
+/// A DDI's three partition descriptors, its signing material and its verity salt.
+type DescribedImage = ([PartitionDescriptor; 3], ImageSigning, [u8; 32]);
+
 /// The partitions, signing material and verity salt a systemd-repart DDI carries.
 ///
 /// The GPT entries are taken in table order, which systemd-repart writes as
 /// root, root-verity and root-verity-sig; admission rejects any other order.
-/// A DDI's partitions, its signing material and its verity salt.
-type DescribedImage = ([PartitionDescriptor; 3], ImageSigning, [u8; 32]);
-
+/// Every offset is checked: a malformed image is an error, never a panic.
 fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> {
+    const OVERFLOW: &str = "a GPT field overflows";
     let bytes = image.image;
     let sector = [512_usize, 4096]
         .into_iter()
         .find(|sector| bytes.get(*sector..*sector + 8) == Some(b"EFI PART".as_slice()))
         .ok_or("the image has no GPT header")?;
-    let first_entry = usize::try_from(le64(bytes, sector + 72)?)? * sector;
+    let first_entry = usize::try_from(le64(bytes, sector + 72)?)?
+        .checked_mul(sector)
+        .ok_or(OVERFLOW)?;
     let count = usize::try_from(le32(bytes, sector + 80)?)?;
     let entry_size = usize::try_from(le32(bytes, sector + 84)?)?;
+    if entry_size < 48 {
+        return Err("a GPT entry is shorter than its fixed fields".into());
+    }
+    let sector_bytes = u64::try_from(sector)?;
     let mut partitions = Vec::new();
     for index in 0..count {
-        let entry = range(bytes, first_entry + index * entry_size, entry_size)?;
+        let offset = index
+            .checked_mul(entry_size)
+            .and_then(|offset| offset.checked_add(first_entry))
+            .ok_or(OVERFLOW)?;
+        let entry = range(bytes, offset, entry_size)?;
         if entry[..16] == [0; 16] {
             continue;
         }
-        let start = le64(entry, 32)?;
-        let length = (le64(entry, 40)? + 1 - start) * sector as u64;
-        let start = start * sector as u64;
+        let (first, last) = (le64(entry, 32)?, le64(entry, 40)?);
+        let length = last
+            .checked_sub(first)
+            .and_then(|span| span.checked_add(1))
+            .and_then(|sectors| sectors.checked_mul(sector_bytes))
+            .ok_or("a GPT entry ends before it starts")?;
+        let start = first.checked_mul(sector_bytes).ok_or(OVERFLOW)?;
         let content = range(bytes, usize::try_from(start)?, usize::try_from(length)?)?;
         partitions.push(PartitionDescriptor {
             role: [
@@ -371,11 +392,12 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
     let partitions: [PartitionDescriptor; 3] = partitions
         .try_into()
         .map_err(|_| "the image does not have exactly three partitions")?;
-    // The format-1 verity superblock's 32-byte salt (cryptsetup `verity_sb`).
-    let salt = extent(bytes, &partitions[1])?
-        .get(88..120)
-        .ok_or("the root-verity partition has no superblock")?
-        .try_into()?;
+    // The format-1 verity superblock (cryptsetup `verity_sb`): a 32-byte salt.
+    let superblock = extent(bytes, &partitions[1])?;
+    if superblock.get(80..82) != Some([32, 0].as_slice()) {
+        return Err("the verity superblock's salt is not 32 bytes".into());
+    }
+    let salt = range(superblock, 88, 32)?.try_into()?;
     let signature = extent(bytes, &partitions[2])?;
     let json = signature
         .iter()
@@ -384,10 +406,15 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
     let json: serde_json::Value = serde_json::from_slice(json)?;
     let root_hash = json["rootHash"]
         .as_str()
-        .ok_or("the root-verity-sig JSON has no rootHash")?;
-    let root_hash = (0..root_hash.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(root_hash.get(index..index + 2).unwrap_or(""), 16))
+        .filter(|text| {
+            text.len() == 64
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or("the root-verity-sig rootHash is not 64 lowercase hexadecimal digits")?;
+    let root_hash = (0..32)
+        .map(|index| u8::from_str_radix(&root_hash[2 * index..2 * index + 2], 16))
         .collect::<Result<Vec<u8>, _>>()?
         .try_into()
         .map_err(|_| "the root-verity-sig rootHash is not 32 bytes")?;

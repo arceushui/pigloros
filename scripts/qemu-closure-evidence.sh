@@ -84,12 +84,13 @@ build() {
   nix path-info --json --json-format 2 --recursive "$(store_path toplevel "${out}")" \
     >"${out}/host/toplevel-closure.json"
   cp -- "$(store_path trustedCertificate "${out}")" "${out}/host/system-trusted-keys.pem"
-  # Part (b): the signed positive image and both signer certificates the
-  # guest ran, for the checker's independent root-hash and salt reading.
+  # Part (b): the three signed images, the tampered byte's offset and both
+  # signer certificates the guest ran, for the checker's independent reading.
   mkdir "${out}/host/images"
   local images file
   images="$(store_path images "${out}")"
-  for file in positive.raw positive.der wrong-key.der root-hash.txt; do
+  for file in positive.raw tampered.raw wrong-key.raw tampered-offset positive.der wrong-key.der \
+    root-hash.txt; do
     cp -- "${images}/${file}" "${out}/host/images/${file}"
   done
   cp -- "$(store_path kernelConfig "${out}")" "${out}/host/kernel-config"

@@ -25,6 +25,11 @@ work="$(mktemp -d)"
 # bytes independently.
 mkdir -p "${work}/tree/usr/lib" "${work}/tree/usr/share/pigloros" "${work}/repart.d"
 printf 'ID=pigloros-444-evidence\nVERSION_ID=1\n' >"${work}/tree/usr/lib/os-release"
+# The staged SIM1 names /adapter with the BLAKE3 of exactly these 7 bytes
+# (StagedInstallation::stage_image), and activation reads it back through
+# the mount. Any image the staged installation activates must carry it.
+printf 'adapter' >"${work}/tree/adapter"
+chmod 0755 "${work}/tree/adapter"
 python3 -I -c '
 import sys
 for index in range(16):
@@ -37,6 +42,8 @@ cat >"${work}/repart.d/10-root.conf" <<'EOF'
 Type=root
 Format=erofs
 CopyFiles=/
+# The Nix build sandbox's file systems have no user extended attributes.
+AddValidateFS=no
 Verity=data
 VerityMatchKey=root
 VerityDataBlockSizeBytes=4096
