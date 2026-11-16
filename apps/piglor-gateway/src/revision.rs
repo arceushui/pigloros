@@ -753,10 +753,20 @@ pub(crate) async fn create<F: GatewayRevisionFamilyV1, O: OperationSpecV1>(
     key: &str,
     body: Value,
 ) -> Response {
-    let permit = match authority.authorize(gateway, None).await {
-        Ok(permit) => permit,
-        Err(error) => return error.into_response(),
-    };
+    match authority.authorize(gateway, None).await {
+        Ok(permit) => create_under::<F>(gateway, permit, key, body).await,
+        Err(error) => error.into_response(),
+    }
+}
+
+/// Admit and commit one revision under its create decision's `permit`, which
+/// is held from admission until the commit settles.
+async fn create_under<F: GatewayRevisionFamilyV1>(
+    gateway: &Gateway,
+    permit: GatewayOperationPermitV1,
+    key: &str,
+    body: Value,
+) -> Response {
     let Some((principal_id, actor)) = permit.decision().map(|decision| {
         (
             *decision.principal().principal_id(),
