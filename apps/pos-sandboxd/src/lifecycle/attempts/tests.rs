@@ -1781,10 +1781,13 @@ mod cases {
             let failed = failed_exchange(&installation, &ledger)?;
             // Its staged bytes and reservations are already released.
             assert_eq!(ledger.usage(), crate::StagingUsage::default());
-            let transfer = failed.transfer();
+            let transfer = failed.transfer().ok_or("no transfer")?;
             assert_eq!(transfer.accepted_bytes, 0);
             assert!(!transfer.complete);
-            assert!(failed.grant().issued_at() <= transfer.finish);
+            assert!(failed
+                .grant()
+                .issued_at()
+                .is_some_and(|issued_at| issued_at <= transfer.finish));
             fixed_registry().map_err(|error| error.to_string())?;
             let lifecycle: AttemptLifecycle = AttemptLifecycle::new(
                 SystemdAttemptRegistry::open()?,

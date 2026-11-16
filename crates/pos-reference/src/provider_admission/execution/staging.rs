@@ -48,9 +48,10 @@ impl<'a> AdmittedEntry<'a> {
         self.execution.grant()
     }
 
-    /// TME1 `input`: the complete input transfer.
+    /// TME1 `input`: the complete input transfer; `None` if the clock could
+    /// not report when it finished.
     #[must_use]
-    pub fn transfer(&self) -> TransferRecord {
+    pub fn transfer(&self) -> Option<TransferRecord> {
         self.execution.transfer()
     }
 

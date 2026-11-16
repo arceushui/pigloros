@@ -256,7 +256,7 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
     )?;
     assert_eq!(grant.grant_digest(), failed.grant().digest());
     assert_eq!(grant.attempt_id, attempt_id);
-    let transfer = failed.transfer();
+    let transfer = failed.transfer().ok_or("no transfer")?;
     assert_eq!(transfer.accepted_bytes, 0);
     assert!(!transfer.complete);
     assert_eq!(ledger.usage(), StagingUsage::default());

@@ -109,7 +109,7 @@ pub struct IssuedGrant {
     bytes: Arc<[u8]>,
     digest: [u8; 32],
     admission: AdmissionLedger,
-    issued_at: u64,
+    issued_at: Option<u64>,
 }
 
 impl IssuedGrant {
@@ -133,9 +133,11 @@ impl IssuedGrant {
         self.admission
     }
 
-    /// When AGR1 was completely written, in `CLOCK_MONOTONIC` nanoseconds.
+    /// When AGR1 was completely written, in `CLOCK_MONOTONIC` nanoseconds;
+    /// `None` if the clock could not report it, which TME1 records as
+    /// missing evidence.
     #[must_use]
-    pub const fn issued_at(&self) -> u64 {
+    pub const fn issued_at(&self) -> Option<u64> {
         self.issued_at
     }
 }
@@ -150,7 +152,7 @@ pub struct FailedInput {
     error: StagingError,
     attempt_id: [u8; 16],
     grant: IssuedGrant,
-    transfer: TransferRecord,
+    transfer: Option<TransferRecord>,
 }
 
 impl FailedInput {
@@ -172,9 +174,10 @@ impl FailedInput {
         &self.grant
     }
 
-    /// TME1 `input`: the transfer as far as it got.
+    /// TME1 `input`: the transfer as far as it got; `None` if the clock
+    /// could not report when it finished.
     #[must_use]
-    pub const fn transfer(&self) -> TransferRecord {
+    pub const fn transfer(&self) -> Option<TransferRecord> {
         self.transfer
     }
 }
@@ -196,16 +199,16 @@ impl FailedInput {
                     active_attempts: 1,
                     incomplete_inputs: 1,
                 },
-                issued_at: 2,
+                issued_at: Some(2),
             },
-            transfer: TransferRecord {
+            transfer: Some(TransferRecord {
                 start: 1,
                 deadline: 4,
                 finish: 3,
                 expected_bytes: 1,
                 accepted_bytes: 0,
                 complete: false,
-            },
+            }),
         }
     }
 }
@@ -260,12 +263,22 @@ impl TransferWindow {
 }
 
 /// The current `CLOCK_MONOTONIC` time in nanoseconds.
-fn monotonic_ns() -> u64 {
+///
+/// # Errors
+/// `InvalidData` for a time the clock cannot report in unsigned
+/// nanoseconds, such as a negative one.
+fn monotonic_ns() -> io::Result<u64> {
     let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
     u64::try_from(now.tv_sec)
-        .unwrap_or_default()
-        .saturating_mul(1_000_000_000)
-        .saturating_add(u64::try_from(now.tv_nsec).unwrap_or_default())
+        .ok()
+        .zip(u64::try_from(now.tv_nsec).ok())
+        .and_then(|(seconds, nanoseconds)| {
+            seconds
+                .checked_mul(1_000_000_000)
+                .and_then(|whole| whole.checked_add(nanoseconds))
+        })
+        .ok_or(io::ErrorKind::InvalidData)
+        .map_err(io::Error::from)
 }
 
 /// Immutable policy derived only from the independently reconstructed case.
@@ -365,7 +378,7 @@ pub struct AdmittedProviderExecution {
     proof: Arc<crate::sandbox_provider_protocol::VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
     grant: IssuedGrant,
-    transfer: TransferRecord,
+    transfer: Option<TransferRecord>,
     // The descriptor pins staged storage even after its private name is unlinked.
     // Close owned resources before releasing bytes, then the counted attempt.
     _input: StagingCharge,

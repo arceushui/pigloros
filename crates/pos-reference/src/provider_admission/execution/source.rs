@@ -225,7 +225,7 @@ pub(super) fn receive(
     let spx_completed = Instant::now();
     // Sampled after the instant, so the recorded deadline is never earlier
     // than the enforced one.
-    let input_start = monotonic_ns();
+    let input_start = monotonic_ns()?;
     let request =
         SandboxExecuteRequest::from_canonical_cbor(&request_record.bytes).map_err(invalid)?;
     require_grant_turn(reader.stream)?;
@@ -493,7 +493,7 @@ impl PreparedProviderExecution {
                                 active_attempts: usage.attempts,
                                 incomplete_inputs: usage.queued_inputs,
                             },
-                            issued_at: monotonic_ns(),
+                            issued_at: monotonic_ns().ok(),
                         });
                     })
             })
@@ -527,7 +527,7 @@ impl PreparedProviderExecution {
         let verified = self.verify_input(stream, file, &mut received);
         let transfer = self.transfer(
             received.accepted,
-            received.finished.unwrap_or_else(monotonic_ns),
+            received.finished.unwrap_or_else(monotonic_ns).ok(),
         );
         match verified {
             Ok((verified_input, root_image, proof, authority)) => {
@@ -553,9 +553,9 @@ impl PreparedProviderExecution {
         }
     }
 
-    fn transfer(&self, accepted: u64, finish: u64) -> TransferRecord {
-        self.window
-            .record(self.policy().input.byte_length, accepted, finish)
+    fn transfer(&self, accepted: u64, finish: Option<u64>) -> Option<TransferRecord> {
+        let expected = self.policy().input.byte_length;
+        finish.map(|finish| self.window.record(expected, accepted, finish))
     }
 
     fn verify_input(
@@ -627,7 +627,7 @@ struct Received {
     /// The accepted bytes.
     accepted: u64,
     /// When the final chunk and the payload digest verified.
-    finished: Option<u64>,
+    finished: Option<std::io::Result<u64>>,
 }
 
 /// The verified input descriptor, the held root image, its proof and the
@@ -663,9 +663,10 @@ impl AdmittedProviderExecution {
         &self.grant
     }
 
-    /// TME1 `input`: the complete input transfer.
+    /// TME1 `input`: the complete input transfer; `None` if the clock could
+    /// not report when it finished.
     #[must_use]
-    pub const fn transfer(&self) -> TransferRecord {
+    pub const fn transfer(&self) -> Option<TransferRecord> {
         self.transfer
     }
 
@@ -1126,7 +1127,7 @@ mod tests {
             );
             // The one chunk is the final chunk: a failed input never counts
             // it, so the transfer is incomplete however far it got.
-            let transfer = failed.transfer();
+            let transfer = failed.transfer().ok_or("no transfer")?;
             assert_eq!(
                 (transfer.start, transfer.deadline, transfer.expected_bytes),
                 (window.start, window.deadline, expected),
@@ -1172,7 +1173,7 @@ mod tests {
             failed.error()
         );
         assert_eq!(failed.grant().bytes(), sent.as_slice());
-        assert!(!failed.transfer().complete);
+        assert!(failed.transfer().is_some_and(|transfer| !transfer.complete));
         assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         Ok(())
     }
@@ -1219,7 +1220,10 @@ mod tests {
                 "{fault}: {error:?}"
             );
             // Every byte arrived in time, but the input was not admitted.
-            assert!(!failed.transfer().complete, "{fault}");
+            assert!(
+                failed.transfer().is_some_and(|transfer| !transfer.complete),
+                "{fault}"
+            );
             assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         }
         Ok(())
@@ -1473,13 +1477,14 @@ mod tests {
                 incomplete_inputs: 1,
             }
         );
-        let transfer = verified.entry().transfer();
+        let transfer = verified.entry().transfer().ok_or("no transfer")?;
         assert!(transfer.complete);
         assert_eq!(
             (transfer.expected_bytes, transfer.accepted_bytes),
             (verified.len(), verified.len())
         );
-        assert!(transfer.start <= issued.issued_at() && issued.issued_at() <= transfer.finish);
+        let issued_at = issued.issued_at().ok_or("no issue time")?;
+        assert!(transfer.start <= issued_at && issued_at <= transfer.finish);
         assert!(transfer.finish <= transfer.deadline);
         assert_eq!(
             verified.entry().policy().request_digest(),
