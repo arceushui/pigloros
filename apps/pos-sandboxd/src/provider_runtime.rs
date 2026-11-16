@@ -1,8 +1,8 @@
 //! The authority a provider runtime binds at startup, before any socket
 //! exists (ADR-069 R11 §5.1 steps 2 to 6, #1358).
 //!
-//! [`ProviderRuntimeAuthority::start`] runs these steps in their normative
-//! order, and the first failure wins:
+//! [`start_runtime_authority`] runs these steps in their normative order,
+//! and the first failure wins:
 //!
 //! 2. **SIC1.** The provider's own installation is opened (refused while
 //!    SIR1 is pending), its bootstrap authority authenticated and the
@@ -20,6 +20,11 @@
 //!    R9 runtime-attestation signer.
 //!
 //! The authority never changes afterwards (R11 D9): no step is repeated.
+//!
+//! [`start_runtime_authority`] must complete before the runtime binds any
+//! socket or sends `READY=1`. That binding and notification come after the
+//! #1399 selector-owned runtime lifecycle (ADR-069 R11 §15) and consume the
+//! returned [`RuntimeAuthority`].
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -63,84 +68,60 @@ pub enum ProviderStartupError {
 }
 
 /// The admitted provider, its SPI1 values and its runtime-attestation
-/// signer, bound once at startup.
-#[derive(Debug)]
-pub struct ProviderRuntimeAuthority {
-    admitted: AdmittedSelectorProvider,
-    installation: ProviderInstallation,
-    signer: KeyFileReleaseSigner,
+/// signer, bound once at startup. Each part can only be built by its own
+/// checked constructor.
+pub type RuntimeAuthority = (
+    AdmittedSelectorProvider,
+    ProviderInstallation,
+    KeyFileReleaseSigner,
+);
+
+/// Run R11 §5.1 steps 2 to 6 against the fixed installation and this
+/// process's own executable.
+///
+/// # Errors
+/// The first step that fails, in order.
+pub fn start_runtime_authority() -> Result<RuntimeAuthority, ProviderStartupError> {
+    InstalledSelectorState::open()
+        .and_then(InstalledSelectorState::authenticate_bootstrap)
+        .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+        .map_err(ProviderStartupError::from)
+        .and_then(|admitted| {
+            bind(
+                admitted,
+                Path::new(SELF_EXECUTABLE),
+                ProviderInstallation::open,
+            )
+        })
 }
 
-impl ProviderRuntimeAuthority {
-    /// Run R11 §5.1 steps 2 to 6 against the fixed installation and this
-    /// process's own executable.
-    ///
-    /// # Errors
-    /// The first step that fails, in order.
-    pub fn start() -> Result<Self, ProviderStartupError> {
-        InstalledSelectorState::open()
-            .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .map_err(ProviderStartupError::from)
-            .and_then(|admitted| {
-                Self::bind(
-                    admitted,
-                    Path::new(SELF_EXECUTABLE),
-                    ProviderInstallation::open,
-                )
-            })
+/// Steps 3 to 6 for `admitted`, with `executable` as the running image and
+/// `open_installation` reading SPI1.
+fn bind(
+    admitted: AdmittedSelectorProvider,
+    executable: &Path,
+    open_installation: impl FnOnce() -> Result<ProviderInstallation, ProviderInstallationError>,
+) -> Result<RuntimeAuthority, ProviderStartupError> {
+    if !runs_admitted_binary(&admitted, executable) {
+        return Err(ProviderStartupError::SelfBinding);
     }
-
-    /// Steps 3 to 6 for `admitted`, with `executable` as the running image
-    /// and `open_installation` reading SPI1.
-    fn bind(
-        admitted: AdmittedSelectorProvider,
-        executable: &Path,
-        open_installation: impl FnOnce() -> Result<ProviderInstallation, ProviderInstallationError>,
-    ) -> Result<Self, ProviderStartupError> {
-        if !runs_admitted_binary(&admitted, executable) {
-            return Err(ProviderStartupError::SelfBinding);
-        }
-        let installation = open_installation()?;
-        if installation.attempt_range().slots()
-            < u128::from(required_slots(admitted.provider().broker_hard_caps()))
-        {
-            return Err(ProviderStartupError::SlotCount);
-        }
-        let key_id = admitted
-            .provider()
-            .manifest()
-            .runtime_attestation_key_id
-            .clone();
-        // Admission already resolved the TRS1 role-3 key that the SPM1 key
-        // ID names and RVS1 leaves active.
-        let signer = RuntimeKey::open(&installation)
-            .and_then(|key| key.require_admitted(admitted.provider().runtime_attestation_key()))?
-            .into_signer(key_id);
-        Ok(Self {
-            admitted,
-            installation,
-            signer,
-        })
+    let installation = open_installation()?;
+    if installation.attempt_range().slots()
+        < u128::from(required_slots(admitted.provider().broker_hard_caps()))
+    {
+        return Err(ProviderStartupError::SlotCount);
     }
-
-    /// The admitted provider and its retained SIC1 authority.
-    #[must_use]
-    pub const fn admitted(&self) -> &AdmittedSelectorProvider {
-        &self.admitted
-    }
-
-    /// The validated SPI1 values.
-    #[must_use]
-    pub const fn installation(&self) -> &ProviderInstallation {
-        &self.installation
-    }
-
-    /// The one R9 runtime-attestation signer.
-    #[must_use]
-    pub const fn signer(&self) -> &KeyFileReleaseSigner {
-        &self.signer
-    }
+    let key_id = admitted
+        .provider()
+        .manifest()
+        .runtime_attestation_key_id
+        .clone();
+    // Admission already resolved the TRS1 role-3 key that the SPM1 key ID
+    // names and RVS1 leaves active.
+    let signer = RuntimeKey::open(&installation)
+        .and_then(|key| key.require_admitted(admitted.provider().runtime_attestation_key()))?
+        .into_signer(key_id);
+    Ok((admitted, installation, signer))
 }
 
 /// Whether `executable`, followed through any link, is the file the held
