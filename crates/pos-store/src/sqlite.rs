@@ -9537,10 +9537,31 @@ fn sqlite_artifact_registrations_for_timeline(
                     addresses
                         .iter()
                         .map(|bytes| sqlite_bound_artifact_registration(connection, bytes))
-                        .collect()
+                        .collect::<Result<Vec<_>, _>>()
                 }
             })
+            .and_then(|rows| sqlite_validate_bound_closures(connection, rows))
     })
+}
+
+/// Validate every bound row once. Bindings cover complete closures, so the
+/// closure of each bound row that no other bound row names as a child
+/// contains all the others; the read costs one walk per such top row.
+fn sqlite_validate_bound_closures(
+    connection: &Connection,
+    rows: Vec<ArtifactRegistrationCatalogRowV1>,
+) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    let children: BTreeSet<Hash> = rows
+        .iter()
+        .flat_map(|row| row.registration().fields().child_artifacts.iter())
+        .map(|edge| edge.registration_address)
+        .collect();
+    let validated = rows
+        .iter()
+        .map(ArtifactRegistrationCatalogRowV1::registration_address)
+        .filter(|address| !children.contains(address))
+        .try_for_each(|address| sqlite_validate_artifact_registration_closure(connection, address));
+    validated.map(|()| rows)
 }
 
 fn sqlite_bound_artifact_registration(
@@ -9552,9 +9573,6 @@ fn sqlite_bound_artifact_registration(
         .and_then(|address| {
             sqlite_load_artifact_registration_by_address(connection, address)
                 .and_then(|row| row.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog))
-                .and_then(|row| {
-                    sqlite_validate_artifact_registration_closure(connection, address).map(|()| row)
-                })
         })
 }
 

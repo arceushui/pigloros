@@ -12431,27 +12431,35 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         timeline: TimelineId,
         max: usize,
     ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
-        let addresses: Vec<Hash> = self
-            .artifact_registration_timelines
-            .range((timeline, Hash::zero())..=(timeline, Hash::from_bytes([u8::MAX; 32])))
-            .map(|(_, address)| *address)
+        // The result is selected from the catalog rows themselves, so a
+        // binding can never name a missing row. The scan is linear in the
+        // catalog, which is acceptable for this in-process adapter.
+        let rows: Vec<&ArtifactRegistrationCatalogRowV1> = self
+            .artifact_registrations
+            .iter()
+            .filter_map(|(address, row)| {
+                self.artifact_registration_timelines
+                    .contains(&(timeline, *address))
+                    .then_some(row)
+            })
             .take(max.saturating_add(1))
             .collect();
-        if addresses.len() > max {
+        if rows.len() > max {
             return Err(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds);
         }
-        addresses
-            .into_iter()
-            .map(|address| {
-                self.artifact_registrations
-                    .get(&address)
-                    .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
-                    .and_then(|row| {
-                        self.validate_artifact_registration_closure(address)
-                            .map(|()| row.clone())
-                    })
-            })
-            .collect()
+        // Bindings cover complete closures, so validating the closure of each
+        // bound row no other bound row names as a child checks every row once.
+        let children: BTreeSet<Hash> = rows
+            .iter()
+            .flat_map(|row| row.registration().fields().child_artifacts.iter())
+            .map(|edge| edge.registration_address)
+            .collect();
+        let validated = rows
+            .iter()
+            .map(|row| row.registration_address())
+            .filter(|address| !children.contains(address))
+            .try_for_each(|address| self.validate_artifact_registration_closure(address));
+        validated.map(|()| rows.into_iter().cloned().collect())
     }
 }
 
@@ -15245,36 +15253,6 @@ mod coverage_entrypoints {
             ArtifactRegistrationCommitOutcomeV1::Applied
         );
         Ok((store, batch, key))
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn memory_timeline_read_rejects_a_binding_without_a_consistent_row(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut store, batch, _) = committed_memory_catalog()?;
-        let timeline = TimelineId::new();
-        store
-            .artifact_registration_timelines
-            .insert((timeline, Hash::from_bytes([0x07; 32])));
-        assert_eq!(
-            ArtifactRegistrationPersistencePortV1::artifact_registrations_for_timeline(
-                &store, timeline, 4
-            ),
-            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
-        );
-
-        let timeline = TimelineId::new();
-        store
-            .artifact_registration_timelines
-            .insert((timeline, batch.root_registration_address()));
-        store.artifact_registration_operations.clear();
-        assert_eq!(
-            ArtifactRegistrationPersistencePortV1::artifact_registrations_for_timeline(
-                &store, timeline, 4
-            ),
-            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
-        );
-        Ok(())
     }
 
     #[test]

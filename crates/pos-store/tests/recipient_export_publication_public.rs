@@ -481,7 +481,16 @@ fn erasure_reads_visible_publications_by_timeline_and_grantee() -> TestResult {
         .recipient_export_publications(&[TimelineId::new()], 0)?
         .is_empty());
 
+    // A pending publication of the same Timeline is not visible.
     let path = fixture.temporary.path().join("recipient.sqlite");
+    rusqlite::Connection::open(&path)?.execute(
+        "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+        rusqlite::params![[0x02_u8; 16].as_slice(), expected[0].grantee_owner.as_str()],
+    )?;
+    assert_eq!(
+        fixture.store.recipient_export_publications(&requested, 4)?,
+        expected
+    );
     let index: i64 = rusqlite::Connection::open(&path)?.query_row(
         "SELECT COUNT(*) FROM sqlite_schema
          WHERE type = 'index' AND name = 'recipient_export_catalog_timeline_v1'",

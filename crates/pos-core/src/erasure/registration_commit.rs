@@ -567,7 +567,8 @@ pub trait ArtifactRegistrationPersistencePortV1 {
 /// `source_timeline` names the Timeline whose data the closure was derived
 /// from. It is required when any record is `PrivateSubjectData` or
 /// `ConsentedSharedData`, so destruction-eligible data can never be stored
-/// unbound, and optional otherwise.
+/// unbound, and optional otherwise. It is checked after every format, graph
+/// and owner check, so a closure that fails one of those reports that error.
 ///
 /// # Errors
 /// Rejects unsupported formats/classes, incomplete or invalid child graphs,
@@ -583,12 +584,6 @@ pub fn prepare_artifact_registration_batch_v1(
     let parsed = parse_artifact_inputs(inputs)?;
     let (records, root_operation_id) =
         derive_records(root_registration_address, &owner_id, parsed, owner_verifier)?;
-    let destruction_eligible = records
-        .iter()
-        .any(|record| !record.registration.fields().data_class.is_always_retained());
-    if destruction_eligible && source_timeline.is_none() {
-        return Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired);
-    }
     let graph_nodes: Vec<_> = records
         .iter()
         .map(|record| ArtifactRegistrationGraphNodeV1 {
@@ -609,6 +604,14 @@ pub fn prepare_artifact_registration_batch_v1(
                 &record.registration,
             )
             .map_err(|_| ArtifactRegistrationPreparationErrorV1::OwnerRejected)?;
+    }
+    // Checked last: only an otherwise valid, owner-verified closure is
+    // refused for its missing source Timeline.
+    let destruction_eligible = records
+        .iter()
+        .any(|record| !record.registration.fields().data_class.is_always_retained());
+    if destruction_eligible && source_timeline.is_none() {
+        return Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired);
     }
     Ok(PreparedArtifactRegistrationBatchV1 {
         owner_id,

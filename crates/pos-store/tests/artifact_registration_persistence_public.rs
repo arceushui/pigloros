@@ -1502,6 +1502,29 @@ fn destruction_eligible_registrations_require_a_source_timeline(
     Ok(())
 }
 
+#[test]
+fn graph_errors_take_precedence_over_a_missing_source_timeline(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root_address, mut inputs) = prepare_repro_manifest_inputs(0x51, &PRIVATE_OWNER)?;
+    // A second WCR1 outside the root closure makes the graph invalid.
+    let (_, _, other) = prepare_repro_manifest_inputs(0x61, &PRIVATE_OWNER)?;
+    inputs.push(other[2].clone());
+    for source_timeline in [None, Some(timeline(2))] {
+        assert_eq!(
+            prepare_artifact_registration_batch_v1(
+                owner_id,
+                root_address,
+                source_timeline,
+                inputs.clone(),
+                &PRIVATE_OWNER,
+            )
+            .err(),
+            Some(pos_core::ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+        );
+    }
+    Ok(())
+}
+
 /// Commit two closures from Timeline 2 and one from Timeline 3, then read
 /// each Timeline at, and one below, its exact row count.
 fn timeline_binding_contract<S>(
