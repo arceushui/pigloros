@@ -21,9 +21,7 @@ use pos_core::{
     PersistedAuthorityV1, TimelineId, TimelineMeta, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 
-use super::freeze::{
-    extension_admitted, observation, overflow, FreezeDraftV1, LOCAL_FREEZE_POSITION,
-};
+use super::freeze::{extension_admitted, observation, ShortfallV1, LOCAL_FREEZE_POSITION};
 use super::{LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1};
 use crate::erasure_host::{
     local_principal_reference, local_subject_admission, LocalErasurePreparationV1,
@@ -209,7 +207,10 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
         request: ErasureReferenceV1,
     ) -> Result<(ErasureReferenceV1, Vec<Vec<u8>>), ErasureErrorV1> {
         self.admits_new_work()
-            .and_then(|()| self.freeze_draft(view, request))
+            .and_then(|()| {
+                self.freeze_draft(view, request)
+                    .map_err(ErasureErrorV1::from)
+            })
             .map(|draft| (draft.body_digest, draft.retained))
     }
 }
@@ -256,7 +257,7 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        Ok(Some(observation(view, request, manifest_digest, None)))
+        observation(view, request, manifest_digest, None).map(Some)
     }
 
     fn verified_topology_observation_for_candidate(
@@ -266,12 +267,7 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         manifest_digest: ErasureReferenceV1,
         candidate: &TimelineMeta,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        Ok(Some(observation(
-            view,
-            request,
-            manifest_digest,
-            Some(candidate.id),
-        )))
+        observation(view, request, manifest_digest, Some(candidate.id)).map(Some)
     }
 
     /// Recompute ERAZ1, ELSEL1, ELIDEM1 and the requester, then run the
@@ -372,7 +368,7 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
             .and_then(|()| {
                 self.freeze_draft(view, request)
                     .map(Some)
-                    .or_else(overflow::<Option<FreezeDraftV1>>)
+                    .or_else(ShortfallV1::resolved)
             })
             .and_then(|draft| {
                 draft.map_or_else(

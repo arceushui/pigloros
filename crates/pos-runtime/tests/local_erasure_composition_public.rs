@@ -1712,16 +1712,16 @@ fn the_local_authority_refuses_an_unbound_freeze() -> TestResult {
             Err(ErasureErrorV1::PolicyConflict)
         );
     }
-    // Before any freeze, every Timeline is unaffected.
-    let observation = authority
-        .verified_topology_observation(&view, request, reference(0x99))?
-        .ok_or("no observation")?;
-    assert!(observation.bindings().is_empty());
-    assert_eq!(observation.unaffected(), view.topology());
-    // The view built outside a host command reads no scope, ARD1 row,
-    // publication or key.
+    // The view built outside a host command reads no scope, so it observes
+    // no partition, and no ARD1 row, publication or key.
     let missing = Err(ErasureErrorV1::ProvenanceMissing);
-    assert!(view.recorded_scope(request).is_none());
+    assert_eq!(
+        authority
+            .verified_topology_observation(&view, request, reference(0x99))
+            .map(drop),
+        missing
+    );
+    assert_eq!(view.recorded_scope(request).map(drop), missing);
     assert_eq!(view.artifact_registrations(authority_timeline()), missing);
     assert_eq!(
         view.recipient_export_publications(&[authority_timeline()]),
@@ -2005,6 +2005,10 @@ fn destruction_goes_only_to_an_owner_the_bundle_names() -> TestResult {
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
+    destruction_command_reference, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1,
+};
+use pos_core::{
     local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_signature_message_v1,
     local_erasure_store_target_v1, local_erasure_timeline_payload_v1, CanonicalBytes,
     LocalErasureLineageRuleV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, OwnerIdV1,
@@ -2212,7 +2216,7 @@ fn signed_freeze(
     scope: ErasureScopeV1,
     before: impl FnOnce(&mut ErasureExecutionHostV1) -> TestResult,
     refused: impl FnOnce(ErasureReferenceV1) -> TestResult<Vec<Vec<u8>>>,
-) -> TestResult<ErasureExecutionHostV1> {
+) -> TestResult<(ErasureExecutionHostV1, Vec<u8>)> {
     let digest = {
         let mut host = store.host(&local_case()?, 4_096)?;
         before(&mut host)?;
@@ -2252,7 +2256,7 @@ fn signed_freeze(
         ErasureLifecycleV1::AccessFrozen
     );
     drop(sender);
-    Ok(host)
+    Ok((host, signed))
 }
 
 /// A forged key, purpose confusion, a stale body: none freezes.
@@ -2270,22 +2274,40 @@ fn refused_signatures(digest: ErasureReferenceV1) -> TestResult<Vec<Vec<u8>>> {
     ])
 }
 
-/// The committed ERSC1 of `request`: the subject bound to `affected` under
-/// ELLR1, over exactly `targets`.
-fn assert_scope(
-    host: &mut ErasureExecutionHostV1,
+/// One expected `(target, category, ack_class)` cell.
+type Cell = (
+    ErasureRequiredTargetV1,
+    ErasureInventoryCategoryV1,
+    &'static str,
+);
+
+/// The committed freeze of `request`: ERSC1 binds the subject to `affected`
+/// under ELLR1 over exactly the targets of `cells`, and the store holds the
+/// EROS1, each ERO1 and the ERFA1/ERFAA1 rebuilt from `cells` alone, so
+/// every Applicable cell has its ELOWN1 owner and its target's command
+/// identity, and every other cell is Inapplicable.
+fn assert_committed_freeze(
+    store: &LocalStore,
+    mut host: ErasureExecutionHostV1,
     request: ErasureReferenceV1,
     mut affected: Vec<TimelineId>,
-    mut targets: Vec<ErasureRequiredTargetV1>,
+    cells: &[Cell],
+    signed: &[u8],
 ) -> TestResult {
     let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
     let state = host
         .read_sender()?
         .erasure_state(request)?
         .ok_or("request missing")?;
+    drop(host);
     let scope = state.scope().ok_or("no committed scope")?;
+    let targets = cells
+        .iter()
+        .map(|cell| cell.0)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     affected.sort_unstable();
-    targets.sort_unstable();
     assert_eq!(scope.scope_members(), [subject]);
     assert_eq!(scope.scope_timeline_ids(), affected.as_slice());
     assert_eq!(
@@ -2293,14 +2315,145 @@ fn assert_scope(
         Some(LocalErasureLineageRuleV1 { subject }.reference()?)
     );
     assert_eq!(scope.target_closure(), target_closure_digest(&targets));
+    let store_identity = ErasureReferenceV1::from_digest(STORE_IDENTITY);
+    let mut obligations = cells
+        .iter()
+        .map(|&(target, category, ack_class)| {
+            ErasureObligationV1::new(ErasureObligationInputV1 {
+                category,
+                target,
+                owner: pos_core::local_erasure_owner_ref_v1(
+                    store_identity,
+                    u64::from(category),
+                    ack_class,
+                )?,
+                command_identity: destruction_command_reference(request, target),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+    let trust = bundle().reference()?;
+    let set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: obligations
+            .iter()
+            .map(ErasureObligationV1::reference)
+            .collect(),
+        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+        trust,
+    })?;
+    let mut matrix = Vec::new();
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        for (index, target) in targets.iter().enumerate() {
+            let owner = obligations
+                .iter()
+                .find(|obligation| {
+                    obligation.category() == category && obligation.target() == *target
+                })
+                .map(ErasureObligationV1::owner);
+            matrix.push(ErasureFreezeApplicabilityRowV1::new(
+                category,
+                u64::try_from(index)?,
+                if owner.is_some() {
+                    ErasureApplicabilityDecisionV1::Applicable
+                } else {
+                    ErasureApplicabilityDecisionV1::Inapplicable
+                },
+                owner,
+            )?);
+        }
+    }
+    let admission = |authorization_provenance| {
+        ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+            request,
+            scope_commitment: scope.reference(),
+            obligation_set: set.reference(),
+            applicability_matrix: matrix.clone(),
+            freeze_position: 1,
+            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            trust,
+            authorization_provenance,
+        })
+    };
+    let authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: admission(reference(0))?.authorization_body_digest()?,
+            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            trust,
+            evidence: signed.to_vec(),
+        })?;
+    let admission = admission(authorization.reference())?;
+    let sqlite = store.sqlite()?;
+    let mut expected = vec![
+        (set.reference(), set.to_canonical_cbor()?),
+        (
+            authorization.reference(),
+            authorization.to_canonical_cbor()?,
+        ),
+        (admission.reference(), admission.to_canonical_cbor()?),
+    ];
+    for obligation in &obligations {
+        expected.push((obligation.reference(), obligation.to_canonical_cbor()?));
+    }
+    for (address, bytes) in expected {
+        assert_eq!(
+            ErasurePersistencePortV1::read_object(&sqlite, address)?,
+            bytes
+        );
+    }
     Ok(())
+}
+
+/// The store target's two cells.
+fn store_cells() -> TestResult<Vec<Cell>> {
+    let target = store_target()?;
+    Ok(vec![
+        (
+            target,
+            ErasureInventoryCategoryV1::Artifact,
+            "client-cache-signal",
+        ),
+        (target, ErasureInventoryCategoryV1::Replica, "local-replica"),
+    ])
+}
+
+/// The Key and Backup cells of one key target.
+fn key_cells(target: ErasureRequiredTargetV1) -> [Cell; 2] {
+    [
+        (target, ErasureInventoryCategoryV1::Key, "key-registry"),
+        (
+            target,
+            ErasureInventoryCategoryV1::Backup,
+            "local-backup-inventory",
+        ),
+    ]
+}
+
+fn payload_cell(timeline: TimelineId) -> TestResult<Cell> {
+    Ok((
+        local_target(
+            ErasureArtifactClassV1::TimelineReplay,
+            local_erasure_timeline_payload_v1(timeline)?,
+            reference(0),
+        )?,
+        ErasureInventoryCategoryV1::Artifact,
+        "timeline-payload",
+    ))
+}
+
+fn subject_key_cells() -> TestResult<[Cell; 2]> {
+    Ok(key_cells(local_target(
+        ErasureArtifactClassV1::TimelineReplay,
+        reference(0),
+        pos_core::local_erasure_key_digest_v1(&subject_key(1)?)?,
+    )?))
 }
 
 #[test]
 fn a_signed_private_freeze_commits_the_subject_closure() -> TestResult {
     let owned = OwnedStore::new()?;
     let mut descendant = None;
-    let mut host = signed_freeze(
+    let (mut host, signed) = signed_freeze(
         &owned.store,
         1,
         ErasureScopeV1::PrivateSubjectData,
@@ -2324,27 +2477,24 @@ fn a_signed_private_freeze_commits_the_subject_closure() -> TestResult {
         ErasureLifecycleV1::AccessFrozen
     );
     assert_frozen(&mut host, &[owned.owned, descendant], owned.other)?;
-    let payload = |timeline| {
-        local_target(
-            ErasureArtifactClassV1::TimelineReplay,
-            local_erasure_timeline_payload_v1(timeline)?,
-            reference(0),
-        )
-    };
-    assert_scope(
-        &mut host,
+    // A request the installed inventory does not hold prepares nothing.
+    assert_eq!(
+        host.command_sender()?
+            .prepare_local_freeze(reference(0x79))
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    let mut cells = store_cells()?;
+    cells.push(payload_cell(owned.owned)?);
+    cells.push(payload_cell(descendant)?);
+    cells.extend(subject_key_cells()?);
+    assert_committed_freeze(
+        &owned.store,
+        host,
         request,
         vec![owned.owned, descendant],
-        vec![
-            store_target()?,
-            payload(owned.owned)?,
-            payload(descendant)?,
-            local_target(
-                ErasureArtifactClassV1::TimelineReplay,
-                reference(0),
-                pos_core::local_erasure_key_digest_v1(&subject_key(1)?)?,
-            )?,
-        ],
+        &cells,
+        &signed,
     )
 }
 
@@ -2352,7 +2502,7 @@ fn a_signed_private_freeze_commits_the_subject_closure() -> TestResult {
 fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestResult {
     let owned = OwnedStore::new()?;
     let request = request_of(1)?;
-    let mut host = signed_freeze(
+    let (mut host, _) = signed_freeze(
         &owned.store,
         1,
         ErasureScopeV1::PrivateSubjectData,
@@ -2480,7 +2630,7 @@ fn publish_export(
 fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestResult {
     let owned = OwnedStore::new()?;
     let export_id = publish_export(&owned.store, owned.owned, other_actor())?;
-    let mut host = signed_freeze(
+    let (mut host, signed) = signed_freeze(
         &owned.store,
         2,
         ErasureScopeV1::ConsentedSharedData,
@@ -2491,18 +2641,23 @@ fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestR
     // Role-0 keys and Timeline payloads are private-subject-data targets;
     // the export to the grantee is one `export-recipient` target.
     let grantee = pos_core::recipient_owner_id_from_grantee(other_actor()).map_err(fail)?;
-    assert_scope(
-        &mut host,
+    let mut cells = store_cells()?;
+    cells.push((
+        local_target(
+            ErasureArtifactClassV1::Export,
+            pos_core::local_erasure_export_recipient_v1(export_id, &grantee)?,
+            reference(0),
+        )?,
+        ErasureInventoryCategoryV1::Artifact,
+        "export-recipient",
+    ));
+    assert_committed_freeze(
+        &owned.store,
+        host,
         request_of(2)?,
         vec![owned.owned],
-        vec![
-            store_target()?,
-            local_target(
-                ErasureArtifactClassV1::Export,
-                pos_core::local_erasure_export_recipient_v1(export_id, &grantee)?,
-                reference(0),
-            )?,
-        ],
+        &cells,
+        &signed,
     )
 }
 
@@ -2550,4 +2705,359 @@ fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
     let mut host = store.host(&local_case()?, 4_096)?;
     assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Rejected);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ARD1 rows bound to an affected Timeline (decision 2A over C1′). The MRM1
+// closure fixture follows `pos-store/tests/artifact_registration_persistence_public.rs`.
+// ---------------------------------------------------------------------------
+
+use pos_core::{
+    extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
+    extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
+    AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterRecordingSessionV1,
+    AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1, AdapterTranscriptInputV1,
+    AdapterTranscriptV1, ArtifactDataClassV1, ArtifactRegistrationFieldsV1,
+    ArtifactRegistrationInputV1, ArtifactRegistrationOwnerVerificationErrorV1,
+    ArtifactRegistrationOwnerVerifierV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1,
+    PreparedArtifactRegistrationBatchV1, ReproManifestRootInputV1,
+    ReproManifestRootRegistrationInputV1, ReproManifestRootV1, WorldRecordingReceiptInputV1,
+    WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
+};
+
+// This fixture isolates the store's transactional port. Its synthetic WCR1
+// registration is not Wave 8 owner-verification evidence.
+struct TestOnlyStructuralOwnerVerifier {
+    recording_data_class: ArtifactDataClassV1,
+    recording_keys: Vec<pos_core::ArtifactKeyDependencyV1>,
+}
+
+impl ArtifactRegistrationOwnerVerifierV1 for TestOnlyStructuralOwnerVerifier {
+    fn derive_native_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        if artifact_class != ErasureArtifactClassV1::TimelineReplay
+            || WorldRecordingReceiptV1::from_canonical_cbor(artifact_bytes).is_err()
+        {
+            return Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected);
+        }
+        ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+            artifact_class,
+            artifact_digest: ArtifactRegistrationV1::artifact_digest(
+                artifact_class,
+                artifact_bytes,
+            ),
+            owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
+            data_class: self.recording_data_class,
+            optionality: pos_core::ArtifactOptionalityV1::Required,
+            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+            required_key_roles: self
+                .recording_keys
+                .iter()
+                .map(|dependency| dependency.identity.role)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            key_dependencies: self.recording_keys.clone(),
+            child_artifacts: Vec::new(),
+        })
+        .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+    }
+
+    fn classify_repro_manifest_label(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(ArtifactDataClassV1::PublicRecord)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _artifact_bytes: &[u8],
+        _registration: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(())
+    }
+}
+
+type ReproManifestInputs = (OwnerIdV1, Hash, Vec<ArtifactRegistrationInputV1>);
+
+fn prepare_repro_manifest_inputs(
+    seed: u8,
+    world_timeline: TimelineId,
+    verifier: &TestOnlyStructuralOwnerVerifier,
+) -> Result<ReproManifestInputs, Box<dyn std::error::Error>> {
+    let owner_id = OwnerIdV1::from_static("wave8-store-owner");
+    let owner_reference = ArtifactRegistrationV1::owner_reference(&owner_id);
+    let operation_id = Hash::from_bytes([seed; 32]);
+    let commit_receipt_digest = Hash::from_bytes([0x52; 32]);
+    let recording = WorldRecordingReceiptV1::new(WorldRecordingReceiptInputV1 {
+        binding_hash: Hash::from_bytes([0x53; 32]),
+        operation_id,
+        actual_commit_receipt_digest: commit_receipt_digest,
+        installed_inventory_generation: Hash::from_bytes([0x54; 32]),
+    })?;
+    let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+        owner_reference,
+        timeline_id: world_timeline,
+        cut_id: 2,
+        commit_receipt_digest,
+        recording_receipt_digest: recording.digest(),
+        logical_head: 0,
+        stitched_head_hash: Hash::from_bytes([0x55; 32]),
+    })?;
+    let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+        owner_reference,
+        configuration_generation: 1,
+        scope_digest: Hash::from_bytes([0x56; 32]),
+        entries: Vec::new(),
+    })?;
+    let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+        owner_reference,
+        world_handle,
+        run_operation_id: operation_id,
+        adapter_admission_digest: admission.digest(),
+        calls: Vec::new(),
+    })?;
+    let root = ReproManifestRootV1::new(ReproManifestRootInputV1 {
+        owner_reference,
+        world_handle,
+        run_operation_id: operation_id,
+        plugin_roster_digest: admission.as_input().scope_digest,
+        adapter_transcript_digest: transcript.digest(),
+        created_at_micros: 2,
+        label: None,
+    })?;
+    let admission_bytes = admission.to_canonical_cbor();
+    let transcript_bytes = transcript.to_canonical_cbor();
+    let recording_bytes = recording.to_canonical_cbor();
+    let root_bytes = root.to_canonical_cbor();
+    let admission_registration = extract_adapter_admission_registration_v1(&admission_bytes)?;
+    let transcript_registration = extract_adapter_transcript_registration_v1(
+        &transcript_bytes,
+        &admission_bytes,
+        &admission_registration,
+    )?;
+    let recording_registration = verifier.derive_native_registration(
+        &owner_id,
+        ErasureArtifactClassV1::TimelineReplay,
+        &recording_bytes,
+    )?;
+    let root_registration =
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
+            root_bytes: &root_bytes,
+            recording_receipt_bytes: &recording_bytes,
+            recording_registration: &recording_registration,
+            transcript_bytes: &transcript_bytes,
+            admission_bytes: &admission_bytes,
+            admission_registration: &admission_registration,
+            transcript_registration: &transcript_registration,
+            owner_id: &owner_id,
+            label_data_class: None,
+        })?;
+    let root_address = root_registration.address();
+    let inputs = [
+        (owner_id, admission_bytes, admission_registration),
+        (owner_id, transcript_bytes, transcript_registration),
+        (owner_id, recording_bytes, recording_registration),
+        (owner_id, root_bytes, root_registration),
+    ]
+    .into_iter()
+    .map(
+        |(owner_id, artifact_bytes, registration)| ArtifactRegistrationInputV1 {
+            owner_id,
+            artifact_bytes,
+            registration_cbor: registration.canonical_cbor().to_vec(),
+        },
+    )
+    .collect();
+    Ok((owner_id, root_address, inputs))
+}
+
+fn close_repro_manifest_recording<R: AdapterRecordingStoreV1 + ?Sized>(
+    store: &mut R,
+    batch: &PreparedArtifactRegistrationBatchV1,
+) -> Result<(), AdapterRecordingStoreErrorV1> {
+    let root = batch
+        .records()
+        .iter()
+        .find(|record| record.registration_address() == batch.root_registration_address())
+        .and_then(|record| ReproManifestRootV1::from_canonical_cbor(record.artifact_bytes()).ok())
+        .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+    let admission = batch
+        .records()
+        .iter()
+        .find(|record| record.artifact_bytes().get(2..6) == Some(b"MAA1"))
+        .and_then(|record| AdapterAdmissionV1::from_canonical_cbor(record.artifact_bytes()).ok())
+        .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+    let session = AdapterRecordingSessionV1::new(
+        root.as_input().owner_reference,
+        root.as_input().world_handle,
+        root.as_input().run_operation_id,
+        admission,
+    )?;
+    store.open_adapter_recording_session(session)?;
+    store
+        .close_adapter_recording_session(
+            root.as_input().owner_reference,
+            root.as_input().run_operation_id,
+        )
+        .map(|_| ())
+}
+
+/// Commit one MRM1 closure of run `seed`, recorded from the World run of
+/// `timeline` and bound to it, whose WCR1 recording is `verifier`'s.
+fn commit_bound_closure(
+    store: &LocalStore,
+    seed: u8,
+    timeline: TimelineId,
+    verifier: &TestOnlyStructuralOwnerVerifier,
+) -> TestResult {
+    let (owner_id, root_address, inputs) = prepare_repro_manifest_inputs(seed, timeline, verifier)?;
+    let batch = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root_address,
+        Some(timeline),
+        inputs,
+        verifier,
+    )?;
+    let mut sqlite = store.sqlite()?;
+    close_repro_manifest_recording(&mut sqlite, &batch)?;
+    EventStore::commit_artifact_registration_batch(&mut sqlite, batch)?;
+    Ok(())
+}
+
+/// The cells decision 1B gives every bound ARD1 row of `class`: its owner
+/// cell, and the Key and Backup cells of each role-7 dependency's target.
+fn ard1_cells(
+    store: &LocalStore,
+    timeline: TimelineId,
+    class: ArtifactDataClassV1,
+) -> TestResult<Vec<Cell>> {
+    let rows = EventStore::artifact_registrations_for_timeline(&store.sqlite()?, timeline, 4_096)?;
+    let mut cells = Vec::new();
+    for row in rows
+        .iter()
+        .filter(|row| row.registration().fields().data_class == class)
+    {
+        let digest = ErasureReferenceV1::from_digest(*row.artifact_digest().as_bytes());
+        let ack_class = if matches!(
+            row.artifact_class(),
+            ErasureArtifactClassV1::CalibrationReport | ErasureArtifactClassV1::ConformanceReport
+        ) {
+            "managed-report"
+        } else {
+            "artifact-store"
+        };
+        cells.push((
+            local_target(row.artifact_class(), digest, reference(0))?,
+            ErasureInventoryCategoryV1::Artifact,
+            ack_class,
+        ));
+        for dependency in &row.registration().fields().key_dependencies {
+            if dependency.identity.role == KeyRoleV1::CommunityArtifactEncryption {
+                cells.extend(key_cells(local_target(
+                    row.artifact_class(),
+                    digest,
+                    pos_core::local_erasure_key_digest_v1(&dependency.identity)?,
+                )?));
+            }
+        }
+    }
+    Ok(cells)
+}
+
+/// An owned store with one private closure, whose recording depends on a
+/// role-7 key, and one consented closure, both bound to the owned Timeline.
+fn ard1_store() -> TestResult<OwnedStore> {
+    let owned = OwnedStore::new()?;
+    let community = pos_core::ArtifactKeyDependencyV1 {
+        identity: KeyIdentityV1::new("community:x", KeyRoleV1::CommunityArtifactEncryption, 1),
+        material_digest: Hash::from_bytes([0x91; 32]),
+        private_material_required: true,
+    };
+    commit_bound_closure(
+        &owned.store,
+        0x51,
+        owned.owned,
+        &TestOnlyStructuralOwnerVerifier {
+            recording_data_class: ArtifactDataClassV1::PrivateSubjectData,
+            recording_keys: vec![community],
+        },
+    )?;
+    commit_bound_closure(
+        &owned.store,
+        0x61,
+        owned.owned,
+        &TestOnlyStructuralOwnerVerifier {
+            recording_data_class: ArtifactDataClassV1::ConsentedSharedData,
+            recording_keys: Vec::new(),
+        },
+    )?;
+    Ok(owned)
+}
+
+#[test]
+fn bound_ard1_rows_of_the_private_class_and_their_role_7_keys_are_targets() -> TestResult {
+    let owned = ard1_store()?;
+    let mut cells = store_cells()?;
+    cells.push(payload_cell(owned.owned)?);
+    cells.extend(subject_key_cells()?);
+    let ard1 = ard1_cells(
+        &owned.store,
+        owned.owned,
+        ArtifactDataClassV1::PrivateSubjectData,
+    )?;
+    // The private recording and its role-7 key: one Artifact, one Key and
+    // one Backup cell; the consented recording is filtered out.
+    assert_eq!(ard1.len(), 3);
+    cells.extend(ard1);
+    let (host, signed) = signed_freeze(
+        &owned.store,
+        1,
+        ErasureScopeV1::PrivateSubjectData,
+        |_| Ok(()),
+        |_| Ok(Vec::new()),
+    )?;
+    assert_committed_freeze(
+        &owned.store,
+        host,
+        request_of(1)?,
+        vec![owned.owned],
+        &cells,
+        &signed,
+    )
+}
+
+#[test]
+fn bound_ard1_rows_of_the_consented_class_are_targets() -> TestResult {
+    let owned = ard1_store()?;
+    let mut cells = store_cells()?;
+    let ard1 = ard1_cells(
+        &owned.store,
+        owned.owned,
+        ArtifactDataClassV1::ConsentedSharedData,
+    )?;
+    assert_eq!(ard1.len(), 1);
+    cells.extend(ard1);
+    let (host, signed) = signed_freeze(
+        &owned.store,
+        2,
+        ErasureScopeV1::ConsentedSharedData,
+        |_| Ok(()),
+        |_| Ok(Vec::new()),
+    )?;
+    assert_committed_freeze(
+        &owned.store,
+        host,
+        request_of(2)?,
+        vec![owned.owned],
+        &cells,
+        &signed,
+    )
 }

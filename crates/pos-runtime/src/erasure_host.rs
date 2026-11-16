@@ -6,8 +6,8 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::authorization_cache::{AuthorizationCacheKeyV1, AuthorizationCacheV1};
 use crate::erasure_authority_view::{
-    ErasureAuthorityReadViewV1, ErasureAuthoritySnapshotViewV1, ErasureAuthorityStoreReadsV1,
-    ErasureRecordedScopeV1, HostAuthorityViewV1, VIEW_LIST_MAX,
+    registration_read_error, ErasureAuthorityReadViewV1, ErasureAuthoritySnapshotViewV1,
+    ErasureAuthorityStoreReadsV1, ErasureRecordedScopeV1, HostAuthorityViewV1, VIEW_LIST_MAX,
 };
 
 use pos_core::{
@@ -1011,9 +1011,13 @@ impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
             .and_then(|store| store.load_authority(grant).ok())
     }
 
-    fn recorded_scope(&self, request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1> {
+    fn recorded_scope(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1> {
         self.try_borrow()
             .ok()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
             .and_then(|store| pos_core::local_erasure_recorded_scope_v1(&**store, request))
     }
 
@@ -1030,13 +1034,7 @@ impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
                     timeline,
                     VIEW_LIST_MAX,
                 )
-                .map_err(|error| {
-                    if error == pos_core::ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds {
-                        ErasureErrorV1::ScopeInvalid
-                    } else {
-                        ErasureErrorV1::ProvenanceMissing
-                    }
-                })
+                .map_err(registration_read_error)
             })
     }
 
@@ -1050,27 +1048,11 @@ impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
             .and_then(|mut store| store.recipient_export_publications(timelines, VIEW_LIST_MAX))
     }
 
-    fn key_identities(
-        &self,
-        owner: &pos_core::OwnerIdV1,
-    ) -> Result<Vec<pos_core::KeyIdentityV1>, ErasureErrorV1> {
+    fn key_registry(&self) -> Result<Option<pos_core::KeyRegistryStateV1>, ErasureErrorV1> {
         self.try_borrow()
             .ok()
             .and_then(|store| store.load_key_registry().ok())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .map(|registry| {
-                registry
-                    .iter()
-                    .flat_map(pos_core::KeyRegistryStateV1::key_records)
-                    .map(|record| record.identity)
-                    .filter(|identity| identity.owner_id == *owner)
-                    .collect::<Vec<_>>()
-            })
-            .and_then(|identities| {
-                (identities.len() <= VIEW_LIST_MAX)
-                    .then_some(identities)
-                    .ok_or(ErasureErrorV1::ScopeInvalid)
-            })
     }
 }
 

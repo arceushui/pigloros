@@ -396,39 +396,48 @@ impl ScopeNodeV1 {
 /// The committed ERSC1 and ERSE1 chain of one request, read through its
 /// current manifest and scope index without validating the record.
 ///
-/// `None` when the request has no committed scope or any object cannot be
-/// read or decoded. A caller uses it only as a hint: core recovery verifies
-/// the record and checks every observation built from it.
+/// `Ok(None)` when the request has no manifest or no committed scope. Once
+/// a scope is recorded, an unreadable or undecodable object is an error.
 pub(super) fn recorded_scope<P: ErasurePersistencePortV1 + ?Sized>(
     port: &P,
     request: ErasureReferenceV1,
-) -> Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)> {
+) -> Result<Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)>, ErasureErrorV1> {
     port.read_manifest(request)
-        .ok()
-        .flatten()
-        .and_then(|stored| ManifestV1::decode(stored.canonical_cbor()).ok())
-        .and_then(|manifest| manifest.scope)
-        .and_then(|scope| port.read_object(scope).ok())
-        .and_then(|bytes| ErasureScopeCommitmentV1::from_canonical_cbor(&bytes).ok())
-        .and_then(|scope| {
-            port.scope_index_count(request)
-                .ok()
-                .and_then(|count| {
-                    (0..count)
-                        .map(|ordinal| {
-                            port.scope_node_ref(request, ordinal)
-                                .ok()
-                                .flatten()
-                                .and_then(|node| port.read_object(node).ok())
-                                .and_then(|bytes| ScopeNodeV1::decode(&bytes).ok())
-                                .and_then(|node| port.read_object(node.extension).ok())
-                                .and_then(|bytes| {
-                                    ErasureScopeExtensionV1::from_canonical_cbor(&bytes).ok()
+        .and_then(|stored| {
+            stored
+                .map(|stored| ManifestV1::decode(stored.canonical_cbor()))
+                .transpose()
+        })
+        .and_then(|manifest| {
+            manifest
+                .and_then(|manifest| manifest.scope)
+                .map(|scope| {
+                    port.read_object(scope)
+                        .and_then(|bytes| ErasureScopeCommitmentV1::from_canonical_cbor(&bytes))
+                        .and_then(|scope| {
+                            port.scope_index_count(request)
+                                .and_then(|count| {
+                                    (0..count)
+                                        .map(|ordinal| {
+                                            port.scope_node_ref(request, ordinal)
+                                                .and_then(|node| {
+                                                    node.ok_or(ErasureErrorV1::ProvenanceMissing)
+                                                })
+                                                .and_then(|node| port.read_object(node))
+                                                .and_then(|bytes| ScopeNodeV1::decode(&bytes))
+                                                .and_then(|node| port.read_object(node.extension))
+                                                .and_then(|bytes| {
+                                                    ErasureScopeExtensionV1::from_canonical_cbor(
+                                                        &bytes,
+                                                    )
+                                                })
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()
                                 })
+                                .map(|extensions| (scope, extensions))
                         })
-                        .collect::<Option<Vec<_>>>()
                 })
-                .map(|extensions| (scope, extensions))
+                .transpose()
         })
 }
 

@@ -25,13 +25,16 @@ use pos_core::{
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureScopeV1,
     ErasureVerifiedTopologyObservationV1, KeyIdentityV1, KeyRoleV1, LocalErasureBundleV1,
     LocalErasureLineageRuleV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, OwnerIdV1,
-    PublicKey, Signature, TimelineId, ERASURE_MAX_TARGETS,
+    PublicKey, Signature, TimelineId, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_TARGETS,
 };
 use pos_crypto::key_roles::verify_for_role;
 use pos_crypto::signing::verifying_key_from_public_key;
 
 use super::authority::LocalErasureAuthorityV1;
-use super::{LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_POLICY_REFERENCE_V1};
+use super::{
+    LocalErasureClassificationRowV1, LOCAL_ERASURE_CLASSIFICATION_V1,
+    LOCAL_ERASURE_POLICY_REFERENCE_V1,
+};
 use crate::ErasureAuthorityReadViewV1;
 
 use ErasureArtifactClassV1::{CalibrationReport, ConformanceReport, Export, TimelineReplay};
@@ -52,29 +55,90 @@ type ClosureCellV1 = (
     &'static str,
 );
 
-/// The closure of one request: each target with its applicable categories.
-type ClosureV1 = BTreeMap<ErasureRequiredTargetV1, Vec<(ErasureInventoryCategoryV1, &'static str)>>;
+/// The closure of one request: each target with its set of applicable
+/// cells. A cell reached twice, for example through two ARD1 rows of one
+/// artifact, is one cell.
+pub(super) type ClosureV1 =
+    BTreeMap<ErasureRequiredTargetV1, BTreeSet<(ErasureInventoryCategoryV1, &'static str)>>;
 
-/// Everything one freeze admission commits, before its ELS1 exists.
-pub(super) struct FreezeDraftV1 {
-    targets: Vec<ErasureRequiredTargetV1>,
-    scope: ErasureScopeCommitmentInputV1,
-    obligations: Vec<ErasureObligationV1>,
-    obligation_set: ErasureObligationSetV1,
-    admission: ErasureFreezeAdmissionEvidenceInputV1,
-    /// `CA(ERFA1-AUTH)`, the digest a purpose-0 ELS1 signs.
-    pub(super) body_digest: ErasureReferenceV1,
-    /// ELB1 and ELLR1, retained before the freeze commits.
-    pub(super) retained: Vec<Vec<u8>>,
+/// Why a freeze plan stops short of an admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ShortfallV1 {
+    /// A bound overflow or an eligible cell without an ELP1 row: the
+    /// freeze commits it as `Rejected(ScopeInvalid)`.
+    Refused,
+    /// Any other failure: returned, never committed.
+    Failed(ErasureErrorV1),
 }
 
-/// Map a closure bound overflow to `T::default()`; any other error stays an
-/// error. A bound overflow is every `ScopeInvalid` of the closure: the
-/// target cap, a view list over its bound, and the ERSC1 cap.
-pub(super) fn overflow<T: Default>(error: ErasureErrorV1) -> Result<T, ErasureErrorV1> {
-    (error == ErasureErrorV1::ScopeInvalid)
-        .then(T::default)
-        .ok_or(error)
+impl From<ErasureErrorV1> for ShortfallV1 {
+    fn from(error: ErasureErrorV1) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<ShortfallV1> for ErasureErrorV1 {
+    fn from(shortfall: ShortfallV1) -> Self {
+        match shortfall {
+            ShortfallV1::Refused => Self::ScopeInvalid,
+            ShortfallV1::Failed(error) => error,
+        }
+    }
+}
+
+impl ShortfallV1 {
+    /// A failed view list read: its `ScopeInvalid` is the list's bound
+    /// overflow, every other error a read failure.
+    pub(super) fn from_list(error: ErasureErrorV1) -> Self {
+        if error == ErasureErrorV1::ScopeInvalid {
+            Self::Refused
+        } else {
+            Self::Failed(error)
+        }
+    }
+
+    /// A refusal resolves to `None`; a failure stays an error.
+    pub(super) fn resolved<T>(self) -> Result<Option<T>, ErasureErrorV1> {
+        match self {
+            Self::Refused => Ok(None),
+            Self::Failed(error) => Err(error),
+        }
+    }
+}
+
+/// Add `cells` to `closure`, refused once it holds more than 4,096 targets
+/// (adr060 :513). Each target holds at most one cell per category, so the
+/// per-category bound follows from the total.
+fn extend_bounded(closure: &mut ClosureV1, cells: Vec<ClosureCellV1>) -> Result<(), ShortfallV1> {
+    for (target, category, ack_class) in cells {
+        closure
+            .entry(target)
+            .or_default()
+            .insert((category, ack_class));
+    }
+    (closure.len() <= ERASURE_MAX_TARGETS)
+        .then_some(())
+        .ok_or(ShortfallV1::Refused)
+}
+
+/// Whether every cell of `closure` is a row of `classification` for the
+/// request's data class (the D1-a permit set).
+pub(super) fn permitted(
+    closure: &ClosureV1,
+    class: ArtifactDataClassV1,
+    classification: &[LocalErasureClassificationRowV1],
+) -> bool {
+    closure.iter().all(|(target, cells)| {
+        cells.iter().all(|&(category, ack_class)| {
+            classification.contains(&(target.artifact_class, class, category, ack_class))
+        })
+    })
+}
+
+/// Whether an ERSC1 of `[subject]` and `timelines` affected Timelines fits
+/// the combined 65,536-entry reference cap (adr060 :1056).
+pub(super) const fn scope_fits(timelines: usize) -> bool {
+    timelines < ERASURE_MAX_INVENTORY_TIMELINES
 }
 
 /// The ELP1 data class a request scope selects. ERQ1 of a Local request
@@ -99,61 +163,81 @@ impl LocalErasureAuthorityV1 {
     /// Every Timeline the actor owns in this snapshot, minus the bundle's
     /// host Timelines, plus every Fork descendant by `fork_point` lineage
     /// (ADR-136 §3, *Affected scope at freeze*), in increasing order.
+    ///
+    /// # Errors
+    /// `ProvenanceMissing` when a topology entry has no Timeline row.
     pub(super) fn affected_timelines(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         actor: EntityId,
-    ) -> Vec<TimelineId> {
-        let rows = view
-            .topology()
+    ) -> Result<Vec<TimelineId>, ErasureErrorV1> {
+        view.topology()
             .iter()
-            .filter_map(|timeline| view.timeline_meta(*timeline))
-            .filter(|row| !self.bundle.host_timelines.contains(&row.id))
-            .collect::<Vec<_>>();
-        let mut children = BTreeMap::<TimelineId, Vec<TimelineId>>::new();
-        for row in &rows {
-            if let Some((parent, _)) = row.fork_point {
-                children.entry(parent).or_default().push(row.id);
-            }
-        }
-        let mut affected = rows
-            .iter()
-            .filter(|row| row.owner == Some(actor))
-            .map(|row| row.id)
-            .collect::<BTreeSet<_>>();
-        let mut pending = affected.iter().copied().collect::<Vec<_>>();
-        while let Some(parent) = pending.pop() {
-            let fresh = children
-                .get(&parent)
-                .into_iter()
-                .flatten()
-                .filter(|child| affected.insert(**child))
-                .copied()
-                .collect::<Vec<_>>();
-            pending.extend(fresh);
-        }
-        affected.into_iter().collect()
+            .map(|timeline| {
+                view.timeline_meta(*timeline)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|rows| {
+                let rows = rows
+                    .into_iter()
+                    .filter(|row| !self.bundle.host_timelines.contains(&row.id))
+                    .collect::<Vec<_>>();
+                let mut children = BTreeMap::<TimelineId, Vec<TimelineId>>::new();
+                for row in &rows {
+                    if let Some((parent, _)) = row.fork_point {
+                        children.entry(parent).or_default().push(row.id);
+                    }
+                }
+                let mut affected = rows
+                    .iter()
+                    .filter(|row| row.owner == Some(actor))
+                    .map(|row| row.id)
+                    .collect::<BTreeSet<_>>();
+                let mut pending = affected.iter().copied().collect::<Vec<_>>();
+                while let Some(parent) = pending.pop() {
+                    let fresh = children
+                        .get(&parent)
+                        .into_iter()
+                        .flatten()
+                        .filter(|child| affected.insert(**child))
+                        .copied()
+                        .collect::<Vec<_>>();
+                    pending.extend(fresh);
+                }
+                affected.into_iter().collect()
+            })
     }
 
     /// The closure of a request of `actor` for `scope` over `affected`, by
     /// the target table of decision 1B: one target per destructible thing,
-    /// each carrying the single local replica.
+    /// each carrying the single local replica. Reading stops as soon as the
+    /// closure exceeds 4,096 targets.
     ///
     /// # Errors
-    /// `ScopeInvalid` above 4,096 targets or when a view list is over its
-    /// bound, or the closed read or encoding error.
+    /// `Refused` above 4,096 targets or when a view list is over its bound;
+    /// otherwise the closed read or encoding error.
     pub(super) fn closure(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         actor: EntityId,
         scope: ErasureScopeV1,
         affected: &[TimelineId],
-    ) -> Result<ClosureV1, ErasureErrorV1> {
+    ) -> Result<ClosureV1, ShortfallV1> {
         let store = self.bundle.store_identity;
         let private = scope == ErasureScopeV1::PrivateSubjectData;
+        let class = data_class(scope);
+        let mut closure = ClosureV1::new();
         local_erasure_replica_set_v1(store)
             .and_then(|replica_set| {
-                local_erasure_replica_id_v1(store).map(|replica_id| {
+                local_erasure_replica_id_v1(store).map(|replica_id| (replica_set, replica_id))
+            })
+            .and_then(|replicas| {
+                local_erasure_store_target_v1(store).map(|digest| (replicas, digest))
+            })
+            .map_err(ShortfallV1::from)
+            .and_then(|((replica_set, replica_id), store_digest)| {
+                let target =
                     move |artifact_class, artifact_digest, key_digest| ErasureRequiredTargetV1 {
                         artifact_class,
                         artifact_digest,
@@ -161,64 +245,69 @@ impl LocalErasureAuthorityV1 {
                         key_digest,
                         replica_set,
                         replica_id,
-                    }
-                })
-            })
-            .and_then(|target| {
-                let store_cells = local_erasure_store_target_v1(store).map(|digest| {
-                    let store_target = target(TimelineReplay, digest, NO_COMPONENT);
+                    };
+                let store_target = target(TimelineReplay, store_digest, NO_COMPONENT);
+                extend_bounded(
+                    &mut closure,
                     vec![
                         (store_target, Artifact, "client-cache-signal"),
                         (store_target, Replica, "local-replica"),
-                    ]
-                });
-                let payload_cells = affected
-                    .iter()
-                    .filter(|_| private)
-                    .map(|timeline| {
-                        local_erasure_timeline_payload_v1(*timeline).map(|digest| {
-                            (
-                                target(TimelineReplay, digest, NO_COMPONENT),
-                                Artifact,
-                                "timeline-payload",
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>();
-                let key_cells = Self::subject_keys(view, actor, private).and_then(|keys| {
-                    keys.iter()
-                        .map(|identity| {
-                            local_erasure_key_digest_v1(identity)
-                                .map(|digest| target(TimelineReplay, NO_COMPONENT, digest))
+                    ],
+                )
+                .and_then(|()| {
+                    affected
+                        .iter()
+                        .filter(|_| private)
+                        .map(|timeline| {
+                            local_erasure_timeline_payload_v1(*timeline).map(|digest| {
+                                (
+                                    target(TimelineReplay, digest, NO_COMPONENT),
+                                    Artifact,
+                                    "timeline-payload",
+                                )
+                            })
                         })
                         .collect::<Result<Vec<_>, _>>()
-                        .map(|targets| key_and_backup_cells(&targets))
-                });
-                let artifact_cells = Self::registrations(view, scope, affected)
-                    .and_then(|rows| registration_cells(&rows, target));
-                let export_cells = Self::exports(view, private, affected, target);
-                [
-                    store_cells,
-                    payload_cells,
-                    key_cells,
-                    artifact_cells,
-                    export_cells,
-                ]
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
+                        .map_err(ShortfallV1::from)
+                        .and_then(|cells| extend_bounded(&mut closure, cells))
+                })
+                .and_then(|()| {
+                    Self::subject_keys(view, actor, private)
+                        .map_err(ShortfallV1::from_list)
+                        .and_then(|keys| {
+                            keys.iter()
+                                .map(|identity| {
+                                    local_erasure_key_digest_v1(identity)
+                                        .map(|digest| target(TimelineReplay, NO_COMPONENT, digest))
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(ShortfallV1::from)
+                        })
+                        .and_then(|targets| {
+                            extend_bounded(&mut closure, key_and_backup_cells(&targets))
+                        })
+                })
+                .and_then(|()| {
+                    affected.iter().try_for_each(|timeline| {
+                        view.artifact_registrations(*timeline)
+                            .map_err(ShortfallV1::from_list)
+                            .and_then(|rows| {
+                                let rows = rows
+                                    .into_iter()
+                                    .filter(|row| row.registration().fields().data_class == class)
+                                    .collect::<Vec<_>>();
+                                registration_cells(&rows, target).map_err(ShortfallV1::from)
+                            })
+                            .and_then(|cells| extend_bounded(&mut closure, cells))
+                    })
+                })
+                .and_then(|()| {
+                    Self::exports(view, private, affected, target)
+                        .map_err(ShortfallV1::from_list)
+                        .and_then(|cells| extend_bounded(&mut closure, cells))
+                })
             })
-            .and_then(|cells| {
-                let mut closure = ClosureV1::new();
-                for (target, category, ack_class) in cells.into_iter().flatten() {
-                    closure
-                        .entry(target)
-                        .or_default()
-                        .push((category, ack_class));
-                }
-                (closure.len() <= ERASURE_MAX_TARGETS)
-                    .then_some(closure)
-                    .ok_or(ErasureErrorV1::ScopeInvalid)
-            })
+            .map(|()| closure)
     }
 
     /// The role-0 keys of the ADR-091 `subject:<hex>` owner, every epoch,
@@ -243,30 +332,6 @@ impl LocalErasureAuthorityV1 {
                     })
                 },
             )
-    }
-
-    /// Every ARD1 registration bound to an affected Timeline whose data
-    /// class is the request's, once each by registration address.
-    fn registrations(
-        view: &dyn ErasureAuthorityReadViewV1,
-        scope: ErasureScopeV1,
-        affected: &[TimelineId],
-    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1> {
-        let class = data_class(scope);
-        affected
-            .iter()
-            .map(|timeline| view.artifact_registrations(*timeline))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|lists| {
-                lists
-                    .into_iter()
-                    .flatten()
-                    .filter(|row| row.registration().fields().data_class == class)
-                    .map(|row| (row.registration_address(), row))
-                    .collect::<BTreeMap<_, _>>()
-                    .into_values()
-                    .collect()
-            })
     }
 
     /// One `export-recipient` cell per (publication, grantee) of an affected
@@ -314,25 +379,27 @@ impl LocalErasureAuthorityV1 {
         actor: EntityId,
         scope: ErasureScopeV1,
     ) -> Result<bool, ErasureErrorV1> {
-        let affected = self.affected_timelines(view, actor);
-        self.closure(view, actor, scope, &affected)
-            .map(|_| true)
-            .or_else(overflow::<bool>)
+        self.affected_timelines(view, actor)
+            .map_err(ShortfallV1::from)
+            .and_then(|affected| self.closure(view, actor, scope, &affected))
+            .map(Some)
+            .or_else(ShortfallV1::resolved)
+            .map(|closure| closure.is_some())
     }
 
     /// The freeze `request` admits on this view, before its signature: the
     /// closure under the ELP1 permit set, ERSC1, EROS1 and ERFA1.
     ///
     /// # Errors
-    /// `ScopeInvalid` for a bound overflow or an eligible cell without an
-    /// ELP1 row, which the freeze commits as `Rejected`; `PolicyConflict`
-    /// for a request the installed inventory does not hold; `Unauthorized`
-    /// when its ERAZ1 no longer verifies.
+    /// `Refused` for a bound overflow or an eligible cell without an ELP1
+    /// row, which the freeze commits as `Rejected`; otherwise `Failed`:
+    /// `PolicyConflict` for a request the installed inventory does not
+    /// hold, `Unauthorized` when its ERAZ1 no longer verifies.
     pub(super) fn freeze_draft(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
-    ) -> Result<FreezeDraftV1, ErasureErrorV1> {
+    ) -> Result<FreezeDraftV1, ShortfallV1> {
         view.verified_request(request)
             .map(|state| state.request().clone())
             .ok_or(ErasureErrorV1::PolicyConflict)
@@ -341,9 +408,25 @@ impl LocalErasureAuthorityV1 {
                     .map(|(_, authorization)| (erq1, authorization.actor_entity))
             })
             .and_then(|(erq1, actor)| {
-                let affected = self.affected_timelines(view, actor);
+                self.affected_timelines(view, actor)
+                    .map(|affected| (erq1, actor, affected))
+            })
+            .map_err(ShortfallV1::from)
+            .and_then(|(erq1, actor, affected)| {
                 self.closure(view, actor, erq1.scope(), &affected)
-                    .and_then(|closure| self.draft(&erq1, affected, &closure))
+                    .and_then(|closure| {
+                        (permitted(
+                            &closure,
+                            data_class(erq1.scope()),
+                            &LOCAL_ERASURE_CLASSIFICATION_V1,
+                        ) && scope_fits(affected.len()))
+                        .then_some(closure)
+                        .ok_or(ShortfallV1::Refused)
+                    })
+                    .and_then(|closure| {
+                        self.draft(&erq1, affected, &closure)
+                            .map_err(ShortfallV1::from)
+                    })
             })
     }
 
@@ -355,25 +438,12 @@ impl LocalErasureAuthorityV1 {
         closure: &ClosureV1,
     ) -> Result<FreezeDraftV1, ErasureErrorV1> {
         let request = erq1.reference();
-        let class = data_class(erq1.scope());
-        let permitted = closure.iter().all(|(target, cells)| {
-            cells.iter().all(|&(category, ack_class)| {
-                LOCAL_ERASURE_CLASSIFICATION_V1.contains(&(
-                    target.artifact_class,
-                    class,
-                    category,
-                    ack_class,
-                ))
-            })
-        });
         let targets = closure.keys().copied().collect::<Vec<_>>();
         let lineage = LocalErasureLineageRuleV1 {
             subject: erq1.subject(),
         };
-        permitted
-            .then_some(())
-            .ok_or(ErasureErrorV1::ScopeInvalid)
-            .and_then(|()| self.bundle.to_canonical_cbor())
+        self.bundle
+            .to_canonical_cbor()
             .and_then(|bundle| {
                 self.bundle.reference().and_then(|trust| {
                     lineage.to_canonical_cbor().and_then(|lineage_bytes| {
@@ -698,6 +768,9 @@ pub(super) fn verified_signature(
 ) -> bool {
     LocalErasureSignatureV1::from_canonical_cbor(evidence)
         .ok()
+        // The purpose and digest are also bound by the signed message, so a
+        // mismatch could not verify anyway; the explicit filter is defence in
+        // depth that refuses before any signature work.
         .filter(|signature| {
             signature.purpose == purpose
                 && signature.signed_digest == digest
@@ -734,42 +807,43 @@ pub(super) fn observation(
     request: ErasureReferenceV1,
     manifest_digest: ErasureReferenceV1,
     candidate: Option<TimelineId>,
-) -> ErasureVerifiedTopologyObservationV1 {
-    let bindings = view
-        .recorded_scope(request)
-        .map(|(scope, extensions)| {
-            scope
-                .scope_members()
-                .iter()
-                .take(1)
-                .flat_map(|member| {
-                    scope
-                        .scope_timeline_ids()
-                        .iter()
-                        .map(move |timeline| (*timeline, *member))
-                })
-                .chain(
-                    extensions
-                        .iter()
-                        .map(|extension| (extension.child_timeline(), extension.fork())),
-                )
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
-    let unaffected = view
-        .topology()
-        .iter()
-        .copied()
-        .chain(candidate)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|timeline| !bindings.contains_key(timeline))
-        .collect();
-    ErasureVerifiedTopologyObservationV1::new(
-        manifest_digest,
-        bindings.into_iter().collect(),
-        unaffected,
-    )
+) -> Result<ErasureVerifiedTopologyObservationV1, ErasureErrorV1> {
+    view.recorded_scope(request).map(|recorded| {
+        let bindings = recorded
+            .map(|(scope, extensions)| {
+                scope
+                    .scope_members()
+                    .first()
+                    .into_iter()
+                    .flat_map(|member| {
+                        scope
+                            .scope_timeline_ids()
+                            .iter()
+                            .map(move |timeline| (*timeline, *member))
+                    })
+                    .chain(
+                        extensions
+                            .iter()
+                            .map(|extension| (extension.child_timeline(), extension.fork())),
+                    )
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let unaffected = view
+            .topology()
+            .iter()
+            .copied()
+            .chain(candidate)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|timeline| !bindings.contains_key(timeline))
+            .collect();
+        ErasureVerifiedTopologyObservationV1::new(
+            manifest_digest,
+            bindings.into_iter().collect(),
+            unaffected,
+        )
+    })
 }
 
 /// Whether one ERSE1 is the Local extension of its child: its Fork scope is
@@ -911,5 +985,122 @@ mod tests {
         assert_eq!(artifact_ack_class(ConformanceReport), "managed-report");
         assert_eq!(artifact_ack_class(Export), "artifact-store");
         Ok(())
+    }
+
+    fn key_target(seed: u8) -> ErasureRequiredTargetV1 {
+        target(
+            TimelineReplay,
+            NO_COMPONENT,
+            ErasureReferenceV1::from_digest([seed; 32]),
+        )
+    }
+
+    /// `count` distinct key targets with their Key and Backup cells.
+    fn key_cells(count: usize) -> Vec<ClosureCellV1> {
+        let targets = (0..count)
+            .map(|index| {
+                let mut digest = [0xaa; 32];
+                digest[..8]
+                    .copy_from_slice(&u64::try_from(index).unwrap_or_default().to_be_bytes());
+                target(
+                    TimelineReplay,
+                    NO_COMPONENT,
+                    ErasureReferenceV1::from_digest(digest),
+                )
+            })
+            .collect::<Vec<_>>();
+        key_and_backup_cells(&targets)
+    }
+
+    #[test]
+    fn the_closure_holds_exactly_4096_targets_and_one_cell_per_reach() {
+        let store = target(
+            TimelineReplay,
+            ErasureReferenceV1::from_digest([0x04; 32]),
+            NO_COMPONENT,
+        );
+        let store_cells = vec![
+            (store, Artifact, "client-cache-signal"),
+            (store, Replica, "local-replica"),
+        ];
+        // 4,095 key targets and the store target: 4,095 Key and 4,095
+        // Backup obligations, 4,096 targets.
+        let mut closure = ClosureV1::new();
+        assert_eq!(extend_bounded(&mut closure, store_cells.clone()), Ok(()));
+        assert_eq!(extend_bounded(&mut closure, key_cells(4_095)), Ok(()));
+        assert_eq!(closure.len(), 4_096);
+        let mut over = ClosureV1::new();
+        assert_eq!(extend_bounded(&mut over, store_cells), Ok(()));
+        assert_eq!(
+            extend_bounded(&mut over, key_cells(4_096)),
+            Err(ShortfallV1::Refused)
+        );
+        // A cell reached twice is one cell.
+        let mut twice = ClosureV1::new();
+        let cells = key_and_backup_cells(&[key_target(0x05)]);
+        assert_eq!(extend_bounded(&mut twice, cells.clone()), Ok(()));
+        assert_eq!(extend_bounded(&mut twice, cells), Ok(()));
+        assert_eq!(twice.get(&key_target(0x05)).map(BTreeSet::len), Some(2));
+    }
+
+    #[test]
+    fn an_unclassified_cell_and_an_over_cap_scope_are_refused() {
+        let mut closure = ClosureV1::new();
+        assert_eq!(
+            extend_bounded(&mut closure, key_and_backup_cells(&[key_target(0x06)])),
+            Ok(())
+        );
+        let private = ArtifactDataClassV1::PrivateSubjectData;
+        assert!(permitted(
+            &closure,
+            private,
+            &LOCAL_ERASURE_CLASSIFICATION_V1
+        ));
+        // A table without the Backup row refuses the Backup cell.
+        let pruned = LOCAL_ERASURE_CLASSIFICATION_V1
+            .iter()
+            .copied()
+            .filter(|row| *row != (TimelineReplay, private, Backup, "local-backup-inventory"))
+            .collect::<Vec<_>>();
+        assert!(!permitted(&closure, private, &pruned));
+        // The other data class has its own rows.
+        assert!(permitted(
+            &closure,
+            ArtifactDataClassV1::ConsentedSharedData,
+            &LOCAL_ERASURE_CLASSIFICATION_V1
+        ));
+        assert!(!permitted(
+            &closure,
+            ArtifactDataClassV1::PublicRecord,
+            &LOCAL_ERASURE_CLASSIFICATION_V1
+        ));
+        // ERSC1 holds the subject and at most 65,535 Timelines.
+        assert!(scope_fits(65_535));
+        assert!(!scope_fits(65_536));
+    }
+
+    #[test]
+    fn only_a_refusal_is_committed() {
+        assert_eq!(
+            ShortfallV1::from_list(ErasureErrorV1::ScopeInvalid),
+            ShortfallV1::Refused
+        );
+        assert_eq!(
+            ShortfallV1::from_list(ErasureErrorV1::ProvenanceMissing),
+            ShortfallV1::Failed(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(ShortfallV1::Refused.resolved::<()>(), Ok(None));
+        assert_eq!(
+            ShortfallV1::Failed(ErasureErrorV1::ScopeInvalid).resolved::<()>(),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasureErrorV1::from(ShortfallV1::Refused),
+            ErasureErrorV1::ScopeInvalid
+        );
+        assert_eq!(
+            ErasureErrorV1::from(ShortfallV1::Failed(ErasureErrorV1::Unauthorized)),
+            ErasureErrorV1::Unauthorized
+        );
     }
 }

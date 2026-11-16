@@ -3936,15 +3936,18 @@ pub use local_records::{
 /// current manifest and scope index without validating the record
 /// (ADR-136 companion §2.6, `scope_commitment` and `scope_extensions`).
 ///
-/// It returns `None` when the request has no committed scope or any object
-/// cannot be read or decoded. The result is evidence, not authority: core
-/// recovery verifies the record itself and checks every topology
-/// observation an authority builds from it.
-#[must_use]
+/// The result is evidence, not authority: core recovery verifies the record
+/// itself and checks every topology observation an authority builds from
+/// it.
+///
+/// # Errors
+/// Once the manifest records a scope, a closed read or decoding error of
+/// any object of the chain; `Ok(None)` only when the request has no
+/// manifest or no committed scope.
 pub fn local_erasure_recorded_scope_v1<P: ErasurePersistencePortV1 + ?Sized>(
     port: &P,
     request: ErasureReferenceV1,
-) -> Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)> {
+) -> Result<Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)>, ErasureErrorV1> {
     persistence::recorded_scope(port, request)
 }
 

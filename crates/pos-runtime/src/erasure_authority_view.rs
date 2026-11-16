@@ -1,12 +1,12 @@
 //! The erasure authority's read-only snapshot view (ADR-136 companion §2.6).
 
-use std::{rc::Rc, sync::Arc};
+use std::{cell::OnceCell, rc::Rc, sync::Arc};
 
 use pos_core::{
     ArtifactRegistrationCatalogRowV1, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1,
     ErasureErrorV1, ErasureReferenceV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureVerifiedInventoryV1, ErasureVerifiedStateV1, Hash, KeyIdentityV1, OwnerIdV1,
-    PersistedAuthorityV1, RecipientExportPublicationRowV1, TimelineId,
+    ErasureVerifiedInventoryV1, ErasureVerifiedStateV1, Hash, KeyIdentityV1, KeyRegistryStateV1,
+    OwnerIdV1, PersistedAuthorityV1, RecipientExportPublicationRowV1, TimelineId,
 };
 
 /// The committed ERSC1 of one request and its ERSE1 chain in ordinal order.
@@ -62,10 +62,17 @@ pub trait ErasureAuthorityReadViewV1: view_sealed::Sealed {
 
     /// The committed ERSC1 and ERSE1 chain of one request, read inside the
     /// host command that built this view (companion §2.6
-    /// `scope_commitment` and `scope_extensions`). `None` when the request
-    /// has no committed scope or it cannot be read; core recovery checks
-    /// every observation built from it.
-    fn recorded_scope(&self, request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1>;
+    /// `scope_commitment` and `scope_extensions`). `Ok(None)` when the
+    /// request has no committed scope; core recovery checks every
+    /// observation built from it.
+    ///
+    /// # Errors
+    /// [`ErasureErrorV1::ProvenanceMissing`] outside a host command, or the
+    /// closed read error of a recorded scope.
+    fn recorded_scope(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1>;
 
     /// Every ARD1 registration bound to `timeline`, in registration-address
     /// order (companion §2.6 `artifact_registrations`).
@@ -104,6 +111,19 @@ pub trait ErasureAuthorityReadViewV1: view_sealed::Sealed {
 /// per-category obligation bound.
 pub(crate) const VIEW_LIST_MAX: usize = pos_core::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY;
 
+/// The view error of a failed ARD1 Timeline read: the read's bound
+/// overflow is the list's `ScopeInvalid`, any other failure an unreadable
+/// store.
+pub(crate) fn registration_read_error(
+    error: pos_core::ArtifactRegistrationPersistenceErrorV1,
+) -> ErasureErrorV1 {
+    if error == pos_core::ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds {
+        ErasureErrorV1::ScopeInvalid
+    } else {
+        ErasureErrorV1::ProvenanceMissing
+    }
+}
+
 mod view_sealed {
     /// Keeps the view closed: only the execution host's view implements it.
     pub trait Sealed {}
@@ -118,7 +138,10 @@ pub(crate) trait ErasureAuthorityStoreReadsV1 {
     fn local_principal_authority(&self, grant: Hash) -> Option<PersistedAuthorityV1>;
 
     /// The committed ERSC1 and ERSE1 chain of one request.
-    fn recorded_scope(&self, request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1>;
+    fn recorded_scope(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1>;
 
     /// The ARD1 rows bound to one Timeline, at most [`VIEW_LIST_MAX`].
     fn artifact_registrations(
@@ -133,8 +156,8 @@ pub(crate) trait ErasureAuthorityStoreReadsV1 {
         timelines: &[TimelineId],
     ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
 
-    /// The key-registry identities of one owner, at most [`VIEW_LIST_MAX`].
-    fn key_identities(&self, owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1>;
+    /// The whole key registry, read once per view.
+    fn key_registry(&self) -> Result<Option<KeyRegistryStateV1>, ErasureErrorV1>;
 }
 
 /// The reads of a view handed out of its host command: none.
@@ -149,8 +172,11 @@ impl ErasureAuthorityStoreReadsV1 for DetachedStoreReadsV1 {
         None
     }
 
-    fn recorded_scope(&self, _request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1> {
-        None
+    fn recorded_scope(
+        &self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
     }
 
     fn artifact_registrations(
@@ -167,7 +193,7 @@ impl ErasureAuthorityStoreReadsV1 for DetachedStoreReadsV1 {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 
-    fn key_identities(&self, _owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1> {
+    fn key_registry(&self) -> Result<Option<KeyRegistryStateV1>, ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 }
@@ -202,6 +228,8 @@ impl ErasureAuthoritySnapshotViewV1 {
 pub(crate) struct HostAuthorityViewV1<'reads> {
     snapshot: Rc<ErasureAuthoritySnapshotViewV1>,
     reads: &'reads dyn ErasureAuthorityStoreReadsV1,
+    /// The key registry, read at most once by this view.
+    key_registry: OnceCell<Result<Option<KeyRegistryStateV1>, ErasureErrorV1>>,
 }
 
 impl<'reads> HostAuthorityViewV1<'reads> {
@@ -210,7 +238,11 @@ impl<'reads> HostAuthorityViewV1<'reads> {
         snapshot: Rc<ErasureAuthoritySnapshotViewV1>,
         reads: &'reads dyn ErasureAuthorityStoreReadsV1,
     ) -> Self {
-        Self { snapshot, reads }
+        Self {
+            snapshot,
+            reads,
+            key_registry: OnceCell::new(),
+        }
     }
 }
 
@@ -220,6 +252,7 @@ impl HostAuthorityViewV1<'static> {
         Self {
             snapshot: Rc::new(snapshot),
             reads: &DETACHED,
+            key_registry: OnceCell::new(),
         }
     }
 }
@@ -275,7 +308,10 @@ impl ErasureAuthorityReadViewV1 for HostAuthorityViewV1<'_> {
         self.reads.local_principal_authority(grant)
     }
 
-    fn recorded_scope(&self, request: ErasureReferenceV1) -> Option<ErasureRecordedScopeV1> {
+    fn recorded_scope(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1> {
         self.reads.recorded_scope(request)
     }
 
@@ -294,6 +330,46 @@ impl ErasureAuthorityReadViewV1 for HostAuthorityViewV1<'_> {
     }
 
     fn key_identities(&self, owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1> {
-        self.reads.key_identities(owner)
+        self.key_registry
+            .get_or_init(|| self.reads.key_registry())
+            .as_ref()
+            .map_err(ErasureErrorV1::clone)
+            .map(|registry| {
+                registry
+                    .iter()
+                    .flat_map(KeyRegistryStateV1::key_records)
+                    .map(|record| record.identity)
+                    .filter(|identity| identity.owner_id == *owner)
+                    .collect::<Vec<_>>()
+            })
+            .and_then(|identities| {
+                (identities.len() <= VIEW_LIST_MAX)
+                    .then_some(identities)
+                    .ok_or(ErasureErrorV1::ScopeInvalid)
+            })
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use pos_core::ArtifactRegistrationPersistenceErrorV1;
+
+    #[test]
+    fn only_an_over_bound_ard1_read_is_scope_invalid() {
+        assert_eq!(
+            registration_read_error(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds),
+            ErasureErrorV1::ScopeInvalid
+        );
+        for error in [
+            ArtifactRegistrationPersistenceErrorV1::StorageFailure,
+            ArtifactRegistrationPersistenceErrorV1::CorruptCatalog,
+        ] {
+            assert_eq!(
+                registration_read_error(error),
+                ErasureErrorV1::ProvenanceMissing
+            );
+        }
     }
 }
