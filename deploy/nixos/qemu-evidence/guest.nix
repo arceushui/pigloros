@@ -26,7 +26,7 @@ let
   # library calls behind the pos-sandboxd `test-support` feature. The
   # official Rust 1.97.1 binaries (rust-toolchain.toml), which nixpkgs pins
   # by SHA-256 as rust_1_97's bootstrap compiler, build it; only the Cargo
-  # workspace is in its source.
+  # workspace and the fixtures it compiles in are in its source.
   rustToolchain = pkgs.rust_1_97.packages.prebuilt;
   rustPlatform = pkgs.makeRustPlatform { inherit (rustToolchain) rustc cargo; };
   conformance = rustPlatform.buildRustPackage {
@@ -40,6 +40,8 @@ let
         (repository + "/apps")
         (repository + "/crates")
         (repository + "/plugins")
+        # pos-reference's test-support fixtures embed these at compile time.
+        (repository + "/fixtures/conformance")
       ];
     };
     cargoLock.lockFile = repository + "/Cargo.lock";

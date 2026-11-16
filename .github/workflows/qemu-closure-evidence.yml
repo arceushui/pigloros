@@ -17,6 +17,7 @@ on:
       - Cargo.toml
       - apps/pos-sandboxd/**
       - crates/pos-reference/**
+      - fixtures/conformance/**
       - scripts/check_qemu_closure_evidence.py
       - scripts/test_check_qemu_closure_evidence.py
       - scripts/check_qemu_closure_workflow_policy.py
