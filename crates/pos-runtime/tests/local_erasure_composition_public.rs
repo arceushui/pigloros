@@ -1296,7 +1296,7 @@ fn authorization_names_the_requests_own_evidence() -> TestResult {
 }
 
 #[test]
-fn a_root_grant_revocation_refuses_new_submissions_but_not_older_requests() -> TestResult {
+fn a_root_grant_revocation_leaves_older_requests_authorized() -> TestResult {
     let shape = GrantShape::standard();
     let store = LocalStore::new(&shape)?;
     {
