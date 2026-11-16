@@ -612,7 +612,7 @@ fn normalize_operational(
                 padded_length,
                 excluded_sensitive: _,
             },
-        ) if *padded_length > 0 && padded_length.is_power_of_two() => {
+        ) if padded_length.is_power_of_two() => {
             output.extend_from_slice(&category.to_be_bytes());
             output.extend_from_slice(&count.to_be_bytes());
             output.extend_from_slice(&padded_length.to_be_bytes());
