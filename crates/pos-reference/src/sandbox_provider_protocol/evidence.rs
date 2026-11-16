@@ -366,7 +366,9 @@ impl AttemptEvidence {
     /// must be complete and bind KOE1 (events 11 to 13) and TME1 (events 0
     /// to 10). SPY1's outcome and its terminal event must be TME1's terminal
     /// code, and a `ReleaseV1` exists exactly when SPR1 names one: it binds
-    /// the KOE1 digest, which must then have status 0.
+    /// the KOE1 digest, which must then have status 0. A `Completed` SPY1's
+    /// output descriptor must be exactly as long as TME1
+    /// `output-capture.accepted-bytes` (R10 I6).
     ///
     /// # Errors
     /// The decoders' closed errors, `SignatureInvalid` for a signature that
