@@ -333,6 +333,8 @@ pub(crate) struct TestPayload {
     pub(crate) output: u64,
     pub(crate) reserved: std::sync::atomic::AtomicBool,
     pub(crate) fail_read: bool,
+    /// Whether a second reservation is refused, as an admitted execution's is.
+    pub(crate) single_use: bool,
 }
 
 impl Default for TestPayload {
@@ -345,6 +347,7 @@ impl Default for TestPayload {
             output: 1_000,
             reserved: std::sync::atomic::AtomicBool::new(false),
             fail_read: false,
+            single_use: true,
         }
     }
 }
@@ -381,6 +384,7 @@ impl crate::adapter_stdio::AttemptPayload for TestPayload {
         if self
             .reserved
             .swap(true, std::sync::atomic::Ordering::SeqCst)
+            && self.single_use
         {
             return None;
         }
@@ -404,4 +408,21 @@ pub(crate) fn adapter_io() -> Option<crate::AdapterIo> {
         .reserve_storage(0)
         .ok()
         .map(crate::AdapterIo::for_test)
+}
+
+/// The one payload every [`AdmittedAttempt::for_test`] shares, so separately
+/// built test attempts stay equal as before. It reserves as often as it is
+/// asked; tests of the single reservation use their own payload.
+pub(crate) fn shared_test_payload() -> Arc<dyn crate::adapter_stdio::AttemptPayload> {
+    static SHARED: std::sync::OnceLock<Arc<TestPayload>> = std::sync::OnceLock::new();
+    let shared = SHARED.get_or_init(|| {
+        Arc::new(TestPayload {
+            ledger: crate::StagingLedger::new(crate::StagingLimits {
+                aggregate_bytes: u64::MAX / 2,
+            }),
+            single_use: false,
+            ..TestPayload::default()
+        })
+    });
+    Arc::clone(shared) as Arc<dyn crate::adapter_stdio::AttemptPayload>
 }

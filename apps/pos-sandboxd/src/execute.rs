@@ -604,7 +604,8 @@ struct Prepared<C> {
 /// after a Local session, the failure is returned without the session's
 /// transcripts.
 ///
-/// The runtime must have its time driver enabled.
+/// The runtime must have its time and I/O drivers enabled: the adapter's
+/// standard channels are registered with the I/O driver.
 ///
 /// All attempts reconstructed or cloned from the same prepared directory share
 /// one execution claim. It is consumed before preparing any execution resources

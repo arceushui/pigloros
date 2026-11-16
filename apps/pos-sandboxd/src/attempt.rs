@@ -361,9 +361,7 @@ impl AdmittedAttempt {
                                 digest: [8; 32],
                             },
                         }),
-                        lease: ExecutionLease(Arc::new(
-                            crate::test_fixtures::TestPayload::default(),
-                        )),
+                        lease: ExecutionLease(crate::test_fixtures::shared_test_payload()),
                         execution: ExecutionOwnership::default(),
                     })
                 })
