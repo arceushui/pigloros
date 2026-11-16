@@ -8,9 +8,9 @@ set -euo pipefail
 # for example azure.archive.ubuntu.com), then the Ubuntu archive and security
 # hosts. The network phases (index refresh and package download) are bounded;
 # if either fails or exceeds the bound, both run once more, with the list
-# rewritten without the runner's first mirror when the runner has a list. Installation then uses only the
-# downloaded packages. Every caller goes through this script; none runs
-# apt-get itself.
+# rewritten without the runner's first mirror when the runner has a list.
+# Installation then uses only the downloaded packages. Every caller goes
+# through this script; none runs apt-get itself.
 #
 # No third-party mirror is listed. mirrors.edge.kernel.org used to come first,
 # but hosted runners have no IPv6 route to it ("Network is unreachable") and on
