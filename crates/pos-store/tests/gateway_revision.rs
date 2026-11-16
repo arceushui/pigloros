@@ -503,13 +503,15 @@ fn sqlite_an_untrustworthy_or_unreadable_revision_fails_closed() {
     );
 }
 
-/// The refusal of opening a new store whose `gateway_revisions` table was
-/// created by `ddl`.
+/// The refusal of reopening a valid store whose `gateway_revisions` table
+/// was replaced by `ddl`.
 fn open_refusal(ddl: &str) -> String {
     let directory = ok(tempdir());
     let path = directory.path().join("incompatible.db");
-    execute(&path, ddl);
-    match SqliteStore::open(path.to_str().unwrap_or_default()) {
+    drop(open_file(&path));
+    execute(&path, &format!("DROP TABLE gateway_revisions; {ddl};"));
+    let opened = SqliteStore::open(path.to_str().unwrap_or_default());
+    match opened {
         Err(CoreError::Storage(message)) => message,
         other => {
             std::panic::resume_unwind(Box::new(format!("unexpected open: {:?}", other.map(drop))))
