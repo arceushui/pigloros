@@ -1757,7 +1757,7 @@ mod tests {
             .complete_committed_update(valid.committed, Duration::from_secs(1))?;
         assert!(!completed.acknowledgement.is_empty());
         assert_ne!(completed.successor.installed().manifest().digest(), [0; 32]);
-        assert!(completed.cancelled_attempt_ids.is_empty());
+        assert_eq!(completed.cancelled_attempt_ids, vec![[42; 16]]);
         valid
             .provider
             .join()
