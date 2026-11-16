@@ -45,6 +45,8 @@ const _: () = assert!(MAX_COMMUNITY_VIEW_TRUST_ROWS_V1 == 64);
 const _: () = assert!(MAX_COMMUNITY_VIEW_KEY_ROWS_V1 == 4096);
 const _: () = assert!(MAX_TEXT == 128);
 const _: () = assert!(MAX_ENCODED_BYTES < MAX_VIEW);
+// A CPK1 bstr always has a 2-byte head (see `encoded_len`).
+const _: () = assert!(super::MAX_COMMUNITY_PASS_KEY_BYTES_V1 <= 255);
 
 /// Scope row state; only `Open` admits use.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -449,9 +451,10 @@ fn is_nonzero_hex(text: &str, digits: usize) -> bool {
 fn encoded_len(input: &CommunityCurrentViewInputV1) -> usize {
     let frontier = match input.frontier {
         CommunityPassFrontierV1::Initial => 2,
+        // `[1, CPK1]`: array head and tag (2), then the CPK1 bstr. A CPK1 is
+        // 42..=64 bytes, so its bstr head is always 2 bytes.
         CommunityPassFrontierV1::Committed(key) => {
-            let key_len = Zeroizing::new(key.to_canonical_cbor()).len();
-            2 + head_len(key_len as u64) + key_len
+            4 + Zeroizing::new(key.to_canonical_cbor()).len()
         }
     };
     let head = input
