@@ -17,5 +17,10 @@ path = "src/main.rs"
 [dependencies]
 pos-reference = { path = "../../crates/pos-reference" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The one production `ProviderLifecyclePort`, `SystemdProviderLifecycle`
+# (ADR-069 R12 §3). Only this package composes it.
+pos-sandboxd = { path = "../pos-sandboxd" }
+
 [lints]
 workspace = true

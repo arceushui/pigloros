@@ -8,6 +8,7 @@
 
 use std::fs::Metadata;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::num::NonZeroU64;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
@@ -27,8 +28,7 @@ use crate::sandbox_provider_protocol::{
     SelectorGrantCommitment,
 };
 use crate::selector::installation::authority::{
-    AdmittedProviderRuntime, AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
-    CommittedInstallationUpdate, ProviderRuntimeSlot,
+    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap, CommittedInstallationUpdate,
 };
 use crate::selector::installation::open_directory_chain;
 use crate::selector::SelectorBoundaryError;
@@ -446,6 +446,16 @@ impl SelectedProviderEndpoint {
     }
 }
 
+/// The `/proc/<pid>/stat` start-time ticks of one live process.
+pub(crate) fn process_start_time_ticks(pid: NonZeroU64) -> Result<u64, SelectorBoundaryError> {
+    i32::try_from(pid.get())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
+        .and_then(provider_process_identity)
+        .map(|identity| identity.start_time_ticks)
+}
+
 fn provider_process_identity(
     pid: rustix::process::Pid,
 ) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
@@ -530,9 +540,7 @@ impl ProviderTransport {
     /// # Errors
     /// Returns a closed error when either admitted endpoint is absent, replaced,
     /// insecure, or outside a root-owned descriptor chain.
-    pub(crate) fn from_admitted(
-        admitted: &AdmittedSelectorProvider,
-    ) -> Result<Self, SelectorBoundaryError> {
+    fn from_admitted(admitted: &AdmittedSelectorProvider) -> Result<Self, SelectorBoundaryError> {
         Self::from_selected_endpoints(SelectedProviderEndpoint::from_admitted(admitted))
     }
 
@@ -598,20 +606,33 @@ impl ProviderTransport {
             })
     }
 
-    /// Seal the root-generated runtime identities around the synchronized provider process.
-    pub(crate) fn admit_runtime(
-        &self,
+    /// Retain the SIC1-selected endpoints of the runtime the selector started.
+    ///
+    /// Every later connection must come from that runtime's main process: its
+    /// `SO_PEERCRED` PID and `/proc` start ticks must equal the started unit's
+    /// observed `MainPID` and start ticks (ADR-069 R11 §5.0 step 8).
+    ///
+    /// # Errors
+    /// Returns a closed error when either admitted endpoint is absent, replaced,
+    /// insecure, or outside a root-owned descriptor chain.
+    pub(crate) fn for_started_runtime(
         admitted: &AdmittedSelectorProvider,
-    ) -> Result<AdmittedProviderRuntime, SelectorBoundaryError> {
-        self.admitted_process
-            .lock()
-            .map_err(selector_unavailable)
-            .and_then(|process| process.ok_or(SelectorBoundaryError::ArtifactInvalid))
-            .and_then(|process| {
-                ProviderRuntimeSlot::allocate(admitted).and_then(|runtime| {
-                    runtime.bind_observed_process(process.pid, process.start_time_ticks)
-                })
-            })
+        main_pid: u64,
+        main_start_time_ticks: u64,
+    ) -> Result<Self, SelectorBoundaryError> {
+        Self::from_admitted(admitted)
+            .map(|transport| transport.expecting(main_pid, main_start_time_ticks))
+    }
+
+    /// The same endpoints, answering only for the given main process.
+    fn expecting(self, main_pid: u64, main_start_time_ticks: u64) -> Self {
+        Self {
+            admitted_process: Mutex::new(Some(ProviderProcessIdentity {
+                pid: main_pid,
+                start_time_ticks: main_start_time_ticks,
+            })),
+            ..self
+        }
     }
 
     /// Prove that the selected provider has activated the exact admitted policy.
@@ -1816,8 +1837,6 @@ mod tests {
         let transport = provider_transport(endpoint.clone(), endpoint);
         assert_eq!(transport.execute_endpoint.path, path);
         assert_eq!(transport.control_endpoint.path, path);
-        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
-        assert!(transport.admit_runtime(&admitted).is_err());
         let observed = provider_process_identity(rustix::process::getpid())?;
         assert_eq!(
             transport.require_admitted_process(observed),
@@ -1834,6 +1853,24 @@ mod tests {
         );
         assert_process_stat_boundaries(observed)?;
 
+        // A started runtime's transport accepts exactly its main process.
+        let expecting = provider_transport(
+            transport.execute_endpoint.clone(),
+            transport.control_endpoint.clone(),
+        )
+        .expecting(observed.pid, observed.start_time_ticks.saturating_add(1));
+        assert_eq!(
+            expecting.bind_admitted_process(observed),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            expecting.bind_admitted_process(ProviderProcessIdentity {
+                start_time_ticks: observed.start_time_ticks.saturating_add(1),
+                ..observed
+            }),
+            Ok(())
+        );
+
         let poisoned = provider_transport(transport.execute_endpoint, transport.control_endpoint);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = poisoned
@@ -1849,10 +1886,6 @@ mod tests {
         );
         assert_eq!(
             poisoned.require_admitted_process(observed),
-            Err(SelectorBoundaryError::SelectorUnavailable)
-        );
-        assert_eq!(
-            poisoned.admit_runtime(&admitted),
             Err(SelectorBoundaryError::SelectorUnavailable)
         );
         Ok(())
