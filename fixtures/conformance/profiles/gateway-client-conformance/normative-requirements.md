@@ -15,7 +15,8 @@ service or on the Gateway implementation as its oracle: every expected exchange 
 A case payload is RFC 8785 JSON with exactly the members `schema`
 (`pigloros.gateway-client-conformance.case.v2`), `family` (the family name) and `subcases`
 (1 to 64). There is no reader for provider contract 1.0.0. A sub-case has exactly `id`
-(`<prefix>.<n>`), `title`, `composition` (`open` or `authorized`), `exchanges` (1 to 128), and
+(`<prefix>.<n>`), `title`, `composition` (`open`, `authorized` or `authorized-air-gapped`),
+`exchanges` (1 to 128), and
 optionally `canary` (1 to 64 printable ASCII bytes). An exchange has exactly `router`
 (`loopback` or `spectator`), `method` (`GET` or `POST`), `path`, `expect`, and optionally
 `actor` (`true`), `body` (any JSON value other than null) and `capture` (`"timeline"`). An
@@ -36,6 +37,7 @@ The path without its query names one route; any other path is outside the gramma
 | events | `GET /v1/timelines/:id/events` | `timeline.events.read` |
 | signals | `POST /v1/timelines/:id/signals` | `timeline.signals.append` |
 | actions | `POST /v1/timelines/:id/actions` | `world.action.v1.submit` |
+| session | `GET /v1/session` | `session.read` |
 
 An exchange whose route capability the attempt does not hold is not sent; its observation is
 `{"refused": "capability-denied"}`. The literal `{timeline}` in a path is replaced by the `id`
@@ -53,14 +55,19 @@ in either execution mode, so Local and Air-Gapped executions are the same.
 
 - `open`: no host authorizer (the default Gateway).
 - `authorized`: the production serve composition with a fixture Local Principal document,
-  from which no production authority is sourced (ADR-108). The document is provisioned and
-  recomposed through the production Local Principal path, and the Gateway requires that
-  Principal for every protected operation. Its one grant is for actor
-  `01JC0GATEWAYF1XTVREACT0R00` and the operations `timeline.create` (resource `timeline`, action
-  `create`) and `timeline.events.read` (resource `timeline.events`, action `read`), audience
-  `gateway`. It grants no action or signal. Action payloads name the World body
-  `01JC0GATEWAYF1XTVREB0DY000`. An exchange with `actor` sends
+  from which no production authority is sourced (ADR-108), over a fresh store that its first
+  `serve` binds to the Local execution mode `gateway-mode-local-v1` (ADR-134) with no operator
+  network grant. The document is provisioned and recomposed through the production Local
+  Principal path, and the Gateway requires that Principal for every protected operation. The
+  Principal's ID is the 16 bytes `0x01` (`01040G2081040G2081040G2081`). Its one grant, issued at
+  authority position 1 and binding no consent, is for actor `01JC0GATEWAYF1XTVREACT0R00` and the
+  operations `timeline.create` (resource `timeline`, action `create`), `timeline.events.read`
+  (resource `timeline.events`, action `read`) and `session.read` (resource `session`, action
+  `read`), audience `gateway`. It grants no action, signal or network capability. Action payloads
+  name the World body `01JC0GATEWAYF1XTVREB0DY000`. An exchange with `actor` sends
   `x-piglor-actor-entity: 01JC0GATEWAYF1XTVREACT0R00`.
+- `authorized-air-gapped`: the same composition over a store bound to the Air-Gapped execution
+  mode `gateway-mode-air-gapped-v1`.
 
 A request `body` is sent as compact JSON with `content-type: application/json`. Every request
 carries `idempotency-key: <sub-case id>`; routes without an idempotency key ignore it, and two
@@ -105,12 +112,18 @@ Event per `201` response of the signals or actions route. The other counters are
 
 - **positive:** `/health` answers `{"ok": true}`; a created Timeline polls an empty exhausted
   page; a committed Society Signal is polled back with its canonical payload; `/v1/ledger` is
-  empty.
+  empty; the fixture Principal's `/v1/session` discloses its grants, generation 1, binding
+  epoch 1, no consent, the EPF1 profile `unavailable`, and the Local mode with network
+  `denied` on `authorized` or the Air-Gapped mode with network `absent` on
+  `authorized-air-gapped`, each with the golden mode-profile digest and the provenance digest
+  the `Session` schema states.
 - **denied** (`capability-denied`): an action without a host authorizer is the `401`
   `unauthenticated` problem and an action the fixture authority does not grant is the `403`
   `unauthorized` problem, each followed by an empty poll (denial without state change); a route
   whose capability the attempt does not hold is refused; a read on the `authorized` Gateway
-  without the actor header is the `401` `unauthenticated` problem.
+  without the actor header is the `401` `unauthenticated` problem; a Session read without the
+  actor header on the `authorized` Gateway, and one on the `open` Gateway (which has no
+  Principal), is the `401` `unauthenticated` problem.
 - **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are the `400`
   `invalid-request` problem; a Timeline ID that is not a ULID is `400` `invalid-request`;
   integer action `params` are the `422` `admission-rejected` problem, and nothing is committed.
