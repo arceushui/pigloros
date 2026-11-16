@@ -39,9 +39,9 @@ use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityCommitOutcomeV1, AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
     AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CapabilityGrantDraftV1,
-    CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, Hash,
-    PersistedAuthorityV1, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1, AuthorityViewV1,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
+    Hash, PersistedAuthorityV1, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use serde::Deserialize;
@@ -61,6 +61,12 @@ pub const MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES: usize = 16 * 1_024;
 const LOCAL_ADAPTER_ID: &str = "local-loopback";
 /// The one audience every Gateway operation is evaluated for.
 const GATEWAY_AUDIENCE: &str = "gateway";
+/// The composition-root seal the Local Principal authentication adapter builds
+/// its pinned evidence and attesting registry with (ADR-129 A5.9, #1374).
+///
+/// It stays private to this adapter and is never re-exported.
+static AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 =
+    AuthorityTrustRootSealV1::for_composition_root();
 
 /// Closed Local Principal provisioning and composition failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -510,14 +516,17 @@ fn authority_for(
 ) -> Result<(AuthenticatedPrincipalResultV1, AuthorityRegistrySnapshotV1), AuthorityErrorV1> {
     AssuranceLevelV1::try_new(1)
         .and_then(|assurance| {
-            AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-                principal: grant.grantee().principal().clone(),
-                adapter_id: LOCAL_ADAPTER_ID.to_owned(),
-                assurance,
-                issued_at: WallTime::from_micros(0),
-                expires_at: WallTime::from_micros(u64::MAX),
-                binding_digest: grant.authority_registry_digest(),
-            })
+            AuthenticatedPrincipalResultV1::try_from_draft(
+                &AUTHORITY_TRUST_ROOT,
+                AuthenticatedPrincipalDraftV1 {
+                    principal: grant.grantee().principal().clone(),
+                    adapter_id: LOCAL_ADAPTER_ID.to_owned(),
+                    assurance,
+                    issued_at: WallTime::from_micros(0),
+                    expires_at: WallTime::from_micros(u64::MAX),
+                    binding_digest: grant.authority_registry_digest(),
+                },
+            )
         })
         .and_then(|evidence| {
             [grant, current]
@@ -528,6 +537,7 @@ fn authority_for(
                     bindings.sort_unstable();
                     bindings.dedup();
                     AuthorityRegistrySnapshotV1::try_new(
+                        &AUTHORITY_TRUST_ROOT,
                         grant.authority_registry_digest(),
                         vec![evidence.registry_binding_digest()],
                         bindings,
@@ -1892,6 +1902,7 @@ mod tests {
         let mut bindings = vec![foreign.binding_digest()?, local.binding_digest()?];
         bindings.sort_unstable();
         let registry = AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             provision.grant.authority_registry_digest(),
             vec![Hash::from_bytes([1; 32])],
             bindings,

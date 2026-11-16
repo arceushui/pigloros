@@ -110,11 +110,10 @@ fn harnesses() -> Vec<Harness> {
                 Some(Box::new(CountingApprover(Arc::clone(&approvals)))),
                 [Kind::new(ACTION)],
             ));
-            let revisions = ok(ok(LocalScheduledAdmissionHostV1::shared()).observe(
-                &registry,
-                store.as_mut(),
-                timeline,
-            ));
+            let revisions = ok(ok(LocalScheduledAdmissionHostV1::shared(
+                &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            ))
+            .observe(&registry, store.as_mut(), timeline));
             Harness {
                 name,
                 store,
@@ -139,7 +138,9 @@ fn proposal(actor: EntityId, payload: &'static [u8]) -> ProposedAction {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn admission(harness: &Harness, key: u8, attempt: u8, observed: u64) -> HumanActionAdmissionV1 {
-    let host = ok(LocalScheduledAdmissionHostV1::shared());
+    let host = ok(LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    ));
     HumanActionAdmissionV1 {
         attempt_id: ok(PipelineAttemptIdV1::try_new([attempt; 16])),
         idempotency: AppendIdentity::new(
@@ -198,7 +199,10 @@ fn the_local_host_admits_a_human_action_on_the_human_path() {
         let actor = EntityId::new();
         let head = ok(harness.store.logical_head(harness.timeline));
 
-        let admitted = ok(ok(LocalScheduledAdmissionHostV1::shared()).admit_action(
+        let admitted = ok(ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ))
+        .admit_action(
             &harness.registry,
             harness.store.as_mut(),
             &proposal(actor, b"walk"),
