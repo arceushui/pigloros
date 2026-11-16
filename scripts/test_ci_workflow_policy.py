@@ -213,6 +213,10 @@ PREFLIGHT_POLICY_STEPS = {
             "run": "python scripts/test_rust_test_policy.py",
         },
         {
+            "name": "Test the Air-Gapped test namespace helpers",
+            "run": "python scripts/test_air_gapped_seccomp_exec.py",
+        },
+        {
             "name": "Check the community Plugin handoff READMEs",
             "run": (
                 "python scripts/check_handoff_readme.py\n"

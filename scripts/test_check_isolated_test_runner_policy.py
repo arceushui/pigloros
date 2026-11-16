@@ -43,12 +43,25 @@ if not NET_ADMIN_OWNER_PATHS:
     raise SystemExit("no Rust owner of the NET_ADMIN isolated test runner was discovered")
 if not OWNER_PATHS:
     raise SystemExit("no Rust owners of delegated isolated test runners were discovered")
+# The ADR-135 §4 Air-Gapped test shape (#1422), its pinned helper and its owners.
+NAMESPACE_RUNNER = Path("scripts/air-gapped-namespace.sh")
+NAMESPACE_HELPER = Path("scripts/air_gapped_seccomp_exec.py")
+NAMESPACE_OWNER_PATHS = tuple(
+    source
+    for source in RUST_SOURCES
+    if NAMESPACE_RUNNER.name in (ROOT / source).read_text(encoding="utf-8")
+)
+if not NAMESPACE_OWNER_PATHS:
+    raise SystemExit("no Rust owner of the Air-Gapped test shape was discovered")
 FIXTURES = (
     Path(".github/workflows/ci.yml"),
     Path(".github/workflows/mutation.yml"),
     *OWNER_PATHS,
     *NET_ADMIN_OWNER_PATHS,
+    *NAMESPACE_OWNER_PATHS,
     *RUNNER_PATHS,
+    NAMESPACE_RUNNER,
+    NAMESPACE_HELPER,
 )
 PRIMARY_OWNER = OWNER_PATHS[0]
 PRIMARY_RUNNER = RUNNER_PATHS[0]
@@ -526,6 +539,69 @@ def check_repinned_runners(temporary: Path) -> None:
             raise SystemExit(f"checker accepted re-pinned unsafe {runner}: {old} -> {new}")
 
 
+def check_namespace_runner(temporary: Path) -> None:
+    """The Air-Gapped test shape passes only as exactly its pinned runner and helper, owned
+    only by the Air-Gapped tests, and a pin moved to an unsafe edit still fails."""
+    for path in (NAMESPACE_RUNNER, NAMESPACE_HELPER):
+        for index, edited in enumerate(edited_bytes((ROOT / path).read_bytes())):
+            root = temporary / f"edited-{path.name}-{index}"
+            copy_fixture(root)
+            (root / path).write_bytes(edited)
+            if invoke(root).returncode == 0:
+                raise SystemExit(f"checker accepted a one-byte edit {index} of {path}")
+    for path in (NAMESPACE_RUNNER, NAMESPACE_HELPER):
+        missing = temporary / f"missing-{path.name}"
+        copy_fixture(missing)
+        (missing / path).unlink()
+        if invoke(missing).returncode == 0:
+            raise SystemExit(f"checker accepted a missing {path}")
+    unexecutable = temporary / "unexecutable-namespace"
+    copy_fixture(unexecutable)
+    (unexecutable / NAMESPACE_RUNNER).chmod(0o644)
+    if invoke(unexecutable).returncode == 0:
+        raise SystemExit("checker accepted a namespace runner that is not executable")
+    owner = NAMESPACE_OWNER_PATHS[0]
+    foreign = temporary / "foreign-namespace-owner"
+    copy_fixture(foreign)
+    (foreign / "crates/foreign_namespace_owner.rs").write_text(
+        (foreign / owner).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    result = invoke(foreign)
+    if result.returncode == 0 or "only the Air-Gapped tests may own" not in result.stderr:
+        raise SystemExit(f"a foreign owner of the namespace runner was accepted: {result.stderr}")
+    unowned = temporary / "unowned-namespace"
+    copy_fixture(unowned)
+    for source in NAMESPACE_OWNER_PATHS:
+        (unowned / source).unlink()
+    result = invoke(unowned)
+    if result.returncode == 0 or "no Rust test self-locates" not in result.stderr:
+        raise SystemExit(f"checker accepted an unowned namespace runner: {result.stderr}")
+    harmless = repinned(
+        temporary, "namespace-comment", NAMESPACE_RUNNER,
+        "if [[ $# -lt 1 ]]; then", "# reviewed\nif [[ $# -lt 1 ]]; then",
+    )
+    if harmless.returncode != 0:
+        raise SystemExit(f"checker refused a re-pinned harmless edit: {harmless.stderr}")
+    unsafe = (
+        ("exec unshare --user --map-root-user --net", "exec unshare --user --map-root-user"),
+        ("--bounding-set=-all ", ""),
+        ("--no-new-privs ", ""),
+        ('python3 "$HELPER" "$@"\nfi', '"$@"\nfi'),
+        ("ip link set lo up && ", ""),
+        ('sh -c "$LOOPBACK_UP" sh setpriv', "setpriv"),
+        ('"${DROP[@]}" \\\n', "\\\n"),
+        ("exec sudo -n -E unshare --net", "exec sudo -n -E unshare --net sudo"),
+        ('--reuid="$(id -u)" --regid="$(id -g)" --init-groups ', ""),
+        ("set -euo pipefail\n", "set -euo pipefail\ndocker run --rm busybox true\n"),
+        ("set -euo pipefail\n", "set -euo pipefail\nsudo -n true\n"),
+        ("#!/bin/bash -p\n", "#!/usr/bin/env bash\n"),
+        ("export PATH=$RUNNER_PATH\n", "\n"),
+    )
+    for index, (old, new) in enumerate(unsafe):
+        if repinned(temporary, f"namespace-{index}", NAMESPACE_RUNNER, old, new).returncode == 0:
+            raise SystemExit(f"checker accepted re-pinned unsafe {NAMESPACE_RUNNER}: {old} -> {new}")
+
+
 def check_runner_name_pieces(temporary: Path) -> None:
     """A runner named in pieces fails wherever it is, and the NET_ADMIN
     runner's name fails outside the Local namespace adapter in any form;
@@ -624,6 +700,7 @@ def main() -> None:
         check_runner_pins(temporary)
         check_repinned_runners(temporary)
         check_read_only_probe(temporary)
+        check_namespace_runner(temporary)
         # A changed caller must still be rejected when another caller retains
         # the valid runner reference, so owner discovery cannot hide the fault.
         multiple_owners = temporary / "multiple-owners"
