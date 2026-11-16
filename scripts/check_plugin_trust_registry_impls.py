@@ -151,6 +151,22 @@ PUBLIC_FIELD = re.compile(
 PUBLIC_USE = re.compile(r"\bpub\s+use\b([^;]*);")
 PUBLIC_ENUM = re.compile(r"\bpub\s+enum\s+\w+[^{;]*\{")
 OPENERS = {"(": ")", "[": "]", "{": "}"}
+# Equivalence of the prefilter: comment stripping only removes text (each comment
+# becomes one space), so a token absent from the raw file is absent from the
+# stripped code, and every finding below needs one of these tokens to match.
+# Rule 1 names PORT, a GUARDED_NAMES entry or a RECEIPT_TYPES entry; rules 2 and 3
+# need ANCHOR_CALL or REGISTRY_AWARE (PORT or `plugin_trust_registry`); rule 5 needs
+# `plugin_trust_registry`; rule 6 needs a confined name. Rule 4 lints every public
+# name of a registry module whatever it contains, so those files are never skipped.
+GUARDS = (
+    *GUARDED_NAMES,
+    *RECEIPT_TYPES,
+    "plugin_trust_registry",
+    "from_bytes_v1",
+    "FixedTrustMaterialSourceV1",
+    "CommunityTrustAnchorBytesV1",
+    "CommunityEvaluationWorldV1",
+)
 
 
 def _advance(code: str, index: int) -> int:
@@ -334,7 +350,10 @@ def violations(root: Path) -> list[str]:
         if relative_path.parts[0] in SKIPPED_PARTS:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        found.extend(file_findings(relative_path.as_posix(), strip_comments(text)))
+        relative = relative_path.as_posix()
+        if not REGISTRY_MODULE.match(relative) and not any(token in text for token in GUARDS):
+            continue
+        found.extend(file_findings(relative, strip_comments(text)))
     return found
 
 
