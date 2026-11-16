@@ -1976,6 +1976,24 @@ mod tests {
         Ok(())
     }
 
+    /// The registry digest also commits to the governance record.
+    #[test]
+    fn the_registry_digest_commits_to_the_governance_record() -> TestResult {
+        let digest = |record: Option<EntityId>| -> TestResult<Hash> {
+            Ok(LocalPrincipalProvisionV1::try_new_provisioned(
+                &principal()?,
+                [actor()?],
+                [GatewayOperationV1::CREATE_TIMELINE],
+                None,
+                record,
+            )?
+            .grant
+            .authority_registry_digest())
+        };
+        assert_ne!(digest(None)?, digest(Some(EntityId::new()))?);
+        Ok(())
+    }
+
     #[test]
     fn malformed_or_empty_documents_are_refused() -> TestResult {
         let actor = format!("\"{ACTOR}\"");
