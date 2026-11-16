@@ -303,6 +303,12 @@ impl AuthenticatedRevocationAcknowledgement {
         self.acknowledgement_digest
     }
 
+    /// The cancelled-attempt set the authenticated RCA1 echoes.
+    #[must_use]
+    pub fn cancelled_attempt_ids(&self) -> &[[u8; 16]] {
+        &self.cancelled_attempt_ids
+    }
+
     pub(crate) fn matches_context(
         &self,
         context: &RecoveryCancellationContext,

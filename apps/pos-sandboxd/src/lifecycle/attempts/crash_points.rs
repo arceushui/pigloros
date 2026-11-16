@@ -1172,7 +1172,10 @@ mod cases {
                 attempt.cleanup()
             );
             if course == Course::Cancelled {
-                assert!(attempt.cancelled());
+                assert_eq!(
+                    attempt.cancel_source(),
+                    Some(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest)
+                );
                 assert!(matches!(
                     attempt.progress(),
                     AttemptProgress::Executed {

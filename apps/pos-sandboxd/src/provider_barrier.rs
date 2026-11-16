@@ -22,11 +22,13 @@
 //!
 //! [`AuthorityCheck`] is the last-moment recheck: the caller's root recheck
 //! (current authority, control floor and attached mount identity), the
-//! cancellation flag, and the observed readback-set digest behind
-//! [`ObservedReadback`]. Once `ReadyV1` is accepted the barrier observes the
-//! unit's kernel state and freezes it (ADR-069 R9 §4.4, KOE1); the recheck
-//! observes it again and releases only if both observations are equal. The
-//! digest it binds is the frozen observation's KOE1 self-digest.
+//! cancellation flag, and the kernel observation behind [`ObservedReadback`].
+//! Once `ReadyV1` is accepted the barrier observes the unit's kernel state
+//! and freezes it as the attempt's KOE1, which binds the attempt's RQE1
+//! (ADR-069 R9 §4.4); the recheck observes it again and releases only if both
+//! observations are equal. The observed readback digest `ReleaseV1` binds is
+//! that KOE1's self-digest, and the release is signed through the sealed
+//! runtime-attestation signer, verified under the admitted key first.
 
 use std::{
     cell::{Cell, RefCell},
@@ -58,11 +60,14 @@ use rustix::{
 };
 use zbus::OwnedFd;
 
+use pos_reference::sandbox_provider_protocol::{BarrierFailure, KernelObservationEvidence};
+
 use crate::{
-    release_after_ready, ActiveAttempt, AdmittedAttempt, CgroupView, CheckedRoot,
-    ExpectedLauncherReady, ImageActivationError, KernelObservation, KernelObservationError,
+    observation_evidence, release_after_ready, ActiveAttempt, AdmittedAttempt, AdmittedRuntimeKey,
+    CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError, KernelObservationError,
     LaunchBarrier, LauncherInvocation, ObservationContext, ObservedUnit, ReleaseBarrierError,
-    ReleaseBinding, ReleaseOutcome, ReleaseRecheck, ReleaseSigner, TransientServiceUnitName,
+    ReleaseBinding, ReleaseOutcome, ReleaseRecheck, RuntimeAttestationSigner,
+    TransientServiceUnitName,
 };
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -103,10 +108,6 @@ pub trait ObservedReadback {
         unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
         context: &ObservationContext<'_>,
     ) -> Result<ObservedUnit, ObservedReadbackUnavailable>;
-
-    /// The KOE1 self-digest of the frozen `observation`, made once the
-    /// `ReadyV1` whose digest is `ready1_digest` was accepted.
-    fn digest(&self, ready1_digest: [u8; 32], observation: &KernelObservation) -> [u8; 32];
 }
 
 /// No kernel observation could be made, so nothing may be released.
@@ -126,10 +127,14 @@ pub enum RecheckRefusal {
     /// The attempt was cancelled.
     #[error("the attempt was cancelled")]
     Cancelled,
-    /// The kernel observation could not be made, first after `ReadyV1` or
-    /// again in the recheck.
-    #[error("no observed readback set exists")]
-    Observation(#[source] ObservedReadbackUnavailable),
+    /// The first kernel observation after `ReadyV1` could not be made, or
+    /// it is no valid KOE1: KOE1 status 2, with no barrier-failure code.
+    #[error("the kernel could not be observed after ReadyV1")]
+    FirstObservation(#[source] ObservedReadbackUnavailable),
+    /// The recheck could not observe the kernel again (R9 barrier failure
+    /// 6).
+    #[error("the kernel could not be observed again")]
+    RecheckObservation(#[source] ObservedReadbackUnavailable),
     /// The recheck observed other kernel state than was frozen after
     /// `ReadyV1`.
     #[error("the kernel observation changed after ReadyV1")]
@@ -222,6 +227,28 @@ where
     }
 }
 
+/// The observation error of an identity read the recheck refused: a read
+/// cut off at the attempt deadline is an expiry, and any other a failed
+/// manager read.
+const fn identity_error(refusal: &RecheckRefusal) -> KernelObservationError {
+    if matches!(refusal, RecheckRefusal::Expired) {
+        KernelObservationError::IdentityExpired
+    } else {
+        KernelObservationError::Identity
+    }
+}
+
+/// Why the recheck's observation failed (ADR-069 R9 §4.6.1): its manager
+/// read failed (8), the deadline passed during that read (10), or the
+/// observation itself could not be made (6).
+fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefusal {
+    match unavailable.0 {
+        KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),
+        KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
+        _ => RecheckRefusal::RecheckObservation(unavailable),
+    }
+}
+
 /// What the unit looked like when `ReadyV1` was verified against it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct UnitSnapshot {
@@ -246,9 +273,15 @@ struct Bounded<'a, R, O, I> {
     observing: Observing<'a>,
     /// The accepted `ReadyV1`'s digest.
     ready: Cell<Option<[u8; 32]>>,
-    /// The kernel observation frozen once `ReadyV1` was accepted.
-    frozen: RefCell<Option<ObservedUnit>>,
+    /// The attempt's RQE1 self-digest, which its KOE1 binds.
+    requested_configuration_evidence: [u8; 32],
+    /// The kernel observation frozen once `ReadyV1` was accepted, and its
+    /// KOE1.
+    frozen: RefCell<Option<Frozen>>,
 }
+
+/// The frozen kernel observation and the KOE1 built from it, once.
+type Frozen = (ObservedUnit, KernelObservationEvidence);
 
 /// What one kernel observation of the unit needs besides its root.
 #[derive(Clone, Copy)]
@@ -336,7 +369,22 @@ where
         verify_launcher(&self.launcher.file, &self.launcher.facts)
             .map_err(|_| RecheckRefusal::UnitChanged)?;
         let root = (self.check.root)().map_err(RecheckRefusal::Root)?;
-        let observed = self.observe(&root).map_err(RecheckRefusal::Observation)?;
+        let observed = self
+            .observe(&root)
+            .and_then(|observed| {
+                observation_evidence(
+                    self.admitted.attempt_id(),
+                    self.admitted.grant_digest(),
+                    ready1_digest,
+                    self.requested_configuration_evidence,
+                    observed.observation(),
+                )
+                .map(|evidence| (observed, evidence))
+                .map_err(|error| {
+                    ObservedReadbackUnavailable(KernelObservationError::Evidence(error))
+                })
+            })
+            .map_err(RecheckRefusal::FirstObservation)?;
         *self.frozen.borrow_mut() = Some(observed);
         Ok(())
     }
@@ -344,16 +392,15 @@ where
     /// Observe again, by the same procedure, and require the frozen
     /// observation: then its KOE1 digest.
     fn observed_again(&self, root: &CheckedRoot) -> Result<[u8; 32], RecheckRefusal> {
-        let again = self.observe(root).map_err(RecheckRefusal::Observation)?;
+        let again = self.observe(root).map_err(recheck_observation)?;
         // Bound to a local so the `RefCell` borrow ends before `again` drops
         // (the tail-expression drop order that Rust 2024 changes).
         let digest = self
             .frozen
             .borrow()
             .as_ref()
-            .zip(self.ready.get())
             .filter(|(frozen, _)| frozen.observation() == again.observation())
-            .map(|(frozen, ready)| self.check.observed.digest(ready, frozen.observation()))
+            .map(|(_, evidence)| evidence.digest())
             .ok_or(RecheckRefusal::ObservationChanged);
         digest
     }
@@ -368,7 +415,7 @@ where
                     self.read_again(&handle, self.identity.invocation_id(self.unit_name))
                         .map(|invocation| (main_pid, invocation))
                 })
-                .map_err(|_| KernelObservationError::Identity)
+                .map_err(|refusal| identity_error(&refusal))
         };
         let context = ObservationContext::new(
             self.observing.cgroup,
@@ -426,7 +473,7 @@ pub enum BarrierError {
     /// `/proc/<MainPID>/exe` could not be observed.
     #[error("the launcher executable could not be observed")]
     LauncherIdentity,
-    /// The attempt deadline passed before the release could start.
+    /// The attempt deadline passed before any `ReadyV1` was received.
     #[error("the attempt deadline passed before the release")]
     Expired,
     /// The bounded receive could not be armed.
@@ -442,6 +489,76 @@ pub enum BarrierError {
     /// use and never retried.
     #[error("a release was already attempted")]
     AlreadyAttempted,
+    /// `ReleaseV1` was sent, and the attempt deadline passed before the
+    /// barrier returned.
+    #[error("the attempt deadline passed after the release")]
+    ExpiredAfterRelease,
+}
+
+impl BarrierError {
+    /// The TME1 `barrier-failure` this failure records (ADR-069 R9 §4.6.1;
+    /// R9 §11 O5 classes channel faults, among them "`ReadyV1` unavailable",
+    /// as code 9 and content faults, among them "recheck expiry", as 10).
+    ///
+    /// Before any `ReadyV1` was received, the barrier could not read the
+    /// unit, hold its launcher, arm the receive or meet the deadline: no
+    /// `ReadyV1` became available, which is `0 ReadyUnavailable` (R9 §11
+    /// O15). After `ReleaseV1` was sent the attempt has progress 2, where
+    /// R9 §4.6.3 requires a null `barrier-failure`. `None` is also recorded
+    /// for a cancellation (TME1 `cancel-source` records it), a first
+    /// observation that failed (KOE1 status 2 records it), a signature that
+    /// did not verify under the admitted key (a provider fault), and the
+    /// setup failures that precede the launch (O15); the classifier's
+    /// fallback or another candidate decides the terminal code.
+    #[must_use]
+    pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
+        match self {
+            Self::Identity(_) | Self::LauncherIdentity | Self::Timeout(_) | Self::Expired => {
+                Some(BarrierFailure::ReadyUnavailable)
+            }
+            Self::Release(release) => release_failure(release),
+            Self::Refused(refusal) => refusal.barrier_failure(),
+            Self::AttemptMismatch
+            | Self::Parameters(_)
+            | Self::Channel(_)
+            | Self::UnitEndTaken
+            | Self::RuntimeFlavor
+            | Self::AlreadyAttempted
+            | Self::ExpiredAfterRelease => None,
+        }
+    }
+}
+
+/// The `barrier-failure` of a `ReadyV1` receive or `ReleaseV1` send.
+const fn release_failure(release: &ReleaseBarrierError) -> Option<BarrierFailure> {
+    match release {
+        ReleaseBarrierError::ReadyUnavailable => Some(BarrierFailure::ReadyUnavailable),
+        ReleaseBarrierError::ReadyFraming => Some(BarrierFailure::ReadyFraming),
+        ReleaseBarrierError::PidMismatch => Some(BarrierFailure::ReadyPidMismatch),
+        ReleaseBarrierError::ReadyMalformed => Some(BarrierFailure::ReadyMalformed),
+        ReleaseBarrierError::ReadyMismatch => Some(BarrierFailure::ReadyMismatch),
+        ReleaseBarrierError::ReleaseSend => Some(BarrierFailure::ReleaseSend),
+        // The recheck's cause is a [`RecheckRefusal`]; a signature that did
+        // not verify is a provider fault.
+        ReleaseBarrierError::Recheck | ReleaseBarrierError::Sign(_) => None,
+    }
+}
+
+impl RecheckRefusal {
+    /// The TME1 `barrier-failure` this refusal records (ADR-069 R9 §4.6.1).
+    #[must_use]
+    pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
+        match self {
+            Self::Root(_) => Some(BarrierFailure::RecheckAuthority),
+            Self::RecheckObservation(_) => Some(BarrierFailure::RecheckObservationUnavailable),
+            Self::ObservationChanged => Some(BarrierFailure::RecheckObservationChanged),
+            Self::Identity(_) => Some(BarrierFailure::RecheckIdentityUnreadable),
+            Self::ExecutableUnreadable => Some(BarrierFailure::RecheckExecutableUnreadable),
+            Self::Expired => Some(BarrierFailure::RecheckExpired),
+            Self::UnitChanged => Some(BarrierFailure::RecheckUnitChanged),
+            Self::Cancelled | Self::FirstObservation(_) => None,
+        }
+    }
 }
 
 /// The production [`LaunchBarrier`].
@@ -459,7 +576,7 @@ pub struct ProviderReleaseBarrier<S, I, R, O> {
     check: AuthorityCheck<R, O>,
     sent: Option<ExecutionRelease>,
     ready: Option<[u8; 32]>,
-    frozen: Option<ObservedUnit>,
+    frozen: Option<Frozen>,
     attempted: bool,
 }
 
@@ -670,6 +787,13 @@ fn release_window_at(
         .ok_or(BarrierError::Expired)
 }
 
+/// The release was sent: the attempt deadline must not have passed since.
+fn released_by(deadline: Instant) -> Result<(), BarrierError> {
+    remaining_until(deadline)
+        .map(|_| ())
+        .map_err(|_| BarrierError::ExpiredAfterRelease)
+}
+
 fn remaining_until(deadline: Instant) -> Result<Duration, BarrierError> {
     deadline
         .checked_duration_since(Instant::now())
@@ -726,40 +850,9 @@ fn require_multi_thread() -> Result<(), BarrierError> {
     }
 }
 
-/// The low-level signing port cannot supply its own admission authority.
-/// RLS1 rejects a zero signature, so a mismatched ID or unverifiable signature
-/// fails before the release packet can be serialized or sent.
-struct AdmittedReleaseSigner<'a> {
-    signer: &'a dyn ReleaseSigner,
-    attempt: &'a AdmittedAttempt,
-}
-
-impl ReleaseSigner for AdmittedReleaseSigner<'_> {
-    fn runtime_attestation_key_id(&self) -> &str {
-        self.attempt.runtime_key_id()
-    }
-
-    fn sign(&self, message: &[u8]) -> [u8; 64] {
-        if self.signer.runtime_attestation_key_id() != self.attempt.runtime_key_id() {
-            return [0; 64];
-        }
-        let signature = self.signer.sign(message);
-        if self
-            .attempt
-            .runtime_key()
-            .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))
-            .is_ok()
-        {
-            signature
-        } else {
-            [0; 64]
-        }
-    }
-}
-
 impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O>
 where
-    S: ReleaseSigner + Send + Sync,
+    S: RuntimeAttestationSigner + Send + Sync,
     I: UnitIdentitySource + Send + Sync,
     R: Fn() -> Result<CheckedRoot, ImageActivationError> + Send + Sync,
     O: ObservedReadback + Send + Sync,
@@ -816,24 +909,32 @@ where
                     .is_ok_and(|limits| limits.work_bytes() != 0),
             },
             ready: Cell::new(None),
+            requested_configuration_evidence: attempt.requested_configuration_evidence(),
             frozen: RefCell::new(None),
         };
         let provider_end = &self.provider_end;
-        let signer = AdmittedReleaseSigner {
-            signer: &self.signer,
-            attempt: &self.admitted,
-        };
+        // Every signature is verified under the independently admitted key
+        // before the release packet can be serialized or sent.
+        let admitted =
+            AdmittedRuntimeKey::new(self.admitted.runtime_key_id(), self.admitted.runtime_key());
         let released = tokio::task::block_in_place(|| {
             bound_channel(provider_end, attempt.deadline())?;
-            release_after_ready(provider_end, main_pid, &expected, &bounded, &signer)
-                .map_err(BarrierError::Release)
+            release_after_ready(
+                provider_end,
+                main_pid,
+                &expected,
+                &bounded,
+                &self.signer,
+                admitted,
+            )
+            .map_err(BarrierError::Release)
         });
         self.ready = bounded.ready.get();
         self.frozen = bounded.frozen.take();
         let release = released
             .map_err(|error| bounded.refusal.take().map_or(error, BarrierError::Refused))?;
         self.sent = Some(release);
-        remaining_until(attempt.deadline()).map(|_| ())
+        released_by(attempt.deadline())
     }
 
     const fn expected(&self, invocation: [u8; 16], launcher: FdIdentity) -> ExpectedLauncherReady {
@@ -862,7 +963,7 @@ where
 
 impl<S, I, R, O> LaunchBarrier for ProviderReleaseBarrier<S, I, R, O>
 where
-    S: ReleaseSigner + Send + Sync,
+    S: RuntimeAttestationSigner + Send + Sync,
     I: UnitIdentitySource + Send + Sync,
     R: Fn() -> Result<CheckedRoot, ImageActivationError> + Send + Sync,
     O: ObservedReadback + Send + Sync,
