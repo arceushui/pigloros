@@ -5,10 +5,19 @@ use pos_owner_bridge::{BridgeError, UnavailableCode};
 
 /// Admission for the minimal owner executable selected by ADR-110 §1a.
 ///
+/// ADR-132 selects the Windows nonce-ledger profile, so the E16 platform gate
+/// admits this target. The gate starts no ceremony and activates nothing:
+/// #399 supplies the actual owner adapter and E15 still gates production.
+///
+/// This gate looks at the target operating system only. `Ok(())` is not a
+/// desktop-profile verdict: OS build, product type, architecture and CPU
+/// features are refused by [`require_windows_profile`], which
+/// `WindowsOwnerHost::start` applies before any owner work.
+///
 /// # Errors
 ///
-/// The accepted E16 profile refuses Windows owner operations until #741;
-/// #399 supplies the actual owner adapter. This gate starts no ceremony.
+/// Returns `Unavailable(PlatformUnsupported)` only if the shared platform
+/// policy stops selecting the Windows profile.
 pub const fn owner_startup() -> Result<(), BridgeError> {
     pos_owner_bridge::encryptor_lock::nonce_ledger_support(
         pos_owner_bridge::encryptor_lock::HOST_TARGET_OS,
@@ -110,12 +119,7 @@ mod tests {
 
     #[test]
     fn platform_admission_is_capability_based_and_fails_closed() {
-        assert_eq!(
-            owner_startup(),
-            Err(BridgeError::Unavailable(
-                UnavailableCode::PlatformUnsupported
-            ))
-        );
+        assert_eq!(owner_startup(), Ok(()));
         let available = CpuFeatures {
             aes_ni: true,
             pclmulqdq: true,

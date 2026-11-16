@@ -359,6 +359,7 @@ mod tests {
         };
         capability_bindings.sort_unstable();
         test_ok(AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             registry_digest,
             vec![request.authenticated().registry_binding_digest()],
             capability_bindings,
@@ -503,6 +504,7 @@ mod tests {
         let leaf_principal = test_ok(PrincipalRefV1::try_new([3; 16], "local.test"));
         let actor = EntityId::new();
         let authenticated = test_ok(AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             AuthenticatedPrincipalDraftV1 {
                 principal: leaf_principal.clone(),
                 adapter_id: "test-adapter".to_owned(),
