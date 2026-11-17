@@ -18,6 +18,7 @@ use crate::selector_protocol::{
 };
 
 pub mod installation;
+pub mod recovery;
 pub mod runtime_lifecycle;
 
 /// Fixed root-owned selector endpoint. It is not configurable by an evaluator.
