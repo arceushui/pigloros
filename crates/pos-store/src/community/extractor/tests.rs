@@ -31,8 +31,8 @@ use super::super::protection::{
     CommunityRecordEvidenceV1,
 };
 use super::{
-    heights, prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1,
-    CommunityArtifactRecordInputV1,
+    extract, heights, prepare_community_artifact_batch_v1, read_root, resolve_children,
+    CommunityArtifactBatchInputV1, CommunityArtifactRecordInputV1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -202,6 +202,37 @@ fn counts(records: &[&CommunityProtectedRecordV1]) -> CommunityGraphCountsV1 {
     }
 }
 
+fn inputs<'a>(
+    records: &[&'a CommunityProtectedRecordV1],
+) -> Vec<CommunityArtifactRecordInputV1<'a>> {
+    records
+        .iter()
+        .map(|record| CommunityArtifactRecordInputV1 {
+            object: record.object(),
+            registration: record.registration(),
+        })
+        .collect()
+}
+
+fn batch<'a>(
+    records: &'a [CommunityArtifactRecordInputV1<'a>],
+    head: &'a [u8],
+    root: &'a [u8],
+) -> CommunityArtifactBatchInputV1<'a> {
+    CommunityArtifactBatchInputV1 {
+        store_incarnation: INCARNATION,
+        profile_digest: PROFILE,
+        operation_id: OPERATION,
+        authorization_ref: AUTHORIZATION,
+        owner_binding_digest: COB,
+        records,
+        graph_root: root,
+        selected_head: head,
+        current_head: None,
+        expected_prior_head: None,
+    }
+}
+
 /// Prepare `records` under `key` against a CSH1 over `members` and a CGR1
 /// with `roots` and the exact counts of `records`.
 fn prepare(
@@ -211,30 +242,45 @@ fn prepare(
     key: &CommunityArtifactProtectorV1,
 ) -> Fallible<Result<(), Error>> {
     let (head, root) = head_and_root(members, roots, counts(records))?;
-    let records: Vec<CommunityArtifactRecordInputV1<'_>> = records
-        .iter()
-        .map(|record| CommunityArtifactRecordInputV1 {
-            object: record.object(),
-            registration: record.registration(),
-        })
-        .collect();
-    Ok(prepare_community_artifact_batch_v1(
-        &SEAL,
-        CommunityArtifactBatchInputV1 {
-            store_incarnation: INCARNATION,
-            profile_digest: PROFILE,
-            operation_id: OPERATION,
-            authorization_ref: AUTHORIZATION,
-            owner_binding_digest: COB,
-            records: &records,
-            graph_root: &root,
-            selected_head: &head,
-            current_head: None,
-            expected_prior_head: None,
-        },
-        &[key],
+    let records = inputs(records);
+    Ok(
+        prepare_community_artifact_batch_v1(&SEAL, batch(&records, &head, &root), &[key])
+            .map(|_| ()),
     )
-    .map(|_| ()))
+}
+
+/// Authenticate and read each of `records` on its own, stopping before any
+/// cross-record check. The CGR1 roots resolve to none of them, so only a
+/// whole batch would also refuse at the closure walk; a refusal here comes
+/// from the record's own checks.
+fn extract_each(
+    records: &[&CommunityProtectedRecordV1],
+    key: &CommunityArtifactProtectorV1,
+) -> Fallible<Result<(), Error>> {
+    let (head, root) = head_and_root(&[MEMBER], &SOME_ROOT, counts(records))?;
+    let records = inputs(records);
+    let batch = batch(&records, &head, &root);
+    let root = read_root(&batch)?;
+    Ok(records
+        .iter()
+        .try_for_each(|record| extract(*record, &batch, &root, &[key]).map(|_| ())))
+}
+
+/// Extract every one of `records`, which must succeed, and resolve their
+/// children, stopping before the shape checks and the closure walk.
+fn resolve(
+    records: &[&CommunityProtectedRecordV1],
+    key: &CommunityArtifactProtectorV1,
+) -> Fallible<Result<(), Error>> {
+    let (head, root) = head_and_root(&[MEMBER], &SOME_ROOT, counts(records))?;
+    let records = inputs(records);
+    let batch = batch(&records, &head, &root);
+    let root = read_root(&batch)?;
+    let extracted = records
+        .iter()
+        .map(|record| extract(*record, &batch, &root, &[key]))
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(resolve_children(&extracted).map(|_| ()))
 }
 
 fn state(bytes: &[u8]) -> Fallible<Vec<u8>> {
@@ -856,11 +902,7 @@ fn a_pass_revision_and_unsupported_or_malformed_records_are_refused() -> TestRes
     ];
     for (index, (kind, plaintext, error)) in refused.into_iter().enumerate() {
         let record = protect(&mut key, kind, &plaintext, &[])?;
-        assert_eq!(
-            prepare(&[&record], &[MEMBER], &SOME_ROOT, &key)?,
-            Err(error),
-            "case {index}"
-        );
+        assert_eq!(extract_each(&[&record], &key)?, Err(error), "case {index}");
     }
     Ok(())
 }
@@ -900,7 +942,7 @@ fn unsupported_node_forms_are_refused() -> TestResult {
         let (bytes, _) = node(spec)?;
         let record = protect(&mut key, Kind::ExecutionProvenance, &bytes, &[])?;
         assert_eq!(
-            prepare(&[&record], &[MEMBER], &SOME_ROOT, &key)?,
+            extract_each(&[&record], &key)?,
             Err(Error::InvalidBinding),
             "node {index}"
         );
@@ -912,10 +954,7 @@ fn unsupported_node_forms_are_refused() -> TestResult {
 fn a_record_of_another_generation_is_refused() -> TestResult {
     let mut key = protector([0x21; 16])?;
     let record = protect(&mut key, Kind::StateContent, &state(b"state")?, &[])?;
-    assert_eq!(
-        prepare(&[&record], &[MEMBER], &SOME_ROOT, &key)?,
-        Err(Error::InvalidBinding)
-    );
+    assert_eq!(extract_each(&[&record], &key)?, Err(Error::InvalidBinding));
     Ok(())
 }
 
@@ -926,7 +965,7 @@ fn duplicate_identities_and_missing_or_unlisted_children_are_refused() -> TestRe
     let first = protect(&mut key, Kind::StateContent, &state_bytes, &[])?;
     let second = protect(&mut key, Kind::StateContent, &state_bytes, &[])?;
     assert_eq!(
-        prepare(&[&first, &second], &[MEMBER], &SOME_ROOT, &key)?,
+        resolve(&[&first, &second], &key)?,
         Err(Error::InvalidBinding)
     );
 
@@ -947,12 +986,7 @@ fn duplicate_identities_and_missing_or_unlisted_children_are_refused() -> TestRe
     })?;
     let unlisted = protect(&mut key, Kind::StateRevisionOrHead, &revision_bytes, &[])?;
     assert_eq!(
-        prepare(
-            &[&first, &producer_record, &unlisted],
-            &[MEMBER],
-            &SOME_ROOT,
-            &key
-        )?,
+        resolve(&[&first, &producer_record, &unlisted], &key)?,
         Err(Error::InvalidBinding)
     );
 
@@ -986,25 +1020,21 @@ fn duplicate_identities_and_missing_or_unlisted_children_are_refused() -> TestRe
         &[&revision_record, &first, &initial],
     )?;
     assert_eq!(
-        prepare(
+        resolve(
             &[&first, &producer_record, &initial, &revision_node_record],
-            &[MEMBER],
-            &SOME_ROOT,
             &key
         )?,
         Err(Error::InvalidBinding)
     );
     // The node resolves its CSR1 before the CSR1 resolves its own children.
     assert_eq!(
-        prepare(
+        resolve(
             &[
                 &revision_node_record,
                 &producer_record,
                 &revision_record,
                 &initial
             ],
-            &[MEMBER],
-            &SOME_ROOT,
             &key
         )?,
         Err(Error::InvalidBinding)
