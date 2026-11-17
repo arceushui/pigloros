@@ -690,7 +690,6 @@ async fn post_consent_revocation(
             (StatusCode::OK, Json(body)).into_response()
         }
     })
-
 }
 
 /// `POST /v1/preferences` (#304): create a Preference or its next revision.
