@@ -24,7 +24,7 @@
 use std::fmt;
 
 use thiserror::Error;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::strict_cbor::{Reader, StrictCborError};
 use crate::subject_cbor;
@@ -80,7 +80,9 @@ impl StrictCborError for PreferenceWeightsErrorV1 {
 }
 
 /// One Preference dimension's `[score, confidence]` pair.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Its debug form is redacted: both values are protected plaintext.
+#[derive(Clone, Copy, PartialEq)]
 pub struct PreferenceWeightV1 {
     /// Affinity in `[-1.0, 1.0]`.
     pub score: f64,
@@ -91,6 +93,12 @@ pub struct PreferenceWeightV1 {
 impl PreferenceWeightV1 {
     fn is_admitted(self) -> bool {
         in_range(self.score, -1.0) && in_range(self.confidence, 0.0)
+    }
+}
+
+impl fmt::Debug for PreferenceWeightV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PreferenceWeightV1(<redacted>)")
     }
 }
 
@@ -200,16 +208,36 @@ pub fn validate_preference_weights(plaintext: &[u8]) -> Result<(), PreferenceWei
     parse(plaintext, &mut |_, _| {})
 }
 
+/// Held dimension names and weights, wiped on drop whether or not they were
+/// admitted.
+///
+/// Sorting is in place and decoding never grows the vector past its initial
+/// capacity, so no unwiped copy of a weight is left in a freed buffer.
+#[derive(Clone, PartialEq)]
+struct Dimensions(Vec<(String, PreferenceWeightV1)>);
+
+impl Drop for Dimensions {
+    fn drop(&mut self) {
+        for (name, weight) in &mut self.0 {
+            name.zeroize();
+            weight.score.zeroize();
+            weight.confidence.zeroize();
+        }
+    }
+}
+
 /// A complete, valid Preference weight set in its deterministic key order.
 ///
-/// Its debug form names only the dimension count.
+/// Its names and weights are wiped on drop, and its debug form names only the
+/// dimension count.
 #[derive(Clone, PartialEq)]
 pub struct PreferenceWeightsV1 {
-    dimensions: Vec<(String, PreferenceWeightV1)>,
+    dimensions: Dimensions,
 }
 
 impl PreferenceWeightsV1 {
-    /// Admit `dimensions` in any order.
+    /// Admit `dimensions` in any order. The given names and weights are
+    /// wiped when they are refused.
     ///
     /// # Errors
     /// Returns [`PreferenceWeightsErrorV1::EntryCount`] for no dimensions or
@@ -218,14 +246,16 @@ impl PreferenceWeightsV1 {
     /// name, and [`PreferenceWeightsErrorV1::Weight`] for a weight out of its
     /// domain.
     pub fn new(
-        mut dimensions: Vec<(String, PreferenceWeightV1)>,
+        dimensions: Vec<(String, PreferenceWeightV1)>,
     ) -> Result<Self, PreferenceWeightsErrorV1> {
-        dimensions.sort_by(|(left, _), (right, _)| {
+        let mut dimensions = Dimensions(dimensions);
+        dimensions.0.sort_unstable_by(|(left, _), (right, _)| {
             left.len().cmp(&right.len()).then_with(|| left.cmp(right))
         });
-        checked_count(dimensions.len() as u64)
+        checked_count(dimensions.0.len() as u64)
             .and_then(|_| {
                 dimensions
+                    .0
                     .iter()
                     .try_fold("", |previous, (name, weight)| {
                         admit(previous, name, *weight)
@@ -240,9 +270,9 @@ impl PreferenceWeightsV1 {
     /// # Errors
     /// As [`validate_preference_weights`].
     pub fn decode(plaintext: &[u8]) -> Result<Self, PreferenceWeightsErrorV1> {
-        let mut dimensions = Vec::new();
+        let mut dimensions = Dimensions(Vec::with_capacity(MAX_PREFERENCE_DIMENSIONS));
         let parsed = parse(plaintext, &mut |name, weight| {
-            dimensions.push((name.to_owned(), weight));
+            dimensions.0.push((name.to_owned(), weight));
         });
         parsed.map(|()| Self { dimensions })
     }
@@ -250,6 +280,7 @@ impl PreferenceWeightsV1 {
     /// The dimensions in deterministic key order.
     pub fn dimensions(&self) -> impl Iterator<Item = (&str, PreferenceWeightV1)> {
         self.dimensions
+            .0
             .iter()
             .map(|(name, weight)| (name.as_str(), *weight))
     }
@@ -258,8 +289,8 @@ impl PreferenceWeightsV1 {
     #[must_use]
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         let mut output = Zeroizing::new(Vec::with_capacity(MAX_PREFERENCE_WEIGHTS_PLAINTEXT_BYTES));
-        subject_cbor::head(&mut output, 5, self.dimensions.len() as u64);
-        for (name, weight) in &self.dimensions {
+        subject_cbor::head(&mut output, 5, self.dimensions.0.len() as u64);
+        for (name, weight) in &self.dimensions.0 {
             subject_cbor::text(&mut output, name);
             subject_cbor::head(&mut output, 4, 2);
             subject_cbor::float(&mut output, weight.score);
@@ -273,7 +304,7 @@ impl fmt::Debug for PreferenceWeightsV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PreferenceWeightsV1")
-            .field("dimensions", &self.dimensions.len())
+            .field("dimensions", &self.dimensions.0.len())
             .finish_non_exhaustive()
     }
 }

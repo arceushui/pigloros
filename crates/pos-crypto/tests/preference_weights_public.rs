@@ -338,6 +338,8 @@ fn encoder_sorts_by_encoding_and_round_trips_byte_exact() -> TestResult {
         format!("{decoded:?}"),
         "PreferenceWeightsV1 { dimensions: 4, .. }"
     );
+    let (_, first) = decoded.dimensions().next().ok_or("expected a dimension")?;
+    assert_eq!(format!("{first:?}"), "PreferenceWeightV1(<redacted>)");
     Ok(())
 }
 

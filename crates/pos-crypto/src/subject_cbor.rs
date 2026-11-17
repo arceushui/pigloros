@@ -54,52 +54,9 @@ pub(crate) fn text(output: &mut Vec<u8>, value: &str) {
     output.extend_from_slice(value.as_bytes());
 }
 
-/// The 52 fraction bits of an IEEE 754 binary64 value.
-const DOUBLE_FRACTION: u64 = (1 << 52) - 1;
-
-/// The bits of the binary64 value `double` in the narrower IEEE 754 format with
-/// `exponent_bits` and `fraction_bits`, or `None` when that format cannot hold
-/// the value bit for bit.
-///
-/// A normal binary64 value narrows to a normal value when its exponent fits
-/// and its dropped fraction bits are zero, or to a subnormal value when the
-/// shifted-out significand bits are zero. Zero keeps its sign. Infinities,
-/// NaNs and binary64 subnormals never narrow.
-fn narrowed(double: u64, exponent_bits: u64, fraction_bits: u64) -> Option<u64> {
-    let bias = (1 << (exponent_bits - 1)) - 1;
-    let exponent = (double >> 52) & 0x7ff;
-    let significand = (double & DOUBLE_FRACTION) | (u64::from(exponent != 0) << 52);
-    let normal = exponent + bias > 1023;
-    let (target, shift) = if normal {
-        (exponent + bias - 1023, 52 - fraction_bits)
-    } else {
-        // `exponent <= 1023 - bias` here, so the shift is at least 53 - fraction_bits.
-        (0, 1076 - fraction_bits - bias - exponent)
-    };
-    let exact = u64::from(significand.trailing_zeros()) >= shift.min(64);
-    (exact && target < (1 << exponent_bits) - 1).then(|| {
-        let kept = significand
-            .checked_shr(u32::try_from(shift).unwrap_or(u32::MAX))
-            .unwrap_or(0);
-        ((double >> 63) << (exponent_bits + fraction_bits))
-            | (target << fraction_bits)
-            | (kept & ((1 << fraction_bits) - 1))
-    })
-}
-
-/// The initial byte, argument width and argument of the shortest of half,
-/// single or double precision that holds `value` bit for bit.
-pub(crate) fn shortest_float(value: f64) -> (u8, usize, u64) {
-    let bits = value.to_bits();
-    narrowed(bits, 5, 10)
-        .map(|half| (0xf9, 2, half))
-        .or_else(|| narrowed(bits, 8, 23).map(|single| (0xfa, 4, single)))
-        .unwrap_or((0xfb, 8, bits))
-}
-
 /// Append `value` as the shortest float that holds it bit for bit.
 pub(crate) fn float(output: &mut Vec<u8>, value: f64) {
-    let (initial, width, argument) = shortest_float(value);
+    let (initial, width, argument) = crate::strict_cbor::shortest_float(value);
     output.push(initial);
     output.extend_from_slice(&argument.to_be_bytes()[8 - width..]);
 }
