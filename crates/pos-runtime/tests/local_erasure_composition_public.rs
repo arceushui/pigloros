@@ -2142,7 +2142,7 @@ fn signature_address(record: &[u8]) -> TestResult<ErasureReferenceV1> {
     Ok(LocalErasureSignatureV1::from_canonical_cbor(record)?.reference()?)
 }
 
-fn freeze(provenance: ErasureReferenceV1) -> ErasureStateTransitionV1 {
+const fn freeze(provenance: ErasureReferenceV1) -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle: ErasureLifecycleV1::AccessFrozen,
         freeze_position: Some(1),
@@ -2278,7 +2278,7 @@ fn signed_freeze(
         1,
     )?;
     let refused = refused(digest)?;
-    store.retain(&[signed.clone()])?;
+    store.retain(std::slice::from_ref(&signed))?;
     store.retain(&refused)?;
     let mut host = store.host(&local_case()?, 4_096)?;
     let request = request_of(key)?;
@@ -2297,7 +2297,6 @@ fn signed_freeze(
             .lifecycle(),
         ErasureLifecycleV1::AccessFrozen
     );
-    drop(sender);
     Ok((host, signed))
 }
 
@@ -2357,23 +2356,7 @@ fn assert_committed_freeze(
         Some(LocalErasureLineageRuleV1 { subject }.reference()?)
     );
     assert_eq!(scope.target_closure(), target_closure_digest(&targets));
-    let store_identity = ErasureReferenceV1::from_digest(STORE_IDENTITY);
-    let mut obligations = cells
-        .iter()
-        .map(|&(target, category, ack_class)| {
-            ErasureObligationV1::new(ErasureObligationInputV1 {
-                category,
-                target,
-                owner: pos_core::local_erasure_owner_ref_v1(
-                    store_identity,
-                    u64::from(category),
-                    ack_class,
-                )?,
-                command_identity: destruction_command_reference(request, target),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+    let obligations = expected_obligations(request, cells)?;
     let trust = bundle().reference()?;
     let set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
         request,
@@ -2384,27 +2367,7 @@ fn assert_committed_freeze(
         policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
         trust,
     })?;
-    let mut matrix = Vec::new();
-    for category in ErasureInventoryCategoryV1::CANONICAL {
-        for (index, target) in targets.iter().enumerate() {
-            let owner = obligations
-                .iter()
-                .find(|obligation| {
-                    obligation.category() == category && obligation.target() == *target
-                })
-                .map(ErasureObligationV1::owner);
-            matrix.push(ErasureFreezeApplicabilityRowV1::new(
-                category,
-                u64::try_from(index)?,
-                if owner.is_some() {
-                    ErasureApplicabilityDecisionV1::Applicable
-                } else {
-                    ErasureApplicabilityDecisionV1::Inapplicable
-                },
-                owner,
-            )?);
-        }
-    }
+    let matrix = expected_matrix(&targets, &obligations)?;
     let admission = |authorization_provenance| {
         ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
             request,
@@ -2459,8 +2422,64 @@ fn store_cells() -> TestResult<Vec<Cell>> {
     ])
 }
 
+/// The ERO1 of every cell, owned by its ELOWN1 owner under the store
+/// identity and naming its target's command identity, in reference order.
+fn expected_obligations(
+    request: ErasureReferenceV1,
+    cells: &[Cell],
+) -> TestResult<Vec<ErasureObligationV1>> {
+    let store_identity = ErasureReferenceV1::from_digest(STORE_IDENTITY);
+    let mut obligations = cells
+        .iter()
+        .map(|&(target, category, ack_class)| {
+            ErasureObligationV1::new(ErasureObligationInputV1 {
+                category,
+                target,
+                owner: pos_core::local_erasure_owner_ref_v1(
+                    store_identity,
+                    u64::from(category),
+                    ack_class,
+                )?,
+                command_identity: destruction_command_reference(request, target),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+    Ok(obligations)
+}
+
+/// The applicability matrix over `targets`: a cell with an obligation is
+/// Applicable with that obligation's owner, every other cell Inapplicable.
+fn expected_matrix(
+    targets: &[ErasureRequiredTargetV1],
+    obligations: &[ErasureObligationV1],
+) -> TestResult<Vec<ErasureFreezeApplicabilityRowV1>> {
+    let mut matrix = Vec::new();
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        for (index, target) in targets.iter().enumerate() {
+            let owner = obligations
+                .iter()
+                .find(|obligation| {
+                    obligation.category() == category && obligation.target() == *target
+                })
+                .map(ErasureObligationV1::owner);
+            matrix.push(ErasureFreezeApplicabilityRowV1::new(
+                category,
+                u64::try_from(index)?,
+                if owner.is_some() {
+                    ErasureApplicabilityDecisionV1::Applicable
+                } else {
+                    ErasureApplicabilityDecisionV1::Inapplicable
+                },
+                owner,
+            )?);
+        }
+    }
+    Ok(matrix)
+}
+
 /// The Key and Backup cells of one key target.
-fn key_cells(target: ErasureRequiredTargetV1) -> [Cell; 2] {
+const fn key_cells(target: ErasureRequiredTargetV1) -> [Cell; 2] {
     [
         (target, ErasureInventoryCategoryV1::Key, "key-registry"),
         (
@@ -2741,7 +2760,6 @@ fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
             .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
-    drop(sender);
     assert!(host.read_sender()?.erasure_state(request_of(2)?)?.is_none());
     drop(host);
     let mut host = store.host(&local_case()?, 4_096)?;
@@ -3505,7 +3523,7 @@ impl Attempted {
             &erasure_signer(),
             1,
         )?;
-        store.retain(&[signed.clone()])?;
+        store.retain(std::slice::from_ref(&signed))?;
         let mut host = store.host(case, 4_096)?;
         let state = host
             .command_sender()?
@@ -4262,7 +4280,6 @@ fn a_complete_receipt_issues_signed_at_its_reached_position() -> TestResult {
     assert_eq!(receipt.issue_position(), 7);
     assert_eq!(receipt.signature(), address);
     assert_eq!(receipt.trust(), attempted.bundle.reference()?);
-    drop(sender);
     drop(host);
     let mut host = attempted.host()?;
     assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Complete);
