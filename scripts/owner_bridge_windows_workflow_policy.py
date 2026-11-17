@@ -23,7 +23,12 @@ if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe coverage scope' }
 $marker = Join-Path $env:RUNNER_TEMP ("owner-desktop-stop-" + [guid]::NewGuid().ToString('N'))
 $observer = $null
 try {
-  $observer = Start-Job -FilePath (Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1') -ArgumentList $marker
+  # A child process on this console streams each observation live; a
+  # timed-out or cancelled step keeps every line printed before it.
+  $observerScript = Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1'
+  $observer = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', "`"$observerScript`"", "`"$marker`"") -NoNewWindow -PassThru
+  # Cache the process handle now so ExitCode stays readable after exit.
+  $null = $observer.Handle
 } catch { Write-Output 'NATIVE_DESKTOP observer=unknown' }
 try {
   cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --no-fail-fast --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored --nocapture
@@ -32,10 +37,10 @@ try {
   try {
     [System.IO.File]::WriteAllText($marker, 'stop')
     if ($null -ne $observer) {
-      $finished = Wait-Job -Job $observer -Timeout 6
-      if ($null -eq $finished) { Write-Output 'NATIVE_DESKTOP observer_stop=unknown' }
-      if ($observer.State -ne 'Completed') { Write-Output 'NATIVE_DESKTOP observer_state=unknown' }
-      Receive-Job -Job $observer -ErrorAction SilentlyContinue
+      if (-not $observer.WaitForExit(6000)) {
+        Write-Output 'NATIVE_DESKTOP observer_stop=unknown'
+        $observer.Kill()
+      } elseif ($observer.ExitCode -ne 0) { Write-Output 'NATIVE_DESKTOP observer_state=unknown' }
     }
   } catch { Write-Output 'NATIVE_DESKTOP observer_output=unknown' }
 }
@@ -96,6 +101,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                      '}\n'},
                                              {'name': 'Measure only shim source coverage',
                                               'id': 'coverage',
+                                              'timeout-minutes': 65,
                                               'shell': 'pwsh',
                                               'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}'},
                                               'run': NATIVE_COVERAGE_COMMAND},
@@ -298,9 +304,9 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
            'path': '${{ runner.temp }}/owner-windows-failed-diagnostic/',
            'if-no-files-found': 'error'}}])
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '98456bf109a07606cb892b25596b08b366b71243930b823bc536a924aa951f49',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'd0962763528c407b5d3cf44732ad59078296f7134f98e05ebc27893f7c7a3f67',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
- 'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}
+ 'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 
 
 def producer_sources(root=ROOT):
