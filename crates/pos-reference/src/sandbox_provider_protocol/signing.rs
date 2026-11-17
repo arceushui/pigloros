@@ -8,13 +8,16 @@
 //! signing oracle.
 //!
 //! [`RuntimeSigned`] is sealed. Its kinds are a subset of the R9 §5 set, and
-//! a kind joins only when its encoder does: RLS1 now, SAU1, SPR1 and SPY1
-//! with their emission. RQE1, KOE1, TME1 and RDY1 never do.
+//! a kind joins only when its encoder does: RLS1, SDY1 and SPE1 now, SAU1,
+//! SPR1 and SPY1 with their emission. RQE1, KOE1, TME1 and RDY1 never do.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
 use super::codec::signature_message;
-use super::{ExecutionReleaseFields, SandboxProviderProtocolError};
+use super::{
+    ExecutionReleaseFields, SandboxDescribeResponseFields, SandboxProviderErrorFields,
+    SandboxProviderProtocolError,
+};
 
 mod runtime_signed_sealed {
     /// Only this crate names the record kinds the runtime key signs.
@@ -41,6 +44,36 @@ impl runtime_signed_sealed::Sealed for Rls1 {}
 impl RuntimeSigned for Rls1 {
     const MAGIC: &'static str = "RLS1";
     type Body = ExecutionReleaseFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// SDY1, the signed `describe` response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sdy1 {}
+
+impl runtime_signed_sealed::Sealed for Sdy1 {}
+
+impl RuntimeSigned for Sdy1 {
+    const MAGIC: &'static str = "SDY1";
+    type Body = SandboxDescribeResponseFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// SPE1, the signed provider error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Spe1 {}
+
+impl runtime_signed_sealed::Sealed for Spe1 {}
+
+impl RuntimeSigned for Spe1 {
+    const MAGIC: &'static str = "SPE1";
+    type Body = SandboxProviderErrorFields;
 
     fn key_id(body: &Self::Body) -> &str {
         &body.runtime_attestation_key_id
