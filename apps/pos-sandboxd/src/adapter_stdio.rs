@@ -10,7 +10,7 @@
 //! stdout.
 //!
 //! Once `ReleaseV1` was sent, [`AdapterChannels::run`] feeds the verified
-//! input under ELM1 ID 16 and captures at most ELM1[8] output bytes, until the
+//! input under ELM1 ID 16 and captures at most ELM1\[8\] output bytes, until the
 //! execute path's ending stops both. The capture is fenced: its bytes leave
 //! the [`FencedOutput`] only against the attempt's terminal evidence.
 
@@ -64,7 +64,7 @@ const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
 /// The production implementation is the admitted execution the attempt's
 /// entry retains.
 pub(crate) trait AttemptPayload: std::fmt::Debug + Send + Sync {
-    /// The verified input length, nonzero and at most ELM1[7].
+    /// The verified input length, nonzero and at most ELM1\[7\].
     fn input_len(&self) -> u64;
 
     /// Read exactly from the verified input.
@@ -73,7 +73,7 @@ pub(crate) trait AttemptPayload: std::fmt::Debug + Send + Sync {
     /// Fails for a range beyond the input, or when the read fails.
     fn read_input_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()>;
 
-    /// Reserve the attempt's one output of exactly ELM1[8] bytes; `None`
+    /// Reserve the attempt's one output of exactly ELM1\[8\] bytes; `None`
     /// once it was reserved.
     fn reserve_output(&self) -> Option<Result<StagingCharge, OutputReservationRefused>>;
 }
@@ -176,9 +176,9 @@ pub(crate) fn monotonic_now_ns() -> u64 {
 pub(crate) struct AdapterChannels {
     provider: ProviderStdio,
     payload: Arc<dyn AttemptPayload>,
-    /// ELM1[8]: the most output bytes accepted.
+    /// ELM1\[8\]: the most output bytes accepted.
     output_limit: u64,
-    /// ELM1[16] in milliseconds: the feed's window.
+    /// ELM1\[16\] in milliseconds: the feed's window.
     input_window_ms: u64,
     charge: StagingCharge,
 }
@@ -322,7 +322,7 @@ async fn write_input(channel: &mut Sender, payload: &Arc<dyn AttemptPayload>, ac
 enum CaptureStop {
     /// (E): end of file, or the drain after an empty cgroup reached `EAGAIN`.
     EndOfStream,
-    /// (C): ELM1[8] bytes were accepted and one more byte was read.
+    /// (C): ELM1\[8\] bytes were accepted and one more byte was read.
     Ceiling,
     /// (X): a read failed, or the execute path ended without an empty cgroup.
     Aborted,
@@ -430,7 +430,7 @@ fn take(bytes: &mut Vec<u8>, read: io::Result<&[u8]>, limit: u64) -> Option<Capt
     }
 }
 
-/// How much to read next: up to one byte more than ELM1[8] still allows,
+/// How much to read next: up to one byte more than ELM1\[8\] still allows,
 /// so the byte past the ceiling is seen but never accepted.
 fn room(limit: u64, accepted: usize) -> usize {
     usize::try_from(limit - accepted as u64).map_or(CAPTURE_CHUNK, |left| {
@@ -438,7 +438,7 @@ fn room(limit: u64, accepted: usize) -> usize {
     })
 }
 
-/// Accept `read` up to ELM1[8]; the ceiling once a byte past it was read.
+/// Accept `read` up to ELM1\[8\]; the ceiling once a byte past it was read.
 fn accept(bytes: &mut Vec<u8>, read: &[u8], limit: u64) -> Option<CaptureStop> {
     let left = usize::try_from(limit - bytes.len() as u64).unwrap_or(usize::MAX);
     let accepted = &read[..read.len().min(left)];
@@ -448,7 +448,7 @@ fn accept(bytes: &mut Vec<u8>, read: &[u8], limit: u64) -> Option<CaptureStop> {
 }
 
 /// Make room for `more` bytes in steps that double the capacity but never
-/// exceed `ceiling`, the bytes ELM1[8] allows, so the capture never holds
+/// exceed `ceiling`, the bytes ELM1\[8\] allows, so the capture never holds
 /// more memory than its reservation.
 fn grow(bytes: &mut Vec<u8>, more: usize, ceiling: usize) {
     let needed = bytes.len() + more;

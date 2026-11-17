@@ -784,14 +784,21 @@ fn root_and_launcher() -> Result<(CheckedRoot, LauncherSource), Box<dyn Error>> 
 
 fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
     let (root, launcher) = root_and_launcher()?;
+    let (release, stdio) = unit_descriptors()?;
     Ok(TransientUnitLaunchInputs::new(
         root,
         launcher,
         mode,
-        descriptor()?,
+        release,
         crate::test_fixtures::invocation()?,
-        crate::UnitStdio::for_test()?,
+        stdio,
     ))
+}
+
+/// The release descriptor and the standard descriptors of a unit no adapter
+/// runs under.
+fn unit_descriptors() -> Result<(OwnedFd, crate::UnitStdio), Box<dyn Error>> {
+    Ok((descriptor()?, crate::UnitStdio::for_test()?))
 }
 
 fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {

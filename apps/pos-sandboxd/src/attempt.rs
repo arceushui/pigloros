@@ -213,12 +213,12 @@ impl AdmittedAttempt {
         self.policy.limits.get(id).map_or(0, |limit| limit.value)
     }
 
-    /// ELM1[8]: the most output bytes the capture accepts.
+    /// ELM1\[8\]: the most output bytes the capture accepts.
     pub(crate) fn output_limit(&self) -> u64 {
         self.limit(8)
     }
 
-    /// ELM1[16] in milliseconds: the stdin feed's window.
+    /// ELM1\[16\] in milliseconds: the stdin feed's window.
     pub(crate) fn input_window_ms(&self) -> u64 {
         self.limit(16)
     }

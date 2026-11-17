@@ -7,7 +7,7 @@
 //!    every captured exchange first, and Local creates the FD 3 socket pair
 //!    and establishes its namespace;
 //! 2. the verified root is rechecked and becomes the only `RootDirectory`;
-//! 3. the attempt's one output reservation of ELM1[8] bytes is made and the
+//! 3. the attempt's one output reservation of ELM1\[8\] bytes is made and the
 //!    adapter's standard channels are created (ADR-069 R10 §4.7 and §4.1);
 //!    then the typed transient unit is started and its requested state
 //!    verified, including the exact `/work` mount, the descriptor layout and
@@ -67,7 +67,7 @@ use crate::{
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
     LocalNetworkPort, LocalProxyBindError, OutputReservationRefused, RequestedConfiguration,
     ServeError, ServedProxy, StdioChannelError, TransientServiceUnitName,
-    TransientUnitLaunchInputs, TransientUnitRequest,
+    TransientUnitLaunchInputs, TransientUnitRequest, UnitStdio,
 };
 
 /// The least time a terminating host call is given, however short the
@@ -756,10 +756,8 @@ where
     let (ended, on_end) = watch::channel(None);
     let supervision = async {
         let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds, cancel).await;
-        let empty = match &supervised {
-            Ok((_, ending)) => observed_empty(&mut cgroup, *ending, bounds.call).await,
-            Err(_) => false,
-        };
+        let ending = supervised.as_ref().ok().map(|(_, ending)| *ending);
+        let empty = observed_empty(&mut cgroup, ending, bounds.call).await;
         ended.send_replace(Some(empty));
         supervised
     };
@@ -1105,30 +1103,7 @@ where
     let (invocation, release) = barrier
         .prepare(&attempt)
         .map_err(|error| ExecuteError::Barrier(Box::new(error)))?;
-    // The recheck comes last but for the output reservation and the
-    // standard channels (R10 §4.9 step 2), so nothing else separates it
-    // from the start of the unit.
-    let checked = recheck().map_err(ExecuteError::Recheck)?;
-    if !checked.matches_attempt(&attempt) {
-        return Err(ExecuteError::RootIdentity);
-    }
-    let payload = attempt.payload();
-    let (charge, (stdio, provider)) = payload
-        .reserve_output()
-        .ok_or(ExecuteError::OutputAlreadyReserved)
-        .and_then(|reserved| reserved.map_err(ExecuteError::OutputReservation))
-        .and_then(|charge| {
-            open_channels()
-                .map(|channels| (charge, channels))
-                .map_err(ExecuteError::StdioChannel)
-        })?;
-    let channels = AdapterChannels::new(
-        provider,
-        payload,
-        attempt.output_limit(),
-        attempt.input_window_ms(),
-        charge,
-    );
+    let (checked, stdio, channels) = recheck_and_open(&attempt, recheck)?;
     let inputs = TransientUnitLaunchInputs::new(
         checked,
         attempt.launcher_source(),
@@ -1150,6 +1125,37 @@ where
         cancel,
         channels,
     })
+}
+
+/// The last steps before the unit start (R10 §4.9 step 2): the root
+/// recheck, then the attempt's output reservation and the adapter's standard
+/// channels, so nothing else separates the recheck from the start.
+fn recheck_and_open(
+    attempt: &AdmittedAttempt,
+    recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError>,
+) -> Result<(CheckedRoot, UnitStdio, AdapterChannels), ExecuteError> {
+    let checked = recheck().map_err(ExecuteError::Recheck)?;
+    if !checked.matches_attempt(attempt) {
+        return Err(ExecuteError::RootIdentity);
+    }
+    let payload = attempt.payload();
+    let (charge, (stdio, provider)) = payload
+        .reserve_output()
+        .ok_or(ExecuteError::OutputAlreadyReserved)
+        .and_then(|reserved| reserved.map_err(ExecuteError::OutputReservation))
+        .and_then(|charge| {
+            open_channels()
+                .map(|channels| (charge, channels))
+                .map_err(ExecuteError::StdioChannel)
+        })?;
+    let channels = AdapterChannels::new(
+        provider,
+        payload,
+        attempt.output_limit(),
+        attempt.input_window_ms(),
+        charge,
+    );
+    Ok((checked, stdio, channels))
 }
 
 fn resolve_replay(
@@ -1376,26 +1382,31 @@ where
 ///
 /// Ending 0 observed it already. After an acknowledged kill (1, 3 and 6) or a
 /// requested stop (5) the cgroup is observed again until it is empty, at most
-/// for one termination call. An unacknowledged kill (2, 4 and 7) is never
-/// observed: its capture aborts.
-async fn observed_empty<K>(cgroup: &mut K, ending: Supervised, call: Duration) -> bool
+/// for one termination call. An unacknowledged kill (2, 4 and 7) or a failed
+/// supervision (`None`) is never observed: its capture aborts.
+async fn observed_empty<K>(cgroup: &mut K, ending: Option<Supervised>, call: Duration) -> bool
 where
     K: UnitCgroup + Send,
 {
-    match ending.ending() {
-        AttemptEnding::CgroupEmpty => true,
-        AttemptEnding::WatchdogKilled
-        | AttemptEnding::ProtocolFailureKilled
-        | AttemptEnding::Cancelled {
-            watchdog: None | Some(true),
-        } => wait_empty(cgroup, Instant::now() + call)
+    match ending.map(Supervised::ending) {
+        Some(AttemptEnding::CgroupEmpty) => true,
+        Some(
+            AttemptEnding::WatchdogKilled
+            | AttemptEnding::ProtocolFailureKilled
+            | AttemptEnding::Cancelled {
+                watchdog: None | Some(true),
+            },
+        ) => wait_empty(cgroup, Instant::now() + call)
             .await
             .unwrap_or(false),
-        AttemptEnding::WatchdogKillFailed
-        | AttemptEnding::ProtocolFailureKillFailed
-        | AttemptEnding::Cancelled {
-            watchdog: Some(false),
-        } => false,
+        None
+        | Some(
+            AttemptEnding::WatchdogKillFailed
+            | AttemptEnding::ProtocolFailureKillFailed
+            | AttemptEnding::Cancelled {
+                watchdog: Some(false),
+            },
+        ) => false,
     }
 }
 

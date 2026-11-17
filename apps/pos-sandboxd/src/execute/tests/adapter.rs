@@ -201,14 +201,14 @@ impl FakeHost {
     }
 }
 
-/// A scenario whose adapter runs `script` on `payload`, with ELM1[8] =
+/// A scenario whose adapter runs `script` on `payload`, with ELM1\[8\] =
 /// `output_limit`.
 struct StdioRun {
     scenario: Scenario,
     outcome: Outcome,
 }
 
-/// The fixture limits with ELM1[8] and ELM1[16] replaced.
+/// The fixture limits with ELM1\[8\] and ELM1\[16\] replaced.
 fn limits(output_limit: u64, input_window_ms: u64, watchdog_ms: u64) -> Vec<SandboxLimit> {
     crate::test_fixtures::execution_limits(watchdog_ms)
         .into_iter()
@@ -247,7 +247,7 @@ impl StdioRun {
         Ok(Self { scenario, outcome })
     }
 
-    /// The adapter writes `output` after reading the input, under ELM1[8] =
+    /// The adapter writes `output` after reading the input, under ELM1\[8\] =
     /// `output_limit`.
     async fn writing(output: Vec<u8>, output_limit: u64) -> TestResult<Self> {
         let script = StdioScript {
@@ -276,7 +276,7 @@ const fn capture_record(
     }
 }
 
-/// One R10 §8.1 row: `output` then end of stream, under ELM1[8] = `limit`.
+/// One R10 §8.1 row: `output` then end of stream, under ELM1\[8\] = `limit`.
 async fn captured(output: Vec<u8>, limit: u64) -> TestResult<OutputCaptureRecord> {
     let run = StdioRun::writing(output, limit).await?;
     Ok(run.execution()?.adapter.output().capture())
@@ -429,33 +429,49 @@ enum Fd3 {
     Silent,
 }
 
-/// A scenario whose adapter writes `S` at once and then never exits, under a
-/// 200 ms watchdog, driven to its ending as `ending` says; the execution and
-/// how long it took.
-async fn hung(ending: Ending) -> TestResult<(Duration, AttemptExecution<String, FakeCgroup, u64>)> {
-    let mut scenario = Scenario::new()?;
-    // The output is queued before the release, so the ending, however early,
-    // finds it on the channel.
-    scenario.host.stdio = Some(StdioScript {
-        output: stream(),
-        input: InputUse::Ignore,
-        never_finish: true,
-        ..StdioScript::default()
-    });
-    scenario.host.faults.extend_from_slice(ending.faults);
-    if ending.cancel {
-        scenario.barrier.cancel_on_release = Some(Arc::new(AttemptCancel::new()));
-    }
-    let (mode, plan) = match ending.local {
-        Some(fd3) => {
-            scenario.host.adapter = match fd3 {
-                Fd3::Violation => AdapterScript::ProtocolViolation,
-                Fd3::Silent => AdapterScript::Silent,
-            };
-            (SandboxExecutionMode::Local, local_plan(UNUSED_ENDPOINT)?.1)
+impl Ending {
+    /// Script `scenario`'s adapter to write `S` at once and then never exit,
+    /// with this ending's faults, cancellation and FD 3 adapter; the
+    /// attempt's mode and plan.
+    fn script(self, scenario: &mut Scenario) -> TestResult<(SandboxExecutionMode, ModePlan)> {
+        // The output is queued before the release, so the ending, however
+        // early, finds it on the channel.
+        scenario.host.stdio = Some(StdioScript {
+            output: stream(),
+            input: InputUse::Ignore,
+            never_finish: true,
+            ..StdioScript::default()
+        });
+        scenario.host.faults.extend_from_slice(self.faults);
+        if self.cancel {
+            scenario.barrier.cancel_on_release = Some(Arc::new(AttemptCancel::new()));
         }
-        None => (SandboxExecutionMode::AirGapped, ModePlan::AirGapped),
-    };
+        match self.local {
+            Some(fd3) => {
+                scenario.host.adapter = fd3.script();
+                Ok((SandboxExecutionMode::Local, local_plan(UNUSED_ENDPOINT)?.1))
+            }
+            None => Ok((SandboxExecutionMode::AirGapped, ModePlan::AirGapped)),
+        }
+    }
+}
+
+impl Fd3 {
+    const fn script(self) -> AdapterScript {
+        match self {
+            Self::Violation => AdapterScript::ProtocolViolation,
+            Self::Silent => AdapterScript::Silent,
+        }
+    }
+}
+
+/// The job of a hung attempt under a 200 ms watchdog, cancelled as its
+/// release is if `scenario` cancels on release.
+fn hung_job(
+    scenario: &Scenario,
+    mode: SandboxExecutionMode,
+    plan: ModePlan,
+) -> TestResult<ExecuteJob> {
     let mut job = scenario.job(ATTEMPT, mode, plan, 200)?;
     if let Some(cancel) = &scenario.barrier.cancel_on_release {
         job.cancel = cancel.signal();
@@ -464,13 +480,23 @@ async fn hung(ending: Ending) -> TestResult<(Duration, AttemptExecution<String, 
         .attempt
         .with_limits(limits(100, 1_000, 200))
         .with_payload(Arc::new(TestPayload::with_input(INPUT)));
+    Ok(job)
+}
+
+/// A scenario whose adapter writes `S` at once and then never exits, under a
+/// 200 ms watchdog, driven to its ending as `ending` says; the execution and
+/// how long it took.
+async fn hung(ending: Ending) -> TestResult<(Duration, AttemptExecution<String, FakeCgroup, u64>)> {
+    let mut scenario = Scenario::new()?;
+    let (mode, plan) = ending.script(&mut scenario)?;
+    let job = hung_job(&scenario, mode, plan)?;
     let recheck = root_for(&scenario.log, &job.attempt);
     let started = Instant::now();
     let outcome = scenario.run_on(&LoopbackNetwork, job, recheck).await;
     let elapsed = started.elapsed();
-    let execution =
-        outcome.map_err(|failure| format!("the execution failed: {}", failure.error))?;
-    Ok((elapsed, execution))
+    outcome
+        .map(|execution| (elapsed, execution))
+        .map_err(|failure| format!("the execution failed: {}", failure.error).into())
 }
 
 /// The capture of an attempt that ended as `ending` with ending code

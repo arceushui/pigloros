@@ -82,10 +82,18 @@ fn sorted(mut properties: Vec<DbusProperty>) -> Vec<DbusProperty> {
 fn requested_value(value: &RequestedConfigurationValue) -> DbusValue {
     match value {
         RequestedConfigurationValue::Typed(value) => readback_value(value),
+        descriptors => descriptor_value(descriptors),
+    }
+}
+
+/// The descriptor array's names, or a standard descriptor of which nothing
+/// is recorded.
+fn descriptor_value(value: &RequestedConfigurationValue) -> DbusValue {
+    match value {
         RequestedConfigurationValue::DescriptorNames(names) => {
             DbusValue::DescriptorNames(names.clone())
         }
-        RequestedConfigurationValue::Descriptor => DbusValue::Descriptor,
+        _ => DbusValue::Descriptor,
     }
 }
 

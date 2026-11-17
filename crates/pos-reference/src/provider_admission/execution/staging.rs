@@ -259,7 +259,7 @@ impl VerifiedStagedInput {
         self.execution.read_exact_at(buffer, offset)
     }
 
-    /// Reserve this attempt's one output of exactly ELM1[8] bytes, retaining
+    /// Reserve this attempt's one output of exactly ELM1\[8\] bytes, retaining
     /// its attempt slot (ADR-069 R10 §4.7).
     ///
     /// `None` once the reservation was made: an attempt has one output.

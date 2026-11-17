@@ -94,7 +94,7 @@ pub enum StagingError {
     Io(#[from] io::Error),
 }
 
-/// Why the attempt's one output reservation of exactly ELM1[8] bytes was
+/// Why the attempt's one output reservation of exactly ELM1\[8\] bytes was
 /// refused (ADR-069 R10 §4.7).
 ///
 /// The request is the policy's own ID 8 limit and the attempt's only one, so

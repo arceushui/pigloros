@@ -304,13 +304,9 @@ impl AttemptSlot {
         if *claimed {
             return None;
         }
-        // `total` refuses only a closed ledger or an aggregate overflow.
         let total = match self.shared.total(&state, ceiling) {
             Ok(total) => total,
-            Err(StagingError::CleanupFailed) => {
-                return Some(Err(OutputReservationRefused::AdmissionClosed))
-            }
-            Err(_) => return Some(Err(OutputReservationRefused::AggregateExceeded)),
+            Err(error) => return Some(Err(output_refusal(&error))),
         };
         *claimed = true;
         state.usage.reserved_bytes = total;
@@ -319,6 +315,15 @@ impl AttemptSlot {
             shared: Arc::clone(&self.shared),
         }
         .charge(ceiling, None, Some(Arc::clone(self)))))
+    }
+}
+
+/// The output reservation's refusal: `total` refuses only a closed ledger or
+/// an aggregate overflow.
+const fn output_refusal(error: &StagingError) -> OutputReservationRefused {
+    match error {
+        StagingError::CleanupFailed => OutputReservationRefused::AdmissionClosed,
+        _ => OutputReservationRefused::AggregateExceeded,
     }
 }
 

@@ -530,12 +530,9 @@ impl SystemdTransientUnitValue {
             Self::Numeric(SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value)) => {
                 SystemdTransientUnitReadbackValue::U32(*value)
             }
-            Self::ExtraFileDescriptors(descriptors) => {
-                return RequestedConfigurationValue::DescriptorNames(
-                    descriptors.iter().map(|(_, name)| name.clone()).collect(),
-                )
+            Self::ExtraFileDescriptors(_) | Self::StandardDescriptor(_) => {
+                return self.descriptor_configuration()
             }
-            Self::StandardDescriptor(_) => return RequestedConfigurationValue::Descriptor,
             Self::TemporaryFileSystem(mounts) => {
                 SystemdTransientUnitReadbackValue::TemporaryFileSystem(mounts.clone())
             }
@@ -544,6 +541,19 @@ impl SystemdTransientUnitValue {
             }
         };
         RequestedConfigurationValue::Typed(typed)
+    }
+
+    /// A descriptor-carrying value as RQE1 records it: the descriptor
+    /// array's names, and nothing of a standard descriptor.
+    fn descriptor_configuration(&self) -> RequestedConfigurationValue {
+        match self {
+            Self::ExtraFileDescriptors(descriptors) => {
+                RequestedConfigurationValue::DescriptorNames(
+                    descriptors.iter().map(|(_, name)| name.clone()).collect(),
+                )
+            }
+            _ => RequestedConfigurationValue::Descriptor,
+        }
     }
 
     /// The same name-list kind carrying `value`.
@@ -562,10 +572,9 @@ impl SystemdTransientUnitValue {
                 Self::BindReadOnlyPaths(expected),
                 SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
             ) => expected == actual,
-            (
-                Self::ExtraFileDescriptors(expected),
-                SystemdTransientUnitReadbackValue::StringArray(actual),
-            ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+            (Self::ExtraFileDescriptors(_) | Self::StandardDescriptor(_), _) => {
+                self.descriptor_matches(observed)
+            }
             (
                 Self::TemporaryFileSystem(expected),
                 SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
@@ -577,13 +586,41 @@ impl SystemdTransientUnitValue {
         }
     }
 
-    /// The signature of the array-valued kinds; `a(ss)` is the last of them.
+    /// Readback equality of the descriptor-carrying kinds: the array's
+    /// names, and a standard descriptor's name, which reads back empty unless
+    /// an enum is `fd` (R10 §4.3). Anything else differs.
+    fn descriptor_matches(&self, observed: &SystemdTransientUnitReadbackValue) -> bool {
+        match (self, observed) {
+            (
+                Self::ExtraFileDescriptors(expected),
+                SystemdTransientUnitReadbackValue::StringArray(actual),
+            ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+            (Self::StandardDescriptor(_), SystemdTransientUnitReadbackValue::String(name)) => {
+                name.is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    /// The signature of the array-valued and descriptor-carrying kinds;
+    /// `a(ss)` is the last of them.
     const fn collection_signature(&self) -> &'static str {
         match self {
             Self::BindReadOnlyPaths(_) => "a(ssbt)",
-            Self::ExtraFileDescriptors(_) => "a(hs)",
+            Self::ExtraFileDescriptors(_) | Self::StandardDescriptor(_) => {
+                self.descriptor_signature()
+            }
             Self::ExecStart(_) => "a(sasb)",
             _ => "a(ss)",
+        }
+    }
+
+    /// The signature of the descriptor-carrying kinds: a standard
+    /// descriptor's `h`, the descriptor array's `a(hs)`.
+    const fn descriptor_signature(&self) -> &'static str {
+        match self {
+            Self::StandardDescriptor(_) => "h",
+            _ => "a(hs)",
         }
     }
 
@@ -713,7 +750,6 @@ impl SystemdTransientUnitProperty {
             SystemdTransientUnitValue::SystemCallFilter(_)
             | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
             SystemdTransientUnitValue::Numeric(value) => value.dbus_signature(),
-            SystemdTransientUnitValue::StandardDescriptor(_) => "h",
             collection => collection.collection_signature(),
         }
     }
@@ -753,11 +789,6 @@ impl SystemdTransientUnitProperty {
                     ),
                     SystemdTransientUnitReadbackValue::U64(actual),
                 ) => expected == actual,
-                // The name reads back empty unless an enum is `fd` (R10 §4.3).
-                (
-                    SystemdTransientUnitValue::StandardDescriptor(_),
-                    SystemdTransientUnitReadbackValue::String(name),
-                ) => name.is_empty(),
                 (expected, actual) => expected.collection_matches(actual),
             }
     }

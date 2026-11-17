@@ -205,11 +205,23 @@ impl SystemdHardeningProperty {
             Self::LockPersonality => "LockPersonality",
             Self::SystemCallArchitectures => "SystemCallArchitectures",
             Self::UMask => "UMask",
+            Self::KillMode
+            | Self::SendSigKill
+            | Self::StandardInput
+            | Self::StandardOutput
+            | Self::StandardError => self.kill_and_stdio_name(),
+        }
+    }
+
+    /// The name of a kill or standard-stream property; `StandardError` is
+    /// the last of them.
+    const fn kill_and_stdio_name(self) -> &'static str {
+        match self {
             Self::KillMode => "KillMode",
             Self::SendSigKill => "SendSIGKILL",
             Self::StandardInput => "StandardInput",
             Self::StandardOutput => "StandardOutput",
-            Self::StandardError => "StandardError",
+            _ => "StandardError",
         }
     }
 
@@ -231,8 +243,7 @@ impl SystemdHardeningProperty {
             | Self::ProtectHostname
             | Self::RestrictSuidSgid
             | Self::RestrictRealtime
-            | Self::LockPersonality
-            | Self::SendSigKill => SystemdHardeningValue::Bool(true),
+            | Self::LockPersonality => SystemdHardeningValue::Bool(true),
             Self::PrivatePids | Self::ProtectHome => SystemdHardeningValue::String("yes"),
             Self::PrivateUsersEx => SystemdHardeningValue::String("self"),
             Self::CapabilityBoundingSet | Self::AmbientCapabilities => {
@@ -246,10 +257,21 @@ impl SystemdHardeningProperty {
             Self::RestrictNamespaces => SystemdHardeningValue::U64(0x7e02_0080),
             Self::SystemCallArchitectures => SystemdHardeningValue::StringArray(&["native"]),
             Self::UMask => SystemdHardeningValue::U32(0o077),
+            Self::KillMode
+            | Self::SendSigKill
+            | Self::StandardInput
+            | Self::StandardOutput
+            | Self::StandardError => self.kill_and_stdio_value(),
+        }
+    }
+
+    /// The value of a kill or standard-stream property; the standard
+    /// streams, the last of them, are all `null`.
+    const fn kill_and_stdio_value(self) -> SystemdHardeningValue {
+        match self {
             Self::KillMode => SystemdHardeningValue::String("control-group"),
-            Self::StandardInput | Self::StandardOutput | Self::StandardError => {
-                SystemdHardeningValue::String("null")
-            }
+            Self::SendSigKill => SystemdHardeningValue::Bool(true),
+            _ => SystemdHardeningValue::String("null"),
         }
     }
 }

@@ -231,6 +231,14 @@ impl FakeHost {
         self.faults.contains(&fault)
     }
 
+    /// An acknowledged kill or a stop ends the unit's tasks, unless they
+    /// linger.
+    fn end_tasks(&self) {
+        if !self.faulty(Fault::Lingering) {
+            self.host_ended.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn observed(&self) -> Observed {
         self.observed
             .lock()
@@ -289,6 +297,15 @@ struct FakeCgroup {
     host_ended: Arc<AtomicBool>,
 }
 
+impl FakeCgroup {
+    /// Whether no unit task remains at poll `polls`: the adapter finished and
+    /// enough polls passed, or a kill or stop ended the tasks.
+    fn tasks_gone(&self, polls: usize) -> bool {
+        (polls > self.empty_after && self.adapter_done.load(Ordering::SeqCst))
+            || self.host_ended.load(Ordering::SeqCst)
+    }
+}
+
 impl UnitCgroup for FakeCgroup {
     type Error = Injected;
 
@@ -297,10 +314,7 @@ impl UnitCgroup for FakeCgroup {
         if self.fail_read {
             Err(Injected)
         } else {
-            Ok(
-                (polls > self.empty_after && self.adapter_done.load(Ordering::SeqCst))
-                    || self.host_ended.load(Ordering::SeqCst),
-            )
+            Ok(self.tasks_gone(polls))
         }
     }
 
@@ -464,10 +478,7 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "stop");
-        // A stopped unit's tasks exit, unless they linger.
-        if !self.faulty(Fault::Lingering) {
-            self.host_ended.store(true, Ordering::SeqCst);
-        }
+        self.end_tasks();
         let hang = self.faulty(Fault::HangStop);
         async move {
             hang_if(hang).await;
@@ -484,10 +495,7 @@ impl UnitHost for FakeHost {
         let outcome = if self.faulty(Fault::Kill) {
             Err(Injected)
         } else {
-            // An acknowledged SIGKILL ends the unit's tasks, unless they linger.
-            if !self.faulty(Fault::Lingering) {
-                self.host_ended.store(true, Ordering::SeqCst);
-            }
+            self.end_tasks();
             Ok(())
         };
         let hang = self.faulty(Fault::HangKill);

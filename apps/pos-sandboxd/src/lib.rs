@@ -506,16 +506,24 @@ impl SystemdDynamicPropertyKind {
         }
     }
 
-    /// The last kinds; `TemporaryFileSystem` is the final one.
+    /// The last kinds.
     const fn tail_name(self) -> &'static str {
         match self {
             Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
+            Self::TemporaryFileSystem => "TemporaryFileSystem",
+            last => last.last_name(),
+        }
+    }
+
+    /// The command and the standard descriptors;
+    /// `StandardErrorFileDescriptor` is the final kind.
+    const fn last_name(self) -> &'static str {
+        match self {
             Self::ExecStart => "ExecStart",
             Self::StandardInputFileDescriptor => "StandardInputFileDescriptor",
             Self::StandardOutputFileDescriptor => "StandardOutputFileDescriptor",
-            Self::StandardErrorFileDescriptor => "StandardErrorFileDescriptor",
-            _ => "TemporaryFileSystem",
+            _ => "StandardErrorFileDescriptor",
         }
     }
 }
