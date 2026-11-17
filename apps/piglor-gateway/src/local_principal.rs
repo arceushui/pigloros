@@ -4156,8 +4156,20 @@ mod tests {
     async fn a_store_without_a_mode_binding_records_no_revocation() -> TestResult {
         let provision = consented_provision()?;
         let actor = actor()?;
-        let mut host = memory_host()?;
-        provision_local_consents(&mut host, &provision)?;
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        // An unbound store, opened without the mode attachment `serve` makes.
+        let unbound_host = || {
+            ErasureExecutionHostV1::open_with_authority(
+                StoreConfig::Sqlite { path: path.clone() },
+                &ErasureCoordinatorCompositionV1::closed(),
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+        };
+        // Provisioning binds its own consent authority to the host it
+        // writes through; the Gateway binds another, so it opens a fresh host.
+        provision_local_consents(&mut unbound_host()?, &provision)?;
+        let mut host = unbound_host()?;
         let authorization = host
             .command_sender()?
             .with_scheduled_admission(|ports| {
