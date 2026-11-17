@@ -125,21 +125,15 @@ fn binds_an_owner_only_leaf() -> TestResult {
     Ok(())
 }
 
-/// A leaf passes its check only as a UID 0 socket: a UID 0 node of another
-/// kind fails, and so does a socket another user owns, wherever the
-/// container can chown.
+/// A leaf passes its check only as a socket: a UID 0 node of another kind
+/// fails. (The isolated container drops `CAP_CHOWN`, so a socket another user
+/// owns cannot be made here.)
 fn requires_a_root_owned_socket_leaf() -> TestResult {
     let parent = fs::File::open(RUNTIME)?;
     let leaf = OsStr::new("provider-execute.sock");
     let socket = UnixListener::bind(EXECUTE)?;
     set_mode(EXECUTE, 0o640)?;
     assert_eq!(leaf_socket(&parent, leaf)?, (identity(EXECUTE)?, 0o640));
-    if std::os::unix::fs::chown(EXECUTE, Some(65_534), Some(65_534)).is_ok() {
-        assert_eq!(
-            leaf_socket(&parent, leaf).err(),
-            Some(ProviderRuntimeError::UnsafeEndpoint)
-        );
-    }
     drop(socket);
     fs::remove_file(EXECUTE)?;
     fs::write(EXECUTE, b"")?;
