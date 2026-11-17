@@ -340,7 +340,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_every_draft_array_bound_is_a_stated_limit(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        document["x-pigloros-limits"]["room_rules"]["enforced_by"]["schema"].pop()
+        document["x-pigloros-limits"]["ensemble_forks"]["enforced_by"]["schema"].pop(0)
         with self.assertRaisesRegex(checker.ContractError, "is not a stated limit"):
             checker.check_description(contract(document=document))
 
@@ -352,7 +352,7 @@ class CheckGatewayContractTest(unittest.TestCase):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
         schemas = document["components"]["schemas"]
-        del schemas["CommittedEventReceipt"]["properties"]["event_schema_id"]["maxLength"]
+        del schemas["AdmissionReceipt"]["properties"]["operation_url"]["maxLength"]
         with self.assertRaisesRegex(checker.ContractError, "unbounded string"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
@@ -537,7 +537,10 @@ class CheckGatewayContractTest(unittest.TestCase):
                 for path in checker.FIXTURE_ORACLES.glob("*.json"):
                     if path.name != "positive.json":
                         (Path(only_head) / path.name).write_bytes(path.read_bytes())
-                with self.assertRaisesRegex(checker.ContractError, "^positive.json: .*head"):
+                # The first input naming the Local profile is refused, not an oracle.
+                with self.assertRaisesRegex(
+                    checker.ContractError, r"^(?!oracle )[\w-]+\.json: .*head"
+                ):
                     checker.check_fixtures(subject, oracles=Path(only_head))
         with tempfile.TemporaryDirectory() as empty:
             with self.assertRaisesRegex(checker.ContractError, "no gateway-client-conformance"):
@@ -741,12 +744,14 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_draft_values_are_bounded_integers(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        receipt = document["components"]["schemas"]["CommittedEventReceipt"]["properties"]
-        del receipt["seq"]["maximum"]
+        reference = document["components"]["schemas"]["RevisionRef"]["properties"]
+        del reference["revision"]["maximum"]
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["components"]["parameters"]["Revision"]["schema"].pop("maximum")
+        projection = document["paths"]["/v1/timelines/{timeline_id}/projection"]["get"]
+        at_seq = next(p for p in projection["parameters"] if p.get("name") == "at_seq")
+        at_seq["schema"].pop("maximum")
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
@@ -1344,7 +1349,7 @@ class CheckGatewayContractTest(unittest.TestCase):
                 self.assert_breaking(document, message)
         baseline = checker.load(checker.BASELINE)
         frozen = baseline["x-pigloros-limits"]
-        self.assertNotIn("room_plugins", frozen)
+        self.assertNotIn("trace_items", frozen)
         current = copy.deepcopy(DOCUMENT["x-pigloros-limits"])
         prefixes = checker.served_pointer_prefixes(contract())
         checker.check_frozen_limits(frozen, current, prefixes)
@@ -1377,7 +1382,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "surface is not the surface"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["x-pigloros-limits"]["room_rules"]["surface"] = "served"
+        document["x-pigloros-limits"]["trace_items"]["surface"] = "served"
         with self.assertRaisesRegex(checker.ContractError, "surface is not the surface"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
