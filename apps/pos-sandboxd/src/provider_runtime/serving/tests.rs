@@ -23,7 +23,8 @@ use pos_reference::sandbox_provider_protocol::{
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 
 use super::{
-    exchange_deadline, root_peer, ControlState, Responder, EXECUTE_CLOSED, FENCED, LIVE, REVOKED,
+    exchange_deadline, trusted_peer, Admission, ControlState, Responder, EXECUTE_CLOSED, FENCED,
+    LIVE, REVOKED,
 };
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::reconcile::ReconcileError;
@@ -813,11 +814,65 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
 }
 
 #[test]
-fn only_a_root_peer_is_answered() -> TestResult {
-    // On a non-root host the peer of a socket pair is not root; in the
-    // isolated container it is.
+fn only_the_trusted_peer_uid_is_answered() -> TestResult {
+    // The peer of a socket pair runs as this process's UID.
     let (local, _) = UnixStream::pair()?;
-    assert_eq!(root_peer(&local), rustix::process::geteuid().is_root());
+    let uid = rustix::process::geteuid().as_raw();
+    assert!(trusted_peer(&local, uid));
+    assert!(!trusted_peer(&local, uid + 1));
+    Ok(())
+}
+
+/// Assert that `peer` reads nothing, not even server write EOF, and that
+/// all of `sent` is still unread at `server`: the connection was dropped
+/// before anything was read or written.
+fn assert_dropped_unread(server: &UnixStream, peer: &mut UnixStream, sent: &[u8]) -> TestResult {
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
+    let mut unread = vec![0; sent.len() + 1];
+    let mut reader = server;
+    assert_eq!(reader.read(&mut unread)?, sent.len());
+    assert_eq!(&unread[..sent.len()], sent);
+    Ok(())
+}
+
+/// A peer of another UID gets zero bytes on either socket: neither the
+/// revocation responder nor the execute answer reads its request, and the
+/// control state stays `Live` (R11 §6 step 6).
+fn drops_an_untrusted_peer(
+    admitted: &AdmittedSelectorProvider,
+    signer: &crate::KeyFileRuntimeSigner,
+    retained: Authority,
+) -> TestResult {
+    let starting = OnceLock::new();
+    let untrusted = Responder {
+        peer_uid: rustix::process::geteuid().as_raw() + 1,
+        ..Responder::new(admitted, signer, &starting)
+    };
+    let (update, _) = revocation_update(admitted, &[], 4)?;
+    let context = cancellation_context(admitted, &update, Vec::new(), Vec::new())?;
+    let sent = framed(&[&context.to_canonical_cbor()?, &update])?;
+    let (server, mut peer) = UnixStream::pair()?;
+    peer.write_all(&sent)?;
+    untrusted.exchange(&server, Instant::now());
+    assert_dropped_unread(&server, &mut peer, &sent)?;
+    assert_eq!(
+        untrusted.revocation.observer().state.load(Ordering::SeqCst),
+        LIVE
+    );
+    let sent = framed(&[&describe([4; 16], retained)?])?;
+    let (server, mut peer) = UnixStream::pair()?;
+    peer.write_all(&sent)?;
+    untrusted.answer(&server, Admission::Answered);
+    assert_dropped_unread(&server, &mut peer, &sent)?;
+    assert_eq!(
+        untrusted.revocation.observer().state.load(Ordering::SeqCst),
+        LIVE
+    );
     Ok(())
 }
 
@@ -836,6 +891,7 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
     the_control_state_only_advances(&admitted)?;
+    drops_an_untrusted_peer(&admitted, &signer, retained)?;
     let starting = OnceLock::new();
     // An acknowledged update fences the runtime for good; describe still
     // answers and execute is refused with 11 (invariant 24).

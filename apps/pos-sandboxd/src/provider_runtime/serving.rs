@@ -91,6 +91,9 @@ const RECHECK: Timespec = Timespec {
     tv_nsec: 10_000_000,
 };
 
+/// The only UID whose connections either socket answers (R11 §6 step 6).
+const ROOT_UID: u32 = 0;
+
 /// The control-socket exchange bound from accept (R11 §8.3 step 1).
 const CONTROL_EXCHANGE: Duration = Duration::from_millis(100);
 
@@ -254,13 +257,15 @@ struct Workers<'scope> {
 
 /// The startup authority that answers requests, its one signer, the
 /// admission state restart reconciliation sets (unset while `Starting`),
-/// the revocation responder and the control state it leaves.
+/// the revocation responder and the control state it leaves, and the one
+/// peer UID both sockets answer.
 pub(super) struct Responder<'a> {
     admitted: &'a AdmittedSelectorProvider,
     signer: &'a KeyFileRuntimeSigner,
     admission: &'a OnceLock<AdmissionState>,
     revocation:
         RevocationUpdateResponder<'a, KeyFileRuntimeSigner, LiveAttempts<'a>, ControlState<'a>>,
+    peer_uid: u32,
 }
 
 impl<'a> Responder<'a> {
@@ -289,6 +294,7 @@ impl<'a> Responder<'a> {
                     admitted,
                 },
             ),
+            peer_uid: ROOT_UID,
         }
     }
 
@@ -401,7 +407,7 @@ impl<'a> Responder<'a> {
     /// peer that is not root is dropped with zero bytes read and written; so
     /// is every peer once the runtime is `Revoked`, after the peer check.
     fn answer(&self, stream: &UnixStream, admission: Admission) {
-        if root_peer(stream) && !self.revocation.observer().revoked() {
+        if trusted_peer(stream, self.peer_uid) && !self.revocation.observer().revoked() {
             self.answer_root(stream, admission);
         }
     }
@@ -410,7 +416,7 @@ impl<'a> Responder<'a> {
     /// then send server write EOF once an RCA1 was written. A peer that is
     /// not root is dropped with zero bytes read and written.
     fn exchange(&self, stream: &UnixStream, accepted: Instant) {
-        if root_peer(stream) && self.respond(stream, accepted) {
+        if trusted_peer(stream, self.peer_uid) && self.respond(stream, accepted) {
             stream.shutdown(std::net::Shutdown::Write).ok();
         }
     }
@@ -672,9 +678,10 @@ impl<'a> Responder<'a> {
     }
 }
 
-/// Whether the `SO_PEERCRED` UID of `stream`'s peer is 0 (R11 §6 step 6).
-fn root_peer(stream: &UnixStream) -> bool {
-    rustix::net::sockopt::socket_peercred(stream).is_ok_and(|peer| peer.uid.is_root())
+/// Whether the `SO_PEERCRED` UID of `stream`'s peer is `uid` (R11 §6 step
+/// 6: [`ROOT_UID`] outside tests).
+fn trusted_peer(stream: &UnixStream, uid: u32) -> bool {
+    rustix::net::sockopt::socket_peercred(stream).is_ok_and(|peer| peer.uid.as_raw() == uid)
 }
 
 /// One complete frame, or step 1's refusal.
