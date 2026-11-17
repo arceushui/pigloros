@@ -1,21 +1,18 @@
 {
-  "name": "draft-option-spec-single-option",
-  "operation_id": "createOptionSpec",
+  "name": "preference-weight-out-of-range",
+  "operation_id": "createPreference",
   "request": {
     "headers": {
       "Idempotency-Key": "client-1-1",
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
     },
     "body": {
-      "options": [
+      "schema_version": 1,
+      "weights": [
         {
-          "key": "coast",
-          "label": "Move to the coast",
-          "tags": [
-            "nature",
-            "quiet"
-          ],
-          "lean_hint_micro": 200000
+          "dimension": "nature",
+          "weight_micro": 1500000
         }
       ]
     }
@@ -27,8 +24,8 @@
       "type": "urn:pigloros:gateway:v1:problem:invalid-request",
       "title": "Invalid request",
       "status": 400,
-      "detail": "at least two options",
-      "instance": "/v1/option-specs",
+      "detail": "a weight is outside [-1, 1]",
+      "instance": "/v1/preferences",
       "code": "invalid-request",
       "schema_id": "urn:pigloros:gateway:v1:schema:problem",
       "retryable": false

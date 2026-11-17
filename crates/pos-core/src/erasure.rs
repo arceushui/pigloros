@@ -3923,6 +3923,8 @@ pub use registration_commit::{
     PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
     MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
 };
+mod local_replica;
+pub use local_replica::LocalReplicaResidualPortV1;
 mod rejoin;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,

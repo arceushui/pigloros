@@ -174,6 +174,7 @@ impl ErasureVerifiedInventoryQueryV1 for SingleUseVerifiedInventoryQueryV1 {
 trait ErasureHostStore:
     crate::ScheduledAdmissionStoreV1
     + pos_core::GatewayModeBindingPortV1
+    + pos_core::GatewayRevisionPortV1
     + ErasureInventoryPersistencePortV1
     + ErasureForkPersistencePortV1
     + ErasurePersistencePortV1
@@ -196,6 +197,7 @@ impl<T> ErasureHostStore for T
 where
     T: crate::ScheduledAdmissionStoreV1
         + pos_core::GatewayModeBindingPortV1
+        + pos_core::GatewayRevisionPortV1
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1
         + ErasurePersistencePortV1
@@ -4060,6 +4062,26 @@ impl ErasureCommandSenderV1<'_> {
         })
     }
 
+    /// Run one Gateway revision operation (#304) on the owned store.
+    ///
+    /// The closure receives the owned store only as
+    /// [`pos_core::GatewayRevisionPortV1`], so it can commit, load or erase
+    /// Gateway-managed revisions and nothing else; the borrow cannot outlive
+    /// the closure. Revisions live outside every Timeline, so no Timeline
+    /// erasure fence applies; the sender's generation still must be current.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error for a stale or unavailable sender.
+    pub fn with_gateway_revisions<T>(
+        &mut self,
+        operation: impl FnOnce(&mut dyn pos_core::GatewayRevisionPortV1) -> T,
+    ) -> Result<T, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation).map(|()| {
+            let port: &mut dyn pos_core::GatewayRevisionPortV1 = self.host.store.host_store();
+            operation(port)
+        })
+    }
+
     /// Append authoritative Events inside the installed erasure fence.
     ///
     /// # Errors
@@ -6730,6 +6752,31 @@ mod tests {
             local_seq: Seq,
         ) -> Result<Option<std::num::NonZeroU64>, pos_core::GatewayModeBindingErrorV1> {
             pos_core::GatewayModeBindingPortV1::load_commit_epoch(&self.inner, timeline, local_seq)
+        }
+    }
+
+    impl pos_core::GatewayRevisionPortV1 for FaultStoreV1 {
+        fn commit_gateway_revision(
+            &mut self,
+            draft: pos_core::GatewayRevisionDraftV1,
+        ) -> Result<pos_core::GatewayRevisionCommitV1, pos_core::GatewayRevisionErrorV1> {
+            pos_core::GatewayRevisionPortV1::commit_gateway_revision(&mut self.inner, draft)
+        }
+
+        fn load_gateway_revision(
+            &self,
+            key: pos_core::GatewayRevisionKeyV1,
+        ) -> Result<Option<pos_core::GatewayRevisionStateV1>, pos_core::GatewayRevisionErrorV1>
+        {
+            pos_core::GatewayRevisionPortV1::load_gateway_revision(&self.inner, key)
+        }
+
+        fn erase_gateway_revision(
+            &mut self,
+            permit: pos_core::GatewayRevisionErasurePermitV1,
+        ) -> Result<Option<pos_core::GatewayRevisionTombstoneV1>, pos_core::GatewayRevisionErrorV1>
+        {
+            pos_core::GatewayRevisionPortV1::erase_gateway_revision(&mut self.inner, permit)
         }
     }
 
