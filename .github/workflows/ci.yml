@@ -1106,6 +1106,9 @@ jobs:
           --exclude 'src/execute/tests/ownership/abandonment.rs'
           --exclude 'src/revision/tests.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/provider_runtime/tests.rs'
+          --exclude 'src/provider_runtime/endpoint/tests.rs'
+          --exclude 'src/provider_runtime/serving/tests.rs'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1154,6 +1157,9 @@ jobs:
           --exclude 'src/execute/tests/ownership/abandonment.rs'
           --exclude 'src/revision/tests.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/provider_runtime/tests.rs'
+          --exclude 'src/provider_runtime/endpoint/tests.rs'
+          --exclude 'src/provider_runtime/serving/tests.rs'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
