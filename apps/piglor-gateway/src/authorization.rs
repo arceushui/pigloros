@@ -1133,13 +1133,14 @@ impl GatewayAuthorization {
     /// Recompose the pinned authority from the store's `record` under the
     /// commit-fence write guard, so no decision or admitted operation
     /// interleaves. A failed read of `record` recomposes nothing and is
-    /// answered as it failed.
+    /// answered as it failed, without waiting for the guard.
     pub(crate) async fn refresh(
         &self,
         record: Result<GatewayAuthorityRecordV1, GatewayAuthorizationError>,
     ) -> Result<(), GatewayAuthorizationError> {
+        let record = record?;
         let _guard = self.commit_lock.write().await;
-        record.and_then(|record| self.refresh_held(record))
+        self.refresh_held(record)
     }
 
     /// Recompose the pinned authority from `record` while the caller holds
