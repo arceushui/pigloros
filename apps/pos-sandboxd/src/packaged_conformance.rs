@@ -175,6 +175,25 @@ pub fn runtime() -> Result<tokio::runtime::Runtime, ConformanceError> {
         .map_err(ConformanceError::Io)
 }
 
+/// The production report text of a mounted root: its mount ID and attempt
+/// root path, for [`run`]'s `describe`.
+#[must_use]
+pub fn describe(mount: &VerifiedRootMount) -> String {
+    format!("{}\t{}", mount.mount_id(), mount.root_directory().as_str())
+}
+
+/// The production detach of a held root, under [`RELEASE_DEADLINE`] from
+/// now, for [`run`]'s `release`.
+#[must_use]
+pub fn release(mount: VerifiedRootMount, directory: &PreparedAttemptDirectory) -> Release<'_> {
+    Box::pin(async move {
+        mount
+            .detach(directory, tokio::time::Instant::now() + RELEASE_DEADLINE)
+            .await
+            .map(drop)
+    })
+}
+
 /// Run one case from `IMAGE CERTIFICATE_DER KEY_DESCRIPTION`.
 ///
 /// Its report lines are, in order: the activation (`mounted` with

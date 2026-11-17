@@ -4,9 +4,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStringExt as _;
 
 use super::{
-    exercise, exit_status, removal_line, report_line, run, runtime, ConformanceCase,
-    ConformanceError, ImageActivationError, PreparedAttemptDirectory, Release,
-    SystemdAttemptRegistryError, VerifiedRootMount,
+    describe, exercise, exit_status, release, removal_line, report_line, run, runtime,
+    ConformanceCase, ConformanceError, ImageActivationError, Release, SystemdAttemptRegistryError,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -59,15 +58,6 @@ fn unverified((): (), _: &()) -> Release<'_> {
 }
 
 fn never_released((): (), _: &()) -> Release<'_> {
-    Box::pin(async { Ok(()) })
-}
-
-fn describe(_: &VerifiedRootMount) -> String {
-    String::new()
-}
-
-fn release(mount: VerifiedRootMount, _: &PreparedAttemptDirectory) -> Release<'_> {
-    drop(mount);
     Box::pin(async { Ok(()) })
 }
 

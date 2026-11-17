@@ -22,8 +22,8 @@ use std::{
 };
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_sandboxd::packaged_conformance::{activate, run, ConformanceError, Release};
-use pos_sandboxd::{ImageActivationError, PreparedAttemptDirectory, VerifiedRootMount};
+use pos_sandboxd::packaged_conformance::{activate, describe, release, run, ConformanceError};
+use pos_sandboxd::ImageActivationError;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -66,17 +66,6 @@ fn provision(components: &[&str]) -> TestResult {
         fs::set_permissions(component, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
-}
-
-/// Never called: activation is refused on the container's kernel.
-fn describe(mount: &VerifiedRootMount) -> String {
-    mount.mount_id().to_string()
-}
-
-/// Never called: activation is refused on the container's kernel.
-fn release(mount: VerifiedRootMount, _: &PreparedAttemptDirectory) -> Release<'_> {
-    drop(mount);
-    Box::pin(async { Ok(()) })
 }
 
 /// A report that refuses every write.
@@ -182,13 +171,22 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
         "activation\trefused\tHostFeatureUnavailable\nrelease\tnone\nremoval\tremoved\n"
     );
     assert!(!Path::new("/var/lib/pigloros").exists());
+    Ok(())
+}
 
-    // A usage error fails the run with a diagnostic and no report.
+/// Unprivileged and outside the container, so the coverage run records the
+/// binary's own profile beside this test's.
+#[test]
+fn the_binary_fails_a_usage_error_with_a_diagnostic_and_no_report() -> TestResult {
     let output = Command::new(env!("CARGO_BIN_EXE_pos-sandboxd-conformance"))
-        .env("LLVM_PROFILE_FILE", "/tmp/conformance-binary-%p.profraw")
+        .stdin(Stdio::null())
         .output()?;
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8(output.stderr)?.starts_with("pos-sandboxd-conformance: usage:"));
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        "pos-sandboxd-conformance: usage: pos-sandboxd-conformance IMAGE CERTIFICATE_DER \
+         KEY_DESCRIPTION\n"
+    );
     Ok(())
 }

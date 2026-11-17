@@ -2,19 +2,15 @@
 //! QEMU evidence guest's driver (feature `test-support`, never deployed).
 //!
 //! This file only wires [`pos_sandboxd::packaged_conformance::run`] to the
-//! process: its arguments, standard input and output, and the production
-//! detach of a held root. It has no branch of its own. The two functions
-//! below run only on a root that the packaged mountfsd and kernel actually
-//! mounted, so only the evidence guest executes them (owner decision Q2).
+//! process: its arguments, standard input and output, and the library's
+//! production `describe` and `release` of a held root. It has no branch of
+//! its own.
 
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-use pos_sandboxd::{
-    packaged_conformance::{exit_status, run, runtime, Release, RELEASE_DEADLINE},
-    PreparedAttemptDirectory, VerifiedRootMount,
-};
+use pos_sandboxd::packaged_conformance::{describe, exit_status, release, run, runtime};
 
 #[cfg(all(
     target_os = "linux",
@@ -34,29 +30,6 @@ fn main() -> std::process::ExitCode {
         }),
         &mut std::io::stderr(),
     )
-}
-
-/// The mounted root's report text: its mount ID and attempt root path.
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-fn describe(mount: &VerifiedRootMount) -> String {
-    format!("{}\t{}", mount.mount_id(), mount.root_directory().as_str())
-}
-
-/// The production detach, under the driver's absolute cleanup deadline.
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-fn release(mount: VerifiedRootMount, directory: &PreparedAttemptDirectory) -> Release<'_> {
-    Box::pin(async move {
-        mount
-            .detach(directory, tokio::time::Instant::now() + RELEASE_DEADLINE)
-            .await
-            .map(drop)
-    })
 }
 
 // Elsewhere the package still builds with every feature; the binary only
