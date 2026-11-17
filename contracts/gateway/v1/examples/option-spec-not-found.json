@@ -1,12 +1,14 @@
 {
-  "name": "draft-option-spec-not-found",
+  "name": "option-spec-not-found",
   "operation_id": "getOptionSpecRevision",
   "request": {
     "path": {
       "option_spec_id": "01JC0GATEWAYW9QPT10N00001A",
       "revision": 2
     },
-    "headers": {}
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
   },
   "request_valid": true,
   "response": {
