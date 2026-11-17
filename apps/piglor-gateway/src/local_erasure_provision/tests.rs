@@ -977,6 +977,19 @@ fn an_existing_out_file_is_refused_before_any_store_write() -> TestResult {
     assert_eq!(std::fs::read(&request.out)?, b"operator file");
     assert_eq!(fixture.store_identity()?, None);
     assert_eq!(fixture.registered_signer(1)?, None);
+
+    // A missing directory is the same refusal, with its own error kind.
+    let mut orphan = fixture.request("missing");
+    orphan.out = orphan.out.join("bundle.elb1");
+    let error = provision_local_erasure_from_credentials(&orphan, &credentials, &deployment.state)
+        .err()
+        .ok_or("an --out in a missing directory is refused")?;
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        error.to_string(),
+        LocalErasureProvisionErrorV1::OutExists.to_string()
+    );
+    assert_eq!(fixture.store_identity()?, None);
     Ok(())
 }
 

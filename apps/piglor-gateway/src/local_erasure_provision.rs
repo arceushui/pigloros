@@ -120,7 +120,7 @@ pub enum LocalErasureProvisionErrorV1 {
          [--signer-epoch <epoch>]"
     )]
     Usage,
-    /// `--out` exists or cannot be created as a new file.
+    /// `--out` exists, or its directory or the new file cannot be opened.
     #[error("--out must name a new file: it exists or cannot be created")]
     OutExists,
     /// The signer credential is not a 32-byte Ed25519 seed.
@@ -452,7 +452,11 @@ fn validated_bundle(
 ) -> io::Result<(OwnerIdV1, (Vec<u8>, TimelineId))> {
     OwnerIdV1::new(request.signer_owner.as_str())
         .ok()
-        .zip(bundle(request, signer, trust, registry, identity).ok())
+        .and_then(|owner| {
+            bundle(request, signer, trust, registry, identity)
+                .ok()
+                .map(|bundle| (owner, bundle))
+        })
         .ok_or(LocalErasureProvisionErrorV1::BundleInvalid)
         .map_err(io::Error::other)
 }
@@ -614,16 +618,14 @@ fn claim_bundle_file(out: &Path) -> io::Result<ClaimedBundleFileV1> {
     out.parent()
         .ok_or(LocalErasureProvisionErrorV1::Usage)
         .map_err(io::Error::other)
-        .and_then(File::open)
+        .and_then(|parent| File::open(parent).map_err(|error| out_unavailable(error.kind())))
         .and_then(|directory| {
             std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(out)
-                .map_err(|error| {
-                    io::Error::new(error.kind(), LocalErasureProvisionErrorV1::OutExists)
-                })
+                .map_err(|error| out_unavailable(error.kind()))
                 .map(|file| ClaimedBundleFileV1 {
                     file,
                     directory,
@@ -631,6 +633,12 @@ fn claim_bundle_file(out: &Path) -> io::Result<ClaimedBundleFileV1> {
                     written: false,
                 })
         })
+}
+
+/// The payload-free [`LocalErasureProvisionErrorV1::OutExists`] refusal of
+/// a `--out` that cannot be claimed, with the io error `kind`.
+fn out_unavailable(kind: io::ErrorKind) -> io::Error {
+    io::Error::new(kind, LocalErasureProvisionErrorV1::OutExists)
 }
 
 #[cfg(test)]
