@@ -24,7 +24,7 @@ use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
     ForkAuthenticationPolicyV1,
 };
-use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
+use pos_core::trusted_clock::{ScriptedTrustedWallSourceV1, SystemGuardMonotonicSourceV1};
 use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1, CapabilityGrantDraftV1,
@@ -39,6 +39,7 @@ use pos_store::community::{
     MemoryCommunityDomainV1,
 };
 use pos_store::memory::MemoryStore;
+use pos_store::MemoryTrustedClockAuthorityV1;
 use ulid::Ulid;
 use zeroize::Zeroizing;
 
@@ -459,7 +460,11 @@ impl World {
         )?;
         let digest = catalogue.digest();
         Ok(Self {
-            domain: MemoryCommunityDomainV1::new(store, INCARNATION)?,
+            domain: MemoryCommunityDomainV1::new(
+                store,
+                INCARNATION,
+                MemoryTrustedClockAuthorityV1::new(),
+            )?,
             authority: CommunityLifecycleAuthorityV1::new(
                 &SEAL,
                 CommunityLifecycleAuthorityInputV1 {
@@ -471,6 +476,7 @@ impl World {
                     store_incarnation: INCARNATION,
                 },
                 ScriptedTrustedWallSourceV1::from_micros([NOW; 64]),
+                SystemGuardMonotonicSourceV1,
             )?,
             catalogue: digest,
         })
@@ -511,7 +517,9 @@ impl World {
                 operation_nonce: *nonce.as_bytes(),
             })?
             .to_canonical_cbor()?;
-        Ok(self.authority.authenticate(&credential, request)?)
+        Ok(self
+            .authority
+            .authenticate(&credential, request, &mut self.domain)?)
     }
 }
 

@@ -37,7 +37,9 @@ use pos_core::community_lifecycle::{
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalEvidenceV1, ForkAuthenticationPolicyV1,
 };
-use pos_core::trusted_clock::TrustedWallSourceV1;
+use pos_core::trusted_clock::{
+    GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
+};
 use pos_core::{
     AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1,
     AuthorityRoleV1, AuthorityTrustRootSealV1, AuthorizationDecisionV1,
@@ -296,7 +298,8 @@ pub struct CommunityLifecycleAuthorityInputV1 {
     pub store_incarnation: [u8; 16],
 }
 
-/// Installed community lifecycle authority with its trusted wall source.
+/// Installed community lifecycle authority with its trusted wall and guard
+/// monotonic sources, which every call's trusted-clock reservation uses.
 pub struct CommunityLifecycleAuthorityV1 {
     catalogue: CommunityAuthorityCatalogueV1,
     catalogue_digest: Hash,
@@ -305,6 +308,7 @@ pub struct CommunityLifecycleAuthorityV1 {
     member_recipient: String,
     store_incarnation: [u8; 16],
     wall: Box<dyn TrustedWallSourceV1>,
+    mono: Box<dyn GuardMonotonicSourceV1>,
 }
 
 impl CommunityLifecycleAuthorityV1 {
@@ -313,15 +317,16 @@ impl CommunityLifecycleAuthorityV1 {
     /// cannot be installed:
     ///
     /// ```compile_fail,E0061
-    /// use pos_core::trusted_clock::TrustedWallSourceV1;
+    /// use pos_core::trusted_clock::{GuardMonotonicSourceV1, TrustedWallSourceV1};
     /// use pos_store::community::{
     ///     CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
     /// };
     /// fn forge(
     ///     input: CommunityLifecycleAuthorityInputV1,
     ///     wall: impl TrustedWallSourceV1 + 'static,
+    ///     mono: impl GuardMonotonicSourceV1 + 'static,
     /// ) {
-    ///     let _ = CommunityLifecycleAuthorityV1::new(input, wall);
+    ///     let _ = CommunityLifecycleAuthorityV1::new(input, wall, mono);
     /// }
     /// ```
     ///
@@ -336,6 +341,7 @@ impl CommunityLifecycleAuthorityV1 {
         _seal: &AuthorityTrustRootSealV1,
         input: CommunityLifecycleAuthorityInputV1,
         wall: impl TrustedWallSourceV1 + 'static,
+        mono: impl GuardMonotonicSourceV1 + 'static,
     ) -> Result<Self, Error> {
         let pins = input.catalogue.as_input();
         let overlap = input
@@ -367,6 +373,7 @@ impl CommunityLifecycleAuthorityV1 {
             member_recipient: input.member_recipient,
             store_incarnation: input.store_incarnation,
             wall: Box::new(wall),
+            mono: Box::new(mono),
         })
     }
 
@@ -374,16 +381,25 @@ impl CommunityLifecycleAuthorityV1 {
     ///
     /// The FAE1 must decode canonically, verify under the installed FAP1,
     /// carry the nonce bound to H(CAP1) and this request's resource, action
-    /// and operation constraint, and be valid at a fresh trusted wall sample.
-    /// Its principal must have a CAP1 actor row. The FAE1 is a bearer
+    /// and operation constraint, and be valid at the operation's one trusted
+    /// sample. Its principal must have a CAP1 actor row. The FAE1 is a bearer
     /// credential: only its digest is kept, as the result's binding digest.
     ///
+    /// Only a verified credential reserves the trusted clock, on `domain`'s
+    /// own clock authority. The reservation sample `t_r` is both `now` for
+    /// the validity check and every request's `at_time`, so R6.2(3)(iii) has
+    /// one shared sample, and the call's decision bound is
+    /// `min(D, expires_at)` (owner decision on #560, note 22722, G1).
+    ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` for any of those failures.
-    pub fn authenticate(
+    /// Returns `EvidenceUnavailable` for any of those failures, for a domain
+    /// other than the installed one, and when the trusted clock cannot
+    /// reserve (A5.5, "no trusted wall sample").
+    pub fn authenticate<D: CommunityStoreDomainV1>(
         &mut self,
         credential: &[u8],
         request: CommunityAdministrativeRequestV1,
+        domain: &mut D,
     ) -> Result<CommunityAuthorityCallV1, Error> {
         let nonce = community_authentication_nonce_v1(
             self.catalogue_digest,
@@ -397,21 +413,21 @@ impl CommunityLifecycleAuthorityV1 {
                 verify_authenticated_principal_evidence_v1(&self.policy, evidence).ok()
             })
             .filter(|verified| verified.evidence().record().operation_nonce == nonce)
-            .and_then(|verified| self.sampled(verified))
-            .filter(|(verified, now)| {
-                let record = verified.evidence().record();
-                record.issued_at <= now.as_micros() && now.as_micros() < record.expires_at
-            })
-            .and_then(|(verified, now)| self.call(request, &verified, now))
+            .filter(|_| domain.store_incarnation() == self.store_incarnation)
             .ok_or(Error::EvidenceUnavailable)
-    }
-
-    /// Sample the trusted wall only once the credential has verified.
-    fn sampled(
-        &mut self,
-        verified: VerifiedAuthenticatedPrincipalEvidenceV1,
-    ) -> Option<(VerifiedAuthenticatedPrincipalEvidenceV1, WallTime)> {
-        self.wall.sample().ok().map(|now| (verified, now))
+            .and_then(|verified| {
+                domain
+                    .reserve_clock(self.wall.as_mut(), self.mono.as_mut())
+                    .map(|reservation| (verified, reservation))
+            })
+            .ok()
+            .filter(|(verified, reservation)| {
+                let record = verified.evidence().record();
+                let now = reservation.sampled_at().as_micros();
+                record.issued_at <= now && now < record.expires_at
+            })
+            .and_then(|(verified, reservation)| self.call(request, &verified, &reservation))
+            .ok_or(Error::EvidenceUnavailable)
     }
 
     /// Derive `authenticated` and the actor from verified evidence (R6.2(3)(iv), (4)).
@@ -419,7 +435,7 @@ impl CommunityLifecycleAuthorityV1 {
         &self,
         request: CommunityAdministrativeRequestV1,
         verified: &VerifiedAuthenticatedPrincipalEvidenceV1,
-        at_time: WallTime,
+        reservation: &TrustedClockReservationV1,
     ) -> Option<CommunityAuthorityCallV1> {
         principal_digest_v1(&verified.evidence().record().principal)
             .ok()
@@ -428,9 +444,10 @@ impl CommunityLifecycleAuthorityV1 {
                 authenticated_result(verified).map(|authenticated| CommunityAuthorityCallV1 {
                     catalogue_digest: self.catalogue_digest,
                     request,
+                    decision_bound: reservation.decision_bound().min(authenticated.expires_at()),
                     authenticated,
                     actor_entity_id,
-                    at_time,
+                    at_time: reservation.sampled_at(),
                 })
             })
     }
@@ -650,13 +667,13 @@ struct RequestShapeV1<'a> {
 /// One authenticated administrative call (R6.2(6)).
 ///
 /// It holds the derived request, the `authenticated` result and actor
-/// derived from the call's FAE1, and the trusted wall sample every request
-/// of the call uses as `at_time`.
+/// derived from the call's FAE1, and the trusted-clock reservation sample
+/// every request of the call uses as `at_time`.
 ///
 /// It is bound to the H(CAP1) of the authority that issued it, and another
 /// authority refuses it. It serves one operation: its `at_time` is the
 /// operation's single trusted sample, and the operation's final writer
-/// enforces its decision bound against [`Self::expires_at`] (A5.4).
+/// refuses at or after its [`Self::decision_bound`] (A5.4).
 ///
 /// It has no public constructor; only [`CommunityLifecycleAuthorityV1::authenticate`]
 /// produces it.
@@ -666,6 +683,7 @@ pub struct CommunityAuthorityCallV1 {
     authenticated: AuthenticatedPrincipalResultV1,
     actor_entity_id: EntityId,
     at_time: WallTime,
+    decision_bound: WallTime,
 }
 
 impl CommunityAuthorityCallV1 {
@@ -675,17 +693,25 @@ impl CommunityAuthorityCallV1 {
         &self.request
     }
 
-    /// The trusted wall sample of this call.
+    /// The trusted-clock reservation sample `t_r` of this call.
     #[must_use]
     pub const fn at_time(&self) -> WallTime {
         self.at_time
     }
 
-    /// The credential's expiry, which bounds the operation's decision bound
-    /// (A5.4, R6.2(3)(iii)).
+    /// The credential's expiry (R6.2(3)(iii)).
     #[must_use]
     pub const fn expires_at(&self) -> WallTime {
         self.authenticated.expires_at()
+    }
+
+    /// The operation's effective decision bound: the earlier of the
+    /// reservation's `D = t_r + 32 s` and the credential's expiry (owner
+    /// decision on #560, note 22722, G1). CAU1 records it and the final
+    /// writer refuses at or after it (A5.4).
+    #[must_use]
+    pub const fn decision_bound(&self) -> WallTime {
+        self.decision_bound
     }
 }
 

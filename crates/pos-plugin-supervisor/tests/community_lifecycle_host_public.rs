@@ -22,6 +22,7 @@ use pos_store::community::{
     metadata_resource, CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
 };
 use pos_store::memory::MemoryStore;
+use pos_store::MemoryTrustedClockAuthorityV1;
 use ulid::Ulid;
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -148,7 +149,11 @@ impl Installation {
         }
         Ok(Self {
             registry,
-            domain: MemoryCommunityDomainV1::new(store, INCARNATION)?,
+            domain: MemoryCommunityDomainV1::new(
+                store,
+                INCARNATION,
+                MemoryTrustedClockAuthorityV1::new(),
+            )?,
         })
     }
 

@@ -19,7 +19,7 @@ use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
     ForkAuthenticationAdapterPolicyV1, ForkAuthenticationPolicyV1,
 };
-use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
+use pos_core::trusted_clock::{ScriptedTrustedWallSourceV1, SystemGuardMonotonicSourceV1};
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
@@ -37,6 +37,7 @@ use pos_store::community::{
     CommunityMemberActionV1, MemoryCommunityDomainV1,
 };
 use pos_store::memory::MemoryStore;
+use pos_store::MemoryTrustedClockAuthorityV1;
 use ulid::Ulid;
 
 type Fallible<T> = Result<T, Box<dyn StdError>>;
@@ -346,6 +347,7 @@ fn install(
             store_incarnation: INCARNATION,
         },
         ScriptedTrustedWallSourceV1::from_micros(samples.iter().copied()),
+        SystemGuardMonotonicSourceV1,
     )?)
 }
 
@@ -406,7 +408,11 @@ impl World {
         let catalogue = CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?;
         let digest = catalogue.digest();
         Ok(Self {
-            domain: MemoryCommunityDomainV1::new(store, INCARNATION)?,
+            domain: MemoryCommunityDomainV1::new(
+                store,
+                INCARNATION,
+                MemoryTrustedClockAuthorityV1::new(),
+            )?,
             authority: install(catalogue, attestation, &[NOW; 64])?,
             catalogue: digest,
         })
@@ -436,9 +442,11 @@ impl World {
 
     fn call(&mut self, operation: &Operation) -> Fallible<CommunityAuthorityCallV1> {
         let credential = self.credential(operation)?;
-        Ok(self
-            .authority
-            .authenticate(&credential, Request::derive(operation)?)?)
+        Ok(self.authority.authenticate(
+            &credential,
+            Request::derive(operation)?,
+            &mut self.domain,
+        )?)
     }
 
     fn admit(
@@ -631,6 +639,7 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
                 store_incarnation: INCARNATION,
             },
             ScriptedTrustedWallSourceV1::from_micros([NOW]),
+            SystemGuardMonotonicSourceV1,
         ))
     };
     let foreign_registry = AuthorityRegistrySnapshotV1::try_new(
@@ -692,6 +701,7 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
                 store_incarnation: [0; 16],
             },
             ScriptedTrustedWallSourceV1::from_micros([NOW]),
+            SystemGuardMonotonicSourceV1,
         )
         .err(),
         Some(Error::InvalidBinding)
@@ -720,10 +730,14 @@ fn an_authorized_initialize_binds_the_exact_request_and_refs() -> TestResult {
     let mut world = World::new(std::slice::from_ref(&leaf))?;
     let credential = world.credential(&initialize())?;
     let request = Request::derive(&initialize())?;
-    let call = world.authority.authenticate(&credential, request)?;
+    let call = world
+        .authority
+        .authenticate(&credential, request, &mut world.domain)?;
     assert_eq!(call.request(), &request);
     assert_eq!(call.at_time(), WallTime::from_micros(NOW));
     assert_eq!(call.expires_at(), WallTime::from_micros(EXPIRES));
+    // G1: D = t_r + 32 s is later than this 30 s credential's expiry.
+    assert_eq!(call.decision_bound(), WallTime::from_micros(EXPIRES));
     let admission =
         world
             .authority
@@ -870,11 +884,17 @@ fn every_credential_defect_gives_12() -> TestResult {
     }
     for credential in credentials {
         assert_eq!(
-            world.authority.authenticate(&credential, request).err(),
+            world
+                .authority
+                .authenticate(&credential, request, &mut world.domain)
+                .err(),
             Some(Error::EvidenceUnavailable)
         );
     }
-    assert!(world.authority.authenticate(&good, request).is_ok());
+    assert!(world
+        .authority
+        .authenticate(&good, request, &mut world.domain)
+        .is_ok());
 
     // No trusted wall sample.
     let attestation = snapshot(&[&leaf])?;
@@ -884,8 +904,39 @@ fn every_credential_defect_gives_12() -> TestResult {
         &[],
     )?;
     assert_eq!(
-        silent.authenticate(&good, request).err(),
+        silent.authenticate(&good, request, &mut world.domain).err(),
         Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// Owner decision on #560, note 22722, G1: the call's decision bound is the
+/// earlier of the reservation's `D = t_r + 32 s` and the credential's expiry,
+/// and `t_r` is the call's `at_time`.
+#[test]
+fn the_decision_bound_is_the_earlier_of_the_reservation_bound_and_expiry() -> TestResult {
+    let leaf = grant(1, 1, 0, &administrative(target(), &ALL_ACTIONS))?;
+    let mut world = World::new(std::slice::from_ref(&leaf))?;
+    let request = Request::derive(&initialize())?;
+    let short = world.credential(&initialize())?;
+    let long = sign(
+        AuthenticatedPrincipalRecordV1 {
+            expires_at: NOW + 40_000_000,
+            ..world.record(&initialize())?
+        },
+        SEED,
+    )?;
+    let short_call = world
+        .authority
+        .authenticate(&short, request, &mut world.domain)?;
+    let long_call = world
+        .authority
+        .authenticate(&long, request, &mut world.domain)?;
+    assert_eq!(short_call.decision_bound(), WallTime::from_micros(EXPIRES));
+    assert_eq!(long_call.at_time(), WallTime::from_micros(NOW));
+    assert_eq!(
+        long_call.decision_bound(),
+        WallTime::from_micros(NOW + 32_000_000)
     );
     Ok(())
 }
@@ -895,7 +946,7 @@ fn every_credential_defect_gives_12() -> TestResult {
 fn credential_validity_holds_from_issue_until_expiry() -> TestResult {
     let leaf = grant(1, 1, 0, &administrative(target(), &ALL_ACTIONS))?;
     let attestation = snapshot(&[&leaf])?;
-    let world = World::new(std::slice::from_ref(&leaf))?;
+    let mut world = World::new(std::slice::from_ref(&leaf))?;
     let request = Request::derive(&initialize())?;
     let credential = world.credential(&initialize())?;
     let mut authority = install(
@@ -904,7 +955,11 @@ fn credential_validity_holds_from_issue_until_expiry() -> TestResult {
         &[ISSUED - 1, ISSUED, EXPIRES - 1, EXPIRES],
     )?;
     let outcomes = (0..4)
-        .map(|_| authority.authenticate(&credential, request).is_ok())
+        .map(|_| {
+            authority
+                .authenticate(&credential, request, &mut world.domain)
+                .is_ok()
+        })
         .collect::<Vec<_>>();
     assert_eq!(outcomes, [false, true, true, false]);
     Ok(())
@@ -1104,7 +1159,8 @@ fn a_call_is_refused_by_another_authority_and_for_an_unknown_leaf() -> TestResul
     let host = AuthorityPersistenceHostV1::new(&snapshot(&[&leaf])?);
     second.bind_authority_persistence(host.persistence_binding())?;
     second.issue_capability_grant(host.authorize_grant(&leaf)?, &leaf)?;
-    let foreign = MemoryCommunityDomainV1::new(second, [0x5b; 16])?;
+    let mut foreign =
+        MemoryCommunityDomainV1::new(second, [0x5b; 16], MemoryTrustedClockAuthorityV1::new())?;
     assert!(world
         .authority
         .authorize_administrative(&call, &other_domain, leaf.grant_id())
@@ -1113,6 +1169,16 @@ fn a_call_is_refused_by_another_authority_and_for_an_unknown_leaf() -> TestResul
         world
             .authority
             .authorize_administrative(&call, &foreign, leaf.grant_id())
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // Nor does a foreign domain reserve a call: authentication refuses it
+    // before its clock is touched.
+    let credential = world.credential(&initialize())?;
+    assert_eq!(
+        world
+            .authority
+            .authenticate(&credential, Request::derive(&initialize())?, &mut foreign)
             .err(),
         Some(Error::EvidenceUnavailable)
     );
@@ -1302,7 +1368,7 @@ fn retire_and_reset_calls_admit_no_member_request() -> TestResult {
 #[test]
 fn a_refused_credential_consumes_no_wall_sample() -> TestResult {
     let leaf = grant(1, 1, 0, &administrative(target(), &ALL_ACTIONS))?;
-    let world = World::new(std::slice::from_ref(&leaf))?;
+    let mut world = World::new(std::slice::from_ref(&leaf))?;
     let attestation = snapshot(&[&leaf])?;
     let mut authority = install(
         CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?,
@@ -1323,12 +1389,18 @@ fn a_refused_credential_consumes_no_wall_sample() -> TestResult {
         sign(world.record(&initialize())?, [9; 32])?,
     ] {
         assert_eq!(
-            authority.authenticate(&refused, request).err(),
+            authority
+                .authenticate(&refused, request, &mut world.domain)
+                .err(),
             Some(Error::EvidenceUnavailable)
         );
     }
     assert!(authority
-        .authenticate(&world.credential(&initialize())?, request)
+        .authenticate(
+            &world.credential(&initialize())?,
+            request,
+            &mut world.domain
+        )
         .is_ok());
     Ok(())
 }

@@ -38,6 +38,7 @@ use super::{
     MemoryCommunityDomainV1,
 };
 use crate::memory::MemoryStore;
+use crate::trusted_clock::MemoryTrustedClockAuthorityV1;
 
 type Fallible<T> = Result<T, Box<dyn StdError>>;
 type TestResult = Fallible<()>;
@@ -192,7 +193,11 @@ fn domain_with(
                     .map(drop)
             })
         })?;
-    Ok(MemoryCommunityDomainV1::new(store, INCARNATION)?)
+    Ok(MemoryCommunityDomainV1::new(
+        store,
+        INCARNATION,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?)
 }
 
 /// Install the metadata authority from explicit composition inputs.
@@ -443,7 +448,12 @@ fn assert_unavailable(world: &mut World) -> TestResult {
 #[test]
 fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
     assert_eq!(
-        MemoryCommunityDomainV1::new(MemoryStore::new(), [0; 16]).err(),
+        MemoryCommunityDomainV1::new(
+            MemoryStore::new(),
+            [0; 16],
+            MemoryTrustedClockAuthorityV1::new()
+        )
+        .err(),
         Some(Error::InvalidBinding)
     );
     let zero_timeline = TimelineId::from_ulid(Ulid::from_bytes([0; 16]));
@@ -457,7 +467,11 @@ fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
             Some(Error::InvalidBinding)
         );
     }
-    let domain = MemoryCommunityDomainV1::new(MemoryStore::new(), INCARNATION)?;
+    let domain = MemoryCommunityDomainV1::new(
+        MemoryStore::new(),
+        INCARNATION,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     assert_eq!(domain.store_incarnation(), INCARNATION);
     assert!(!domain.is_bootstrapped());
     Ok(())

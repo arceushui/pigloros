@@ -3,10 +3,10 @@
 //!
 //! It is the one interface through which the installed community owners
 //! reach a backend's protected domain. It is an implementation detail of
-//! ADR-129 §1 "sealed persistence", not an authority trait: it exposes only
-//! the domain's store incarnation and the guarded load of a persisted grant
-//! chain, and every decision is still evaluated by the installed owner
-//! itself (A5.9).
+//! ADR-129 §1 "sealed persistence", not an authority trait: it exposes the
+//! domain's store incarnation, the guarded load of a persisted grant chain
+//! and a reservation on the domain's own trusted clock, and every decision
+//! is still evaluated by the installed owner itself (A5.9).
 //!
 //! The trait is nominally `pub` only because the public evaluator methods
 //! are generic over it, and a `pub(super)` bound on a public method trips the
@@ -17,6 +17,10 @@
 //! `SQLite` domain adds the second in Stack B (A5.6, R6.10 parity).
 
 use pos_core::community_lifecycle::CommunityLifecycleErrorV1 as Error;
+use pos_core::trusted_clock::{
+    reserve_trusted_clock, GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
+    WaitBudgetV1,
+};
 use pos_core::{AuthorityPersistencePortV1, Hash, PersistedAuthorityV1};
 
 use super::memory_domain::MemoryCommunityDomainV1;
@@ -37,6 +41,21 @@ pub trait CommunityStoreDomainV1 {
     /// Returns `EvidenceUnavailable` for a missing, foreign or unloadable
     /// chain (A5.5).
     fn load_authority(&self, leaf_grant_id: Hash) -> Result<PersistedAuthorityV1, Error>;
+
+    /// Commit one ADR-112 trusted-clock reservation on this domain's own
+    /// installed clock authority, with a fresh wait budget and no owner
+    /// lock. Its sample `t_r` is the operation's one trusted sample (owner
+    /// decision on #560, note 22722, G1).
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for every reservation failure: no
+    /// trusted wall sample, a rollback, a latched overrun or a storage
+    /// failure (A5.5).
+    fn reserve_clock(
+        &mut self,
+        wall: &mut dyn TrustedWallSourceV1,
+        mono: &mut dyn GuardMonotonicSourceV1,
+    ) -> Result<TrustedClockReservationV1, Error>;
 }
 
 impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
@@ -47,6 +66,16 @@ impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
     fn load_authority(&self, leaf_grant_id: Hash) -> Result<PersistedAuthorityV1, Error> {
         self.store
             .load_authority(leaf_grant_id)
+            .ok()
+            .ok_or(Error::EvidenceUnavailable)
+    }
+
+    fn reserve_clock(
+        &mut self,
+        wall: &mut dyn TrustedWallSourceV1,
+        mono: &mut dyn GuardMonotonicSourceV1,
+    ) -> Result<TrustedClockReservationV1, Error> {
+        reserve_trusted_clock(&mut self.clock, wall, mono, &mut WaitBudgetV1::new(), None)
             .ok()
             .ok_or(Error::EvidenceUnavailable)
     }
