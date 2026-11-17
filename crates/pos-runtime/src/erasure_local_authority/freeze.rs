@@ -430,12 +430,13 @@ impl LocalErasureAuthorityV1 {
             .and_then(|(erq1, actor, affected)| {
                 self.closure(view, actor, erq1.scope(), &affected)
                     .and_then(|closure| {
-                        (permitted(
+                        permitted(
                             &closure,
                             data_class(erq1.scope()),
                             &LOCAL_ERASURE_CLASSIFICATION_V1,
-                        ) && scope_fits(affected.len()))
+                        )
                         .then_some(closure)
+                        .filter(|_| scope_fits(affected.len()))
                         .ok_or(ShortfallV1::Refused)
                     })
                     .and_then(|closure| {
@@ -786,9 +787,10 @@ pub(super) fn verified_signature(
 ) -> bool {
     LocalErasureSignatureV1::from_canonical_cbor(evidence)
         .ok()
-        // The purpose and digest are also bound by the signed message, so a
-        // mismatch could not verify anyway; the explicit filter is defence in
-        // depth that refuses before any signature work.
+        // The message is built from the expected purpose and digest, and the
+        // key from the bundle's signer, so a record whose own labels name
+        // another purpose, digest or signer would still verify: this filter
+        // is what refuses it, before any signature work.
         .filter(|signature| {
             signature.purpose == purpose
                 && signature.signed_digest == digest
