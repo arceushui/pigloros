@@ -119,7 +119,7 @@ impl StagedInstallation {
             &resolved,
             input,
             0,
-            [2; 16],
+            fixture_nonce(),
         )?;
         staged.request = request.to_canonical_cbor()?;
         staged.evaluation = evaluation.to_canonical_cbor()?;
@@ -401,8 +401,8 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
     if superblock.get(80..82) != Some([32, 0].as_slice()) {
         return Err("the verity superblock's salt is not 32 bytes".into());
     }
-    let mut salt = [0; 32];
-    salt.copy_from_slice(range(superblock, 88, 32)?);
+    let field = range(superblock, 88, 32)?;
+    let salt: [u8; 32] = std::array::from_fn(|index| field[index]);
     let signature = extent(bytes, &partitions[2])?;
     let json = signature
         .iter()
@@ -461,6 +461,12 @@ fn extent<'a>(
     partition: &PartitionDescriptor,
 ) -> Result<&'a [u8], Box<dyn Error>> {
     range(bytes, partition.start_bytes, partition.length_bytes)
+}
+
+/// The execute request's nonce, derived from a fixture label.
+fn fixture_nonce() -> [u8; 16] {
+    let digest = blake3::hash(b"PiglorOS.ProviderAdmissionFixtureNonce.v1\0");
+    std::array::from_fn(|index| digest.as_bytes()[index])
 }
 
 fn range(bytes: &[u8], start: u64, length: u64) -> Result<&[u8], Box<dyn Error>> {
