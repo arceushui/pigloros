@@ -23,7 +23,9 @@ The payload is RFC 8785 JSON with schema `pigloros.replay-conformance.case.v2`:
 - `profiles`: one EPF1 id, or two (Local, then Air-Gapped) for
   `CrossProfileConformance`; the adapter's host installs
   `deterministic-local-v1`, `deterministic-air-gapped-v1`, `replay-v1`
-  (`RecordedReplay` only) and `live-local-v1` (`LiveUnverified` only);
+  (`RecordedReplay` only), and `live-local-v1` and `live-air-gapped-v1`
+  (`LiveUnverified` only; ADR-135). W8H1 entry LIVE-001 covers both live
+  profiles, one sub-case each;
 - `manifest`: the manifest fields the fixture owns (format version, seed,
   `resource_limit` in Events, network flag, declared ReplayClaim, the input,
   closure, evaluator, room, scheduler and budget digests, the request digest and
