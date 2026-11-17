@@ -1,7 +1,7 @@
 use std::{
     io::IoSlice,
     mem::MaybeUninit,
-    os::{fd::OwnedFd as StdOwnedFd, unix::fs::PermissionsExt},
+    os::fd::OwnedFd as StdOwnedFd,
     sync::atomic::AtomicUsize,
     thread::{self, JoinHandle},
 };
@@ -1069,24 +1069,18 @@ fn assert_no_release_received(launcher: JoinHandle<Option<ExecutionRelease>>) ->
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_safe_key_file_cannot_substitute_another_runtime_signing_identity() -> TestResult {
+async fn another_runtime_key_cannot_substitute_the_signing_identity() -> TestResult {
     for (key_id, seed) in [
         ("foreign-runtime-key", crate::test_fixtures::RUNTIME_SEED),
         (KEY_ID, [0x53; 32]),
     ] {
-        assert_foreign_signer_refuses_release(safe_key_file_signer(key_id, &seed)?).await?;
+        assert_foreign_signer_refuses_release(foreign_signer(key_id, &seed)).await?;
     }
     Ok(())
 }
 
-fn safe_key_file_signer(key_id: &str, seed: &[u8; 32]) -> TestResult<crate::KeyFileRuntimeSigner> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("key");
-    std::fs::write(&path, seed)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
-    let (held, owner) = File::open(directory.path())
-        .and_then(|held| held.metadata().map(|metadata| (held, metadata.uid())))?;
-    crate::KeyFileRuntimeSigner::open(&held, "key", owner, key_id.to_owned()).map_err(Into::into)
+fn foreign_signer(key_id: &str, seed: &[u8; 32]) -> crate::KeyFileRuntimeSigner {
+    crate::KeyFileRuntimeSigner::from_signing_key(SigningKey::from_bytes(seed), key_id.to_owned())
 }
 
 async fn assert_foreign_signer_refuses_release(signer: crate::KeyFileRuntimeSigner) -> TestResult {

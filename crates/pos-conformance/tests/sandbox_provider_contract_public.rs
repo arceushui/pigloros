@@ -1436,7 +1436,6 @@ fn provider_error_validation_precedence_agrees() -> TestResult {
     producer.operation = None;
     producer.signature = [0; 64];
     reference.operation = None;
-    reference.signature = [0; 64];
     assert_eq!(
         producer.validate(),
         Err(SandboxContractErrorV1::InconsistentFields)
@@ -1444,6 +1443,22 @@ fn provider_error_validation_precedence_agrees() -> TestResult {
     assert_eq!(
         reference.verify_signature(&key.verifying_key()),
         Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    // The reference keeps its signature private, so the same pair of faults
+    // (no operation and a zero signature) is fed to its decoder as bytes:
+    // the identity check wins over the signature check there too.
+    let mut document: Value = ciborium::from_reader(bytes.as_slice())?;
+    if let Value::Array(wrapper) = &mut document {
+        if let Some(Value::Array(unsigned)) = wrapper.first_mut() {
+            unsigned[2] = Value::Null;
+        }
+        wrapper[2] = Value::Bytes(vec![0; 64]);
+    }
+    let mut faulted = Vec::new();
+    ciborium::into_writer(&document, &mut faulted)?;
+    assert_eq!(
+        independent::SandboxProviderError::from_canonical_cbor(&faulted).err(),
+        Some(independent::SandboxProviderProtocolError::InconsistentFields)
     );
     Ok(())
 }
@@ -2317,7 +2332,8 @@ fn describe_responses_reject_mismatched_request_bindings() -> TestResult {
         Err(independent::SandboxProviderProtocolError::DigestMismatch)
     );
     let mut invalid_independent_described = independent_described;
-    invalid_independent_described.response_digest[0] ^= 1;
+    // The retained digest no longer binds a changed field.
+    invalid_independent_described.spm1_digest[0] ^= 1;
     assert_eq!(
         invalid_independent_described.validate_for_request(&independent_describe),
         Err(independent::SandboxProviderProtocolError::DigestMismatch)
