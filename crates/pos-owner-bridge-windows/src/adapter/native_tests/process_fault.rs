@@ -3535,19 +3535,21 @@ impl Fixture {
         self.handle = handle;
         let step = pass_unwind(attempt);
         assert!(failure.is_none(), "{failure:?}");
-        if !reached {
-            return step;
+        // No early return for an unreached step: whether a step finishes
+        // before the consuming phase depends on WebView2 timing, so a
+        // separate return line would be covered only on some runs.
+        if reached {
+            let mut state = state;
+            state.phase = crate::ProcessFaultPhase::PostedConsuming;
+            state.reply_state = ControlState::Consuming as u32;
+            self.reached = Some(state);
+            self.evidence_complete = true;
+            assert!(
+                self.surface.fault_owners_retained(),
+                "consuming owners missing"
+            );
+            self.check_blocked_admission();
         }
-        let mut state = state;
-        state.phase = crate::ProcessFaultPhase::PostedConsuming;
-        state.reply_state = ControlState::Consuming as u32;
-        self.reached = Some(state);
-        self.evidence_complete = true;
-        assert!(
-            self.surface.fault_owners_retained(),
-            "consuming owners missing"
-        );
-        self.check_blocked_admission();
         step
     }
 }
