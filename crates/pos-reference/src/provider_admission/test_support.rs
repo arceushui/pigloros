@@ -590,7 +590,7 @@ mod tests {
 
     #[test]
     fn every_malformed_field_is_an_error_not_a_panic() {
-        let cases: [Case; 19] = [
+        let cases: [Case; 21] = [
             ("no GPT header", |ddi| {
                 ddi.bytes[512] = b'X';
             }),
@@ -652,8 +652,18 @@ mod tests {
             ("64 lowercase hexadecimal", |ddi| {
                 ddi.signature(&ROOT_HASH.replace('3', "g"));
             }),
-            ("base64", |ddi| {
+            ("the root-verity-sig JSON has no signature", |ddi| {
+                let json = format!(r#"{{"rootHash":"{ROOT_HASH}"}}"#);
+                ddi.bytes[7 * 512..7 * 512 + json.len()].copy_from_slice(json.as_bytes());
+                ddi.bytes[7 * 512 + json.len()..8 * 512].fill(0);
+            }),
+            ("the root-verity-sig signature is not base64", |ddi| {
                 let json = format!(r#"{{"rootHash":"{ROOT_HASH}","signature":"A"}}"#);
+                ddi.bytes[7 * 512..7 * 512 + json.len()].copy_from_slice(json.as_bytes());
+                ddi.bytes[7 * 512 + json.len()..8 * 512].fill(0);
+            }),
+            ("the root-verity-sig signature is not base64", |ddi| {
+                let json = format!(r#"{{"rootHash":"{ROOT_HASH}","signature":"AQ!D"}}"#);
                 ddi.bytes[7 * 512..7 * 512 + json.len()].copy_from_slice(json.as_bytes());
                 ddi.bytes[7 * 512 + json.len()..8 * 512].fill(0);
             }),
