@@ -311,3 +311,254 @@ fn tagged_object(
         }
     })
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{KeyIdentityV1, KeyRoleV1};
+
+    fn record(tag: &str, payload: Vec<u8>) -> Result<Vec<u8>, ErasureErrorV1> {
+        super::super::encode_canonical(&Value::Array(vec![
+            Value::Text(tag.to_owned()),
+            Value::Bytes(payload),
+        ]))
+    }
+
+    fn timeline(seed: u128) -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from(seed))
+    }
+
+    #[test]
+    fn bounds_hold_their_adr_values() {
+        assert_eq!(ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, 1_048_576);
+        assert_eq!(RETAINED_OBJECT_MAX_ARRAY, 4_097);
+        assert_eq!(LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 1_024);
+        assert_eq!(LOCAL_OWNER_RESULT_MAX_BYTES_V1, 4_096);
+    }
+
+    /// A record of exactly the retained-object bound is admitted under any
+    /// caller bound, and one byte more is refused.
+    #[test]
+    fn retained_object_admits_exactly_its_byte_bound() -> Result<(), ErasureErrorV1> {
+        // Array head, "ERS1" text and a four-byte byte-string head.
+        let largest = record("ERS1", vec![0; ERASURE_RETAINED_OBJECT_MAX_BYTES_V1 - 11])?;
+        assert_eq!(largest.len(), ERASURE_RETAINED_OBJECT_MAX_BYTES_V1);
+        assert_eq!(
+            ErasureRetainedObjectV1::new(&largest, usize::MAX)?.canonical_cbor(),
+            largest.as_slice()
+        );
+        let over = record("ERS1", vec![0; ERASURE_RETAINED_OBJECT_MAX_BYTES_V1 - 10])?;
+        assert_eq!(
+            ErasureRetainedObjectV1::new(&over, usize::MAX),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
+    }
+
+    /// The tag plus 4,096 entries, the largest TPS1 array, decodes; one more
+    /// entry is refused.
+    #[test]
+    fn retained_object_admits_exactly_its_array_bound() -> Result<(), ErasureErrorV1> {
+        let array = |entries: usize| {
+            let mut items = vec![Value::Text("ERA1".to_owned())];
+            items.resize(entries + 1, Value::Integer(0.into()));
+            super::super::encode_canonical(&Value::Array(items))
+        };
+        let largest = array(super::super::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY)?;
+        assert_eq!(
+            ErasureRetainedObjectV1::new(&largest, usize::MAX)?.tag(),
+            "ERA1"
+        );
+        let over = array(super::super::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY + 1)?;
+        assert_eq!(
+            ErasureRetainedObjectV1::new(&over, usize::MAX),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_object_keeps_its_tag_bytes_and_tagged_address() -> Result<(), ErasureErrorV1> {
+        let bytes = record("ELO1", vec![7])?;
+        let object = ErasureRetainedObjectV1::new(&bytes, LOCAL_OWNER_RESULT_MAX_BYTES_V1)?;
+        assert_eq!(object.tag(), "ELO1");
+        assert_eq!(object.canonical_cbor(), bytes.as_slice());
+        let mut preimage = b"ELO1\0".to_vec();
+        preimage.extend_from_slice(&bytes);
+        assert_eq!(
+            object.reference(),
+            ErasureReferenceV1::from_digest(*blake3::hash(&preimage).as_bytes())
+        );
+        assert_eq!(
+            ErasureRetainedObjectV1::new(&bytes, bytes.len() - 1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn record_tag_is_an_upper_case_letter_then_upper_case_letters_or_digits(
+    ) -> Result<(), ErasureErrorV1> {
+        for tag in ["AB", "E1", "ELO1", "ELNEG1", "ABCDEFGH", "A1234567"] {
+            let object = ErasureRetainedObjectV1::new(&record(tag, Vec::new())?, 1_024)?;
+            assert_eq!(object.tag(), tag);
+        }
+        for tag in ["", "A", "ABCDEFGHI", "1A", "aB", "Ab", "A-", "ÄB"] {
+            assert_eq!(
+                ErasureRetainedObjectV1::new(&record(tag, Vec::new())?, 1_024),
+                Err(ErasureErrorV1::InvalidEncoding),
+                "{tag:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_object_must_be_an_array_led_by_its_tag() -> Result<(), ErasureErrorV1> {
+        for value in [
+            Value::Text("ELO1".to_owned()),
+            Value::Array(Vec::new()),
+            Value::Array(vec![
+                Value::Integer(1.into()),
+                Value::Text("ELO1".to_owned()),
+            ]),
+            Value::Array(vec![Value::Bytes(b"ELO1".to_vec())]),
+        ] {
+            assert_eq!(
+                ErasureRetainedObjectV1::new(&super::super::encode_canonical(&value)?, 1_024),
+                Err(ErasureErrorV1::InvalidEncoding)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_reads_back_its_rows_and_store_identity() -> Result<(), ErasureErrorV1> {
+        let (first, second) = (timeline(1), timeline(2));
+        let inventory =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![first, second], 4)?;
+        let rows = vec![
+            ErasureAuthorityTimelineRowV1 {
+                id: first,
+                owner: Some(EntityId::from_ulid(ulid::Ulid::from(9_u128))),
+                fork_point: None,
+            },
+            ErasureAuthorityTimelineRowV1 {
+                id: second,
+                owner: None,
+                fork_point: Some((first, Seq::from_u64(3))),
+            },
+        ];
+        let identity = Hash::from_bytes([5; 32]);
+        let snapshot =
+            ErasureAuthoritySnapshotV1::new(inventory.clone(), rows.clone(), Some(identity))?;
+        assert_eq!(snapshot.inventory(), &inventory);
+        assert_eq!(snapshot.timelines(), rows.as_slice());
+        assert_eq!(snapshot.timeline(first), Some(&rows[0]));
+        assert_eq!(snapshot.timeline(second), Some(&rows[1]));
+        assert_eq!(snapshot.timeline(timeline(3)), None);
+        assert_eq!(snapshot.store_identity(), Some(identity));
+        assert_eq!(
+            ErasureAuthoritySnapshotV1::new(inventory, rows[..1].to_vec(), None),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_effect_exposes_its_tombstone_or_effect_record() -> Result<(), ErasureErrorV1> {
+        let elo1 = record("ELO1", vec![1])?;
+        let request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("owner", KeyRoleV1::SubjectDataEncryption, 1),
+            Hash::from_bytes([2; 32]),
+            Hash::from_bytes([3; 32]),
+        );
+        let receipt = Hash::from_bytes([4; 32]);
+        let tombstone = PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::KeyTombstone {
+                request: Box::new(request),
+                deletion_receipt: receipt,
+            },
+            &elo1,
+        )?;
+        assert_eq!(tombstone.key_tombstone(), Some((request, receipt)));
+        assert_eq!(tombstone.effect_object(), None);
+        assert_eq!(tombstone.owner_result().canonical_cbor(), elo1.as_slice());
+
+        for (effect, tag) in [
+            (
+                LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", vec![1])?),
+                "ELAD1",
+            ),
+            (
+                LocalOwnerEffectV1::CacheGeneration(record("ELCG1", vec![1])?),
+                "ELCG1",
+            ),
+            (
+                LocalOwnerEffectV1::Negative(record("ELNEG1", vec![1])?),
+                "ELNEG1",
+            ),
+        ] {
+            let prepared = PreparedLocalOwnerEffectV1::new(effect, &elo1)?;
+            assert_eq!(prepared.key_tombstone(), None);
+            assert_eq!(
+                prepared.effect_object().map(ErasureRetainedObjectV1::tag),
+                Some(tag)
+            );
+            assert_eq!(prepared.owner_result().tag(), "ELO1");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_effect_refuses_other_tags_and_oversized_owner_results() -> Result<(), ErasureErrorV1>
+    {
+        let elo1 = record("ELO1", vec![1])?;
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(
+                LocalOwnerEffectV1::Negative(record("ELCG1", vec![1])?),
+                &elo1
+            ),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        let negative = || record("ELNEG1", vec![1]).map(LocalOwnerEffectV1::Negative);
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(negative()?, &record("ELNEG1", vec![1])?),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        // Array head, "ELO1" text and a two-byte byte-string head.
+        let largest = record("ELO1", vec![0; LOCAL_OWNER_RESULT_MAX_BYTES_V1 - 9])?;
+        assert_eq!(largest.len(), LOCAL_OWNER_RESULT_MAX_BYTES_V1);
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(negative()?, &largest)?
+                .owner_result()
+                .canonical_cbor(),
+            largest.as_slice()
+        );
+        let over = record("ELO1", vec![0; LOCAL_OWNER_RESULT_MAX_BYTES_V1 - 8])?;
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(negative()?, &over),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        // Array head, "ELNEG1" text and a two-byte byte-string head.
+        let largest_effect = record("ELNEG1", vec![0; LOCAL_OWNER_EFFECT_MAX_BYTES_V1 - 11])?;
+        assert_eq!(largest_effect.len(), LOCAL_OWNER_EFFECT_MAX_BYTES_V1);
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(
+                LocalOwnerEffectV1::Negative(largest_effect.clone()),
+                &elo1
+            )?
+            .effect_object()
+            .map(ErasureRetainedObjectV1::canonical_cbor),
+            Some(largest_effect.as_slice())
+        );
+        let over_effect = record("ELNEG1", vec![0; LOCAL_OWNER_EFFECT_MAX_BYTES_V1 - 10])?;
+        assert_eq!(over_effect.len(), LOCAL_OWNER_EFFECT_MAX_BYTES_V1 + 1);
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(over_effect), &elo1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
+    }
+}

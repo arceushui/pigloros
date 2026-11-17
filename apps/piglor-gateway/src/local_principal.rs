@@ -525,14 +525,17 @@ pub fn provision_local_consents(
         .command_sender()
         .and_then(|mut sender| sender.records_timeline(timeline))
         .map_err(|_| LocalPrincipalErrorV1::Unavailable);
-    let recorded = match existing {
-        Ok(true) => host
-            .read_sender()
-            .and_then(|mut reads| reads.read_bounded(timeline, SeqRange::all(), consent_bounds()))
-            .map_err(|_| LocalPrincipalErrorV1::Unavailable),
-        Ok(false) => Ok(Vec::new()),
-        Err(error) => Err(error),
-    };
+    let recorded = existing.and_then(|existing| {
+        if existing {
+            host.read_sender()
+                .and_then(|mut reads| {
+                    reads.read_bounded(timeline, SeqRange::all(), consent_bounds())
+                })
+                .map_err(|_| LocalPrincipalErrorV1::Unavailable)
+        } else {
+            Ok(Vec::new())
+        }
+    });
     recorded.and_then(|recorded| {
         if !recorded.is_empty() || records.is_empty() {
             return recorded_grants_are(&recorded, &records)
@@ -833,15 +836,10 @@ fn consented_chains<S>(store: &S) -> Result<Vec<PersistedAuthorityV1>, LocalPrin
 where
     S: AuthorityPersistencePortV1 + ?Sized,
 {
-    let mut chains = Vec::new();
-    for position in 0..MAX_CAPABILITY_CONSENT_REFERENCES {
-        match load_chain(store, LocalGrantKindV1::Consented(position)) {
-            Ok(Some(chain)) => chains.push(chain),
-            Ok(None) => break,
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(chains)
+    (0..MAX_CAPABILITY_CONSENT_REFERENCES)
+        .map(|position| load_chain(store, LocalGrantKindV1::Consented(position)))
+        .map_while(Result::transpose)
+        .collect()
 }
 
 /// The chain `store` records under the grant of `kind`, or `None` when it
@@ -1895,6 +1893,25 @@ mod tests {
         Ok(())
     }
 
+    /// The registry digest also commits to the consent draft.
+    #[test]
+    fn the_registry_digest_commits_to_the_consent_draft() -> TestResult {
+        let digest =
+            |provision: &LocalPrincipalProvisionV1| provision.grant.authority_registry_digest();
+        let reconsented = LocalPrincipalProvisionV1::try_new_with_consent(
+            &principal()?,
+            [actor()?],
+            CONSENTED_OPERATIONS,
+            Some(&consent_of(vec![grant_draft(
+                "operation",
+                &["timeline", "society.signal"],
+                false,
+            )])?),
+        )?;
+        assert_ne!(digest(&consented_provision()?), digest(&reconsented));
+        Ok(())
+    }
+
     #[test]
     fn malformed_or_empty_documents_are_refused() -> TestResult {
         let actor = format!("\"{ACTOR}\"");
@@ -2656,11 +2673,30 @@ mod tests {
         let older = chain_record(&path)?;
         record_revocation(&path, &provision)?;
         let newer = chain_record(&path)?;
-        authorization.refresh(newer.clone()).await?;
+        authorization.refresh(Ok(newer.clone())).await?;
         assert!(!authorization.is_behind(&newer));
         // A refresh that read the store before the revocation lands later.
-        authorization.refresh(older).await?;
+        authorization.refresh(Ok(older)).await?;
         assert!(!authorization.is_behind(&newer));
+        Ok(())
+    }
+
+    /// A refresh whose store read failed recomposes nothing and answers the
+    /// failure at once: it never waits for the commit-fence write guard,
+    /// here held by a revocation.
+    #[tokio::test]
+    async fn a_failed_read_refreshes_nothing_without_the_fence() -> TestResult {
+        let authorization = loaded(&served_provision()?)?;
+        let _fence = authorization.exclusive_fence().await;
+        let refreshed = tokio::time::timeout(
+            Duration::from_secs(5),
+            authorization.refresh(Err(crate::GatewayAuthorizationError::AuthorityUnavailable)),
+        )
+        .await?;
+        assert!(matches!(
+            refreshed,
+            Err(crate::GatewayAuthorizationError::AuthorityUnavailable)
+        ));
         Ok(())
     }
 
@@ -4078,6 +4114,140 @@ mod tests {
             drop((gateway, app));
             assert_eq!(recorded_state(&path)?, before, "{actions_consented}");
         }
+        Ok(())
+    }
+
+    /// A Principal composed before its consent Timeline is read binds no
+    /// consent: a request a consent-bound grant covers is refused, while the
+    /// root grant still decides the operations no consent governs.
+    #[test]
+    fn unread_consents_bind_nothing() -> TestResult {
+        let authorization = loaded(&consented_provision()?)?;
+        let actor = actor()?;
+        let request = |operation| {
+            crate::GatewayAuthorizationRequest::operation(actor, operation, None, WallTime::now())
+        };
+        assert!(authorization
+            .authorize(request(GatewayOperationV1::READ_SESSION))
+            .is_ok());
+        assert!(matches!(
+            authorization.authorize(request(GatewayOperationV1::CREATE_TIMELINE)),
+            Err(crate::GatewayAuthorizationError::Denied(_))
+        ));
+        Ok(())
+    }
+
+    /// A revocation the store refuses to append records nothing: the
+    /// request answers the append's failure and the consent stays granted.
+    #[tokio::test]
+    async fn a_refused_revocation_append_records_nothing() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let actor = actor()?;
+        let (mut gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        drop(app);
+        let ceiling = gateway.limits.max_events_per_timeline;
+        // The consent Timeline holds its three grants: a revocation exceeds it.
+        gateway.limits.max_events_per_timeline = 3;
+        let app = app_of(gateway.clone());
+        let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
+        let (status, problem) = revoke_with(&app, actor, &consent, "over-the-ceiling").await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!("resource-limit-exceeded")
+            )
+        );
+        assert_eq!(
+            session_of(&app, actor).await?["consents"][0]["state"],
+            "granted"
+        );
+        // The refused append released its fence reservation: once the
+        // ceiling allows it, the same request records the revocation.
+        let mut raised = gateway.clone();
+        raised.limits.max_events_per_timeline = ceiling;
+        let raised_app = app_of(raised.clone());
+        let (status, revocation) =
+            revoke_with(&raised_app, actor, &consent, "over-the-ceiling").await?;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(revocation["consent_ref"], consent);
+        assert_eq!(revocation["generation"], 4);
+        gateway.shutdown().await?;
+        drop(raised_app);
+        drop(raised);
+        drop(gateway);
+        drop(app);
+        Ok(())
+    }
+
+    /// A store bound to no execution mode records no revocation: its answer
+    /// could never name the binding the revocation's commit was produced
+    /// under, so it is refused as unavailable before anything is appended.
+    #[tokio::test]
+    async fn a_store_without_a_mode_binding_records_no_revocation() -> TestResult {
+        let provision = consented_provision()?;
+        let actor = actor()?;
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        // An unbound store, opened without the mode attachment `serve` makes.
+        let unbound_host = || {
+            ErasureExecutionHostV1::open_with_authority(
+                StoreConfig::Sqlite { path: path.clone() },
+                &ErasureCoordinatorCompositionV1::closed(),
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+        };
+        // Provisioning binds its own consent authority to the host it
+        // writes through; the Gateway binds another, so it opens a fresh host.
+        provision_local_consents(&mut unbound_host()?, &provision)?;
+        let mut host = unbound_host()?;
+        let authorization = host
+            .command_sender()?
+            .with_scheduled_admission(|ports| {
+                provision_local_principal(&mut *ports, &provision)
+                    .and_then(|_| load_local_principal(&*ports))
+            })??
+            .ok_or("a provisioned store recomposes")?;
+        let granted = host.read_sender()?.read_bounded(
+            local_principal_consent_timeline(),
+            SeqRange::all(),
+            consent_bounds(),
+        )?;
+        let consent_ref = granted.first().ok_or("a consent is recorded")?.id;
+        let gateway =
+            crate::gateway_with_erasure_host_and_authorization(host, [actor], authorization)?;
+        let consent_head = || async {
+            gateway
+                .store
+                .protected_logical_head(local_principal_consent_timeline())
+                .await
+                .map_err(|error| format!("{error:?}"))
+        };
+        assert_eq!(consent_head().await?, Seq::from_u64(3));
+        let app = app_of(gateway.clone());
+        let (status, problem) =
+            revoke_with(&app, actor, &json!(consent_ref.to_string()), "unbound").await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("temporarily-unavailable")
+            )
+        );
+        // Nothing was appended to the consent Timeline.
+        assert_eq!(consent_head().await?, Seq::from_u64(3));
+        let permit = gateway
+            .authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
+            .await?;
+        assert!(gateway
+            .consent_pinned(&permit, consent_ref)
+            .is_some_and(|consent| consent.revocation().is_none()));
+        drop(permit);
+        gateway.shutdown().await?;
+        drop(gateway);
+        drop(app);
         Ok(())
     }
 

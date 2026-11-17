@@ -206,4 +206,22 @@ mod tests {
         assert_eq!(store.erasure_evidence.get(&reference), Some(&bytes));
         Ok(())
     }
+
+    /// An address that already holds other bytes is not retainable: the
+    /// retain is refused and the held bytes stay as they were.
+    #[test]
+    fn retaining_over_an_address_holding_other_bytes_is_refused() -> Result<(), ErasureErrorV1> {
+        let mut store = MemoryStore::new();
+        let bytes = [0x82, 0x64, b'E', b'R', b'C', b'1', 0x01];
+        let reference = ErasureRetainedObjectV1::new(&bytes, 1_024)?.reference();
+        let held = vec![0x82, 0x64, b'E', b'R', b'C', b'1', 0x02];
+        store.erasure_evidence.insert(reference, held.clone());
+        assert_eq!(
+            store.local_erasure_retain(&bytes, 1_024),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(store.erasure_evidence.get(&reference), Some(&held));
+        assert!(store.erasure_retained_objects.is_empty());
+        Ok(())
+    }
 }
