@@ -3909,7 +3909,7 @@ mod tests {
         let linked = chain_port(&[first_node, second_node], objects.clone())?;
         assert_eq!(
             recorded_scope_extensions(&linked, request, scope),
-            Ok(vec![first.clone(), second.clone()])
+            Ok(vec![first, second])
         );
         let missing = Err(ErasureErrorV1::ProvenanceMissing);
         // Another committed scope does not own this chain.
