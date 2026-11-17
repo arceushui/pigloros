@@ -749,7 +749,9 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["components"]["parameters"]["Revision"]["schema"].pop("maximum")
+        projection = document["paths"]["/v1/timelines/{timeline_id}/projection"]["get"]
+        at_seq = next(p for p in projection["parameters"] if p.get("name") == "at_seq")
+        at_seq["schema"].pop("maximum")
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
