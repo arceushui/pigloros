@@ -332,3 +332,42 @@ impl GatewayOperationV1 {
         Self::CONSENT_EXEMPT.contains(&self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A party sees exactly the consents it is the subject or the grantee of,
+    /// and each consent discloses whether it permits export.
+    #[test]
+    fn a_party_sees_the_consents_it_is_subject_or_grantee_of() {
+        let subject = EntityId::new();
+        let grantee = EntityId::new();
+        let exported = GatewayConsentV1::new(EventId::new(), grantee, Seq::from_u64(1), true);
+        let withheld =
+            GatewayConsentV1::new(EventId::new(), EntityId::new(), Seq::from_u64(2), false);
+        let consents = GatewayConsentsV1::new(
+            TimelineId::new(),
+            Seq::from_u64(2),
+            subject,
+            Vec::new(),
+            vec![exported, withheld],
+        );
+        assert!(exported.export_permitted());
+        assert!(!withheld.export_permitted());
+        assert_eq!(
+            consents.of_party(subject).copied().collect::<Vec<_>>(),
+            [exported, withheld]
+        );
+        assert_eq!(
+            consents.of_party(grantee).copied().collect::<Vec<_>>(),
+            [exported]
+        );
+        assert_eq!(consents.of_party(EntityId::new()).count(), 0);
+        assert_eq!(
+            consents.named_for(subject, withheld.consent_ref()),
+            Some(withheld)
+        );
+        assert_eq!(consents.named_for(grantee, withheld.consent_ref()), None);
+    }
+}
