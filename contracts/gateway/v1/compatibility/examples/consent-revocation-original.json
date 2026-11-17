@@ -1,0 +1,46 @@
+{
+  "name": "consent-revocation-original",
+  "operation_id": "revokeConsent",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-21",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "consent_ref": "01JC0GATEWAYW90C0NSENT0001"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:consent-revocation",
+      "id": "01JC0GATEWAYW90REV0KE00001",
+      "generation": 2,
+      "provenance": {
+        "digest": "582d720a564be9e2a09580fcf00153b59e45a0d53884c4c731cfb31d9184d465",
+        "origin": "host-derived"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "unavailable",
+        "reason": "not-installed"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "consent_ref": "01JC0GATEWAYW90C0NSENT0001",
+      "state": "revoked",
+      "future_protected_work": "denied"
+    }
+  }
+}
