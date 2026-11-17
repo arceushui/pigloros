@@ -995,10 +995,10 @@ jobs:
     if: ${{ !cancelled() && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     # Budget: the pre-steps (full-history checkout, install-action, LCOV
-    # downloads), the resolver step's 40-minute bound on waiting for main's
+    # downloads), the resolver step's 45-minute bound on waiting for main's
     # trusted baseline (see that step), then scoring and uploads, all within
-    # 60 minutes.
-    timeout-minutes: 60
+    # 70 minutes.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1042,11 +1042,12 @@ jobs:
       # Polls up to 30 minutes while main's ci.yml run for the trusted base is
       # still producing its cargo-crap baseline, then falls back to the nearest
       # first-parent main ancestor's baseline (fetch-depth 0 above provides that
-      # history), then fails closed as before. The extra minutes cover the last
-      # poll, GitHub API retry backoff and the ancestor walk.
+      # history), then fails closed as before. The extra 15 minutes cover the
+      # last poll and the 30-commit ancestor walk even when GitHub API calls
+      # need retries; a step that still runs out of time fails closed.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
-        timeout-minutes: 40
+        timeout-minutes: 45
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}

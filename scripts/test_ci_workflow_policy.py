@@ -736,7 +736,7 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     crap = jobs.get("cargo-crap", {})
     if (
         "strategy" in crap
-        or crap.get("timeout-minutes") != 60
+        or crap.get("timeout-minutes") != 70
         or "core-gate" in job_needs(crap)
         or "coverage" not in job_needs(crap)
     ):

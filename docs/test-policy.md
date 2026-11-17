@@ -142,7 +142,9 @@ gets a baseline within that bound, the job uses the baseline of the nearest
 first-parent `main` ancestor among the 30 commits before it; a function `main`
 improved after that ancestor may then regrow up to its ancestor score, which
 the owner accepted. With no trusted baseline in that window, the job fails
-closed.
+closed (pull requests that change no Rust, Cargo or toolchain input bootstrap
+instead). A failed `core-gate` no longer stops cargo-crap from running; `ci-gate`
+still fails on it.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,

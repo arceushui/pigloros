@@ -1442,7 +1442,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_cargo_crap_timeouts_cover_the_bounded_wait(self) -> None:
         self.assert_rejected(
-            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 45})
+            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 60})
         )
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 150})
@@ -1455,8 +1455,22 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assert_rejected(
             lambda workflow: self.cargo_crap_step(
                 workflow, "Resolve trusted cargo-crap baseline"
-            ).update({"timeout-minutes": 35})
+            ).update({"timeout-minutes": 40})
         )
+
+    def test_cargo_crap_timeouts_leave_room_beyond_the_wait_bound(self) -> None:
+        resolver = RESOLVER_PATH.read_text(encoding="utf-8")
+        wait = next(
+            int(line.split("=", 1)[1])
+            for line in resolver.splitlines()
+            if line.startswith("BASELINE_WAIT_LIMIT_SECONDS=")
+        )
+        job = self.workflow["jobs"]["cargo-crap"]
+        step = self.cargo_crap_step(self.workflow, "Resolve trusted cargo-crap baseline")
+        # The step must outlast the wait by the ancestor walk and API retries,
+        # and the job must leave the pre-steps and scoring their own budget.
+        self.assertGreaterEqual(step["timeout-minutes"] * 60, wait + 15 * 60)
+        self.assertGreaterEqual(job["timeout-minutes"], step["timeout-minutes"] + 20)
 
     def test_rejects_resolver_give_up_paths_that_skip_the_recheck_or_reason(self) -> None:
         mutations = {

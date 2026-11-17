@@ -116,8 +116,8 @@ ANALYZE_COMMAND = (
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
-# Standard-stage jobs start from core-gate, while cargo-crap starts from coverage: none consumes
-# cargo-crap output, so the native Windows lane that cargo-crap waits for never
+# Standard-stage jobs start from core-gate; cargo-crap starts from coverage.
+# None consumes cargo-crap output, so the native Windows lane that cargo-crap waits for never
 # delays or hides their findings. ci-gate requires cargo-crap directly.
 STAGED_MAIN_JOBS = {
     "rustdoc": ["ci_change_scope", "core-gate"],
@@ -489,7 +489,7 @@ def check_workflow(
         "cargo-crap must skip documentation-only pull requests",
     )
     require(job.get("runs-on") == "ubuntu-24.04", "cargo-crap runner changed")
-    require(job.get("timeout-minutes") == 60, "cargo-crap timeout changed")
+    require(job.get("timeout-minutes") == 70, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
     require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
@@ -564,7 +564,7 @@ def check_workflow(
         == {
             "name": "Resolve trusted cargo-crap baseline",
             "id": "baseline",
-            "timeout-minutes": 40,
+            "timeout-minutes": 45,
             "env": {
                 "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
                 "EVENT_NAME": "${{ github.event_name }}",
