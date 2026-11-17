@@ -63,7 +63,8 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
   omits the capability.
 
 - **One lock per store.** `serve` and the offline writers (`owntracks pair|rotate|revoke`,
-  `provision-local-fork-authority`, `provision-local-principal`) hold a shared non-blocking lock on
+  `provision-local-fork-authority`, `provision-local-principal`, `provision-local-erasure`) hold a
+  shared non-blocking lock on
   `<sqlite-path>.gateway-mode.lock`; `migrate-mode` holds it exclusively. Offline writers need a
   store a first `serve` has bound, and never bind one. An Air-Gapped store refuses `owntracks pair`
   and `rotate`. Only Gateway processes write a bound store; other hosts, such as `pos-experiment`,
@@ -182,6 +183,42 @@ revocation. The contract's `Session` schema states the provenance digest.
 changed grant is not supported yet. Provisioning a different document is refused with
 `a different Local Principal`. To recover, provision the original document again (an exact retry
 succeeds), or stop the Gateway, create a new database and provision the new document into it.
+
+### Local erasure authority
+
+The single-host erasure authority (ADR-136) is activated by a bundle that a TPS1 root signs. Its
+offline first step is the one-shot
+[systemd unit](../../deploy/systemd/piglor-gateway-local-erasure-provision.service), run after the
+Local Principal is provisioned:
+
+```text
+piglor-gateway provision-local-erasure <sqlite-path> --issued-by <erasure-bundle/...>
+    --signer-owner <owner-id> --out <path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]
+```
+
+The unit reads exactly two credentials: `pigloros.local-erasure-signer`, the role-2 signer's
+32-byte Ed25519 seed, and `pigloros.release-trust`, the deployment release anchor that
+authenticates the installed TPS1 of the trust state store at `/var/lib/pigloros/trust-state.db`:
+
+```toml
+policy_id = "pigloros-local"
+operator_public_key = "<64 lowercase hex characters>"
+genesis_digest = "<64 lowercase hex characters>"
+```
+
+`--issued-by` must name a current, unrevoked TPS1 root with the `erasure-bundle/` key id prefix,
+and the TPS1 must not revoke the signer key `erasure-signer/<64 hex>`. Provisioning then registers
+the signer key in the key registry under `(--signer-owner, role 2, --signer-epoch)`, writes the
+store's erasure identity once from 32 random bytes, opens the Erasure Host Timeline
+`pigloros.local-erasure.host` (the ULID prefix of `CA("ELHT1", [store_identity])`), and writes the
+unsigned ELB1 to the new file `--out` with mode `0600`; an existing file is never overwritten. The
+holder of the `erasure-bundle/` root signs it into ELB1S, on another machine if the key lives there.
+An exact re-run emits the same bundle. A routine signer rotation re-runs it with a new signer
+credential, a higher `--signer-epoch` and a new `--out`; it works on a store that already holds
+erasure requests. The key registry refuses another key for a registered identity, a lower epoch
+and a reused key. The unit writes `/var/lib/pigloros/local-erasure-bundle.elb1` for the root
+`erasure-bundle/local`: move the file away once it is signed, and override `ExecStart` in a drop-in
+to name another root or epoch.
 
 ### Separate deterministic experiment host
 

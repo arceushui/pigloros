@@ -732,15 +732,41 @@ pub(crate) fn read_single_credential(
     service_uid: u32,
     maximum: usize,
 ) -> Result<Zeroizing<Vec<u8>>, LocalForkAuthenticationErrorV1> {
+    read_credentials(directory, &[name], service_uid, maximum).and_then(|credentials| {
+        credentials
+            .into_iter()
+            .next()
+            .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
+    })
+}
+
+/// Read the credentials `names`, given in sorted order.
+///
+/// The protected systemd credential directory must hold exactly them, with
+/// the custody checks of [`read_single_credential`], each at most `maximum`
+/// bytes.
+pub(crate) fn read_credentials(
+    directory: &Path,
+    names: &[&str],
+    service_uid: u32,
+    maximum: usize,
+) -> Result<Vec<Zeroizing<Vec<u8>>>, LocalForkAuthenticationErrorV1> {
     open_credential_directory(directory, service_uid).and_then(|directory| {
         sorted_credential_names(&directory)
-            .and_then(|names| {
-                (names == [name])
+            .and_then(|found| {
+                (found == names)
                     .then_some(())
                     .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
             })
-            .and_then(|()| read_bounded_credential(&directory, name, service_uid, maximum))
-            .map(Zeroizing::new)
+            .and_then(|()| {
+                names
+                    .iter()
+                    .map(|name| {
+                        read_bounded_credential(&directory, name, service_uid, maximum)
+                            .map(Zeroizing::new)
+                    })
+                    .collect()
+            })
     })
 }
 

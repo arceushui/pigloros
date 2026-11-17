@@ -1,7 +1,7 @@
 //! The single-host Local/Air-Gapped erasure authority (ADR-136).
 //!
-//! This module holds the ELP1 policy compiled into this binary, the
-//! composition-time verification of the installed ELB1/ELB1S bundle against
+//! This module holds the ELP1 policy and the executor binding (ELEXV1)
+//! compiled into this binary, the composition-time verification of the installed ELB1/ELB1S bundle against
 //! the profile's TPS1 anchor and the store (ADR-136 §4, *Bundle*), and the
 //! verify-only `LocalErasureAuthorityV1` that composition installs over the
 //! verified bundle, from submission through freeze to attempt,
@@ -9,6 +9,7 @@
 //! ADR-136 §1 are later slices of the same module.
 
 mod authority;
+mod binding;
 mod destruction;
 mod freeze;
 mod policy;
@@ -16,11 +17,11 @@ mod policy;
 use std::sync::Arc;
 
 use pos_core::{
-    local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1, CanonicalBytes,
-    ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, EventStore,
-    Hash, KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature, TimelineId,
-    ERASURE_MAX_INVENTORY_REQUESTS,
+    local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
+    local_erasure_host_timeline_v1, CanonicalBytes, ErasureInventoryPersistencePortV1,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, EventStore, Hash, KeyIdentityV1, KeyRoleV1,
+    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureExecutionBindingV1, OwnerIdV1,
+    PublicKey, Signature, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_crypto::signing::{verify, verifying_key_from_public_key};
 use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
@@ -29,6 +30,10 @@ use crate::erasure_host::{LocalErasurePreparationV1, LocalErasureSubmissionBindi
 use crate::ErasureCoordinatorCompositionV1;
 use authority::LocalErasureAuthorityV1;
 
+pub use binding::{
+    local_erasure_execution_binding_v1, LOCAL_ERASURE_EXECUTOR_ID_V1,
+    LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1, LOCAL_ERASURE_EXECUTOR_VERSION_V1,
+};
 pub use policy::{
     compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
     LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
@@ -62,7 +67,8 @@ pub enum LocalErasureCompositionErrorV1 {
     BundleInvalid,
     /// The bundle names another policy than the one compiled into this
     /// binary, or another executor, Local Principal registry, store identity
-    /// or live signer key than this deployment and store, or the
+    /// or live signer key than this deployment and store, its
+    /// `host_timelines` omit the store's Erasure Host Timeline, or the
     /// store identity or key registry cannot be read.
     BundleMismatch,
     /// The installed TPS1 revokes the bundle root or the bundle signer.
@@ -122,9 +128,13 @@ impl ErasureCoordinatorCompositionV1 {
     /// signer may be revoked; its policy must be
     /// [`compiled_local_erasure_policy_v1`]; its Local Principal registry
     /// digest, execution binding and store identity must equal this
-    /// deployment's; and the key registry must hold its role-2 signer key
-    /// live, not destroyed. When the store holds any erasure request, every
-    /// retained TPS1 must verify under the pinned operator key.
+    /// deployment's; its `host_timelines` must list the Erasure Host
+    /// Timeline of its store identity
+    /// ([`pos_core::local_erasure_host_timeline_v1`]), the fence of key
+    /// destruction for erasure; and the key registry must hold its role-2
+    /// signer key live, not destroyed. When the store holds any erasure
+    /// request, every retained TPS1 must verify under the pinned operator
+    /// key.
     ///
     /// A composition only admits new work: recovery of committed evidence
     /// verifies against the retained ELB1 and TPS1, never this check.
@@ -146,6 +156,7 @@ impl ErasureCoordinatorCompositionV1 {
     {
         verified_bundle(inputs)
             .and_then(|bundle| matches_store(&bundle, store).map(|()| bundle))
+            .and_then(lists_its_host_timeline)
             .and_then(|bundle| {
                 retained_trust_verifies(inputs.operator_public_key, store)
                     .then_some(bundle)
@@ -282,6 +293,18 @@ where
         .is_some_and(|key| *key.as_bytes() == bundle.signer_public_key);
     (same_store && registered_signer)
         .then_some(())
+        .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
+}
+
+/// The bundle must list its store's Erasure Host Timeline, the fence of key
+/// destruction for erasure, among its host Timelines (owner decision Q14 of
+/// 2026-11-17 on #1412).
+fn lists_its_host_timeline(
+    bundle: LocalErasureBundleV1,
+) -> Result<LocalErasureBundleV1, LocalErasureCompositionErrorV1> {
+    local_erasure_host_timeline_v1(bundle.store_identity)
+        .is_ok_and(|host| bundle.host_timelines.binary_search(&host).is_ok())
+        .then_some(bundle)
         .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
 }
 

@@ -862,6 +862,27 @@ where
     }
 }
 
+/// The authority registry digest of the Local Principal root grant `store`
+/// records, or `None` when it records no Local Principal.
+///
+/// # Errors
+/// Returns the [`load_local_principal`] read errors.
+#[cfg(target_os = "linux")]
+pub(crate) fn recorded_registry_digest<S>(store: &S) -> Result<Option<Hash>, LocalPrincipalErrorV1>
+where
+    S: AuthorityPersistencePortV1 + ?Sized,
+{
+    load_chain(store, LocalGrantKindV1::Root).map(|chain| {
+        chain.and_then(|chain| {
+            chain
+                .chain()
+                .grants()
+                .last()
+                .map(CapabilityGrantV1::authority_registry_digest)
+        })
+    })
+}
+
 /// Compose the Local Principal recorded in the store of `host`.
 ///
 /// # Errors
@@ -1428,12 +1449,12 @@ fn derived_timeline(context: &str) -> TimelineId {
 }
 
 /// The one grant identity a store's Local Principal is recorded under.
-fn local_principal_grant_id() -> Hash {
+pub(crate) fn local_principal_grant_id() -> Hash {
     derived_hash("pigloros gateway local principal grant v1")
 }
 
 /// The authority Timeline the Local Principal's grant is issued on.
-fn local_principal_authority_timeline() -> TimelineId {
+pub(crate) fn local_principal_authority_timeline() -> TimelineId {
     derived_timeline("pigloros gateway local principal authority timeline v1")
 }
 

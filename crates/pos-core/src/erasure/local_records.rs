@@ -289,6 +289,38 @@ pub fn local_erasure_coordinator_v1(
     tagged("ELCOORD1", vec![digest(store_identity)])
 }
 
+/// The Erasure Host Timeline of one store: the 128-bit prefix of
+/// `CA("ELHT1", [store_identity])`, read as a ULID.
+///
+/// It is a host-owned root Timeline that `provision-local-erasure` opens and
+/// every ELB1 of the store lists in `host_timelines`; it serves only as the
+/// fence of key destruction for erasure. The ULID's time bits are a digest
+/// prefix and carry no time.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_host_timeline_v1(
+    store_identity: ErasureReferenceV1,
+) -> Result<TimelineId, ErasureErrorV1> {
+    tagged("ELHT1", vec![digest(store_identity)]).map(|reference| {
+        let mut prefix = [0; 16];
+        prefix.copy_from_slice(&reference.digest()[..16]);
+        TimelineId::from_ulid(ulid::Ulid::from_bytes(prefix))
+    })
+}
+
+/// `CA("ELEXV1", [executor_id, version])`, the ELB1 `executor_version_digest`
+/// of one executor version.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_executor_version_v1(
+    executor_id: &str,
+    version: u64,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELEXV1", vec![text(executor_id), uint(version)])
+}
+
 /// `CA(tag, fields)`: the domain-tagged digest of one canonical array.
 fn tagged(tag: &str, fields: Vec<Value>) -> Result<ErasureReferenceV1, ErasureErrorV1> {
     encode_limited(&Value::Array(fields), KIB)
