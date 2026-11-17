@@ -660,22 +660,40 @@ pub struct LocalErasureSubmissionBindingV1 {
 }
 
 /// The pure Local erasure evaluations the host asks of the Local authority
-/// besides the authority trait (ADR-136 §5 and §6). Both read only the
+/// besides the authority trait (ADR-136 §5 and §6). They read only the
 /// host-built view.
 pub(crate) trait LocalErasurePreparationV1: Send + Sync {
     /// Authenticate a prospective request of the Principal `principal_ref`
-    /// as `actor` against the root grant at the current chain head, then
-    /// answer whether its closure for `scope` fits the 4,096-target bound
-    /// on this snapshot. The host retains nothing before this passes.
+    /// as `actor` against the root grant at the current chain head. The
+    /// host answers no replay, runs no per-subject check and retains
+    /// nothing before this passes.
     ///
     /// # Errors
     /// `Unauthorized` for a Principal, actor or root grant the authority
-    /// would not admit, `TrustSnapshotInvalid` once new admissions are
-    /// closed, and otherwise the closed read error of the closure.
-    fn admit_submission(
+    /// would not admit.
+    fn authenticate_submission(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         principal_ref: ErasureReferenceV1,
+        actor: EntityId,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Whether new admissions are open. Closed admissions refuse a fresh
+    /// request but not the exact replay of an installed one.
+    ///
+    /// # Errors
+    /// `TrustSnapshotInvalid` once the installed TPS1 or the bundle has
+    /// expired.
+    fn submissions_open(&self) -> Result<(), ErasureErrorV1>;
+
+    /// Whether the closure of an authenticated prospective request of
+    /// `actor` for `scope` fits the 4,096-target bound on this snapshot.
+    ///
+    /// # Errors
+    /// The closed read error of the closure.
+    fn submission_fits(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         actor: EntityId,
         scope: ErasureScopeV1,
     ) -> Result<bool, ErasureErrorV1>;
@@ -4301,25 +4319,35 @@ impl ErasureCommandSenderV1<'_> {
     /// Submit one Local erasure request (ADR-136 §6).
     ///
     /// The host derives the `erasure_id` from the Principal, the actor and
-    /// the Idempotency-Key digest. A request with that id already installed
-    /// returns its state when its ELIDEM1 binds the same body, and is a
-    /// conflict otherwise. A fresh request must pass the per-subject checks
-    /// against the installed inventory, and the authority must admit the
-    /// Principal and actor and find the closure within its bound; only then
-    /// does the host retain its ERAZ1, ELSEL1 and ELIDEM1, build ERQ1 and
-    /// submit it, and the authority re-checks all of it from its view. A
-    /// refused submission retains nothing.
+    /// the Idempotency-Key digest. The authority first authenticates the
+    /// Principal and actor against the root grant at the current chain
+    /// head, so a caller it would not admit learns nothing of any request
+    /// or subject. A request with that id already installed then returns
+    /// its state when its ELIDEM1 binds the same body, and is a conflict
+    /// otherwise; this exact replay is answered even once new admissions
+    /// have closed, since expiry closes new admissions only. A fresh
+    /// request needs new admissions open, must pass the per-subject checks
+    /// against the installed inventory, and the authority must find the
+    /// closure within its bound; only then does the host retain its ERAZ1,
+    /// ELSEL1 and ELIDEM1, build ERQ1 and submit it, and the authority
+    /// re-checks all of it from its view. A refused submission retains
+    /// nothing.
     ///
     /// # Errors
     /// Returns [`LocalErasureSubmitErrorV1::Concurrent`] while another
     /// request of the subject is pre-terminal or has an active attempt not
     /// pinned to a revoked bundle,
     /// [`LocalErasureSubmitErrorV1::QuotaExhausted`] once the subject's
-    /// quota is used, and otherwise a payload-free host error: a host with
-    /// no Local composition or Local Principal record refuses with
-    /// [`ErasureHostErrorV1::AuthorizationDenied`], and an
-    /// Idempotency-Key reused for another body, or a retained-only scope,
-    /// is a [`ErasureHostErrorV1::Conflict`].
+    /// quota is used, [`LocalErasureSubmitErrorV1::ScopeTooLarge`] for a
+    /// closure over its bound, and otherwise a payload-free host error: a
+    /// host with no Local composition or Local Principal record, and a
+    /// Principal, actor or root grant the authority does not authorize at
+    /// the chain head, refuse with
+    /// [`ErasureHostErrorV1::AuthorizationDenied`]; a fresh request once
+    /// the installed TPS1 or the bundle has expired is
+    /// [`ErasureHostErrorV1::RecoveryUnavailable`]; and an Idempotency-Key
+    /// reused for another body, or a retained-only scope, is a
+    /// [`ErasureHostErrorV1::Conflict`].
     pub fn submit_local_erasure(
         &mut self,
         submission: &LocalErasureSubmissionV1,
@@ -4345,68 +4373,67 @@ impl ErasureCommandSenderV1<'_> {
                     })
                     .map(|records| (installed, records))
             })?;
-        if let Some(state) = installed
-            .states()
-            .find(|state| state.request().reference() == records.request.reference())
-        {
-            return (state.request().provenance() == records.request.provenance())
-                .then(|| state.state().clone())
-                .ok_or(LocalErasureSubmitErrorV1::Host(
-                    ErasureHostErrorV1::Conflict,
-                ));
-        }
-        let subject = records.request.subject();
         let limits = (
             self.host.recovery_limits.maximum_requests(),
             binding.store_request_reserve,
             records.actors,
         );
-        self.with_local_view(installed, |view| {
-            local_subject_admission(
-                view.verified_requests().into_iter(),
-                subject,
-                limits,
-                |state| binding.preparation.holds_subject(view, state),
-            )
-            .map_or_else(
-                |refusal| Ok(Err(refusal)),
-                |()| {
-                    binding
-                        .preparation
-                        .admit_submission(
-                            view,
-                            records.principal_ref,
-                            submission.actor,
-                            submission.scope,
-                        )
-                        .map(Ok)
-                },
-            )
-        })
-        .map_err(LocalErasureSubmitErrorV1::from)
-        .and_then(|admission| admission.map_err(LocalErasureSubmitErrorV1::from))
-        .and_then(|fits| {
-            fits.then_some(())
-                .ok_or(LocalErasureSubmitErrorV1::ScopeTooLarge)
-        })
-        .and_then(|()| {
-            records
-                .objects
-                .iter()
-                .try_for_each(|object| {
-                    self.host
-                        .store
-                        .host_store()
-                        .retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
-                        .map(drop)
-                })
-                .map_err(|error| LocalErasureSubmitErrorV1::Host(map_erasure_error(error)))
-        })
-        .and_then(|()| {
-            let provenance = records.request.provenance();
-            self.submit_erasure_request(records.request, provenance)
-                .map_err(LocalErasureSubmitErrorV1::Host)
-        })
+        let preparation = &binding.preparation;
+        let request = &records.request;
+        // `Some` is the answer to an exact replay; `None` admits a fresh
+        // request whose records may now be retained.
+        let replayed = self
+            .with_local_view(Arc::clone(&installed), |view| {
+                preparation.authenticate_submission(
+                    view,
+                    records.principal_ref,
+                    submission.actor,
+                )?;
+                if let Some(state) = installed
+                    .states()
+                    .find(|state| state.request().reference() == request.reference())
+                {
+                    return Ok((state.request().provenance() == request.provenance())
+                        .then(|| Some(state.state().clone()))
+                        .ok_or(LocalErasureSubmitErrorV1::Host(
+                            ErasureHostErrorV1::Conflict,
+                        )));
+                }
+                preparation.submissions_open()?;
+                if let Err(refusal) = local_subject_admission(
+                    view.verified_requests().into_iter(),
+                    request.subject(),
+                    limits,
+                    |state| preparation.holds_subject(view, state),
+                ) {
+                    return Ok(Err(refusal.into()));
+                }
+                preparation
+                    .submission_fits(view, submission.actor, submission.scope)
+                    .map(|fits| {
+                        fits.then_some(None)
+                            .ok_or(LocalErasureSubmitErrorV1::ScopeTooLarge)
+                    })
+            })
+            .map_err(LocalErasureSubmitErrorV1::from)
+            .and_then(std::convert::identity)?;
+        if let Some(state) = replayed {
+            return Ok(state);
+        }
+        records
+            .objects
+            .iter()
+            .try_for_each(|object| {
+                self.host
+                    .store
+                    .host_store()
+                    .retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
+                    .map(drop)
+            })
+            .map_err(|error| LocalErasureSubmitErrorV1::Host(map_erasure_error(error)))?;
+        let provenance = records.request.provenance();
+        self.submit_erasure_request(records.request, provenance)
+            .map_err(LocalErasureSubmitErrorV1::Host)
     }
 
     /// Prepare the access freeze of one Local erasure request (ADR-136 §5).
