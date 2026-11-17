@@ -3107,4 +3107,40 @@ mod tests {
             MAX_AUTHORIZATION_AUDITS
         );
     }
+
+    /// A record whose consent-bound chain count differs from the pinned
+    /// state's is ahead of it even when no chain and no consent head is
+    /// ahead; a record matching the pinned state is not.
+    #[test]
+    fn a_changed_consent_chain_count_puts_the_pin_behind() {
+        let fixture = fixture();
+        let authority = fixture.authority.authority();
+        let consents = GatewayConsentsV1::new(
+            TimelineId::new(),
+            Seq::from_u64(3),
+            fixture.actor,
+            Vec::new(),
+            Vec::new(),
+        );
+        let pinned = GatewayPinnedAuthorityV1::new(
+            fixture.authority.clone(),
+            fixture.authorization.registry_for_test(),
+            Some(GatewayConsentedAuthorityV1::new(
+                vec![fixture.authority.clone()],
+                consents.timeline(),
+                Some(consents),
+            )),
+        );
+        let record = |chains: usize| GatewayAuthorityRecordV1 {
+            chain: authority.clone(),
+            consented: Some(GatewayConsentRecordV1 {
+                chains: vec![authority.clone(); chains],
+                head: Seq::from_u64(3),
+                events: None,
+            }),
+        };
+        assert!(!pinned.is_behind(&record(1)));
+        assert!(pinned.is_behind(&record(0)));
+        assert!(pinned.is_behind(&record(2)));
+    }
 }
