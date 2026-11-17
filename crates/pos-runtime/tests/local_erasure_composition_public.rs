@@ -1652,6 +1652,17 @@ fn a_plain_submission_cannot_bypass_the_subject_checks() -> TestResult {
     Ok(())
 }
 
+/// The bundle naming `owner` as its one `key-registry` owner.
+fn owned_bundle(owner: ErasureReferenceV1) -> LocalErasureBundleV1 {
+    let mut with_owner = bundle();
+    with_owner.owners = vec![LocalErasureOwnerRowV1 {
+        category: 1,
+        ack_class: "key-registry".to_owned(),
+        owner_ref: owner,
+    }];
+    with_owner
+}
+
 /// The composed Local authority over a provisioned store whose bundle
 /// names one `key-registry` owner, and a host-built view of that store.
 fn local_authority() -> TestResult<(
@@ -1666,13 +1677,7 @@ fn local_authority() -> TestResult<(
         1,
         "key-registry",
     )?;
-    let mut with_owner = bundle();
-    with_owner.owners = vec![LocalErasureOwnerRowV1 {
-        category: 1,
-        ack_class: "key-registry".to_owned(),
-        owner_ref: owner,
-    }];
-    let case = Case::signed(&with_owner, &bundle_root(), &[])?;
+    let case = Case::signed(&owned_bundle(owner), &bundle_root(), &[])?;
     let composition = {
         let mut sqlite = SqliteStore::open(&store.path)?;
         sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
@@ -2250,6 +2255,24 @@ fn signed_freeze(
     let mut host = store.host(&local_case()?, 4_096)?;
     let request = request_of(key)?;
     let mut sender = host.command_sender()?;
+    // Even under a verifying ELS1, only `AccessFrozen` at the Local freeze
+    // position is admitted.
+    let provenance = signature_address(&signed)?;
+    for transition in [
+        ErasureStateTransitionV1 {
+            freeze_position: Some(2),
+            ..freeze(provenance)
+        },
+        ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::Authorized,
+            ..freeze(provenance)
+        },
+    ] {
+        assert_eq!(
+            sender.freeze_access(request, &transition).map(drop),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+    }
     for record in &refused {
         assert_eq!(
             sender
@@ -2267,7 +2290,25 @@ fn signed_freeze(
     Ok((host, signed))
 }
 
-/// A forged key, purpose confusion, a stale body: none freezes.
+/// A purpose-0 ELS1 over `digest` by the bundle's signer whose own labels
+/// `relabel` then rewrites: its signature still verifies over the expected
+/// message, so only the label check refuses it.
+fn relabelled_signature(
+    digest: ErasureReferenceV1,
+    relabel: impl FnOnce(&mut LocalErasureSignatureV1),
+) -> TestResult<Vec<u8>> {
+    let mut signature = LocalErasureSignatureV1::from_canonical_cbor(&signature_record(
+        LocalErasureSignaturePurposeV1::FreezeAuthorization,
+        digest,
+        &erasure_signer(),
+        1,
+    )?)?;
+    relabel(&mut signature);
+    Ok(signature.to_canonical_cbor()?)
+}
+
+/// A forged key, purpose confusion, a stale body, and a valid signature
+/// under a wrong purpose, digest or signer label: none freezes.
 fn refused_signatures(digest: ErasureReferenceV1) -> TestResult<Vec<Vec<u8>>> {
     let purpose = LocalErasureSignaturePurposeV1::FreezeAuthorization;
     Ok(vec![
@@ -2279,7 +2320,74 @@ fn refused_signatures(digest: ErasureReferenceV1) -> TestResult<Vec<Vec<u8>>> {
             1,
         )?,
         signature_record(purpose, reference(0x77), &erasure_signer(), 1)?,
+        relabelled_signature(digest, |signature| {
+            signature.purpose = LocalErasureSignaturePurposeV1::OwnerResult;
+        })?,
+        relabelled_signature(digest, |signature| {
+            signature.signed_digest = reference(0x77);
+        })?,
+        relabelled_signature(digest, |signature| {
+            signature.signer_identity.epoch = 2;
+        })?,
     ])
+}
+
+/// Committed freeze evidence verifies only when ERFAA1 and ERFA1 pin the
+/// compiled ELP1 and one trust revision, even under a purpose-0 ELS1 over
+/// the ERFA1 body that the pinned bundle's signer made.
+#[test]
+fn committed_freeze_evidence_pins_one_policy_and_trust() -> TestResult {
+    let (_store, composition, mut host, owner) = local_authority()?;
+    let view = host.authority_view()?;
+    let authority = composition.authority();
+    let trust = owned_bundle(owner).reference()?;
+    let mut matrix = Vec::new();
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        matrix.push(ErasureFreezeApplicabilityRowV1::new(
+            category,
+            0,
+            ErasureApplicabilityDecisionV1::Inapplicable,
+            None,
+        )?);
+    }
+    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        request: reference(0x90),
+        scope_commitment: reference(0xc0),
+        obligation_set: reference(0xc1),
+        applicability_matrix: matrix,
+        freeze_position: 1,
+        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+        trust,
+        authorization_provenance: reference(0xc3),
+    })?;
+    let body = admission.authorization_body_digest()?;
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::FreezeAuthorization,
+        body,
+        &erasure_signer(),
+        1,
+    )?;
+    let validated = |policy, pinned| {
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: body,
+            policy,
+            trust: pinned,
+            evidence: signed.clone(),
+        })
+        .and_then(|authorization| {
+            authority.validate_freeze_authorization_with_view(&view, &admission, &authorization)
+        })
+    };
+    assert_eq!(validated(LOCAL_ERASURE_POLICY_REFERENCE_V1, trust), Ok(()));
+    assert_eq!(
+        validated(reference(0xc4), trust),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    assert_eq!(
+        validated(LOCAL_ERASURE_POLICY_REFERENCE_V1, reference(0xc5)),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
 }
 
 /// One expected `(target, category, ack_class)` cell.
