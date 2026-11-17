@@ -9,8 +9,8 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    AttemptEvidence, AttemptProgressCode, AttemptResponse, RuntimeSigned, SandboxAuditRecord,
-    SandboxAuditRecordFields, SandboxProviderProtocolError as ProtocolError,
+    AttemptEvidence, AttemptProgressCode, AttemptResponse, ReceiptAuthority, RuntimeSigned,
+    SandboxAuditRecord, SandboxAuditRecordFields, SandboxProviderProtocolError as ProtocolError,
     SandboxProviderReceipt, SandboxProviderReceiptFields, SandboxProviderResult,
     SandboxProviderResultFields, SandboxTerminalOutcome, SelfDigested, Verified,
 };
@@ -790,6 +790,168 @@ fn the_receipt_and_result_encoders_refuse_invalid_fields() -> TestResult {
             Some(error)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn the_receipt_encoder_refuses_each_out_of_bounds_field_alone() -> TestResult {
+    let receipt = receipt_fields(&SandboxProviderReceipt::from_canonical_cbor(
+        &completed(&COMPLETED)?.receipt,
+    )?);
+    for (case, fields) in [
+        (
+            "a zero authority digest",
+            SandboxProviderReceiptFields {
+                authority: ReceiptAuthority {
+                    rvs1_digest: [0; 32],
+                    ..receipt.authority.clone()
+                },
+                ..receipt.clone()
+            },
+        ),
+        (
+            "a zero network transcript digest",
+            SandboxProviderReceiptFields {
+                network_transcript_digests: vec![[0; 32]],
+                ..receipt.clone()
+            },
+        ),
+        (
+            "a zero ReadyV1 digest",
+            SandboxProviderReceiptFields {
+                ready1_digest: Some([0; 32]),
+                ..receipt.clone()
+            },
+        ),
+        (
+            "a zero ReleaseV1 digest",
+            SandboxProviderReceiptFields {
+                release1_digest: Some([0; 32]),
+                ..receipt.clone()
+            },
+        ),
+        (
+            "an empty key ID",
+            SandboxProviderReceiptFields {
+                runtime_attestation_key_id: String::new(),
+                ..receipt.clone()
+            },
+        ),
+    ] {
+        assert_eq!(
+            SandboxProviderReceipt::self_digested(fields).err(),
+            Some(ProtocolError::FieldOutOfBounds),
+            "{case}"
+        );
+    }
+    assert!(SandboxProviderReceipt::self_digested(receipt).is_ok());
+    Ok(())
+}
+
+#[test]
+fn the_result_encoder_refuses_each_out_of_bounds_field_alone() -> TestResult {
+    // The SPY1 operational-event list holds at most 256 entries.
+    const MAX_EVENTS: usize = 256;
+    let result = result_fields(&SandboxProviderResult::from_canonical_cbor(
+        &completed(&COMPLETED)?.result,
+    )?);
+    for (case, fields, error) in [
+        (
+            "a zero attempt ID",
+            SandboxProviderResultFields {
+                attempt_id: [0; 16],
+                ..result.clone()
+            },
+            ProtocolError::FieldOutOfBounds,
+        ),
+        (
+            "one event over the list bound",
+            SandboxProviderResultFields {
+                operational_events: vec![11; MAX_EVENTS + 1],
+                ..result.clone()
+            },
+            ProtocolError::FieldOutOfBounds,
+        ),
+        // At the bound the list is in range and only its shape is wrong.
+        (
+            "a list at the bound",
+            SandboxProviderResultFields {
+                operational_events: vec![11; MAX_EVENTS],
+                ..result.clone()
+            },
+            ProtocolError::InconsistentFields,
+        ),
+        (
+            "an event code above 13",
+            SandboxProviderResultFields {
+                operational_events: vec![11, 14],
+                ..result.clone()
+            },
+            ProtocolError::FieldOutOfBounds,
+        ),
+        (
+            "an empty key ID",
+            SandboxProviderResultFields {
+                runtime_attestation_key_id: String::new(),
+                ..result
+            },
+            ProtocolError::FieldOutOfBounds,
+        ),
+    ] {
+        assert_eq!(
+            SandboxProviderResult::self_digested(fields).err(),
+            Some(error),
+            "{case}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_result_encoder_binds_each_admission_digest_to_the_outcome() -> TestResult {
+    let cancelled = result_fields(&SandboxProviderResult::from_canonical_cbor(
+        &build(Fixture::released(TME1_C)?, &Plan::new(&[11, 12, 1], 1))?.result,
+    )?);
+    assert_eq!(cancelled.outcome, SandboxTerminalOutcome::Cancelled);
+    let rejected = SandboxProviderResultFields {
+        outcome: SandboxTerminalOutcome::Rejected,
+        output: None,
+        agr1_digest: None,
+        spr1_digest: None,
+        operational_events: Vec::new(),
+        ..cancelled.clone()
+    };
+    for (case, fields) in [
+        (
+            "a cancellation without its SPR1",
+            SandboxProviderResultFields {
+                spr1_digest: None,
+                ..cancelled.clone()
+            },
+        ),
+        (
+            "a cancellation without its AGR1",
+            SandboxProviderResultFields {
+                agr1_digest: None,
+                ..cancelled.clone()
+            },
+        ),
+        (
+            "a rejection with an AGR1",
+            SandboxProviderResultFields {
+                agr1_digest: cancelled.agr1_digest,
+                ..rejected.clone()
+            },
+        ),
+    ] {
+        assert_eq!(
+            SandboxProviderResult::self_digested(fields).err(),
+            Some(ProtocolError::InconsistentFields),
+            "{case}"
+        );
+    }
+    assert!(SandboxProviderResult::self_digested(cancelled).is_ok());
+    assert!(SandboxProviderResult::self_digested(rejected).is_ok());
     Ok(())
 }
 
