@@ -1104,7 +1104,10 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/revision/tests.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/adapter/native_tests.rs'
+          --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
@@ -1149,7 +1152,10 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/revision/tests.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/adapter/native_tests.rs'
+          --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
@@ -1725,6 +1731,8 @@ jobs:
           python scripts/test_check_test_support_features.py
       - name: Test rust-test-policy test-code classification
         run: python scripts/test_rust_test_policy.py
+      - name: Test the Air-Gapped test namespace helpers
+        run: python scripts/test_air_gapped_seccomp_exec.py
       - name: Check the community Plugin handoff READMEs
         run: |
           python scripts/check_handoff_readme.py
