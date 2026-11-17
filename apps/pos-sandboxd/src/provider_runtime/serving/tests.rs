@@ -19,7 +19,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
 };
 
-use super::{root_peer, Responder};
+use super::{trusted_peer, Admission, Responder};
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::tests::{
     bind_as_provider, encode, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
@@ -645,6 +645,7 @@ fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
+    drops_an_untrusted_peer(&admitted, &signer, retained)?;
     let responder = Responder::new(&admitted, &signer);
     // A full pool of one: the next connection is accepted and refused with
     // SPE1 12 at once (journal 22582).
@@ -671,10 +672,46 @@ fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
 }
 
 #[test]
-fn only_a_root_peer_is_answered() -> TestResult {
-    // On a non-root host the peer of a socket pair is not root; in the
-    // isolated container it is.
+fn only_the_trusted_peer_uid_is_answered() -> TestResult {
+    // The peer of a socket pair runs as this process's UID.
     let (local, _) = UnixStream::pair()?;
-    assert_eq!(root_peer(&local), rustix::process::geteuid().is_root());
+    let uid = rustix::process::geteuid().as_raw();
+    assert!(trusted_peer(&local, uid));
+    assert!(!trusted_peer(&local, uid + 1));
     Ok(())
+}
+
+/// Assert that `peer` reads nothing, not even server write EOF, and that
+/// all of `sent` is still unread at `server`: the connection was dropped
+/// before anything was read or written.
+fn assert_dropped_unread(server: &UnixStream, peer: &mut UnixStream, sent: &[u8]) -> TestResult {
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
+    let mut unread = vec![0; sent.len() + 1];
+    let mut reader = server;
+    assert_eq!(reader.read(&mut unread)?, sent.len());
+    assert_eq!(&unread[..sent.len()], sent);
+    Ok(())
+}
+
+/// A peer of another UID gets zero bytes on the execute socket: its request
+/// is not read (R11 §6 step 6).
+fn drops_an_untrusted_peer(
+    admitted: &pos_reference::selector::installation::authority::AdmittedSelectorProvider,
+    signer: &crate::KeyFileRuntimeSigner,
+    retained: Authority,
+) -> TestResult {
+    let untrusted = Responder {
+        peer_uid: rustix::process::geteuid().as_raw() + 1,
+        ..Responder::new(admitted, signer)
+    };
+    let sent = framed(&[&describe([4; 16], retained)?])?;
+    let (server, mut peer) = UnixStream::pair()?;
+    peer.write_all(&sent)?;
+    untrusted.answer(&server, Admission::Answered);
+    assert_dropped_unread(&server, &mut peer, &sent)
 }
