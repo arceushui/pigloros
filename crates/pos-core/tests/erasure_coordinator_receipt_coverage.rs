@@ -2716,6 +2716,41 @@ fn coordinator_recovery_rejects_missing_scope_and_resolution_indexes() -> Result
 }
 
 #[test]
+fn recorded_scope_reads_the_committed_scope_and_extension_chain() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = complete_persisted_graph(Some(lineage_rule))?;
+    let request = graph.request.reference();
+    let scope = coordinator_scope(request, target(10), lineage_rule)?;
+    assert_eq!(
+        pos_core::ErasureRecordedScopeReadV1::recorded_scope(&graph.adapter, request)?,
+        Some((scope.clone(), Vec::new()))
+    );
+
+    let first = coordinator_extension(request, &scope, lineage_rule, None)?;
+    let second = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        fork: reference(162),
+        child_timeline: pos_core::TimelineId::new(),
+        lineage_rule,
+        predecessor_extension: Some(first.reference()),
+        admission_provenance: reference(163),
+    })?;
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
+    coordinator.append_scope_extension(request, first)?;
+    coordinator.append_scope_extension(request, second)?;
+    assert_eq!(
+        pos_core::ErasureRecordedScopeReadV1::recorded_scope(&graph.adapter, request)?,
+        Some((scope, vec![first, second]))
+    );
+    assert_eq!(
+        pos_core::ErasureRecordedScopeReadV1::recorded_scope(&graph.adapter, reference(251))?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
 fn coordinator_recovery_propagates_index_reference_failures() -> Result<(), ErasureErrorV1> {
     let graph = complete_persisted_graph(None)?;
     let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
