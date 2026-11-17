@@ -178,6 +178,11 @@ impl LocalErasureAuthorityV1 {
     /// host Timelines, plus every Fork descendant by `fork_point` lineage
     /// (ADR-136 §3, *Affected scope at freeze*), in increasing order.
     ///
+    /// Only the listed host Timelines are excluded. A Fork of a host
+    /// Timeline is no host Timeline: when it inherits the actor as owner,
+    /// as every Fork inherits its parent's owner, it is a Timeline the
+    /// actor owns and is affected.
+    ///
     /// # Errors
     /// `ProvenanceMissing` when a topology entry has no Timeline row.
     pub(super) fn affected_timelines(
