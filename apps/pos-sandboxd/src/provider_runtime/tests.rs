@@ -391,6 +391,16 @@ pub(super) fn revocation_update(
     providers: &[[u8; 32]],
     seed: u8,
 ) -> TestResult<(Vec<u8>, [u8; 32])> {
+    key_and_provider_revocation_update(admitted, &[], providers, seed)
+}
+
+/// As `revocation_update`, also revoking the sorted key IDs `keys`.
+pub(super) fn key_and_provider_revocation_update(
+    admitted: &AdmittedSelectorProvider,
+    keys: &[&str],
+    providers: &[[u8; 32]],
+    seed: u8,
+) -> TestResult<(Vec<u8>, [u8; 32])> {
     let bootstrap = admitted.bootstrap();
     let text = |value: &str| Value::Text(value.to_owned());
     let (next, next_digest) = policy_signed(
@@ -400,7 +410,7 @@ pub(super) fn revocation_update(
             Value::Integer(1.into()),
             Value::Bytes(bootstrap.trust().snapshot_digest().to_vec()),
             Value::Integer((bootstrap.revocation().revocation_epoch() + 1).into()),
-            Value::Array(Vec::new()),
+            Value::Array(keys.iter().copied().map(text).collect()),
             Value::Array(
                 providers
                     .iter()

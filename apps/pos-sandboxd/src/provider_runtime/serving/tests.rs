@@ -31,7 +31,8 @@ use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::reconcile::ReconcileError;
 use crate::provider_runtime::tests::{
     bind_as_provider, cancellation_context, encode, in_isolated_root, install_spi1,
-    revocation_update, spi1, test_lifecycle, Scripted, TestResult, RUNTIME_SEED,
+    key_and_provider_revocation_update, revocation_update, spi1, test_lifecycle, Scripted,
+    TestResult, RUNTIME_SEED,
 };
 use crate::provider_runtime::ExchangeObserver;
 use crate::provider_runtime::{
@@ -986,11 +987,12 @@ fn a_control_exchange_ends_100_ms_after_its_accept() {
 
 /// The live control state only advances: the fence and an acknowledgement
 /// that does not revoke this runtime leave it `Fenced`; one that revokes
-/// its SPM1 makes it `Revoked` (R11 §7.1).
+/// its SPM1, its binary or its runtime-attestation key, each alone, makes it
+/// `Revoked` (R11 §7.1).
 fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestResult {
     let bootstrap = admitted.bootstrap();
-    let next = |providers: &[[u8; 32]], nonce| -> TestResult<_> {
-        let (update, _) = revocation_update(admitted, providers, nonce)?;
+    let next_revoking = |keys: &[&str], providers: &[[u8; 32]], nonce| -> TestResult<_> {
+        let (update, _) = key_and_provider_revocation_update(admitted, keys, providers, nonce)?;
         Ok(RevocationUpdateRequest::authenticate(
             &update,
             bootstrap.trust(),
@@ -998,6 +1000,23 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
         )?
         .next_revocation)
     };
+    let next = |providers: &[[u8; 32]], nonce| next_revoking(&[], providers, nonce);
+    let manifest = admitted.provider().manifest();
+    for (keys, providers, nonce) in [
+        (Vec::new(), vec![manifest.binary_digest], 10),
+        (
+            vec![manifest.runtime_attestation_key_id.as_str()],
+            Vec::new(),
+            11,
+        ),
+    ] {
+        let control = ControlState {
+            state: AtomicU8::new(FENCED),
+            admitted,
+        };
+        control.acknowledging(bootstrap.trust(), &next_revoking(&keys, &providers, nonce)?);
+        assert!(control.revoked());
+    }
     let control = ControlState {
         state: AtomicU8::new(LIVE),
         admitted,
@@ -1011,8 +1030,7 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
     assert_eq!(state(), FENCED);
     control.acknowledging(bootstrap.trust(), &next(&[], 7)?);
     assert!(!control.revoked());
-    let manifest = admitted.provider().manifest().manifest_digest;
-    control.acknowledging(bootstrap.trust(), &next(&[manifest], 8)?);
+    control.acknowledging(bootstrap.trust(), &next(&[manifest.manifest_digest], 8)?);
     assert!(control.revoked());
     assert_eq!(state(), REVOKED);
     // A later acknowledgement that revokes nothing cannot undo it.
