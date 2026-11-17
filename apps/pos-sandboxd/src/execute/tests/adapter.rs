@@ -7,7 +7,6 @@
 //! provider feeds it.
 
 use std::io::Read as _;
-use std::os::fd::AsFd as _;
 use std::os::unix::fs::MetadataExt as _;
 
 use pos_reference::sandbox_provider_protocol::{OutputCaptureRecord, SandboxLimit};
