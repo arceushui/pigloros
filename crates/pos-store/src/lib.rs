@@ -2995,4 +2995,62 @@ mod bound_closure_tests {
         );
         Ok(())
     }
+
+    /// A child shared by two MRM1 roots and a non-MRM1 parent is never walked
+    /// as a root, and every permutation of the bound rows walks the same
+    /// closures and reaches the same result: ARD1 addresses hash the child
+    /// edges, so the pass depends on the edges, not the row order.
+    #[test]
+    fn permuted_rows_with_a_shared_child_walk_the_same_closures() -> TestResult {
+        let shared = row(ErasureArtifactClassV1::TimelineReplay, b"shared", &[])?;
+        let root_a = row(
+            ErasureArtifactClassV1::ReproManifest,
+            b"\x00\x00MRM1-a",
+            &[&shared],
+        )?;
+        let root_b = row(
+            ErasureArtifactClassV1::ReproManifest,
+            b"\x00\x00MRM1-b",
+            &[&shared],
+        )?;
+        let parent = row(
+            ErasureArtifactClassV1::TimelineReplay,
+            b"parent",
+            &[&shared],
+        )?;
+        assert!(root_a.is_repro_manifest_root() && root_b.is_repro_manifest_root());
+        let bound = [&shared, &root_a, &root_b, &parent];
+        let closure = |address: Hash| BTreeSet::from([address, shared.registration_address()]);
+        let expected: BTreeMap<Hash, usize> = [&root_a, &root_b, &parent]
+            .iter()
+            .map(|row| (row.registration_address(), 1))
+            .collect();
+        let mut permutations = 0;
+        for code in 0..256_usize {
+            let indices = [code % 4, code / 4 % 4, code / 16 % 4, code / 64];
+            if (0..4).any(|index| !indices.contains(&index)) {
+                continue;
+            }
+            permutations += 1;
+            let order = indices.map(|index| bound[index]);
+            let mut walks: BTreeMap<Hash, usize> = BTreeMap::new();
+            validate_bound_closures_once(&order, |address| {
+                *walks.entry(address).or_default() += 1;
+                Ok(closure(address))
+            })?;
+            assert_eq!(walks, expected);
+            assert_eq!(
+                validate_bound_closures_once(&order, |address| {
+                    if address == parent.registration_address() {
+                        Err(BoundClosureError::CorruptCatalog)
+                    } else {
+                        Ok(closure(address))
+                    }
+                }),
+                Err(BoundClosureError::CorruptCatalog)
+            );
+        }
+        assert_eq!(permutations, 24);
+        Ok(())
+    }
 }
