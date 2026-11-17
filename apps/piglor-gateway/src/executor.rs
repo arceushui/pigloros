@@ -2438,7 +2438,6 @@ impl WorkerCommandV1 for ProducedUnderCommand {
             ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
         };
         drop(reply.send(Ok(produced)));
-
     }
 
     fn expire_unrun(self: Box<Self>) {
