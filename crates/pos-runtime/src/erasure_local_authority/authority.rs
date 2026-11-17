@@ -37,6 +37,8 @@ const REQUEST_RESOURCE: &str = "erasure";
 /// bundle.
 pub(super) struct LocalErasureAuthorityV1 {
     pub(super) bundle: LocalErasureBundleV1,
+    /// `CA(ELB1)` of `bundle`, computed once at composition.
+    pub(super) bundle_reference: Option<ErasureReferenceV1>,
     /// The installed TPS1 `offline_valid_through`, in Unix seconds (UTC).
     pub(super) trust_expiry: u64,
     /// The installed TPS1 `revoked_key_ids`: a bundle whose root or signer
@@ -259,10 +261,11 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         Err(ErasureErrorV1::PolicyConflict)
     }
 
-    /// A recovered ERRA1 must still be the attempt ADR-136 §5 derives for
-    /// its request, pinning a bundle that resolves, the retained one after
-    /// a rotation. The admission-time fences (expiry, the current bundle,
-    /// the subject fence) are not re-run.
+    /// A recovered ERRA1 must still be the attempt its request derives.
+    ///
+    /// It must pin a bundle that resolves, the retained one after a
+    /// rotation. The admission-time fences (expiry, the current bundle,
+    /// the subject fence) are not re-run (ADR-136 §5).
     fn validate_attempt_with_view(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -272,9 +275,11 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         self.attempt_verified(view, request, admission)
     }
 
-    /// A recovered owner acknowledgement must carry a purpose-1 ELS1 over
-    /// its binding ELO1 by the signer of the bundle it pins, the retained
-    /// one after a rotation or a revocation.
+    /// A recovered owner acknowledgement must carry its signed ELO1.
+    ///
+    /// The evidence is a purpose-1 ELS1 over its binding ELO1 by the signer
+    /// of the bundle it pins, the retained one after a rotation or a
+    /// revocation.
     fn validate_acknowledgement_with_view(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -283,9 +288,11 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         self.acknowledgement_verified(view, acknowledgement)
     }
 
-    /// A recovered receipt must issue at its §6 position under a purpose-2
-    /// ELS1 over its ERCB1 by the signer of the bundle its attempt pins,
-    /// the retained one after a rotation or a revocation.
+    /// A recovered receipt must be signed at its §6 position.
+    ///
+    /// Its signature is a purpose-2 ELS1 over its ERCB1 by the signer of
+    /// the bundle its attempt pins, the retained one after a rotation or a
+    /// revocation.
     fn validate_receipt_with_view(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,

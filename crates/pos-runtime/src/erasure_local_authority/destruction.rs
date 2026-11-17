@@ -11,6 +11,8 @@
 //! is the C4 driver's scheduling (ADR-136 §6): the authority admits any
 //! retry that recomputes, within the per-request attempt quota.
 
+use std::borrow::Cow;
+
 use pos_core::{
     local_erasure_receipt_body_reference_v1, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceV1, ErasureAttemptQuotaReservationV1, ErasureErrorV1,
@@ -121,7 +123,7 @@ impl LocalErasureAuthorityV1 {
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         trust: ErasureReferenceV1,
-    ) -> Option<LocalErasureBundleV1> {
+    ) -> Option<Cow<'_, LocalErasureBundleV1>> {
         self.pinned_bundle(view, trust)
             .filter(|bundle| !self.revoked(bundle))
     }
@@ -215,10 +217,11 @@ impl LocalErasureAuthorityV1 {
             && view.frozen_trust(erq1.reference()) == Ok(Some(admission.trust()))
     }
 
-    /// Whether ERRA1 recomputes for `erq1` (ADR-136 §5 and §6): within the
-    /// lifetime attempt quota, under the request's own ERAZ1 and the ELP1
-    /// ERQ1 pins, at the §6 positions. Admission and recovery both require
-    /// it.
+    /// Whether ERRA1 recomputes for `erq1` (ADR-136 §5 and §6).
+    ///
+    /// It must be within the lifetime attempt quota, under the request's
+    /// own ERAZ1 and the ELP1 ERQ1 pins, at the §6 positions. Admission and
+    /// recovery both require it.
     fn derives_attempt(
         view: &dyn ErasureAuthorityReadViewV1,
         erq1: &ErasureRequestV1,
@@ -231,11 +234,13 @@ impl LocalErasureAuthorityV1 {
                 == Some((admission.admitted_position(), admission.deadline_position()))
     }
 
-    /// Re-verify one recovered attempt of `erq1` (ADR-136 companion §2.4,
-    /// as amended for #1425): it must still recompute, and the bundle it
-    /// pins must resolve, the retained one after a rotation. The
-    /// admission-time fences are not re-run: expiry, the current bundle and
-    /// the subject fence decided only whether the attempt could start.
+    /// Re-verify one recovered attempt of `erq1`.
+    ///
+    /// Under the companion §2.4 amendment of #1425 it must still recompute,
+    /// and the bundle it pins must resolve, the retained one after a
+    /// rotation. The admission-time fences are not re-run: expiry, the
+    /// current bundle and the subject fence decided only whether the
+    /// attempt could start.
     ///
     /// # Errors
     /// `PolicyConflict` when the attempt does not recompute or its bundle
@@ -326,10 +331,11 @@ impl LocalErasureAuthorityV1 {
             .and_then(|bundle| Self::acknowledgement_signed(view, &bundle, acknowledgement))
     }
 
-    /// Re-verify one recovered owner acknowledgement as admission checks
-    /// it, against the bundle it pins whether or not the installed TPS1
-    /// now revokes it: committed evidence stays verifiable through the
-    /// retained ELB1 (ADR-136 §5, *Old evidence*).
+    /// Re-verify one recovered owner acknowledgement.
+    ///
+    /// The check is admission's, against the bundle it pins whether or not
+    /// the installed TPS1 now revokes it: committed evidence stays
+    /// verifiable through the retained ELB1 (ADR-136 §5, *Old evidence*).
     ///
     /// # Errors
     /// `TrustSnapshotInvalid` when the pinned bundle does not resolve;
@@ -398,9 +404,11 @@ impl LocalErasureAuthorityV1 {
             })
     }
 
-    /// Re-verify one recovered receipt of `attempt` as admission checks it,
-    /// against the bundle the attempt pins whether or not the installed
-    /// TPS1 now revokes it (ADR-136 §5, *Old evidence*).
+    /// Re-verify one recovered receipt of `attempt`.
+    ///
+    /// The check is admission's, against the bundle the attempt pins
+    /// whether or not the installed TPS1 now revokes it (ADR-136 §5, *Old
+    /// evidence*).
     ///
     /// # Errors
     /// `TrustSnapshotInvalid` when the pinned bundle does not resolve,

@@ -5149,3 +5149,121 @@ fn committed_evidence_still_verifies_after_a_bundle_rotation() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn recovery_needs_a_resolvable_bundle_and_the_issue_position() -> TestResult {
+    let (_store, composition, mut host, owner) = local_authority()?;
+    let view = host.authority_view()?;
+    let authority = composition.authority();
+    let mut current = bundle();
+    current.owners = vec![LocalErasureOwnerRowV1 {
+        category: 1,
+        ack_class: "key-registry".to_owned(),
+        owner_ref: owner,
+    }];
+    let erq1 = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(0x90),
+        subject: reference(0xca),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(0xcb)],
+        requester: reference(0xcc),
+        authorization: reference(0xc7),
+        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+        request_position: 0,
+        horizon_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+        provenance: reference(0xcd),
+    })?;
+    // Attempt 0 as its request derives it, pinning the composed bundle.
+    let pinned = ErasureRetryAdmissionInputV1 {
+        request: erq1.reference(),
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![reference(0xc5)],
+        command_identities: vec![reference(0xc6)],
+        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+        trust: current.reference()?,
+        admitted_position: 2,
+        deadline_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+        authorization_provenance: reference(0xc7),
+    };
+    let attempt = ErasureRetryAdmissionV1::new(pinned.clone())?;
+    // The same attempt pinning a bundle that is neither composed nor
+    // retained.
+    let unresolved = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        trust: reference(0xc2),
+        ..pinned
+    })?;
+    assert_eq!(
+        authority.validate_attempt_with_view(&view, &erq1, &attempt),
+        Ok(())
+    );
+    assert_eq!(
+        authority.validate_attempt_with_view(&view, &erq1, &unresolved),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let acknowledgement =
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request: erq1.reference(),
+            command: reference(0xc6),
+            attempt: unresolved.reference(),
+            obligation: reference(0xc5),
+            owner,
+            scope: reference(0xc0),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(0xc9),
+            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            trust: reference(0xc2),
+        })?;
+    assert_eq!(
+        authority.validate_acknowledgement_with_view(&view, &acknowledgement),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    // One executed obligation: a complete receipt of attempt 0 issues at
+    // 2 + 1. Another position is refused before its signature is read;
+    // at that position the unretained signature is refused.
+    let late = ErasureReceiptV1::new(receipt_input(&[], 7, reference(0xce)))?;
+    let reached = ErasureReceiptV1::new(receipt_input(&[], 3, reference(0xce)))?;
+    assert_eq!(
+        authority.validate_receipt_with_view(&view, &unresolved, &reached),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    assert_eq!(
+        authority.validate_receipt_with_view(&view, &attempt, &late),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        authority.validate_receipt_with_view(&view, &attempt, &reached),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_retry_recovers_on_its_retained_frozen_bundle_after_a_rotation() -> TestResult {
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    let (receipt, unresolved) = attempted.partially_failed()?;
+    let retry = ErasureRetryAdmissionV1::new(Attempted::attempt_input(
+        attempted.store.head,
+        attempted.bundle.reference()?,
+        &unresolved,
+        Some(&receipt),
+    )?)?;
+    assert_eq!(retry.attempt_ordinal(), 1);
+    assert_eq!(
+        attempted
+            .host()?
+            .command_sender()?
+            .dispatch_erasure_destruction(attempted.request, &retry)?
+            .lifecycle(),
+        ErasureLifecycleV1::PartialFailure
+    );
+    attempted.complete_retry(&retry, &unresolved)?;
+    // After a routine rotation, recovery re-verifies both attempts, the
+    // retry's derivation from its source receipt included, and their
+    // evidence against the retained frozen bundle.
+    assert_eq!(
+        attempted.lifecycle_after_rotation(&[])?,
+        ErasureLifecycleV1::Complete
+    );
+    Ok(())
+}

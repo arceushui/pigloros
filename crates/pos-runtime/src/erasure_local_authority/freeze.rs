@@ -7,6 +7,7 @@
 //! writes it: the driver signs the ERFA1-AUTH body the authority prepares,
 //! and the authority verifies that signature with the bundle's pinned key.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::{
@@ -627,19 +628,22 @@ impl LocalErasureAuthorityV1 {
             })
     }
 
-    /// The bundle a committed freeze or attempt pins by `CA(ELB1)`: the
-    /// verified bundle, or after a rotation the retained ELB1 bytes.
+    /// The bundle a committed freeze or attempt pins by `CA(ELB1)`.
+    ///
+    /// It is the verified bundle, borrowed and compared by its cached
+    /// address, or after a rotation the retained ELB1 bytes.
     pub(super) fn pinned_bundle(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         trust: ErasureReferenceV1,
-    ) -> Option<LocalErasureBundleV1> {
-        (self.bundle.reference().ok() == Some(trust))
-            .then(|| self.bundle.clone())
+    ) -> Option<Cow<'_, LocalErasureBundleV1>> {
+        (self.bundle_reference == Some(trust))
+            .then_some(Cow::Borrowed(&self.bundle))
             .or_else(|| {
                 view.retained_object(trust)
                     .and_then(|bytes| LocalErasureBundleV1::from_canonical_cbor(&bytes).ok())
                     .filter(|bundle| bundle.reference().ok() == Some(trust))
+                    .map(Cow::Owned)
             })
     }
 
