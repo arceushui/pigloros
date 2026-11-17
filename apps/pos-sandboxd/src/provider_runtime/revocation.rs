@@ -247,7 +247,9 @@ where
     }
 
     /// Step 4: the view of the attempt state source, if it is taken by
-    /// `deadline`. A view not taken in time is dropped part-way.
+    /// `deadline`. A view not taken in time is dropped part-way. The
+    /// timeout's timer is created inside the runtime: the serving thread has
+    /// no runtime of its own to register it with.
     fn fenced_view(&self, deadline: Instant) -> Option<Vec<AttemptCleanupState>> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         tokio::runtime::Builder::new_current_thread()
@@ -256,10 +258,9 @@ where
             .ok()
             .and_then(|runtime| {
                 runtime
-                    .block_on(tokio::time::timeout(
-                        remaining,
-                        self.source.attempt_states(),
-                    ))
+                    .block_on(async {
+                        tokio::time::timeout(remaining, self.source.attempt_states()).await
+                    })
                     .ok()
                     .flatten()
             })
