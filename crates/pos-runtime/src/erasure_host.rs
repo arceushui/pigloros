@@ -3606,55 +3606,60 @@ impl ErasureCommandSenderV1<'_> {
         id: TimelineId,
         name: &str,
     ) -> Result<Timeline, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (timeline, generation) = self.host.apply_unaffected_topology_change(
-            None,
-            |permit, store| {
-                store
-                    .get_timeline_for_host_transition(permit, id)
-                    .map_store_error()
-                    .map(|recorded| {
-                        recorded.unwrap_or_else(|| {
-                            Timeline::new(TimelineMeta {
-                                id,
-                                mode: TimelineMode::Live,
-                                name: Some(name.to_owned()),
-                                owner: None,
-                                fork_point: None,
-                            })
-                        })
-                    })
-            },
-            |permit, store, candidate| {
-                store
-                    .get_timeline_for_host_transition(permit, id)
-                    .and_then(|recorded| {
-                        recorded.map_or_else(
-                            || {
-                                store
-                                    .create_timeline_for_host_transition_with_meta(
-                                        permit,
-                                        candidate.meta.clone(),
-                                    )
-                                    .map(|timeline| TopologyTransitionResultV1 {
-                                        timeline,
-                                        #[cfg(test)]
-                                        created: true,
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| {
+                self.host.apply_unaffected_topology_change(
+                    None,
+                    |permit, store| {
+                        store
+                            .get_timeline_for_host_transition(permit, id)
+                            .map_store_error()
+                            .map(|recorded| {
+                                recorded.unwrap_or_else(|| {
+                                    Timeline::new(TimelineMeta {
+                                        id,
+                                        mode: TimelineMode::Live,
+                                        name: Some(name.to_owned()),
+                                        owner: None,
+                                        fork_point: None,
                                     })
-                            },
-                            |timeline| {
-                                Ok(TopologyTransitionResultV1 {
-                                    timeline,
-                                    #[cfg(test)]
-                                    created: false,
                                 })
-                            },
-                        )
-                    })
-            },
-        )?;
-        self.generation = generation;
-        Ok(timeline)
+                            })
+                    },
+                    |permit, store, candidate| {
+                        store
+                            .get_timeline_for_host_transition(permit, id)
+                            .and_then(|recorded| {
+                                recorded.map_or_else(
+                                    || {
+                                        store
+                                            .create_timeline_for_host_transition_with_meta(
+                                                permit,
+                                                candidate.meta.clone(),
+                                            )
+                                            .map(|timeline| TopologyTransitionResultV1 {
+                                                timeline,
+                                                #[cfg(test)]
+                                                created: true,
+                                            })
+                                    },
+                                    |timeline| {
+                                        Ok(TopologyTransitionResultV1 {
+                                            timeline,
+                                            #[cfg(test)]
+                                            created: false,
+                                        })
+                                    },
+                                )
+                            })
+                    },
+                )
+            })
+            .map(|(timeline, generation)| {
+                self.generation = generation;
+                timeline
+            })
     }
 
     /// Initialize a ledger Timeline and its durable signing registry through

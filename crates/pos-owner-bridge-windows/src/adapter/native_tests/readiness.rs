@@ -19,7 +19,7 @@ use pos_owner_bridge_codec::{
 
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use super::foreground::{Foreground, Ticket};
-use super::trace::{worker_stage, Trace};
+use super::trace::{lifecycle_stage, worker_stage, Trace};
 use super::{pass, pass_unwind, retirement, TestResult};
 use crate::{NativeFactory, NativePulse, StaPump};
 
@@ -27,9 +27,11 @@ const WORKERS: usize = 4;
 const RUNS_PER_WORKER: usize = 250;
 
 pub(super) fn run(runtime_path: &Path, root: &Path) {
+    lifecycle_stage("readiness.loopback-start");
     let loopback = pass(SharedLoopback::start_fixture(
         pos_owner_bridge::listener::FixtureProfile::Pending,
     ));
+    lifecycle_stage("readiness.workers-spawn");
     let foreground = Arc::new(Foreground::default());
     let mut workers = Vec::new();
     for worker in 0..WORKERS {
@@ -42,6 +44,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) {
         }));
     }
     // Every creating STA retires its accepted owners before its join completes.
+    lifecycle_stage("readiness.workers-join");
     let results: Vec<_> = workers.into_iter().map(thread::JoinHandle::join).collect();
     let mut reports = Vec::new();
     for (worker, result) in results.into_iter().enumerate() {
@@ -65,11 +68,15 @@ fn run_worker(
     foreground: &Foreground,
     worker: usize,
 ) -> usize {
+    lifecycle_stage(&format!("readiness.worker{worker}.verify-runtime"));
     pass(crate::create_private_directory(&root));
     let runtime = Arc::new(pass(crate::verify_fixed_runtime(runtime_path, &root)));
+    lifecycle_stage(&format!("readiness.worker{worker}.owner-factory"));
     let factory = Rc::new(pass(crate::Native::owner_factory()));
     let shared_factory: Rc<dyn NativeFactory> = factory.clone();
+    lifecycle_stage(&format!("readiness.worker{worker}.store-open"));
     let mut store = pass(WindowsCleanupStore::open(root.clone()));
+    lifecycle_stage(&format!("readiness.worker{worker}.surface"));
     let mut surface = pass(
         Surface::new(
             shared_factory,
@@ -81,6 +88,7 @@ fn run_worker(
         )
         .map_err(pos_owner_bridge::SurfaceError::error),
     );
+    lifecycle_stage(&format!("readiness.worker{worker}.ceremonies"));
     for iteration in 0..RUNS_PER_WORKER {
         let number = pass(u64::try_from(worker * RUNS_PER_WORKER + iteration + 1));
         let mut bytes = [0; 16];
