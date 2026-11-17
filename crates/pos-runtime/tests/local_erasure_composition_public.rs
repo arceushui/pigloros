@@ -1208,6 +1208,12 @@ fn request_of(key: u8) -> TestResult<ErasureReferenceV1> {
 
 /// The ERAZ1 the host builds for key `key` at chain head `head`.
 fn authorization(key: u8, head: u64) -> TestResult<LocalErasureAuthorizationV1> {
+    authorization_at(key, head, 0)
+}
+
+/// The ERAZ1 the host builds for key `key` at chain head `head` and
+/// revocation epoch `epoch`.
+fn authorization_at(key: u8, head: u64, epoch: u64) -> TestResult<LocalErasureAuthorizationV1> {
     Ok(LocalErasureAuthorizationV1 {
         principal_ref: principal_ref()?,
         actor_entity: actor(),
@@ -1215,7 +1221,7 @@ fn authorization(key: u8, head: u64) -> TestResult<LocalErasureAuthorizationV1> 
         authority_registry_digest: ErasureReferenceV1::from_digest(REGISTRY),
         authority_chain: authority_timeline(),
         chain_head_position: head,
-        revocation_epoch: 0,
+        revocation_epoch: epoch,
         erq1_request: request_of(key)?,
     })
 }
@@ -1383,7 +1389,8 @@ fn a_root_grant_revocation_leaves_older_requests_authorized() -> TestResult {
             .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
             .map_err(fail)?;
     }
-    // The revocation is fenced after the head request 1 is bound to.
+    // The revocation is fenced at position + 1 of the head request 1 is
+    // bound to, the last fence that still leaves that position authorized.
     store.revoke(&shape)?;
     let mut host = store.host(&local_case()?, 4_096)?;
     let mut sender = host.command_sender()?;
@@ -1409,6 +1416,156 @@ fn a_fresh_submission_after_a_root_grant_revocation_is_unauthorized() -> TestRes
             ErasureHostErrorV1::AuthorizationDenied
         ))
     );
+    Ok(())
+}
+
+/// Assert that the submission of key 2 is refused with `error`, not with
+/// the subject's `Concurrent`, and retains neither its ELIDEM1 nor the
+/// ERAZ1 it would bind at the recorded head or, after a revocation, at the
+/// head one past it and revocation epoch 1.
+fn refused_before_the_subject_checks(
+    store: &LocalStore,
+    host: &mut ErasureExecutionHostV1,
+    error: ErasureHostErrorV1,
+) -> TestResult {
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(error))
+    );
+    let view = host.authority_view()?;
+    for (head, epoch) in [(store.head, 0), (store.head + 1, 1)] {
+        assert_eq!(
+            view.retained_object(authorization_at(2, head, epoch)?.reference()?),
+            None
+        );
+    }
+    assert_eq!(view.retained_object(idempotency(2)?.reference()?), None);
+    Ok(())
+}
+
+#[test]
+fn an_unauthenticated_submission_learns_nothing_of_a_held_subject() -> TestResult {
+    let shape = GrantShape::standard();
+    let store = LocalStore::new(&shape)?;
+    {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        let mut sender = host.command_sender()?;
+        sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        // While new admissions are open, request 1 holds the subject.
+        assert_eq!(
+            sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::Concurrent)
+        );
+    }
+    // Once the TPS1 has expired, the closed admission answers first.
+    let mut expired = local_case()?;
+    expired.clock = after_trust_expiry;
+    let mut host = store.host(&expired, 4_096)?;
+    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::RecoveryUnavailable)?;
+    drop(host);
+    // Once the root grant is revoked, the authentication failure answers
+    // first, although request 1 still holds the subject.
+    store.revoke(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::AuthorizationDenied)
+}
+
+#[test]
+fn a_replay_is_answered_only_to_an_authorized_caller() -> TestResult {
+    let shape = GrantShape::standard();
+    let store = LocalStore::new(&shape)?;
+    let state = {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        let mut sender = host.command_sender()?;
+        let state = sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        // While the root grant authorizes the actor, the exact retry
+        // returns the original state.
+        assert_eq!(
+            sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+            Ok(state.clone())
+        );
+        state
+    };
+    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    // Once the root grant is revoked, neither the exact retry nor the same
+    // key with another body learns the installed request: both are refused
+    // as unauthorized, not answered with the state or a conflict.
+    store.revoke(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let mut sender = host.command_sender()?;
+    for scope in [
+        ErasureScopeV1::PrivateSubjectData,
+        ErasureScopeV1::ConsentedSharedData,
+    ] {
+        assert_eq!(
+            sender.submit_local_erasure(&submission(1, scope)?),
+            Err(LocalErasureSubmitErrorV1::Host(
+                ErasureHostErrorV1::AuthorizationDenied
+            ))
+        );
+    }
+    // Another Principal replaying the key is refused the same way.
+    let mut stranger = submission(1, ErasureScopeV1::PrivateSubjectData)?;
+    stranger.principal = delegate()?;
+    assert_eq!(
+        sender.submit_local_erasure(&stranger),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::AuthorizationDenied
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn an_exact_retry_is_answered_after_new_admissions_close() -> TestResult {
+    let mut case = local_case()?;
+    let store = LocalStore::new(&GrantShape::standard())?;
+    case.clock = at_trust_expiry;
+    let state = {
+        let mut host = store.host(&case, 4_096)?;
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?
+    };
+    // Expiry closes new admissions only: the exact retry of the installed
+    // request returns its original state, while a fresh request is refused
+    // before the subject checks would answer `Concurrent`.
+    case.clock = after_trust_expiry;
+    let mut host = store.host(&case, 4_096)?;
+    let mut sender = host.command_sender()?;
+    assert_eq!(
+        sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Ok(state)
+    );
+    assert_eq!(
+        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::RecoveryUnavailable
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_root_grant_admits_the_last_position_of_its_window() -> TestResult {
+    // `valid_until` one past the recorded chain head still admits: the
+    // window is half-open. A later grant moving the head onto
+    // `valid_until` refuses (`the_root_grant_must_match_...`).
+    let mut shape = GrantShape::standard();
+    shape.valid = (1, 2);
+    let store = LocalStore::new(&shape)?;
+    assert_eq!(store.head + 1, 2);
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let state = host
+        .command_sender()?
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
     Ok(())
 }
 
@@ -1509,8 +1666,9 @@ fn submission_needs_a_local_composition_and_its_principal() -> TestResult {
 }
 
 /// Assert that `submission` is refused with `error` and retains no ELIDEM1
-/// of key 1, nor the ERAZ1 and ELSEL1 the Principal's own submission of
-/// key 1 at the recorded head would.
+/// of key 1, nor the ELSEL1 and the ERAZ1 the Principal's own submission
+/// of key 1 would, at the recorded head or after a revocation moved the
+/// head one past it.
 fn refused_without_retention(
     store: &LocalStore,
     host: &mut ErasureExecutionHostV1,
@@ -1525,6 +1683,7 @@ fn refused_without_retention(
     let view = host.authority_view()?;
     for object in [
         authorization(1, store.head)?.reference()?,
+        authorization_at(1, store.head + 1, 1)?.reference()?,
         LocalErasureSelectorV1 { subject }.reference()?,
         idempotency(1)?.reference()?,
     ] {
@@ -2818,19 +2977,21 @@ fn a_signed_private_freeze_commits_the_subject_closure() -> TestResult {
 }
 
 #[test]
-fn a_host_timeline_and_its_forks_stay_outside_the_frozen_scope() -> TestResult {
+fn a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not() -> TestResult {
     let owned = OwnedStore::new()?;
-    // A host Timeline the actor owns, and a Fork of it.
+    // A host Timeline the actor owns, and a Fork of it that inherits the
+    // actor as owner, as every Fork does.
     let (host_timeline, host_fork) = {
         let mut sqlite = owned.store.sqlite()?;
         let host_timeline = sqlite
             .create_timeline_with_meta(TimelineMeta::root_owned("host", actor()))?
             .id();
         let host_fork = sqlite
-            .create_timeline_with_meta(TimelineMeta::forked_from(
+            .create_timeline_with_meta(TimelineMeta::forked_from_owned(
                 host_timeline,
                 Seq::ZERO,
                 "host-fork",
+                actor(),
             ))?
             .id();
         (host_timeline, host_fork)
@@ -2861,10 +3022,9 @@ fn a_host_timeline_and_its_forks_stay_outside_the_frozen_scope() -> TestResult {
             .lifecycle(),
         ErasureLifecycleV1::AccessFrozen
     );
-    // Only the actor's own Timeline freezes; the host Timeline and its
-    // Fork stay readable.
-    assert_frozen(&mut host, &[owned.owned], host_timeline)?;
-    assert!(host.read_sender()?.timeline(host_fork)?.is_some());
+    // The listed host Timeline stays readable. Its Fork is no host
+    // Timeline: the actor owns it, so it freezes with the actor's own.
+    assert_frozen(&mut host, &[owned.owned, host_fork], host_timeline)?;
     assert!(host.read_sender()?.timeline(owned.other)?.is_some());
     Ok(())
 }
