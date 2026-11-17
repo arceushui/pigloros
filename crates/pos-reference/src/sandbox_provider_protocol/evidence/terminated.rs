@@ -428,11 +428,9 @@ impl TerminationEvidenceFields {
             && self.service.is_none()
             && self.ending.is_none()
             && self.barrier_failure.is_none()
-            && self.output_capture.is_none()
-            && self.output_transfer.is_none()
+            && self.nothing_after_release()
             && self.local_network.is_none()
             && self.work_after.is_none()
-            && self.adapter_input.is_none()
     }
 
     /// Progress 1: a start job; snapshots only with a unit, both or neither;
@@ -445,10 +443,15 @@ impl TerminationEvidenceFields {
             && (self.unit.is_some() || self.baseline.is_none())
             && self.baseline.is_some() == self.terminal.is_some()
             && self.ending.is_none()
-            && self.output_capture.is_none()
+            && self.nothing_after_release()
+            && (self.unit.is_some() || self.work_after.is_none())
+    }
+
+    /// Before `ReleaseV1`: no output capture, output transfer or stdin feed.
+    const fn nothing_after_release(&self) -> bool {
+        self.output_capture.is_none()
             && self.output_transfer.is_none()
             && self.adapter_input.is_none()
-            && (self.unit.is_some() || self.work_after.is_none())
     }
 
     /// Progress 2: a done start job, the unit, both snapshots, an ending and
@@ -470,16 +473,22 @@ impl TerminationEvidenceFields {
     /// released run, and the cleanup finished no earlier than the terminal
     /// snapshot.
     fn ordered(&self) -> bool {
+        self.transfers_ordered()
+            && self
+                .terminal
+                .as_ref()
+                .is_none_or(|terminal| self.cleanup.finished_at >= terminal.observed_at)
+    }
+
+    /// Each transfer is ordered, the capture is consistent and the stdin
+    /// feed lies within the released run.
+    fn transfers_ordered(&self) -> bool {
         self.input.ordered()
             && self.output_transfer.is_none_or(TransferRecord::ordered)
             && self.output_capture.is_none_or(OutputCaptureRecord::ordered)
             && self
                 .adapter_input
                 .is_none_or(|feed| self.feed_ordered(feed))
-            && self
-                .terminal
-                .as_ref()
-                .is_none_or(|terminal| self.cleanup.finished_at >= terminal.observed_at)
     }
 
     /// R10 §4.8 and §7 rule 9: the stdin feed is ordered, carries exactly
@@ -710,12 +719,13 @@ type Conclusion = (
 );
 
 fn conclusion(fields: &[Value; 28]) -> Result<Conclusion> {
-    Ok((
+    let (cleanup, previous, terminal) = (
         CleanupRecord::decode(&fields[24])?,
         optional(&fields[25], digest)?,
         optional(&fields[26], code)?,
-        optional(&fields[27], TransferRecord::decode)?,
-    ))
+    );
+    optional(&fields[27], TransferRecord::decode)
+        .map(|adapter_input| (cleanup, previous, terminal, adapter_input))
 }
 
 fn unit_identity(value: &Value) -> Result<UnitIdentity> {
