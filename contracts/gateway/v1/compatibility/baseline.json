@@ -958,6 +958,399 @@
         }
       }
     },
+    "/v1/scenario-rooms": {
+      "post": {
+        "operationId": "createScenarioRoom",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "description": "Create revision 1 of a Scenario Room from a declarative ADR-041 descriptor (#303). The server assigns the room ID and correlation ID, sorts the lists canonically, resolves every plugin against the reviewed host catalogue entry it ships, and computes the three ADR-041 hashes (Redmine #303 amendment of ADR-041). The decision requires `scenario-room.create` for the acting entity and covers every `persona` participant as an actor; `governance_ref` must name the host's governance record.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScenarioRoomRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed first revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry (the same `Idempotency-Key` and request): the revision it committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (including a `persona` participant the Principal's grant does not cover), `revoked` or `consent-invalid` (a `privacy_export_ref` that names no consent granted to the Principal). The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`: a plugin the deployment does not bundle at exactly that version, a rule whose first segment names no requested plugin, or a `governance_ref` that names no governance record of the host.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms/{room_id}/revisions": {
+      "post": {
+        "operationId": "deriveScenarioRoomRevision",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "description": "Derive the next immutable revision of a Scenario Room from its head revision `parent_revision` (#303; ADR-041 sections 5, 7 and 9). A complete new descriptor; there is no automatic merge. Requires `scenario-room.derive`, with the same persona and governance rules as `createScenarioRoom`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeriveScenarioRoomRevisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry, or a derive whose `parent_revision` is no longer the head and whose descriptor equals the revision already derived from that parent (ADR-041 section 7): the existing revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized`, `revoked` or `consent-invalid`, as for `createScenarioRoom`. The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: no such room or `parent_revision`, identical for a missing and a protected room.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`, as for `createScenarioRoom`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms/{room_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getScenarioRoomRevision",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "description": "Read one immutable Scenario Room revision (#303). Requires `scenario-room.read` for the acting entity; the decision precedes the lookup, and an unknown room or revision answers like a protected one.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomId"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `revoked`: the authority decision precedes any lookup.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: the denial-record bound; retryable, with `Retry-After`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
     "/v1/preferences": {
       "post": {
         "operationId": "createPreference",
@@ -2658,6 +3051,465 @@
           }
         }
       },
+      "CreateScenarioRoomRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-scenario-room-request",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "descriptor"
+        ],
+        "properties": {
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-input"
+          }
+        }
+      },
+      "DeriveScenarioRoomRevisionRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:derive-scenario-room-revision-request",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A complete new descriptor derived from `parent_revision`; there is no automatic merge.",
+        "required": [
+          "parent_revision",
+          "descriptor"
+        ],
+        "properties": {
+          "parent_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-input"
+          }
+        }
+      },
+      "ScenarioRoomRevision": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
+        "type": "object",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID), in lower-case hex.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "revision",
+          "provenance",
+          "mode_profile",
+          "execution_profile",
+          "availability",
+          "descriptor",
+          "parent_revision",
+          "commit"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:scenario-room-revision"
+          },
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor"
+          },
+          "parent_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "commit": {
+            "$ref": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CommittedEventReceipt": {
+        "$id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "timeline_id",
+          "event_id",
+          "seq",
+          "event_schema_id",
+          "next_cursor"
+        ],
+        "description": "The authoritative commit receipt: the Event at its Timeline sequence and the cursor that observes its Projection.",
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+          },
+          "timeline_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "event_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "event_schema_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:event-cursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ScenarioRoomDescriptor": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The admitted ADR-041 descriptor: the payload of one `room.revision.v1` Event, encoded as the RFC 8785 bytes of this object. `plugin_composition_hash`, `rule_set_hash` and `descriptor_hash` are defined by the Redmine #303 amendment of ADR-041; a client recomputes `rule_set_hash` and `descriptor_hash` from the members.",
+        "required": [
+          "room_id",
+          "revision",
+          "schema_version",
+          "tick_duration_ms",
+          "max_ticks",
+          "scheduler_seed",
+          "scheduler_policy",
+          "intervention_policy",
+          "plugins",
+          "rules",
+          "participants",
+          "initial_conditions",
+          "governance_ref",
+          "privacy_export_ref",
+          "correlation_id",
+          "plugin_composition_hash",
+          "rule_set_hash",
+          "descriptor_hash"
+        ],
+        "properties": {
+          "room_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "tick_duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "max_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "scheduler_seed": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "32 seed bytes in hex (ADR-041)."
+          },
+          "scheduler_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "intervention_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "plugins": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plugin_id",
+                "version"
+              ],
+              "properties": {
+                "plugin_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                }
+              }
+            },
+            "description": "Plugins already admitted and bundled by the deployment trust policy; a room cannot discover, install or retrieve a Plugin."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "value_micro"
+              ],
+              "properties": {
+                "rule_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "participants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "kind"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "kind": {
+                  "enum": [
+                    "persona",
+                    "agent",
+                    "society",
+                    "world-body"
+                  ]
+                }
+              }
+            }
+          },
+          "initial_conditions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "dimension",
+                "value_micro"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "governance_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "privacy_export_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "correlation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "pattern": "^(?!0{32})[0-9a-f]{32}$",
+            "description": "16 runtime-generated non-zero bytes; never caller supplied."
+          },
+          "plugin_composition_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "rule_set_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "descriptor_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          }
+        }
+      },
+      "ScenarioRoomInput": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-input",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the room ID, revision, correlation ID and hashes are server-owned and cannot be supplied. The server admits the lists sorted (plugins by `plugin_id`, rules by `rule_id`, participants by `entity_id`, initial conditions by `entity_id` then `dimension`) and refuses a duplicate key, a `plugin_id` containing `.`, a `rule_id` whose first `.`-separated segment names no requested plugin, and an initial condition whose `entity_id` is not a participant. Every plugin must be bundled by the deployment at exactly its `version`. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`), measured on the admitted `room.revision.v1` payload.",
+        "required": [
+          "schema_version",
+          "tick_duration_ms",
+          "max_ticks",
+          "scheduler_seed",
+          "scheduler_policy",
+          "intervention_policy",
+          "plugins",
+          "rules",
+          "participants",
+          "initial_conditions",
+          "governance_ref",
+          "privacy_export_ref"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "tick_duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "max_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "scheduler_seed": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "32 seed bytes in hex (ADR-041)."
+          },
+          "scheduler_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "intervention_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "plugins": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plugin_id",
+                "version"
+              ],
+              "properties": {
+                "plugin_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                }
+              }
+            },
+            "description": "Plugins already admitted and bundled by the deployment trust policy; a room cannot discover, install or retrieve a Plugin."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "value_micro"
+              ],
+              "properties": {
+                "rule_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "participants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "kind"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "kind": {
+                  "enum": [
+                    "persona",
+                    "agent",
+                    "society",
+                    "world-body"
+                  ]
+                }
+              }
+            }
+          },
+          "initial_conditions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "dimension",
+                "value_micro"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "governance_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "privacy_export_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          }
+        }
+      },
       "CreateOptionSpecRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:create-option-spec-request",
         "type": "object",
@@ -3007,6 +3859,24 @@
           "$ref": "#/components/schemas/Ulid"
         }
       },
+      "Revision": {
+        "name": "revision",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "RoomId": {
+        "name": "room_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
       "OptionSpecId": {
         "name": "option_spec_id",
         "in": "path",
@@ -3021,16 +3891,6 @@
         "required": true,
         "schema": {
           "$ref": "#/components/schemas/Ulid"
-        }
-      },
-      "Revision": {
-        "name": "revision",
-        "in": "path",
-        "required": true,
-        "schema": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
         }
       }
     },
@@ -3317,6 +4177,99 @@
       "enforced_by": {
         "schema": [
           "/components/schemas/SessionModeProfile/properties/network_grants/maxItems"
+        ]
+      }
+    },
+    "room_descriptor_bytes": {
+      "value": 4096,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "adr",
+      "source": "ADR-041 section 1",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "room_plugins": {
+      "value": 32,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "adr",
+      "source": "ADR-041 section 1; pos-runtime MAX_REQUIRED_PLUGINS_V1",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/plugins/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/plugins/maxItems",
+          "/components/schemas/PreviewEvidence/properties/plugins/maxItems"
+        ]
+      }
+    },
+    "room_rules": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "adr",
+      "source": "ADR-041 section 1",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/rules/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/rules/maxItems"
+        ]
+      }
+    },
+    "room_participants": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/participants/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/participants/maxItems"
+        ]
+      }
+    },
+    "room_initial_conditions": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/initial_conditions/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/initial_conditions/maxItems"
+        ]
+      }
+    },
+    "horizon_ticks": {
+      "value": 65535,
+      "unit": "ticks",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "pos-runtime counterfactual MAX_SUFFIX_TICK_SPAN",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/max_ticks/maximum",
+          "/components/schemas/ScenarioRoomDescriptor/properties/max_ticks/maximum",
+          "/components/schemas/CreateEnsembleRequest/properties/horizon_ticks/maximum",
+          "/components/schemas/Ensemble/properties/horizon_ticks/maximum"
         ]
       }
     },

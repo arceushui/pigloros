@@ -74,6 +74,27 @@ impl OperationSpecV1 for ReadSessionOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_SESSION;
 }
 
+/// `POST /v1/scenario-rooms`.
+pub struct CreateScenarioRoomOperation;
+
+impl OperationSpecV1 for CreateScenarioRoomOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::CREATE_SCENARIO_ROOM;
+}
+
+/// `POST /v1/scenario-rooms/{room_id}/revisions`.
+pub struct DeriveScenarioRoomOperation;
+
+impl OperationSpecV1 for DeriveScenarioRoomOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::DERIVE_SCENARIO_ROOM;
+}
+
+/// `GET /v1/scenario-rooms/{room_id}/revisions/{revision}`.
+pub struct ReadScenarioRoomOperation;
+
+impl OperationSpecV1 for ReadScenarioRoomOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_SCENARIO_ROOM;
+}
+
 /// `POST /v1/me/consent-revocations`.
 pub struct RevokeConsentOperation;
 
@@ -220,6 +241,35 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
         .await
         .unwrap_or(Err(GatewayError::StoreExecutorUnhealthy))
     }
+
+    /// [`Self::run`], requiring the Principal's grant to also cover every
+    /// entity of `covered` as an actor, decided under the same fence (a
+    /// Scenario Room's `persona` participants, #303 decision 3a). The first
+    /// entity the grant does not cover is a recorded denial, and `operation`
+    /// never starts.
+    ///
+    /// # Errors
+    /// Returns the failures of [`Self::run`], and a recorded
+    /// [`GatewayError::AuthorizationDenied`] for an uncovered entity.
+    pub async fn run_covering<T, F, Fut>(
+        self,
+        gateway: &Gateway,
+        covered: Vec<EntityId>,
+        operation: F,
+    ) -> Result<T, GatewayError>
+    where
+        F: FnOnce(Gateway, GatewayOperationPermitV1) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, GatewayError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let permit = gateway
+            .authorize_operation_covering(O::OPERATION, self.actor_entity_id, &covered)
+            .await?;
+        let gateway = gateway.clone();
+        tokio::spawn(async move { operation(gateway, permit).await })
+            .await
+            .unwrap_or(Err(GatewayError::StoreExecutorUnhealthy))
+    }
 }
 
 /// The authority commit fence held over one protected decision, taken after
@@ -253,7 +303,7 @@ impl AuthorityFence {
 #[must_use = "dropping the permit releases the authority fence before the operation runs"]
 pub struct GatewayOperationPermitV1 {
     decision: Option<GatewayAuthorizationDecision>,
-    _fence: Option<AuthorityFence>,
+    fence: Option<AuthorityFence>,
 }
 
 impl GatewayOperationPermitV1 {
@@ -290,7 +340,7 @@ impl Gateway {
         if !self.has_authorization() {
             return Ok(GatewayOperationPermitV1 {
                 decision: None,
-                _fence: None,
+                fence: None,
             });
         }
         let (Some(authorization), Some(actor)) = (self.authorization.as_ref(), actor_entity_id)
@@ -308,13 +358,56 @@ impl Gateway {
         match fence.authorize(authorization, request) {
             Ok(decision) => Ok(GatewayOperationPermitV1 {
                 decision: Some(decision),
-                _fence: Some(fence),
+                fence: Some(fence),
             }),
             Err(error) => {
                 // The denial's evidence is written after the fence is
                 // released, so an authority replacement never waits on it.
                 drop(fence);
                 Err(self.authorization_failure(authorization, error).await)
+            }
+        }
+    }
+
+    /// [`Self::authorize_operation`] on the host, then decide `operation`
+    /// for each entity of `covered` as its actor under the same fence.
+    ///
+    /// # Errors
+    /// Returns the failures of [`Self::authorize_operation`], and a recorded
+    /// [`GatewayError::AuthorizationDenied`] for the first uncovered entity.
+    pub(crate) async fn authorize_operation_covering(
+        &self,
+        operation: GatewayOperationV1,
+        actor_entity_id: Option<EntityId>,
+        covered: &[EntityId],
+    ) -> Result<GatewayOperationPermitV1, GatewayError> {
+        let permit = self
+            .authorize_operation(operation, actor_entity_id, None, None)
+            .await?;
+        let uncovered = permit
+            .fence
+            .as_ref()
+            .zip(self.authorization.as_ref())
+            .zip(permit.decision())
+            .and_then(|((fence, authorization), decision)| {
+                let at_time = decision.request().at_time;
+                covered.iter().find_map(|entity| {
+                    fence
+                        .authorize(
+                            authorization,
+                            GatewayAuthorizationRequest::operation(
+                                *entity, operation, None, at_time,
+                            ),
+                        )
+                        .err()
+                        .map(|error| (Arc::clone(authorization), error))
+                })
+            });
+        match uncovered {
+            None => Ok(permit),
+            Some((authorization, error)) => {
+                drop(permit);
+                Err(self.authorization_failure(&authorization, error).await)
             }
         }
     }
