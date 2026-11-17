@@ -194,12 +194,12 @@ fn assert_refused(
 /// through the control socket: the acceptor finds the replaced leaf before
 /// it accepts, and both listeners close (invariant 10). The replacement and
 /// the waking connection, which [`assert_unanswered`] checks once the
-/// listeners are gone.
+/// listeners are gone. The acceptor is woken even when the replacement
+/// fails: a removed leaf without a replacement ends serving too.
 fn replace_execute_leaf() -> TestResult<(UnixListener, UnixStream)> {
-    fs::remove_file(EXECUTE)?;
-    let replacement = UnixListener::bind(EXECUTE)?;
-    let woken = UnixStream::connect(CONTROL)?;
-    Ok((replacement, woken))
+    let replacement = fs::remove_file(EXECUTE).and_then(|()| UnixListener::bind(EXECUTE));
+    let woken = UnixStream::connect(CONTROL);
+    Ok((replacement?, woken?))
 }
 
 /// Assert that `stream` ends with zero bytes: it is closed or reset, and
@@ -226,16 +226,18 @@ fn assert_silent(endpoint: &str, bytes: &[u8]) -> TestResult {
     assert_unanswered(stream)
 }
 
-/// Ends serving when dropped unended: a check that fails or panics still
-/// replaces the execute leaf and wakes the acceptor, so the thread scope
-/// never waits on a runtime that is still serving.
+/// Ends serving on every path. Dropped before [`ServingGuard::end`], as
+/// when a check fails or panics, it replaces the execute leaf and wakes the
+/// acceptor, so the thread scope never waits on a runtime that is still
+/// serving. Dropped either way, it then removes the execute leaf, so no
+/// socket file is left to collide with the next bind.
 struct ServingGuard {
     armed: bool,
 }
 
 impl ServingGuard {
     /// End serving now: the replacement and the waking connection.
-    fn end(mut self) -> TestResult<(UnixListener, UnixStream)> {
+    fn end(&mut self) -> TestResult<(UnixListener, UnixStream)> {
         self.armed = false;
         replace_execute_leaf()
     }
@@ -244,10 +246,11 @@ impl ServingGuard {
 impl Drop for ServingGuard {
     fn drop(&mut self) {
         if self.armed {
-            // The leaf stays replaced on disk once the listener is dropped,
-            // and the queued connection has already woken the acceptor.
+            // The queued connection has already woken the acceptor, and a
+            // leaf that is replaced or removed ends serving either way.
             drop(replace_execute_leaf());
         }
+        drop(fs::remove_file(EXECUTE));
     }
 }
 
@@ -261,7 +264,7 @@ fn while_serving(
     let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
     let woken = std::thread::scope(|scope| -> TestResult<UnixStream> {
         let serving = scope.spawn(|| responder.serve(&execute, &control, pool));
-        let guard = ServingGuard { armed: true };
+        let mut guard = ServingGuard { armed: true };
         check()?;
         let (replacement, woken) = guard.end()?;
         assert_eq!(
@@ -272,9 +275,7 @@ fn while_serving(
         Ok(woken)
     })?;
     drop((execute, control));
-    assert_unanswered(woken)?;
-    fs::remove_file(EXECUTE)?;
-    Ok(())
+    assert_unanswered(woken)
 }
 
 /// Steps 1 to 6 for describe, cancel and reconcile.
