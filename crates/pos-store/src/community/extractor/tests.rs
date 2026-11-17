@@ -241,7 +241,19 @@ fn prepare(
     roots: &[CommunityNativeNodeReferenceV1],
     key: &CommunityArtifactProtectorV1,
 ) -> Fallible<Result<(), Error>> {
-    let (head, root) = head_and_root(members, roots, counts(records))?;
+    prepare_counted(records, members, roots, counts(records), key)
+}
+
+/// Prepare `records` under `key` against a CSH1 over `members` and a CGR1
+/// with `roots` and `graph_counts`.
+fn prepare_counted(
+    records: &[&CommunityProtectedRecordV1],
+    members: &[Hash],
+    roots: &[CommunityNativeNodeReferenceV1],
+    graph_counts: CommunityGraphCountsV1,
+    key: &CommunityArtifactProtectorV1,
+) -> Fallible<Result<(), Error>> {
+    let (head, root) = head_and_root(members, roots, graph_counts)?;
     let records = inputs(records);
     Ok(
         prepare_community_artifact_batch_v1(&SEAL, batch(&records, &head, &root), &[key])
@@ -449,7 +461,12 @@ enum Extra {
     /// An `InitialState` node at the same coordinate, citing another CMB1
     /// envelope.
     SameOrdinal,
+    /// A CSC1 that no record cites, so no root reaches it.
+    Unreachable,
 }
+
+/// How a case rewrites the exact CGR1 counts of its records.
+type Recount = fn(CommunityGraphCountsV1) -> CommunityGraphCountsV1;
 
 /// Every fact of the forged single-member graph a case may change.
 #[derive(Clone, Copy)]
@@ -470,6 +487,7 @@ struct Spec {
     cited_ordinal: Option<u32>,
     extra: Extra,
     root_is_initial: bool,
+    recount: Recount,
 }
 
 impl Spec {
@@ -489,6 +507,7 @@ impl Spec {
         cited_ordinal: None,
         extra: Extra::None,
         root_is_initial: false,
+        recount: std::convert::identity,
     };
 }
 
@@ -523,19 +542,27 @@ fn state_record(
 /// `extra` adds beside the graph, if any.
 const fn extra_coordinate(extra: Extra) -> Option<(u64, u8)> {
     match extra {
-        Extra::None => None,
+        Extra::None | Extra::Unreachable => None,
         Extra::OtherProducer => Some((2, 0x60)),
         Extra::SameOrdinal => Some((1, 0x61)),
     }
 }
 
-/// The extra `InitialState` node `spec` adds beside the graph, if any.
+/// A CSC1 over other state, citing nothing.
+fn spare_record(key: &mut CommunityArtifactProtectorV1) -> Fallible<CommunityProtectedRecordV1> {
+    protect(key, Kind::StateContent, &state(b"spare")?, &[])
+}
+
+/// The extra record `spec` adds beside the graph, if any.
 fn extra_record(
     key: &mut CommunityArtifactProtectorV1,
     spec: &Spec,
     initializer: Hash,
     producer_record: &CommunityProtectedRecordV1,
 ) -> Fallible<Option<CommunityProtectedRecordV1>> {
+    if spec.extra == Extra::Unreachable {
+        return spare_record(key).map(Some);
+    }
     let Some((producer_ordinal, envelope)) = extra_coordinate(spec.extra) else {
         return Ok(None);
     };
@@ -718,7 +745,8 @@ fn prepare_forged(
     } else {
         revision.1
     };
-    prepare(&records, &[spec.head_member], &[root], key)
+    let graph_counts = (spec.recount)(counts(&records));
+    prepare_counted(&records, &[spec.head_member], &[root], graph_counts, key)
 }
 
 /// Forge the graph `spec` describes and prepare it.
@@ -990,7 +1018,8 @@ fn duplicate_identities_and_missing_or_unlisted_children_are_refused() -> TestRe
         Err(Error::InvalidBinding)
     );
 
-    // A `StateRevision` node whose CSR1, or whose CSR1's CSC1, is absent.
+    // A `StateRevision` node whose CSR1 is absent: the node's lookup of its
+    // CSR1 refuses.
     let revision_record = protect(
         &mut key,
         Kind::StateRevisionOrHead,
@@ -1026,7 +1055,9 @@ fn duplicate_identities_and_missing_or_unlisted_children_are_refused() -> TestRe
         )?,
         Err(Error::InvalidBinding)
     );
-    // The node resolves its CSR1 before the CSR1 resolves its own children.
+    // A `StateRevision` node whose CSR1 is present but whose CSC1 is absent.
+    // The node comes first in the batch, so its lookup of the CSC1 its CSR1
+    // names refuses before the CSR1's own children are resolved.
     assert_eq!(
         resolve(
             &[
@@ -1039,6 +1070,51 @@ fn duplicate_identities_and_missing_or_unlisted_children_are_refused() -> TestRe
         )?,
         Err(Error::InvalidBinding)
     );
+    Ok(())
+}
+
+/// Review L on #1180 at ddd9b488d: a graph that passes every other check
+/// is refused when a CGR1 count is wrong or a record is unreachable.
+#[test]
+fn a_closure_that_is_not_exactly_the_batch_is_refused() -> TestResult {
+    let recounts: [Recount; 6] = [
+        |counts| CommunityGraphCountsV1 {
+            registrations: counts.registrations + 1,
+            ..counts
+        },
+        |counts| CommunityGraphCountsV1 {
+            edges: counts.edges + 1,
+            ..counts
+        },
+        |counts| CommunityGraphCountsV1 {
+            keys: counts.keys + 1,
+            ..counts
+        },
+        |counts| CommunityGraphCountsV1 {
+            maximum_depth: counts.maximum_depth + 1,
+            ..counts
+        },
+        |counts| CommunityGraphCountsV1 {
+            registration_bytes: counts.registration_bytes + 1,
+            ..counts
+        },
+        |counts| CommunityGraphCountsV1 {
+            artifact_bytes: counts.artifact_bytes + 1,
+            ..counts
+        },
+    ];
+    for (index, recount) in recounts.into_iter().enumerate() {
+        let case = Spec {
+            recount,
+            ..Spec::BASE
+        };
+        assert_eq!(forge(&case)?, Err(Error::InvalidBinding), "count {index}");
+    }
+    let unreachable = Spec {
+        extra: Extra::Unreachable,
+        ..Spec::BASE
+    };
+    assert_eq!(forge(&unreachable)?, Err(Error::InvalidBinding));
     Ok(())
 }
 
