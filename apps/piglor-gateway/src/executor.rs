@@ -80,6 +80,8 @@ macro_rules! submit {
     }};
 }
 
+pub mod scenario_room;
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod lifecycle_coverage_tests {
