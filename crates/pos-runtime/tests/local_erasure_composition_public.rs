@@ -1386,6 +1386,59 @@ fn a_fresh_submission_after_a_root_grant_revocation_is_unauthorized() -> TestRes
     Ok(())
 }
 
+/// Assert that the submission of key 2 is refused with `error`, not with
+/// the subject's `Concurrent`, and retains neither its ELIDEM1 nor an ERAZ1
+/// bound to the recorded head or the one past it.
+fn refused_before_the_subject_checks(
+    store: &LocalStore,
+    host: &mut ErasureExecutionHostV1,
+    error: ErasureHostErrorV1,
+) -> TestResult {
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(error))
+    );
+    let view = host.authority_view()?;
+    for head in [store.head, store.head + 1] {
+        assert_eq!(
+            view.retained_object(authorization(2, head)?.reference()?),
+            None
+        );
+    }
+    assert_eq!(view.retained_object(idempotency(2)?.reference()?), None);
+    Ok(())
+}
+
+#[test]
+fn an_unauthenticated_submission_learns_nothing_of_a_held_subject() -> TestResult {
+    let shape = GrantShape::standard();
+    let store = LocalStore::new(&shape)?;
+    {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        let mut sender = host.command_sender()?;
+        sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        // While new admissions are open, request 1 holds the subject.
+        assert_eq!(
+            sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::Concurrent)
+        );
+    }
+    // Once the TPS1 has expired, the closed admission answers first.
+    let mut expired = local_case()?;
+    expired.clock = after_trust_expiry;
+    let mut host = store.host(&expired, 4_096)?;
+    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::RecoveryUnavailable)?;
+    drop(host);
+    // Once the root grant is revoked, the authentication failure answers
+    // first, although request 1 still holds the subject.
+    store.revoke(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::AuthorizationDenied)
+}
+
 #[test]
 fn an_expired_bundle_closes_new_admissions_but_not_a_rejection() -> TestResult {
     let mut expiring = bundle();

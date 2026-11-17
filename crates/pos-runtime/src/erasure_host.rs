@@ -664,18 +664,29 @@ pub struct LocalErasureSubmissionBindingV1 {
 /// host-built view.
 pub(crate) trait LocalErasurePreparationV1: Send + Sync {
     /// Authenticate a prospective request of the Principal `principal_ref`
-    /// as `actor` against the root grant at the current chain head, then
-    /// answer whether its closure for `scope` fits the 4,096-target bound
-    /// on this snapshot. The host retains nothing before this passes.
+    /// as `actor` against the root grant at the current chain head. The
+    /// host runs no per-subject check and retains nothing before this
+    /// passes.
     ///
     /// # Errors
     /// `Unauthorized` for a Principal, actor or root grant the authority
-    /// would not admit, `TrustSnapshotInvalid` once new admissions are
-    /// closed, and otherwise the closed read error of the closure.
-    fn admit_submission(
+    /// would not admit, and `TrustSnapshotInvalid` once new admissions are
+    /// closed.
+    fn authenticate_submission(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         principal_ref: ErasureReferenceV1,
+        actor: EntityId,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Whether the closure of an authenticated prospective request of
+    /// `actor` for `scope` fits the 4,096-target bound on this snapshot.
+    ///
+    /// # Errors
+    /// The closed read error of the closure.
+    fn submission_fits(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         actor: EntityId,
         scope: ErasureScopeV1,
     ) -> Result<bool, ErasureErrorV1>;
@@ -4303,12 +4314,14 @@ impl ErasureCommandSenderV1<'_> {
     /// The host derives the `erasure_id` from the Principal, the actor and
     /// the Idempotency-Key digest. A request with that id already installed
     /// returns its state when its ELIDEM1 binds the same body, and is a
-    /// conflict otherwise. A fresh request must pass the per-subject checks
-    /// against the installed inventory, and the authority must admit the
-    /// Principal and actor and find the closure within its bound; only then
-    /// does the host retain its ERAZ1, ELSEL1 and ELIDEM1, build ERQ1 and
-    /// submit it, and the authority re-checks all of it from its view. A
-    /// refused submission retains nothing.
+    /// conflict otherwise. For a fresh request the authority must first
+    /// admit the Principal and actor, so an unauthenticated caller learns
+    /// nothing of the subject; the request must then pass the per-subject
+    /// checks against the installed inventory, and the authority must find
+    /// the closure within its bound. Only then does the host retain its
+    /// ERAZ1, ELSEL1 and ELIDEM1, build ERQ1 and submit it, and the
+    /// authority re-checks all of it from its view. A refused submission
+    /// retains nothing.
     ///
     /// # Errors
     /// Returns [`LocalErasureSubmitErrorV1::Concurrent`] while another
@@ -4361,27 +4374,26 @@ impl ErasureCommandSenderV1<'_> {
             binding.store_request_reserve,
             records.actors,
         );
+        let preparation = &binding.preparation;
         self.with_local_view(installed, |view| {
-            local_subject_admission(
-                view.verified_requests().into_iter(),
-                subject,
-                limits,
-                |state| binding.preparation.holds_subject(view, state),
-            )
-            .map_or_else(
-                |refusal| Ok(Err(refusal)),
-                |()| {
-                    binding
-                        .preparation
-                        .admit_submission(
-                            view,
-                            records.principal_ref,
-                            submission.actor,
-                            submission.scope,
-                        )
-                        .map(Ok)
-                },
-            )
+            preparation
+                .authenticate_submission(view, records.principal_ref, submission.actor)
+                .and_then(|()| {
+                    local_subject_admission(
+                        view.verified_requests().into_iter(),
+                        subject,
+                        limits,
+                        |state| preparation.holds_subject(view, state),
+                    )
+                    .map_or_else(
+                        |refusal| Ok(Err(refusal)),
+                        |()| {
+                            preparation
+                                .submission_fits(view, submission.actor, submission.scope)
+                                .map(Ok)
+                        },
+                    )
+                })
         })
         .map_err(LocalErasureSubmitErrorV1::from)
         .and_then(|admission| admission.map_err(LocalErasureSubmitErrorV1::from))

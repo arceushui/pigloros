@@ -220,14 +220,13 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
     /// New admissions must be open, `principal_ref` must be the root
     /// grant's Principal, and the grant must authorize `actor` at the
     /// current chain head, exactly as `authenticate` later re-checks the
-    /// ERAZ1 bound to that head; only then is the closure read.
-    fn admit_submission(
+    /// ERAZ1 bound to that head.
+    fn authenticate_submission(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         principal_ref: ErasureReferenceV1,
         actor: EntityId,
-        scope: ErasureScopeV1,
-    ) -> Result<bool, ErasureErrorV1> {
+    ) -> Result<(), ErasureErrorV1> {
         self.admits_new_work()
             .and_then(|()| self.principal(view))
             .and_then(|principal| {
@@ -236,7 +235,15 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
                 .then_some(())
                 .ok_or(ErasureErrorV1::Unauthorized)
             })
-            .and_then(|()| Self::closure_fits(self, view, actor, scope))
+    }
+
+    fn submission_fits(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        actor: EntityId,
+        scope: ErasureScopeV1,
+    ) -> Result<bool, ErasureErrorV1> {
+        self.closure_fits(view, actor, scope)
     }
 
     fn prepare_freeze(
