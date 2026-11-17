@@ -226,12 +226,40 @@ fn assert_unanswered(mut stream: UnixStream) -> TestResult {
 }
 
 /// Assert that `endpoint` answers `bytes` with nothing: a connection closed
-/// with input still unread is reset rather than ended.
+/// with input still unread is reset rather than ended, and one closed before
+/// the write completes refuses it with a broken pipe.
 fn assert_silent(endpoint: &str, bytes: &[u8]) -> TestResult {
     let mut stream = UnixStream::connect(endpoint)?;
-    stream.write_all(bytes)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    match stream.write_all(bytes) {
+        Ok(()) => stream.shutdown(std::net::Shutdown::Write)?,
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe),
+    }
     assert_unanswered(stream)
+}
+
+/// Ends serving when dropped unended: a check that fails or panics still
+/// replaces the execute leaf and wakes the acceptor, so the thread scope
+/// never waits on a runtime that is still serving.
+struct ServingGuard {
+    armed: bool,
+}
+
+impl ServingGuard {
+    /// End serving now: the replacement and the waking connection.
+    fn end(mut self) -> TestResult<(UnixListener, UnixStream)> {
+        self.armed = false;
+        replace_execute_leaf()
+    }
+}
+
+impl Drop for ServingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // The leaf stays replaced on disk once the listener is dropped,
+            // and the queued connection has already woken the acceptor.
+            drop(replace_execute_leaf());
+        }
+    }
 }
 
 /// Bind both endpoints, serve them through `responder` with `pool` while
@@ -244,8 +272,9 @@ fn while_serving(
     let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
     let woken = std::thread::scope(|scope| -> TestResult<UnixStream> {
         let serving = scope.spawn(|| responder.serve(&execute, &control, pool));
+        let guard = ServingGuard { armed: true };
         check()?;
-        let (replacement, woken) = replace_execute_leaf()?;
+        let (replacement, woken) = guard.end()?;
         assert_eq!(
             serving.join().map_err(|_| "the runtime panicked")?,
             ProviderRuntimeError::UnsafeEndpoint
