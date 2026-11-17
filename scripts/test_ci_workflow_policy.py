@@ -699,13 +699,13 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
 
 
 STANDARD_STAGE_RUNNER_CAP = 8
-LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate", "cargo-crap"})
+LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate"})
 CARGO_CRAP_CONSUMERS = ["ci-gate", "depgraph", "modules-structure"]
 # Heavy jobs released by core-gate. Browser parity follows WASM packaging on
-# the same budget. cargo-crap starts beside them but compiles nothing (pinned
-# binary, cargo metadata and LCOV parsing in a 10-minute budget, plus a bounded
-# idle wait for main's trusted baseline), and standard-gate and ci-gate are
-# lightweight fan-ins.
+# the same budget. cargo-crap starts earlier, from coverage, and compiles
+# nothing (pinned binary, cargo metadata and LCOV parsing in a 10-minute budget,
+# plus a bounded idle wait for main's trusted baseline), and standard-gate and
+# ci-gate are lightweight fan-ins.
 STANDARD_STAGE_JOBS = frozenset(
     {
         "rustdoc",
@@ -734,8 +734,13 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
         if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
     }
     crap = jobs.get("cargo-crap", {})
-    if "strategy" in crap or crap.get("timeout-minutes") != 150 or "core-gate" not in job_needs(crap):
-        raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
+    if (
+        "strategy" in crap
+        or crap.get("timeout-minutes") != 60
+        or "core-gate" in job_needs(crap)
+        or "coverage" not in job_needs(crap)
+    ):
+        raise AssertionError("cargo-crap must stay one lightweight runner released by coverage")
     if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != CARGO_CRAP_CONSUMERS:
         raise AssertionError("only ci-gate and the main-only reports may wait for cargo-crap")
     if started != STANDARD_STAGE_JOBS:
@@ -2538,9 +2543,12 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "only ci-gate and the main-only reports may wait for cargo-crap": lambda w: w["jobs"]["audit"][
                 "needs"
             ].append("cargo-crap"),
-            "one lightweight runner released by core-gate": lambda w: w["jobs"]["cargo-crap"].update(
+            "one lightweight runner released by coverage": lambda w: w["jobs"]["cargo-crap"].update(
                 {"timeout-minutes": 90}
             ),
+            "lightweight runner released by coverage": lambda w: w["jobs"]["cargo-crap"][
+                "needs"
+            ].append("core-gate"),
         }
         for message, mutate in mutations.items():
             with self.subTest(message=message):
