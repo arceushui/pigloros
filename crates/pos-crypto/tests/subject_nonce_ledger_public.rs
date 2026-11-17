@@ -5,7 +5,7 @@ use ciborium::Value;
 use pos_crypto::subject_key::SubjectKeyUseV1;
 use pos_crypto::subject_nonce_ledger::{
     SubjectNonceLedgerErrorV1 as Error, SubjectNonceLedgerRowV1 as Row,
-    SubjectNonceLedgerV1 as Ledger, EXHAUSTED_SUBJECT_NONCE_COUNTER,
+    SubjectNonceLedgerV1 as Ledger, SubjectStoreFileIdV1, EXHAUSTED_SUBJECT_NONCE_COUNTER,
     MAX_SUBJECT_NONCE_LEDGER_BYTES,
 };
 
@@ -17,13 +17,21 @@ const GOLDEN: &str = concat!(
     "373038303930613062306330643065306600015820111111111111111111111111",
     "1111111111111111111111111111111111111111830102030102",
 );
+const WINDOWS_GOLDEN: &str = concat!(
+    "8344534e4c3101818778287375626a6563743a303030313032303330343035303630",
+    "373038303930613062306330643065306600015820111111111111111111111111",
+    "1111111111111111111111111111111111111111830202030102",
+);
 
 fn row() -> Row {
     Row {
         owner_id: OWNER.to_owned(),
         epoch: 1,
         root_material_digest: [0x11; 32],
-        store_file_id: [2, 3],
+        store_file_id: SubjectStoreFileIdV1::Linux {
+            device: 2,
+            inode: 3,
+        },
         data_next: 1,
         bootstrap_next: 2,
     }
@@ -42,15 +50,22 @@ fn wire_row(row: &Row) -> Value {
 }
 
 fn wire_fields(row: &Row) -> Vec<Value> {
+    let (tag, first, second) = match row.store_file_id {
+        SubjectStoreFileIdV1::Linux { device, inode } => (1, device, inode),
+        SubjectStoreFileIdV1::Windows {
+            volume_serial,
+            file_index,
+        } => (2, u64::from(volume_serial), file_index),
+    };
     vec![
         Value::Text(row.owner_id.clone()),
         Value::Integer(0.into()),
         Value::Integer(row.epoch.into()),
         Value::Bytes(row.root_material_digest.to_vec()),
         Value::Array(vec![
-            Value::Integer(1.into()),
-            Value::Integer(row.store_file_id[0].into()),
-            Value::Integer(row.store_file_id[1].into()),
+            Value::Integer(tag.into()),
+            Value::Integer(first.into()),
+            Value::Integer(second.into()),
         ]),
         Value::Integer(row.data_next.into()),
         Value::Integer(row.bootstrap_next.into()),
@@ -101,7 +116,10 @@ fn identities_follow_encoded_owner_then_epoch_and_preserve_all_metadata() -> Tes
     for epoch in [1, 23, 24, 255, 256, 65_535, 65_536, u64::MAX] {
         rows.push(Row {
             epoch,
-            store_file_id: [u64::MAX, 0],
+            store_file_id: SubjectStoreFileIdV1::Linux {
+                device: u64::MAX,
+                inode: 0,
+            },
             root_material_digest: [0; 32],
             data_next: 0xffff_ffff,
             bootstrap_next: 0x1_0000_0000,
@@ -111,7 +129,10 @@ fn identities_follow_encoded_owner_then_epoch_and_preserve_all_metadata() -> Tes
     rows.push(Row {
         owner_id: "subject:ffffffffffffffffffffffffffffffff".to_owned(),
         epoch: 1,
-        store_file_id: [0, u64::MAX],
+        store_file_id: SubjectStoreFileIdV1::Linux {
+            device: 0,
+            inode: u64::MAX,
+        },
         data_next: 0x1_0000_0000,
         bootstrap_next: 1,
         ..row()
@@ -134,7 +155,10 @@ fn repeated_identity_cannot_change_its_digest_store_or_counters() -> TestResult 
             ..first.clone()
         },
         Row {
-            store_file_id: [9, 10],
+            store_file_id: SubjectStoreFileIdV1::Linux {
+                device: 9,
+                inode: 10,
+            },
             ..first.clone()
         },
         Row {
@@ -270,6 +294,12 @@ fn every_row_field_requires_its_exact_wire_type_and_shape() -> TestResult {
             Err(Error::InvalidEncoding)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn store_identity_requires_its_exact_wire_type_and_shape() -> TestResult {
+    let original = wire_fields(&row());
     for (store, error) in [
         (
             vec![Value::Integer(1.into()), Value::Integer(2.into())],
@@ -286,7 +316,7 @@ fn every_row_field_requires_its_exact_wire_type_and_shape() -> TestResult {
         ),
         (
             vec![
-                Value::Integer(2.into()),
+                Value::Integer(3.into()),
                 Value::Integer(2.into()),
                 Value::Integer(3.into()),
             ],
@@ -316,6 +346,22 @@ fn every_row_field_requires_its_exact_wire_type_and_shape() -> TestResult {
             ],
             Error::InvalidEncoding,
         ),
+        (
+            vec![
+                Value::Integer(2.into()),
+                Value::Null,
+                Value::Integer(3.into()),
+            ],
+            Error::InvalidEncoding,
+        ),
+        (
+            vec![
+                Value::Integer(2.into()),
+                Value::Integer(2.into()),
+                Value::Null,
+            ],
+            Error::InvalidEncoding,
+        ),
     ] {
         let mut bad = original.clone();
         bad[4] = Value::Array(store);
@@ -323,6 +369,68 @@ fn every_row_field_requires_its_exact_wire_type_and_shape() -> TestResult {
             Ledger::from_bytes(&encode(&document(vec![Value::Array(bad)]))?),
             Err(error)
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn windows_identity_round_trips_and_preserves_platform_in_successors() -> TestResult {
+    let mut windows = row();
+    windows.store_file_id = SubjectStoreFileIdV1::Windows {
+        volume_serial: 2,
+        file_index: 3,
+    };
+    let expected = hex(WINDOWS_GOLDEN)?;
+    assert_eq!(independent(&[windows.clone()])?, expected);
+    let ledger = Ledger::new([windows.clone()])?;
+    assert_eq!(ledger.as_bytes(), expected);
+    assert_eq!(Ledger::from_bytes(&expected)?, ledger);
+    assert_eq!(
+        ledger.advance_counter(&row(), SubjectKeyUseV1::Data),
+        Err(Error::RowMismatch)
+    );
+    let candidate = ledger.advance_counter(&windows, SubjectKeyUseV1::Data)?;
+    windows.data_next += 1;
+    assert_eq!(candidate.as_bytes(), independent(&[windows.clone()])?);
+    assert_eq!(Ledger::from_bytes(candidate.as_bytes())?, candidate);
+    assert_eq!(Ledger::new([row(), windows]), Err(Error::InvalidOrder));
+    let mixed = [
+        row(),
+        Row {
+            epoch: 2,
+            store_file_id: SubjectStoreFileIdV1::Windows {
+                volume_serial: 2,
+                file_index: 3,
+            },
+            ..row()
+        },
+    ];
+    let mixed_ledger = Ledger::new(mixed.clone())?;
+    assert_eq!(mixed_ledger.as_bytes(), independent(&mixed)?);
+    assert_eq!(Ledger::from_bytes(mixed_ledger.as_bytes())?, mixed_ledger);
+    Ok(())
+}
+
+#[test]
+fn windows_volume_serial_has_exact_u32_bound() -> TestResult {
+    let mut fields = wire_fields(&row());
+    for (serial, result) in [
+        (0_u64, Ok(())),
+        (u64::from(u32::MAX), Ok(())),
+        (u64::from(u32::MAX) + 1, Err(Error::InvalidRow)),
+        (u64::MAX, Err(Error::InvalidRow)),
+    ] {
+        fields[4] = Value::Array(vec![
+            Value::Integer(2.into()),
+            Value::Integer(serial.into()),
+            Value::Integer(u64::MAX.into()),
+        ]);
+        let bytes = encode(&document(vec![Value::Array(fields.clone())]))?;
+        let decoded = Ledger::from_bytes(&bytes);
+        assert_eq!(decoded.as_ref().map(|_| ()).map_err(|error| *error), result);
+        if let Ok(ledger) = decoded {
+            assert_eq!(ledger.as_bytes(), bytes);
+        }
     }
     Ok(())
 }
@@ -424,7 +532,10 @@ fn whole_file_bound_includes_every_header_and_accepts_exactly_one_mib() -> TestR
     let mut rows = minimal_full_ledger_rows();
     let last = &mut rows[12_335];
     // Integer widths add exactly 2 + 4 bytes to reach the accepted byte bound.
-    last.store_file_id = [256, 65_536];
+    last.store_file_id = SubjectStoreFileIdV1::Linux {
+        device: 256,
+        inode: 65_536,
+    };
     let exact = independent(&rows)?;
     assert_eq!(exact.len(), 1_048_576);
     let ledger = Ledger::new(rows.clone())?;
@@ -462,7 +573,10 @@ fn minimal_full_ledger_rows() -> Vec<Row> {
     (1..=12_336)
         .map(|id| Row {
             owner_id: format!("subject:{id:032x}"),
-            store_file_id: [1, 1],
+            store_file_id: SubjectStoreFileIdV1::Linux {
+                device: 1,
+                inode: 1,
+            },
             data_next: 1,
             bootstrap_next: 1,
             ..row()
@@ -578,11 +692,17 @@ fn counter_candidates_require_the_entire_exact_existing_row() -> TestResult {
             ..expected.clone()
         },
         Row {
-            store_file_id: [9, 3],
+            store_file_id: SubjectStoreFileIdV1::Linux {
+                device: 9,
+                inode: 3,
+            },
             ..expected.clone()
         },
         Row {
-            store_file_id: [2, 9],
+            store_file_id: SubjectStoreFileIdV1::Linux {
+                device: 2,
+                inode: 9,
+            },
             ..expected.clone()
         },
         Row {
@@ -621,7 +741,10 @@ fn counter_encoding_growth_cannot_exceed_the_complete_file_bound() -> TestResult
         ] {
             let mut rows = minimal_full_ledger_rows();
             let last = &mut rows[12_335];
-            last.store_file_id = store_file_id;
+            last.store_file_id = SubjectStoreFileIdV1::Linux {
+                device: store_file_id[0],
+                inode: store_file_id[1],
+            };
             match key_use {
                 SubjectKeyUseV1::Data => last.data_next = counter,
                 SubjectKeyUseV1::Bootstrap => last.bootstrap_next = counter,

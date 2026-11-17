@@ -93,8 +93,9 @@ operations = ["session.read", "timeline.create", "timeline.events.read", "timeli
 
 The grantable operations are `consent.revoke`, `session.read`, `timeline.create`,
 `timeline.events.read`, `timeline.signals.append`, `ledger.predictions.create`,
-`world.action.v1.submit`, `preference.create`, `preference.read`, `option-spec.create` and
-`option-spec.read`, plus the
+`world.action.v1.submit`, `preference.create`, `preference.read`, `option-spec.create`,
+`option-spec.read`, `scenario-room.create`, `scenario-room.derive` and `scenario-room.read`, plus
+the
 Principal network capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
 and only makes the Session report `network: capability-granted` in Local mode. Encrypt it like the
 Fork-admission credentials and provision:

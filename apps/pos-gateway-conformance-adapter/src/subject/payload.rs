@@ -1,8 +1,8 @@
 //! The case payload grammar of the requirements text (sections 1 and 2).
 //!
 //! The payload decodes into these exact records (no unknown member), then [`parse`] checks the
-//! schema string, the family, the counts and texts, every route, and that each `{timeline}` and
-//! each `{consent}` follows its capture. A payload outside the grammar is `None`, which is
+//! schema string, the family, the counts and texts, every route, and that each `{timeline}`,
+//! each `{room}` and each `{consent}` follows its capture. A payload outside the grammar is `None`, which is
 //! `payload-invalid`.
 
 use piglor_gateway::mode_profile::GatewayModeProfileIdV1;
@@ -15,6 +15,11 @@ use super::SCHEMA_ID;
 pub(super) const TIMELINE_SLOT: &str = "{timeline}";
 /// The literal a request body names the captured consent by.
 pub(super) const CONSENT_SLOT: &str = "{consent}";
+/// The literal a path names the captured Scenario Room by.
+pub(super) const ROOM_SLOT: &str = "{room}";
+/// The route-table segment a path names a revision number by: a positive decimal integer
+/// without a leading zero.
+const REVISION_SEGMENT: &str = "{revision}";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +57,11 @@ pub(super) enum CompositionV2 {
     /// governs Timeline creation (#309).
     #[serde(rename = "authorized-consented")]
     AuthorizedConsented,
+    /// The Local composition with a fixture Local Principal document that may create, derive
+    /// and read Scenario Rooms, records a governance record and binds one consent with export
+    /// permitted (#303).
+    #[serde(rename = "authorized-rooms")]
+    AuthorizedRooms,
 }
 
 impl CompositionV2 {
@@ -60,7 +70,9 @@ impl CompositionV2 {
     pub(super) const fn mode(self) -> Option<GatewayModeProfileIdV1> {
         match self {
             Self::Open => None,
-            Self::Authorized | Self::AuthorizedConsented => Some(GatewayModeProfileIdV1::Local),
+            Self::Authorized | Self::AuthorizedConsented | Self::AuthorizedRooms => {
+                Some(GatewayModeProfileIdV1::Local)
+            }
             Self::AuthorizedAirGapped => Some(GatewayModeProfileIdV1::AirGapped),
         }
     }
@@ -91,6 +103,8 @@ pub(super) enum CaptureV2 {
     Timeline,
     /// The `consent_ref` of the response's first consent fills [`CONSENT_SLOT`].
     Consent,
+    /// The `id` of the response fills [`ROOM_SLOT`].
+    Room,
 }
 
 /// One HTTP exchange and its expected observation.
@@ -139,55 +153,72 @@ impl ExchangeV2 {
 /// One route of the documented Gateway route table (requirements section 2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RouteV2 {
-    /// The path without its query; [`TIMELINE_SLOT`] stands for one non-empty segment.
+    /// The path without its query; [`TIMELINE_SLOT`] and [`ROOM_SLOT`] stand for one
+    /// non-empty segment and `{revision}` for a positive decimal segment.
     path: &'static str,
     /// The capability an attempt must hold for the route.
     capability: &'static str,
-    /// Whether a `201` response of the route commits one Event.
-    commits: bool,
+    /// The Events a `201` response of the route commits: a room create or derive appends its
+    /// request claim and the revision.
+    events: u64,
 }
 
 /// The route table of the requirements text, section 2, in its order.
-const ROUTES: [RouteV2; 8] = [
+const ROUTES: [RouteV2; 11] = [
     RouteV2 {
         path: "/health",
         capability: "gateway.health.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/ledger",
         capability: "gateway.ledger.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/timelines",
         capability: "timeline.create",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/timelines/{timeline}/events",
         capability: "timeline.events.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/timelines/{timeline}/signals",
         capability: "timeline.signals.append",
-        commits: true,
+        events: 1,
     },
     RouteV2 {
         path: "/v1/timelines/{timeline}/actions",
         capability: "world.action.v1.submit",
-        commits: true,
+        events: 1,
     },
     RouteV2 {
         path: "/v1/session",
         capability: "session.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/me/consent-revocations",
         capability: "consent.revoke",
-        commits: true,
+        events: 1,
+    },
+    RouteV2 {
+        path: "/v1/scenario-rooms",
+        capability: "scenario-room.create",
+        events: 2,
+    },
+    RouteV2 {
+        path: "/v1/scenario-rooms/{room}/revisions",
+        capability: "scenario-room.derive",
+        events: 2,
+    },
+    RouteV2 {
+        path: "/v1/scenario-rooms/{room}/revisions/{revision}",
+        capability: "scenario-room.read",
+        events: 0,
     },
 ];
 
@@ -197,22 +228,45 @@ impl RouteV2 {
         self.capability
     }
 
-    /// Whether a `201` response of the route commits one Event.
-    pub(super) const fn commits(self) -> bool {
-        self.commits
+    /// The Events a `201` response of the route commits.
+    pub(super) const fn events(self) -> u64 {
+        self.events
     }
 
-    /// Whether `base`, a path without its query, names this route: the exact path, or for a
-    /// Timeline route its prefix, one non-empty segment and its suffix.
+    /// Whether `base`, a path without its query, names this route: as many `/`-separated
+    /// segments, each the route's literal segment, any non-empty segment for a Timeline or
+    /// room slot, or a positive decimal for the revision segment.
     fn matches(self, base: &str) -> bool {
-        self.path
-            .split_once(TIMELINE_SLOT)
-            .map_or(base == self.path, |(prefix, suffix)| {
-                base.strip_prefix(prefix)
-                    .and_then(|rest| rest.strip_suffix(suffix))
-                    .is_some_and(|timeline| !timeline.is_empty() && !timeline.contains('/'))
-            })
+        terminated_segments(self.path)
+            .zip(terminated_segments(base))
+            .all(segment_matches)
     }
+}
+
+/// The `/`-separated segments of `path` followed by one `None`, so two paths of different
+/// segment counts pair a segment with `None`.
+fn terminated_segments(path: &str) -> impl Iterator<Item = Option<&str>> {
+    path.split('/').map(Some).chain(std::iter::once(None))
+}
+
+/// Whether a path segment names the route-table segment it pairs with.
+///
+/// A Timeline or room slot takes any non-empty segment and the revision segment a positive
+/// decimal; any other segment must be the literal itself, and the end of one path only pairs
+/// with the end of the other.
+fn segment_matches(pair: (Option<&str>, Option<&str>)) -> bool {
+    match pair {
+        (Some(TIMELINE_SLOT | ROOM_SLOT), Some(segment)) => !segment.is_empty(),
+        (Some(REVISION_SEGMENT), Some(segment)) => is_revision(segment),
+        (template, segment) => template == segment,
+    }
+}
+
+/// A positive decimal integer without a leading zero.
+fn is_revision(segment: &str) -> bool {
+    !segment.starts_with('0')
+        && !segment.is_empty()
+        && segment.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn route_of(path: &str) -> Option<RouteV2> {
@@ -238,6 +292,7 @@ fn subcase_id_is_valid(id: &str, prefix: &str) -> bool {
 fn exchanges_are_valid(exchanges: &mut [ExchangeV2]) -> bool {
     let mut timeline = false;
     let mut consent = false;
+    let mut room = false;
     (1..=128).contains(&exchanges.len())
         && exchanges.iter_mut().all(|exchange| {
             exchange.route = route_of(&exchange.path);
@@ -246,9 +301,11 @@ fn exchanges_are_valid(exchanges: &mut [ExchangeV2]) -> bool {
                 && exchange.route.is_some()
                 && exchange.actor != Some(false)
                 && (timeline || !exchange.path.contains(TIMELINE_SLOT))
+                && (room || !exchange.path.contains(ROOM_SLOT))
                 && (consent || !exchange.uses_consent());
             timeline |= matches!(exchange.capture, Some(CaptureV2::Timeline));
             consent |= matches!(exchange.capture, Some(CaptureV2::Consent));
+            room |= matches!(exchange.capture, Some(CaptureV2::Room));
             valid
         })
 }
@@ -291,7 +348,8 @@ mod tests {
         include_str!("../../../../scripts/generate_gateway_conformance_fixtures.py");
 
     /// The `(path, capability)` rows of the requirements' route table (section 2), with `:id`
-    /// written as the Timeline slot.
+    /// written as the Timeline slot, `:room` as the room slot and `:revision` as the revision
+    /// segment.
     fn documented_routes() -> Vec<(String, String)> {
         let section = REQUIREMENTS
             .split("## 2. Routes and capabilities")
@@ -305,7 +363,12 @@ mod tests {
                 let route = cells.get(2)?.strip_prefix('`')?.strip_suffix('`')?;
                 let (_, path) = route.split_once(' ')?;
                 let capability = cells.get(3)?.strip_prefix('`')?.strip_suffix('`')?;
-                Some((path.replace(":id", TIMELINE_SLOT), capability.to_owned()))
+                Some((
+                    path.replace(":id", TIMELINE_SLOT)
+                        .replace(":room", ROOM_SLOT)
+                        .replace(":revision", REVISION_SEGMENT),
+                    capability.to_owned(),
+                ))
             })
             .collect()
     }
@@ -335,22 +398,31 @@ mod tests {
                 (route.path, route.capability),
                 (path.as_str(), capability.as_str())
             );
-            assert_eq!(route_of(path), Some(*route), "{path}");
-            assert_eq!(route_of(&format!("{path}?limit=1")), Some(*route), "{path}");
+            let concrete = path.replace(REVISION_SEGMENT, "12");
+            assert_eq!(route_of(&concrete), Some(*route), "{path}");
+            assert_eq!(
+                route_of(&format!("{concrete}?limit=1")),
+                Some(*route),
+                "{path}"
+            );
         }
         let mut capabilities = ROUTES.map(RouteV2::capability).map(str::to_owned).to_vec();
         capabilities.sort_unstable();
         assert_eq!(generator_capabilities(), capabilities);
         assert_eq!(
-            ROUTES.map(RouteV2::commits),
-            [false, false, false, false, true, true, false, true]
+            ROUTES.map(RouteV2::events),
+            [0, 0, 0, 0, 1, 1, 0, 1, 2, 2, 0]
         );
     }
 
     #[test]
     fn other_prefixes_and_suffixes_name_no_route() {
         for route in ROUTES {
-            let concrete = route.path.replace(TIMELINE_SLOT, "t");
+            let concrete = route
+                .path
+                .replace(TIMELINE_SLOT, "t")
+                .replace(ROOM_SLOT, "r")
+                .replace(REVISION_SEGMENT, "1");
             for path in [
                 format!("{concrete}x"),
                 format!("{concrete}/"),
@@ -365,6 +437,12 @@ mod tests {
             "/v1/timelines/a/b/events",
             "/v1/timelines/t",
             "/v1/session/events",
+            "/v1/scenario-rooms//revisions",
+            "/v1/scenario-rooms/r/revisions/0",
+            "/v1/scenario-rooms/r/revisions/01",
+            "/v1/scenario-rooms/r/revisions/",
+            "/v1/scenario-rooms/r/revisions/x1",
+            "/v1/scenario-rooms/r/revisions/1/x",
             "/v2/session",
             "/v2/timelines/t/events",
             "",
