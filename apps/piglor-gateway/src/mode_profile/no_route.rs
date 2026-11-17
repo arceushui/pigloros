@@ -18,8 +18,10 @@ use std::{fmt, fs, net::Ipv4Addr, path::Path};
 const FALLBACK_DEVICES: [&str; 9] = [
     "sit0", "tunl0", "ip6tnl0", "gre0", "gretap0", "erspan0", "ip_vti0", "ip6_vti0", "ip6gre0",
 ];
-/// `CAP_NET_ADMIN`, `CAP_NET_RAW` and `CAP_SYS_ADMIN`.
-const NETWORK_CAPABILITIES: u64 = (1 << 12) | (1 << 13) | (1 << 21);
+/// `CAP_NET_ADMIN` (bit 12), `CAP_NET_RAW` (bit 13) and `CAP_SYS_ADMIN`
+/// (bit 21), as one literal so that no operator in it can be mutated into an
+/// equivalent one.
+const NETWORK_CAPABILITIES: u64 = 0x0020_3000;
 /// `Seccomp: 2`: a seccomp filter is installed.
 const SECCOMP_MODE_FILTER: &str = "2";
 
@@ -395,4 +397,70 @@ fn status(text: &str) -> Result<(), AirGappedNoRouteDenialV1> {
                 AirGappedNoRouteDenialV1::Seccomp,
             )
         })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use AirGappedHostFactV1 as Fact;
+    use AirGappedNoRouteDenialV1 as Denial;
+
+    const NONE: &str = "0000000000000000";
+    const NET_ADMIN: &str = "0000000000001000";
+    const SYS_ADMIN: &str = "0000000000200000";
+    /// `CAP_NET_BIND_SERVICE` (bit 10) and `CAP_NET_BROADCAST` (bit 11) only.
+    const OTHER: &str = "0000000000000c00";
+
+    /// A `/proc/self/status` with the given sets, `NoNewPrivs` and `Seccomp: 2`.
+    fn status_of(eff: &str, prm: &str, bnd: &str, no_new_privs: &str) -> String {
+        format!(
+            "Name:\tgateway\nCapInh:\t{NONE}\nCapPrm:\t{prm}\nCapEff:\t{eff}\n\
+             CapBnd:\t{bnd}\nCapAmb:\t{NONE}\nNoNewPrivs:\t{no_new_privs}\nSeccomp:\t2\n"
+        )
+    }
+
+    #[test]
+    fn the_network_capabilities_are_exactly_net_admin_net_raw_and_sys_admin() {
+        assert_eq!(NETWORK_CAPABILITIES, (1 << 12) + (1 << 13) + (1 << 21));
+        assert_eq!(NETWORK_CAPABILITIES.count_ones(), 3);
+    }
+
+    #[test]
+    fn ipv6_is_disabled_exactly_when_its_sysctl_directory_is_absent() {
+        let absent = !Path::new("/proc/sys/net/ipv6").exists();
+        assert_eq!(AirGappedHostFactsV1::read().ipv6_disabled, absent);
+    }
+
+    #[test]
+    fn both_dev_header_lines_must_hold_a_column_separator() {
+        let unreadable = Err(Denial::Unreadable(Fact::Dev));
+        assert_eq!(devices("a|\nb|\nlo: 0\n"), Ok(()));
+        assert_eq!(devices("a|\nb\nlo: 0\n"), unreadable);
+        assert_eq!(devices("a\nb|\nlo: 0\n"), unreadable);
+    }
+
+    #[test]
+    fn only_a_slash_line_ending_in_local_is_a_local_entry() {
+        let unreadable = Denial::Unreadable(Fact::FibTrie);
+        let loopback = Some(Ipv4Addr::LOCALHOST);
+        assert_eq!(local_entry("/8 host UNICAST", None, unreadable), Ok(None));
+        assert_eq!(local_entry("8 host LOCAL", None, unreadable), Ok(None));
+        assert_eq!(local_entry("/8 LOCAL", None, unreadable), Err(unreadable));
+        assert_eq!(local_entry("/8 LOCAL", loopback, unreadable), Ok(loopback));
+    }
+
+    #[test]
+    fn a_capability_in_both_effective_and_permitted_is_held() {
+        let held = status_of(NET_ADMIN, NET_ADMIN, NONE, "1");
+        assert_eq!(status(&held), Err(Denial::Capability));
+    }
+
+    #[test]
+    fn a_bounding_set_without_network_capabilities_passes_without_no_new_privs() {
+        assert_eq!(status(&status_of(NONE, NONE, OTHER, "0")), Ok(()));
+        assert_eq!(status(&status_of(NONE, NONE, NONE, "0")), Ok(()));
+        let regainable = status_of(NONE, NONE, SYS_ADMIN, "0");
+        assert_eq!(status(&regainable), Err(Denial::BoundingSet));
+    }
 }
