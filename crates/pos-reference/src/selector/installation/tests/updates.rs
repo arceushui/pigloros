@@ -28,6 +28,17 @@ impl UpdateDirectory {
     }
 }
 
+/// What a fixture's successor RVS1 revokes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SuccessorRevocation {
+    /// Nothing: only the epoch advances.
+    Nothing,
+    /// The selected provider's SPM1 (RVS1 field 5).
+    SelectedProvider,
+    /// The selected provider's role-3 runtime-attestation key (RVS1 field 4).
+    RuntimeKey,
+}
+
 pub(crate) struct UpdateFixture {
     directory: UpdateDirectory,
     bootstrap: AuthenticatedSelectorBootstrap,
@@ -79,9 +90,26 @@ impl UpdateFixture {
     pub(crate) fn commit_live_update(
         &self,
     ) -> TestResult<crate::selector::installation::authority::CommittedInstallationUpdate> {
+        Ok(self
+            .commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?
+            .0)
+    }
+
+    /// Durably commit one update with these attempt sets, leaving SIR1
+    /// pending, and return it with the exact SIU1 that committed it.
+    pub(crate) fn commit_pending_update(
+        &self,
+        previous_live_attempt_ids: Vec<[u8; 16]>,
+        required_cancelled_attempt_ids: Vec<[u8; 16]>,
+        revocation: SuccessorRevocation,
+    ) -> TestResult<(
+        crate::selector::installation::authority::CommittedInstallationUpdate,
+        Vec<u8>,
+    )> {
         let admitted = self.admitted()?;
         let challenge = admitted.bootstrap().issue_update_challenge()?;
-        let request = self.request(&challenge, None)?;
+        let request =
+            self.request_with_revocation(&challenge.to_canonical_cbor()?, None, revocation)?;
         let update = admitted.bootstrap().validate_update(challenge, &request)?;
         let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
         let snapshot = InstallationRecoverySnapshot::seal(
@@ -89,10 +117,15 @@ impl UpdateFixture {
             &runtime,
             &self.recovery_directory()?,
             fs::metadata(self.directory.path())?.uid(),
-            Vec::new(),
-            Vec::new(),
+            previous_live_attempt_ids,
+            required_cancelled_attempt_ids,
         )?;
-        Ok(Arc::new(admitted).commit_update(update, snapshot)?)
+        Ok((Arc::new(admitted).commit_update(update, snapshot)?, request))
+    }
+
+    /// The installation root this fixture owns or names.
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
     }
 
     fn recovery_directory(&self) -> TestResult<File> {
@@ -113,21 +146,25 @@ impl UpdateFixture {
         challenge: &[u8],
         nonce_override: Option<[u8; 16]>,
     ) -> TestResult<Vec<u8>> {
-        self.request_with_revocation(challenge, nonce_override, false)
+        self.request_with_revocation(challenge, nonce_override, SuccessorRevocation::Nothing)
     }
 
     fn request_revoking_selected_provider(
         &self,
         challenge: &InstallationChallenge,
     ) -> TestResult<Vec<u8>> {
-        self.request_with_revocation(&challenge.to_canonical_cbor()?, None, true)
+        self.request_with_revocation(
+            &challenge.to_canonical_cbor()?,
+            None,
+            SuccessorRevocation::SelectedProvider,
+        )
     }
 
     fn request_with_revocation(
         &self,
         challenge: &[u8],
         nonce_override: Option<[u8; 16]>,
-        revoke_selected_provider: bool,
+        revocation: SuccessorRevocation,
     ) -> TestResult<Vec<u8>> {
         let challenge_document = decode_canonical(challenge)?;
         let challenge_fields = array(&challenge_document, 5)?;
@@ -137,6 +174,17 @@ impl UpdateFixture {
         let nonce = nonce_override.unwrap_or(fixed_bytes(&challenge_fields[3])?);
         assert_ne!(nonce, [0; 16]);
 
+        let revoked_keys = if revocation == SuccessorRevocation::RuntimeKey {
+            vec![Value::Text(
+                self.admitted()?
+                    .provider()
+                    .manifest()
+                    .runtime_attestation_key_id
+                    .clone(),
+            )]
+        } else {
+            Vec::new()
+        };
         let current = self.bootstrap.installed();
         let current_document = decode_canonical(current.manifest_bytes())?;
         let mut manifest_fields = array_values(&array(&current_document, 2)?[0])?.to_vec();
@@ -147,8 +195,8 @@ impl UpdateFixture {
                 integer(1),
                 digest(self.bootstrap.trust().snapshot_digest()),
                 integer(self.bootstrap.revocation().revocation_epoch() + 1),
-                Value::Array(Vec::new()),
-                Value::Array(if revoke_selected_provider {
+                Value::Array(revoked_keys),
+                Value::Array(if revocation == SuccessorRevocation::SelectedProvider {
                     vec![digest(
                         self.bootstrap.policy().selection().provider_manifest,
                     )]
@@ -429,6 +477,28 @@ fn challenge_bound_update_retains_exact_successor_without_installing_it() -> Tes
         validated.previous_manifest_bytes()
     );
     assert!(!fixture.directory.path().join(RECOVERY_NAME).exists());
+    Ok(())
+}
+
+#[test]
+fn a_mode_one_challenge_never_authorizes_a_new_update() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let fresh = fixture.bootstrap.issue_update_challenge()?;
+    let fresh_bytes = fresh.to_canonical_cbor()?;
+    let fields = array(&decode_canonical(&fresh_bytes)?, 5)?.to_vec();
+    let request = fixture.request(&fresh, None)?;
+    let pending = InstallationChallenge::for_pending_transaction(
+        fixed_bytes(&fields[2])?,
+        fixed_bytes(&fields[3])?,
+    );
+    let pending_fields = array(&decode_canonical(&pending.to_canonical_cbor()?)?, 5)?.to_vec();
+    assert_eq!(pending_fields[..4], fields[..4]);
+    assert_eq!(uint(&pending_fields[4])?, 1);
+    assert!(fixture
+        .bootstrap
+        .validate_update(pending, &request)
+        .is_err());
+    assert!(fixture.bootstrap.validate_update(fresh, &request).is_ok());
     Ok(())
 }
 
