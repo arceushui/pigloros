@@ -888,7 +888,9 @@ pub(crate) enum LocalSubjectRefusalV1 {
 /// Over the installed requests, no request of the subject may `hold` it
 /// (be pre-terminal or have an active attempt), and the subject must have
 /// fewer requests than its lifetime quota
-/// `floor((maximum_requests - reserve) / A)`.
+/// `floor((maximum_requests - reserve) / A)`. The scan stops at the first
+/// request that holds the subject; `holds` decides, so a state it cannot
+/// read still holds it.
 pub(crate) fn local_subject_admission<'state>(
     states: impl Iterator<Item = &'state ErasureVerifiedStateV1>,
     subject: ErasureReferenceV1,
@@ -896,10 +898,11 @@ pub(crate) fn local_subject_admission<'state>(
     holds: impl Fn(&ErasureVerifiedStateV1) -> bool,
 ) -> Result<(), LocalSubjectRefusalV1> {
     let mut count = 0_u64;
-    let mut concurrent = false;
     for state in states.filter(|state| state.request().subject() == subject) {
+        if holds(state) {
+            return Err(LocalSubjectRefusalV1::Concurrent);
+        }
         count += 1;
-        concurrent |= holds(state);
     }
     let quota = u64::try_from(maximum_requests)
         .ok()
@@ -907,9 +910,7 @@ pub(crate) fn local_subject_admission<'state>(
         .zip(u64::try_from(actors).ok())
         .and_then(|(available, actors)| available.checked_div(actors))
         .unwrap_or(0);
-    if concurrent {
-        Err(LocalSubjectRefusalV1::Concurrent)
-    } else if count >= quota {
+    if count >= quota {
         Err(LocalSubjectRefusalV1::QuotaExhausted)
     } else {
         Ok(())

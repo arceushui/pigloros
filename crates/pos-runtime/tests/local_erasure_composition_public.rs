@@ -2055,7 +2055,7 @@ fn the_local_authority_refuses_an_unknown_attempt_or_unpinned_acknowledgement() 
 }
 
 #[test]
-fn the_local_authority_refuses_correction_resolution_and_receipts_yet() -> TestResult {
+fn a_receipt_needs_an_active_attempt_and_correction_and_resolution_are_refused() -> TestResult {
     let (store, composition, mut host, _owner) = local_authority()?;
     let view = host.authority_view()?;
     let authority = composition.authority();
@@ -2106,6 +2106,8 @@ fn the_local_authority_refuses_correction_resolution_and_receipts_yet() -> TestR
         signature: reference(0xa8),
         receipt_digest: reference(0),
     };
+    // Receipts are served, but only for a request with a readable active
+    // attempt; this request has none.
     assert_eq!(
         authority.admit_receipt(&view, &receipt),
         Err(ErasureErrorV1::ProvenanceMissing)
