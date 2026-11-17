@@ -39,6 +39,7 @@ pub mod owntracks;
 pub mod owntracks_http;
 pub mod problem;
 pub mod revision;
+pub mod scenario_room;
 pub mod startup;
 
 pub use authorization::{
