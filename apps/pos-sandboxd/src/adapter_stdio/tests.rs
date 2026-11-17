@@ -376,10 +376,17 @@ fn the_capture_doubles_its_capacity_up_to_its_limit() {
         (50_000, 100_000),
     ] {
         assert_eq!(accept(&mut bytes, &vec![7; read], limit), None);
-        assert_eq!(bytes.capacity(), capacity, "after {} bytes", bytes.len());
+        // `reserve_exact` may allocate more than it is asked for, so only the
+        // requested step is pinned: at least it, and short of the next one.
+        assert!(
+            (capacity..2 * capacity).contains(&bytes.capacity()),
+            "after {} bytes: {}",
+            bytes.len(),
+            bytes.capacity()
+        );
     }
     assert_eq!(accept(&mut bytes, &[7], limit), Some(CaptureStop::Ceiling));
-    assert_eq!((bytes.len(), bytes.capacity()), (100_000, 100_000));
+    assert_eq!(bytes.len(), 100_000);
 }
 
 /// A payload that records the offset and length of each input read.
