@@ -30,7 +30,9 @@ use pos_crypto::subject_key::{
     subject_owner_id, SubjectKeyUseV1, SubjectKeyWrapErrorV1, SubjectKeyWrapParamsV1,
     SubjectKeyWrapV1, SubjectPrfOutputV1, SubjectRootKeyV1,
 };
-use pos_crypto::subject_nonce_ledger::{SubjectNonceLedgerRowV1, SubjectNonceLedgerV1};
+use pos_crypto::subject_nonce_ledger::{
+    SubjectNonceLedgerRowV1, SubjectNonceLedgerV1, SubjectStoreFileIdV1,
+};
 use pos_store::subject_data_consumer::{
     append_subject_preference_weights, destroy_subject_key, read_subject_field,
     SubjectDataAppendV1, SubjectDataConsumerErrorV1 as Refusal, SubjectKeyringV1,
@@ -135,7 +137,10 @@ fn nonce_row(
         owner_id,
         epoch,
         root_material_digest: *digest.as_bytes(),
-        store_file_id: [0, 0],
+        store_file_id: SubjectStoreFileIdV1::Linux {
+            device: 0,
+            inode: 0,
+        },
         data_next,
         bootstrap_next: 1,
     })
