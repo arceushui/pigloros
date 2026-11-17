@@ -13,6 +13,9 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
+
 use crate::sandbox_provider_protocol::{
     ExecuteAuthority, PartitionDescriptor, PartitionRole, PayloadDescriptor, RequestAuthority,
     SandboxArchitecture, SandboxExecuteRequest,
@@ -423,11 +426,14 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
     {
         *byte = (hex_value(pair[0]) << 4) | hex_value(pair[1]);
     }
-    let proof = base64_decode(
-        json["signature"]
-            .as_str()
-            .ok_or("the root-verity-sig JSON has no signature")?,
-    )?;
+    // Standard padded base64, as systemd writes the root-verity-sig signature.
+    let proof = STANDARD
+        .decode(
+            json["signature"]
+                .as_str()
+                .ok_or("the root-verity-sig JSON has no signature")?,
+        )
+        .map_err(|error| format!("the root-verity-sig signature is not base64: {error}"))?;
     Ok((
         partitions,
         ImageSigning {
@@ -482,30 +488,6 @@ fn guid(bytes: &[u8]) -> [u8; 16] {
     result[4..6].reverse();
     result[6..8].reverse();
     result
-}
-
-/// Standard padded base64, as systemd writes the root-verity-sig signature.
-fn base64_decode(text: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    if !text.len().is_multiple_of(4) {
-        return Err("base64 length is not a multiple of four".into());
-    }
-    let mut output = Vec::with_capacity(text.len() / 4 * 3);
-    for chunk in text.as_bytes().chunks(4) {
-        let padding = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
-        let mut value = 0_u32;
-        for byte in &chunk[..4 - padding] {
-            let digit = ALPHABET
-                .iter()
-                .zip(0_u32..)
-                .find_map(|(candidate, digit)| (candidate == byte).then_some(digit))
-                .ok_or("invalid base64 digit")?;
-            value = (value << 6) | digit;
-        }
-        value <<= 6 * padding;
-        output.extend_from_slice(&value.to_be_bytes()[1..4 - padding]);
-    }
-    Ok(output)
 }
 
 fn fixture_frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {

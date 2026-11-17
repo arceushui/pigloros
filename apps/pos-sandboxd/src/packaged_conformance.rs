@@ -41,7 +41,7 @@ use crate::{
 const ATTEMPT_ID: [u8; 16] = *b"pigloros-444-evd";
 
 /// The absolute cleanup deadline a held root's detach gets after release.
-pub const RELEASE_DEADLINE: Duration = Duration::from_mins(1);
+const RELEASE_DEADLINE: Duration = Duration::from_mins(1);
 
 /// The release of a held root from the attempt directory it is attached to.
 pub type Release<'directory> =
@@ -182,7 +182,7 @@ pub fn describe(mount: &VerifiedRootMount) -> String {
     format!("{}\t{}", mount.mount_id(), mount.root_directory().as_str())
 }
 
-/// The production detach of a held root, under [`RELEASE_DEADLINE`] from
+/// The production detach of a held root, under a one-minute deadline from
 /// now, for [`run`]'s `release`.
 #[must_use]
 pub fn release(mount: VerifiedRootMount, directory: &PreparedAttemptDirectory) -> Release<'_> {
