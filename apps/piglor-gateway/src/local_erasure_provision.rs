@@ -20,15 +20,18 @@
 //! mode `0600`; an existing file is refused before anything else happens,
 //! and a claimed file is removed again when a later step fails or panics (a
 //! run killed outright can leave an empty file, which is safe to delete).
-//! Every check that needs no store write runs next: the installed TPS1 must
-//! not be past its `offline_valid_through`, the `--issued-by` key id must be
-//! a current, unrevoked TPS1 root, the installed TPS1 must not revoke the
-//! signer key, the store must record a Local Principal, and the complete
-//! ELB1 must encode. Then the command registers the signer key under
-//! `(signer_owner, role 2, signer_epoch)`, writes the store identity once,
-//! opens the Erasure Host Timeline if it is absent, and writes the unsigned
-//! ELB1 to the claimed file, syncing it and its directory. The holder of the
-//! `erasure-bundle/` root signs it into ELB1S offline.
+//! The checks that need no store write run next, in order: the installed
+//! TPS1 must not be past its `offline_valid_through`, the `--issued-by` key
+//! id must be a current, unrevoked TPS1 root, the installed TPS1 must not
+//! revoke the signer key, and `<sqlite-path>` must name an existing file;
+//! then the command takes the shared mode lock, which creates the store's
+//! lock file, attaches as an offline writer, and checks that the store
+//! records a Local Principal and that the complete ELB1 encodes. Only then
+//! does it register the signer key under `(signer_owner, role 2,
+//! signer_epoch)`, write the store identity once, open the Erasure Host
+//! Timeline if it is absent, and write the unsigned ELB1 to the claimed
+//! file, syncing it and its directory. The holder of the `erasure-bundle/`
+//! root signs it into ELB1S offline.
 //!
 //! **Shared lock.** Like every offline writer, the command holds the mode
 //! lock shared, so the lock alone does not exclude a serving Gateway. The
@@ -336,6 +339,9 @@ fn signer_material(seed: &[u8]) -> Result<SigningKeyMaterial, LocalErasureProvis
 ///
 /// `trust` must not have expired: `now` must not be past its
 /// `offline_valid_through`, the bound composition admits new work under.
+/// A `sqlite_path` that names no existing file is refused as an unbound
+/// store before the mode lock is taken, so provisioning creates neither a
+/// database nor a lock file for it.
 ///
 /// # Errors
 /// Returns a [`LocalErasureProvisionErrorV1`] refusal, or the mode-lock,
@@ -358,7 +364,12 @@ pub fn provision_local_erasure(
     )
     .map_err(io::Error::other)
     .and_then(|()| {
-        crate::mode_profile::GatewayModeStoreLockV1::shared(&request.sqlite_path)
+        Some(request.sqlite_path.as_str())
+            .filter(|path| Path::new(path).is_file())
+            .ok_or(crate::mode_profile::GatewayModeErrorV1::Store(
+                pos_core::GatewayModeBindingErrorV1::Unbound,
+            ))
+            .and_then(crate::mode_profile::GatewayModeStoreLockV1::shared)
             .map_err(io::Error::other)
             .and_then(|lock| {
                 let provisioned = provision_locked(request, signer, trust);
@@ -410,25 +421,19 @@ fn trusted_issuer(
     }
 }
 
-/// The raw-store steps under the mode lock.
+/// The raw-store steps under the mode lock, over the existing file
+/// [`provision_local_erasure`] checked before taking the lock.
 ///
-/// A path that names no existing file is refused as an unbound store before
-/// it is opened, so provisioning never creates a database. The steps build
-/// ELB1 from the recorded Local Principal and store identity, then register
-/// the signer and write the identity, and return ELB1 and the Erasure Host
-/// Timeline when the store does not hold it yet.
+/// The steps build ELB1 from the recorded Local Principal and store
+/// identity, then register the signer and write the identity, and return
+/// ELB1 and the Erasure Host Timeline when the store does not hold it yet.
 fn provision_store(
     request: &LocalErasureProvisionRequestV1,
     signer: &SigningKeyMaterial,
     trust: &CurrentTrustPolicyV1,
 ) -> io::Result<(Vec<u8>, Option<TimelineId>)> {
-    Some(request.sqlite_path.as_str())
-        .filter(|path| Path::new(path).is_file())
-        .ok_or(crate::mode_profile::GatewayModeErrorV1::Store(
-            pos_core::GatewayModeBindingErrorV1::Unbound,
-        ))
+    SqliteStore::open(&request.sqlite_path)
         .map_err(io::Error::other)
-        .and_then(|path| SqliteStore::open(path).map_err(io::Error::other))
         .and_then(|mut store| {
             crate::mode_profile::attach_offline_writer_v1(&mut store)
                 .map_err(io::Error::other)

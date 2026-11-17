@@ -101,6 +101,11 @@ impl Deployment {
     /// A genesis TPS1 whose roots are an `erasure-bundle/` root and an
     /// unprefixed root and which revokes `revoked` (sorted).
     fn new(revoked: &[&str]) -> TestResult<Self> {
+        Self::valid_through(revoked, "9999-12-31T23:59:59Z")
+    }
+
+    /// [`Self::new`] with the TPS1 `offline_valid_through` `valid_through`.
+    fn valid_through(revoked: &[&str], valid_through: &str) -> TestResult<Self> {
         let draft = pos_conformance::draft_trust_policy_snapshot_bytes_v1()?;
         let mut snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&draft)?;
         snapshot.trust_roots = vec![
@@ -108,7 +113,7 @@ impl Deployment {
             root(UNPREFIXED_ROOT, &unprefixed_root()),
         ];
         snapshot.revoked_key_ids = revoked.iter().map(|id| (*id).to_owned()).collect();
-        "9999-12-31T23:59:59Z".clone_into(&mut snapshot.offline_valid_through);
+        valid_through.clone_into(&mut snapshot.offline_valid_through);
         let message = snapshot.operator_signature_message_v1()?;
         snapshot.operator_signature = operator().sign(&message).to_bytes();
         let genesis = snapshot.to_canonical_cbor()?;
@@ -600,6 +605,34 @@ fn an_expired_tps1_is_refused_before_any_write() -> TestResult {
     Ok(())
 }
 
+/// The credentialed command checks the installed TPS1 against the wall
+/// clock: one whose `offline_valid_through` has passed is refused before
+/// any write, and the claimed `--out` is removed.
+#[test]
+fn the_unit_refuses_a_tps1_the_clock_has_passed() -> TestResult {
+    let deployment = Deployment::valid_through(&[], "2000-01-01T00:00:00Z")?;
+    let fixture = Fixture::new(true)?;
+    let credentials = fixture.credentials(
+        "credentials",
+        &[
+            (LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME, SIGNER_SEED.as_slice()),
+            (RELEASE_TRUST_CREDENTIAL_NAME, deployment.release.as_bytes()),
+        ],
+    )?;
+    let request = fixture.request("o");
+    let error = provision_local_erasure_from_credentials(&request, &credentials, &deployment.state)
+        .err()
+        .ok_or("a TPS1 the clock has passed is refused")?;
+    assert_eq!(
+        error.to_string(),
+        LocalErasureProvisionErrorV1::TrustExpired.to_string()
+    );
+    assert_eq!(fixture.store_identity()?, None);
+    assert_eq!(fixture.registered_signer(1)?, None);
+    assert!(!request.out.exists());
+    Ok(())
+}
+
 /// ADR-134 §8: an offline writer refuses an unbound store, a store
 /// `migrate-mode` holds, and a path that is no store.
 #[test]
@@ -627,8 +660,10 @@ fn provisioning_is_an_offline_writer() -> TestResult {
             GatewayModeBindingErrorV1::Unbound
         ))
     );
-    // A missing store is refused before it is opened, so none is created.
+    // A missing store is refused before the mode lock is taken or the store
+    // opened, so neither a database nor its lock file is created.
     assert!(!unbound.exists());
+    assert!(std::fs::read_dir(directory.path())?.next().is_none());
     request.sqlite_path = directory.path().to_str().ok_or("not UTF-8")?.to_owned();
     assert_eq!(
         unbound_store(provision_local_erasure(
@@ -727,6 +762,10 @@ fn refusals_have_stable_operator_messages() {
         (
             LocalErasureProvisionErrorV1::SignerCredentialInvalid,
             "32-byte Ed25519 seed",
+        ),
+        (
+            LocalErasureProvisionErrorV1::TrustExpired,
+            "TPS1 has expired",
         ),
         (LocalErasureProvisionErrorV1::IssuerUntrusted, "--issued-by"),
         (LocalErasureProvisionErrorV1::SignerRevoked, "revokes"),

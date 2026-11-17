@@ -227,16 +227,16 @@ genesis_digest = "<64 lowercase hex characters>"
 The command first claims `--out`, an absolute path, as a new file with mode `0600`: an existing
 file is refused before the store is touched, and the claimed file is removed again if a later step
 fails or panics. A run killed outright can leave an empty `--out` behind; it holds no bundle and
-is safe to delete before the next run. The `<sqlite-path>` must already be a bound Gateway store,
-and the installed TPS1 must not be past its `offline_valid_through`. `--issued-by` must name a
-current, unrevoked TPS1 root
-with the `erasure-bundle/` key id prefix, and the TPS1 must not revoke the signer key
-`erasure-signer/<64 hex>`. Provisioning then
-registers the signer key in the key registry under `(--signer-owner, role 2, --signer-epoch)`,
-writes the store's erasure identity once from 32 random bytes, opens the Erasure Host Timeline
-`pigloros.local-erasure.host` (the ULID prefix of `CA("ELHT1", [store_identity])`), and writes the
-unsigned ELB1 to the claimed file. The holder of the `erasure-bundle/` root signs it into ELB1S, on
-another machine if the key lives there.
+is safe to delete before the next run. The installed TPS1 must not be past its
+`offline_valid_through`, `--issued-by` must name a current, unrevoked TPS1 root with the
+`erasure-bundle/` key id prefix, and the TPS1 must not revoke the signer key
+`erasure-signer/<64 hex>`. The `<sqlite-path>` must already be a bound Gateway store; a path that
+names no file is refused before the mode lock is taken, so neither a database nor a lock file is
+created for it. Provisioning then registers the signer key in the key registry under
+`(--signer-owner, role 2, --signer-epoch)`, writes the store's erasure identity once from 32 random
+bytes, opens the Erasure Host Timeline `pigloros.local-erasure.host` (the ULID prefix of
+`CA("ELHT1", [store_identity])`), and writes the unsigned ELB1 to the claimed file. The holder of
+the `erasure-bundle/` root signs it into ELB1S, on another machine if the key lives there.
 
 An exact re-run emits the same bundle. A routine signer rotation re-runs it with a new signer
 credential, a higher `--signer-epoch` and a new `--out`. A re-run on a store that already has its
