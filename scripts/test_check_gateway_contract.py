@@ -54,7 +54,9 @@ TIMELINES = "/v1/timelines"
 EVENTS = "/v1/timelines/{timeline_id}/events"
 PREVIEWS = "/v1/decision-previews"
 # A Draft read whose family has both a positive and a fail-closed example.
-PREFERENCE = "/v1/preferences/{preference_id}/revisions/{revision}"
+PREVIEW = "/v1/decision-previews/{preview_id}"
+# A Draft creation that answers `201`.
+PREVIEW_ACTIONS = "/v1/decision-previews/{preview_id}/actions"
 
 
 def example(name: str) -> dict:
@@ -262,10 +264,10 @@ class CheckGatewayContractTest(unittest.TestCase):
         examples = [
             (name, item)
             for name, item in checker.load_examples()
-            if item["operation_id"] not in ("createPreference", "getPreferenceRevision")
+            if item["operation_id"] not in ("createDecisionPreview", "getDecisionPreview")
             or item["response"]["status"] < 400
         ]
-        with self.assertRaisesRegex(checker.ContractError, "family preference"):
+        with self.assertRaisesRegex(checker.ContractError, "family decision-preview"):
             checker.check_examples(contract(), examples)
 
     def test_a_draft_mutation_without_an_idempotency_key_is_rejected(self) -> None:
@@ -283,15 +285,15 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_operation_must_be_structurally_draft(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["paths"][PREFERENCE]["get"]["x-pigloros-owner"]
+        del document["paths"][PREVIEW]["get"]["x-pigloros-owner"]
         with self.assertRaisesRegex(checker.ContractError, "owner ticket"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"][PREFERENCE]["get"]["description"] = "Read the preference."
+        document["paths"][PREVIEW]["get"]["description"] = "Read the preview."
         with self.assertRaisesRegex(checker.ContractError, "does not start with Draft"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"][PREFERENCE]["get"]["tags"] = []
+        document["paths"][PREVIEW]["get"]["tags"] = []
         with self.assertRaisesRegex(checker.ContractError, "one family tag"):
             checker.check_description(contract(document=document))
 
@@ -303,7 +305,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_read_answers_an_enveloped_resource(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        answer = document["paths"][PREFERENCE]["get"]["responses"]["200"]["content"]
+        answer = document["paths"][PREVIEW]["get"]["responses"]["200"]["content"]
         answer["application/json"]["schema"] = {
             "$ref": "#/components/schemas/CommittedEventReceipt"
         }
@@ -314,14 +316,14 @@ class CheckGatewayContractTest(unittest.TestCase):
         document = copy.deepcopy(DOCUMENT)
         answer = document["paths"]["/health"]["get"]["responses"]["200"]["content"]
         answer["application/json"]["schema"] = {
-            "$ref": "#/components/schemas/PreferenceRevision"
+            "$ref": "#/components/schemas/DecisionPreview"
         }
         with self.assertRaisesRegex(checker.ContractError, "served operations reach the Draft"):
             checker.check_description(contract(document=document))
 
     def test_a_draft_operation_reaching_an_unmarked_schema_is_rejected(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["components"]["schemas"]["PreferenceRevision"]["x-pigloros-maturity"]
+        del document["components"]["schemas"]["DecisionPreview"]["x-pigloros-maturity"]
         with self.assertRaisesRegex(checker.ContractError, "neither Draft nor served"):
             checker.check_description(contract(document=document))
 
@@ -412,7 +414,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         mode."""
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
-        body = example("draft-preference-get")["response"]["body"]
+        body = example("preference-get")["response"]["body"]
         self.assertEqual(body["mode_profile"]["mode"], "local")
         self.assertEqual(subject.schema_errors(body, schema), [])
         installed = {"profile_kind": "epf1", "state": "installed", "profile_digest": "0" * 64}
@@ -449,7 +451,7 @@ class CheckGatewayContractTest(unittest.TestCase):
     def test_a_resource_discloses_its_produced_under_mode_profile(self) -> None:
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
-        body = example("draft-preference-get")["response"]["body"]
+        body = example("preference-get")["response"]["body"]
         mode = body["mode_profile"]
         self.assertTrue(subject.schema_errors(
             {key: value for key, value in body.items() if key != "mode_profile"}, schema))
@@ -784,15 +786,18 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        request = document["components"]["schemas"]["CreatePreferenceRequest"]["properties"]
-        request["weights"]["items"]["properties"]["weight_micro"]["type"] = "number"
+        request = document["components"]["schemas"]["SimulatedActionRequest"]["properties"]
+        request["observed_seq"]["type"] = "number"
         with self.assertRaisesRegex(checker.ContractError, "JSON number"):
             checker.check_description(contract(document=document))
         subject = contract()
-        body = example("draft-preference-create")["request"]["body"]
+        body = example("preference-create")["request"]["body"]
         schema = {"$ref": "#/components/schemas/CreatePreferenceRequest"}
         self.assertEqual(subject.schema_errors(body, schema), [])
-        fractional = {"weights": [{"dimension": "nature", "weight_micro": 0.5}]}
+        fractional = {
+            "schema_version": 1,
+            "weights": [{"dimension": "nature", "weight_micro": 0.5}],
+        }
         self.assertTrue(subject.schema_errors(fractional, schema))
         operation = DOCUMENT["paths"][
             "/v1/preferences/{preference_id}/revisions/{revision}"
@@ -805,7 +810,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_creation_answers_a_closed_or_enveloped_body(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        answer = document["paths"]["/v1/preferences"]["post"]["responses"]["201"]["content"]
+        answer = document["paths"][PREVIEW_ACTIONS]["post"]["responses"]["201"]["content"]
         answer["application/json"]["schema"] = {"$ref": "#/components/schemas/ActionRequest"}
         with self.assertRaisesRegex(checker.ContractError, "closed or enveloped"):
             checker.check_description(contract(document=document))
