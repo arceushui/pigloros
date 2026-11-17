@@ -6,6 +6,7 @@ use crate::{
         AppendSignalOperation, CreateOptionSpecOperation, CreatePredictionOperation,
         CreatePreferenceOperation, CreateTimelineOperation, OperationAuthority,
         ReadOptionSpecOperation, ReadPreferenceOperation, ReadSessionOperation,
+        RevokeConsentOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -156,6 +157,7 @@ fn loopback_routes() -> Router<AppState> {
         .route("/v1/timelines/{timeline_id}/actions", post(post_action))
         .route("/v1/timelines/{timeline_id}/signals", post(post_signal))
         .route("/v1/session", get(get_session))
+        .route("/v1/me/consent-revocations", post(post_consent_revocation))
         .route("/v1/preferences", post(post_preference))
         .route(
             "/v1/preferences/{preference_id}/revisions/{revision}",
@@ -191,6 +193,7 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/timelines/{timeline_id}/actions"),
     ("POST", "/v1/timelines/{timeline_id}/signals"),
     ("GET", "/v1/session"),
+    ("POST", "/v1/me/consent-revocations"),
     ("POST", "/v1/preferences"),
     (
         "GET",
@@ -652,6 +655,41 @@ async fn get_session(
         .await
         .and_then(|permit| state.gateway.session_v1(&permit))
         .map(Json)
+}
+
+/// The body of `POST /v1/me/consent-revocations` (#309): the consent the
+/// acting Principal revokes, named by its `consent.granted.v1` `EventId`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentRevocationRequestV1 {
+    consent_ref: ulid::Ulid,
+}
+
+/// `POST /v1/me/consent-revocations` (#309): revoke one of the acting
+/// Principal's own consents under the permit of its `consent.revoke`
+/// decision; `201` for a recorded revocation, `200` for the original one.
+async fn post_consent_revocation(
+    State(state): State<AppState>,
+    IdempotencyKey(key): IdempotencyKey,
+    authority: OperationAuthority<RevokeConsentOperation>,
+    ContractJson(body): ContractJson<ConsentRevocationRequestV1>,
+) -> Result<Response, GatewayError> {
+    let outcome = state
+        .gateway
+        .revoke_consent_v1(
+            authority.authorize(&state.gateway, None).await?,
+            pos_core::EventId::from_ulid(body.consent_ref),
+            &key,
+        )
+        .await?;
+    Ok(match outcome {
+        crate::authorization::revocation::ConsentRevocationOutcomeV1::Recorded(body) => {
+            (StatusCode::CREATED, Json(body)).into_response()
+        }
+        crate::authorization::revocation::ConsentRevocationOutcomeV1::Original(body) => {
+            (StatusCode::OK, Json(body)).into_response()
+        }
+    })
 }
 
 /// `POST /v1/preferences` (#304): create a Preference or its next revision.

@@ -8,8 +8,13 @@
 //! looks anything up. Before each decision the host compares the authority
 //! its store records with the pinned one and, when the store is ahead (a
 //! revocation recorded by another writer), recomposes the view and its
-//! registry together (owner decisions D3 and D10 on #302). The returned
-//! [`GatewayOperationPermitV1`] holds the authority commit fence, and
+//! registry together (owner decisions D3 and D10 on #302). A Principal with
+//! consents is read through the consent Timeline of the host that owns the
+//! store: once another process records anything to the store, that read
+//! fails, so once the store is ahead of the pin (a revocation recorded
+//! there) every covered decision is stale revocation state (`503`,
+//! retryable) until the host restarts and recomposes the revocation.
+//! The returned [`GatewayOperationPermitV1`] holds the authority commit fence, and
 //! [`OperationAuthority::run`] runs the admitted mutation as a detached task
 //! that owns the permit until the mutation completes, even when the request
 //! is cancelled; so a revocation waits for every operation admitted before
@@ -23,12 +28,13 @@
 use std::{convert::Infallible, future::Future, marker::PhantomData, sync::Arc};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
-use pos_core::{EntityId, TimelineId, WallTime};
+use pos_core::{EntityId, Hash, SeqRange, TimelineId, WallTime};
 use tokio::sync::OwnedRwLockReadGuard;
 
 use crate::{
-    Gateway, GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
-    GatewayAuthorizationRequest, GatewayError, GatewayOperationV1,
+    Gateway, GatewayAuthorityRecordV1, GatewayAuthorization, GatewayAuthorizationDecision,
+    GatewayAuthorizationError, GatewayAuthorizationRequest, GatewayConsentRecordV1, GatewayError,
+    GatewayOperationV1,
 };
 
 /// The header that names the acting entity of a protected operation.
@@ -66,6 +72,13 @@ pub struct ReadSessionOperation;
 
 impl OperationSpecV1 for ReadSessionOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_SESSION;
+}
+
+/// `POST /v1/me/consent-revocations`.
+pub struct RevokeConsentOperation;
+
+impl OperationSpecV1 for RevokeConsentOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::REVOKE_CONSENT;
 }
 
 /// `POST /v1/preferences`.
@@ -319,21 +332,118 @@ impl Gateway {
         }
     }
 
-    /// Reload the chain the store records for the authorizer's source and
+    /// Reload the chains the store records for the authorizer's source, and
+    /// the consent Timeline head when its Principal binds consents, and
     /// recompose the pinned authority when the store is ahead of it.
-    async fn bring_current(
+    pub(crate) async fn bring_current(
         &self,
         authorization: &GatewayAuthorization,
     ) -> Result<(), GatewayAuthorizationError> {
-        let Some(leaf) = authorization.source_leaf() else {
-            return Ok(());
-        };
-        match self.store.load_authority(leaf).await {
-            Ok(Ok(persisted)) if authorization.is_behind(&persisted) => {
-                authorization.refresh(&persisted).await
+        match self.source_record(authorization).await {
+            Ok(Some(record)) if authorization.is_behind(&record) => {
+                self.refresh_with_consent_events(authorization, record)
+                    .await
             }
-            Ok(Ok(_)) => Ok(()),
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Read the consent Timeline's Events into `record`, then recompose the
+    /// pinned authority from it under the commit-fence write guard.
+    async fn refresh_with_consent_events(
+        &self,
+        authorization: &GatewayAuthorization,
+        record: GatewayAuthorityRecordV1,
+    ) -> Result<(), GatewayAuthorizationError> {
+        authorization
+            .refresh(self.with_consent_events(authorization, Ok(record)).await)
+            .await
+    }
+
+    /// The authority record the store holds under the source leaf of the
+    /// authorizer; `None` for an authorizer without a store source.
+    pub(crate) async fn source_record(
+        &self,
+        authorization: &GatewayAuthorization,
+    ) -> Result<Option<GatewayAuthorityRecordV1>, GatewayAuthorizationError> {
+        let Some(leaf) = authorization.source_leaf() else {
+            return Ok(None);
+        };
+        self.authority_record(authorization, leaf).await.map(Some)
+    }
+
+    /// The authority record the store holds under the source leaf `leaf`
+    /// of the authorizer, without the consent Timeline's Events.
+    pub(crate) async fn authority_record(
+        &self,
+        authorization: &GatewayAuthorization,
+        leaf: Hash,
+    ) -> Result<GatewayAuthorityRecordV1, GatewayAuthorizationError> {
+        let chain = self.store.load_authority(leaf).await;
+        let consented = match authorization.consented_binding() {
+            Some((leaves, timeline)) => Some(self.consent_record(&leaves, timeline).await),
+            None => None,
+        };
+        match (chain, consented.transpose()) {
+            (Ok(Ok(chain)), Ok(consented)) => Ok(GatewayAuthorityRecordV1 { chain, consented }),
             _ => Err(GatewayAuthorizationError::AuthorityUnavailable),
         }
+    }
+
+    /// The consent-bound chains under `leaves` and the head of the consent
+    /// Timeline `timeline`.
+    async fn consent_record(
+        &self,
+        leaves: &[Hash],
+        timeline: TimelineId,
+    ) -> Result<GatewayConsentRecordV1, GatewayAuthorizationError> {
+        let mut chains = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            chains.push(self.store.load_authority(*leaf).await);
+        }
+        let head = self.store.protected_logical_head(timeline).await;
+        match (
+            chains.into_iter().collect::<Result<Result<Vec<_>, _>, _>>(),
+            head,
+        ) {
+            (Ok(Ok(chains)), Ok(head)) => Ok(GatewayConsentRecordV1 {
+                chains,
+                head,
+                events: None,
+            }),
+            _ => Err(GatewayAuthorizationError::AuthorityUnavailable),
+        }
+    }
+
+    /// `record` with the Events of the authorizer's consent Timeline, when
+    /// its Principal binds consents. The consent Timeline is read whatever
+    /// `record` is, so a failure of either read is one unavailable answer.
+    pub(crate) async fn with_consent_events(
+        &self,
+        authorization: &GatewayAuthorization,
+        record: Result<GatewayAuthorityRecordV1, GatewayAuthorizationError>,
+    ) -> Result<GatewayAuthorityRecordV1, GatewayAuthorizationError> {
+        let Some((_, timeline)) = authorization.consented_binding() else {
+            return record;
+        };
+        let read = self
+            .store
+            .read(
+                timeline,
+                SeqRange::all(),
+                crate::local_principal::consent_bounds(),
+            )
+            .await
+            .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable);
+        record.and_then(|record| {
+            read.map(|events| GatewayAuthorityRecordV1 {
+                chain: record.chain,
+                consented: record.consented.map(|consented| GatewayConsentRecordV1 {
+                    events: Some(events),
+                    ..consented
+                }),
+            })
+        })
     }
 }

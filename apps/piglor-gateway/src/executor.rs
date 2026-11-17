@@ -18,7 +18,7 @@ use pos_core::{
     store::{AppendDedupScope, EventReadBounds, EventStore, PurgeOutcome, SeqRange},
     timeline::Timeline,
     AuthorityErrorV1, AuthorityPersistenceErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit,
-    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
+    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError, CorrelationId,
     ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
     ForkAuthenticationPolicyV1, ForkClassifierSourceV1, GatewayRevisionErrorV1,
@@ -465,7 +465,7 @@ enum Command {
     },
     AppendConsentRevocation {
         timeline: TimelineId,
-        revocation: ConsentRevokedV1,
+        revocation: (ConsentRevokedV1, Option<CorrelationId>),
         cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
@@ -1607,6 +1607,17 @@ impl StoreExecutor {
             }
         )))
     }
+    /// The binding the commit `commit` (a Timeline and sequence) was
+    /// produced under, or with no commit the binding the next commit would
+    /// be produced under (ADR-134 §5).
+    pub(crate) async fn produced_under(
+        &self,
+        commit: Option<(TimelineId, Seq)>,
+    ) -> Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            ProducedUnderCommand { commit, reply }
+        )))
+    }
     pub(crate) async fn remove_append_identities_bounded(
         &self,
         scope: AppendDedupScope,
@@ -1736,7 +1747,7 @@ impl StoreExecutor {
     pub(crate) async fn append_consent_revocation(
         &self,
         timeline: TimelineId,
-        revocation: ConsentRevokedV1,
+        revocation: (ConsentRevokedV1, Option<CorrelationId>),
         cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
@@ -2402,6 +2413,31 @@ impl WorkerCommandV1 for LoadAuthorityCommand {
             }
         };
         drop(reply.send(Ok(loaded)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+struct ProducedUnderCommand {
+    commit: Option<(TimelineId, Seq)>,
+    reply: oneshot::Sender<
+        Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError>,
+    >,
+}
+
+impl WorkerCommandV1 for ProducedUnderCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self { commit, reply } = *self;
+        let produced = match &mut state.store {
+            ExecutorStore::Host(host, _) => {
+                crate::mode_profile::produced_under_v1(host.gateway_mode_binding(), commit)
+            }
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
+        };
+        drop(reply.send(Ok(produced)));
     }
 
     fn expire_unrun(self: Box<Self>) {
@@ -3347,7 +3383,7 @@ fn execute_host_action_admission(
     >,
 ) {
     let result = open_action_fence(host, context.timeline)
-        .and_then(|()| persisted_action_authority(host, context.authorization))
+        .and_then(|()| persisted_action_authority(host, context.authorization, context.decision))
         .and_then(|authority| {
             with_host_action_fence(host, context.timeline, |sender| {
                 reauthorize_action(context.authorization, context.decision).and_then(|decision| {
@@ -3426,11 +3462,12 @@ fn refused_action_fence(
 fn persisted_action_authority(
     host: &mut ErasureExecutionHostV1,
     authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
 ) -> Result<(Hash, PersistedAuthorityV1), ActionCommandError> {
     host.command_sender()
         .and_then(|mut sender| {
             sender.with_scheduled_admission(|ports| {
-                action_admission::persist_authority(authorization, ports)
+                action_admission::persist_authority(authorization, decision, ports)
             })
         })
         .map_err(host_action_error)
@@ -3663,7 +3700,7 @@ fn execute_append_consent_revocation_command_from_command(
 fn execute_append_consent_revocation_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
-    revocation: &ConsentRevokedV1,
+    (revocation, correlation): &(ConsentRevokedV1, Option<CorrelationId>),
     cleanup_scope: AppendDedupScope,
     permit: ConsentAppendPermit,
     maximum: u64,
@@ -3683,11 +3720,13 @@ fn execute_append_consent_revocation_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            let drafts = [EventDraft::new(
+            let mut draft = EventDraft::new(
                 revocation.subject_id,
                 Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
                 payload,
-            )];
+            );
+            draft.correlation_id = *correlation;
+            let drafts = [draft];
             state.store.execute(
                 |host| {
                     host.command_sender().and_then(|mut sender| {
@@ -4203,7 +4242,7 @@ mod tests {
         execute_append_consent_revocation_command(
             &mut state,
             timeline,
-            &revocation,
+            &(revocation, None),
             AppendDedupScope::from_keyed_hash([0; 32]),
             authority.append_permit(),
             10,
@@ -4888,6 +4927,18 @@ mod tests {
     }
 
     #[test]
+    fn expired_produced_under_lookup_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::ProducedUnderCommand {
+                commit: Some((TimelineId::new(), pos_core::Seq::from_u64(1))),
+                reply,
+            })),
+            receiver,
+        );
+    }
+
+    #[test]
     fn expired_gateway_revision_replies() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         let operation: super::RevisionOperationV1<()> = Box::new(|_port| Ok(()));
@@ -4895,6 +4946,21 @@ mod tests {
             Command::Action(Box::new(super::RevisionCommand { operation, reply })),
             receiver,
         );
+    }
+
+    /// A store that is not the erasure host records no execution-mode
+    /// binding: neither the next commit nor a recorded one was produced
+    /// under any.
+    #[tokio::test]
+    async fn a_store_without_a_mode_binding_produces_under_none(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        for commit in [None, Some((TimelineId::new(), pos_core::Seq::from_u64(1)))] {
+            assert!(executor.produced_under(commit).await.test_ok()?.is_none());
+        }
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+        Ok(())
     }
 
     #[test]
@@ -4998,7 +5064,7 @@ mod tests {
         assert_expired(
             Command::AppendConsentRevocation {
                 timeline,
-                revocation,
+                revocation: (revocation, None),
                 cleanup_scope: AppendDedupScope::from_keyed_hash([0; 32]),
                 permit: authority.append_permit(),
                 maximum: 1,
@@ -5061,7 +5127,7 @@ mod tests {
                 executor
                     .append_consent_revocation(
                         timeline,
-                        revocation,
+                        (revocation, None),
                         cleanup_scope,
                         permit,
                         10,

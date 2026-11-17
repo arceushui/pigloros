@@ -1,5 +1,5 @@
 {
-  "name": "draft-consent-revocation-unauthenticated",
+  "name": "consent-revocation-unauthenticated",
   "operation_id": "revokeConsent",
   "request": {
     "headers": {

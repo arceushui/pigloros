@@ -29,11 +29,14 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   their Events and read its own Session (#1362) and grants no action, signal or network
   capability, is provisioned into it, and the production `local_gateway` composition serves it
   and requires it for every protected operation. No production authority is sourced from the
-  fixture document (ADR-108).
-- Observations are normalized as the profile text states: ULID `id` members, cursors and error
-  messages become placeholders.
+  fixture document (ADR-108). The `authorized-consented` composition (#309) also grants
+  `consent.revoke` and binds one consent, provisioned through the production `provision_on_host`
+  path, that governs Timeline creation; an exchange that captures `consent` fills the `{consent}`
+  slot of later request bodies with the first `consent_ref` its Session lists.
+- Observations are normalized as the profile text states: ULID `id` and `consent_ref` members,
+  cursors and error messages become placeholders.
 - Usage: one execution step per sent exchange, the response bytes as output bytes, one Event per
-  `201` signal or action response; the other counters are 0.
+  `201` signal, action or consent revocation response; the other counters are 0.
 
 ## Fixtures and tests
 
