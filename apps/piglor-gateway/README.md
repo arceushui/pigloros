@@ -227,7 +227,9 @@ genesis_digest = "<64 lowercase hex characters>"
 The command first claims `--out`, an absolute path, as a new file with mode `0600`: an existing
 file is refused before the store is touched, and the claimed file is removed again if a later step
 fails or panics. A run killed outright can leave an empty `--out` behind; it holds no bundle and
-is safe to delete before the next run. `--issued-by` must name a current, unrevoked TPS1 root
+is safe to delete before the next run. The `<sqlite-path>` must already be a bound Gateway store,
+and the installed TPS1 must not be past its `offline_valid_through`. `--issued-by` must name a
+current, unrevoked TPS1 root
 with the `erasure-bundle/` key id prefix, and the TPS1 must not revoke the signer key
 `erasure-signer/<64 hex>`. Provisioning then
 registers the signer key in the key registry under `(--signer-owner, role 2, --signer-epoch)`,
@@ -245,6 +247,11 @@ command holds the store lock shared, like every offline writer; the unit's
 `Conflicts=piglor-gateway.service` stops `serve` while it updates the key registry. The unit writes
 `/var/lib/pigloros/local-erasure-bundle.elb1` for the root `erasure-bundle/local`: move the file
 away once it is signed, and override `ExecStart` in a drop-in to name another root or epoch.
+
+> **Warning:** the default `--expiry 0` emits a bundle that never expires: it stays valid until a
+> TPS1 revokes its root or signer key. Pass `--expiry <unix-seconds>` for a bundle that lapses on
+> its own. The unit's fixed `--out` also makes every re-run fail with `--out must name a new file`
+> until the previous bundle is moved away.
 
 ### Separate deterministic experiment host
 

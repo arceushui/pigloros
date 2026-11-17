@@ -6,8 +6,8 @@ use pos_conformance::{TrustPolicyRootV1, TrustPolicySnapshotV1};
 use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_host_timeline_v1,
     local_erasure_signer_key_id_v1, ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, EventStore, KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1,
-    LocalErasureBundleV1, OwnerIdV1, TimelineId,
+    ErasureReferenceV1, EventStore, GatewayModeBindingErrorV1, KeyIdentityV1, KeyRoleV1,
+    LocalErasureBundleSignatureV1, LocalErasureBundleV1, OwnerIdV1, TimelineId,
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
@@ -33,7 +33,9 @@ use crate::local_principal::{
     local_principal_authority_timeline, local_principal_consent_timeline, local_principal_grant_id,
     provision_on_host, recorded_registry_digest, LocalPrincipalProvisionV1,
 };
-use crate::mode_profile::{bind_test_store, GatewayModeProfileIdV1, GatewayModeStoreLockV1};
+use crate::mode_profile::{
+    bind_test_store, GatewayModeErrorV1, GatewayModeProfileIdV1, GatewayModeStoreLockV1,
+};
 use crate::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -450,10 +452,15 @@ fn a_routine_rotation_registers_the_next_signer_epoch() -> TestResult {
     let deployment = Deployment::new(&[])?;
     let trust = deployment.trust()?;
     let fixture = Fixture::new(true)?;
-    let first = provision_local_erasure(&fixture.request("a"), &signer(SIGNER_SEED), &trust)?;
+    let first = provision_local_erasure(
+        &fixture.request("a"),
+        &signer(SIGNER_SEED),
+        &trust,
+        present(),
+    )?;
     let mut rotation = fixture.request("b");
     rotation.signer_epoch = 2;
-    let rotated = provision_local_erasure(&rotation, &signer(ROTATED_SEED), &trust)?;
+    let rotated = provision_local_erasure(&rotation, &signer(ROTATED_SEED), &trust, present())?;
     let first = LocalErasureBundleV1::from_canonical_cbor(&first)?;
     let decoded = LocalErasureBundleV1::from_canonical_cbor(&rotated)?;
     assert_eq!(decoded.store_identity, first.store_identity);
@@ -466,7 +473,12 @@ fn a_routine_rotation_registers_the_next_signer_epoch() -> TestResult {
     // Two stores provisioned from one document get different identities,
     // so different bundles (ADR-136 Q16).
     let sibling = Fixture::new(true)?;
-    let other = provision_local_erasure(&sibling.request("a"), &signer(SIGNER_SEED), &trust)?;
+    let other = provision_local_erasure(
+        &sibling.request("a"),
+        &signer(SIGNER_SEED),
+        &trust,
+        present(),
+    )?;
     let other = LocalErasureBundleV1::from_canonical_cbor(&other)?;
     assert_ne!(other.store_identity, first.store_identity);
     assert_ne!(other.host_timelines, first.host_timelines);
@@ -477,7 +489,12 @@ fn a_routine_rotation_registers_the_next_signer_epoch() -> TestResult {
         let mut request = fixture.request("refused");
         request.signer_epoch = epoch;
         assert_eq!(
-            refusal(provision_local_erasure(&request, &signer(seed), &trust)),
+            refusal(provision_local_erasure(
+                &request,
+                &signer(seed),
+                &trust,
+                present()
+            )),
             Some(LocalErasureProvisionErrorV1::SignerRefused)
         );
     }
@@ -494,7 +511,8 @@ fn refusals_before_any_write_leave_the_store_unprovisioned() -> TestResult {
         refusal(provision_local_erasure(
             &no_principal.request("o"),
             &signer(SIGNER_SEED),
-            &trust
+            &trust,
+            present()
         )),
         Some(LocalErasureProvisionErrorV1::PrincipalMissing)
     );
@@ -522,7 +540,8 @@ fn refusals_before_any_write_leave_the_store_unprovisioned() -> TestResult {
             refusal(provision_local_erasure(
                 &request,
                 &signer(SIGNER_SEED),
-                &trust
+                &trust,
+                present()
             )),
             Some(expected)
         );
@@ -542,13 +561,42 @@ fn refusals_before_any_write_leave_the_store_unprovisioned() -> TestResult {
             refusal(provision_local_erasure(
                 &fixture.request("o"),
                 &signer(SIGNER_SEED),
-                &revoking
+                &revoking,
+                present()
             )),
             Some(expected)
         );
     }
     assert_eq!(fixture.store_identity()?, None);
     assert_eq!(fixture.registered_signer(1)?, None);
+    Ok(())
+}
+
+/// An installed TPS1 past its `offline_valid_through` is refused before any
+/// write; at that second itself it still provisions.
+#[test]
+fn an_expired_tps1_is_refused_before_any_write() -> TestResult {
+    let trust = Deployment::new(&[])?.trust()?;
+    let fixture = Fixture::new(true)?;
+    assert_eq!(
+        refusal(provision_local_erasure(
+            &fixture.request("o"),
+            &signer(SIGNER_SEED),
+            &trust,
+            trust.expiry() + 1
+        )),
+        Some(LocalErasureProvisionErrorV1::TrustExpired)
+    );
+    assert_eq!(fixture.store_identity()?, None);
+    assert_eq!(fixture.registered_signer(1)?, None);
+
+    provision_local_erasure(
+        &fixture.request("o"),
+        &signer(SIGNER_SEED),
+        &trust,
+        trust.expiry(),
+    )?;
+    assert!(fixture.store_identity()?.is_some());
     Ok(())
 }
 
@@ -561,13 +609,48 @@ fn provisioning_is_an_offline_writer() -> TestResult {
     let unbound = directory.path().join("unbound.db");
     let mut request = Fixture::new(true)?.request("o");
     request.sqlite_path = unbound.to_str().ok_or("not UTF-8")?.to_owned();
-    assert!(provision_local_erasure(&request, &signer(SIGNER_SEED), &trust).is_err());
+    let unbound_store = |result: std::io::Result<Vec<u8>>| {
+        result
+            .err()
+            .and_then(std::io::Error::into_inner)
+            .and_then(|inner| inner.downcast::<GatewayModeErrorV1>().ok())
+            .map(|refusal| *refusal)
+    };
+    assert_eq!(
+        unbound_store(provision_local_erasure(
+            &request,
+            &signer(SIGNER_SEED),
+            &trust,
+            present()
+        )),
+        Some(GatewayModeErrorV1::Store(
+            GatewayModeBindingErrorV1::Unbound
+        ))
+    );
+    // A missing store is refused before it is opened, so none is created.
+    assert!(!unbound.exists());
     request.sqlite_path = directory.path().to_str().ok_or("not UTF-8")?.to_owned();
-    assert!(provision_local_erasure(&request, &signer(SIGNER_SEED), &trust).is_err());
+    assert_eq!(
+        unbound_store(provision_local_erasure(
+            &request,
+            &signer(SIGNER_SEED),
+            &trust,
+            present()
+        )),
+        Some(GatewayModeErrorV1::Store(
+            GatewayModeBindingErrorV1::Unbound
+        ))
+    );
 
     let fixture = Fixture::new(true)?;
     let migrating = GatewayModeStoreLockV1::exclusive(&fixture.path)?;
-    assert!(provision_local_erasure(&fixture.request("o"), &signer(SIGNER_SEED), &trust).is_err());
+    assert!(provision_local_erasure(
+        &fixture.request("o"),
+        &signer(SIGNER_SEED),
+        &trust,
+        present()
+    )
+    .is_err());
     drop(migrating);
     assert_eq!(fixture.store_identity()?, None);
     Ok(())
@@ -892,7 +975,12 @@ fn a_rotation_on_a_store_holding_a_request_needs_no_host() -> TestResult {
     let deployment = Deployment::new(&[])?;
     let trust = deployment.trust()?;
     let fixture = Fixture::new(true)?;
-    let first = provision_local_erasure(&fixture.request("a"), &signer(SIGNER_SEED), &trust)?;
+    let first = provision_local_erasure(
+        &fixture.request("a"),
+        &signer(SIGNER_SEED),
+        &trust,
+        present(),
+    )?;
     let first = LocalErasureBundleV1::from_canonical_cbor(&first)?;
     let host_timeline = local_erasure_host_timeline_v1(first.store_identity)?;
     fixture.commit_request()?;
@@ -901,7 +989,7 @@ fn a_rotation_on_a_store_holding_a_request_needs_no_host() -> TestResult {
 
     let mut rotation = fixture.request("b");
     rotation.signer_epoch = 2;
-    let rotated = provision_local_erasure(&rotation, &signer(ROTATED_SEED), &trust)?;
+    let rotated = provision_local_erasure(&rotation, &signer(ROTATED_SEED), &trust, present())?;
     let rotated = LocalErasureBundleV1::from_canonical_cbor(&rotated)?;
     assert_eq!(rotated.store_identity, first.store_identity);
     assert_eq!(rotated.host_timelines, first.host_timelines);
@@ -928,9 +1016,14 @@ fn a_store_holding_a_request_without_its_host_timeline_is_refused() -> TestResul
     let refused =
         crate::startup::erasure_host_failure(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
             .to_string();
-    let error = provision_local_erasure(&fixture.request("o"), &signer(SIGNER_SEED), &trust)
-        .err()
-        .ok_or("the closed host refuses a store that holds a request")?;
+    let error = provision_local_erasure(
+        &fixture.request("o"),
+        &signer(SIGNER_SEED),
+        &trust,
+        present(),
+    )
+    .err()
+    .ok_or("the closed host refuses a store that holds a request")?;
     assert_eq!(error.to_string(), refused);
     // The refusal comes after the idempotent signer and identity writes.
     let identity = fixture.store_identity()?.ok_or("no store identity")?;
@@ -943,9 +1036,14 @@ fn a_store_holding_a_request_without_its_host_timeline_is_refused() -> TestResul
     assert!(!fixture.holds_timeline(host_timeline)?);
     assert_eq!(fixture.request_count()?, 1);
     // A re-run repeats both writes unchanged and is refused the same way.
-    let again = provision_local_erasure(&fixture.request("o"), &signer(SIGNER_SEED), &trust)
-        .err()
-        .ok_or("a re-run is refused the same way")?;
+    let again = provision_local_erasure(
+        &fixture.request("o"),
+        &signer(SIGNER_SEED),
+        &trust,
+        present(),
+    )
+    .err()
+    .ok_or("a re-run is refused the same way")?;
     assert_eq!(again.to_string(), refused);
     assert_eq!(fixture.store_identity()?, Some(identity));
     assert_eq!(fixture.registered_signer(1)?, Some(public_key));
@@ -1014,6 +1112,7 @@ fn a_run_interrupted_after_the_signer_registration_completes() -> TestResult {
         &fixture.request("o"),
         &signer(SIGNER_SEED),
         &deployment.trust()?,
+        present(),
     )?;
     assert!(fixture.store_identity()?.is_some());
     assert_eq!(fixture.compose(&deployment, &bundle)?, None);

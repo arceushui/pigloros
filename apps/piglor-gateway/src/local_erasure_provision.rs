@@ -20,8 +20,9 @@
 //! mode `0600`; an existing file is refused before anything else happens,
 //! and a claimed file is removed again when a later step fails or panics (a
 //! run killed outright can leave an empty file, which is safe to delete).
-//! Every check that needs no store write runs next: the `--issued-by` key id must be a
-//! current, unrevoked TPS1 root, the installed TPS1 must not revoke the
+//! Every check that needs no store write runs next: the installed TPS1 must
+//! not be past its `offline_valid_through`, the `--issued-by` key id must be
+//! a current, unrevoked TPS1 root, the installed TPS1 must not revoke the
 //! signer key, the store must record a Local Principal, and the complete
 //! ELB1 must encode. Then the command registers the signer key under
 //! `(signer_owner, role 2, signer_epoch)`, writes the store identity once,
@@ -126,6 +127,9 @@ pub enum LocalErasureProvisionErrorV1 {
     /// The signer credential is not a 32-byte Ed25519 seed.
     #[error("the local erasure signer credential is not a 32-byte Ed25519 seed")]
     SignerCredentialInvalid,
+    /// The installed TPS1 is past its `offline_valid_through`.
+    #[error("the installed TPS1 has expired; install a current TPS1 first")]
+    TrustExpired,
     /// `--issued-by` names no current TPS1 root, or a revoked one.
     #[error("--issued-by names no current, unrevoked root of the installed TPS1")]
     IssuerUntrusted,
@@ -298,23 +302,40 @@ fn credentialed_bundle(
             .and_then(|trust| {
                 signer_material(&signer)
                     .map_err(io::Error::other)
-                    .and_then(|signer| provision_local_erasure(request, &signer, &trust))
+                    .and_then(|signer| {
+                        provision_local_erasure(request, &signer, &trust, unix_now())
+                    })
             })
     })
 }
 
+/// The current Unix second (UTC); a clock before the epoch reads as the
+/// largest second, so it fails closed against every TPS1 expiry.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |elapsed| elapsed.as_secs())
+}
+
 /// The signing key of a 32-byte Ed25519 seed credential.
+///
+/// The seed is copied straight into a zeroizing buffer, so no other copy of
+/// it outlives this call.
 fn signer_material(seed: &[u8]) -> Result<SigningKeyMaterial, LocalErasureProvisionErrorV1> {
-    <[u8; 32]>::try_from(seed)
-        .map(|seed| {
-            let seed = Zeroizing::new(seed);
-            SigningKeyMaterial::new(SigningKey::from_bytes(&seed))
+    (seed.len() == 32)
+        .then(|| {
+            let mut secret = Zeroizing::new([0_u8; 32]);
+            secret.copy_from_slice(seed);
+            SigningKeyMaterial::new(SigningKey::from_bytes(&secret))
         })
-        .map_err(|_| LocalErasureProvisionErrorV1::SignerCredentialInvalid)
+        .ok_or(LocalErasureProvisionErrorV1::SignerCredentialInvalid)
 }
 
 /// Provision the store of `request` for `signer` under the installed TPS1
-/// `trust` and return the unsigned ELB1.
+/// `trust` at Unix second `now` and return the unsigned ELB1.
+///
+/// `trust` must not have expired: `now` must not be past its
+/// `offline_valid_through`, the bound composition admits new work under.
 ///
 /// # Errors
 /// Returns a [`LocalErasureProvisionErrorV1`] refusal, or the mode-lock,
@@ -327,18 +348,24 @@ pub fn provision_local_erasure(
     request: &LocalErasureProvisionRequestV1,
     signer: &SigningKeyMaterial,
     trust: &CurrentTrustPolicyV1,
+    now: u64,
 ) -> io::Result<Vec<u8>> {
-    trusted_issuer(request, trust, signer.public_verification_key().as_bytes())
-        .map_err(io::Error::other)
-        .and_then(|()| {
-            crate::mode_profile::GatewayModeStoreLockV1::shared(&request.sqlite_path)
-                .map_err(io::Error::other)
-                .and_then(|lock| {
-                    let provisioned = provision_locked(request, signer, trust);
-                    drop(lock);
-                    provisioned
-                })
-        })
+    trusted_issuer(
+        request,
+        trust,
+        now,
+        signer.public_verification_key().as_bytes(),
+    )
+    .map_err(io::Error::other)
+    .and_then(|()| {
+        crate::mode_profile::GatewayModeStoreLockV1::shared(&request.sqlite_path)
+            .map_err(io::Error::other)
+            .and_then(|lock| {
+                let provisioned = provision_locked(request, signer, trust);
+                drop(lock);
+                provisioned
+            })
+    })
 }
 
 /// The steps under the mode lock: the raw-store steps, then the Erasure
@@ -357,16 +384,19 @@ fn provision_locked(
     })
 }
 
-/// The `--issued-by` root must be current and unrevoked, and the signer key
-/// unrevoked, in the installed TPS1.
+/// The installed TPS1 must not have expired at `now`, the `--issued-by`
+/// root must be current and unrevoked in it, and the signer key unrevoked.
 fn trusted_issuer(
     request: &LocalErasureProvisionRequestV1,
     trust: &CurrentTrustPolicyV1,
+    now: u64,
     signer_public_key: &[u8; 32],
 ) -> Result<(), LocalErasureProvisionErrorV1> {
     let snapshot = trust.snapshot();
     let revoked = |key_id: &str| snapshot.revoked_key_ids.iter().any(|id| id == key_id);
-    if revoked(&request.issued_by)
+    if now > trust.expiry() {
+        Err(LocalErasureProvisionErrorV1::TrustExpired)
+    } else if revoked(&request.issued_by)
         || !snapshot
             .trust_roots
             .iter()
@@ -382,16 +412,23 @@ fn trusted_issuer(
 
 /// The raw-store steps under the mode lock.
 ///
-/// They build ELB1 from the recorded Local Principal and store identity,
-/// then register the signer and write the identity, and return ELB1 and
-/// the Erasure Host Timeline when the store does not hold it yet.
+/// A path that names no existing file is refused as an unbound store before
+/// it is opened, so provisioning never creates a database. The steps build
+/// ELB1 from the recorded Local Principal and store identity, then register
+/// the signer and write the identity, and return ELB1 and the Erasure Host
+/// Timeline when the store does not hold it yet.
 fn provision_store(
     request: &LocalErasureProvisionRequestV1,
     signer: &SigningKeyMaterial,
     trust: &CurrentTrustPolicyV1,
 ) -> io::Result<(Vec<u8>, Option<TimelineId>)> {
-    SqliteStore::open(&request.sqlite_path)
+    Some(request.sqlite_path.as_str())
+        .filter(|path| Path::new(path).is_file())
+        .ok_or(crate::mode_profile::GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unbound,
+        ))
         .map_err(io::Error::other)
+        .and_then(|path| SqliteStore::open(path).map_err(io::Error::other))
         .and_then(|mut store| {
             crate::mode_profile::attach_offline_writer_v1(&mut store)
                 .map_err(io::Error::other)
