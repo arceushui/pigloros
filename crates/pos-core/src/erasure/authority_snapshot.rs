@@ -535,6 +535,24 @@ mod tests {
             PreparedLocalOwnerEffectV1::new(negative()?, &over),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+        // Array head, "ELNEG1" text and a two-byte byte-string head.
+        let largest_effect = record("ELNEG1", vec![0; LOCAL_OWNER_EFFECT_MAX_BYTES_V1 - 11])?;
+        assert_eq!(largest_effect.len(), LOCAL_OWNER_EFFECT_MAX_BYTES_V1);
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(
+                LocalOwnerEffectV1::Negative(largest_effect.clone()),
+                &elo1
+            )?
+            .effect_object()
+            .map(ErasureRetainedObjectV1::canonical_cbor),
+            Some(largest_effect.as_slice())
+        );
+        let over_effect = record("ELNEG1", vec![0; LOCAL_OWNER_EFFECT_MAX_BYTES_V1 - 10])?;
+        assert_eq!(over_effect.len(), LOCAL_OWNER_EFFECT_MAX_BYTES_V1 + 1);
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(over_effect), &elo1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
         Ok(())
     }
 }
