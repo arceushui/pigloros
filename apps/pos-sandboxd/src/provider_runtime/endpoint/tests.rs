@@ -1,6 +1,7 @@
 //! ADR-069 R11 §6 bind rules (invariants 5 to 8), as root in the isolated
 //! container, where `/run` is a fresh root-owned tmpfs.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
@@ -9,7 +10,7 @@ use std::path::Path;
 
 use rustix::fs::{mknodat, FileType, Mode, CWD};
 
-use super::{bind_endpoints, ProviderEndpoint};
+use super::{bind_endpoints, leaf_socket, ProviderEndpoint};
 use crate::provider_runtime::tests::{in_isolated_root, TestResult};
 use crate::provider_runtime::ProviderRuntimeError;
 
@@ -120,6 +121,33 @@ fn binds_an_owner_only_leaf() -> TestResult {
     assert_eq!(endpoint.verify(), Err(ProviderRuntimeError::UnsafeEndpoint));
     drop(endpoint);
     assert_eq!(identity(EXECUTE)?, replaced);
+    fs::remove_file(EXECUTE)?;
+    Ok(())
+}
+
+/// A leaf passes its check only as a UID 0 socket: a UID 0 node of another
+/// kind fails, and so does a socket another user owns, wherever the
+/// container can chown.
+fn requires_a_root_owned_socket_leaf() -> TestResult {
+    let parent = fs::File::open(RUNTIME)?;
+    let leaf = OsStr::new("provider-execute.sock");
+    let socket = UnixListener::bind(EXECUTE)?;
+    set_mode(EXECUTE, 0o640)?;
+    assert_eq!(leaf_socket(&parent, leaf)?, (identity(EXECUTE)?, 0o640));
+    if std::os::unix::fs::chown(EXECUTE, Some(65_534), Some(65_534)).is_ok() {
+        assert_eq!(
+            leaf_socket(&parent, leaf).err(),
+            Some(ProviderRuntimeError::UnsafeEndpoint)
+        );
+    }
+    drop(socket);
+    fs::remove_file(EXECUTE)?;
+    fs::write(EXECUTE, b"")?;
+    assert_eq!(fs::symlink_metadata(EXECUTE)?.uid(), 0);
+    assert_eq!(
+        leaf_socket(&parent, leaf).err(),
+        Some(ProviderRuntimeError::UnsafeEndpoint)
+    );
     fs::remove_file(EXECUTE)?;
     Ok(())
 }
@@ -265,6 +293,7 @@ fn endpoints_bind_only_fresh_owner_only_leaves_beneath_safe_directories() -> Tes
     refuses_unsafe_ancestors()?;
     refuses_every_existing_node()?;
     binds_an_owner_only_leaf()?;
+    requires_a_root_owned_socket_leaf()?;
     // A second-bind failure removes the first leaf only (invariant 6).
     fs::write(CONTROL, b"")?;
     let control = identity(CONTROL)?;

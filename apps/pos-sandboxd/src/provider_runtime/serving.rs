@@ -329,10 +329,7 @@ impl<'a> Responder<'a> {
     ) -> Result<(), ProviderRuntimeError> {
         workers.answered.retain(|worker| !worker.is_finished());
         workers.refusing.retain(|worker| !worker.is_finished());
-        // While every answered and every refusing slot is busy the execute
-        // listener is not polled; the control listener and both endpoint
-        // checks still are.
-        let accepting = workers.answered.len() < pool || workers.refusing.len() < pool.max(1);
+        let accepting = accepting(workers.answered.len(), workers.refusing.len(), pool);
         let mut ready = [
             PollFd::new(control.listener(), PollFlags::IN),
             PollFd::new(
@@ -346,12 +343,7 @@ impl<'a> Responder<'a> {
         ];
         poll(&mut ready, (!accepting).then_some(&RECHECK))
             .map_err(unavailable)
-            .map(|_| {
-                (
-                    !ready[0].revents().is_empty(),
-                    accepting && !ready[1].revents().is_empty(),
-                )
-            })
+            .map(|_| readiness(accepting, ready[0].revents(), ready[1].revents()))
             .and_then(|readiness| {
                 execute
                     .verify()
@@ -380,10 +372,7 @@ impl<'a> Responder<'a> {
                     })
             })
             .map(|(control_missed, execute_ready, accepted)| {
-                // An accept that produced nothing (such as `EMFILE`) backs
-                // off briefly instead of spinning on a listener that stays
-                // readable.
-                let missed = control_missed || (execute_ready && accepted.is_none());
+                let missed = missed(control_missed, execute_ready, accepted.is_some());
                 thread::sleep(ACCEPT_BACKOFF * u32::from(missed));
                 let admission = if workers.answered.len() < pool {
                     Admission::Answered
@@ -676,6 +665,29 @@ impl<'a> Responder<'a> {
         .and_then(|error| error.to_canonical_cbor().map_err(RuntimeSignerError::from))
         .ok()
     }
+}
+
+/// Whether the acceptor polls the execute listener, given its `answered`
+/// and `refusing` workers: while every answered and every refusing slot is
+/// busy it is not polled; the control listener and both endpoint checks
+/// still are.
+fn accepting(answered: usize, refusing: usize, pool: usize) -> bool {
+    answered < pool || refusing < pool.max(1)
+}
+
+/// Whether one poll found the control and the execute listener ready. The
+/// execute listener counts only while `accepting`: while it is not polled
+/// for input, whatever else it reports is no connection to accept.
+const fn readiness(accepting: bool, control: PollFlags, execute: PollFlags) -> (bool, bool) {
+    (!control.is_empty(), accepting && !execute.is_empty())
+}
+
+/// Whether an accept produced nothing (such as `EMFILE`): a control accept
+/// that `control_missed`, or an execute accept that was `execute_ready` but
+/// not `execute_accepted`. Then the acceptor backs off briefly instead of
+/// spinning on a listener that stays readable.
+const fn missed(control_missed: bool, execute_ready: bool, execute_accepted: bool) -> bool {
+    control_missed || (execute_ready && !execute_accepted)
 }
 
 /// Whether the `SO_PEERCRED` UID of `stream`'s peer is `uid` (R11 §6 step

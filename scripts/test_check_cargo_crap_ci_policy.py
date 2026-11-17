@@ -59,6 +59,8 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/provider_runtime/endpoint/tests.rs",
     "src/provider_runtime/serving/tests.rs",
     "src/provider_runtime/revocation/tests.rs",
+    "src/scenario_room/tests.rs",
+    "src/executor/scenario_room/tests.rs",
 )
 EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS = (
     "src/adapter/native_tests.rs",
