@@ -48,8 +48,8 @@ const fn usage(event_count: u64, execution_steps: u64) -> ResourceUsage {
 const MEASURED_USAGE: [ResourceUsage; 7] = [
     // positive: pos.1 (1 leg, 3 Events), pos.2 (1 leg, 4 Events), pos.3 (2 legs, 2 refused).
     usage(11, 4),
-    // denied: den.1a, den.1b (2 legs) and den.2; 6 Events folded.
-    usage(6, 4),
+    // denied: den.1a, den.1b (2 legs), den.2 and den.3; 9 Events folded.
+    usage(9, 5),
     // malformed: mal.1a, mal.1b (2 legs) and mal.2, every leg refused before its fold.
     usage(0, 4),
     // resource-exhaustion: res.1, refused at its `resource_limit` before any Event is read.
