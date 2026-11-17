@@ -388,6 +388,18 @@ fn refuses_by_precedence(key: &VerifyingKey, authority: Authority) -> TestResult
     Ok(())
 }
 
+/// A 2 MiB record is within the 16 MiB frame bound (ADR-069 §4), so it is
+/// read whole and refused at step 2, not at step 1 as an oversized frame.
+fn reads_a_record_above_one_mebibyte(key: &VerifyingKey) -> TestResult {
+    let large = request("SDQ1", 2, vec![Value::Bytes(vec![0; 2 << 20])], false)?;
+    assert_invalid(
+        &exchange(&[&large])?,
+        key,
+        Some(0),
+        SandboxProviderErrorCode::UnsupportedVersion,
+    )
+}
+
 /// Cancel and reconcile pass step 6 and get SPE1 11 (invariant 12).
 fn refuses_attempt_operations_while_starting(
     key: &VerifyingKey,
@@ -570,6 +582,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
         )
     );
     refuses_by_precedence(&key, retained)?;
+    reads_a_record_above_one_mebibyte(&key)?;
     refuses_attempt_operations_while_starting(&key, retained)?;
     refuses_execute_while_starting(&key, &staged)?;
     // A root control connection is closed with zero bytes.
