@@ -102,6 +102,34 @@ impl OperationSpecV1 for RevokeConsentOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::REVOKE_CONSENT;
 }
 
+/// `POST /v1/preferences`.
+pub struct CreatePreferenceOperation;
+
+impl OperationSpecV1 for CreatePreferenceOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::CREATE_PREFERENCE;
+}
+
+/// `GET /v1/preferences/{preference_id}/revisions/{revision}`.
+pub struct ReadPreferenceOperation;
+
+impl OperationSpecV1 for ReadPreferenceOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_PREFERENCE;
+}
+
+/// `POST /v1/option-specs`.
+pub struct CreateOptionSpecOperation;
+
+impl OperationSpecV1 for CreateOptionSpecOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::CREATE_OPTION_SPEC;
+}
+
+/// `GET /v1/option-specs/{option_spec_id}/revisions/{revision}`.
+pub struct ReadOptionSpecOperation;
+
+impl OperationSpecV1 for ReadOptionSpecOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_OPTION_SPEC;
+}
+
 /// The authority inputs of one protected operation, from the request head.
 ///
 /// They are only the acting entity, when the request names a valid one.

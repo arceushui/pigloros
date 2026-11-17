@@ -21,9 +21,10 @@ use pos_core::{
     ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError, CorrelationId,
     ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
-    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1,
-    OwnTracksIngressRateKeyV1, PersistedAuthorityV1, PipelineOutcomeV1, PreparedOwnTracksIngressV1,
-    ProposedAction, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, GatewayRevisionErrorV1,
+    GatewayRevisionPortV1, Hash, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
+    PersistedAuthorityV1, PipelineOutcomeV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{
@@ -1571,6 +1572,16 @@ impl StoreExecutor {
             PurgeActionReceiptsCommand { limit, reply }
         )))
     }
+    /// Run one Gateway revision operation (#304) on the host's revision port.
+    pub(crate) async fn gateway_revision<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut dyn GatewayRevisionPortV1) -> RevisionResultV1<T> + Send + 'static,
+    ) -> Result<RevisionResultV1<T>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(RevisionCommand {
+            operation: Box::new(operation),
+            reply
+        })))
+    }
     /// Durably record one batch of denial evidence in its own store command.
     pub(crate) async fn record_denial_evidence(
         &self,
@@ -2429,6 +2440,46 @@ impl WorkerCommandV1 for ProducedUnderCommand {
             ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
         };
         drop(reply.send(Ok(produced)));
+
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+/// The result of one Gateway revision operation on the host store (#304).
+type RevisionResultV1<T> = Result<T, GatewayRevisionErrorV1>;
+
+/// One Gateway revision operation, run on the host's revision port.
+type RevisionOperationV1<T> =
+    Box<dyn FnOnce(&mut dyn GatewayRevisionPortV1) -> RevisionResultV1<T> + Send>;
+
+/// One boxed Gateway revision operation and its reply.
+///
+/// It runs as a Write-class command on the host's revision port, so a
+/// revision commit is linearised with every other store write. Only the
+/// test-only `Generic` and `Gateway` stores lack the port; they answer
+/// unavailable.
+struct RevisionCommand<T> {
+    operation: RevisionOperationV1<T>,
+    reply: oneshot::Sender<Result<RevisionResultV1<T>, StoreExecutorError>>,
+}
+
+impl<T: Send + 'static> WorkerCommandV1 for RevisionCommand<T> {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self { operation, reply } = *self;
+        let result = match &mut state.store {
+            ExecutorStore::Host(host, _) => host
+                .command_sender()
+                .and_then(|mut sender| sender.with_gateway_revisions(operation))
+                .unwrap_or(Err(GatewayRevisionErrorV1::Unavailable)),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                Err(GatewayRevisionErrorV1::Unavailable)
+            }
+        };
+        drop(reply.send(Ok(result)));
     }
 
     fn expire_unrun(self: Box<Self>) {
@@ -4886,6 +4937,16 @@ mod tests {
                 commit: Some((TimelineId::new(), pos_core::Seq::from_u64(1))),
                 reply,
             })),
+            receiver,
+        );
+    }
+
+    #[test]
+    fn expired_gateway_revision_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        let operation: super::RevisionOperationV1<()> = Box::new(|_port| Ok(()));
+        assert_expired(
+            Command::Action(Box::new(super::RevisionCommand { operation, reply })),
             receiver,
         );
     }

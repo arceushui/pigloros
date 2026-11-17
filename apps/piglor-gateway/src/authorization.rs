@@ -248,7 +248,7 @@ pub enum GatewayAuthorizationTarget {
 /// authorizes; the Local Principal is provisioned with grants named by
 /// [`Self::name`], and `Session` discloses the ones its grant covers. Each
 /// constant has its own resource, so a grant covers exactly the constants it
-/// names. Later operations (#303, #304, #309) add a constant with a fresh
+/// names. Later operations (#303, #309) add a constant with a fresh
 /// resource and action pair and authorize through
 /// [`crate::Gateway::authorize_operation`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -302,6 +302,20 @@ impl GatewayOperationV1 {
         "world.action.v1.submit",
         "action",
     );
+    /// `POST /v1/preferences`: create a Preference or, with `parent`, its
+    /// next revision (#304).
+    pub const CREATE_PREFERENCE: Self =
+        Self::new("preference.create", "preference", "create", "operation");
+    /// `GET /v1/preferences/{preference_id}/revisions/{revision}` (#304).
+    pub const READ_PREFERENCE: Self =
+        Self::new("preference.read", "preference.revision", "read", "read");
+    /// `POST /v1/option-specs`: create an `OptionSpec` or, with `parent`, its
+    /// next revision (#304).
+    pub const CREATE_OPTION_SPEC: Self =
+        Self::new("option-spec.create", "option-spec", "create", "operation");
+    /// `GET /v1/option-specs/{option_spec_id}/revisions/{revision}` (#304).
+    pub const READ_OPTION_SPEC: Self =
+        Self::new("option-spec.read", "option-spec.revision", "read", "read");
     /// `POST /v1/scenario-rooms`: create revision 1 of a Scenario Room (#303).
     pub const CREATE_SCENARIO_ROOM: Self = Self::new(
         "scenario-room.create",
@@ -327,10 +341,14 @@ impl GatewayOperationV1 {
     );
     /// Every operation this Gateway serves and the network capability, in
     /// name order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: &[Self] = &[
         Self::REVOKE_CONSENT,
         Self::NETWORK,
         Self::CREATE_PREDICTION,
+        Self::CREATE_OPTION_SPEC,
+        Self::READ_OPTION_SPEC,
+        Self::CREATE_PREFERENCE,
+        Self::READ_PREFERENCE,
         Self::CREATE_SCENARIO_ROOM,
         Self::DERIVE_SCENARIO_ROOM,
         Self::READ_SCENARIO_ROOM,
@@ -385,7 +403,8 @@ impl GatewayOperationV1 {
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|operation| operation.name == name)
     }
 }
@@ -1164,13 +1183,14 @@ impl GatewayAuthorization {
     /// Recompose the pinned authority from the store's `record` under the
     /// commit-fence write guard, so no decision or admitted operation
     /// interleaves. A failed read of `record` recomposes nothing and is
-    /// answered as it failed.
+    /// answered as it failed, without waiting for the guard.
     pub(crate) async fn refresh(
         &self,
         record: Result<GatewayAuthorityRecordV1, GatewayAuthorizationError>,
     ) -> Result<(), GatewayAuthorizationError> {
+        let record = record?;
         let _guard = self.commit_lock.write().await;
-        record.and_then(|record| self.refresh_held(record))
+        self.refresh_held(record)
     }
 
     /// Recompose the pinned authority from `record` while the caller holds
@@ -2537,19 +2557,27 @@ mod tests {
 
     #[test]
     fn served_operations_are_closed_and_keyed_by_resource_and_action() {
-        let names = GatewayOperationV1::ALL.map(GatewayOperationV1::name);
-        let mut sorted = names;
+        let names = GatewayOperationV1::ALL
+            .iter()
+            .copied()
+            .map(GatewayOperationV1::name)
+            .collect::<Vec<_>>();
+        let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
         // Strictly sorted: no two entries share a name, nor a resource.
         assert!(names.windows(2).all(|pair| pair[0] < pair[1]), "{names:?}");
-        let mut resources = GatewayOperationV1::ALL.map(GatewayOperationV1::resource);
+        let mut resources = GatewayOperationV1::ALL
+            .iter()
+            .copied()
+            .map(GatewayOperationV1::resource)
+            .collect::<Vec<_>>();
         resources.sort_unstable();
         assert!(
             resources.windows(2).all(|pair| pair[0] < pair[1]),
             "{resources:?}"
         );
-        for operation in GatewayOperationV1::ALL {
+        for &operation in GatewayOperationV1::ALL {
             assert_eq!(GatewayOperationV1::named(operation.name()), Some(operation));
         }
         assert_eq!(GatewayOperationV1::named("timeline.delete"), None);

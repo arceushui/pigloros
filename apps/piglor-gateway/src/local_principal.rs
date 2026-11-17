@@ -2650,6 +2650,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_revocation_refuses_every_revision_operation_before_any_lookup() -> TestResult {
+        let provision = provision([
+            GatewayOperationV1::CREATE_PREFERENCE,
+            GatewayOperationV1::READ_PREFERENCE,
+            GatewayOperationV1::CREATE_OPTION_SPEC,
+            GatewayOperationV1::READ_OPTION_SPEC,
+        ])?;
+        let served = served_store(&provision)?;
+        let actor = actor()?;
+        let preference = json!({
+            "schema_version": 1,
+            "weights": [{"dimension": "nature", "weight_micro": 1}],
+        });
+        let (status, created) = send(
+            &served.app,
+            "POST",
+            "/v1/preferences",
+            Some(actor),
+            Some(preference.clone()),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CREATED);
+        record_revocation(&served.path, &provision)?;
+        let read = format!(
+            "/v1/preferences/{}/revisions/1",
+            created["id"].as_str().unwrap_or_default()
+        );
+        let options = json!({
+            "schema_version": 1,
+            "options": [
+                {"key": "coast", "label": "Coast", "tags": []},
+                {"key": "city", "label": "City", "tags": []},
+            ],
+        });
+        for (method, uri, body) in [
+            ("POST", "/v1/preferences".to_owned(), Some(preference)),
+            ("GET", read, None),
+            ("POST", "/v1/option-specs".to_owned(), Some(options)),
+            (
+                "GET",
+                format!("/v1/option-specs/{}/revisions/1", EntityId::new().inner()),
+                None,
+            ),
+        ] {
+            let (status, problem) = send(&served.app, method, &uri, Some(actor), body).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+            assert_eq!(problem["code"], "revoked", "{uri}");
+        }
+        served.gateway.shutdown().await?;
+        drop(served);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_cancelled_request_keeps_its_admitted_mutation_ahead_of_a_revocation() -> TestResult {
         let provision = served_provision()?;
         let served = served_store(&provision)?;
@@ -2758,6 +2812,25 @@ mod tests {
         // A refresh that read the store before the revocation lands later.
         authorization.refresh(Ok(older)).await?;
         assert!(!authorization.is_behind(&newer));
+        Ok(())
+    }
+
+    /// A refresh whose store read failed recomposes nothing and answers the
+    /// failure at once: it never waits for the commit-fence write guard,
+    /// here held by a revocation.
+    #[tokio::test]
+    async fn a_failed_read_refreshes_nothing_without_the_fence() -> TestResult {
+        let authorization = loaded(&served_provision()?)?;
+        let _fence = authorization.exclusive_fence().await;
+        let refreshed = tokio::time::timeout(
+            Duration::from_secs(5),
+            authorization.refresh(Err(crate::GatewayAuthorizationError::AuthorityUnavailable)),
+        )
+        .await?;
+        assert!(matches!(
+            refreshed,
+            Err(crate::GatewayAuthorizationError::AuthorityUnavailable)
+        ));
         Ok(())
     }
 
@@ -4191,9 +4264,10 @@ mod tests {
         assert!(authorization
             .authorize(request(GatewayOperationV1::READ_SESSION))
             .is_ok());
-        assert!(authorization
-            .authorize(request(GatewayOperationV1::CREATE_TIMELINE))
-            .is_err());
+        assert!(matches!(
+            authorization.authorize(request(GatewayOperationV1::CREATE_TIMELINE)),
+            Err(crate::GatewayAuthorizationError::Denied(_))
+        ));
         Ok(())
     }
 
@@ -4207,6 +4281,7 @@ mod tests {
         let actor = actor()?;
         let (mut gateway, app) = consented_gateway(&path, &consented_provision()?)?;
         drop(app);
+        let ceiling = gateway.limits.max_events_per_timeline;
         // The consent Timeline holds its three grants: a revocation exceeds it.
         gateway.limits.max_events_per_timeline = 3;
         let app = app_of(gateway.clone());
@@ -4223,7 +4298,19 @@ mod tests {
             session_of(&app, actor).await?["consents"][0]["state"],
             "granted"
         );
+        // The refused append released its fence reservation: once the
+        // ceiling allows it, the same request records the revocation.
+        let mut raised = gateway.clone();
+        raised.limits.max_events_per_timeline = ceiling;
+        let raised_app = app_of(raised.clone());
+        let (status, revocation) =
+            revoke_with(&raised_app, actor, &consent, "over-the-ceiling").await?;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(revocation["consent_ref"], consent);
+        assert_eq!(revocation["generation"], 4);
         gateway.shutdown().await?;
+        drop(raised_app);
+        drop(raised);
         drop(gateway);
         drop(app);
         Ok(())
@@ -4265,6 +4352,14 @@ mod tests {
         let consent_ref = granted.first().ok_or("a consent is recorded")?.id;
         let gateway =
             crate::gateway_with_erasure_host_and_authorization(host, [actor], authorization)?;
+        let consent_head = || async {
+            gateway
+                .store
+                .protected_logical_head(local_principal_consent_timeline())
+                .await
+                .map_err(|error| format!("{error:?}"))
+        };
+        assert_eq!(consent_head().await?, Seq::from_u64(3));
         let app = app_of(gateway.clone());
         let (status, problem) =
             revoke_with(&app, actor, &json!(consent_ref.to_string()), "unbound").await?;
@@ -4275,6 +4370,8 @@ mod tests {
                 json!("temporarily-unavailable")
             )
         );
+        // Nothing was appended to the consent Timeline.
+        assert_eq!(consent_head().await?, Seq::from_u64(3));
         let permit = gateway
             .authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
             .await?;
