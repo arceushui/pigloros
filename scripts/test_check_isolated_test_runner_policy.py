@@ -610,6 +610,17 @@ def check_namespace_runner(temporary: Path) -> None:
         ('--init-groups "${DROP[@]}"', "--init-groups"),
         ('"${DROP[@]}" \\\n  python3 "$HELPER" "$@"', '"${DROP[@]}" \\\n  "$@"'),
         ("sh -c 'ip link set lo up' 2>/dev/null; then", "true; then"),
+        # --hold-network-capability holds CAP_NET_ADMIN alone, and only as the invoking user.
+        ("-all,+net_admin --inh-caps", "-all,+net_admin,+net_raw --inh-caps"),
+        ("--ambient-caps=-all,+net_admin)", "--ambient-caps=-all,+sys_admin)"),
+        ("readonly CAPABILITIES\n", "readonly CAPABILITIES\nEXTRA=(--bounding-set=+all)\n"),
+        ('--reuid="$(id -u)" ', "--reuid=0 "),
+        ('--init-groups "${DROP[@]}"', '--init-groups --reuid=0 "${DROP[@]}"'),
+        ('--init-groups "${DROP[@]}"', '--init-groups --keep-caps "${DROP[@]}"'),
+        ("  shift\n", "  shift\n  sudo -n true\n"),
+        ('readonly DROP=(--no-new-privs "${CAPABILITIES[@]}")',
+         "readonly DROP=(--no-new-privs)"),
+        ("readonly CAPABILITIES\n", "CAPABILITIES=(--bounding-set=-all)\nreadonly CAPABILITIES\n"),
     )
     for index, (old, new) in enumerate(unsafe):
         if repinned(temporary, f"namespace-{index}", NAMESPACE_RUNNER, old, new).returncode == 0:

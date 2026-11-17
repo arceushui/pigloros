@@ -89,6 +89,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/execute/tests/ownership/abandonment.rs",
     "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
+    "src/mode_profile/tests.rs",
     # The Windows owner bridge's #[cfg(test)] native harness; its fixtures
     # (for example Fixture::consuming_step) see run-dependent native coverage.
     "src/adapter/native_tests.rs",

@@ -34,9 +34,15 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod declaration;
 mod gmp1;
+mod no_route;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+pub use no_route::{
+    check_air_gapped_no_route_v1, AirGappedHostFactV1, AirGappedHostFactsV1,
+    AirGappedNoRouteDenialV1,
+};
 
 use std::{
     collections::BTreeSet,
@@ -59,7 +65,7 @@ use pos_core::{
 };
 use pos_runtime::ErasureExecutionHostV1;
 
-use gmp1::{Gmp1RecordV1, AIR_GAPPED_MODE_PROFILE_ID, LOCAL_MODE_PROFILE_ID};
+use gmp1::{Gmp1RecordV1, AIR_GAPPED_MODE_PROFILE_ID, AIR_GAPPED_NO_ROUTE, LOCAL_MODE_PROFILE_ID};
 
 mod compiled {
     include!(concat!(env!("OUT_DIR"), "/gateway_mode_profiles.rs"));
@@ -117,6 +123,10 @@ pub enum GatewayModeErrorV1 {
     /// `LEDGER_SOURCE` names a network source.
     #[error("LEDGER_SOURCE must be a local filesystem path")]
     NetworkLedgerSource,
+    /// Startup predicate 6, `air-gapped-no-route`, found a network path or a
+    /// network capability (ADR-135 §4).
+    #[error("air-gapped-no-route refused the Air-Gapped mode: {0}")]
+    NetworkPathPresent(AirGappedNoRouteDenialV1),
     /// The store refused or failed the binding operation.
     #[error("store execution-mode binding failed: {0}")]
     Store(#[from] pos_core::GatewayModeBindingErrorV1),
@@ -330,7 +340,7 @@ fn decode_gmp1(bytes: &[u8]) -> Option<Gmp1RecordV1> {
         ingress: small_list(ingress)?,
         startup_predicates: small_list(predicates)?,
         revocation_freshness: small(&freshness)?,
-        registration_profile_id: optional_text(registration).ok()?,
+        registration_profile_id: text(registration)?,
         previous_mode_profile_digest: optional_digest(previous).ok()?,
     };
     (record.validate().is_ok() && record.encode() == bytes).then_some(record)
@@ -351,15 +361,6 @@ fn small_list(value: Value) -> Option<Vec<u8>> {
         .into_array()
         .ok()
         .and_then(|items| items.iter().map(small).collect())
-}
-
-/// A text or `null` field; `Err` for any other value.
-fn optional_text(value: Value) -> Result<Option<String>, ()> {
-    if value.is_null() {
-        Ok(None)
-    } else {
-        text(value).map(Some).ok_or(())
-    }
 }
 
 /// A 32-byte string or `null` field; `Err` for any other value.
@@ -392,8 +393,12 @@ pub(crate) fn installed_gateway_mode_profile_v1(
     .and_then(|()| GatewayModeProfileV1::decode(id, bytes))
 }
 
-/// Run startup predicates 1 to 4, the pure configuration checks, for `id`
-/// before any lock, store, ledger or listener (ADR-134 §4).
+/// Run the step-2 startup predicates of `id` before any lock or store.
+///
+/// These are predicates 1 to 4, the pure configuration checks, and, for a
+/// profile that declares it, predicate 6 `air-gapped-no-route` over this
+/// process's `/proc/self` facts; they run before any lock, store, ledger or
+/// listener (ADR-134 §4, ADR-135 §4).
 ///
 /// # Errors
 /// Returns the first refused predicate.
@@ -412,6 +417,23 @@ fn verify_predicates(
     listeners_within_ingress(profile, composition)
         .and_then(|()| network_features_granted(profile, composition))
         .and_then(|()| no_network_ledger_source(composition))
+        .and_then(|()| air_gapped_no_route(profile))
+}
+
+/// Predicate 6: a profile that declares `air-gapped-no-route` runs only in a
+/// loopback-only namespace without network capabilities, read from this
+/// process's own `/proc/self` facts and never from caller input.
+fn air_gapped_no_route(profile: &GatewayModeProfileV1) -> Result<(), GatewayModeErrorV1> {
+    if profile
+        .record
+        .startup_predicates
+        .contains(&AIR_GAPPED_NO_ROUTE)
+    {
+        check_air_gapped_no_route_v1(&AirGappedHostFactsV1::read())
+            .map_err(GatewayModeErrorV1::NetworkPathPresent)
+    } else {
+        Ok(())
+    }
 }
 
 const fn refuse(refused: bool, error: GatewayModeErrorV1) -> Result<(), GatewayModeErrorV1> {
@@ -704,8 +726,8 @@ impl GatewayModeBindingV1 {
 
     /// The ADR-058 profile this mode's own Plugin registration selects
     /// (field 9); it never authorizes.
-    pub(crate) fn registration_profile_id(&self) -> Option<&str> {
-        self.profile.record.registration_profile_id.as_deref()
+    pub(crate) fn registration_profile_id(&self) -> &str {
+        &self.profile.record.registration_profile_id
     }
 
     /// The signal a stale write fires.
