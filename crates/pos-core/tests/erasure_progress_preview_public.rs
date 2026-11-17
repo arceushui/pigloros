@@ -404,7 +404,7 @@ fn recorded_progress_and_preview_follow_every_committed_step() -> TestResult {
 fn recorded_progress_and_preview_refuse_an_unrecoverable_record() -> TestResult {
     let request = request()?;
     let id = request.reference();
-    let (mut coordinator, adapter) = frozen(&request)?;
+    let (coordinator, adapter) = frozen(&request)?;
     // An unknown request has no record to preview.
     assert_eq!(
         coordinator
