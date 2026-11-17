@@ -1,0 +1,34 @@
+{
+  "name": "preference-unsupported-schema-version",
+  "operation_id": "createPreference",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "schema_version": 2,
+      "weights": [
+        {
+          "dimension": "nature",
+          "weight_micro": 800000
+        }
+      ]
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unsupported-version",
+      "title": "Unsupported version",
+      "status": 400,
+      "detail": "unsupported schema_version",
+      "instance": "/v1/preferences",
+      "code": "unsupported-version",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

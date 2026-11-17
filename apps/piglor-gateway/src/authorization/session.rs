@@ -170,7 +170,8 @@ impl GatewayAuthorization {
                     principal: decision.principal().clone(),
                     entity_ids,
                     grants: GatewayOperationV1::ALL
-                        .into_iter()
+                        .iter()
+                        .copied()
                         .filter(|operation| {
                             mode.network_allowed() || *operation != GatewayOperationV1::NETWORK
                         })
