@@ -1,5 +1,5 @@
 {
-  "name": "draft-scenario-room-derive",
+  "name": "scenario-room-derive",
   "operation_id": "deriveScenarioRoomRevision",
   "request": {
     "path": {
@@ -7,7 +7,8 @@
     },
     "headers": {
       "Idempotency-Key": "client-1-2",
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
     },
     "body": {
       "parent_revision": 1,
@@ -20,17 +21,13 @@
         "intervention_policy": 1,
         "plugins": [
           {
-            "plugin_id": "world",
-            "version": "1.0.0"
-          },
-          {
-            "plugin_id": "society",
-            "version": "1.0.0"
+            "plugin_id": "gateway-world-actions",
+            "version": "0.1.0"
           }
         ],
         "rules": [
           {
-            "rule_id": "society.nudge.scale",
+            "rule_id": "gateway-world-actions.nudge.scale",
             "value_micro": 500000
           }
         ],
@@ -64,7 +61,7 @@
       "id": "01JC0GATEWAYW9R00M00000001",
       "revision": 2,
       "provenance": {
-        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "digest": "fd6e6cb67f418f827eed51918ee73b195a95d0e478a85da75eb99db0145288ab",
         "origin": "principal-authored"
       },
       "mode_profile": {
@@ -94,17 +91,13 @@
         "intervention_policy": 1,
         "plugins": [
           {
-            "plugin_id": "world",
-            "version": "1.0.0"
-          },
-          {
-            "plugin_id": "society",
-            "version": "1.0.0"
+            "plugin_id": "gateway-world-actions",
+            "version": "0.1.0"
           }
         ],
         "rules": [
           {
-            "rule_id": "society.nudge.scale",
+            "rule_id": "gateway-world-actions.nudge.scale",
             "value_micro": 500000
           }
         ],
@@ -128,18 +121,18 @@
         "governance_ref": "01JC0GATEWAYW90G0VERN00001",
         "privacy_export_ref": "01JC0GATEWAYW90PR1VACY0001",
         "correlation_id": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f",
-        "plugin_composition_hash": "0606060606060606060606060606060606060606060606060606060606060606",
-        "rule_set_hash": "0707070707070707070707070707070707070707070707070707070707070707",
-        "descriptor_hash": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        "plugin_composition_hash": "361f956939882f237b9bedde8cfb696bafed4edc7102abc753100eeea2b28842",
+        "rule_set_hash": "d6680d8982d3d59c9e957ed271cfc33550f7df4ed173438b0a6d8c7597f020d9",
+        "descriptor_hash": "38faafa40c54b39de8ba95636f7c68a1e6428d0b867e86cadff943e302a2e975"
       },
       "parent_revision": 1,
       "commit": {
         "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
         "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
-        "event_id": "01JC0GATEWAYW9EVENT0000001",
-        "seq": 2,
+        "event_id": "01JC0GATEWAYW9EVENT0000002",
+        "seq": 3,
         "event_schema_id": "room.revision.v1",
-        "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.3"
+        "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.4"
       }
     }
   }
