@@ -1,0 +1,67 @@
+{
+  "name": "preference-create",
+  "operation_id": "createPreference",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "schema_version": 1,
+      "weights": [
+        {
+          "dimension": "nature",
+          "weight_micro": 800000
+        },
+        {
+          "dimension": "cost",
+          "weight_micro": -400000
+        }
+      ]
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 201,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:preference-revision",
+      "schema_version": 1,
+      "id": "01JC0GATEWAYW9PREF0000001A",
+      "revision": 1,
+      "provenance": {
+        "digest": "936a5e2a9d04fe2d747e3593dc39c284b059226d0294c15bafc967b269754e60",
+        "origin": "principal-authored"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "unavailable",
+        "reason": "not-installed"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "subject_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+      "weights": [
+        {
+          "dimension": "cost",
+          "weight_micro": -400000
+        },
+        {
+          "dimension": "nature",
+          "weight_micro": 800000
+        }
+      ],
+      "parent_revision": null,
+      "digest": "f14145c6e48b82b1d711a305bcdf9c1bfc5308c55052e056627bdbf136c770bf"
+    }
+  }
+}

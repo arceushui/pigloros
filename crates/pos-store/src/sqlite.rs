@@ -170,6 +170,7 @@ mod fork_replay_registry;
 mod fork_replay_row;
 mod fork_replay_suffix;
 mod gateway_mode_binding;
+mod gateway_revision;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod interval_test_support;
@@ -2543,8 +2544,10 @@ impl SqliteStore {
                      evidence BLOB NOT NULL CHECK (length(evidence) IN (14, 71))
                  );
                  {}
+                 {}
                  COMMIT;",
-                sqlite_schema_ddl(gateway_mode_binding::GATEWAY_MODE_SCHEMA_TABLES)
+                sqlite_schema_ddl(gateway_mode_binding::GATEWAY_MODE_SCHEMA_TABLES),
+                sqlite_schema_ddl(gateway_revision::GATEWAY_REVISION_SCHEMA_TABLES)
             ))
             .map_err(Self::into_storage_error)
             .and_then(|()| self.validate_authority_schema_and_state())
@@ -2553,6 +2556,7 @@ impl SqliteStore {
     fn validate_authority_schema_and_state(&self) -> Result<(), CoreError> {
         self.validate_authority_schema()
             .and_then(|()| self.validate_gateway_mode_schema())
+            .and_then(|()| self.validate_gateway_revision_schema())
             .and_then(|()| {
                 read_authority_state(&self.conn)
                     .map(|_| ())
