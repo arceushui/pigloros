@@ -55,6 +55,10 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/execute/tests/ownership/abandonment.rs",
     "src/provider_lifecycle/tests.rs",
 )
+EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS = (
+    "src/adapter/native_tests.rs",
+    "src/adapter/native_tests/**",
+)
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",
     "benches/**",
@@ -71,6 +75,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/action_admission_tests.rs",
     *EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS,
     *EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS,
+    *EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS,
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -538,6 +543,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/provider_barrier/production.rs",
             "src/provider_lifecycle.rs",
             "src/provider_lifecycle/production.rs",
+            "src/adapter.rs",
+            "src/adapter/native.rs",
+            "src/adapter/native_tests_production.rs",
+            "src/adapter/surface/native_tests/production.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):
