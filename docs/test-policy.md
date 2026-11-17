@@ -36,7 +36,8 @@ to prove its own unmutated scratch copy before testing mutations. A fixture
 missing only from the copied tree must fail the baseline rather than count as
 a caught mutant. The aggregate gate requires the shared baseline and every
 shard. This also applies to manual workflow dispatch. The separate baseline has
-the normal test job's 30-minute limit; mutant limits remain 120 seconds for tests, 600 seconds for
+the normal test job's 30-minute limit; mutant limits are 240 seconds for tests (this also bounds each
+shard's unmutated baseline, and pos-store's suite runs close to 120 seconds), 600 seconds for
 builds, and a 60-minute shard watchdog. `scripts/test_mutation_workflow_policy.py`
 locks this dependency and exercises failed, cancelled, missing and skipped
 results against the actual fan-in shell. Harness startup failures are not
