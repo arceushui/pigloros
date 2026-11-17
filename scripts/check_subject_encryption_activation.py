@@ -39,6 +39,10 @@ REFERENCE = re.compile(r"\b(?:" + NAMES + r")\b")
 PORT_REFERENCE = re.compile(r"\b(?:" + "|".join(PORTS) + r")\b")
 MACRO = re.compile(r"\b\w+\s*!\s*([({\[])")
 TEST_ITEM = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:#\[[^\]]*\]\s*)*")
+# Equivalence of the prefilter: `scan` and `strip_comments` only blank text or turn
+# a raw identifier into underscores, so a name absent from the raw file is absent
+# from the scanned code, and every finding of `check_source` needs one of these names.
+GUARDS = (*TYPES, *PORTS)
 FAKES = {
     "crates/pos-owner-bridge/tests/protocol/main.rs": {"FakeEnrollment", "FakeUnlock"},
 }
@@ -67,6 +71,8 @@ def without_test_items(code: str) -> str:
 
 def check_source(relative: str, text: str) -> list[str]:
     """Check real tokens and the actual file-leading gate, not quoted examples."""
+    if not any(token in text for token in GUARDS):
+        return []
     scanned = scan(text)
     code = scanned.code
     errors = []

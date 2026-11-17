@@ -61,6 +61,13 @@ impl OperationSpecV1 for CreatePredictionOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::CREATE_PREDICTION;
 }
 
+/// `GET /v1/session`.
+pub struct ReadSessionOperation;
+
+impl OperationSpecV1 for ReadSessionOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_SESSION;
+}
+
 /// The authority inputs of one protected operation, from the request head.
 ///
 /// They are only the acting entity, when the request names a valid one.

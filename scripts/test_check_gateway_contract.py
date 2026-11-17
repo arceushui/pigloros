@@ -10,10 +10,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_gateway_contract as checker  # noqa: E402
+import generate_gateway_conformance_fixtures as generator  # noqa: E402
 
 DOCUMENT = checker.load(checker.OPENAPI)
 REGISTRY = checker.load(checker.PROBLEM_TYPES)
@@ -51,10 +53,25 @@ UNROUTED_PATHS = Path(__file__).resolve().parent / "data/gateway_unrouted_paths.
 TIMELINES = "/v1/timelines"
 EVENTS = "/v1/timelines/{timeline_id}/events"
 PREVIEWS = "/v1/decision-previews"
+# A Draft read whose family has both a positive and a fail-closed example.
+PREFERENCE = "/v1/preferences/{preference_id}/revisions/{revision}"
 
 
 def example(name: str) -> dict:
     return checker.load(checker.EXAMPLES / f"{name}.json")  # type: ignore[return-value]
+
+
+LOCAL_MODE = "gateway-mode-local-v1"
+LOCAL_HEAD = checker.MODE_PROFILE_ROTATION_CHAINS[LOCAL_MODE][-1]
+NEXT_HEAD = "f" * 64
+
+
+def rotated_local_chain():
+    """The rotation chains after a reviewed Local revision appended `NEXT_HEAD`: every body
+    that names today's Local head now names its predecessor."""
+    chains = {**checker.MODE_PROFILE_ROTATION_CHAINS}
+    chains[LOCAL_MODE] = (*chains[LOCAL_MODE], NEXT_HEAD)
+    return mock.patch.dict(checker.MODE_PROFILE_ROTATION_CHAINS, chains)
 
 
 def problem(status: int, code: str, instance: str = TIMELINES) -> dict:
@@ -197,12 +214,13 @@ class CheckGatewayContractTest(unittest.TestCase):
         self.assertGreater(len(checker.check_limits(subject)), 0)
 
     def test_a_served_exchange_cannot_reach_a_draft_operation(self) -> None:
-        with self.assertRaisesRegex(checker.ContractError, "Draft operation getSession"):
-            contract().operation_for("GET", "/v1/session")
+        export = f"/v1/exports/{checker.SAMPLE_ULID}"
+        with self.assertRaisesRegex(checker.ContractError, "Draft operation getExport"):
+            contract().operation_for("GET", export)
         exchange = {
             "router": "loopback",
             "method": "GET",
-            "path": "/v1/session",
+            "path": export,
             "expect": {"status": 401, "body": {"json": problem(401, "unauthenticated")}},
         }
         payload = {"subcases": [{"id": "draft.1", "exchanges": [exchange]}]}
@@ -224,9 +242,10 @@ class CheckGatewayContractTest(unittest.TestCase):
         examples = [
             (name, item)
             for name, item in checker.load_examples()
-            if item["operation_id"] != "getSession" or item["response"]["status"] < 400
+            if item["operation_id"] not in ("createPreference", "getPreferenceRevision")
+            or item["response"]["status"] < 400
         ]
-        with self.assertRaisesRegex(checker.ContractError, "family session"):
+        with self.assertRaisesRegex(checker.ContractError, "family preference"):
             checker.check_examples(contract(), examples)
 
     def test_a_draft_mutation_without_an_idempotency_key_is_rejected(self) -> None:
@@ -244,15 +263,15 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_operation_must_be_structurally_draft(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["paths"]["/v1/session"]["get"]["x-pigloros-owner"]
+        del document["paths"][PREFERENCE]["get"]["x-pigloros-owner"]
         with self.assertRaisesRegex(checker.ContractError, "owner ticket"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"]["/v1/session"]["get"]["description"] = "Read the session."
+        document["paths"][PREFERENCE]["get"]["description"] = "Read the preference."
         with self.assertRaisesRegex(checker.ContractError, "does not start with Draft"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"]["/v1/session"]["get"]["tags"] = []
+        document["paths"][PREFERENCE]["get"]["tags"] = []
         with self.assertRaisesRegex(checker.ContractError, "one family tag"):
             checker.check_description(contract(document=document))
 
@@ -264,7 +283,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_read_answers_an_enveloped_resource(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        answer = document["paths"]["/v1/session"]["get"]["responses"]["200"]["content"]
+        answer = document["paths"][PREFERENCE]["get"]["responses"]["200"]["content"]
         answer["application/json"]["schema"] = {
             "$ref": "#/components/schemas/CommittedEventReceipt"
         }
@@ -274,13 +293,15 @@ class CheckGatewayContractTest(unittest.TestCase):
     def test_a_served_operation_reaching_a_draft_schema_is_rejected(self) -> None:
         document = copy.deepcopy(DOCUMENT)
         answer = document["paths"]["/health"]["get"]["responses"]["200"]["content"]
-        answer["application/json"]["schema"] = {"$ref": "#/components/schemas/Session"}
+        answer["application/json"]["schema"] = {
+            "$ref": "#/components/schemas/PreferenceRevision"
+        }
         with self.assertRaisesRegex(checker.ContractError, "served operations reach the Draft"):
             checker.check_description(contract(document=document))
 
     def test_a_draft_operation_reaching_an_unmarked_schema_is_rejected(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["components"]["schemas"]["Session"]["x-pigloros-maturity"]
+        del document["components"]["schemas"]["PreferenceRevision"]["x-pigloros-maturity"]
         with self.assertRaisesRegex(checker.ContractError, "neither Draft nor served"):
             checker.check_description(contract(document=document))
 
@@ -329,7 +350,7 @@ class CheckGatewayContractTest(unittest.TestCase):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
         schemas = document["components"]["schemas"]
-        del schemas["ResourceEnvelope"]["properties"]["schema_id"]["maxLength"]
+        del schemas["CommittedEventReceipt"]["properties"]["event_schema_id"]["maxLength"]
         with self.assertRaisesRegex(checker.ContractError, "unbounded string"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
@@ -364,37 +385,45 @@ class CheckGatewayContractTest(unittest.TestCase):
         ):
             self.assertTrue(subject.schema_errors(invalid, schema), invalid)
 
-    def test_local_mode_never_claims_an_air_gapped_profile(self) -> None:
+    def test_profile_identifiers_are_open_but_namespaced(self) -> None:
+        """The servable sets of README rule 3 are a server invariant, not a schema rule: the
+        identifiers are open so a later family (#1372) stays within v1, but the Gateway mode
+        and ADR-058 namespaces stay disjoint and a known mode profile keeps its mode."""
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
         body = example("draft-preference-get")["response"]["body"]
         self.assertEqual(body["mode_profile"]["mode"], "local")
         self.assertEqual(subject.schema_errors(body, schema), [])
         installed = {"profile_kind": "epf1", "state": "installed", "profile_digest": "0" * 64}
-        for profile_id in ("replay-v1", "deterministic-local-v1", "live-local-v1"):
+        for profile_id in ("replay-v1", "deterministic-local-v1", "live-local-v1",
+                           "deterministic-air-gapped-v1", "live-air-gapped-v1"):
             served = {**body, "execution_profile": {**installed, "profile_id": profile_id}}
-            self.assertEqual(subject.schema_errors(served, schema), [])
-        air_profile = {**installed, "profile_id": "deterministic-air-gapped-v1"}
-        self.assertTrue(subject.schema_errors({**body, "execution_profile": air_profile}, schema))
-        air_mode = {
-            **body["mode_profile"],
-            "mode": "air-gapped",
-            "mode_profile_id": "gateway-mode-air-gapped-v1",
-            "mode_profile_digest": checker.GOLDEN_MODE_PROFILE_DIGESTS[
-                "gateway-mode-air-gapped-v1"
-            ],
-        }
-        self.assertEqual(subject.schema_errors({**body, "mode_profile": air_mode}, schema), [])
-        self.assertEqual(
-            subject.schema_errors({**body, "mode_profile": air_mode,
-                                   "execution_profile": air_profile}, schema),
-            [],
-        )
-        local_only = {**installed, "profile_id": "live-local-v1"}
-        self.assertTrue(subject.schema_errors({**body, "mode_profile": air_mode,
-                                               "execution_profile": local_only}, schema))
+            self.assertEqual(subject.schema_errors(served, schema), [], profile_id)
+        for profile_id in ("gateway-mode-local-v1", "Live-local-v1", "live-local", "live-v0",
+                           "a" * 62 + "-v1"):
+            served = {**body, "execution_profile": {**installed, "profile_id": profile_id}}
+            self.assertTrue(subject.schema_errors(served, schema), profile_id)
+        reason = {"profile_kind": "epf1", "state": "unavailable", "reason": "not-qualified"}
+        self.assertEqual(subject.schema_errors({**body, "execution_profile": reason}, schema), [])
         self.assertTrue(subject.schema_errors(
-            {**body, "mode_profile": {**body["mode_profile"], "mode": "air-gapped"}}, schema))
+            {**body, "execution_profile": {**reason, "reason": "Not Installed"}}, schema))
+        mode = body["mode_profile"]
+        self.assertTrue(subject.schema_errors(
+            {**body, "mode_profile": {**mode, "mode": "air-gapped"}}, schema))
+        self.assertTrue(subject.schema_errors(
+            {**body, "mode_profile": {**mode, "mode_profile_id": "deterministic-local-v1"}},
+            schema))
+        future = {**mode, "mode_profile_id": "gateway-mode-edge-v1", "mode": "edge"}
+        self.assertEqual(subject.schema_errors({**body, "mode_profile": future}, schema), [])
+        self.assertTrue(checker.mode_profile_errors({**body, "mode_profile": future}))
+
+    def test_the_closed_sets_say_so(self) -> None:
+        schemas = DOCUMENT["components"]["schemas"]
+        for schema in (schemas["ExecutionProfile"]["properties"]["state"],
+                       schemas["ProvenanceReference"]["properties"]["origin"],
+                       schemas["SessionModeProfile"]["properties"]["network"]):
+            self.assertIn("enum", schema)
+            self.assertIn("deliberately closed in v1", schema["description"])
 
     def test_a_resource_discloses_its_produced_under_mode_profile(self) -> None:
         subject = contract()
@@ -417,8 +446,8 @@ class CheckGatewayContractTest(unittest.TestCase):
     def test_only_the_session_reports_the_current_network_posture(self) -> None:
         subject = contract()
         schema = {"$ref": "#/components/schemas/Session"}
-        local = example("draft-session-local")["response"]["body"]
-        air = example("draft-session-air-gapped")["response"]["body"]
+        local = example("session-local")["response"]["body"]
+        air = example("session-air-gapped")["response"]["body"]
         self.assertEqual(subject.schema_errors(local, schema), [])
         self.assertEqual(subject.schema_errors(air, schema), [])
         self.assertEqual(air["mode_profile"]["network"], "absent")
@@ -427,7 +456,8 @@ class CheckGatewayContractTest(unittest.TestCase):
         self.assertEqual(subject.schema_errors({**local, "mode_profile": granted}, schema), [])
         for invalid in (
             {**local["mode_profile"], "network": "absent"},
-            {**local["mode_profile"], "network_grants": ["ledger"]},
+            {**local["mode_profile"], "network_grants": ["Ledger"]},
+            {**local["mode_profile"], "network_grants": [f"grant-{n}" for n in range(17)]},
             {**local["mode_profile"], "network_grants": ["owntracks", "owntracks"]},
             {key: value for key, value in local["mode_profile"].items() if key != "network"},
         ):
@@ -466,10 +496,67 @@ class CheckGatewayContractTest(unittest.TestCase):
         forged["mode_profile"]["mode_profile_id"] = "gateway-mode-air-gapped-v1"
         self.assertTrue(checker.mode_profile_errors(forged))
         operations = checker.operations_by_id(contract())
-        session = example("draft-session-local")
+        session = example("session-local")
         session["response"]["body"]["mode_profile"]["mode_profile_digest"] = "1" * 64
-        with self.assertRaisesRegex(checker.ContractError, "golden gateway-mode-local-v1"):
+        with self.assertRaisesRegex(checker.ContractError, "the head gateway-mode-local-v1"):
             checker.check_example(contract(), operations, "forged", session)
+        with self.assertRaisesRegex(checker.ContractError, "rotation-chain gateway-mode-local"):
+            checker.check_example(contract(), operations, "forged", session, frozen=True)
+        unknown = {"mode_profile_id": "gateway-mode-edge-v1", "mode_profile_digest": LOCAL_HEAD}
+        self.assertEqual(len(checker.mode_profile_errors(unknown, frozen=True)), 1)
+
+    def test_a_frozen_example_may_name_any_revision_of_its_rotation_chain(self) -> None:
+        subject = contract()
+        operations = checker.operations_by_id(subject)
+        session = example("session-local")
+        self.assertEqual(
+            session["response"]["body"]["mode_profile"]["mode_profile_digest"], LOCAL_HEAD
+        )
+        with rotated_local_chain():
+            checker.check_example(subject, operations, "frozen", session, frozen=True)
+            with self.assertRaisesRegex(checker.ContractError, "the head gateway-mode-local-v1"):
+                checker.check_example(subject, operations, "current", session)
+            self.assertGreater(checker.check_compatibility(subject), 0)
+            with self.assertRaisesRegex(checker.ContractError, "the head gateway-mode-local-v1"):
+                checker.check_examples(subject)
+            nested = {"items": [{"mode_profile_id": LOCAL_MODE, "mode_profile_digest": NEXT_HEAD}]}
+            self.assertEqual(checker.mode_profile_errors(nested), [])
+            nested["items"][0]["mode_profile_digest"] = LOCAL_HEAD
+            self.assertEqual(checker.mode_profile_errors(nested, frozen=True), [])
+            self.assertEqual(len(checker.mode_profile_errors(nested)), 1)
+
+    def test_the_conformance_inputs_and_oracles_name_the_chain_heads(self) -> None:
+        subject = contract()
+        self.assertGreater(checker.check_fixtures(subject), 0)
+        with rotated_local_chain():
+            with self.assertRaisesRegex(checker.ContractError, "oracle positive.json: .*head"):
+                checker.check_fixtures(subject)
+            with tempfile.TemporaryDirectory() as only_head:
+                for path in checker.FIXTURE_ORACLES.glob("*.json"):
+                    if path.name != "positive.json":
+                        (Path(only_head) / path.name).write_bytes(path.read_bytes())
+                with self.assertRaisesRegex(checker.ContractError, "^positive.json: .*head"):
+                    checker.check_fixtures(subject, oracles=Path(only_head))
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaisesRegex(checker.ContractError, "no gateway-client-conformance"):
+                checker.check_fixtures(subject, oracles=Path(empty))
+
+    def test_the_generator_names_the_checker_chain_heads(self) -> None:
+        source = (checker.ROOT / "scripts/check_gateway_contract.py").read_text(encoding="utf-8")
+        heads = generator.rotation_chain_heads(source)
+        self.assertEqual(heads, generator.MODE_PROFILE_DIGESTS)
+        self.assertEqual(
+            heads,
+            {key: chain[-1] for key, chain in checker.MODE_PROFILE_ROTATION_CHAINS.items()},
+        )
+        generator.check_mode_profile_digests()
+        rotated = source.replace(f'"{LOCAL_HEAD}",', f'"{LOCAL_HEAD}",\n        "{NEXT_HEAD}",')
+        self.assertEqual(generator.rotation_chain_heads(rotated)[LOCAL_MODE], NEXT_HEAD)
+        with mock.patch.object(generator.Path, "read_text", return_value=rotated):
+            with self.assertRaisesRegex(SystemExit, "not the contract checker's chain heads"):
+                generator.check_mode_profile_digests()
+        with self.assertRaisesRegex(SystemExit, "declares no MODE_PROFILE_ROTATION_CHAINS"):
+            generator.rotation_chain_heads("MODE_PROFILE_DIGESTS = {}\n")
 
     def test_the_execution_mode_profile_declaration_is_closed_and_golden(self) -> None:
         declaration = checker.load(checker.MODE_PROFILES)
@@ -477,7 +564,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         self.assertEqual(checker.check_mode_profiles(declaration, schema), 2)
         self.assertEqual(
             [profile["mode_profile_id"] for profile in declaration["profiles"]],
-            sorted(checker.GOLDEN_MODE_PROFILE_DIGESTS),
+            sorted(checker.MODE_PROFILE_ROTATION_CHAINS),
         )
 
         def rejected(mutate, message: str = "declaration") -> None:
@@ -507,20 +594,56 @@ class CheckGatewayContractTest(unittest.TestCase):
         rejected(lambda d: d["profiles"][1].update(registration_profile_id=None))
         rejected(lambda d: d["profiles"][1].update(startup_predicates=["linux"]))
         rejected(lambda d: d["profiles"].reverse(), "not sorted")
-        valid_rotation = copy.deepcopy(declaration)
-        valid_rotation["profiles"][1].update(
-            semantic_version="1.1.0", previous_mode_profile_digest="a" * 64)
-        self.assertEqual(checker.check_mode_profiles(valid_rotation, schema), 2)
+        rejected(lambda d: d["profiles"][1].update(
+            semantic_version="1.1.0", previous_mode_profile_digest="a" * 64),
+            "gateway-mode-local-v1 does not name its rotation-chain predecessor")
+        rotation = copy.deepcopy(declaration)
+        rotation["profiles"][1].update(
+            semantic_version="1.1.0", previous_mode_profile_digest=LOCAL_HEAD)
+        with rotated_local_chain():
+            self.assertEqual(checker.check_mode_profiles(rotation, schema), 2)
+            with self.assertRaisesRegex(checker.ContractError, "local-v1 does not name"):
+                checker.check_mode_profiles(declaration, schema)
+        middle = "e" * 64
+        three = {LOCAL_MODE: (LOCAL_HEAD, middle, NEXT_HEAD)}
+        with mock.patch.dict(checker.MODE_PROFILE_ROTATION_CHAINS, three):
+            rotation["profiles"][1].update(previous_mode_profile_digest=middle)
+            self.assertEqual(checker.check_mode_profiles(rotation, schema), 2)
+            rotation["profiles"][1].update(previous_mode_profile_digest=LOCAL_HEAD)
+            with self.assertRaisesRegex(checker.ContractError, "local-v1 does not name"):
+                checker.check_mode_profiles(rotation, schema)
+        for broken in ((), (LOCAL_HEAD, LOCAL_HEAD), (LOCAL_HEAD.upper(),), ("0" * 63,)):
+            with mock.patch.dict(checker.MODE_PROFILE_ROTATION_CHAINS, {LOCAL_MODE: broken}):
+                with self.assertRaisesRegex(checker.ContractError, "rotation chain is not"):
+                    checker.check_mode_profiles(declaration, schema)
 
     def test_a_resource_has_exactly_one_ordinal_and_no_unknown_member(self) -> None:
         subject = contract()
-        session = example("draft-session-local")["response"]["body"]
+        session = example("session-local")["response"]["body"]
         schema = {"$ref": "#/components/schemas/Session"}
         self.assertEqual(subject.schema_errors(session, schema), [])
         self.assertTrue(subject.schema_errors({**session, "revision": 1}, schema))
         self.assertTrue(subject.schema_errors({**session, "extra": 1}, schema))
         withheld = {"state": "available", "withheld": [{"member": "/x", "reason": "deleted"}]}
         self.assertTrue(subject.schema_errors({**session, "availability": withheld}, schema))
+
+    def test_the_served_session_accepts_both_contract_versions(self) -> None:
+        subject = contract()
+        session = example("session-local")["response"]["body"]
+        schema = {"$ref": "#/components/schemas/Session"}
+        for version in ("1.0.0-draft", "1.0.0"):
+            versioned = {**session, "contract": {"api_major": "v1", "contract_version": version}}
+            self.assertEqual(subject.schema_errors(versioned, schema), [], version)
+        for version in ("1.0.1", "2.0.0", "1.0.0-rc1"):
+            versioned = {**session, "contract": {"api_major": "v1", "contract_version": version}}
+            self.assertTrue(subject.schema_errors(versioned, schema), version)
+        revoked = {"state": "partial", "withheld": [{"member": "/consents", "reason": "revoked"}]}
+        self.assertEqual(subject.schema_errors({**session, "availability": revoked}, schema), [])
+        operation = subject.operations()[("GET", "/v1/session")]
+        self.assertEqual(operation["x-pigloros-status"], "served")
+        frozen = checker.load(checker.BASELINE)
+        self.assertIn("/v1/session", frozen["paths"])
+        self.assertIn("Session", frozen["components"]["schemas"])
 
     def test_an_admission_receipt_never_claims_a_commit(self) -> None:
         subject = contract()
@@ -616,8 +739,8 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_draft_values_are_bounded_integers(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        envelope = document["components"]["schemas"]["ResourceEnvelope"]["properties"]
-        del envelope["generation"]["maximum"]
+        receipt = document["components"]["schemas"]["CommittedEventReceipt"]["properties"]
+        del receipt["seq"]["maximum"]
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
@@ -984,7 +1107,7 @@ class CheckGatewayContractTest(unittest.TestCase):
                 item["response"]["body"]["head"] = -1
         with self.assertRaisesRegex(checker.ContractError, "response invalid"):
             checker.check_compatibility(contract(), frozen=broken)
-        drafted = frozen + [("draft.json", example("draft-session-local"))]
+        drafted = frozen + [("draft.json", example("draft-export-exported"))]
         with self.assertRaisesRegex(checker.ContractError, "no served operation"):
             checker.check_compatibility(contract(), frozen=drafted)
         with self.assertRaisesRegex(checker.ContractError, "no frozen compatibility examples"):
@@ -992,14 +1115,18 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_promoted_operation_must_be_frozen_and_freezing_only_appends(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        session = document["paths"]["/v1/session"]["get"]
-        session["x-pigloros-status"] = "served"
-        self.assert_breaking(document, "GET /v1/session: a served operation is not frozen")
+        export = document["paths"]["/v1/exports/{export_id}"]["get"]
+        export["x-pigloros-status"] = "served"
+        self.assert_breaking(
+            document, "GET /v1/exports/{export_id}: a served operation is not frozen"
+        )
         promoted = contract(document=document)
         baseline = checker.load(checker.BASELINE)
         frozen = checker.freeze(promoted, baseline)
-        self.assertEqual(frozen["paths"]["/v1/session"]["get"]["operationId"], "getSession")
-        self.assertIn("Session", frozen["components"]["schemas"])
+        self.assertEqual(frozen["paths"]["/v1/exports/{export_id}"]["get"]["operationId"],
+                         "getExport")
+        self.assertIn("Export", frozen["components"]["schemas"])
+        self.assertNotIn("Export", baseline["components"]["schemas"])
         self.assertIn("ResourceEnvelope", frozen["components"]["schemas"])
         for path in baseline["paths"]:
             self.assertEqual(frozen["paths"][path], baseline["paths"][path])

@@ -444,8 +444,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install evaluator packaging tools
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install --yes b3sum jq
+          bash scripts/prepare-ubuntu-package-mirror.sh b3sum jq
       - name: Build and verify standalone evaluator release evidence
         run: |
           shadow_directory="${RUNNER_TEMP}/caller-path-shadow"
@@ -482,8 +481,7 @@ jobs:
           fetch-depth: 0
       - name: Install fixture verification tools
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install --yes b3sum jq
+          bash scripts/prepare-ubuntu-package-mirror.sh b3sum jq
       - name: Obtain pinned offline SCS1 derivation inputs
         env:
           SYSTEMD_SCS1_SYSTEMD_SOURCE: ${{ runner.temp }}/systemd-scs1-source
@@ -563,8 +561,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fixture verification tools
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install --yes b3sum jq
+          bash scripts/prepare-ubuntu-package-mirror.sh b3sum jq
       - name: Reject non-main manual artifact publication
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |
@@ -805,9 +802,7 @@ jobs:
       - name: Install the musl and aarch64 cross toolchains
         run: |
           set -euo pipefail
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends musl-tools gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          bash scripts/prepare-ubuntu-package-mirror.sh --no-install-recommends musl-tools gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Build the provider binary as a static ELF for each architecture
         run: |
           set -euo pipefail
@@ -992,7 +987,11 @@ jobs:
     # out of this pull request.
     if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget: the pre-steps (full-history checkout, install-action, LCOV
+    # downloads), the resolver step's 130-minute bound on waiting for main's
+    # trusted baseline (see that step), then scoring and uploads, all within
+    # 150 minutes.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1033,8 +1032,14 @@ jobs:
         run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
+      # Polls up to 120 minutes while main's ci.yml run for the trusted base is
+      # still producing its cargo-crap baseline, then falls back to the nearest
+      # first-parent main ancestor's baseline (fetch-depth 0 above provides that
+      # history), then fails closed as before. The extra minutes cover the last
+      # poll, GitHub API retry backoff and the ancestor walk.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
+        timeout-minutes: 130
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
@@ -1099,6 +1104,7 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/provider_lifecycle/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
@@ -1143,6 +1149,7 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/provider_lifecycle/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
@@ -1869,8 +1876,7 @@ jobs:
           tool: cargo-depgraph
       - name: Install graphviz
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install -y graphviz
+          bash scripts/prepare-ubuntu-package-mirror.sh graphviz
       - name: Generate dependency graph
         run: |
           mkdir -p artifacts

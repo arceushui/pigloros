@@ -3,6 +3,7 @@
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from check_subject_encryption_activation import check_source, violations
@@ -81,6 +82,25 @@ class ActivationPolicyTests(unittest.TestCase):
             found = violations(root)
             self.assertEqual(len(found), 1)
             self.assertIn("crates/x/src/target/hidden.rs", found[0])
+
+
+    def test_prefilter_skips_only_files_without_a_guarded_name(self):
+        # scan and strip_comments only blank text, so a file whose raw bytes name no
+        # activation type or owner port cannot match after scanning: it is skipped.
+        import check_subject_encryption_activation as checker
+
+        scanned = []
+        original = checker.scan
+
+        def recording(text):
+            scanned.append(text)
+            return original(text)
+
+        with mock.patch.object(checker, "scan", recording):
+            self.assertEqual(check_source("crates/x/src/plain.rs", "// plain\nfn f() {}\n"), [])
+            self.assertEqual(scanned, [])
+            self.assertTrue(check_source("crates/x/src/lib.rs", OWNER))
+            self.assertEqual(scanned, [OWNER])
 
 
 if __name__ == "__main__":

@@ -13,8 +13,8 @@ contract (`contracts/gateway/v1/openapi.json` and its problem-type registry) and
 grammar and normalization of `fixtures/conformance/profiles/gateway-client-conformance/
 normative-requirements.md`. Every expected response body is also validated against the
 contract by `scripts/check_gateway_contract.py`. The only computed values are the `society.signal` payload bytes
-(the encoding the requirements text states) and the independent-evaluation digests, both
-derived here. The only primitive it imports is the BLAKE3 hash of
+(the encoding the requirements text states), the independent-evaluation digests and the Session
+provenance digest (the record the `Session` schema states), all derived here. The only primitive it imports is the BLAKE3 hash of
 `generate_pmf1_golden_vectors.py`.
 
 Usage:
@@ -32,6 +32,7 @@ against its schema. It then regenerates every output and compares it with the ch
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import struct
@@ -80,6 +81,18 @@ ACTOR = "01JC0GATEWAYF1XTVREACT0R00"
 BODY = "01JC0GATEWAYF1XTVREB0DY000"
 ENTITY = "01JC0GATEWAYF1XTVRES1GNA10"
 ULID_PATTERN = "[0-7][0-9A-HJKMNP-TV-Z]{25}"
+CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+# The Principal of the authorized compositions' fixture Local Principal document: 16 bytes 0x01.
+PRINCIPAL_BYTES = bytes([1]) * 16
+# The ADR-134 digest of each Gateway execution-mode profile's current revision: the head of its
+# rotation chain in `scripts/check_gateway_contract.py` (`--check` verifies the two agree).
+MODE_PROFILE_DIGESTS = {
+    "gateway-mode-air-gapped-v1":
+        "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
+    "gateway-mode-local-v1": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+}
+# The operations the fixture Local Principal is granted, sorted: what its Session discloses.
+PRINCIPAL_GRANTS = ["session.read", "timeline.create", "timeline.events.read"]
 CURSOR_PATTERN = f"v1\\.[0-9a-f]{{64}}\\.{ULID_PATTERN}\\.[1-9][0-9]*"
 
 # The route of a request path (query removed) and the capability it needs (section "Routes").
@@ -90,6 +103,7 @@ ROUTE_CAPABILITY = {
     "events": "timeline.events.read",
     "signals": "timeline.signals.append",
     "actions": "world.action.v1.submit",
+    "session": "session.read",
 }
 CAPABILITIES = tuple(sorted(ROUTE_CAPABILITY.values()))
 MAX_TIMELINES = 64  # README "Timeline bound"
@@ -98,7 +112,12 @@ EVENT_LIMIT = 100  # README "Polling": limit defaults to and may not exceed 100
 
 def route_of(path: str) -> str | None:
     base = path.split("?", 1)[0]
-    fixed = {"/health": "health", "/v1/ledger": "ledger", "/v1/timelines": "create"}
+    fixed = {
+        "/health": "health",
+        "/v1/ledger": "ledger",
+        "/v1/timelines": "create",
+        "/v1/session": "session",
+    }
     if base in fixed:
         return fixed[base]
     match = re.fullmatch(r"/v1/timelines/([^/]+)/(events|signals|actions)", base)
@@ -231,6 +250,56 @@ def not_routed(path: str) -> dict:
     return problem(404, "not-found-or-unavailable", path.replace("{timeline}", "<ulid>"))
 
 
+def ulid_text(data: bytes) -> str:
+    """The canonical Crockford base32 text of a 16-byte ULID."""
+    value = int.from_bytes(data, "big")
+    return "".join(CROCKFORD[(value >> (5 * (25 - index))) & 31] for index in range(26))
+
+
+def session_body(mode_profile_id: str, mode: str, network: str) -> dict:
+    """The `Session` the contract prescribes for the fixture Local Principal: generation 1 (its
+    one grant is issued at authority position 1 and binds no consent), binding epoch 1, no
+    operator network grant, and the provenance digest of the `Session` schema description."""
+    principal = ulid_text(PRINCIPAL_BYTES)
+    digest = MODE_PROFILE_DIGESTS[mode_profile_id]
+    record = (
+        b"PiglorOS.GatewaySession.v1\x00"
+        + PRINCIPAL_BYTES
+        + (1).to_bytes(8, "big")
+        + digest.encode("ascii")
+        + (1).to_bytes(8, "big")
+    )
+    return {
+        "availability": {"state": "available", "withheld": []},
+        "consents": [],
+        "contract": {"api_major": "v1", "contract_version": "1.0.0-draft"},
+        "execution_profile": {
+            "profile_kind": "epf1",
+            "reason": "not-installed",
+            "state": "unavailable",
+        },
+        "generation": 1,
+        "grants": PRINCIPAL_GRANTS,
+        "id": "<ulid>",
+        "mode_profile": {
+            "binding_epoch": 1,
+            "mode": mode,
+            "mode_profile_digest": digest,
+            "mode_profile_id": mode_profile_id,
+            "network": network,
+            "network_grants": [],
+            "profile_kind": "gateway-mode-v1",
+        },
+        "principal": {"entity_ids": [ACTOR], "principal_id": principal},
+        "provenance": {"digest": golden.blake3(record).hex(), "origin": "host-derived"},
+        "schema_id": "urn:pigloros:gateway:v1:schema:session",
+    }
+
+
+def session(expect: dict, actor: bool = True) -> Exchange:
+    return Exchange("loopback", "GET", "/v1/session", expect, actor=actor)
+
+
 REFUSED = {"refused": "capability-denied"}
 EMPTY_PAGE = observed(
     200, json_body({"events": [], "next_cursor": None, "next_from_seq": None})
@@ -356,6 +425,33 @@ def positive_subcases() -> list[SubCase]:
             ],
         ),
         SubCase("pos.4", "the public Prediction Ledger JSON is empty", "open", [ledger()]),
+        SubCase(
+            "pos.5",
+            "the Local Principal's Session discloses its grants and the Local mode",
+            "authorized",
+            [
+                session(
+                    observed(
+                        200, json_body(session_body("gateway-mode-local-v1", "local", "denied"))
+                    )
+                )
+            ],
+        ),
+        SubCase(
+            "pos.6",
+            "on an Air-Gapped store the Session discloses the Air-Gapped mode and no network",
+            "authorized-air-gapped",
+            [
+                session(
+                    observed(
+                        200,
+                        json_body(
+                            session_body("gateway-mode-air-gapped-v1", "air-gapped", "absent")
+                        ),
+                    )
+                )
+            ],
+        ),
     ]
 
 
@@ -392,6 +488,18 @@ def denied_subcases() -> list[SubCase]:
             "a read without the actor header on an authorized Gateway is unauthorized",
             "authorized",
             [create("den-4", actor=True), poll(routed_problem(401, "unauthenticated", EVENTS_PATH))],
+        ),
+        SubCase(
+            "den.5",
+            "a Session read without the actor header on an authorized Gateway is unauthenticated",
+            "authorized",
+            [session(routed_problem(401, "unauthenticated", "/v1/session"), actor=False)],
+        ),
+        SubCase(
+            "den.6",
+            "a Gateway without a host authorizer has no Principal and no Session to disclose",
+            "open",
+            [session(routed_problem(401, "unauthenticated", "/v1/session"))],
         ),
     ]
 
@@ -703,7 +811,7 @@ def family_schema(family: str) -> dict:
         "properties": {
             "id": {"type": "string", "pattern": f"^{ID_PREFIX[family]}\\.[0-9]+$"},
             "title": {"type": "string", "pattern": "^[ -~]{1,160}$"},
-            "composition": {"enum": ["open", "authorized"]},
+            "composition": {"enum": ["open", "authorized", "authorized-air-gapped"]},
             "exchanges": {
                 "type": "array",
                 "minItems": 1,
@@ -900,9 +1008,31 @@ def check_normalization() -> None:
         "next_cursor": "v1.x",
     }:
         raise SystemExit("the normalization accepts a non-ULID")
-    for constant in (ACTOR, BODY, ENTITY):
+    for constant in (ACTOR, BODY, ENTITY, ulid_text(PRINCIPAL_BYTES)):
         if not re.fullmatch(ULID_PATTERN, constant):
             raise SystemExit(f"{constant} is not a ULID")
+    if ulid_text(bytes(15) + bytes([33])) != "0" * 24 + "11":
+        raise SystemExit("the ULID text encoding is broken")
+
+
+def rotation_chain_heads(checker: str) -> dict[str, str]:
+    """The head of each rotation chain the contract checker source declares."""
+    for node in ast.parse(checker).body:
+        if (
+            isinstance(node, ast.Assign)
+            and [getattr(target, "id", None) for target in node.targets]
+            == ["MODE_PROFILE_ROTATION_CHAINS"]
+        ):
+            chains = ast.literal_eval(node.value)
+            return {identifier: chain[-1] for identifier, chain in chains.items()}
+    raise SystemExit("the contract checker declares no MODE_PROFILE_ROTATION_CHAINS")
+
+
+def check_mode_profile_digests() -> None:
+    """The mode-profile digests are the heads of the contract checker's rotation chains."""
+    checker = (HERE / "check_gateway_contract.py").read_text(encoding="utf-8")
+    if rotation_chain_heads(checker) != MODE_PROFILE_DIGESTS:
+        raise SystemExit("the mode-profile digests are not the contract checker's chain heads")
 
 
 def provider() -> dict:
@@ -956,6 +1086,7 @@ def self_test() -> None:
     check_blake3_vectors()
     check_signal_payloads()
     check_normalization()
+    check_mode_profile_digests()
     check_routes_and_usage()
     check_payload_schemas()
 

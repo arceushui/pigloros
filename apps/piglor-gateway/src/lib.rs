@@ -7298,6 +7298,52 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn scan_chunk_of_maximum_events_fits_the_page_byte_budget() {
+        // One scan chunk holds `MAX_EVENTS_PER_POLL + 1` Events and must
+        // budget each at the per-Event payload and type maxima. Sixty-one
+        // maximum Events are the fewest whose bytes exceed
+        // `(MAX_EVENTS_PER_POLL + 1) * (MAX_EVENT_PAYLOAD_BYTES -
+        // MAX_EVENT_TYPE_BYTES)`, so a budget that subtracts the type
+        // allowance instead of adding it refuses this page.
+        const EVENTS: usize = 61;
+        const _: () = assert!(
+            EVENTS * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES)
+                > (MAX_EVENTS_PER_POLL + 1) * (MAX_EVENT_PAYLOAD_BYTES - MAX_EVENT_TYPE_BYTES)
+        );
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
+        let timeline = store.create_timeline("maximum-events").test_ok();
+        let entity = EntityId::new();
+        for _ in 0..EVENTS {
+            store
+                .append(
+                    timeline.id(),
+                    &[EventDraft::new(
+                        entity,
+                        Kind::new("x".repeat(MAX_EVENT_TYPE_BYTES)),
+                        CanonicalBytes::from_vec(vec![0xff; MAX_EVENT_PAYLOAD_BYTES]),
+                    )],
+                )
+                .test_ok();
+        }
+
+        let page = Gateway::new(store)
+            .read_events_page(&timeline.id().to_string(), 0, MAX_EVENTS_PER_POLL)
+            .await
+            .test_ok();
+
+        assert_eq!(page.events.len(), EVENTS);
+        assert_eq!(page.next_from_seq, None);
+        assert!(page.next_cursor.is_none());
+        for (seq, event) in (1_u64..).zip(&page.events) {
+            assert_eq!(event.seq, Seq::from_u64(seq));
+            assert_eq!(event.event_type.as_str().len(), MAX_EVENT_TYPE_BYTES);
+            assert_eq!(event.payload.as_slice().len(), MAX_EVENT_PAYLOAD_BYTES);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn admission_budgets_the_exact_worst_case_cursor_boundary() {
         let entity = EntityId::new();
         let mut boundary = None;
@@ -7519,6 +7565,44 @@ mod tests {
             vec![1001]
         );
         assert_eq!(page.next_from_seq, Some(Seq::from_u64(1002)));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn a_full_page_filled_by_one_scan_chunk_still_finds_the_next_public_event() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("protected-chunk-boundary")
+            .await
+            .test_ok();
+        let draft = |kind: &str| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(kind),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        };
+        // The first scan chunk holds exactly one public Event and is full, so
+        // only a further chunk can reveal whether another public Event exists.
+        let mut drafts = vec![draft(EVENT_TYPE_ACTION)];
+        drafts.extend((0..MAX_EVENTS_PER_POLL).map(|_| draft("persona.profile")));
+        drafts.push(draft(EVENT_TYPE_ACTION));
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok();
+        assert_eq!(
+            page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1]
+        );
+        let last = u64::try_from(MAX_EVENTS_PER_POLL).test_ok() + 2;
+        assert_eq!(page.next_from_seq, Some(Seq::from_u64(last)));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }

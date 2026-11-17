@@ -4,7 +4,7 @@
 use crate::{
     operation::{
         AppendSignalOperation, CreatePredictionOperation, CreateTimelineOperation,
-        OperationAuthority,
+        OperationAuthority, ReadSessionOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -154,6 +154,7 @@ fn loopback_routes() -> Router<AppState> {
         .route("/v1/timelines/{timeline_id}/events", get(list_events))
         .route("/v1/timelines/{timeline_id}/actions", post(post_action))
         .route("/v1/timelines/{timeline_id}/signals", post(post_signal))
+        .route("/v1/session", get(get_session))
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
@@ -172,12 +173,13 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
 }
 
 /// The protected loopback routes, by method and route template.
-const PROTECTED_ROUTES: [(&str, &str); 5] = [
+const PROTECTED_ROUTES: [(&str, &str); 6] = [
     ("POST", "/v1/ledger/predictions"),
     ("POST", "/v1/timelines"),
     ("GET", "/v1/timelines/{timeline_id}/events"),
     ("POST", "/v1/timelines/{timeline_id}/actions"),
     ("POST", "/v1/timelines/{timeline_id}/signals"),
+    ("GET", "/v1/session"),
 ];
 
 /// Answer every protected route of an unprovisioned host `401` before its
@@ -456,7 +458,6 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
 }
@@ -617,6 +618,19 @@ async fn post_signal(
         })
         .await?;
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
+}
+
+/// `GET /v1/session` (#1362): the acting Principal's own Session, derived
+/// under the permit of its `session.read` decision.
+async fn get_session(
+    State(state): State<AppState>,
+    authority: OperationAuthority<ReadSessionOperation>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    authority
+        .authorize(&state.gateway, None)
+        .await
+        .and_then(|permit| state.gateway.session_v1(&permit))
+        .map(Json)
 }
 
 async fn post_ledger_prediction(
@@ -2202,9 +2216,9 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn host_event_cursor_rejects_stale_generation_and_wrong_timeline() {
-        let (gateway, app, id, actor) = host_cursor_fixture("cursor-owner").await;
+    /// A host Timeline with two Events and the live cursor after the first.
+    async fn live_host_cursor(name: &str) -> (Gateway, Router, String, String) {
+        let (gateway, app, id, actor) = host_cursor_fixture(name).await;
         for marker in 1..=2 {
             gateway
                 .append_action(
@@ -2224,7 +2238,42 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let cursor = first["next_cursor"].as_str().test_ok();
+        let cursor = first["next_cursor"].as_str().test_ok().to_owned();
+        (gateway, app, id, cursor)
+    }
+
+    #[tokio::test]
+    async fn malformed_renderings_of_a_live_cursor_query_are_invalid_requests() {
+        let (gateway, app, id, cursor) = live_host_cursor("cursor-malformed").await;
+        // The contract's cursor digest is 64 lowercase hex digits; an
+        // uppercase rendering of a live cursor is malformed, not a synonym.
+        let mut parts = cursor.split('.').map(str::to_owned).collect::<Vec<_>>();
+        parts[1] = parts[1].to_ascii_uppercase();
+        assert_ne!(parts[1], cursor.split('.').nth(1).test_ok());
+        let uppercase = parts.join(".");
+        for query in [
+            format!("cursor={uppercase}&limit=1"),
+            // A repeated cursor or page limit is malformed even when both
+            // copies are valid.
+            format!("cursor={cursor}&cursor={cursor}&limit=1"),
+            format!("cursor={cursor}&limit=1&limit=1"),
+        ] {
+            let (status, problem) = json_request(
+                app.clone(),
+                "GET",
+                &format!("/v1/timelines/{id}/events?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(problem["code"], "invalid-request", "{query}");
+        }
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn host_event_cursor_rejects_stale_generation_and_wrong_timeline() {
+        let (gateway, app, id, cursor) = live_host_cursor("cursor-owner").await;
         let (status, second) = json_request(
             app.clone(),
             "GET",
@@ -2284,7 +2333,7 @@ osf_link = \"https://osf.io/example\"\n";
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = json_request(
             app,
             "GET",
@@ -2700,6 +2749,29 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(missing["detail"], "authorization unavailable");
+
+        // An out-of-range page limit is malformed input, refused before any
+        // actor is authenticated or denied.
+        let wrong_actor = EntityId::new().to_string();
+        for limit in [0, MAX_EVENTS_PER_POLL + 1] {
+            let uri = format!("/v1/timelines/{id}/events?limit={limit}");
+            let (status, problem) = json_request(app.clone(), "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(problem["code"], "invalid-request", "{uri}");
+            let request = Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header("x-piglor-actor-entity", &wrong_actor)
+                .body(Body::empty())
+                .test_ok();
+            let response = app.clone().oneshot(request).await.test_ok();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .test_ok();
+            let problem: serde_json::Value = serde_json::from_slice(&body).test_ok();
+            assert_eq!(problem["code"], "invalid-request", "{uri}");
+        }
 
         let request = Request::builder()
             .method("GET")
