@@ -889,6 +889,15 @@ fn the_result_encoder_refuses_each_out_of_bounds_field_alone() -> TestResult {
             },
             ProtocolError::FieldOutOfBounds,
         ),
+        // Code 13 is in range: only the completed sequence is wrong.
+        (
+            "event code 13",
+            SandboxProviderResultFields {
+                operational_events: vec![11, 13],
+                ..result.clone()
+            },
+            ProtocolError::InconsistentFields,
+        ),
         (
             "an empty key ID",
             SandboxProviderResultFields {
@@ -913,6 +922,9 @@ fn the_result_encoder_binds_each_admission_digest_to_the_outcome() -> TestResult
         &build(Fixture::released(TME1_C)?, &Plan::new(&[11, 12, 1], 1))?.result,
     )?);
     assert_eq!(cancelled.outcome, SandboxTerminalOutcome::Cancelled);
+    let with_output = result_fields(&SandboxProviderResult::from_canonical_cbor(
+        &completed(&COMPLETED)?.result,
+    )?);
     let rejected = SandboxProviderResultFields {
         outcome: SandboxTerminalOutcome::Rejected,
         output: None,
@@ -940,6 +952,20 @@ fn the_result_encoder_binds_each_admission_digest_to_the_outcome() -> TestResult
             "a rejection with an AGR1",
             SandboxProviderResultFields {
                 agr1_digest: cancelled.agr1_digest,
+                ..rejected.clone()
+            },
+        ),
+        (
+            "a rejection with an SPR1",
+            SandboxProviderResultFields {
+                spr1_digest: cancelled.spr1_digest,
+                ..rejected.clone()
+            },
+        ),
+        (
+            "a rejection with an output",
+            SandboxProviderResultFields {
+                output: with_output.output,
                 ..rejected.clone()
             },
         ),
