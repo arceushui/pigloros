@@ -6,6 +6,11 @@ mod creation;
 mod directory;
 mod environment;
 mod events;
+#[cfg(any(test, feature = "test-support"))]
+mod ledger_storage;
+#[cfg(any(test, feature = "test-support"))]
+mod nonce_ledger;
+
 #[cfg(test)]
 mod fixture_parent;
 mod process;
@@ -16,6 +21,8 @@ mod registry;
 mod session;
 mod settings;
 mod socket;
+#[cfg(any(test, feature = "test-support"))]
+mod store_file_identity;
 mod text;
 mod window;
 
