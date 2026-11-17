@@ -54,17 +54,36 @@ pub(super) enum ProfileV1 {
     Replay,
     #[serde(rename = "live-local-v1")]
     Live,
+    #[serde(rename = "live-air-gapped-v1")]
+    LiveAirGapped,
 }
 
 impl ProfileV1 {
+    /// The number of profiles. The match is exhaustive, so adding a variant
+    /// fails to compile until this count is revisited, and with it every
+    /// table sized by it ([`Self::IDS`] and the host's EPF1 table).
+    pub(super) const COUNT: usize = match Self::Local {
+        Self::Local | Self::AirGapped | Self::Replay | Self::Live | Self::LiveAirGapped => 5,
+    };
+
+    /// The EPF1 profile ids, indexed by [`Self::index`].
+    const IDS: [&'static str; Self::COUNT] = [
+        "deterministic-local-v1",
+        "deterministic-air-gapped-v1",
+        "replay-v1",
+        "live-local-v1",
+        "live-air-gapped-v1",
+    ];
+
+    /// The position of the profile in declaration order, which indexes
+    /// [`Self::IDS`] and the host's EPF1 table.
+    pub(super) const fn index(self) -> usize {
+        self as usize
+    }
+
     /// The EPF1 profile id.
     pub(super) const fn id(self) -> &'static str {
-        match self {
-            Self::Local => "deterministic-local-v1",
-            Self::AirGapped => "deterministic-air-gapped-v1",
-            Self::Replay => "replay-v1",
-            Self::Live => "live-local-v1",
-        }
+        Self::IDS[self.index()]
     }
 }
 

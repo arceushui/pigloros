@@ -72,7 +72,7 @@ const fn usage(event_count: u64, execution_steps: u64) -> ResourceUsage {
 /// (`MEASURED_USAGE`) against the provider budgets; keep the two in step.
 const MEASURED_USAGE: [(FixtureFamily, ResourceUsage); 7] = [
     (FixtureFamily::Positive, usage(11, 4)),
-    (FixtureFamily::Denied, usage(6, 4)),
+    (FixtureFamily::Denied, usage(9, 5)),
     (FixtureFamily::Malformed, usage(0, 4)),
     (FixtureFamily::ResourceExhaustion, usage(0, 1)),
     (FixtureFamily::DeletionRedaction, usage(2, 4)),
@@ -733,7 +733,7 @@ fn a_leg_that_is_not_as_expected_fails_its_oracle() -> TestResult {
     )?;
     let observation = observe(&denied)?;
     assert_eq!(observation.result, failure(SUBCASE_MISMATCH));
-    assert_eq!(observation.usage.execution_steps, 4);
+    assert_eq!(observation.usage.execution_steps, 5);
 
     // Every other declared claim is read and runs; none is what den.2 expects.
     for claim in [
