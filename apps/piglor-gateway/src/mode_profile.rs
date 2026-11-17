@@ -1194,6 +1194,22 @@ pub(crate) fn test_binding_of(
     GatewayModeBindingV1::new(profile, composition, NonZeroU64::MIN)
 }
 
+/// Bind `host`'s store to the compiled `id` over `composition` exactly as
+/// [`bind_gateway_mode_v1`] does (bind, attach or rotate, at the store's real
+/// epoch), with the ADR-134 §4 host predicates the caller vouches for.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn test_bind_vouched(
+    id: GatewayModeProfileIdV1,
+    composition: GatewayServeCompositionV1,
+    host: &mut ErasureExecutionHostV1,
+) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
+    installed_gateway_mode_profile_v1(id).and_then(|profile| {
+        bind_store(host.gateway_mode_binding(), &profile)
+            .map(|record| GatewayModeBindingV1::new(profile, composition, record.binding_epoch()))
+    })
+}
+
 /// Attach `host`'s adapter to the binding of `mode`, as `serve` does before
 /// it composes a Gateway over a store an earlier process bound.
 #[cfg(test)]

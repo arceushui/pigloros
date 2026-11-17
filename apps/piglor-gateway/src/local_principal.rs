@@ -3480,14 +3480,15 @@ mod tests {
         drop(app);
 
         // Under a later binding epoch, the answer still names the binding
-        // the revocation was produced under.
+        // the revocation was produced under. This test host has a network
+        // path, so the Air-Gapped no-route predicate is vouched for here.
         crate::mode_profile::migrate_gateway_mode_v1(
             path,
             crate::mode_profile::GatewayModeProfileIdV1::Local,
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
         )?;
         let mut host = sqlite_host(path)?;
-        let mode = crate::mode_profile::bind_gateway_mode_v1(
+        let mode = crate::mode_profile::test_bind_vouched(
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
             crate::mode_profile::GatewayServeCompositionV1 {
                 tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
