@@ -132,9 +132,10 @@ jobs:
       # One worker retains four harness threads without competing with another
       # owning-package suite or compiler on this runner. Sixteen shards retain
       # the full selection and unchanged watchdogs; at most eight run together.
-      # --timeout also bounds this shard's unmutated baseline. pos-store's
-      # full suite runs close to 120 s on these runners (run 44010869119
-      # timed out its baseline at 120 s), so the limit keeps 2x headroom.
+      # Run mutants in changed lines: --timeout also bounds each shard's
+      # unmutated baseline, not only the mutants. pos-store's full suite takes
+      # about 120 s or more on these runners (run 44010869119 hit the former
+      # 120 s limit in its baseline test phase), so the limit is doubled.
       - name: Run mutants in changed lines
         # Reuse each worker's compiler state instead of rebuilding every edit.
         env:
