@@ -8721,6 +8721,82 @@ mod tests {
         Ok(())
     }
 
+    /// The hosted port passes the authority's freeze-authorization and Fork
+    /// scope-extension refusals through unchanged.
+    #[test]
+    fn hosted_coordinator_port_propagates_freeze_and_fork_extension_refusals(
+    ) -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &ForkChildAuthorityV1,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
+        let request = reference(82);
+        let applicability_matrix = ErasureInventoryCategoryV1::CANONICAL
+            .into_iter()
+            .map(|category| {
+                ErasureFreezeApplicabilityRowV1::new(
+                    category,
+                    0,
+                    ErasureApplicabilityDecisionV1::Inapplicable,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let admission =
+            ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+                request,
+                scope_commitment: reference(83),
+                obligation_set: reference(84),
+                applicability_matrix,
+                freeze_position: 1,
+                policy: reference(85),
+                trust: reference(86),
+                authorization_provenance: reference(87),
+            })?;
+        let authorization =
+            ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+                admission_body_digest: admission.authorization_body_digest()?,
+                policy: reference(85),
+                trust: reference(86),
+                evidence: vec![1],
+            })?;
+        assert_eq!(
+            port.validate_freeze_authorization(&admission, &authorization),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: reference(83),
+            fork: reference(88),
+            child_timeline: child,
+            lineage_rule: reference(89),
+            predecessor_extension: None,
+            admission_provenance: reference(90),
+        })?;
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(88),
+            expected_inventory_generation: reference(91),
+            child_scope: reference(92),
+            child: TimelineMeta {
+                id: child,
+                mode: TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: Some((parent, Seq::ZERO)),
+            },
+        };
+        assert_eq!(
+            port.admit_fork_scope_extension(&extension, &input),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        Ok(())
+    }
+
     #[test]
     fn hosted_coordinator_port_delegates_resolution_and_destruction_authority(
     ) -> Result<(), ErasureErrorV1> {
