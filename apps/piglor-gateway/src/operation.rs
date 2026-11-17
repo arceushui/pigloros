@@ -328,10 +328,9 @@ impl Gateway {
         authorization: &GatewayAuthorization,
         record: GatewayAuthorityRecordV1,
     ) -> Result<(), GatewayAuthorizationError> {
-        match self.with_consent_events(authorization, Ok(record)).await {
-            Ok(record) => authorization.refresh(record).await,
-            Err(error) => Err(error),
-        }
+        authorization
+            .refresh(self.with_consent_events(authorization, Ok(record)).await)
+            .await
     }
 
     /// The authority record the store holds under the source leaf of the
@@ -409,12 +408,13 @@ impl Gateway {
             )
             .await
             .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable);
-        record.and_then(|mut record| {
-            read.map(|events| {
-                if let Some(consented) = record.consented.as_mut() {
-                    consented.events = Some(events);
-                }
-                record
+        record.and_then(|record| {
+            read.map(|events| GatewayAuthorityRecordV1 {
+                chain: record.chain,
+                consented: record.consented.map(|consented| GatewayConsentRecordV1 {
+                    events: Some(events),
+                    ..consented
+                }),
             })
         })
     }
