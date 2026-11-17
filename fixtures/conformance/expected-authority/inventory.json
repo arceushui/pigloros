@@ -138,13 +138,14 @@
         "LiveUnverified"
       ],
       "profiles": [
+        "live-air-gapped-v1",
         "live-local-v1"
       ],
       "expected_outcome": "NonDeterministicAdmission",
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
-      "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
+      "fixture_bytes_digest": "d29b5eb58bd33d5bca54fc8aaa27d5d32d82e7ab80be03464f95d5a314da157a",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "39d1dbfb8fbe135a69afe11323ef0910a2d106250da8994fa99f1ecea2b776f0",
+      "expected_result_digest": "cd4df306e60df44b32c0943b0cb9e1da7dfccfaca95f9fb4c356ec6cd6009261",
       "materialization_status": "materialized"
     },
     {
@@ -174,9 +175,9 @@
       ],
       "expected_outcome": "TypedFailure",
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
-      "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
+      "fixture_bytes_digest": "d29b5eb58bd33d5bca54fc8aaa27d5d32d82e7ab80be03464f95d5a314da157a",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "39d1dbfb8fbe135a69afe11323ef0910a2d106250da8994fa99f1ecea2b776f0",
+      "expected_result_digest": "cd4df306e60df44b32c0943b0cb9e1da7dfccfaca95f9fb4c356ec6cd6009261",
       "materialization_status": "materialized"
     }
   ]
