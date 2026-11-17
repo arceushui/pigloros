@@ -315,6 +315,15 @@ fn the_capture_never_holds_more_memory_than_its_limit() {
 
 #[test]
 fn the_admitted_execution_is_the_production_payload() -> TestResult {
+    use crate::test_fixtures::attempt_directory::require_isolated_root;
+
+    if !require_isolated_root(
+        "adapter_stdio::tests::the_admitted_execution_is_the_production_payload",
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
     let installation =
         pos_reference::provider_admission::test_support::StagedInstallation::stage_execution()
             .map_err(|error| error.to_string())?;
@@ -324,14 +333,19 @@ fn the_admitted_execution_is_the_production_payload() -> TestResult {
     let (_staging, verified) =
         crate::test_fixtures::staged_execution::verified_input(&installation, &ledger)
             .map_err(|error| error.to_string())?;
+    let output_limit = verified.entry().policy().effective_limits()[8].value;
     let payload: Arc<dyn AttemptPayload> = verified.entry().retain();
     let input = installation.input();
     assert_eq!(payload.input_len(), u64::try_from(input.len())?);
     let mut read = vec![0; input.len()];
     payload.read_input_at(&mut read, 0)?;
     assert_eq!(read, input);
-    // The attempt has one output: it is reserved, or refused, once.
-    assert!(payload.reserve_output().is_some());
+    // The attempt's one output: exactly ELM1[8] bytes, reserved once.
+    let before = ledger.usage().reserved_bytes;
+    let _charge = payload
+        .reserve_output()
+        .ok_or("the first output reservation was refused")??;
+    assert_eq!(ledger.usage().reserved_bytes - before, output_limit);
     assert!(payload.reserve_output().is_none());
     Ok(())
 }
