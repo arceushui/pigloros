@@ -135,7 +135,7 @@ fn open_channels_with(null: &str) -> Result<(UnitStdio, ProviderStdio), StdioCha
                 .map(|()| (input, output))
         })
         .and_then(|pipes| {
-            open(null, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())
+            open(null, OFlags::WRONLY.union(OFlags::CLOEXEC), Mode::empty())
                 .and_then(|error| fstat(&error).map(|stat| (pipes, error, stat)))
         })
         .map_err(|errno| StdioChannelError::Io(errno.into()))
@@ -159,7 +159,7 @@ fn open_channels_with(null: &str) -> Result<(UnitStdio, ProviderStdio), StdioCha
 }
 
 fn nonblocking(descriptor: &StdOwnedFd) -> Result<(), Errno> {
-    fcntl_getfl(descriptor).and_then(|flags| fcntl_setfl(descriptor, flags | OFlags::NONBLOCK))
+    fcntl_getfl(descriptor).and_then(|flags| fcntl_setfl(descriptor, flags.union(OFlags::NONBLOCK)))
 }
 
 /// `CLOCK_MONOTONIC` now, in nanoseconds.

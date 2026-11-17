@@ -1605,6 +1605,20 @@ mod tests {
         verified.read_exact_at(&mut readback, 0)?;
         assert_eq!(readback, staged.input());
         let execution = verified.entry().retain();
+        // The attempt's one output: exactly ELM1[8] bytes, reserved once
+        // through either handle and released with its charge.
+        let before = ledger.usage().reserved_bytes;
+        let output = verified
+            .reserve_output()
+            .ok_or("the first output reservation was refused")??;
+        assert_eq!(
+            ledger.usage().reserved_bytes - before,
+            verified.entry().policy().effective_limits()[8].value
+        );
+        assert!(execution.reserve_output().is_none());
+        assert!(verified.reserve_output().is_none());
+        drop(output);
+        assert_eq!(ledger.usage().reserved_bytes, before);
         let length = verified.len();
         execution.read_exact_at(&mut [], length)?;
         let mut last = [0xff];

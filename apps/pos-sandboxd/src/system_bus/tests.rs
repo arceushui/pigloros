@@ -468,6 +468,10 @@ struct RecordingService {
     fail_root_directory: bool,
     fail_root_image_policy: bool,
     fail_memory_max: bool,
+    /// `StandardInput`, `StandardOutput` and `StandardError`.
+    standard_streams: [&'static str; 3],
+    /// The three `Standard*FileDescriptorName` values, in the same order.
+    standard_descriptor_names: [&'static str; 3],
 }
 
 #[derive(Clone, Default)]
@@ -500,6 +504,8 @@ impl RecordingService {
             fail_root_directory: false,
             fail_root_image_policy: false,
             fail_memory_max: false,
+            standard_streams: ["null"; 3],
+            standard_descriptor_names: [""; 3],
         }
     }
 
@@ -721,32 +727,32 @@ impl RecordingService {
 
     #[zbus(property, name = "StandardInput")]
     fn standard_input(&self) -> &'static str {
-        self.fixed("null")
+        self.fixed(self.standard_streams[0])
     }
 
     #[zbus(property, name = "StandardOutput")]
     fn standard_output(&self) -> &'static str {
-        self.fixed("null")
+        self.fixed(self.standard_streams[1])
     }
 
     #[zbus(property, name = "StandardError")]
     fn standard_error(&self) -> &'static str {
-        self.fixed("null")
+        self.fixed(self.standard_streams[2])
     }
 
     #[zbus(property, name = "StandardInputFileDescriptorName")]
     fn standard_input_file_descriptor_name(&self) -> &'static str {
-        self.fixed("")
+        self.fixed(self.standard_descriptor_names[0])
     }
 
     #[zbus(property, name = "StandardOutputFileDescriptorName")]
     fn standard_output_file_descriptor_name(&self) -> &'static str {
-        self.fixed("")
+        self.fixed(self.standard_descriptor_names[1])
     }
 
     #[zbus(property, name = "StandardErrorFileDescriptorName")]
     fn standard_error_file_descriptor_name(&self) -> &'static str {
-        self.fixed("")
+        self.fixed(self.standard_descriptor_names[2])
     }
 
     #[zbus(property, name = "MemoryMax")]
@@ -1110,6 +1116,46 @@ async fn unequal_typed_property_readback_fails_closed() -> Result<(), Box<dyn Er
         error,
         SystemdTransientUnitTransportError::Readback(TransientUnitRequestError::ReadbackMismatch)
     ));
+    Ok(())
+}
+
+/// Each standard stream and each descriptor name is read from its own
+/// property: one substituted value alone fails the readback.
+#[tokio::test]
+async fn each_standard_stream_is_read_back_from_its_own_property() -> Result<(), Box<dyn Error>> {
+    for (index, attempt) in (0..6).zip(0x40_u8..) {
+        let mut service = RecordingService::exact(expected_system_call_filter()?);
+        if index < 3 {
+            service.standard_streams[index] = "tty";
+        } else {
+            service.standard_descriptor_names[index - 3] = "substituted";
+        }
+        let (transport, _server) = transport(
+            Arc::new(Mutex::new(None)),
+            ManagerBehavior::default(),
+            service,
+        )
+        .await?;
+        let error = transport
+            .start(
+                TransientServiceUnitName::from_attempt_id([attempt; 16])?,
+                request(LaunchMode::Local {
+                    host_service: descriptor()?,
+                })?,
+            )
+            .await
+            .err()
+            .ok_or("a substituted standard stream was accepted")?;
+        assert!(
+            matches!(
+                error,
+                SystemdTransientUnitTransportError::Readback(
+                    TransientUnitRequestError::ReadbackMismatch
+                )
+            ),
+            "{index}: {error:?}"
+        );
+    }
     Ok(())
 }
 

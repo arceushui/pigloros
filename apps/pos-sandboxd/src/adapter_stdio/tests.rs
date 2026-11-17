@@ -349,3 +349,119 @@ fn the_admitted_execution_is_the_production_payload() -> TestResult {
     assert!(payload.reserve_output().is_none());
     Ok(())
 }
+
+// Each read asks for one byte past what ELM1[8] still allows, and for at
+// most one 64 KiB chunk.
+#[test]
+fn each_read_asks_for_one_byte_past_the_ceiling_at_most_one_chunk() {
+    assert_eq!(room(10, 4), 7);
+    assert_eq!(room(10, 10), 1);
+    assert_eq!(room(65_534, 0), 65_535);
+    assert_eq!(room(65_535, 0), 65_536);
+    assert_eq!(room(1 << 20, 0), 65_536);
+    assert_eq!(room(u64::MAX, 0), 65_536);
+}
+
+// The capture's memory doubles until it would pass the ceiling, and grows
+// only when the accepted bytes would not fit.
+#[test]
+fn the_capture_doubles_its_capacity_up_to_its_limit() {
+    let mut bytes = Vec::new();
+    let limit = 100_000;
+    for (read, capacity) in [
+        (10_000, 10_000),
+        (5_000, 20_000),
+        (5_000, 20_000),
+        (30_000, 50_000),
+        (50_000, 100_000),
+    ] {
+        assert_eq!(accept(&mut bytes, &vec![7; read], limit), None);
+        assert_eq!(bytes.capacity(), capacity, "after {} bytes", bytes.len());
+    }
+    assert_eq!(accept(&mut bytes, &[7], limit), Some(CaptureStop::Ceiling));
+    assert_eq!((bytes.len(), bytes.capacity()), (100_000, 100_000));
+}
+
+/// A payload that records the offset and length of each input read.
+#[derive(Debug)]
+struct Recorded {
+    payload: TestPayload,
+    reads: std::sync::Mutex<Vec<(u64, usize)>>,
+}
+
+impl AttemptPayload for Recorded {
+    fn input_len(&self) -> u64 {
+        self.payload.input_len()
+    }
+
+    fn read_input_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        self.reads
+            .lock()
+            .map_err(|_| io::Error::other("poisoned read log"))?
+            .push((offset, buffer.len()));
+        self.payload.read_input_at(buffer, offset)
+    }
+
+    fn reserve_output(&self) -> Option<Result<StagingCharge, OutputReservationRefused>> {
+        self.payload.reserve_output()
+    }
+}
+
+#[tokio::test]
+async fn the_feed_reads_the_input_in_chunks_of_64_kib() -> TestResult {
+    let (unit, provider) = open_channels()?;
+    let (stdin, _, _) = unit.into_parts();
+    // The adapter drains its stdin, which holds less than the input.
+    let reader = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let mut stdin = std::fs::File::from(std::os::fd::OwnedFd::from(stdin));
+        std::io::Read::read_to_end(&mut stdin, &mut all).map(|_| all)
+    });
+    let mut input = vec![7; 65_536];
+    input.extend_from_slice(b"tail!");
+    let recorded = Arc::new(Recorded {
+        payload: TestPayload::with_input(&input),
+        reads: std::sync::Mutex::default(),
+    });
+    let payload = Arc::clone(&recorded) as Arc<dyn AttemptPayload>;
+    let (accepted, _) = feed(provider.input, &payload, None, std::future::pending()).await;
+    assert_eq!(accepted, 65_541);
+    assert_eq!(
+        *recorded.reads.lock().map_err(|_| "poisoned read log")?,
+        [(0, 65_536), (65_536, 5)]
+    );
+    assert_eq!(reader.join().map_err(|_| "the reader panicked")??, input);
+    Ok(())
+}
+
+// The window is open only while its deadline is still ahead: one that closes
+// as the feed starts writes nothing, and the feed closes the channel.
+#[tokio::test(start_paused = true)]
+async fn a_window_closing_as_the_feed_starts_writes_nothing() -> TestResult {
+    let (unit, provider) = open_channels()?;
+    // Off a millisecond tick, so the window's timer is not due at once.
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let payload: Arc<dyn AttemptPayload> = Arc::new(TestPayload::with_input(b"input"));
+    let deadline = tokio::time::Instant::now();
+    let (accepted, _) = feed(
+        provider.input,
+        &payload,
+        Some(deadline),
+        std::future::pending(),
+    )
+    .await;
+    assert_eq!(accepted, 0);
+    let (stdin, _, _) = unit.into_parts();
+    let mut read = [0; 1];
+    assert_eq!(rustix::io::read(&stdin, &mut read)?, 0);
+    Ok(())
+}
+
+// The payload every test attempt shares reserves as often as it is asked:
+// more charges at once than a default payload's ledger holds.
+#[test]
+fn the_shared_test_payload_reserves_as_often_as_it_is_asked() {
+    let payload = crate::test_fixtures::shared_test_payload();
+    let charges: Vec<_> = (0..2_000).map(|_| payload.reserve_output()).collect();
+    assert!(charges.iter().all(|charge| matches!(charge, Some(Ok(_)))));
+}
