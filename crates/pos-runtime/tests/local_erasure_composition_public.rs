@@ -3497,7 +3497,7 @@ impl Attempted {
             &erasure_signer(),
             1,
         )?;
-        store.retain(&[signed.clone()])?;
+        store.retain(std::slice::from_ref(&signed))?;
         let mut host = store.host(case, 4_096)?;
         let state = host
             .command_sender()?
@@ -4166,7 +4166,6 @@ fn a_complete_receipt_issues_signed_at_its_reached_position() -> TestResult {
     assert_eq!(receipt.issue_position(), 7);
     assert_eq!(receipt.signature(), address);
     assert_eq!(receipt.trust(), attempted.bundle.reference()?);
-    drop(sender);
     drop(host);
     let mut host = attempted.host()?;
     assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Complete);
