@@ -174,9 +174,9 @@ impl RegistryDirectory {
             owner,
         })
     }
-}
 
-impl RegistryDirectory {
+    /// The recovery view (R12 §5.1): nothing but the activation marker, which
+    /// no attempt owns; a committed intent or a temporary record is refused.
     fn require_no_attempt_record(&self) -> Result<(), SystemdAttemptRegistryError> {
         require_only(&self.file, Some(activation::MARKER_NAME)).map(drop)
     }

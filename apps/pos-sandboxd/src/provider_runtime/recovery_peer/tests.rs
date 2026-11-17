@@ -280,6 +280,7 @@ fn the_recovery_peer_answers_one_exchange_of_the_pending_sir1() -> TestResult {
     fs::write(Path::new(REGISTRY).join("activation"), b"")?;
     let (outcome, read) = run_peer(ROOT_UID, &pair, None)?;
     assert_eq!(outcome, Ok(()));
+    assert!(!read.is_empty(), "the acknowledged exchange wrote no RCA1");
     let acknowledgement = RevocationAcknowledgement::authenticate_for_context(
         unframe(&read)?,
         KEY_ID,

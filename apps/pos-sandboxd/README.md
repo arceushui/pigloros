@@ -313,6 +313,13 @@ RCC1/RCU1 responder lands. Restart reconciliation, which opens admission, is
 the next #1358 slice. The mode reads no environment variable but
 `NOTIFY_SOCKET`.
 
+`release_after_ready` is the provider half: it accepts one `ReadyV1` only from
+the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
+held or observed evidence, rechecks current authority through the
+`ReleaseRecheck` port, and sends one `ReleaseV1` signed through
+`RuntimeAttestationSigner` and verified under the admitted runtime key before
+it is sent.
+
 ## Recovery peer mode (#349)
 
 `recovery-peer <32 lowercase hex endpoint ID>` answers one RCC1/RCU1
@@ -324,18 +331,12 @@ self-digest), requires the SPI1 key file to hold that key, binds
 sends `READY=1`, and accepts exactly one connection from a root peer. The
 R11 §8 revocation responder answers it with `AuthorityResolution::Recovery`.
 The attempt state is empty only when the registry, under its exclusive
-`flock`, holds no attempt record; the lock is released before RCA1 is
+`flock`, holds nothing but the activation marker (no committed intent and no
+temporary record); the lock is released before RCA1 is
 written. The peer exits after server EOF or on any failure, with no
 registry write, no system-bus or mountfsd call and no process creation.
 Until the selector's recovery operation starts it (#349 B), the mode is
 reached only through argv.
-
-`release_after_ready` is the provider half: it accepts one `ReadyV1` only from
-the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
-held or observed evidence, rechecks current authority through the
-`ReleaseRecheck` port, and sends one `ReleaseV1` signed through
-`RuntimeAttestationSigner` and verified under the admitted runtime key before
-it is sent.
 
 ## Local attempt namespaces (#911)
 
