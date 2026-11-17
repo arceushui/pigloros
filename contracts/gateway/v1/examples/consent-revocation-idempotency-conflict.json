@@ -1,0 +1,28 @@
+{
+  "name": "consent-revocation-idempotency-conflict",
+  "operation_id": "revokeConsent",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-19",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "consent_ref": "01JC0GATEWAYW90C0NSENT0001"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:idempotency-conflict",
+      "title": "Idempotency conflict",
+      "status": 409,
+      "detail": "idempotency key reused with a different request",
+      "instance": "/v1/me/consent-revocations",
+      "code": "idempotency-conflict",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}
