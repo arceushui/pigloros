@@ -244,8 +244,9 @@ impl GatewayActionAdmission<'_> {
     }
 }
 
-/// Persist the authority chain and every revocation record behind a decision
-/// in the admission store.
+/// Persist the authority chain the decision was decided on, its root chain or
+/// the chain of the consent governing it, and every revocation record behind
+/// it in the admission store.
 ///
 /// The host runs this in the same store command as the admission but before
 /// the Timeline's erasure fence opens, because authority persistence commits
@@ -253,11 +254,16 @@ impl GatewayActionAdmission<'_> {
 /// [`PipelineOutcomeV1::PolicyIndeterminate`].
 pub(super) fn persist_authority(
     authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
     ports: &mut dyn ScheduledAdmissionPortsV1,
 ) -> Result<(Hash, PersistedAuthorityV1), HumanActionAdmissionErrorV1> {
-    authorization.persist_authority(ports).map_err(|_| {
-        HumanActionAdmissionErrorV1::NotAdmitted(Box::new(PipelineOutcomeV1::PolicyIndeterminate))
-    })
+    authorization
+        .persist_authority(ports, decision)
+        .map_err(|_| {
+            HumanActionAdmissionErrorV1::NotAdmitted(Box::new(
+                PipelineOutcomeV1::PolicyIndeterminate,
+            ))
+        })
 }
 
 /// The only form in which a caller's idempotency key is retained.

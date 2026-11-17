@@ -4,8 +4,10 @@
 use crate::{
     operation::{
         AppendSignalOperation, CreateOptionSpecOperation, CreatePredictionOperation,
-        CreatePreferenceOperation, CreateTimelineOperation, OperationAuthority,
-        ReadOptionSpecOperation, ReadPreferenceOperation, ReadSessionOperation,
+        CreatePreferenceOperation, CreateScenarioRoomOperation, CreateTimelineOperation,
+        DeriveScenarioRoomOperation, OperationAuthority, ReadOptionSpecOperation,
+        ReadPreferenceOperation, ReadScenarioRoomOperation, ReadSessionOperation,
+        RevokeConsentOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -156,6 +158,16 @@ fn loopback_routes() -> Router<AppState> {
         .route("/v1/timelines/{timeline_id}/actions", post(post_action))
         .route("/v1/timelines/{timeline_id}/signals", post(post_signal))
         .route("/v1/session", get(get_session))
+        .route("/v1/scenario-rooms", post(create_scenario_room))
+        .route(
+            "/v1/scenario-rooms/{room_id}/revisions",
+            post(derive_scenario_room),
+        )
+        .route(
+            "/v1/scenario-rooms/{room_id}/revisions/{revision}",
+            get(get_scenario_room_revision),
+        )
+        .route("/v1/me/consent-revocations", post(post_consent_revocation))
         .route("/v1/preferences", post(post_preference))
         .route(
             "/v1/preferences/{preference_id}/revisions/{revision}",
@@ -191,6 +203,10 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/timelines/{timeline_id}/actions"),
     ("POST", "/v1/timelines/{timeline_id}/signals"),
     ("GET", "/v1/session"),
+    ("POST", "/v1/scenario-rooms"),
+    ("POST", "/v1/scenario-rooms/{room_id}/revisions"),
+    ("GET", "/v1/scenario-rooms/{room_id}/revisions/{revision}"),
+    ("POST", "/v1/me/consent-revocations"),
     ("POST", "/v1/preferences"),
     (
         "GET",
@@ -652,6 +668,116 @@ async fn get_session(
         .await
         .and_then(|permit| state.gateway.session_v1(&permit))
         .map(Json)
+}
+
+/// `POST /v1/scenario-rooms` (#1398): revision 1 of a room, decided with
+/// every `persona` participant covered by the Principal's grant.
+async fn create_scenario_room(
+    State(state): State<AppState>,
+    authority: OperationAuthority<CreateScenarioRoomOperation>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Result<Response, ProblemV1> {
+    let request = crate::scenario_room::parse_create(&body)?;
+    let personas = crate::scenario_room::personas(&request.input);
+    let outcome = authority
+        .run_covering(
+            &state.gateway,
+            personas,
+            move |gateway, permit| async move {
+                Ok(gateway.create_scenario_room(permit, &key, request).await)
+            },
+        )
+        .await?;
+    room_response(outcome)
+}
+
+/// `POST /v1/scenario-rooms/{room_id}/revisions` (#1398).
+async fn derive_scenario_room(
+    State(state): State<AppState>,
+    ContractPath(room_id): ContractPath<String>,
+    authority: OperationAuthority<DeriveScenarioRoomOperation>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Result<Response, ProblemV1> {
+    let room_id = crate::scenario_room::parse_room_id(&room_id)?;
+    let request = crate::scenario_room::parse_derive(room_id, &body)?;
+    let personas = crate::scenario_room::personas(&request.input);
+    let outcome = authority
+        .run_covering(
+            &state.gateway,
+            personas,
+            move |gateway, permit| async move {
+                Ok(gateway
+                    .derive_scenario_room(permit, room_id, &key, request)
+                    .await)
+            },
+        )
+        .await?;
+    room_response(outcome)
+}
+
+/// `GET /v1/scenario-rooms/{room_id}/revisions/{revision}` (#1398).
+async fn get_scenario_room_revision(
+    State(state): State<AppState>,
+    ContractPath((room_id, revision)): ContractPath<(String, u64)>,
+    authority: OperationAuthority<ReadScenarioRoomOperation>,
+) -> Result<Response, ProblemV1> {
+    let room_id = crate::scenario_room::parse_room_id(&room_id)?;
+    let outcome = authority
+        .run(&state.gateway, None, move |gateway| async move {
+            Ok(gateway.read_scenario_room(room_id, revision).await)
+        })
+        .await?;
+    room_response(outcome)
+}
+
+/// The response of one room outcome or its problem.
+fn room_response(
+    outcome: Result<
+        crate::executor::scenario_room::RoomOutcomeV1,
+        crate::scenario_room::RoomFailureV1,
+    >,
+) -> Result<Response, ProblemV1> {
+    outcome.map_err(ProblemV1::from).map(|outcome| {
+        let (status, body) = crate::scenario_room::revision_response(&outcome);
+        (status, Json(body)).into_response()
+    })
+}
+
+/// The body of `POST /v1/me/consent-revocations` (#309): the consent the
+/// acting Principal revokes, named by its `consent.granted.v1` `EventId`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentRevocationRequestV1 {
+    consent_ref: ulid::Ulid,
+}
+
+/// `POST /v1/me/consent-revocations` (#309): revoke one of the acting
+/// Principal's own consents under the permit of its `consent.revoke`
+/// decision; `201` for a recorded revocation, `200` for the original one.
+async fn post_consent_revocation(
+    State(state): State<AppState>,
+    IdempotencyKey(key): IdempotencyKey,
+    authority: OperationAuthority<RevokeConsentOperation>,
+    ContractJson(body): ContractJson<ConsentRevocationRequestV1>,
+) -> Result<Response, GatewayError> {
+    let outcome = state
+        .gateway
+        .revoke_consent_v1(
+            authority.authorize(&state.gateway, None).await?,
+            pos_core::EventId::from_ulid(body.consent_ref),
+            &key,
+        )
+        .await?;
+    Ok(match outcome {
+        crate::authorization::revocation::ConsentRevocationOutcomeV1::Recorded(body) => {
+            (StatusCode::CREATED, Json(body)).into_response()
+        }
+        crate::authorization::revocation::ConsentRevocationOutcomeV1::Original(body) => {
+            (StatusCode::OK, Json(body)).into_response()
+        }
+    })
 }
 
 /// `POST /v1/preferences` (#304): create a Preference or its next revision.
@@ -1172,6 +1298,7 @@ mod tests {
                                 .replace("{timeline_id}", &timeline)
                                 .replace("{preference_id}", &timeline)
                                 .replace("{option_spec_id}", &timeline)
+                                .replace("{room_id}", &timeline)
                                 .replace("{revision}", "1")
                         ))
                         .header("content-type", "application/json")
