@@ -1,12 +1,14 @@
 {
-  "name": "draft-preference-deleted",
+  "name": "preference-deleted",
   "operation_id": "getPreferenceRevision",
   "request": {
     "path": {
       "preference_id": "01JC0GATEWAYW9PREF0000001A",
       "revision": 1
     },
-    "headers": {}
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
   },
   "request_valid": true,
   "response": {
