@@ -16,14 +16,13 @@ use pos_core::community_lifecycle::{
     CommunityRecordKindsV1, CommunityScopeMembersV1, CommunitySelectionInputV1,
     CommunitySelectionV1, CommunityTimelineFloorsV1,
 };
-use pos_core::{
-    AuthorityPersistencePortV1, AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId,
-};
+use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::private_hash::scope_set_digest;
 use super::sealer::SealedMetadataV1;
+use super::store_domain::CommunityStoreDomainV1;
 use super::vault::{fresh_identity, VaultKeyV1};
 use crate::memory::MemoryStore;
 
@@ -187,10 +186,10 @@ impl MemoryCommunityDomainV1 {
         &self,
         policy: &CommunityMetadataPolicyV1,
     ) -> Result<PersistedAuthorityV1, Error> {
-        self.store
-            .load_authority(policy.as_input().metadata_authority_leaf_grant)
-            .ok()
-            .ok_or(Error::EvidenceUnavailable)
+        CommunityStoreDomainV1::load_authority(
+            self,
+            policy.as_input().metadata_authority_leaf_grant,
+        )
     }
 
     /// Bootstrap a proven-empty domain, or verify an existing one.
