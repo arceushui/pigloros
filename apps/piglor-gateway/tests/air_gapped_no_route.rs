@@ -66,11 +66,11 @@ fn with(change: impl FnOnce(&mut AirGappedHostFactsV1)) -> AirGappedHostFactsV1 
 }
 
 fn appended(text: Option<&str>, line: &str) -> Option<String> {
-    text.map(|text| format!("{text}{line}\n"))
+    Some(format!("{}{line}\n", text?))
 }
 
 fn replaced(text: Option<&str>, from: &str, to: &str) -> Option<String> {
-    let text = text.unwrap_or_default();
+    let text = text?;
     assert!(text.contains(from), "{from}");
     Some(text.replacen(from, to, 1))
 }
@@ -162,17 +162,17 @@ fn unparsable_facts_deny() {
         (Fact::Dev, |facts| facts.dev = Some("lo: 0\n".to_owned())),
         (Fact::Dev, |facts| facts.dev = Some("a|b\n".to_owned())),
         (Fact::Dev, |facts| {
-            facts.dev = appended(facts.dev.as_deref(), "no-colon")
+            facts.dev = appended(facts.dev.as_deref(), "no-colon");
         }),
         (Fact::Dev, |facts| {
-            facts.dev = appended(facts.dev.as_deref(), "   : 0 0")
+            facts.dev = appended(facts.dev.as_deref(), "   : 0 0");
         }),
         // `lo` must be listed (ADR-135 §4 item 1).
         (Fact::Dev, |facts| {
             facts.dev = replaced(facts.dev.as_deref(), "    lo:", "  sit0:");
         }),
         (Fact::Route, |facts| {
-            facts.route = Some("Destination\n".to_owned())
+            facts.route = Some("Destination\n".to_owned());
         }),
         // A row with more fields than its format is unparsable too.
         (Fact::Ipv6Route, |facts| {
@@ -183,31 +183,31 @@ fn unparsable_facts_deny() {
         }),
         (Fact::Route, |facts| facts.route = Some(String::new())),
         (Fact::Ipv6Route, |facts| {
-            facts.ipv6_route = Some("00 lo\n".to_owned())
+            facts.ipv6_route = Some("00 lo\n".to_owned());
         }),
         (Fact::IfInet6, |facts| {
-            facts.if_inet6 = Some("::1 lo\n".to_owned())
+            facts.if_inet6 = Some("::1 lo\n".to_owned());
         }),
         (Fact::FibTrie, |facts| {
-            facts.fib_trie = Some("     |-- not-an-address\n".to_owned())
+            facts.fib_trie = Some("     |-- not-an-address\n".to_owned());
         }),
         (Fact::FibTrie, |facts| {
-            facts.fib_trie = Some("        /32 host LOCAL\n".to_owned())
+            facts.fib_trie = Some("        /32 host LOCAL\n".to_owned());
         }),
         (Fact::Igmp, |facts| {
-            facts.igmp = Some("1\tlo :     1      V3\n".to_owned())
+            facts.igmp = Some("1\tlo :     1      V3\n".to_owned());
         }),
         (Fact::Igmp, |facts| {
             facts.igmp = Some("Idx\tDevice\n\t\t\t\t010000E0     1 0:00000000\t\t0\n".to_owned());
         }),
         (Fact::Igmp, |facts| {
-            facts.igmp = appended(facts.igmp.as_deref(), "x\tlo        :     1      V3")
+            facts.igmp = appended(facts.igmp.as_deref(), "x\tlo        :     1      V3");
         }),
         (Fact::Igmp, |facts| {
-            facts.igmp = appended(facts.igmp.as_deref(), "no colon here")
+            facts.igmp = appended(facts.igmp.as_deref(), "no colon here");
         }),
         (Fact::Igmp6, |facts| {
-            facts.igmp6 = Some("1 lo ff02\n".to_owned())
+            facts.igmp6 = Some("1 lo ff02\n".to_owned());
         }),
         (Fact::Igmp6, |facts| {
             facts.igmp6 = Some("x lo ff020000000000000000000000000001 1 0000000C 0\n".to_owned());
