@@ -79,6 +79,45 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   `examples/` and the gateway-client-conformance fixtures name the head; a frozen example under
   `compatibility/examples/` may name any revision of the chain, because rule 6 freezes its wire
   validity, not what the current release serves.
+- The Scenario Room routes are served (#303): `createScenarioRoom`, `deriveScenarioRoomRevision`
+  and `getScenarioRoomRevision`, each under its own grant (`scenario-room.create`, `.derive`,
+  `.read`). Every `persona` participant must be an actor the Principal's grant covers, and
+  `governance_ref` must be the host's governance record: the optional `governance_record_id` of
+  the Local Principal provisioning document. A room may name only the Plugin of the reviewed host
+  catalogue entry the Gateway ships (`gateway-world-actions` `0.1.0`). Each room is one Timeline,
+  and the revision's `commit` is its `room.revision.v1` Event. `privacy_export_ref` must name a consent the
+  acting Principal holds (the `consent_ref` of its `consent.granted.v1` Event): one it does not
+  hold is `403 consent-invalid` and a revoked one `403 revoked`, checked under the operation's
+  permit, so a revocation takes effect from the next room operation. The check precedes the
+  Idempotency-Key lookup, so even an exact retry after the consent was revoked is `403 revoked`:
+  a revoked consent stops all protected work on the room, replays included. Under decision 2a the
+  consent need not match the room's purpose or data categories; a later #309 consent scope may
+  narrow that. A room's Timeline is an ordinary root Timeline: it shares the root-Timeline
+  ceiling and its `room.revision.v1` and `room.request.v1` Events are readable through
+  `GET /v1/timelines/{timeline_id}/events` with the `timeline.events.read` grant.
+- A malformed body, a missing or malformed `Idempotency-Key` and a malformed room ID are
+  `400 invalid-request` before the authority decision and before any lookup; every other
+  answer of a room operation follows the decision. An `Idempotency-Key` of a room operation is
+  claimed once, as a plain Event on the host's request Timeline for a creation, or on the room's
+  own Timeline for a derive, and stays claimed for that Timeline's lifetime (no ADR-038
+  retention window applies to it). A refused request, a stale derive and a ceiling refusal
+  claim nothing, so the key stays free for another request. A derive whose parent is not the
+  head is decided before any key lookup or claim: it answers with the revision already derived
+  from that parent (`200`) when it hashes like that revision (ADR-041 section 7), and is
+  otherwise `409 append-conflict`, even when its `Idempotency-Key` was used for a different
+  request, which would else be `409 idempotency-conflict`. A new room's ID is its claim's Event ID, so a retry after an interrupted attempt finishes the same
+  room. A creation claims on the host's request Timeline (at most one claim per room, so the
+  root-Timeline ceiling of 64 keeps it far below its Event ceiling); a derive claims on the room's
+  own Timeline, which holds its claims and revisions, so a room holds at most half of
+  `events_per_timeline` revisions. A ceiling is a permanent `429 resource-limit-exceeded`
+  (`retryable: false`), as on every other route. Finding a claim reads its Timeline once, since
+  the host has no entity index.
+- A `ScenarioRoomRevision` (#303) is `principal-authored`. Its `provenance.digest` is
+  BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of
+  `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a
+  Crockford base32 ULID), in lower-case hex. The descriptor's `rule_set_hash` and `descriptor_hash` are the RFC 8785
+  hashes of the ADR-041 amendment of #303; `plugin_composition_hash` depends on the host's bundled
+  Plugins and cannot be recomputed by a client.
 - `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
   its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Until #461
   installs an EPF1, every Gateway resource reports `unavailable`.
@@ -274,7 +313,7 @@ since the merge base with `main`: a pull request cannot loosen the baseline toge
 contract. `servers` and `info.version` are not frozen: a client must not hard-code the server
 URL, and the description's revision label is not part of the wire contract. The golden examples
 `unsupported-version-api-major`, `not-found-unrouted-path`, `unknown-required-schema-event-type`,
-`unsupported-version-legacy-event-type`, `draft-scenario-room-unsupported-schema-version`,
+`unsupported-version-legacy-event-type`, `scenario-room-unsupported-schema-version`,
 `draft-decision-preview-incompatible-profile`, `draft-decision-preview-profile-not-installed`,
 `draft-replay-incompatible-profile`, `preference-unsupported-schema-version` and
 `compatible-unknown-optional-member-ignored` are the negotiation and unknown-member cases.
