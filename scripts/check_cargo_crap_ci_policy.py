@@ -88,6 +88,10 @@ TEST_ONLY_EXCLUSIONS = (
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
     "src/provider_lifecycle/tests.rs",
+    "src/provider_runtime/tests.rs",
+    "src/provider_runtime/endpoint/tests.rs",
+    "src/provider_runtime/serving/tests.rs",
+    "src/provider_runtime/revocation/tests.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (

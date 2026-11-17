@@ -54,6 +54,10 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
     "src/provider_lifecycle/tests.rs",
+    "src/provider_runtime/tests.rs",
+    "src/provider_runtime/endpoint/tests.rs",
+    "src/provider_runtime/serving/tests.rs",
+    "src/provider_runtime/revocation/tests.rs",
 )
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",

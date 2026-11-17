@@ -1105,6 +1105,10 @@ jobs:
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/provider_runtime/tests.rs'
+          --exclude 'src/provider_runtime/endpoint/tests.rs'
+          --exclude 'src/provider_runtime/serving/tests.rs'
+          --exclude 'src/provider_runtime/revocation/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
@@ -1150,6 +1154,10 @@ jobs:
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/provider_runtime/tests.rs'
+          --exclude 'src/provider_runtime/endpoint/tests.rs'
+          --exclude 'src/provider_runtime/serving/tests.rs'
+          --exclude 'src/provider_runtime/revocation/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0

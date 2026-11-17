@@ -621,11 +621,22 @@ impl SystemCallFilter {
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
     let arguments: Vec<_> = arguments.into_iter().collect();
-    match arguments.as_slice() {
+    let Some(diagnostic) = run_mode(&arguments) else {
+        report("usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime");
+        return std::process::ExitCode::from(2);
+    };
+    report(&diagnostic);
+    std::process::ExitCode::FAILURE
+}
+
+/// Run the mode `arguments` name and return the diagnostic for its failure,
+/// or `None` when they name no mode.
+#[cfg(target_os = "linux")]
+fn run_mode(arguments: &[std::ffi::OsString]) -> Option<String> {
+    match arguments {
         [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => {
             let error = provider_runtime::serve_provider_runtime();
-            report(&format!("pos-sandboxd: {error}"));
-            std::process::ExitCode::FAILURE
+            Some(format!("pos-sandboxd: {error}"))
         }
         [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
             let error = lpv1
@@ -633,13 +644,9 @@ pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::proc
                 .map_or(launcher::LauncherError::Parameters, |hex| {
                     launcher::run_launch_barrier(hex)
                 });
-            report(&format!("pos-sandboxd: {error}"));
-            std::process::ExitCode::FAILURE
+            Some(format!("pos-sandboxd: {error}"))
         }
-        _ => {
-            report("usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime");
-            std::process::ExitCode::from(2)
-        }
+        _ => None,
     }
 }
 
