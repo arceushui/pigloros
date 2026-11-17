@@ -821,6 +821,32 @@ mod cases {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_cancellation_whose_attempt_is_reconciled_while_it_waits_is_cleaned() -> TestResult {
+        let runtime = Runtime::new()?;
+        let fixture = TeardownFixture::new(1, TeardownStop::Empty, TeardownReset::Unload).await?;
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
+            .behaving(Behaviour::RunsUntilCancelled);
+        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let cancel = async {
+            steps.executing().await;
+            runtime.lifecycle.cancel(&cancel_request(1, grant(1))).await
+        };
+        // The run ends and is reconciled in one poll, so the waiting
+        // cancellation next finds the attempt reconciled, not ended.
+        let run_and_reconcile = async {
+            let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+            runtime
+                .lifecycle
+                .reconcile(&reconcile_request(1, grant(1)))?;
+            Ok::<_, Box<dyn std::error::Error>>(ended)
+        };
+        let (cancelled, ended) = tokio::join!(cancel, run_and_reconcile);
+        assert_eq!(cancelled?, SandboxCancellationResult::CancelledAndCleaned);
+        cleaned(&ended?)?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_cancellation_during_activation_fences_the_unit_start() -> TestResult {
         let runtime = Runtime::new()?;
         let fixture = manager(1).await?;
