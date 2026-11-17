@@ -265,6 +265,29 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         }
     }
 
+    /// Read a half, single or double precision float in the shortest of the
+    /// three that holds its value bit for bit.
+    ///
+    /// # Errors
+    /// Returns the invalid-encoding error for an item that is not a float, a
+    /// truncated argument, or a float that a narrower precision holds.
+    pub fn float(&mut self) -> Result<f64, E> {
+        let start = self.offset;
+        let initial = self.byte()?;
+        let width = match initial {
+            0xf9 => 2,
+            0xfa => 4,
+            0xfb => 8,
+            _ => return Err(self.invalid()),
+        };
+        self.take(width).and_then(|_| {
+            ciborium::from_reader::<f64, _>(&self.bytes[start..self.offset])
+                .ok()
+                .filter(|value| crate::subject_cbor::shortest_float(*value).0 == initial)
+                .ok_or_else(|| self.invalid())
+        })
+    }
+
     /// Require that every byte was consumed.
     ///
     /// # Errors
