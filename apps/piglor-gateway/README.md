@@ -93,8 +93,9 @@ operations = ["session.read", "timeline.create", "timeline.events.read", "timeli
 ```
 
 The grantable operations are `consent.revoke`, `session.read`, `timeline.create`,
-`timeline.events.read`, `timeline.signals.append`, `ledger.predictions.create` and
-`world.action.v1.submit`, plus the
+`timeline.events.read`, `timeline.signals.append`, `ledger.predictions.create`,
+`world.action.v1.submit`, `preference.create`, `preference.read`, `option-spec.create` and
+`option-spec.read`, plus the
 Principal network capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
 and only makes the Session report `network: capability-granted` in Local mode. Encrypt it like the
 Fork-admission credentials and provision:
@@ -164,6 +165,21 @@ revocation from it. Once another process records anything to the store, the host
 (`503 temporarily-unavailable`) on every read of the consent Timeline, so a revocation recorded
 there makes every decision the host's grants cover fail closed until the host restarts; the
 restarted host then sees it.
+
+### Preferences and OptionSpecs
+
+`POST /v1/preferences` and `POST /v1/option-specs` (#304) create revision 1 of a user-authored
+Preference or OptionSpec, or with `parent` its next revision; `GET .../{id}/revisions/{revision}`
+reads one. Each needs its own grant, and the acting entity is the revision's subject: only that
+subject is answered, any other caller gets `404`. The Gateway stores the revisions in its own
+database tables, outside every Timeline, each in one transaction with its idempotency record and
+the execution-mode binding it was produced under, so they survive a restart. A parent must be the
+current head (`409 append-conflict`), and only `Idempotency-Key` makes a retry return the original
+revision. Erasure (the host-only `GatewayRevisionPortV1::erase_gateway_revision`, which the subject
+erasure workflow #309 drives) deletes the row under `secure_delete`, checkpoints the write-ahead
+log, rewrites the request digest of the idempotency record to a constant and keeps a payload-free
+tombstone, so the subject then reads `410 deleted`, its retries under the key answer `410` and
+every other caller gets `404` (or `409` for a retry under the same key). The contract README states the digests.
 
 ### Session
 

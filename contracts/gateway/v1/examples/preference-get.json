@@ -1,33 +1,25 @@
 {
-  "name": "draft-preference-create",
-  "operation_id": "createPreference",
+  "name": "preference-get",
+  "operation_id": "getPreferenceRevision",
   "request": {
-    "headers": {
-      "Idempotency-Key": "client-1-1",
-      "content-type": "application/json"
+    "path": {
+      "preference_id": "01JC0GATEWAYW9PREF0000001A",
+      "revision": 1
     },
-    "body": {
-      "weights": [
-        {
-          "dimension": "nature",
-          "weight_micro": 800000
-        },
-        {
-          "dimension": "cost",
-          "weight_micro": -400000
-        }
-      ]
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
     }
   },
   "request_valid": true,
   "response": {
-    "status": 201,
+    "status": 200,
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:preference-revision",
+      "schema_version": 1,
       "id": "01JC0GATEWAYW9PREF0000001A",
       "revision": 1,
       "provenance": {
-        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "digest": "936a5e2a9d04fe2d747e3593dc39c284b059226d0294c15bafc967b269754e60",
         "origin": "principal-authored"
       },
       "mode_profile": {
@@ -49,16 +41,16 @@
       "subject_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
       "weights": [
         {
-          "dimension": "nature",
-          "weight_micro": 800000
-        },
-        {
           "dimension": "cost",
           "weight_micro": -400000
+        },
+        {
+          "dimension": "nature",
+          "weight_micro": 800000
         }
       ],
       "parent_revision": null,
-      "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      "digest": "f14145c6e48b82b1d711a305bcdf9c1bfc5308c55052e056627bdbf136c770bf"
     }
   }
 }

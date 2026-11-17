@@ -121,6 +121,14 @@ impl MemoryGatewayModeStateV1 {
         }
     }
 
+    /// The binding a Gateway revision commit records (#304): the current
+    /// binding, when this instance is attached to its epoch.
+    pub(super) fn revision_mode(
+        &self,
+    ) -> Result<GatewayModeBindingRecordV1, pos_core::GatewayRevisionErrorV1> {
+        pos_core::gateway_revision_mode_v1(self.current().cloned(), self.attached)
+    }
+
     /// Simulate another process changing the binding: replace this
     /// instance's attached epoch.
     #[cfg(test)]

@@ -149,7 +149,7 @@ const POPULATED_STORE_SQL: &str = "SELECT EXISTS (SELECT 1 FROM timelines)
      OR EXISTS (SELECT 1 FROM fork_principal_owner_bindings)";
 
 /// A stored binding epoch: an `SQLite` integer of at least 1.
-struct SqlEpochV1(NonZeroU64);
+pub(super) struct SqlEpochV1(pub(super) NonZeroU64);
 
 impl FromSql for SqlEpochV1 {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
@@ -165,7 +165,7 @@ impl FromSql for SqlEpochV1 {
 
 /// The `SQLite` integer of a `u64` value; values beyond `i64::MAX` saturate
 /// and are refused by the column checks or later reads.
-fn sql_integer(value: u64) -> i64 {
+pub(super) fn sql_integer(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
@@ -183,7 +183,7 @@ impl BindingRowV1 {
     }
 }
 
-type BindingStep<T> = rusqlite::Result<Result<T, GatewayModeBindingErrorV1>>;
+pub(super) type BindingStep<T> = rusqlite::Result<Result<T, GatewayModeBindingErrorV1>>;
 
 /// Collapse an adapter failure into the port's closed unavailable error.
 fn settle<T>(step: BindingStep<T>) -> Result<T, GatewayModeBindingErrorV1> {
@@ -214,7 +214,7 @@ fn read_binding_row(conn: &Connection) -> rusqlite::Result<Option<BindingRowV1>>
     .optional()
 }
 
-fn read_binding(conn: &Connection) -> BindingStep<Option<GatewayModeBindingRecordV1>> {
+pub(super) fn read_binding(conn: &Connection) -> BindingStep<Option<GatewayModeBindingRecordV1>> {
     read_binding_row(conn).map(|row| row.map(BindingRowV1::record).transpose())
 }
 
@@ -288,9 +288,13 @@ fn change_in_transaction(
 }
 
 /// Commit a successful step, roll back any other.
+///
+/// A `COMMIT` that fails, for example on a deferred constraint, leaves the
+/// transaction open, so it is rolled back before the failure is returned.
 fn finish_binding_transaction<T>(conn: &Connection, step: BindingStep<T>) -> BindingStep<T> {
     let commit = step.as_ref().is_ok_and(Result::is_ok);
     conn.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" })
+        .inspect_err(|_| drop(conn.execute_batch("ROLLBACK")))
         .and(step)
 }
 
