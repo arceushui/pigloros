@@ -873,10 +873,18 @@ mod tests {
 
     #[test]
     fn the_production_clock_reads_clock_monotonic() -> TestResult {
-        let before = super::super::timespec_ns(rustix::time::clock_gettime(
-            rustix::time::ClockId::Monotonic,
-        ))?;
-        assert!(super::super::monotonic_ns()? >= before);
+        let sample = || {
+            super::super::timespec_ns(rustix::time::clock_gettime(
+                rustix::time::ClockId::Monotonic,
+            ))
+        };
+        let before = sample()?;
+        let now = super::super::monotonic_ns()?;
+        let after = sample()?;
+        assert!(
+            (before..=after).contains(&now),
+            "{before} <= {now} <= {after}"
+        );
         Ok(())
     }
 
