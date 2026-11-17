@@ -1810,21 +1810,26 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
     Ok(())
 }
 
-/// An ELNEG1 commits only with a negative ELO1 that carries its closed error
-/// code (ADR-136 §4a); any other owner result is refused.
+/// An ELNEG1 commits only with a negative ELO1 that binds it as its
+/// `effect_digest` and carries its command, owner reference and closed
+/// error code (ADR-136 §4a); any other owner result is refused.
 #[test]
 fn a_negative_effect_is_bound_only_by_an_elo1_with_its_error_code() -> TestResult {
     let effect = negative(ErasureErrorV1::BackupInventoryIncomplete);
     let elneg1 = effect.to_canonical_cbor()?;
+    let bound_result = LocalErasureOwnerResultV1 {
+        request: reference(46),
+        attempt: reference(49),
+        obligation: reference(50),
+        command: effect.command,
+        owner_ref: effect.owner_ref,
+        error: Some(effect.error),
+        effect_digest: effect.reference()?,
+    };
     let elo1 = |error| {
         LocalErasureOwnerResultV1 {
-            request: reference(46),
-            attempt: reference(49),
-            obligation: reference(50),
-            command: effect.command,
-            owner_ref: effect.owner_ref,
             error,
-            effect_digest: effect.reference()?,
+            ..bound_result
         }
         .to_canonical_cbor()
     };
@@ -1838,10 +1843,26 @@ fn a_negative_effect_is_bound_only_by_an_elo1_with_its_error_code() -> TestResul
         Some(elneg1.as_slice())
     );
     assert_eq!(prepared.owner_result().canonical_cbor(), bound.as_slice());
-    // Another closed code, or a positive result, does not bind the ELNEG1.
+    // Another closed code, a positive result, or another command, owner
+    // reference or effect digest, each alone, does not bind the ELNEG1.
     for other in [
         elo1(Some(ErasureErrorV1::ArtifactDeletionFailed))?,
         elo1(None)?,
+        LocalErasureOwnerResultV1 {
+            command: reference(51),
+            ..bound_result
+        }
+        .to_canonical_cbor()?,
+        LocalErasureOwnerResultV1 {
+            owner_ref: reference(51),
+            ..bound_result
+        }
+        .to_canonical_cbor()?,
+        LocalErasureOwnerResultV1 {
+            effect_digest: reference(51),
+            ..bound_result
+        }
+        .to_canonical_cbor()?,
     ] {
         assert_eq!(
             PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), &other),

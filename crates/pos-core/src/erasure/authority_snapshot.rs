@@ -220,7 +220,8 @@ pub enum LocalOwnerEffectV1 {
     /// One canonical ELCG1 cache generation.
     CacheGeneration(Vec<u8>),
     /// One canonical ELNEG1 negative owner result, bound only by an ELO1
-    /// with the same closed error code.
+    /// that names it as its `effect_digest` and carries its command, owner
+    /// reference and closed error code.
     Negative(Vec<u8>),
     /// One canonical ELRP1 local-replica purge, committed after the purge.
     ReplicaPurge(Vec<u8>),
@@ -240,15 +241,16 @@ impl PreparedLocalOwnerEffectV1 {
     ///
     /// A record effect must carry its own record tag (ELAD1, ELCG1, ELNEG1
     /// or ELRP1) and the owner result must be an ELO1 record. An ELNEG1 and
-    /// its ELO1 must both be canonical, and the ELO1 must be negative with
-    /// the ELNEG1's closed error code (ADR-136 §4a).
+    /// its ELO1 must both be canonical, and the ELO1 must bind the ELNEG1 as
+    /// its `effect_digest` and carry its command, owner reference and closed
+    /// error code (ADR-136 §4a).
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::InvalidEncoding`] when a record is malformed
     /// or carries another tag, [`ErasureErrorV1::ScopeInvalid`] when one is
     /// over the retained-object bound, and
-    /// [`ErasureErrorV1::ProvenanceMissing`] when an ELO1 does not carry its
-    /// ELNEG1's error code.
+    /// [`ErasureErrorV1::ProvenanceMissing`] when an ELO1 does not bind its
+    /// ELNEG1 so.
     pub fn new(effect: LocalOwnerEffectV1, elo1: &[u8]) -> Result<Self, ErasureErrorV1> {
         let (key_tombstone, effect_object) = match effect {
             LocalOwnerEffectV1::KeyTombstone {
@@ -305,12 +307,17 @@ impl PreparedLocalOwnerEffectV1 {
     }
 }
 
-/// Whether canonical `elo1` binds canonical ELNEG1 `elneg1`: an ELO1 with
-/// the same closed error code (ADR-136 §4a).
+/// Whether canonical `elo1` binds canonical ELNEG1 `elneg1` (ADR-136 §4a):
+/// an ELO1 whose `effect_digest` is the ELNEG1's content address and whose
+/// command, owner reference and closed error code are the ELNEG1's.
 fn negative_bound_by(elneg1: &[u8], elo1: &[u8]) -> Result<(), ErasureErrorV1> {
     let negative = LocalErasureNegativeResultV1::from_canonical_cbor(elneg1)?;
     let owner_result = LocalErasureOwnerResultV1::from_canonical_cbor(elo1)?;
-    if owner_result.error == Some(negative.error) {
+    if negative.reference() == Ok(owner_result.effect_digest)
+        && owner_result.command == negative.command
+        && owner_result.owner_ref == negative.owner_ref
+        && owner_result.error == Some(negative.error)
+    {
         Ok(())
     } else {
         Err(ErasureErrorV1::ProvenanceMissing)

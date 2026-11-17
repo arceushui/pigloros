@@ -1301,8 +1301,8 @@ local_record_api!(LocalErasureCacheGenerationV1);
 /// ELNEG1, the durable owner effect of one negative owner result.
 ///
 /// `["ELNEG1", 1, command, owner_ref, error_code]`, at most 1 KiB (ADR-136
-/// §4a). An ELO1 with the same closed error code binds it as its
-/// `effect_digest`.
+/// §4a). An ELO1 binds it as its `effect_digest` and carries its command,
+/// owner reference and closed error code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalErasureNegativeResultV1 {
     /// The destruction command.
