@@ -233,12 +233,13 @@ impl Fixture {
         let registry = recorded_registry_digest(&store)?.ok_or("no Local Principal")?;
         let trust = deployment.trust()?;
         let binding = local_erasure_execution_binding_v1();
+        let operator_public_key = operator().verifying_key().to_bytes();
         Ok(ErasureCoordinatorCompositionV1::local(
             &LocalErasureCompositionInputsV1 {
                 bundle,
                 bundle_signature: &signature,
                 trust: &trust,
-                operator_public_key: operator().verifying_key().to_bytes(),
+                operator_public_key,
                 authority_registry_digest: ErasureReferenceV1::from_digest(*registry.as_bytes()),
                 execution_binding: Some(&binding),
                 principal_grant: local_principal_grant_id(),

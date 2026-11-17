@@ -452,11 +452,7 @@ fn validated_bundle(
 ) -> io::Result<(OwnerIdV1, (Vec<u8>, TimelineId))> {
     OwnerIdV1::new(request.signer_owner.as_str())
         .ok()
-        .and_then(|owner| {
-            bundle(request, signer, trust, registry, identity)
-                .ok()
-                .map(|bundle| (owner, bundle))
-        })
+        .zip(bundle(request, signer, trust, registry, identity).ok())
         .ok_or(LocalErasureProvisionErrorV1::BundleInvalid)
         .map_err(io::Error::other)
 }
