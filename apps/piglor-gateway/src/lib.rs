@@ -116,7 +116,7 @@ fn gateway_output_binding<P: Plugin>(
     gateway_output_binding_with_profile(
         plugin,
         configuration_details,
-        mode.registration_profile_id().unwrap_or_default(),
+        mode.registration_profile_id(),
     )
 }
 
@@ -368,7 +368,7 @@ mod coverage_tests {
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
         let registry = super::fixture_action_registry_builder(std::iter::empty(), None).test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
-        for selection in [Some("live-local-v1"), None] {
+        for selection in ["live-local-v1", "live-air-gapped-v1"] {
             assert!(matches!(
                 super::gateway_action_registry_builder(std::iter::empty(), None, selection),
                 Err(RuntimeError::OutputAdmission(
@@ -492,7 +492,7 @@ mod coverage_tests {
             registry.register_from_host_catalogue_entry(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
-                Some("live-local-v1"),
+                "live-local-v1",
             ),
             Err(RuntimeError::OutputAdmission(
                 OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
@@ -551,7 +551,7 @@ mod coverage_tests {
             registry.register_from_host_catalogue_entry(
                 &foreign,
                 &ForeignApproverConfiguration,
-                Some("live-local-v1"),
+                "live-local-v1",
             ),
             registry.register_host_catalogue_fixture(
                 &foreign,
@@ -1366,12 +1366,13 @@ fn gateway_action_registry_with_authority(
 
 // The production registry selects the reviewed Gateway entry with installed
 // evidence for the profile the bound execution mode selects (ADR-134 §7,
-// field 9: Local `live-local-v1`, Air-Gapped none). No installed Gateway EPF1
-// exists, so it fails closed; #461 owns positive activation.
+// field 9: Local `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135).
+// No installed Gateway EPF1 exists, so it fails closed; #461 owns positive
+// activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    registration_profile_id: Option<&str>,
+    registration_profile_id: &str,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
         registry.register_from_host_catalogue_entry(entry, frozen, registration_profile_id)
@@ -4379,8 +4380,9 @@ mod tests {
         drop(gateway);
     }
 
-    /// ADR-134 §7: registration follows the bound mode's selection and fails
-    /// closed in both modes until an EPF1 is installed (#461, #1372).
+    /// ADR-134 §7: registration follows the bound mode's selection (Local
+    /// `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135) and fails
+    /// closed in both modes until #461 installs an EPF1.
     #[tokio::test]
     async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
         for mode in [
@@ -4791,8 +4793,11 @@ mod tests {
 
     #[test]
     fn gateway_action_registry_builder_propagates_binding_errors() {
-        let too_many_bodies =
-            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None, None);
+        let too_many_bodies = gateway_action_registry_builder(
+            std::iter::repeat(EntityId::new()),
+            None,
+            "live-local-v1",
+        );
         assert!(matches!(
             too_many_bodies,
             Err(pos_runtime::RuntimeError::OutputAdmission(
