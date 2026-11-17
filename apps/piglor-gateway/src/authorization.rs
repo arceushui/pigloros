@@ -316,6 +316,29 @@ impl GatewayOperationV1 {
     /// `GET /v1/option-specs/{option_spec_id}/revisions/{revision}` (#304).
     pub const READ_OPTION_SPEC: Self =
         Self::new("option-spec.read", "option-spec.revision", "read", "read");
+    /// `POST /v1/scenario-rooms`: create revision 1 of a Scenario Room (#303).
+    pub const CREATE_SCENARIO_ROOM: Self = Self::new(
+        "scenario-room.create",
+        "scenario-room",
+        "create",
+        "operation",
+    );
+    /// `POST /v1/scenario-rooms/{room_id}/revisions`: derive the next
+    /// revision of a Scenario Room (#303).
+    pub const DERIVE_SCENARIO_ROOM: Self = Self::new(
+        "scenario-room.derive",
+        "scenario-room.revision",
+        "derive",
+        "operation",
+    );
+    /// `GET /v1/scenario-rooms/{room_id}/revisions/{revision}`: read one
+    /// Scenario Room revision (#303).
+    pub const READ_SCENARIO_ROOM: Self = Self::new(
+        "scenario-room.read",
+        "scenario-room.revisions",
+        "read",
+        "read",
+    );
     /// Every operation this Gateway serves and the network capability, in
     /// name order.
     pub const ALL: &[Self] = &[
@@ -326,6 +349,9 @@ impl GatewayOperationV1 {
         Self::READ_OPTION_SPEC,
         Self::CREATE_PREFERENCE,
         Self::READ_PREFERENCE,
+        Self::CREATE_SCENARIO_ROOM,
+        Self::DERIVE_SCENARIO_ROOM,
+        Self::READ_SCENARIO_ROOM,
         Self::READ_SESSION,
         Self::CREATE_TIMELINE,
         Self::READ_EVENTS,
@@ -382,6 +408,11 @@ impl GatewayOperationV1 {
             .find(|operation| operation.name == name)
     }
 }
+
+/// The scope resource prefix that records the host's single-participant
+/// Scenario Room governance record (#303 decision 1a); the record's ULID
+/// follows it. It names no [`GatewayOperationV1`].
+pub const GOVERNANCE_RESOURCE_PREFIX: &str = "scenario-room.governance.";
 
 /// Whether `scope` names `operation`: each [`GatewayOperationV1`] constant
 /// has its own resource, so naming that resource names the operation.
@@ -1281,6 +1312,24 @@ impl GatewayAuthorization {
             .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
     }
 
+    /// The single-participant governance record the pinned leaf grant
+    /// records, if any (#303 decision 1a).
+    pub(crate) fn governance_record(&self) -> Option<EntityId> {
+        self.pinned()
+            .view
+            .authority()
+            .chain()
+            .grants()
+            .last()
+            .and_then(|leaf| {
+                leaf.scope()
+                    .resources()
+                    .iter()
+                    .find_map(|resource| resource.strip_prefix(GOVERNANCE_RESOURCE_PREFIX))
+                    .and_then(crate::scenario_room::canonical_entity)
+            })
+    }
+
     /// The current pinned authority; replacement only swaps a complete
     /// snapshot, so a poisoned lock still holds a whole one.
     fn pinned(&self) -> Arc<GatewayPinnedAuthorityV1> {
@@ -1342,6 +1391,13 @@ impl GatewayAuthorization {
     /// Acquire the append fence used by the Gateway before a final recheck.
     pub(crate) async fn commit_fence(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.commit_lock).read_owned().await
+    }
+
+    /// Whether a writer (a revocation's exclusive fence) is queued behind
+    /// the current readers, so no new reader is admitted.
+    #[cfg(test)]
+    pub(crate) fn fence_writer_waits(&self) -> bool {
+        self.commit_lock.try_read().is_err()
     }
 
     /// Persist every immutable record behind the current authority view in

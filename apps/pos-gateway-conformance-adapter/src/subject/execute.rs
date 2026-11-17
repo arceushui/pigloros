@@ -33,10 +33,10 @@ use ulid::Ulid;
 
 use super::payload::{
     CaptureV2, CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, CONSENT_SLOT,
-    TIMELINE_SLOT,
+    ROOM_SLOT, TIMELINE_SLOT,
 };
-use super::ACTOR_ENTITY_ID;
-use crate::observation_v1;
+use super::{ACTOR_ENTITY_ID, GOVERNANCE_RECORD_ID};
+use crate::{observation_v1, substitute_captured_v1};
 
 /// The header an exchange with `actor` sends.
 const ACTOR_HEADER: &str = "x-piglor-actor-entity";
@@ -158,16 +158,16 @@ fn host() -> Option<ErasureExecutionHostV1> {
 /// it has one.
 ///
 /// `open` is the unprotected in-process harness Gateway. `authorized`,
-/// `authorized-air-gapped` and `authorized-consented` are the production serve composition
-/// (#1361, #1360, #309): the first `serve` binds a fresh `SQLite` store to the Local or the
-/// Air-Gapped execution mode, a fixture Local Principal document is provisioned into it with
-/// the production `provision_on_host`, and the Gateway is composed over that store by
-/// `local_gateway` under that binding, which requires the recorded Principal for every
-/// protected operation.
+/// `authorized-air-gapped`, `authorized-consented` and `authorized-rooms` are the production
+/// serve composition (#1361, #1360, #309, #303): the first `serve` binds a fresh `SQLite` store
+/// to the Local or the Air-Gapped execution mode, a fixture Local Principal document is
+/// provisioned into it with the production `provision_on_host`, and the Gateway is composed
+/// over that store by `local_gateway` under that binding, which requires the recorded
+/// Principal for every protected operation.
 fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
-    composition.mode().map_or_else(open_gateway, |id| {
-        authorized_gateway(id, composition == CompositionV2::AuthorizedConsented)
-    })
+    composition
+        .mode()
+        .map_or_else(open_gateway, |id| authorized_gateway(id, composition))
 }
 
 /// The unprotected in-process harness Gateway of the `open` composition.
@@ -178,15 +178,15 @@ fn open_gateway() -> Option<(Gateway, Option<ScratchStore>)> {
 }
 
 /// The production serve composition over a fresh store bound to the execution mode `id`,
-/// whose fixture Principal binds a consent when `consented`.
+/// whose fixture Principal is the document of `composition`.
 fn authorized_gateway(
     id: GatewayModeProfileIdV1,
-    consented: bool,
+    composition: CompositionV2,
 ) -> Option<(Gateway, Option<ScratchStore>)> {
     let store = ScratchStore::new();
     store_host(&store)
         .and_then(|mut host| bind_mode(&mut host, id))
-        .and_then(|_| provision_store(&store, consented))
+        .and_then(|_| provision_store(&store, composition))
         .and_then(|()| store_host(&store))
         .and_then(|mut host| {
             bind_mode(&mut host, id).and_then(|mode| local_gateway(host, None, &mode).ok())
@@ -226,36 +226,82 @@ fn bind_mode(
     .ok()
 }
 
-/// Provision the fixture Local Principal of the authorized compositions into `store`: it may
-/// create Timelines, read their Events and read its own Session as the fixture actor, and holds
-/// no action, signal or network grant. When `consented` (`authorized-consented`) it may also
-/// revoke a consent, and its one consent, by the fixture actor to itself, governs Timeline
-/// creation. Only its document is fixture data.
-fn provision_store(store: &ScratchStore, consented: bool) -> Option<()> {
+/// The fixture Local Principal document of an authorized composition, as the fixture actor:
+/// its operations, its one consent and its governance record.
+///
+/// `authorized` and `authorized-air-gapped` may create Timelines, read their Events and read
+/// their own Session, and hold no action, signal or network grant. `authorized-consented` may
+/// also revoke a consent, and its one consent, by the fixture actor to itself, governs Timeline
+/// creation. `authorized-rooms` may create Timelines, read its Session, revoke a consent and
+/// create, derive and read Scenario Rooms; it records the fixture governance record, and its
+/// one consent governs Timeline creation and permits export, so a room may name it as its
+/// `privacy_export_ref`.
+fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
+    let consent = |export_permitted| LocalConsentDraftV1 {
+        subject: actor,
+        grantee: actor,
+        grants: vec![LocalConsentGrantDraftV1 {
+            purpose: "operation".to_owned(),
+            data_categories: vec!["timeline".to_owned()],
+            export_permitted,
+        }],
+    };
+    match composition {
+        CompositionV2::AuthorizedConsented => (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+            ],
+            Some(consent(false)),
+            None,
+        ),
+        CompositionV2::AuthorizedRooms => (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::CREATE_SCENARIO_ROOM,
+                GatewayOperationV1::DERIVE_SCENARIO_ROOM,
+                GatewayOperationV1::READ_SCENARIO_ROOM,
+            ],
+            Some(consent(true)),
+            entity(GOVERNANCE_RECORD_ID),
+        ),
+        CompositionV2::Open | CompositionV2::Authorized | CompositionV2::AuthorizedAirGapped => (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+            ],
+            None,
+            None,
+        ),
+    }
+}
+
+/// The operations, consent and governance record of a fixture Local Principal document.
+type FixtureDocument = (
+    Vec<GatewayOperationV1>,
+    Option<LocalConsentDraftV1>,
+    Option<EntityId>,
+);
+
+/// Provision the fixture Local Principal of `composition` into `store`. Only its document is
+/// fixture data.
+fn provision_store(store: &ScratchStore, composition: CompositionV2) -> Option<()> {
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
         .zip(entity(ACTOR_ENTITY_ID))
         .and_then(|(principal, actor)| {
-            let operations = [
-                GatewayOperationV1::CREATE_TIMELINE,
-                GatewayOperationV1::READ_EVENTS,
-                GatewayOperationV1::READ_SESSION,
-            ];
-            let consent = consented.then(|| LocalConsentDraftV1 {
-                subject: actor,
-                grantee: actor,
-                grants: vec![LocalConsentGrantDraftV1 {
-                    purpose: "operation".to_owned(),
-                    data_categories: vec!["timeline".to_owned()],
-                    export_permitted: false,
-                }],
-            });
-            let revoke = consented.then_some(GatewayOperationV1::REVOKE_CONSENT);
-            LocalPrincipalProvisionV1::try_new_with_consent(
+            let (operations, consent, governance) = document(composition, actor);
+            LocalPrincipalProvisionV1::try_new_provisioned(
                 &principal,
                 [actor],
-                operations.into_iter().chain(revoke),
+                operations,
                 consent.as_ref(),
+                governance,
             )
             .ok()
         })
@@ -301,8 +347,8 @@ impl Drop for ScratchStore {
 /// The header that carries the idempotency key of every request.
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
-/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured Timeline ID
-/// and `{consent}` by the captured consent. Every request carries the sub-case ID as its
+/// The raw HTTP request of an exchange, with `{timeline}` and `{room}` replaced by the captured
+/// Timeline and room IDs and `{consent}` by the captured consent. Every request carries the sub-case ID as its
 /// idempotency key; routes without one ignore it.
 fn request(exchange: &ExchangeV2, slots: &Slots, key: &str) -> Request<Body> {
     let body = exchange.body.as_ref().map_or_else(Body::empty, |value| {
@@ -319,7 +365,8 @@ fn request(exchange: &ExchangeV2, slots: &Slots, key: &str) -> Request<Body> {
     };
     let path = exchange
         .path
-        .replace(TIMELINE_SLOT, slots.timeline.as_deref().unwrap_or_default());
+        .replace(TIMELINE_SLOT, slots.timeline.as_deref().unwrap_or_default())
+        .replace(ROOM_SLOT, slots.room.as_deref().unwrap_or_default());
     *request.uri_mut() = Uri::try_from(path).unwrap_or_default();
     if exchange.body.is_some() {
         request.headers_mut().insert(
@@ -345,9 +392,21 @@ fn request(exchange: &ExchangeV2, slots: &Slots, key: &str) -> Request<Body> {
 struct Slots {
     timeline: Option<String>,
     consent: Option<String>,
+    room: Option<String>,
 }
 
 impl Slots {
+    /// The `(slot, value)` pairs of the captured consent and room that later responses echo.
+    fn captured(&self) -> Vec<(&'static str, &str)> {
+        [
+            (CONSENT_SLOT, self.consent.as_deref()),
+            (ROOM_SLOT, self.room.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(slot, value)| value.map(|value| (slot, value)))
+        .collect()
+    }
+
     /// Fill the slot `capture` names from the response `parsed`.
     fn capture(&mut self, capture: Option<CaptureV2>, parsed: Option<&Value>) {
         let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
@@ -355,6 +414,7 @@ impl Slots {
             Some(CaptureV2::Timeline) => {
                 self.timeline = text(parsed.and_then(|value| value.get("id")));
             }
+            Some(CaptureV2::Room) => self.room = text(parsed.and_then(|value| value.get("id"))),
             Some(CaptureV2::Consent) => {
                 self.consent =
                     text(parsed.and_then(|value| value.pointer("/consents/0/consent_ref")));
@@ -416,7 +476,7 @@ async fn exchange_all(
                 .unwrap_or_default();
             run.steps += 1;
             run.output_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            run.events += u64::from(status == 201 && route.is_some_and(RouteV2::commits));
+            run.events += route.filter(|_| status == 201).map_or(0, RouteV2::events);
             if exchange.router == RouterV2::Spectator {
                 present |= subcase
                     .canary
@@ -425,7 +485,10 @@ async fn exchange_all(
             }
             let parsed = serde_json::from_slice::<Value>(&bytes).ok();
             slots.capture(exchange.capture(), parsed.as_ref());
-            observation_v1(status, parsed)
+            observation_v1(
+                status,
+                parsed.map(|value| substitute_captured_v1(value, &slots.captured())),
+            )
         } else {
             json!({"refused": "capability-denied"})
         };
