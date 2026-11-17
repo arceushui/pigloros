@@ -844,11 +844,18 @@ pub fn bind_gateway_mode_v1(
 ) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
     installed_gateway_mode_profile_v1(id)
         .and_then(|profile| verify_predicates(&profile, &composition).map(|()| profile))
-        .and_then(|profile| {
-            bind_store(host.gateway_mode_binding(), &profile).map(|record| {
-                GatewayModeBindingV1::new(profile, composition, record.binding_epoch())
-            })
-        })
+        .and_then(|profile| bind_verified(profile, composition, host))
+}
+
+/// Bind, attach or rotate `host`'s store to `profile`, whose predicates over
+/// `composition` hold, and return the handle at the store's binding epoch.
+fn bind_verified(
+    profile: GatewayModeProfileV1,
+    composition: GatewayServeCompositionV1,
+    host: &mut ErasureExecutionHostV1,
+) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
+    bind_store(host.gateway_mode_binding(), &profile)
+        .map(|record| GatewayModeBindingV1::new(profile, composition, record.binding_epoch()))
 }
 
 /// The Gateway error of a failed host binding check: a store bound to
@@ -1204,10 +1211,8 @@ pub(crate) fn test_bind_vouched(
     composition: GatewayServeCompositionV1,
     host: &mut ErasureExecutionHostV1,
 ) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
-    installed_gateway_mode_profile_v1(id).and_then(|profile| {
-        bind_store(host.gateway_mode_binding(), &profile)
-            .map(|record| GatewayModeBindingV1::new(profile, composition, record.binding_epoch()))
-    })
+    installed_gateway_mode_profile_v1(id)
+        .and_then(|profile| bind_verified(profile, composition, host))
 }
 
 /// Attach `host`'s adapter to the binding of `mode`, as `serve` does before
