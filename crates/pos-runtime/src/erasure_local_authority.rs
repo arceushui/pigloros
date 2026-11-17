@@ -1,12 +1,13 @@
 //! The single-host Local/Air-Gapped erasure authority (ADR-136).
 //!
 //! This module holds the ELP1 policy and the executor binding (ELEXV1)
-//! compiled into this binary, the composition-time verification of the installed ELB1/ELB1S bundle against
-//! the profile's TPS1 anchor and the store (ADR-136 §4, *Bundle*), and the
-//! verify-only `LocalErasureAuthorityV1` that composition installs over the
-//! verified bundle, from submission through freeze to attempt,
-//! acknowledgement and receipt admission. The executor, signer and driver of
-//! ADR-136 §1 are later slices of the same module.
+//! compiled into this binary, the composition-time verification of the
+//! installed ELB1/ELB1S bundle against the profile's TPS1 anchor and the
+//! store (ADR-136 §4, *Bundle*), and the verify-only
+//! `LocalErasureAuthorityV1` that composition installs over the verified
+//! bundle, from submission through freeze to attempt, acknowledgement and
+//! receipt admission. The executor, signer and driver of ADR-136 §1 are
+//! later slices of the same module.
 
 mod authority;
 mod binding;

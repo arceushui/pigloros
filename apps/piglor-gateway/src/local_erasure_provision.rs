@@ -12,18 +12,27 @@
 //!
 //! ```text
 //! piglor-gateway provision-local-erasure <sqlite-path>
-//!     --issued-by <erasure-bundle/...> --signer-owner <owner-id> --out <path>
+//!     --issued-by <erasure-bundle/...> --signer-owner <owner-id> --out <absolute-path>
 //!     [--expiry <unix-seconds, default 0>] [--signer-epoch <epoch, default 1>]
 //! ```
 //!
-//! Every check that needs no write runs first: the `--issued-by` key id must
-//! be a current, unrevoked TPS1 root, the installed TPS1 must not revoke the
+//! The command first claims `--out`, an absolute path, as a new file with
+//! mode `0600`; an existing file is refused before anything else happens,
+//! and a claimed file is removed again when a later step fails. Every check
+//! that needs no store write runs next: the `--issued-by` key id must be a
+//! current, unrevoked TPS1 root, the installed TPS1 must not revoke the
 //! signer key, the store must record a Local Principal, and the complete
 //! ELB1 must encode. Then the command registers the signer key under
 //! `(signer_owner, role 2, signer_epoch)`, writes the store identity once,
 //! opens the Erasure Host Timeline if it is absent, and writes the unsigned
-//! ELB1 to a new `--out` file with mode `0600`. The holder of the
+//! ELB1 to the claimed file, syncing it and its directory. The holder of the
 //! `erasure-bundle/` root signs it into ELB1S offline.
+//!
+//! **Shared lock.** Like every offline writer, the command holds the mode
+//! lock shared, so the lock alone does not exclude a serving Gateway. The
+//! key-registry read-modify-write relies on the unit's
+//! `Conflicts=piglor-gateway.service`, which stops `serve` while the command
+//! runs.
 //!
 //! **Store identity.** 32 random bytes, written once through the write-once
 //! erasure store identity; a re-run reuses the recorded value.
@@ -35,10 +44,11 @@
 //! time. It is the fence of key destruction for erasure, so the bundle lists
 //! it in `host_timelines` with the Principal's Consent Timeline and its
 //! authority Timeline, sorted, and composition refuses a bundle without it.
-//! The first run opens it through a closed erasure host, which serves only a
-//! store without erasure requests; a re-run on a store that already has it,
-//! such as a routine signer rotation on a store that holds requests, never
-//! opens a host and writes only through the raw store under the mode lock.
+//! The first run opens it through a closed erasure host. A re-run on a
+//! store that already has it, such as a routine signer rotation on a store
+//! that holds erasure requests, opens no host and writes only through the
+//! raw store under the mode lock. A store that holds erasure requests but no
+//! Erasure Host Timeline cannot be provisioned: the closed host refuses it.
 //!
 //! **Executor binding (ELEXV1).** ELB1 binds
 //! [`pos_runtime::local_erasure_execution_binding_v1`]: the executor id
@@ -50,6 +60,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs::File,
     io::{self, Write as _},
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
@@ -104,7 +115,7 @@ pub enum LocalErasureProvisionErrorV1 {
     /// The command line is not the documented one.
     #[error(
         "Usage: piglor-gateway provision-local-erasure <sqlite-path> --issued-by <key-id> \
-         --signer-owner <owner-id> --out <path> [--expiry <unix-seconds>] \
+         --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] \
          [--signer-epoch <epoch>]"
     )]
     Usage,
@@ -121,7 +132,8 @@ pub enum LocalErasureProvisionErrorV1 {
     #[error("the store records no Local Principal; run provision-local-principal first")]
     PrincipalMissing,
     /// The values form no valid ELB1, such as an `--issued-by` key id
-    /// without the `erasure-bundle/` prefix or a signer epoch of zero.
+    /// without the `erasure-bundle/` prefix, a signer epoch of zero or a
+    /// signer owner that is no key-registry owner id.
     #[error(
         "these values form no valid local erasure bundle: --issued-by needs the \
          erasure-bundle/ prefix, --signer-owner 1 to 128 bytes and --signer-epoch at least 1"
@@ -131,8 +143,9 @@ pub enum LocalErasureProvisionErrorV1 {
     /// identity, the epoch is below the owner's highest, or the key is
     /// registered elsewhere.
     #[error(
-        "the key registry refuses this signer: rotate with a new credential and a higher \
-         --signer-epoch"
+        "the key registry refuses this signer key: another key holds this --signer-owner and \
+         --signer-epoch, the epoch is below the owner's highest, or the key is registered \
+         under another epoch"
     )]
     SignerRefused,
 }
@@ -142,7 +155,7 @@ pub enum LocalErasureProvisionErrorV1 {
 pub struct LocalErasureProvisionRequestV1 {
     /// The Gateway's `SQLite` store.
     pub sqlite_path: String,
-    /// The new file the unsigned ELB1 is written to.
+    /// The new file the unsigned ELB1 is written to, an absolute path.
     pub out: PathBuf,
     /// The TPS1 root key id that signs the bundle.
     pub issued_by: String,
@@ -159,16 +172,18 @@ impl LocalErasureProvisionRequestV1 {
     ///
     /// # Errors
     /// Returns [`LocalErasureProvisionErrorV1::Usage`] without an `SQLite`
-    /// path, with an unknown, repeated or value-less flag, without a
-    /// required flag, or with a number that is not a `u64`.
+    /// path or with a flag in its place, with an unknown, repeated or
+    /// value-less flag, without a required flag, with a relative `--out`,
+    /// or with a number that is not a `u64`.
     pub fn parse(args: &[String]) -> Result<Self, LocalErasureProvisionErrorV1> {
         args.split_first()
+            .filter(|(sqlite_path, _)| !sqlite_path.starts_with("--"))
             .ok_or(LocalErasureProvisionErrorV1::Usage)
             .and_then(|(sqlite_path, flags)| {
                 flag_values(flags).and_then(|values| {
                     Ok(Self {
                         sqlite_path: sqlite_path.clone(),
-                        out: PathBuf::from(required(&values, "--out")?),
+                        out: absolute(required(&values, "--out")?)?,
                         issued_by: required(&values, "--issued-by")?.to_owned(),
                         expiry: number(&values, "--expiry", 0)?,
                         signer_owner: required(&values, "--signer-owner")?.to_owned(),
@@ -203,6 +218,12 @@ fn required<'a>(
         .ok_or(LocalErasureProvisionErrorV1::Usage)
 }
 
+fn absolute(path: &str) -> Result<PathBuf, LocalErasureProvisionErrorV1> {
+    Some(PathBuf::from(path))
+        .filter(|path| path.is_absolute())
+        .ok_or(LocalErasureProvisionErrorV1::Usage)
+}
+
 fn number(
     values: &BTreeMap<&str, &str>,
     flag: &str,
@@ -217,41 +238,56 @@ fn number(
 
 /// Run `provision-local-erasure` from its systemd credentials.
 ///
-/// It authenticates the installed TPS1 of the trust state store at
-/// `trust_state` against the release anchor in `credential_directory`,
-/// provisions the store of `request` and writes the unsigned ELB1 to
-/// `request.out`. The directory must hold exactly
+/// It claims `request.out`, authenticates the installed TPS1 of the trust
+/// state store at `trust_state` against the release anchor in
+/// `credential_directory`, provisions the store of `request` and writes the
+/// unsigned ELB1 to the claimed file. The directory must hold exactly
 /// [`LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME`] and
 /// [`RELEASE_TRUST_CREDENTIAL_NAME`], with the custody checks of the
 /// Fork-authority credentials.
 ///
 /// # Errors
-/// Returns an error when a credential or the deployment trust is
-/// unavailable or invalid, when [`provision_local_erasure`] refuses, or
-/// when `request.out` exists or cannot be written.
+/// Returns an error when `request.out` exists or cannot be created, when a
+/// credential or the deployment trust is unavailable or invalid, when
+/// [`provision_local_erasure`] refuses, or when the file cannot be written.
+/// After a claim, every error removes the claimed file again.
 pub fn provision_local_erasure_from_credentials(
     request: &LocalErasureProvisionRequestV1,
     credential_directory: &Path,
     trust_state: &Path,
 ) -> io::Result<()> {
-    crate::local_fork_authentication::read_credentials(
+    claim_bundle_file(&request.out).and_then(|claimed| {
+        credentialed_bundle(request, credential_directory, trust_state)
+            .and_then(|bundle| claimed.write(&bundle))
+            .inspect_err(|_| drop(std::fs::remove_file(&request.out)))
+    })
+}
+
+/// Read the unit's two credentials and the deployment trust, then
+/// provision the store and return the unsigned ELB1.
+fn credentialed_bundle(
+    request: &LocalErasureProvisionRequestV1,
+    credential_directory: &Path,
+    trust_state: &Path,
+) -> io::Result<Vec<u8>> {
+    crate::local_fork_authentication::open_exact_credentials(
         credential_directory,
         &[
             LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
             RELEASE_TRUST_CREDENTIAL_NAME,
         ],
         rustix::process::geteuid().as_raw(),
-        MAX_CREDENTIAL_BYTES,
     )
-    .map_err(io::Error::other)
     .and_then(|credentials| {
-        let mut credentials = credentials.into_iter();
         credentials
-            .next()
-            .zip(credentials.next())
-            .ok_or(LocalErasureProvisionErrorV1::SignerCredentialInvalid)
-            .map_err(io::Error::other)
+            .read(LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME, MAX_CREDENTIAL_BYTES)
+            .and_then(|signer| {
+                credentials
+                    .read(RELEASE_TRUST_CREDENTIAL_NAME, MAX_CREDENTIAL_BYTES)
+                    .map(|release| (signer, release))
+            })
     })
+    .map_err(io::Error::other)
     .and_then(|(signer, release)| {
         release_trust_from_credential(&release)
             .and_then(|release| load_deployment_trust_v1(trust_state, release))
@@ -262,7 +298,6 @@ pub fn provision_local_erasure_from_credentials(
                     .and_then(|signer| provision_local_erasure(request, &signer, &trust))
             })
     })
-    .and_then(|bundle| write_bundle(&request.out, &bundle))
 }
 
 /// The signing key of a 32-byte Ed25519 seed credential.
@@ -385,10 +420,15 @@ fn write_store(
     snapshot: &ErasureAuthoritySnapshotV1,
 ) -> io::Result<(Vec<u8>, Option<TimelineId>)> {
     let identity = snapshot.store_identity().unwrap_or_else(random_identity);
-    bundle(request, signer, trust, registry, identity)
+    OwnerIdV1::new(request.signer_owner.as_str())
         .map_err(|_| io::Error::other(LocalErasureProvisionErrorV1::BundleInvalid))
-        .and_then(|(bundle, host_timeline)| {
-            register_signer(store, request, signer)
+        .and_then(|owner| {
+            bundle(request, signer, trust, registry, identity)
+                .map_err(|_| io::Error::other(LocalErasureProvisionErrorV1::BundleInvalid))
+                .map(|bundle| (owner, bundle))
+        })
+        .and_then(|(owner, (bundle, host_timeline))| {
+            register_signer(store, owner, request.signer_epoch, signer)
                 .and_then(|()| {
                     store
                         .init_erasure_store_identity(identity)
@@ -473,11 +513,12 @@ fn owner_rows(
         .collect()
 }
 
-/// Register the signer key under `(signer_owner, role 2, signer_epoch)`;
-/// an exact re-registration is unchanged.
+/// Register the signer key under `(owner, role 2, epoch)`; an exact
+/// re-registration is unchanged.
 fn register_signer(
     store: &mut SqliteStore,
-    request: &LocalErasureProvisionRequestV1,
+    owner: OwnerIdV1,
+    epoch: u64,
     signer: &SigningKeyMaterial,
 ) -> io::Result<()> {
     store
@@ -485,18 +526,12 @@ fn register_signer(
         .map_err(io::Error::other)
         .and_then(|registry| {
             let mut registry = registry.unwrap_or_else(KeyRegistryStateV1::new);
-            OwnerIdV1::new(request.signer_owner.as_str())
-                .and_then(|owner| {
-                    registry.register_key(KeyRegistrationV1::new(
-                        KeyIdentityV1::new(
-                            owner,
-                            KeyRoleV1::TimelineIntegritySigning,
-                            request.signer_epoch,
-                        ),
-                        signer.material_digest(),
-                        Some(signer.public_verification_key()),
-                    ))
-                })
+            registry
+                .register_key(KeyRegistrationV1::new(
+                    KeyIdentityV1::new(owner, KeyRoleV1::TimelineIntegritySigning, epoch),
+                    signer.material_digest(),
+                    Some(signer.public_verification_key()),
+                ))
                 .map_err(|_| io::Error::other(LocalErasureProvisionErrorV1::SignerRefused))
                 .and_then(|_| store.save_key_registry(&registry).map_err(io::Error::other))
         })
@@ -526,14 +561,36 @@ fn open_host_timeline(sqlite_path: &str, timeline: TimelineId) -> io::Result<()>
     })
 }
 
-/// Write `bundle` to the new file `out`, owner-only.
-fn write_bundle(out: &Path, bundle: &[u8]) -> io::Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(out)
-        .and_then(|mut file| file.write_all(bundle).and_then(|()| file.sync_all()))
+/// The claimed `--out` file and its directory.
+struct ClaimedBundleFileV1 {
+    file: File,
+    directory: File,
+}
+
+impl ClaimedBundleFileV1 {
+    /// Write `bundle`, then sync the file and its directory.
+    fn write(mut self, bundle: &[u8]) -> io::Result<()> {
+        self.file
+            .write_all(bundle)
+            .and_then(|()| self.file.sync_all())
+            .and_then(|()| self.directory.sync_all())
+    }
+}
+
+/// Claim the absolute path `out` as a new owner-only file.
+fn claim_bundle_file(out: &Path) -> io::Result<ClaimedBundleFileV1> {
+    out.parent()
+        .ok_or(LocalErasureProvisionErrorV1::Usage)
+        .map_err(io::Error::other)
+        .and_then(File::open)
+        .and_then(|directory| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(out)
+                .map(|file| ClaimedBundleFileV1 { file, directory })
+        })
 }
 
 #[cfg(test)]

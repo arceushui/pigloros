@@ -184,7 +184,7 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             Ok(())
         }
         _ => {
-            output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]|version>");
+            output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]|version>");
             output_stderr!("  profiles: gateway-mode-local-v1, gateway-mode-air-gapped-v1");
             output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
             output_stderr!("  owntracks status <sqlite-path>");
@@ -1111,6 +1111,7 @@ mod tests {
         let usage = run(&command(), None).test_err()?;
         assert!(usage.to_string().contains("Usage:"));
 
+        let out = directory.path().join("bundle.elb1");
         let mut args = command();
         args.extend(
             [
@@ -1120,7 +1121,7 @@ mod tests {
                 "--signer-owner",
                 "pigloros.local-erasure-signer",
                 "--out",
-                "bundle.elb1",
+                out.display().to_string().as_str(),
             ]
             .map(str::to_owned),
         );
@@ -1131,6 +1132,7 @@ mod tests {
         let unavailable = run(&args, Some(LOCAL_ERASURE_CREDENTIAL_DIRECTORY)).test_err()?;
         assert!(!unavailable.to_string().is_empty());
         assert!(!database.exists());
+        assert!(!out.exists());
         Ok(())
     }
 

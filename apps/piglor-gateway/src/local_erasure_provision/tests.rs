@@ -300,7 +300,7 @@ fn the_command_line_parses_its_flags_and_defaults() {
         "--signer-epoch",
         "2",
         "--out",
-        "bundle",
+        "/bundle",
     ]));
     assert_eq!(
         explicit.map(|request| (request.expiry, request.signer_epoch)),
@@ -310,61 +310,51 @@ fn the_command_line_parses_its_flags_and_defaults() {
 
 #[test]
 fn a_malformed_command_line_is_a_usage_error() {
+    // Each case changes one thing in a valid command line.
+    let valid = [
+        "db",
+        "--out",
+        "/o",
+        "--issued-by",
+        "r",
+        "--signer-owner",
+        "s",
+    ];
+    assert!(LocalErasureProvisionRequestV1::parse(&args(&valid)).is_ok());
     for invalid in [
         args(&[]),
-        args(&["db"]),
-        args(&["db", "--issued-by"]),
+        args(&valid[..1]),
+        args(&valid[..2]),
+        args(&valid[..5]),
         args(&["db", "--issued-by", "r", "--signer-owner", "s"]),
-        args(&["db", "--out", "o", "--signer-owner", "s"]),
-        args(&["db", "--out", "o", "--issued-by", "r"]),
+        args(&["db", "--out", "/o", "--signer-owner", "s"]),
         args(&[
             "db",
             "--out",
-            "o",
-            "--issued-by",
-            "r",
-            "--signer-owner",
-            "s",
-            "--other",
-            "x",
-        ]),
-        args(&[
-            "db",
-            "--out",
-            "o",
-            "--out",
-            "p",
+            "relative",
             "--issued-by",
             "r",
             "--signer-owner",
             "s",
         ]),
         args(&[
-            "db",
+            "--db",
             "--out",
-            "o",
+            "/o",
             "--issued-by",
             "r",
             "--signer-owner",
             "s",
-            "--expiry",
-            "-1",
         ]),
-        args(&[
-            "db",
-            "--out",
-            "o",
-            "--issued-by",
-            "r",
-            "--signer-owner",
-            "s",
-            "--signer-epoch",
-            "x",
-        ]),
+        args(&[valid.as_slice(), ["--other", "x"].as_slice()].concat()),
+        args(&[valid.as_slice(), ["--out", "/p"].as_slice()].concat()),
+        args(&[valid.as_slice(), ["--expiry", "-1"].as_slice()].concat()),
+        args(&[valid.as_slice(), ["--signer-epoch", "x"].as_slice()].concat()),
     ] {
         assert_eq!(
             LocalErasureProvisionRequestV1::parse(&invalid),
-            Err(LocalErasureProvisionErrorV1::Usage)
+            Err(LocalErasureProvisionErrorV1::Usage),
+            "{invalid:?}"
         );
     }
 }
@@ -517,11 +507,14 @@ fn refusals_before_any_write_leave_the_store_unprovisioned() -> TestResult {
     epoch_zero.signer_epoch = 0;
     let mut long_owner = fixture.request("o");
     long_owner.signer_owner = "o".repeat(129);
+    let mut empty_owner = fixture.request("o");
+    empty_owner.signer_owner = String::new();
     for (request, expected) in [
         (absent_root, LocalErasureProvisionErrorV1::IssuerUntrusted),
         (unprefixed, LocalErasureProvisionErrorV1::BundleInvalid),
         (epoch_zero, LocalErasureProvisionErrorV1::BundleInvalid),
         (long_owner, LocalErasureProvisionErrorV1::BundleInvalid),
+        (empty_owner, LocalErasureProvisionErrorV1::BundleInvalid),
     ] {
         assert_eq!(
             refusal(provision_local_erasure(
@@ -666,4 +659,331 @@ fn refusals_have_stable_operator_messages() {
     ] {
         assert!(error.to_string().contains(fragment), "{error}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stores that already hold an erasure request.
+// ---------------------------------------------------------------------------
+
+use pos_core::{
+    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureReceiptInputV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineMeta,
+};
+use pos_runtime::{
+    ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1,
+};
+
+/// A test authority that admits one submission and proves every Timeline
+/// unaffected; it refuses every later lifecycle step.
+struct SubmissionAuthority;
+
+const REFUSED: ErasureErrorV1 = ErasureErrorV1::PolicyConflict;
+
+impl ErasureCoordinatorAuthorityV1 for SubmissionAuthority {
+    fn validate_freeze_authorization_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _admission: &ErasureFreezeAdmissionEvidenceV1,
+        _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn validate_scope_extension_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn validate_administrative_resolution_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn verified_topology_observation(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        _request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+            manifest_digest,
+            Vec::new(),
+            view.topology().to_vec(),
+        )))
+    }
+
+    fn authenticate(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_authorization(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: ErasureReferenceV1,
+        _provenance: ErasureReferenceV1,
+        _decision: ErasureAuthorizationDecisionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_corrected_submission(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+        _correction: &ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_atomic_freeze(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: ErasureReferenceV1,
+        _requested: &ErasureStateTransitionV1,
+    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_scope_extension(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_fork_scope_extension(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _extension: &ErasureScopeExtensionV1,
+        _input: &ErasureForkAdmissionInputV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn resolve_fork_child_scope(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _parent: TimelineId,
+        _child: &TimelineMeta,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn resolve_fork_scope_extension(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _requirement: ErasureForkScopeRequirementV1,
+        _input: &ErasureForkAdmissionInputV1,
+    ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_administrative_resolution(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn dispatch_destruction(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: ErasureReferenceV1,
+        _commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_attempt(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_acknowledgement(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn admit_receipt(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _input: &ErasureReceiptInputV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+}
+
+const fn digest(value: u8) -> ErasureReferenceV1 {
+    ErasureReferenceV1::from_digest([value; 32])
+}
+
+impl Fixture {
+    /// Commit one erasure request into the store through a host composed
+    /// with [`SubmissionAuthority`].
+    fn commit_request(&self) -> TestResult {
+        let composition = ErasureCoordinatorCompositionV1::new(
+            std::sync::Arc::new(SubmissionAuthority),
+            digest(30),
+        )?;
+        let mut host = ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Sqlite {
+                path: self.path.clone(),
+            },
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        crate::mode_profile::attach_offline_writer_v1(host.gateway_mode_binding())?;
+        let request = ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: digest(1),
+            subject: digest(2),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![digest(3)],
+            requester: digest(4),
+            authorization: digest(5),
+            policy: digest(6),
+            request_position: 9,
+            horizon_position: 20,
+            provenance: digest(7),
+        })?;
+        host.command_sender()?
+            .submit_erasure_request(request.clone(), request.provenance())?;
+        Ok(())
+    }
+
+    fn request_count(&self) -> TestResult<usize> {
+        Ok(SqliteStore::open(&self.path)?
+            .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())?
+            .inventory()
+            .request_heads()
+            .len())
+    }
+}
+
+/// Owner decision Q15: a routine rotation on a store that holds an erasure
+/// request opens no host, so it succeeds through the raw store.
+#[test]
+fn a_rotation_on_a_store_holding_a_request_needs_no_host() -> TestResult {
+    let deployment = Deployment::new(&[])?;
+    let trust = deployment.trust()?;
+    let fixture = Fixture::new(true)?;
+    let first = provision_local_erasure(&fixture.request("a"), &signer(SIGNER_SEED), &trust)?;
+    let first = LocalErasureBundleV1::from_canonical_cbor(&first)?;
+    let host_timeline = local_erasure_host_timeline_v1(first.store_identity)?;
+    fixture.commit_request()?;
+    assert_eq!(fixture.request_count()?, 1);
+    assert!(fixture.holds_timeline(host_timeline)?);
+
+    let mut rotation = fixture.request("b");
+    rotation.signer_epoch = 2;
+    let rotated = provision_local_erasure(&rotation, &signer(ROTATED_SEED), &trust)?;
+    let rotated = LocalErasureBundleV1::from_canonical_cbor(&rotated)?;
+    assert_eq!(rotated.store_identity, first.store_identity);
+    assert_eq!(rotated.host_timelines, first.host_timelines);
+    assert_eq!(rotated.signer_identity.epoch, 2);
+    assert_eq!(
+        fixture.registered_signer(2)?,
+        Some(
+            SigningKey::from_bytes(&ROTATED_SEED)
+                .verifying_key()
+                .to_bytes()
+        )
+    );
+    assert_eq!(fixture.request_count()?, 1);
+    Ok(())
+}
+
+/// A store that holds an erasure request but no Erasure Host Timeline is
+/// refused: the closed host that would open it does not serve the store.
+#[test]
+fn a_store_holding_a_request_without_its_host_timeline_is_refused() -> TestResult {
+    let trust = Deployment::new(&[])?.trust()?;
+    let fixture = Fixture::new(true)?;
+    fixture.commit_request()?;
+    let error = provision_local_erasure(&fixture.request("o"), &signer(SIGNER_SEED), &trust)
+        .err()
+        .ok_or("the closed host refuses a store that holds a request")?;
+    assert!(
+        error.to_string().contains("erasure host recovery failed"),
+        "{error}"
+    );
+    let identity = fixture.store_identity()?.ok_or("no store identity")?;
+    let host_timeline =
+        local_erasure_host_timeline_v1(ErasureReferenceV1::from_digest(*identity.as_bytes()))?;
+    assert!(!fixture.holds_timeline(host_timeline)?);
+    assert_eq!(fixture.request_count()?, 1);
+    Ok(())
+}
+
+/// A pre-existing `--out` is refused before the store is touched and is
+/// left in place.
+#[test]
+fn an_existing_out_file_is_refused_before_any_store_write() -> TestResult {
+    let deployment = Deployment::new(&[])?;
+    let fixture = Fixture::new(true)?;
+    let credentials = fixture.credentials(
+        "credentials",
+        &[
+            (LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME, SIGNER_SEED.as_slice()),
+            (RELEASE_TRUST_CREDENTIAL_NAME, deployment.release.as_bytes()),
+        ],
+    )?;
+    let request = fixture.request("existing.elb1");
+    std::fs::write(&request.out, b"operator file")?;
+    let error = provision_local_erasure_from_credentials(&request, &credentials, &deployment.state)
+        .err()
+        .ok_or("an existing --out file is refused")?;
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&request.out)?, b"operator file");
+    assert_eq!(fixture.store_identity()?, None);
+    assert_eq!(fixture.registered_signer(1)?, None);
+    Ok(())
+}
+
+/// A crash after the signer registration and before the identity write
+/// leaves a store a full re-run provisions.
+#[test]
+fn a_run_interrupted_after_the_signer_registration_completes() -> TestResult {
+    let deployment = Deployment::new(&[])?;
+    let fixture = Fixture::new(true)?;
+    let mut store = SqliteStore::open(&fixture.path)?;
+    super::register_signer(
+        &mut store,
+        OwnerIdV1::new(SIGNER_OWNER)?,
+        1,
+        &signer(SIGNER_SEED),
+    )?;
+    drop(store);
+    assert_eq!(fixture.store_identity()?, None);
+
+    let bundle = provision_local_erasure(
+        &fixture.request("o"),
+        &signer(SIGNER_SEED),
+        &deployment.trust()?,
+    )?;
+    assert!(fixture.store_identity()?.is_some());
+    assert_eq!(fixture.compose(&deployment, &bundle)?, None);
+    Ok(())
 }
