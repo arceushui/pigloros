@@ -1,0 +1,28 @@
+{
+  "name": "consent-revocation-not-held",
+  "operation_id": "revokeConsent",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-22",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "consent_ref": "01JC0GATEWAYW90C0NSENT0001"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 404,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
+      "title": "Not found or unavailable",
+      "status": 404,
+      "detail": "resource not found or unavailable",
+      "instance": "/v1/me/consent-revocations",
+      "code": "not-found-or-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

@@ -58,6 +58,7 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Society Reducer** | `plugins/society` | Folds Society Signals into running means per dimension. |
 | **Context Nudge** | future client composition | Adjusts Preferences using Society Signal means before scoring. Formula: `adjusted = clamp(pref + avg(nudges), -1, 1)` where `nudge = (mean - 0.5) × 0.25`. |
 | **AI Influence Index** | future client projection | Fraction of Timeline events from AI agents (`agent.*`), broken down by archetype (`goal-seeking`, `rule-bound`). It is not a current MVP claim. |
+| **Consent Timeline** | `apps/piglor-gateway` | The Local Principal's one root Timeline of ADR-039 `consent.granted.v1` and `consent.revoked.v1` Events (#309), under a fixed identity no client can create, read or append. All of one Principal's consents share its one subject and one grantee; each governs the granted operations of its ADR-059 purpose and data categories, and is revoked at the sequence of its first revocation (its fence). |
 | **Prediction Ledger** | `plugins/ledger`, `apps/piglor-ledger`, `apps/piglor-gateway` | Public pre-registered prediction log with Brier Scores, verification hashes, and OSF workflow. Curated TOML tier + signed EventStore tier (ADR-017). |
 
 ---

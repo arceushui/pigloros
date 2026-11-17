@@ -3394,6 +3394,96 @@ impl ErasureCommandSenderV1<'_> {
         Ok(timeline)
     }
 
+    /// Whether the store records the Timeline `id` at all, by identity: the
+    /// complete inventory this sender's generation installed lists every
+    /// durable Timeline and Fork, whatever its erasure classification.
+    ///
+    /// The lookup is a bounded search of that inventory. It reveals only
+    /// whether the identity exists, also for a Timeline a fence would refuse
+    /// to read, and reads nothing of any Timeline.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error for a stale sender or an
+    /// unavailable host.
+    pub fn records_timeline(&mut self, id: TimelineId) -> Result<bool, ErasureHostErrorV1> {
+        self.host
+            .ensure_generation_with_inventory(self.generation)
+            .map(|inventory| inventory.records_timeline(id))
+    }
+
+    /// Open the root Timeline `id`: create it, named `name`, when the store
+    /// holds no Timeline `id`, else return the recorded one unchanged. Either
+    /// way the successor inventory generation is published, exactly as
+    /// [`Self::create_timeline`] publishes it.
+    ///
+    /// A host-owned record keeps a well-known identity this way: a client
+    /// creates root Timelines only through [`Self::create_timeline`], whose
+    /// identities are fresh, so it can never claim `id` first.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error. If persistence succeeds but successor
+    /// publication fails, the host is poisoned and no further sender is issued.
+    pub fn open_root_timeline(
+        &mut self,
+        id: TimelineId,
+        name: &str,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| {
+                self.host.apply_unaffected_topology_change(
+                    None,
+                    |permit, store| {
+                        store
+                            .get_timeline_for_host_transition(permit, id)
+                            .map_store_error()
+                            .map(|recorded| {
+                                recorded.unwrap_or_else(|| {
+                                    Timeline::new(TimelineMeta {
+                                        id,
+                                        mode: TimelineMode::Live,
+                                        name: Some(name.to_owned()),
+                                        owner: None,
+                                        fork_point: None,
+                                    })
+                                })
+                            })
+                    },
+                    |permit, store, candidate| {
+                        store
+                            .get_timeline_for_host_transition(permit, id)
+                            .and_then(|recorded| {
+                                recorded.map_or_else(
+                                    || {
+                                        store
+                                            .create_timeline_for_host_transition_with_meta(
+                                                permit,
+                                                candidate.meta.clone(),
+                                            )
+                                            .map(|timeline| TopologyTransitionResultV1 {
+                                                timeline,
+                                                #[cfg(test)]
+                                                created: true,
+                                            })
+                                    },
+                                    |timeline| {
+                                        Ok(TopologyTransitionResultV1 {
+                                            timeline,
+                                            #[cfg(test)]
+                                            created: false,
+                                        })
+                                    },
+                                )
+                            })
+                    },
+                )
+            })
+            .map(|(timeline, generation)| {
+                self.generation = generation;
+                timeline
+            })
+    }
+
     /// Initialize a ledger Timeline and its durable signing registry through
     /// the host-owned topology transition.
     ///

@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use pos_gateway_conformance_adapter::{
-    executor_declaration, exit_code, normalize_response_v1, observation_v1, run, AdapterRunErrorV1,
-    ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS, CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID,
-    SCHEMA_ID, SUBCASE_MISMATCH,
+    executor_declaration, exit_code, normalize_response_v1, observation_v1, run,
+    substitute_captured_v1, AdapterRunErrorV1, ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS,
+    CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{
@@ -205,9 +205,18 @@ fn wanted_steps_and_events(attempt: &CaseAttempt) -> TestResult<(u64, u64)> {
             }
             steps += 1;
             let path = exchange["path"].as_str().ok_or("no path")?;
-            let commits = path.ends_with("/signals") || path.ends_with("/actions");
-            if commits && exchange["expect"]["status"] == json!(201) {
-                events += 1;
+            // A room create or derive appends its request claim and the revision.
+            let committed = if path == "/v1/scenario-rooms" || path.ends_with("/revisions") {
+                2
+            } else {
+                u64::from(
+                    path.ends_with("/signals")
+                        || path.ends_with("/actions")
+                        || path == "/v1/me/consent-revocations",
+                )
+            };
+            if exchange["expect"]["status"] == json!(201) {
+                events += committed;
             }
         }
     }
@@ -383,6 +392,16 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("slot before capture", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/{timeline}/events");
         }),
+        case("room before capture", |p| {
+            first_exchange(p)["path"] = json!("/v1/scenario-rooms/{room}/revisions");
+        }),
+        case("revision zero", |p| {
+            first_exchange(p)["path"] = json!("/v1/scenario-rooms/r/revisions/0");
+        }),
+        case("consent before capture", |p| {
+            first_exchange(p)["path"] = json!("/v1/me/consent-revocations");
+            first_exchange(p)["body"] = json!({"consent_ref": "{consent}"});
+        }),
     ]
 }
 
@@ -527,6 +546,7 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
             "instance": format!("/v1/timelines/{ulid}/not-a-ulid/events"),
             "error": "kept",
             "name": ulid,
+            "consents": [{"consent_ref": ulid}, {"consent_ref": "not-a-ulid"}],
         })),
         json!({
             "events": [{"id": "<ulid>", "entity": ulid, "seq": 1, "ok": true, "none": null}],
@@ -535,7 +555,72 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
             "instance": "/v1/timelines/<ulid>/not-a-ulid/events",
             "error": "kept",
             "name": ulid,
+            "consents": [{"consent_ref": "<ulid>"}, {"consent_ref": "not-a-ulid"}],
         })
+    );
+}
+
+#[test]
+fn normalization_pins_captured_echoes_and_replaces_only_well_formed_room_hashes() {
+    let ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let room_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    let consent_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+    let captured = [("{consent}", consent_id), ("{room}", room_id)];
+    let schema = "urn:pigloros:gateway:v1:schema:scenario-room-revision";
+    let hash = "ab".repeat(32);
+    let normalized = |value: Value| normalize_response_v1(substitute_captured_v1(value, &captured));
+    assert_eq!(
+        normalized(json!({
+            "schema_id": schema,
+            "id": room_id,
+            "descriptor": {
+                "room_id": room_id,
+                "privacy_export_ref": consent_id,
+                "governance_ref": ulid,
+                "correlation_id": "5f".repeat(16),
+                "descriptor_hash": hash,
+                "rule_set_hash": hash,
+            },
+            "commit": {"timeline_id": ulid, "event_id": ulid, "seq": 1},
+            "provenance": {"digest": hash, "origin": "principal-authored"},
+        })),
+        json!({
+            "schema_id": schema,
+            "id": "{room}",
+            "descriptor": {
+                "room_id": "{room}",
+                "privacy_export_ref": "{consent}",
+                "governance_ref": ulid,
+                "correlation_id": "<correlation>",
+                "descriptor_hash": "<hash>",
+                "rule_set_hash": hash,
+            },
+            "commit": {"timeline_id": "<ulid>", "event_id": "<ulid>", "seq": 1},
+            "provenance": {"digest": "<hash>", "origin": "principal-authored"},
+        })
+    );
+    // An echo of another room or consent, an all-zero or malformed hash or correlation ID, and
+    // a provenance digest outside a room revision or that is no hash stay as they are.
+    for kept in [
+        json!({"room_id": ulid, "privacy_export_ref": ulid, "items": [ulid, 1]}),
+        json!({"correlation_id": "0".repeat(32), "descriptor_hash": "0".repeat(64)}),
+        json!({"correlation_id": "5F".repeat(16), "descriptor_hash": "AB".repeat(32)}),
+        json!({"correlation_id": "5f".repeat(17), "descriptor_hash": "ab".repeat(33)}),
+        json!({"correlation_id": "5g".repeat(16), "descriptor_hash": "ag".repeat(32)}),
+        json!({"provenance": {"digest": hash, "origin": "principal-authored"}}),
+        json!({"schema_id": "urn:other", "provenance": {"digest": hash}}),
+        json!({"schema_id": schema, "provenance": {"digest": "0".repeat(64)}}),
+        json!({"schema_id": schema, "provenance": {"digest": "ab".repeat(31)}}),
+        json!({"schema_id": schema, "provenance": {"digest": 1}}),
+        json!({"schema_id": schema, "provenance": {"origin": "principal-authored"}}),
+        json!({"schema_id": schema, "provenance": hash}),
+        json!({"schema_id": schema, "evidence": {"digest": hash}}),
+    ] {
+        assert_eq!(normalized(kept.clone()), kept, "{kept}");
+    }
+    assert_eq!(
+        substitute_captured_v1(json!([room_id, {"a": consent_id}, ulid, null]), &captured),
+        json!(["{room}", {"a": "{consent}"}, ulid, null])
     );
 }
 
