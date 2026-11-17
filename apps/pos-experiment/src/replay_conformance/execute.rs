@@ -54,16 +54,16 @@ pub(super) const SUBJECT_DRIVER: &str = "replay-subject.driver";
 /// repository Draft authority records. The Draft authority declares no EPF1
 /// for `RecordedReplay` or `LiveUnverified`, so `replay-v1` and
 /// `live-local-v1` are `deterministic-local-v1` restricted to that one class,
-/// under their own id and digest. The TPS1 is the bundled Draft snapshot, so
-/// its root, revocation and continuity evidence is the host's own. Its
+/// and `live-air-gapped-v1` (ADR-135) is `deterministic-air-gapped-v1`
+/// restricted to `LiveUnverified`, each under its own id and digest. The
+/// TPS1 is the bundled Draft snapshot, so its root, revocation and
+/// continuity evidence is the host's own. Its
 /// signature evidence is not: the host authenticates the TPS1 operator
 /// signature under its own pin of the Draft authority's deployment-operator
 /// key, never a key the snapshot carries, and reports that result.
 pub(super) struct HostV1 {
-    local: ExecutionProfileV1,
-    air_gapped: ExecutionProfileV1,
-    replay: ExecutionProfileV1,
-    live: ExecutionProfileV1,
+    /// The EPF1 of each [`ProfileV1`], indexed by [`ProfileV1::index`].
+    profiles: [ExecutionProfileV1; ProfileV1::COUNT],
     snapshot: TrustPolicySnapshotV1,
     snapshot_digest: [u8; 32],
     operator_key: [u8; 32],
@@ -97,19 +97,23 @@ impl HostV1 {
             .zip(draft_profile(ProfileV1::AirGapped))
             .zip(snapshot)
             .and_then(|((local, air_gapped), snapshot)| {
+                let replay = restricted(
+                    &local,
+                    ProfileV1::Replay,
+                    ReproducibilityClassV1::RecordedReplay,
+                );
+                let live = restricted(
+                    &local,
+                    ProfileV1::Live,
+                    ReproducibilityClassV1::LiveUnverified,
+                );
+                let live_air_gapped = restricted(
+                    &air_gapped,
+                    ProfileV1::LiveAirGapped,
+                    ReproducibilityClassV1::LiveUnverified,
+                );
                 snapshot.digest().ok().map(|snapshot_digest| Self {
-                    replay: restricted(
-                        &local,
-                        ProfileV1::Replay,
-                        ReproducibilityClassV1::RecordedReplay,
-                    ),
-                    live: restricted(
-                        &local,
-                        ProfileV1::Live,
-                        ReproducibilityClassV1::LiveUnverified,
-                    ),
-                    local,
-                    air_gapped,
+                    profiles: [local, air_gapped, replay, live, live_air_gapped],
                     snapshot,
                     snapshot_digest,
                     operator_key: DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
@@ -118,12 +122,7 @@ impl HostV1 {
     }
 
     const fn profile(&self, profile: ProfileV1) -> &ExecutionProfileV1 {
-        match profile {
-            ProfileV1::Local => &self.local,
-            ProfileV1::AirGapped => &self.air_gapped,
-            ProfileV1::Replay => &self.replay,
-            ProfileV1::Live => &self.live,
-        }
+        &self.profiles[profile.index()]
     }
 
     /// The request of one leg: the manifest the fixture owns, bound by the
@@ -557,5 +556,37 @@ fn digest_size(value: &DigestSizeV1) -> DigestSizeRecordV1 {
     DigestSizeRecordV1 {
         digest: value.digest.map(|digest| hex(&digest)),
         size: value.size,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    //! The [`ProfileV1`] tables stay aligned with the enum: every variant
+    //! indexes in bounds, carries its serde id and selects its own EPF1.
+
+    use super::*;
+
+    /// Every profile, sized by [`ProfileV1::COUNT`] so a missing entry fails
+    /// to compile.
+    const ALL: [ProfileV1; ProfileV1::COUNT] = [
+        ProfileV1::Local,
+        ProfileV1::AirGapped,
+        ProfileV1::Replay,
+        ProfileV1::Live,
+        ProfileV1::LiveAirGapped,
+    ];
+
+    #[test]
+    fn every_profile_indexes_its_own_id_and_epf1() -> Result<(), Box<dyn std::error::Error>> {
+        let host = HostV1::install().ok_or("the host installs its EPF1 table")?;
+        for (position, profile) in ALL.into_iter().enumerate() {
+            assert_eq!(profile.index(), position);
+            assert!(profile.index() < ProfileV1::COUNT);
+            let named: ProfileV1 = serde_json::from_value(serde_json::Value::from(profile.id()))?;
+            assert_eq!(named, profile);
+            assert_eq!(host.profile(profile).profile_id, profile.id());
+        }
+        Ok(())
     }
 }
