@@ -3,8 +3,10 @@
 
 use crate::{
     operation::{
-        AppendSignalOperation, CreatePredictionOperation, CreateTimelineOperation,
-        OperationAuthority, ReadSessionOperation, RevokeConsentOperation,
+        AppendSignalOperation, CreateOptionSpecOperation, CreatePredictionOperation,
+        CreatePreferenceOperation, CreateTimelineOperation, OperationAuthority,
+        ReadOptionSpecOperation, ReadPreferenceOperation, ReadSessionOperation,
+        RevokeConsentOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -156,6 +158,16 @@ fn loopback_routes() -> Router<AppState> {
         .route("/v1/timelines/{timeline_id}/signals", post(post_signal))
         .route("/v1/session", get(get_session))
         .route("/v1/me/consent-revocations", post(post_consent_revocation))
+        .route("/v1/preferences", post(post_preference))
+        .route(
+            "/v1/preferences/{preference_id}/revisions/{revision}",
+            get(get_preference_revision),
+        )
+        .route("/v1/option-specs", post(post_option_spec))
+        .route(
+            "/v1/option-specs/{option_spec_id}/revisions/{revision}",
+            get(get_option_spec_revision),
+        )
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
@@ -182,6 +194,16 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/timelines/{timeline_id}/signals"),
     ("GET", "/v1/session"),
     ("POST", "/v1/me/consent-revocations"),
+    ("POST", "/v1/preferences"),
+    (
+        "GET",
+        "/v1/preferences/{preference_id}/revisions/{revision}",
+    ),
+    ("POST", "/v1/option-specs"),
+    (
+        "GET",
+        "/v1/option-specs/{option_spec_id}/revisions/{revision}",
+    ),
 ];
 
 /// Answer every protected route of an unprovisioned host `401` before its
@@ -668,6 +690,70 @@ async fn post_consent_revocation(
             (StatusCode::OK, Json(body)).into_response()
         }
     })
+
+}
+
+/// `POST /v1/preferences` (#304): create a Preference or its next revision.
+async fn post_preference(
+    State(state): State<AppState>,
+    authority: OperationAuthority<CreatePreferenceOperation>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Response {
+    crate::revision::create::<crate::revision::PreferenceFamily, _>(
+        &state.gateway,
+        authority,
+        &key,
+        body,
+    )
+    .await
+}
+
+/// `GET /v1/preferences/{preference_id}/revisions/{revision}` (#304).
+async fn get_preference_revision(
+    State(state): State<AppState>,
+    authority: OperationAuthority<ReadPreferenceOperation>,
+    ContractPath((id, revision)): ContractPath<(String, u64)>,
+) -> Response {
+    crate::revision::read::<crate::revision::PreferenceFamily, _>(
+        &state.gateway,
+        authority,
+        &id,
+        revision,
+    )
+    .await
+}
+
+/// `POST /v1/option-specs` (#304): create an `OptionSpec` or its next
+/// revision.
+async fn post_option_spec(
+    State(state): State<AppState>,
+    authority: OperationAuthority<CreateOptionSpecOperation>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Response {
+    crate::revision::create::<crate::revision::OptionSpecFamily, _>(
+        &state.gateway,
+        authority,
+        &key,
+        body,
+    )
+    .await
+}
+
+/// `GET /v1/option-specs/{option_spec_id}/revisions/{revision}` (#304).
+async fn get_option_spec_revision(
+    State(state): State<AppState>,
+    authority: OperationAuthority<ReadOptionSpecOperation>,
+    ContractPath((id, revision)): ContractPath<(String, u64)>,
+) -> Response {
+    crate::revision::read::<crate::revision::OptionSpecFamily, _>(
+        &state.gateway,
+        authority,
+        &id,
+        revision,
+    )
+    .await
 }
 
 async fn post_ledger_prediction(
@@ -1121,7 +1207,11 @@ mod tests {
                         .method(method)
                         .uri(format!(
                             "{}{query}",
-                            route.replace("{timeline_id}", &timeline)
+                            route
+                                .replace("{timeline_id}", &timeline)
+                                .replace("{preference_id}", &timeline)
+                                .replace("{option_spec_id}", &timeline)
+                                .replace("{revision}", "1")
                         ))
                         .header("content-type", "application/json")
                         .header(
