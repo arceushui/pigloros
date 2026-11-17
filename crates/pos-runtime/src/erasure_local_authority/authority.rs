@@ -61,10 +61,16 @@ impl LocalPrincipalV1 {
     /// chain position `position`: it names the `erasure` resource and the
     /// `request` action, lets the Principal act as `actor`, is valid there
     /// under core's temporal rule `valid_from <= position < valid_until`,
-    /// and no revocation on its chain is fenced at or before `position`.
+    /// and no revocation on its authority Timeline is fenced at or before
+    /// `position`.
     ///
-    /// The chain's revocations include the grant's own, whose fence is its
-    /// `revocation_fence`, so that fence needs no separate check.
+    /// The revocations are every persisted revocation record on the root
+    /// grant's authority Timeline ([`PersistedAuthorityV1::revocations`]),
+    /// not only those of grants on its chain. This is stricter than core's
+    /// chain rule: a revocation of any grant on that Timeline closes the
+    /// root grant from its fence on. The set includes the grant's own
+    /// revocation, whose fence is its `revocation_fence`, so that fence
+    /// needs no separate check.
     fn authorizes(&self, actor: EntityId, position: u64) -> bool {
         let scope = self.grant.scope();
         scope
@@ -214,26 +220,38 @@ impl LocalErasureAuthorityV1 {
 }
 
 impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
-    /// New admissions must be open, `principal_ref` must be the root
-    /// grant's Principal, and the grant must authorize `actor` at the
-    /// current chain head, exactly as `authenticate` later re-checks the
-    /// ERAZ1 bound to that head; only then is the closure read.
-    fn admit_submission(
+    /// `principal_ref` must be the root grant's Principal, and the grant
+    /// must authorize `actor` at the chain head of this view, the rule
+    /// `authenticate` later applies to the ERAZ1. The host builds that
+    /// ERAZ1 from its own earlier read of the chain, so the two heads are
+    /// the same unless the chain head moves between the reads; a
+    /// submission raced by such a move passes here, has its records
+    /// retained, and is then refused by `authenticate`.
+    fn authenticate_submission(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         principal_ref: ErasureReferenceV1,
         actor: EntityId,
+    ) -> Result<(), ErasureErrorV1> {
+        self.principal(view).and_then(|principal| {
+            (principal.principal_ref == principal_ref
+                && principal.authorizes(actor, principal.authority.head_position().as_u64()))
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
+        })
+    }
+
+    fn submissions_open(&self) -> Result<(), ErasureErrorV1> {
+        self.admits_new_work()
+    }
+
+    fn submission_fits(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        actor: EntityId,
         scope: ErasureScopeV1,
     ) -> Result<bool, ErasureErrorV1> {
-        self.admits_new_work()
-            .and_then(|()| self.principal(view))
-            .and_then(|principal| {
-                (principal.principal_ref == principal_ref
-                    && principal.authorizes(actor, principal.authority.head_position().as_u64()))
-                .then_some(())
-                .ok_or(ErasureErrorV1::Unauthorized)
-            })
-            .and_then(|()| Self::closure_fits(self, view, actor, scope))
+        self.closure_fits(view, actor, scope)
     }
 
     fn prepare_freeze(

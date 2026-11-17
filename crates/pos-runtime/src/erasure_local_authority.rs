@@ -300,8 +300,8 @@ where
 /// as `CA(ELB1)`, and recovery resolves only that ELB1 by reference: the
 /// verified bundle, or after a rotation the retained ELB1 bytes. Recovery
 /// resolves no TPS1, so retained TPS1 bytes are checked only here. Passing
-/// here admits nothing on its own: this slice composes the closed
-/// authority, which proves only an empty store.
+/// here only lets the root compose: every admission of the composed
+/// authority still applies its own trust, bundle and grant checks.
 fn retained_trust_verifies<S>(operator_public_key: [u8; 32], store: &mut S) -> bool
 where
     S: ErasureInventoryPersistencePortV1 + ?Sized,
