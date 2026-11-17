@@ -22,10 +22,11 @@
 //! The authority never changes afterwards (R11 D9): no step is repeated.
 //!
 //! The `provider-runtime` mode, [`serve_provider_runtime`], runs these
-//! steps before any socket exists. The selector started this process as its
-//! runtime unit (#1399, R11 §5.0), so the mode then binds both SIC1
-//! endpoints, execute then control (`endpoint`, R11 §6), sends `READY=1`
-//! (`notify`) and serves both in state `Starting` (`serving`, R11 §7).
+//! steps before any socket exists. This runtime is the selector's runtime
+//! unit, started by the selector (#1399, R11 §5.0), so the mode then binds
+//! both SIC1 endpoints, execute then control (`endpoint`, R11 §6), sends
+//! `READY=1` (`notify`) and serves both in state `Starting` (`serving`,
+//! R11 §7).
 //! Restart reconciliation, which opens admission, is not composed yet
 //! (R11 §15 slice 4): until it is, the runtime stays `Starting`.
 
