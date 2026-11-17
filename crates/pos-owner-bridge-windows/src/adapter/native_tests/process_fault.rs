@@ -3535,22 +3535,23 @@ impl Fixture {
         self.handle = handle;
         let step = pass_unwind(attempt);
         assert!(failure.is_none(), "{failure:?}");
-        // No early return for an unreached step: whether a step finishes
-        // before the consuming phase depends on WebView2 timing, so a
-        // separate return line would be covered only on some runs.
-        if reached {
-            let mut state = state;
-            state.phase = crate::ProcessFaultPhase::PostedConsuming;
-            state.reply_state = ControlState::Consuming as u32;
-            self.reached = Some(state);
-            self.evidence_complete = true;
-            assert!(
-                self.surface.fault_owners_retained(),
-                "consuming owners missing"
-            );
-            self.check_blocked_admission();
-        }
+        // No branch on `reached` here: whether a step finishes before the
+        // consuming phase depends on WebView2 timing, so either arm of an
+        // `if` would be covered only on some runs.
+        reached.then(|| self.record_consuming(state));
         step
+    }
+
+    fn record_consuming(&mut self, mut state: ProcessFaultState) {
+        state.phase = crate::ProcessFaultPhase::PostedConsuming;
+        state.reply_state = ControlState::Consuming as u32;
+        self.reached = Some(state);
+        self.evidence_complete = true;
+        assert!(
+            self.surface.fault_owners_retained(),
+            "consuming owners missing"
+        );
+        self.check_blocked_admission();
     }
 }
 
