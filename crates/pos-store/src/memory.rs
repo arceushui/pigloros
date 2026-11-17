@@ -3976,13 +3976,15 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
     }
 
     /// `MemoryStore` has no recipient-export publication path, so no
-    /// publication is ever visible.
+    /// publication is ever visible and no `max` can be exceeded.
     fn recipient_export_publications(
         &mut self,
         _timelines: &[TimelineId],
         _max: usize,
     ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
-        Ok(Vec::new())
+        // Spelled as cargo-mutants' own replacement so that no equivalent
+        // mutant is generated for this constant body.
+        Ok(vec![])
     }
 }
 
