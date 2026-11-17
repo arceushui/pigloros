@@ -155,42 +155,44 @@ fn protector() -> Result<CommunityArtifactProtectorV1, CommunityLifecycleErrorV1
     })
 }
 
-fn assemble(producer_ordinal: u64) -> Result<Assembled, Box<dyn std::error::Error>> {
-    let implementation = ImplementationKeyV1::new("plugin-a".into(), "host-v1".into(), hash(3))?;
-    let states = [
+fn states() -> Result<[Vec<u8>; 2], CommunityLifecycleErrorV1> {
+    Ok([
         CommunityStateContentV1::new(SCHEMA, b"state-a")?
             .to_canonical_cbor()
             .to_vec(),
         CommunityStateContentV1::new(SCHEMA, b"state-b")?
             .to_canonical_cbor()
             .to_vec(),
-    ];
-    let rows = (0..2)
+    ])
+}
+
+fn rows<'a>(
+    implementation: &'a ImplementationKeyV1,
+    states: &[Vec<u8>; 2],
+) -> Result<Vec<CommunityProfileMemberV1<'a>>, CommunityLifecycleErrorV1> {
+    (0..2)
         .map(|slot| {
             CommunityProfileMemberV1::new(
                 ENTRIES[slot],
-                &implementation,
+                implementation,
                 hash(4),
                 SCHEMA,
                 hash(6),
                 initializer(&states[slot]),
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let profile = profile(&rows)?;
-    let owner = CommunityInitializerOwnerV1::new(
-        &SEAL,
-        &profile,
-        states
-            .iter()
-            .map(|state| Zeroizing::new(state.clone()))
-            .collect(),
-    )?;
-    let bindings = (0..2)
+        .collect()
+}
+
+fn bindings<'a>(
+    implementation: &'a ImplementationKeyV1,
+    states: &[Vec<u8>; 2],
+) -> Result<Vec<CommunityMemberBindingV1<'a>>, CommunityLifecycleErrorV1> {
+    (0..2)
         .map(|slot| {
             CommunityMemberBindingV1::new(CommunityMemberBindingInputV1 {
                 stable_entry: ENTRIES[slot],
-                implementation: &implementation,
+                implementation,
                 pmf1_digest: hash(4),
                 state_schema_digest: SCHEMA,
                 negotiated_tuple_digest: hash(6),
@@ -198,12 +200,50 @@ fn assemble(producer_ordinal: u64) -> Result<Assembled, Box<dyn std::error::Erro
                 protected_owner_binding_digest: COB,
             })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect()
+}
+
+/// Decrypt every record of an assembled graph; a refused graph has none.
+fn open_records(
+    graph: &Result<CommunityInitializationGraphV1, CommunityLifecycleErrorV1>,
+    protector: &CommunityArtifactProtectorV1,
+) -> Result<Vec<Zeroizing<Vec<u8>>>, CommunityLifecycleErrorV1> {
+    graph.as_ref().map_or_else(
+        |_| Ok(Vec::new()),
+        |graph| {
+            graph
+                .records()
+                .iter()
+                .map(|record| {
+                    CommunityProtectedObjectV1::from_canonical_cbor(record.protected().object())
+                        .and_then(|object| protector.open_envelope(object.content_envelope()))
+                })
+                .collect()
+        },
+    )
+}
+
+fn assemble(producer_ordinal: u64) -> Result<Assembled, Box<dyn std::error::Error>> {
+    let implementation = ImplementationKeyV1::new("plugin-a".into(), "host-v1".into(), hash(3))?;
+    let states = states()?;
+    let rows = rows(&implementation, &states)?;
+    let profile = profile(&rows)?;
+    assemble_profile(producer_ordinal, &implementation, &profile, states)
+}
+
+/// Bind both members of `profile` to one request and assemble its graph.
+fn assemble_profile(
+    producer_ordinal: u64,
+    implementation: &ImplementationKeyV1,
+    profile: &CommunityDurableProfileV1<'_>,
+    states: [Vec<u8>; 2],
+) -> Result<Assembled, Box<dyn std::error::Error>> {
+    let bindings = bindings(implementation, &states)?;
     let member_digests: Vec<Hash> = bindings
         .iter()
         .map(CommunityMemberBindingV1::digest)
         .collect();
-    let request = request(&profile, &member_digests)?;
+    let request = request(profile, &member_digests)?;
     let members: Vec<CommunityInitializationMemberV1<'_>> = bindings
         .iter()
         .zip([0x60, 0x61])
@@ -212,41 +252,52 @@ fn assemble(producer_ordinal: u64) -> Result<Assembled, Box<dyn std::error::Erro
             binding_envelope_address: hash(address),
         })
         .collect();
-    let mut protector = protector()?;
-    let graph = CommunityInitializationGraphV1::assemble(
-        &SEAL,
-        CommunityInitializationGraphInputV1 {
-            store_incarnation: INCARNATION,
-            producer_ordinal,
-            request: &request,
-            profile: &profile,
-            members: &members,
-            owner_binding_digest: COB,
-            host_provenance_digest: CPV,
-            event_logical_head: Seq::from_u64(12),
-        },
-        &owner,
-        &mut protector,
-    );
-    let plaintexts = match &graph {
-        Ok(graph) => graph
-            .records()
-            .iter()
-            .map(|record| {
-                CommunityProtectedObjectV1::from_canonical_cbor(record.protected().object())
-                    .and_then(|object| protector.open_envelope(object.content_envelope()))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        Err(_) => Vec::new(),
+    let input = CommunityInitializationGraphInputV1 {
+        store_incarnation: INCARNATION,
+        producer_ordinal,
+        request: &request,
+        profile,
+        members: &members,
+        owner_binding_digest: COB,
+        host_provenance_digest: CPV,
+        event_logical_head: Seq::from_u64(12),
     };
+    let (graph, plaintexts, burned) = assemble_input(input, profile, &states)?;
     Ok(Assembled {
         graph,
         plaintexts,
         states,
         member_digests: member_digests.clone(),
         request_digest: request.digest(),
-        burned: protector.burned_credits(),
+        burned,
     })
+}
+
+/// The graph `input` assembles or its refusal, its decrypted records and
+/// the credits the protector burned.
+type AssembledInput = (
+    Result<CommunityInitializationGraphV1, CommunityLifecycleErrorV1>,
+    Vec<Zeroizing<Vec<u8>>>,
+    u32,
+);
+
+fn assemble_input(
+    input: CommunityInitializationGraphInputV1<'_>,
+    profile: &CommunityDurableProfileV1<'_>,
+    states: &[Vec<u8>; 2],
+) -> Result<AssembledInput, CommunityLifecycleErrorV1> {
+    let owner = CommunityInitializerOwnerV1::new(
+        &SEAL,
+        profile,
+        states
+            .iter()
+            .map(|state| Zeroizing::new(state.clone()))
+            .collect(),
+    )?;
+    let mut protector = protector()?;
+    let graph = CommunityInitializationGraphV1::assemble(&SEAL, input, &owner, &mut protector);
+    let plaintexts = open_records(&graph, &protector)?;
+    Ok((graph, plaintexts, protector.burned_credits()))
 }
 
 /// One member's decrypted records and the facts they must bind.

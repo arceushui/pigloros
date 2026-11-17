@@ -1,7 +1,8 @@
 # Read-only CI diagnostics only; never used to select a process or drive a fixture.
 param([Parameter(Mandatory = $true)][string] $StopMarker)
 $ErrorActionPreference = 'Stop'
-$deadline = [DateTime]::UtcNow.AddMinutes(44)
+# Outlive the 65-minute coverage step cap; the stop marker ends it sooner.
+$deadline = [DateTime]::UtcNow.AddMinutes(66)
 $previous = $null
 $lastEmission = [DateTime]::MinValue
 $emissions = 0
