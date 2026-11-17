@@ -1108,6 +1108,8 @@ jobs:
           --exclude 'src/provider_lifecycle/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
+          --exclude 'src/adapter/native_tests.rs'
+          --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
@@ -1156,6 +1158,8 @@ jobs:
           --exclude 'src/provider_lifecycle/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
+          --exclude 'src/adapter/native_tests.rs'
+          --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
