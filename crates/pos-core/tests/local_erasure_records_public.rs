@@ -1773,11 +1773,6 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
             "ELCG1",
         ),
         (
-            LocalOwnerEffectV1::Negative(elneg1.clone()),
-            &elneg1,
-            "ELNEG1",
-        ),
-        (
             LocalOwnerEffectV1::ReplicaPurge(elrp1.clone()),
             &elrp1,
             "ELRP1",
@@ -1812,5 +1807,54 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
             Err(ErasureErrorV1::InvalidEncoding)
         );
     }
+    Ok(())
+}
+
+/// An ELNEG1 commits only with a negative ELO1 that carries its closed error
+/// code (ADR-136 §4a); any other owner result is refused.
+#[test]
+fn a_negative_effect_is_bound_only_by_an_elo1_with_its_error_code() -> TestResult {
+    let effect = negative(ErasureErrorV1::BackupInventoryIncomplete);
+    let elneg1 = effect.to_canonical_cbor()?;
+    let elo1 = |error| {
+        LocalErasureOwnerResultV1 {
+            request: reference(46),
+            attempt: reference(49),
+            obligation: reference(50),
+            command: effect.command,
+            owner_ref: effect.owner_ref,
+            error,
+            effect_digest: effect.reference()?,
+        }
+        .to_canonical_cbor()
+    };
+    let bound = elo1(Some(ErasureErrorV1::BackupInventoryIncomplete))?;
+    let prepared =
+        PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), &bound)?;
+    assert_eq!(
+        prepared
+            .effect_object()
+            .map(ErasureRetainedObjectV1::canonical_cbor),
+        Some(elneg1.as_slice())
+    );
+    assert_eq!(prepared.owner_result().canonical_cbor(), bound.as_slice());
+    // Another closed code, or a positive result, does not bind the ELNEG1.
+    for other in [
+        elo1(Some(ErasureErrorV1::ArtifactDeletionFailed))?,
+        elo1(None)?,
+    ] {
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), &other),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    // An owner result that is not a canonical ELO1 is refused.
+    assert_eq!(
+        PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::Negative(elneg1),
+            &REPLICA_PURGE.to_canonical_cbor()?
+        ),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
     Ok(())
 }
