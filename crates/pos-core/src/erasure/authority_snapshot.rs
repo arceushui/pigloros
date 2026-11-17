@@ -44,7 +44,7 @@ pub const ERASURE_RECORD_TAG_MIN_BYTES_V1: usize = 2;
 /// The longest record tag of a retained object, in bytes.
 pub const ERASURE_RECORD_TAG_MAX_BYTES_V1: usize = 8;
 
-/// The largest ELAD1, ELCG1 or ELNEG1 owner-effect record (ADR-136 §4a).
+/// The largest ELAD1, ELCG1, ELNEG1 or ELRP1 owner-effect record (ADR-136 §4a).
 pub const LOCAL_OWNER_EFFECT_MAX_BYTES_V1: usize = 1024;
 
 /// The largest ELO1 owner-result record (ADR-136 §4).
@@ -221,6 +221,8 @@ pub enum LocalOwnerEffectV1 {
     CacheGeneration(Vec<u8>),
     /// One canonical ELNEG1 negative owner result.
     Negative(Vec<u8>),
+    /// One canonical ELRP1 local-replica purge, committed after the purge.
+    ReplicaPurge(Vec<u8>),
 }
 
 /// One owner effect and its owner-result object, validated for one adapter
@@ -235,8 +237,8 @@ pub struct PreparedLocalOwnerEffectV1 {
 impl PreparedLocalOwnerEffectV1 {
     /// Validate one effect and its canonical ELO1 owner result.
     ///
-    /// A record effect must carry its own record tag (ELAD1, ELCG1 or
-    /// ELNEG1) and the owner result must be an ELO1 record.
+    /// A record effect must carry its own record tag (ELAD1, ELCG1, ELNEG1
+    /// or ELRP1) and the owner result must be an ELO1 record.
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::InvalidEncoding`] when a record is malformed
@@ -259,6 +261,10 @@ impl PreparedLocalOwnerEffectV1 {
             LocalOwnerEffectV1::Negative(record) => (
                 None,
                 tagged_object(record, "ELNEG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
+            ),
+            LocalOwnerEffectV1::ReplicaPurge(record) => (
+                None,
+                tagged_object(record, "ELRP1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
             ),
         };
         effect_object

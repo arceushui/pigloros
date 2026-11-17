@@ -279,10 +279,12 @@ fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
         ("ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 30),
         ("ELCG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 31),
         ("ELNEG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 32),
+        ("ELRP1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 33),
     ] {
         let effect = |bytes: Vec<u8>| match tag {
             "ELAD1" => LocalOwnerEffectV1::ArtifactDisposition(bytes),
             "ELCG1" => LocalOwnerEffectV1::CacheGeneration(bytes),
+            "ELRP1" => LocalOwnerEffectV1::ReplicaPurge(bytes),
             _ => LocalOwnerEffectV1::Negative(bytes),
         };
         let at_bound = sized_record(tag, bound)?;
@@ -337,6 +339,11 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
             "ELNEG1",
             12,
         ),
+        (
+            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 1)?),
+            "ELRP1",
+            13,
+        ),
     ] {
         let elo1 = record("ELO1", seed)?;
         assert_eq!(
@@ -366,6 +373,13 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         store.commit_local_owner_effect(
             LocalOwnerEffectV1::Negative(record("ELNEG1", 2)?),
             &record("ELS1", 2)?
+        ),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        store.commit_local_owner_effect(
+            LocalOwnerEffectV1::ReplicaPurge(record("ELNEG1", 3)?),
+            &refused
         ),
         Err(ErasureErrorV1::InvalidEncoding)
     );

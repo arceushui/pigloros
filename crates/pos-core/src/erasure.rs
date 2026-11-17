@@ -2025,6 +2025,43 @@ impl ErasureDestructionCommandV1 {
     }
 }
 
+/// One exact, coordinator-dispatched destruction command and its request.
+///
+/// It is the ADR-136 §4a `ErasureOwnerCommandV1` (owner decision Q4 on
+/// #1412): the [`ErasureDestructionCommandV1`] core handed to
+/// `dispatch_destruction` for the request's active attempt, whose
+/// `provenance` is that attempt. An ELO1 owner result binds both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureOwnerCommandV1 {
+    /// The ERQ1 request the command serves.
+    pub request: ErasureReferenceV1,
+    /// The dispatched destruction command.
+    pub destruction: ErasureDestructionCommandV1,
+}
+
+/// The ADR-075 §3 erasure execution port (ADR-136 §4a).
+///
+/// An executor receives only an exact, coordinator-dispatched command and
+/// returns the content address of the ELO1 owner result it made durable. It
+/// has no access to the authority or the signer. The Local executor and the
+/// future non-local executors (#357) implement the same trait.
+pub trait ErasureAuthorityExecutionV1 {
+    /// What the executor runs the owner work through: the Local owner host
+    /// commands, or a non-local executor's remote client.
+    type Context: ?Sized;
+
+    /// Run the owner work of `command` and commit its owner result.
+    ///
+    /// # Errors
+    /// Returns a closed error when no owner result could be made durable.
+    /// A negative owner outcome is an owner result, not an error.
+    fn execute(
+        &mut self,
+        command: &ErasureOwnerCommandV1,
+        context: &mut Self::Context,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+}
+
 /// Derive the content-addressed identity of one destruction command.
 #[must_use]
 pub fn destruction_command_reference(
@@ -3923,14 +3960,15 @@ pub use local_records::{
     local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_request_v1,
     local_erasure_requester_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
     local_erasure_store_target_v1, local_erasure_subject_v1, local_erasure_timeline_payload_v1,
-    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
-    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
-    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
-    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
-    LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1,
-    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
-    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
+    LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1,
+    LocalErasureBundleV1, LocalErasureCacheGenerationV1, LocalErasureClassificationV1,
+    LocalErasureDisclosureV1, LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1,
+    LocalErasureLineageRuleV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
+    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRedactionV1, LocalErasureRejectionV1,
+    LocalErasureReplicaPurgeV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
+    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
+    ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
 /// The committed ERSC1 and ERSE1 chain of one request, read through its
 /// current manifest and scope index without validating the record.
@@ -3987,9 +4025,60 @@ pub trait ErasureRecordedAttemptReadV1: recorded_scope_sealed::Sealed {
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
 }
 
+/// One request's attempt progress, as its current manifest records it.
+///
+/// It is evidence, not authority: [`ErasureRecordedProgressReadV1`] applies
+/// core recovery's structural checks but no authority verification, and core
+/// recovery still verifies the record before any lifecycle command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureRecordedProgressV1 {
+    /// The frozen EROS1 obligations, in the obligation set's order.
+    pub obligations: Vec<ErasureObligationV1>,
+    /// The effective acknowledgement inventory, ordered by obligation and
+    /// owner: the positive acknowledgements of earlier attempts and every
+    /// acknowledgement of the latest attempt, active or completed.
+    pub effective: Vec<ErasureAcknowledgementProvenanceV1>,
+    /// The admission of the active attempt, if any.
+    pub active: Option<ErasureRetryAdmissionV1>,
+    /// The number of completed attempts.
+    pub completed_attempt_count: u64,
+    /// The ERC1 receipt of the latest completed attempt, if any.
+    pub latest_receipt: Option<ErasureReceiptV1>,
+}
+
+/// The attempt progress of one request, read through its current manifest.
+///
+/// ADR-136 §5 and §6 need it for a crash-safe driver and a re-deriving
+/// signer (owner decision Q2 on #1412). The read runs core recovery's
+/// structural checks of the manifest, its foundation, its fixed evidence and
+/// its attempt history, without the host's authority verification. The
+/// trait is sealed and implemented only for `dyn ErasurePersistencePortV1`,
+/// so no adapter can override it; a host reads it through that trait object.
+pub trait ErasureRecordedProgressReadV1: recorded_scope_sealed::Sealed {
+    /// The request's recorded progress, `Ok(None)` when it has no manifest.
+    ///
+    /// # Errors
+    /// Once a manifest exists, the closed error of the first structural
+    /// check, read or decoding failure.
+    fn recorded_progress(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1>;
+}
+
+impl ErasureRecordedProgressReadV1 for dyn ErasurePersistencePortV1 + '_ {
+    fn recorded_progress(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
+        persistence::recorded_progress(self, request)
+    }
+}
+
 mod recorded_scope_sealed {
-    /// Keeps [`super::ErasureRecordedScopeReadV1`] and
-    /// [`super::ErasureRecordedAttemptReadV1`] core-implemented.
+    /// Keeps [`super::ErasureRecordedScopeReadV1`],
+    /// [`super::ErasureRecordedAttemptReadV1`] and
+    /// [`super::ErasureRecordedProgressReadV1`] core-implemented.
     pub trait Sealed {}
 
     impl<P: super::ErasurePersistencePortV1 + ?Sized> Sealed for P {}

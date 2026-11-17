@@ -4593,6 +4593,42 @@ impl ErasureCommandSenderV1<'_> {
         self.apply_receipt_command(request, input)
     }
 
+    /// The ERC1 [`Self::finalize_erasure_request`] would commit for `input`.
+    ///
+    /// Core builds it with finalize's own normalization over the installed
+    /// generation's committed record, so a signer can sign the exact ERCB1
+    /// that finalize later admits (ADR-136 §5 purpose 2). Nothing is
+    /// admitted, written or published, and a refusal never poisons the host.
+    ///
+    /// # Errors
+    /// Returns a payload-free stale-generation, authorization, conflict or
+    /// recovery error.
+    pub fn preview_erasure_receipt(
+        &mut self,
+        request: ErasureReferenceV1,
+        input: &ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
+        let limits = self.host.recovery_limits;
+        let composition = self.host.authority.clone().zip(self.host.coordinator);
+        self.host
+            .ensure_generation_with_inventory(self.generation)
+            .and_then(|installed| {
+                composition
+                    .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+                    .and_then(|(authority, coordinator)| {
+                        let port = HostedCoordinatorPortV1::new(
+                            self.host.store.host_store(),
+                            authority.as_ref(),
+                            limits,
+                        )
+                        .with_verified_inventory(installed);
+                        ErasureCoordinatorStateMachineV1::new(port, coordinator)
+                            .preview_receipt(request, input.clone())
+                            .map_err(map_erasure_error)
+                    })
+            })
+    }
+
     /// Recover the original durable Fork result after a lost reply or restart.
     ///
     /// This operation never allocates a child or writes ERSE1 evidence. A

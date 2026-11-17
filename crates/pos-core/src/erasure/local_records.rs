@@ -5,14 +5,19 @@
 //! tag. A decoder accepts only the exact canonical bytes its encoder writes:
 //! maps, floats, indefinite items, unknown, missing or trailing fields, and
 //! values outside the record's rules are refused.
+//!
+//! The owner-effect records ELAD1, ELCG1 and ELNEG1 are ADR-136 §4a's; ELRP1,
+//! the positive local-replica purge, is a NEW tag by owner decision Q3 on
+//! #1412. An ELO1 owner result binds exactly one of them, or a key
+//! tombstone's deletion receipt, as its `effect_digest`.
 
 use ciborium::value::Value;
 
 use super::{
     array, bytes32, decode_limited, digest, domain_digest, encode_limited, evidence::string,
     header, strictly_increasing, text, uint, unsigned, ArtifactDataClassV1, ErasureArtifactClassV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReferenceV1, ErasureScopeV1,
-    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
+    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureScopeV1, ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
 };
 use crate::ids::{EntityId, TimelineId};
 
@@ -1087,6 +1092,199 @@ impl LocalRecordV1 for LocalErasureOwnerResultV1 {
 }
 
 local_record_api!(LocalErasureOwnerResultV1);
+
+/// How an ELAD1 artifact disposition treated its artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalErasureRedactionV1 {
+    /// Code 0: the artifact is redacted.
+    Redacted,
+    /// Code 1: the artifact is destroyed.
+    Destroyed,
+}
+
+impl LocalErasureRedactionV1 {
+    const fn code(self) -> u64 {
+        match self {
+            Self::Redacted => 0,
+            Self::Destroyed => 1,
+        }
+    }
+
+    const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
+        match code {
+            0 => Ok(Self::Redacted),
+            1 => Ok(Self::Destroyed),
+            _ => Err(ErasureErrorV1::InvalidEncoding),
+        }
+    }
+}
+
+/// ELAD1, the durable owner effect of one artifact disposition.
+///
+/// `["ELAD1", 1, request, artifact_class, artifact_digest, redaction,
+/// replay_claim_to]`, at most 1 KiB (ADR-136 §4a). An ELO1 binds it as its
+/// `effect_digest` for the `artifact-store` and `managed-report` classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalErasureArtifactDispositionV1 {
+    /// The ERQ1 request.
+    pub request: ErasureReferenceV1,
+    /// The ADR-060 class of the disposed artifact.
+    pub artifact_class: ErasureArtifactClassV1,
+    /// The disposed artifact's digest.
+    pub artifact_digest: ErasureReferenceV1,
+    /// Whether the artifact was redacted or destroyed.
+    pub redaction: LocalErasureRedactionV1,
+    /// The replay claim the artifact's evidence degrades to.
+    pub replay_claim_to: ErasureReplayClaimV1,
+}
+
+impl LocalRecordV1 for LocalErasureArtifactDispositionV1 {
+    const TAG: &'static str = "ELAD1";
+    const MAX_BYTES: usize = KIB;
+
+    fn fields(&self) -> Vec<Value> {
+        vec![
+            digest(self.request),
+            uint(self.artifact_class.code()),
+            digest(self.artifact_digest),
+            uint(self.redaction.code()),
+            uint(self.replay_claim_to.code()),
+        ]
+    }
+
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, request, artifact_class, artifact_digest, redaction, replay_claim_to] =
+            open::<7>(record, Self::TAG)?;
+        Ok(Self {
+            request: bytes32(request)?,
+            artifact_class: unsigned(artifact_class).and_then(ErasureArtifactClassV1::from_code)?,
+            artifact_digest: bytes32(artifact_digest)?,
+            redaction: unsigned(redaction).and_then(LocalErasureRedactionV1::from_code)?,
+            replay_claim_to: unsigned(replay_claim_to).and_then(ErasureReplayClaimV1::from_code)?,
+        })
+    }
+}
+
+local_record_api!(LocalErasureArtifactDispositionV1);
+
+/// ELCG1, the durable owner effect of one client-cache redaction generation.
+///
+/// `["ELCG1", 1, request, scope_commitment, generation]`, at most 1 KiB
+/// (ADR-136 §4a). An ELO1 binds it as its `effect_digest` for the
+/// `client-cache-signal` class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalErasureCacheGenerationV1 {
+    /// The ERQ1 request.
+    pub request: ErasureReferenceV1,
+    /// The request's committed ERSC1 scope.
+    pub scope_commitment: ErasureReferenceV1,
+    /// The committed redaction generation.
+    pub generation: u64,
+}
+
+impl LocalRecordV1 for LocalErasureCacheGenerationV1 {
+    const TAG: &'static str = "ELCG1";
+    const MAX_BYTES: usize = KIB;
+
+    fn fields(&self) -> Vec<Value> {
+        vec![
+            digest(self.request),
+            digest(self.scope_commitment),
+            uint(self.generation),
+        ]
+    }
+
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, request, scope_commitment, generation] = open::<5>(record, Self::TAG)?;
+        Ok(Self {
+            request: bytes32(request)?,
+            scope_commitment: bytes32(scope_commitment)?,
+            generation: unsigned(generation)?,
+        })
+    }
+}
+
+local_record_api!(LocalErasureCacheGenerationV1);
+
+/// ELNEG1, the durable owner effect of one negative owner result.
+///
+/// `["ELNEG1", 1, command, owner_ref, error_code]`, at most 1 KiB (ADR-136
+/// §4a). An ELO1 with the same closed error code binds it as its
+/// `effect_digest`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalErasureNegativeResultV1 {
+    /// The destruction command.
+    pub command: ErasureReferenceV1,
+    /// The owner reference.
+    pub owner_ref: ErasureReferenceV1,
+    /// The closed ADR-060 error code of the negative result.
+    pub error: ErasureErrorV1,
+}
+
+impl LocalRecordV1 for LocalErasureNegativeResultV1 {
+    const TAG: &'static str = "ELNEG1";
+    const MAX_BYTES: usize = KIB;
+
+    fn fields(&self) -> Vec<Value> {
+        vec![
+            digest(self.command),
+            digest(self.owner_ref),
+            uint(self.error.code()),
+        ]
+    }
+
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, command, owner_ref, error] = open::<5>(record, Self::TAG)?;
+        Ok(Self {
+            command: bytes32(command)?,
+            owner_ref: bytes32(owner_ref)?,
+            error: unsigned(error).and_then(ErasureErrorV1::from_code)?,
+        })
+    }
+}
+
+local_record_api!(LocalErasureNegativeResultV1);
+
+/// ELRP1, the durable owner effect of one positive local-replica purge.
+///
+/// `["ELRP1", 1, request, command, replica_id]`, at most 1 KiB. ELRP1 is a
+/// NEW tag by owner decision Q3 on #1412 (2026-11-17), pending its ADR-136
+/// amendment. The purge runs outside every transaction, because VACUUM
+/// cannot run inside one, so ELRP1 and its ELO1 commit together right after
+/// a successful purge; a crash between the two re-runs the idempotent purge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalErasureReplicaPurgeV1 {
+    /// The ERQ1 request.
+    pub request: ErasureReferenceV1,
+    /// The destruction command.
+    pub command: ErasureReferenceV1,
+    /// The purged replica, [`local_erasure_replica_id_v1`].
+    pub replica_id: ErasureReferenceV1,
+}
+
+impl LocalRecordV1 for LocalErasureReplicaPurgeV1 {
+    const TAG: &'static str = "ELRP1";
+    const MAX_BYTES: usize = KIB;
+
+    fn fields(&self) -> Vec<Value> {
+        vec![
+            digest(self.request),
+            digest(self.command),
+            digest(self.replica_id),
+        ]
+    }
+
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, request, command, replica_id] = open::<5>(record, Self::TAG)?;
+        Ok(Self {
+            request: bytes32(request)?,
+            command: bytes32(command)?,
+            replica_id: bytes32(replica_id)?,
+        })
+    }
+}
+
+local_record_api!(LocalErasureReplicaPurgeV1);
 
 /// What an ELS1 signature attests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
