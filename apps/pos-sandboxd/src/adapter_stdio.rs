@@ -16,6 +16,7 @@
 
 use std::future::Future;
 use std::io;
+use std::num::NonZeroUsize;
 use std::os::fd::OwnedFd as StdOwnedFd;
 use std::sync::Arc;
 use std::time::Duration;
@@ -308,11 +309,11 @@ async fn write_input(channel: &mut Sender, payload: &Arc<dyn AttemptPayload>, ac
             .await;
             // A failed write, `EPIPE` among them, or a write of nothing
             // stops the feed.
-            let Some(wrote) = wrote.ok().filter(|wrote| *wrote > 0) else {
+            let Some(wrote) = wrote.ok().and_then(NonZeroUsize::new) else {
                 return;
             };
-            written += wrote;
-            *accepted += wrote as u64;
+            written += wrote.get();
+            *accepted += wrote.get() as u64;
         }
     }
 }
