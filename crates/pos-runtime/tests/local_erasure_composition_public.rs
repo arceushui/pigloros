@@ -1463,6 +1463,16 @@ fn a_replay_is_answered_only_to_an_authorized_caller() -> TestResult {
             sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
             Ok(state.clone())
         );
+        // While the grant is still valid, another Principal replaying the
+        // key is refused for the Principal mismatch alone.
+        let mut stranger = submission(1, ErasureScopeV1::PrivateSubjectData)?;
+        stranger.principal = delegate()?;
+        assert_eq!(
+            sender.submit_local_erasure(&stranger),
+            Err(LocalErasureSubmitErrorV1::Host(
+                ErasureHostErrorV1::AuthorizationDenied
+            ))
+        );
         state
     };
     assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
@@ -1483,15 +1493,6 @@ fn a_replay_is_answered_only_to_an_authorized_caller() -> TestResult {
             ))
         );
     }
-    // Another Principal replaying the key is refused the same way.
-    let mut stranger = submission(1, ErasureScopeV1::PrivateSubjectData)?;
-    stranger.principal = delegate()?;
-    assert_eq!(
-        sender.submit_local_erasure(&stranger),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::AuthorizationDenied
-        ))
-    );
     Ok(())
 }
 
