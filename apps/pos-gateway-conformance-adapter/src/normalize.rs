@@ -93,17 +93,40 @@ fn normalize(value: Value, key: Option<&str>) -> Value {
     }
 }
 
+/// The `(member, whether a value of it is masked, placeholder)` rows of the operational text
+/// members that a placeholder replaces whole.
+const TEXT_MASKS: [(&str, fn(&str) -> bool, &str); 4] = [
+    ("next_cursor", is_cursor, "<cursor>"),
+    ("correlation_id", is_correlation, "<correlation>"),
+    ("descriptor_hash", is_hash, "<hash>"),
+    ("detail", is_text, "<message>"),
+];
+
 fn normalize_text(key: Option<&str>, text: String) -> String {
     match key {
         Some("id" | "instance" | "consent_ref" | "timeline_id" | "event_id") => {
             normalize_ulid_segments(&text)
         }
-        Some("next_cursor") if is_cursor(&text) => "<cursor>".to_owned(),
-        Some("correlation_id") if is_nonzero_hex(&text, 32) => "<correlation>".to_owned(),
-        Some("descriptor_hash") if is_nonzero_hex(&text, 64) => "<hash>".to_owned(),
-        Some("detail") => "<message>".to_owned(),
-        _ => text,
+        _ => TEXT_MASKS
+            .iter()
+            .find(|(member, masked, _)| key == Some(*member) && masked(&text))
+            .map_or(text, |(_, _, placeholder)| (*placeholder).to_owned()),
     }
+}
+
+/// Every problem `detail` text is masked.
+const fn is_text(_: &str) -> bool {
+    true
+}
+
+/// A correlation ID: 32 lowercase hex digits that are not all zero.
+fn is_correlation(text: &str) -> bool {
+    is_nonzero_hex(text, 32)
+}
+
+/// A hash: 64 lowercase hex digits that are not all zero.
+fn is_hash(text: &str) -> bool {
+    is_nonzero_hex(text, 64)
 }
 
 /// Every `/`-separated segment of a ULID member or a problem `instance` that is a ULID becomes
@@ -136,7 +159,7 @@ fn is_cursor(text: &str) -> bool {
 fn mask_digest(provenance: &mut Value) {
     if let Some(digest) = provenance
         .get_mut("digest")
-        .filter(|digest| digest.as_str().is_some_and(|text| is_nonzero_hex(text, 64)))
+        .filter(|digest| digest.as_str().is_some_and(is_hash))
     {
         *digest = Value::from("<hash>");
     }

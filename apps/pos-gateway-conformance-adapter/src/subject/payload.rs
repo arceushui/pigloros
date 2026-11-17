@@ -237,16 +237,26 @@ impl RouteV2 {
     /// segments, each the route's literal segment, any non-empty segment for a Timeline or
     /// room slot, or a positive decimal for the revision segment.
     fn matches(self, base: &str) -> bool {
-        base.split('/').count() == self.path.split('/').count()
-            && self
-                .path
-                .split('/')
-                .zip(base.split('/'))
-                .all(|(template, segment)| match template {
-                    TIMELINE_SLOT | ROOM_SLOT => !segment.is_empty(),
-                    REVISION_SEGMENT => is_revision(segment),
-                    literal => literal == segment,
-                })
+        terminated_segments(self.path)
+            .zip(terminated_segments(base))
+            .all(segment_matches)
+    }
+}
+
+/// The `/`-separated segments of `path` followed by one `None`, so two paths of different
+/// segment counts pair a segment with `None`.
+fn terminated_segments(path: &str) -> impl Iterator<Item = Option<&str>> {
+    path.split('/').map(Some).chain(std::iter::once(None))
+}
+
+/// Whether a path segment names the route-table segment it pairs with: any non-empty segment
+/// for a Timeline or room slot, a positive decimal for the revision segment, otherwise the
+/// literal segment itself (and the end of one path only the end of the other).
+fn segment_matches(pair: (Option<&str>, Option<&str>)) -> bool {
+    match pair {
+        (Some(TIMELINE_SLOT | ROOM_SLOT), Some(segment)) => !segment.is_empty(),
+        (Some(REVISION_SEGMENT), Some(segment)) => is_revision(segment),
+        (template, segment) => template == segment,
     }
 }
 
