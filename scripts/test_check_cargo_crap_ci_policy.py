@@ -55,6 +55,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/execute/tests/ownership/abandonment.rs",
     "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
+    "src/mode_profile/tests.rs",
 )
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",
