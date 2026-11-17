@@ -186,6 +186,33 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             })
     }
 
+    /// The verified record of `request`, read without caching it or
+    /// retaining a recovery error: the cached record, else a fresh core
+    /// recovery whose failure is only returned.
+    fn read_record(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<RecoveredErasureV1, ErasureErrorV1> {
+        self.records
+            .iter()
+            .find(|record| record.request.reference() == request)
+            .cloned()
+            .map_or_else(
+                || {
+                    self.port
+                        .read_manifest(request)
+                        .and_then(|stored| stored.ok_or(ErasureErrorV1::ProvenanceMissing))
+                        .and_then(|stored| {
+                            RecoveredErasureV1::recover(
+                                &self.port, &self.port, &self.port, request, &stored,
+                            )
+                            .map_err(super::RecoveryFailureV1::error)
+                        })
+                },
+                Ok,
+            )
+    }
+
     fn commit(
         &mut self,
         next: RecoveredErasureV1,
@@ -1190,7 +1217,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     }
 
     /// The ERC1 [`Self::finalize`] would return for `input`, without
-    /// admitting, committing or caching anything.
+    /// admitting or committing it.
     ///
     /// It shares finalize's normalization, so a signer can sign the exact
     /// receipt body finalize later admits (ADR-136 §5 purpose 2, owner
@@ -1198,16 +1225,23 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Without an active attempt it is finalize's exact retry: the latest
     /// receipt, when `input` normalizes to it.
     ///
+    /// Byte equality with finalize holds only for an input finalize accepts:
+    /// the preview does not run the receipt admission, so a signer still
+    /// learns from finalize whether the signed receipt was admitted.
+    ///
+    /// The preview is write-free: it neither caches the record nor retains a
+    /// recovery error when the record does not recover.
+    ///
     /// # Errors
     ///
     /// Returns the closed lifecycle, receipt or recovery error finalize
     /// would return before admitting the receipt.
     pub fn preview_receipt(
-        &mut self,
+        &self,
         request: ErasureReferenceV1,
         input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
+        let mut record = self.read_record(request)?;
         if record.active.is_none() {
             return self.finalize_exact_retry(&record, input);
         }

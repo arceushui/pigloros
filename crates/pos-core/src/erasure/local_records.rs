@@ -1093,6 +1093,88 @@ impl LocalRecordV1 for LocalErasureOwnerResultV1 {
 
 local_record_api!(LocalErasureOwnerResultV1);
 
+/// The ELO1 owner result of one executed command, bound to that command.
+///
+/// [`super::ErasureAuthorityExecutionV1::execute`] returns it. It can only be
+/// built from ELO1 bytes whose request, attempt, obligation, command and
+/// owner are the command's, so a driver acknowledges each command with the
+/// owner result of exactly that command. It is not authority: the
+/// acknowledgement admission and the signer still verify the retained ELO1
+/// and its effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureOwnerResultV1 {
+    command: super::ErasureOwnerCommandV1,
+    owner_result: ErasureReferenceV1,
+    error: Option<ErasureErrorV1>,
+}
+
+impl ErasureOwnerResultV1 {
+    /// Bind canonical ELO1 bytes to the command they answer.
+    ///
+    /// # Errors
+    /// Returns the ELO1 decoding error, and
+    /// [`ErasureErrorV1::ProvenanceMissing`] when the ELO1 answers another
+    /// request, attempt, obligation, command or owner.
+    pub fn bind(
+        command: &super::ErasureOwnerCommandV1,
+        elo1: &[u8],
+    ) -> Result<Self, ErasureErrorV1> {
+        LocalErasureOwnerResultV1::from_canonical_cbor(elo1).and_then(|result| {
+            let destruction = command.destruction;
+            require_provenance(
+                (
+                    result.request,
+                    result.attempt,
+                    result.obligation,
+                    result.command,
+                    result.owner_ref,
+                ) == (
+                    command.request,
+                    destruction.provenance,
+                    destruction.obligation,
+                    destruction.command,
+                    destruction.owner,
+                ),
+            )
+            .map(|()| Self {
+                command: *command,
+                owner_result: ErasureReferenceV1::from_digest(domain_digest(
+                    LocalErasureOwnerResultV1::TAG,
+                    elo1,
+                )),
+                error: result.error,
+            })
+        })
+    }
+
+    /// The command the owner result answers.
+    #[must_use]
+    pub const fn command(&self) -> &super::ErasureOwnerCommandV1 {
+        &self.command
+    }
+
+    /// `CA(ELO1)`, the acknowledgement evidence of the command.
+    #[must_use]
+    pub const fn owner_result(&self) -> ErasureReferenceV1 {
+        self.owner_result
+    }
+
+    /// `None` for a positive owner result, else its closed negative code.
+    #[must_use]
+    pub const fn error(&self) -> Option<ErasureErrorV1> {
+        self.error
+    }
+}
+
+/// Accept a binding only when it holds.
+const fn require_provenance(rule: bool) -> Result<(), ErasureErrorV1> {
+    if rule {
+        Ok(())
+    } else {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+}
+
 /// How an ELAD1 artifact disposition treated its artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalErasureRedactionV1 {
@@ -1123,7 +1205,9 @@ impl LocalErasureRedactionV1 {
 ///
 /// `["ELAD1", 1, request, artifact_class, artifact_digest, redaction,
 /// replay_claim_to]`, at most 1 KiB (ADR-136 §4a). An ELO1 binds it as its
-/// `effect_digest` for the `artifact-store` and `managed-report` classes.
+/// `effect_digest` for an obligation of the `artifact-store` or
+/// `managed-report` acknowledgement class; `artifact_class` is the ADR-060
+/// class of the disposed artifact itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalErasureArtifactDispositionV1 {
     /// The ERQ1 request.

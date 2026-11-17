@@ -299,6 +299,45 @@ pub trait ErasureCoordinatorAuthorityV1: Send + Sync {
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1>;
 
+    /// Validate one recovered attempt admission (ERRA1) of `request`.
+    ///
+    /// Recovery calls it once for each recovered attempt. It re-verifies
+    /// what the admission bound, not the admission-time fences.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, policy, trust, or provenance error.
+    fn validate_attempt_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        request: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Validate one recovered owner acknowledgement and its evidence.
+    ///
+    /// Recovery calls it once for each recovered acknowledgement.
+    ///
+    /// # Errors
+    /// Returns a closed owner, evidence, trust, or provenance error.
+    fn validate_acknowledgement_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Validate one recovered receipt of the attempt `attempt` admitted.
+    ///
+    /// Recovery calls it once for each completed attempt.
+    ///
+    /// # Errors
+    /// Returns a closed policy, trust, signature, or provenance error.
+    fn validate_receipt_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        attempt: &ErasureRetryAdmissionV1,
+        receipt: &ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1>;
+
     /// Resolve one manifest revision against the authoritative Timeline/Fork topology.
     ///
     /// # Errors
@@ -499,6 +538,32 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
         &self,
         _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn validate_attempt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+        _admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn validate_acknowledgement_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn validate_receipt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _attempt: &ErasureRetryAdmissionV1,
+        _receipt: &ErasureReceiptV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
@@ -1350,6 +1415,38 @@ impl ErasureRecoveryAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
         self.authority_view().and_then(|view| {
             self.authority
                 .validate_administrative_resolution_with_view(&view, resolution)
+        })
+    }
+
+    fn validate_attempt_admission(
+        &self,
+        request: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority_view().and_then(|view| {
+            self.authority
+                .validate_attempt_with_view(&view, request, admission)
+        })
+    }
+
+    fn validate_acknowledgement(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority_view().and_then(|view| {
+            self.authority
+                .validate_acknowledgement_with_view(&view, acknowledgement)
+        })
+    }
+
+    fn validate_receipt(
+        &self,
+        attempt: &ErasureRetryAdmissionV1,
+        receipt: &ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority_view().and_then(|view| {
+            self.authority
+                .validate_receipt_with_view(&view, attempt, receipt)
         })
     }
 }
@@ -4602,8 +4699,17 @@ impl ErasureCommandSenderV1<'_> {
     ///
     /// Core builds it with finalize's own normalization over the installed
     /// generation's committed record, so a signer can sign the exact ERCB1
-    /// that finalize later admits (ADR-136 §5 purpose 2). Nothing is
-    /// admitted, written or published, and a refusal never poisons the host.
+    /// that finalize later admits (ADR-136 §5 purpose 2). Byte equality holds
+    /// only for an input finalize accepts: the preview runs no receipt
+    /// admission, so the signer still learns from finalize whether the signed
+    /// receipt was admitted.
+    ///
+    /// Nothing is admitted, written, retained or published. The read takes
+    /// no transition fence: it relies on this sender's exclusive `&mut`
+    /// borrow of the single-writer host, so no command can commit between
+    /// its recovery and its result. A refused preview never poisons the host;
+    /// like every sender command, the generation check still closes a host
+    /// whose gate diverged from its installed inventory.
     ///
     /// # Errors
     /// Returns a payload-free stale-generation, authorization, conflict or
@@ -7944,6 +8050,32 @@ mod tests {
             Err(ErasureErrorV1::Unauthorized)
         }
 
+        fn validate_attempt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_acknowledgement_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_receipt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _attempt: &ErasureRetryAdmissionV1,
+            _receipt: &ErasureReceiptV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
         fn verified_topology_observation(
             &self,
             _view: &dyn ErasureAuthorityReadViewV1,
@@ -8099,6 +8231,32 @@ mod tests {
             &self,
             _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_attempt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_acknowledgement_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_receipt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _attempt: &ErasureRetryAdmissionV1,
+            _receipt: &ErasureReceiptV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
@@ -8420,6 +8578,32 @@ mod tests {
             Err(ErasureErrorV1::Unauthorized)
         }
 
+        fn validate_attempt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_acknowledgement_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_receipt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _attempt: &ErasureRetryAdmissionV1,
+            _receipt: &ErasureReceiptV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
         fn verified_topology_observation(
             &self,
             _view: &dyn ErasureAuthorityReadViewV1,
@@ -8607,6 +8791,32 @@ mod tests {
             &self,
             _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_attempt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_acknowledgement_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_receipt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _attempt: &ErasureRetryAdmissionV1,
+            _receipt: &ErasureReceiptV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
@@ -9913,6 +10123,56 @@ mod tests {
             host.install_inventory_from_coordinator(4),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
+    }
+
+    #[test]
+    fn receipt_preview_is_read_only_and_needs_both_recovery_credentials(
+    ) -> Result<(), ErasureHostErrorV1> {
+        let mut fixture = rejected_host_with_resolve_control()?;
+        let request = fixture.request;
+        let input = lifecycle_receipt(request, 40);
+        // A recoverable record without an attempt has no receipt to preview,
+        // and an unknown request has no record: both refusals keep the host
+        // ready.
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(request, &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(reference(41), &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(fixture.host.status(), ErasureHostStatusV1::Ready);
+
+        fixture.host.authority = None;
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(request, &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        fixture.host.authority = Some(fixture.authority.clone());
+        fixture.host.coordinator = None;
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(request, &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(fixture.host.status(), ErasureHostStatusV1::Ready);
+        Ok(())
     }
 
     #[test]

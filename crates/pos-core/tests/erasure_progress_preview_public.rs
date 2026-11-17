@@ -16,12 +16,12 @@ use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactTransitionV1,
     ErasureAuthorityExecutionV1, ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1,
     ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
-    ErasureObligationV1, ErasureOwnerCommandV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureRecordedProgressReadV1,
-    ErasureRecordedProgressV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateTransitionV1,
-    LocalErasureNegativeResultV1, LocalErasureOwnerResultV1, LocalOwnerEffectV1,
-    PreparedLocalOwnerEffectV1,
+    ErasureObligationV1, ErasureOwnerCommandV1, ErasureOwnerResultV1, ErasurePersistencePortV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
+    ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureScopeV1, ErasureStateTransitionV1, LocalErasureNegativeResultV1,
+    LocalErasureOwnerResultV1, LocalOwnerEffectV1, PreparedLocalOwnerEffectV1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -183,14 +183,14 @@ const fn acknowledgement(
     }
 }
 
-/// The recorded progress, read as a host reads it: through the persistence
-/// port as a trait object.
+/// The verified progress, read as a host reads it: through the persistence
+/// port as a trait object, under the host's own verifiers.
 fn progress(
     adapter: &PublicPort,
     request: ErasureReferenceV1,
 ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
     let port: &dyn ErasurePersistencePortV1 = adapter;
-    port.recorded_progress(request)
+    port.recorded_progress(adapter, adapter, request)
 }
 
 fn recorded(
@@ -436,7 +436,7 @@ impl ErasureAuthorityExecutionV1 for NegativeExecutor {
         &mut self,
         command: &ErasureOwnerCommandV1,
         context: &mut Self::Context,
-    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    ) -> Result<ErasureOwnerResultV1, ErasureErrorV1> {
         let destruction = command.destruction;
         let effect = LocalErasureNegativeResultV1 {
             command: destruction.command,
@@ -456,9 +456,9 @@ impl ErasureAuthorityExecutionV1 for NegativeExecutor {
             LocalOwnerEffectV1::Negative(effect.to_canonical_cbor()?),
             &owner_result.to_canonical_cbor()?,
         )?;
-        let address = prepared.owner_result().reference();
+        let result = ErasureOwnerResultV1::bind(command, prepared.owner_result().canonical_cbor())?;
         context.push(prepared);
-        Ok(address)
+        Ok(result)
     }
 }
 
@@ -481,9 +481,15 @@ fn an_executor_turns_each_dispatched_command_into_an_owner_result() -> TestResul
                 attempt.reference(),
             ),
         };
-        let result = executor.execute(&command, &mut owner_effects)?;
+        let executed = executor.execute(&command, &mut owner_effects)?;
         // A re-execution of the same command is the same owner result.
-        assert_eq!(executor.execute(&command, &mut owner_effects)?, result);
+        assert_eq!(executor.execute(&command, &mut owner_effects)?, executed);
+        assert_eq!(executed.command(), &command);
+        assert_eq!(
+            executed.error(),
+            Some(ErasureErrorV1::ArtifactDeletionFailed)
+        );
+        let result = executed.owner_result();
         coordinator.acknowledge(
             id,
             acknowledgement(
@@ -528,5 +534,97 @@ fn an_executor_turns_each_dispatched_command_into_an_owner_result() -> TestResul
             )
         );
     }
+    Ok(())
+}
+
+#[test]
+fn an_owner_result_binds_only_the_command_it_answers() -> TestResult {
+    let request = request()?;
+    let id = request.reference();
+    let obligation = obligations(id)?[0];
+    let command = ErasureOwnerCommandV1 {
+        request: id,
+        destruction: ErasureDestructionCommandV1::from_obligation(&obligation, reference(50)),
+    };
+    let answer = LocalErasureOwnerResultV1 {
+        request: id,
+        attempt: reference(50),
+        obligation: obligation.reference(),
+        command: obligation.command_identity(),
+        owner_ref: obligation.owner(),
+        error: None,
+        effect_digest: reference(51),
+    };
+    let bytes = answer.to_canonical_cbor()?;
+    let bound = ErasureOwnerResultV1::bind(&command, &bytes)?;
+    assert_eq!(bound.owner_result(), answer.reference()?);
+    assert_eq!(bound.command(), &command);
+    assert_eq!(bound.error(), None);
+    // An ELO1 answering any other request, attempt, obligation, command or
+    // owner is refused, as are bytes that are not one canonical ELO1.
+    for other in [
+        LocalErasureOwnerResultV1 {
+            request: reference(52),
+            ..answer
+        },
+        LocalErasureOwnerResultV1 {
+            attempt: reference(52),
+            ..answer
+        },
+        LocalErasureOwnerResultV1 {
+            obligation: reference(52),
+            ..answer
+        },
+        LocalErasureOwnerResultV1 {
+            command: reference(52),
+            ..answer
+        },
+        LocalErasureOwnerResultV1 {
+            owner_ref: reference(52),
+            ..answer
+        },
+    ] {
+        assert_eq!(
+            ErasureOwnerResultV1::bind(&command, &other.to_canonical_cbor()?),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    assert!(ErasureOwnerResultV1::bind(&command, &bytes[1..]).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_receipt_preview_never_retains_a_recovery_error() -> TestResult {
+    let request = request()?;
+    let id = request.reference();
+    let (_, adapter) = frozen(&request)?;
+    // A fresh coordinator recovers the record itself: a recoverable record
+    // without an attempt previews nothing.
+    let fresh = ErasureCoordinatorStateMachineV1::new(adapter.clone(), reference(2));
+    assert_eq!(
+        fresh
+            .preview_receipt(id, receipt_input(ATTEMPT_DEADLINE, reference(40)))
+            .map(drop),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let stored = adapter.current_manifest(id).ok_or("no manifest")?;
+    adapter.replace_manifest_raw(id, reference(98), stored.canonical_cbor().to_vec())?;
+    // The unrecoverable record is refused and nothing is retained ...
+    let mut corrupt = ErasureCoordinatorStateMachineV1::new(adapter.clone(), reference(2));
+    assert_eq!(
+        corrupt
+            .preview_receipt(id, receipt_input(ATTEMPT_DEADLINE, reference(40)))
+            .map(drop),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(adapter.recovery_error_refs(id)?, Vec::new());
+    // ... while finalize retains the same recovery failure.
+    assert_eq!(
+        corrupt
+            .finalize(id, receipt_input(ATTEMPT_DEADLINE, reference(40)))
+            .map(drop),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(adapter.recovery_error_refs(id)?.len(), 1);
     Ok(())
 }
