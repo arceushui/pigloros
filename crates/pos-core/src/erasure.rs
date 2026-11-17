@@ -2879,8 +2879,13 @@ pub trait ErasureInventoryPersistencePortV1 {
     /// Read every visible recipient-export publication whose source Timeline
     /// is in `timelines`, sorted by `(timeline, export_id)` (ADR-136 §2.6).
     ///
-    /// A pending publication is not visible and is never returned. An adapter
-    /// with no recipient-export publication path returns an empty list.
+    /// A pending publication is not visible and is never returned.
+    ///
+    /// Only an adapter with no recipient-export publication write path at all,
+    /// such as `MemoryStore`, may answer with an unconditional empty list: it
+    /// can never hold a publication, so the empty answer is exact rather than
+    /// fail-open. An adapter that can publish must read its catalog, and an
+    /// absent catalog is empty only because nothing was ever published.
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::ScopeInvalid`] when more than `max`

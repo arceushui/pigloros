@@ -3406,6 +3406,13 @@ impl ErasureExecutionHostV1 {
         ))
     }
 
+    /// Prepare every ERSE1 admission of one fork and commit them in one batch.
+    ///
+    /// `view` is read once and stays fixed for the whole fork transition. That
+    /// meets the "read after every durable write" contract: the loop only
+    /// prepares (`prepare_fork_admission` returns an uncommitted mutation),
+    /// and the one durable write is `commit_fork_admission` after it, bound to
+    /// the transition's expected inventory generation.
     fn prepare_identified_fork(
         &mut self,
         view: &dyn ErasureAuthorityReadViewV1,

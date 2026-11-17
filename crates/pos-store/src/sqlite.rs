@@ -9513,6 +9513,12 @@ fn bind_sqlite_artifact_registration_timeline(
 /// the read stops one binding past `max`. Rows and bindings are append-only
 /// and committed together, so a binding without a consistent row is
 /// corruption, never a row to skip.
+///
+/// The binding read, each row load and the closure validation are separate
+/// statements, not one snapshot. That is consistent only because the catalog
+/// is append-only: a concurrent commit cannot change or remove a binding,
+/// row or closure object already read, and a binding it adds after the
+/// binding read is not returned.
 fn sqlite_artifact_registrations_for_timeline(
     connection: &Connection,
     timeline: TimelineId,
