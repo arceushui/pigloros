@@ -62,11 +62,8 @@ pub(super) const SUBJECT_DRIVER: &str = "replay-subject.driver";
 /// signature under its own pin of the Draft authority's deployment-operator
 /// key, never a key the snapshot carries, and reports that result.
 pub(super) struct HostV1 {
-    local: ExecutionProfileV1,
-    air_gapped: ExecutionProfileV1,
-    replay: ExecutionProfileV1,
-    live: ExecutionProfileV1,
-    live_air_gapped: ExecutionProfileV1,
+    /// The EPF1 of each [`ProfileV1`], indexed by [`ProfileV1::index`].
+    profiles: [ExecutionProfileV1; 5],
     snapshot: TrustPolicySnapshotV1,
     snapshot_digest: [u8; 32],
     operator_key: [u8; 32],
@@ -100,24 +97,23 @@ impl HostV1 {
             .zip(draft_profile(ProfileV1::AirGapped))
             .zip(snapshot)
             .and_then(|((local, air_gapped), snapshot)| {
+                let replay = restricted(
+                    &local,
+                    ProfileV1::Replay,
+                    ReproducibilityClassV1::RecordedReplay,
+                );
+                let live = restricted(
+                    &local,
+                    ProfileV1::Live,
+                    ReproducibilityClassV1::LiveUnverified,
+                );
+                let live_air_gapped = restricted(
+                    &air_gapped,
+                    ProfileV1::LiveAirGapped,
+                    ReproducibilityClassV1::LiveUnverified,
+                );
                 snapshot.digest().ok().map(|snapshot_digest| Self {
-                    replay: restricted(
-                        &local,
-                        ProfileV1::Replay,
-                        ReproducibilityClassV1::RecordedReplay,
-                    ),
-                    live: restricted(
-                        &local,
-                        ProfileV1::Live,
-                        ReproducibilityClassV1::LiveUnverified,
-                    ),
-                    live_air_gapped: restricted(
-                        &air_gapped,
-                        ProfileV1::LiveAirGapped,
-                        ReproducibilityClassV1::LiveUnverified,
-                    ),
-                    local,
-                    air_gapped,
+                    profiles: [local, air_gapped, replay, live, live_air_gapped],
                     snapshot,
                     snapshot_digest,
                     operator_key: DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
@@ -126,13 +122,7 @@ impl HostV1 {
     }
 
     const fn profile(&self, profile: ProfileV1) -> &ExecutionProfileV1 {
-        match profile {
-            ProfileV1::Local => &self.local,
-            ProfileV1::AirGapped => &self.air_gapped,
-            ProfileV1::Replay => &self.replay,
-            ProfileV1::Live => &self.live,
-            ProfileV1::LiveAirGapped => &self.live_air_gapped,
-        }
+        &self.profiles[profile.index()]
     }
 
     /// The request of one leg: the manifest the fixture owns, bound by the

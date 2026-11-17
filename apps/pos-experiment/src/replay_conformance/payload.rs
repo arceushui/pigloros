@@ -59,15 +59,24 @@ pub(super) enum ProfileV1 {
 }
 
 impl ProfileV1 {
+    /// The EPF1 profile ids, indexed by [`Self::index`].
+    const IDS: [&'static str; 5] = [
+        "deterministic-local-v1",
+        "deterministic-air-gapped-v1",
+        "replay-v1",
+        "live-local-v1",
+        "live-air-gapped-v1",
+    ];
+
+    /// The position of the profile in declaration order, which indexes
+    /// [`Self::IDS`] and the host's EPF1 table.
+    pub(super) const fn index(self) -> usize {
+        self as usize
+    }
+
     /// The EPF1 profile id.
     pub(super) const fn id(self) -> &'static str {
-        match self {
-            Self::Local => "deterministic-local-v1",
-            Self::AirGapped => "deterministic-air-gapped-v1",
-            Self::Replay => "replay-v1",
-            Self::Live => "live-local-v1",
-            Self::LiveAirGapped => "live-air-gapped-v1",
-        }
+        Self::IDS[self.index()]
     }
 }
 
