@@ -45,6 +45,12 @@ const RETAINED_TPS1_TAG: &str = "TPS1";
 /// head: it is the store request-head cap, chosen as a fixed read bound.
 /// A store retaining more TPS1 objects cannot be checked within it and
 /// stays closed with `ErasureTrustAnchorRotated`.
+///
+/// The read materialises the whole set: at the cap, up to this many
+/// [`pos_core::ERASURE_RETAINED_OBJECT_MAX_BYTES_V1`] objects (about 4 GiB)
+/// are held in memory at once. That worst case is accepted as a one-off
+/// composition cost rather than adding a streaming read to the store port;
+/// a real store retains one TPS1 per trust revision its admissions pinned.
 const MAX_RETAINED_TPS1: usize = ERASURE_MAX_INVENTORY_REQUESTS;
 
 /// The closed, payload-free reasons a Local erasure composition stays
@@ -127,7 +133,7 @@ impl ErasureCoordinatorCompositionV1 {
     /// retained TPS1 must verify under the pinned operator key.
     ///
     /// A composition only admits new work: recovery of committed evidence
-    /// verifies against the retained ELB1 and TPS1, never this check.
+    /// verifies against the ELB1 it pins by reference, never this check.
     ///
     /// The coordinator identity is `CA("ELCOORD1", [store_identity])`. The
     /// composed authority is `LocalErasureAuthorityV1` over the verified
@@ -294,9 +300,13 @@ where
 /// trust revision (ADR-136 §5): submission references only ERAZ1, ELP1,
 /// ELSEL1 and ELIDEM1, and a TPS1 is retained first with the freeze and
 /// retry admissions that pin one. Requests that are only submitted or
-/// authorized therefore legitimately retain no TPS1. A committed pin
-/// whose TPS1 bytes were removed is refused where that evidence is read,
-/// when recovery resolves the pinned ELB1 and TPS1 by reference.
+/// authorized therefore legitimately retain no TPS1. A committed freeze
+/// pins its trust as `CA(ELB1)`, and recovery resolves only that ELB1 by
+/// reference: the verified bundle, or after a rotation the retained ELB1
+/// bytes. Recovery resolves no TPS1, so retained TPS1 bytes are checked
+/// only here. Passing
+/// here admits nothing on its own: this slice composes the closed
+/// authority, which proves only an empty store.
 fn retained_trust_verifies<S>(operator_public_key: [u8; 32], store: &mut S) -> bool
 where
     S: ErasureInventoryPersistencePortV1 + ?Sized,

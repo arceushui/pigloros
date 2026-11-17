@@ -162,6 +162,14 @@ impl SqliteStore {
     /// sorted by `(timeline, export_id)`. Only `recipient_export_catalog_v1`
     /// holds visible publications; a pending one is never read. A store that
     /// never published has no catalog, which reads as empty.
+    ///
+    /// This read is not part of the authority's Timeline snapshot
+    /// transaction, so it alone cannot exclude a publication racing it. That
+    /// is safe because `publish_recipient_export` (`recipient_owner.rs`)
+    /// publishes only while holding the erasure `Export` fence of its
+    /// Timeline, which a Timeline under erasure refuses (pinned by
+    /// `publication_holds_the_erasure_export_fence`): a pending publication
+    /// left outside that fence can never become visible for such a Timeline.
     pub(super) fn local_erasure_recipient_export_publications(
         &self,
         timelines: &[TimelineId],
