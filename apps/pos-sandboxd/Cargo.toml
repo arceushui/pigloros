@@ -54,7 +54,6 @@ zlink = { version = "=0.7.1", default-features = false, features = [
   "tokio",
   "tracing",
 ] }
-zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # In-process netlink encoding and decoding for the Local attempt namespace
