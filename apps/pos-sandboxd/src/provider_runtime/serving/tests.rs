@@ -18,8 +18,9 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxCancelRequest, SandboxDescribeRequest, SandboxDescribeResponse, SandboxExecuteRequest,
     SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
 };
+use rustix::event::PollFlags;
 
-use super::{trusted_peer, Admission, Deadlined, Responder};
+use super::{accepting, missed, readiness, trusted_peer, Admission, Deadlined, Responder};
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::tests::{
     bind_as_provider, encode, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
@@ -753,4 +754,43 @@ fn a_deadlined_stream_has_nothing_to_flush() -> TestResult {
         Err(std::io::ErrorKind::WouldBlock)
     );
     Ok(())
+}
+
+#[test]
+fn the_execute_listener_is_polled_while_either_pool_has_a_free_slot() {
+    // A free answered slot alone, a free refusing slot alone, and neither.
+    assert!(accepting(0, 1, 1));
+    assert!(accepting(1, 0, 1));
+    assert!(accepting(1, 1, 2));
+    assert!(!accepting(1, 1, 1));
+    assert!(!accepting(2, 3, 2));
+    // Pool 0 still runs one refusal at a time.
+    assert!(accepting(0, 0, 0));
+    assert!(!accepting(0, 1, 0));
+}
+
+#[test]
+fn execute_readiness_counts_only_while_accepting() {
+    let none = PollFlags::empty();
+    assert_eq!(readiness(true, none, none), (false, false));
+    assert_eq!(readiness(true, PollFlags::IN, none), (true, false));
+    assert_eq!(readiness(true, none, PollFlags::IN), (false, true));
+    // While not accepting, whatever the execute listener reports is ignored.
+    assert_eq!(readiness(false, none, PollFlags::IN), (false, false));
+    assert_eq!(
+        readiness(false, PollFlags::IN, PollFlags::HUP),
+        (true, false)
+    );
+}
+
+#[test]
+fn only_an_accept_that_produced_nothing_backs_off() {
+    // A control accept that missed, alone.
+    assert!(missed(true, false, false));
+    assert!(missed(true, true, true));
+    // An execute accept that was ready and produced nothing, alone.
+    assert!(missed(false, true, false));
+    // A ready execute accept that produced a connection, and no accept.
+    assert!(!missed(false, true, true));
+    assert!(!missed(false, false, false));
 }
