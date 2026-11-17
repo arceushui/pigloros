@@ -344,7 +344,7 @@ fn a_missing_or_mismatched_gateway_executor_runs_no_exchange_body() -> TestResul
     let mut newer_minor = exact.clone();
     newer_minor.provider.abi_minor += 1;
     let mut old_contract = exact.clone();
-    old_contract.provider.contract_version = "1.0.0".to_owned();
+    "1.0.0".clone_into(&mut old_contract.provider.contract_version);
     let mut plugin_protocol = exact;
     plugin_protocol.subject_adapter = SubjectAdapterKind::PublicPluginProtocol;
     for (label, executors) in [
