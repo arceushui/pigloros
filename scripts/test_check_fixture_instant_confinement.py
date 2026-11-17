@@ -285,7 +285,53 @@ def expect_rejected(case: str, result: subprocess.CompletedProcess[str], reason:
         raise SystemExit(f"checker rejected {case} without {reason!r}:\n{result.stderr}")
 
 
+def check_prefilter() -> None:
+    """Strip only files that contain a guarded token, and still reject a guarded violation.
+
+    The prefilter is exact because stripping comments only removes text, so a file
+    whose raw bytes name no guarded token cannot match after stripping.
+    """
+    import check_fixture_instant_confinement as checker
+
+    stripped: list[str] = []
+    original = checker.strip_comments
+
+    def recording(text: str) -> str:
+        stripped.append(text)
+        return original(text)
+
+    checked = (
+        "crates/pos-state/src/wall.rs",
+        "crates/pos-state/src/instant.rs",
+        "crates/pos-core/src/lib.rs",
+    )
+    files = {
+        # One guard token per file, so dropping any single guard hides a violation.
+        "crates/pos-state/src/wall.rs": "fn f(_: FixtureWallSourceV1) {}\n",
+        "crates/pos-state/src/instant.rs": "fn f(_: FixtureEvaluationInstantV1) {}\n",
+        "crates/pos-core/src/lib.rs": "pub use trusted_clock::*;\n",
+        "crates/pos-state/src/plain.rs": "// plain\nfn plain() {}\n",
+    }
+    checker.strip_comments = recording
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative, text in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            found = checker.source_violations(root)
+    finally:
+        checker.strip_comments = original
+    for relative in checked:
+        if not any(finding.startswith(relative + ":") for finding in found):
+            raise SystemExit(f"prefilter hid the violation in {relative}: {found}")
+    if sorted(stripped) != sorted(files[relative] for relative in checked):
+        raise SystemExit(f"prefilter stripped a file without a guarded token: {stripped}")
+
+
 def main() -> None:
+    check_prefilter()
     repository = invoke(ROOT)
     if repository.returncode != 0:
         raise SystemExit(f"repository violates policy:\n{repository.stderr}")
