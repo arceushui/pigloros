@@ -1679,7 +1679,7 @@ fn a_plain_submission_cannot_bypass_the_subject_checks() -> TestResult {
 }
 
 /// The bundle naming `owner` as its one `key-registry` owner.
-fn owned_bundle(owner: ErasureReferenceV1) -> LocalErasureBundleV1 {
+fn single_owner_bundle(owner: ErasureReferenceV1) -> LocalErasureBundleV1 {
     let mut with_owner = bundle();
     with_owner.owners = vec![LocalErasureOwnerRowV1 {
         category: 1,
@@ -1703,7 +1703,7 @@ fn local_authority() -> TestResult<(
         1,
         "key-registry",
     )?;
-    let case = Case::signed(&owned_bundle(owner), &bundle_root(), &[])?;
+    let case = Case::signed(&single_owner_bundle(owner), &bundle_root(), &[])?;
     let composition = {
         let mut sqlite = SqliteStore::open(&store.path)?;
         sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
@@ -2373,7 +2373,7 @@ fn committed_freeze_evidence_pins_one_policy_and_trust() -> TestResult {
     let (_store, composition, mut host, owner) = local_authority()?;
     let view = host.authority_view()?;
     let authority = composition.authority();
-    let trust = owned_bundle(owner).reference()?;
+    let trust = single_owner_bundle(owner).reference()?;
     let mut matrix = Vec::new();
     for category in ErasureInventoryCategoryV1::CANONICAL {
         matrix.push(ErasureFreezeApplicabilityRowV1::new(
