@@ -136,6 +136,10 @@ struct LocalPrincipalDocumentV1 {
     operations: Vec<String>,
     #[serde(default)]
     consent: Option<LocalConsentDocumentV1>,
+    /// The host's single-participant Scenario Room governance record
+    /// (#303 decision 1a), if any.
+    #[serde(default)]
+    governance_record_id: Option<String>,
 }
 
 /// The document's `[consent]` table.
@@ -214,11 +218,31 @@ impl LocalPrincipalProvisionV1 {
         operations: impl IntoIterator<Item = GatewayOperationV1>,
         consent: Option<&LocalConsentDraftV1>,
     ) -> Result<Self, LocalPrincipalErrorV1> {
+        Self::try_new_provisioned(principal, actor_entity_ids, operations, consent, None)
+    }
+
+    /// The complete provisioning: [`Self::try_new_with_consent`], also
+    /// recording `governance_record` as the host's single-participant
+    /// Scenario Room governance record (#303 decision 1a): one scope
+    /// resource of the root grant,
+    /// [`crate::authorization::GOVERNANCE_RESOURCE_PREFIX`] followed by the
+    /// record's ULID. That resource names no operation.
+    ///
+    /// # Errors
+    /// Returns the refusals of [`Self::try_new_with_consent`].
+    pub fn try_new_provisioned(
+        principal: &PrincipalRefV1,
+        actor_entity_ids: impl IntoIterator<Item = EntityId>,
+        operations: impl IntoIterator<Item = GatewayOperationV1>,
+        consent: Option<&LocalConsentDraftV1>,
+        governance_record: Option<EntityId>,
+    ) -> Result<Self, LocalPrincipalErrorV1> {
         let mut actors = actor_entity_ids.into_iter().collect::<Vec<_>>();
         actors.sort_unstable();
         actors.dedup();
         let operations = sorted_operations(operations);
-        let registry_digest = registry_digest(principal, &actors, &operations, consent);
+        let registry_digest =
+            registry_digest(principal, &actors, &operations, consent, governance_record);
         consent
             .map_or(Ok(Vec::new()), |consent| {
                 governed(consent, &actors, &operations)
@@ -233,7 +257,7 @@ impl LocalPrincipalProvisionV1 {
                     principal,
                     LocalGrantKindV1::Root,
                     (actors.as_slice(), ungoverned.as_slice()),
-                    None,
+                    (None, governance_record),
                     registry_digest,
                 )
                 .map_err(|_| LocalPrincipalErrorV1::Invalid)
@@ -311,12 +335,29 @@ impl LocalPrincipalProvisionV1 {
                             })
                         })
                 });
-                principal.zip(actors).zip(operations).zip(consent)
+                let governance = document
+                    .governance_record_id
+                    .as_deref()
+                    .map_or(Some(None), |text| {
+                        crate::scenario_room::canonical_entity(text).map(Some)
+                    });
+                principal
+                    .zip(actors)
+                    .zip(operations)
+                    .zip(consent.zip(governance))
             })
             .ok_or(LocalPrincipalErrorV1::Invalid)
-            .and_then(|(((principal, actors), operations), consent)| {
-                Self::try_new_with_consent(&principal, actors, operations, consent.as_ref())
-            })
+            .and_then(
+                |(((principal, actors), operations), (consent, governance))| {
+                    Self::try_new_provisioned(
+                        &principal,
+                        actors,
+                        operations,
+                        consent.as_ref(),
+                        governance,
+                    )
+                },
+            )
     }
 }
 
@@ -352,21 +393,32 @@ impl LocalGrantKindV1 {
 
 /// One root grant of `principal` of `kind` for `operations` acting as
 /// `actors`, bound to `consent` (its subject and consent references) when
-/// given.
+/// given, and recording `governance` as a scope resource when given.
 fn root_grant(
     principal: &PrincipalRefV1,
     kind: LocalGrantKindV1,
     (actors, operations): (&[EntityId], &[GatewayOperationV1]),
-    consent: Option<(EntityId, Vec<Hash>)>,
+    (consent, governance): (Option<(EntityId, Vec<Hash>)>, Option<EntityId>),
     registry_digest: Hash,
 ) -> Result<CapabilityGrantV1, AuthorityErrorV1> {
+    let governance = governance.map(|record| {
+        format!(
+            "{}{record}",
+            crate::authorization::GOVERNANCE_RESOURCE_PREFIX
+        )
+    });
     let (grant_id, issuance_timeline) = kind.identity();
     let (subject_ids, consent_references) = consent.map_or_else(
         || (Vec::new(), Vec::new()),
         |(subject, references)| (vec![subject], references),
     );
     CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-        resources: sorted_set(operations.iter().copied().map(GatewayOperationV1::resource)),
+        resources: sorted_set(
+            operations
+                .iter()
+                .map(|operation| operation.resource())
+                .chain(governance.as_deref()),
+        ),
         actions: sorted_set(operations.iter().copied().map(GatewayOperationV1::action)),
         purposes: sorted_set(operations.iter().copied().map(GatewayOperationV1::purpose)),
         audiences: vec![GATEWAY_AUDIENCE.to_owned()],
@@ -481,7 +533,7 @@ fn consented_grants(
                         principal,
                         LocalGrantKindV1::Consented(position),
                         (actors, operations.as_slice()),
-                        Some((consent.subject, vec![consent_id(&payload)])),
+                        (Some((consent.subject, vec![consent_id(&payload)])), None),
                         registry_digest,
                     )
                     .map_err(|_| LocalPrincipalErrorV1::Invalid)
@@ -1372,6 +1424,7 @@ fn registry_digest(
     actors: &[EntityId],
     operations: &[GatewayOperationV1],
     consent: Option<&LocalConsentDraftV1>,
+    governance_record: Option<EntityId>,
 ) -> Hash {
     let mut hasher = blake3::Hasher::new_derive_key("pigloros gateway local principal registry v1");
     hasher.update(principal.principal_id());
@@ -1385,7 +1438,16 @@ fn registry_digest(
         framed(&mut hasher, operation.name().as_bytes());
     }
     framed_consent(&mut hasher, consent);
+    framed_governance(&mut hasher, governance_record);
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Commit the registry digest to the document's governance record, if it
+/// names one.
+fn framed_governance(hasher: &mut blake3::Hasher, governance_record: Option<EntityId>) {
+    if let Some(record) = governance_record {
+        hasher.update(&record.inner().to_bytes());
+    }
 }
 
 /// Commit the registry digest to the document's consent draft, if any: its
@@ -1909,6 +1971,24 @@ mod tests {
             )])?),
         )?;
         assert_ne!(digest(&consented_provision()?), digest(&reconsented));
+        Ok(())
+    }
+
+    /// The registry digest also commits to the governance record.
+    #[test]
+    fn the_registry_digest_commits_to_the_governance_record() -> TestResult {
+        let digest = |record: Option<EntityId>| -> TestResult<Hash> {
+            Ok(LocalPrincipalProvisionV1::try_new_provisioned(
+                &principal()?,
+                [actor()?],
+                [GatewayOperationV1::CREATE_TIMELINE],
+                None,
+                record,
+            )?
+            .grant
+            .authority_registry_digest())
+        };
+        assert_ne!(digest(None)?, digest(Some(EntityId::new()))?);
         Ok(())
     }
 
@@ -4047,7 +4127,7 @@ mod tests {
                 grant.scope().actor_entity_ids(),
                 [GatewayOperationV1::APPEND_SIGNAL].as_slice(),
             ),
-            None,
+            (None, None),
             grant.authority_registry_digest(),
         )?)
     }
