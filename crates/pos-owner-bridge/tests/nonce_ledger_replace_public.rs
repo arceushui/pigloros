@@ -9,7 +9,8 @@ use std::path::Path;
 
 use pos_crypto::subject_key::SubjectKeyUseV1;
 use pos_crypto::subject_nonce_ledger::{
-    SubjectNonceLedgerRowV1, SubjectNonceLedgerV1, MAX_SUBJECT_NONCE_LEDGER_BYTES,
+    SubjectNonceLedgerRowV1, SubjectNonceLedgerV1, SubjectStoreFileIdV1,
+    MAX_SUBJECT_NONCE_LEDGER_BYTES,
 };
 use pos_owner_bridge::encryptor_lock::linux::SubjectEncryptorLock;
 use pos_owner_bridge::{BridgeError, UnavailableCode};
@@ -28,7 +29,10 @@ fn ledger() -> TestResult<(SubjectNonceLedgerV1, SubjectNonceLedgerRowV1)> {
         owner_id: "subject:00000000000000000000000000000001".to_owned(),
         epoch: 1,
         root_material_digest: [9; 32],
-        store_file_id: [7, 11],
+        store_file_id: SubjectStoreFileIdV1::Linux {
+            device: 7,
+            inode: 11,
+        },
         data_next: 12,
         bootstrap_next: 3,
     };
