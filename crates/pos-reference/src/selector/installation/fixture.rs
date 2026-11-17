@@ -656,7 +656,6 @@ pub(crate) fn admitted_state_with_arguments(
         .collect();
     Ok(InstalledSelectorState {
         root: tempfile::tempdir().and_then(|directory| File::open(directory.path()))?,
-        manifest_file: tempfile::NamedTempFile::new()?.into_file(),
         manifest_bytes: Vec::new(),
         manifest: InstallationManifest {
             root_key_id: "root".to_owned(),
