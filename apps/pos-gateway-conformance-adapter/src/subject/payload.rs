@@ -249,9 +249,11 @@ fn terminated_segments(path: &str) -> impl Iterator<Item = Option<&str>> {
     path.split('/').map(Some).chain(std::iter::once(None))
 }
 
-/// Whether a path segment names the route-table segment it pairs with: any non-empty segment
-/// for a Timeline or room slot, a positive decimal for the revision segment, otherwise the
-/// literal segment itself (and the end of one path only the end of the other).
+/// Whether a path segment names the route-table segment it pairs with.
+///
+/// A Timeline or room slot takes any non-empty segment and the revision segment a positive
+/// decimal; any other segment must be the literal itself, and the end of one path only pairs
+/// with the end of the other.
 fn segment_matches(pair: (Option<&str>, Option<&str>)) -> bool {
     match pair {
         (Some(TIMELINE_SLOT | ROOM_SLOT), Some(segment)) => !segment.is_empty(),
