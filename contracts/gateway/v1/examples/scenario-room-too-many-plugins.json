@@ -1,5 +1,5 @@
 {
-  "name": "draft-scenario-room-too-many-plugins",
+  "name": "scenario-room-too-many-plugins",
   "operation_id": "deriveScenarioRoomRevision",
   "request": {
     "path": {
@@ -7,7 +7,8 @@
     },
     "headers": {
       "Idempotency-Key": "client-1-3",
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
     },
     "body": {
       "parent_revision": 1,
@@ -154,7 +155,7 @@
         ],
         "rules": [
           {
-            "rule_id": "society.nudge.scale",
+            "rule_id": "gateway-world-actions.nudge.scale",
             "value_micro": 250000
           }
         ],
