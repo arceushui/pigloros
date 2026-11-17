@@ -1394,8 +1394,9 @@ fn a_fresh_submission_after_a_root_grant_revocation_is_unauthorized() -> TestRes
 }
 
 /// Assert that the submission of key 2 is refused with `error`, not with
-/// the subject's `Concurrent`, and retains neither its ELIDEM1 nor an ERAZ1
-/// bound to the recorded head or the one past it.
+/// the subject's `Concurrent`, and retains neither its ELIDEM1 nor the
+/// ERAZ1 it would bind at the recorded head or, after a revocation, at the
+/// head one past it and revocation epoch 1.
 fn refused_before_the_subject_checks(
     store: &LocalStore,
     host: &mut ErasureExecutionHostV1,
@@ -1407,9 +1408,9 @@ fn refused_before_the_subject_checks(
         Err(LocalErasureSubmitErrorV1::Host(error))
     );
     let view = host.authority_view()?;
-    for head in [store.head, store.head + 1] {
+    for (head, epoch) in [(store.head, 0), (store.head + 1, 1)] {
         assert_eq!(
-            view.retained_object(authorization(2, head)?.reference()?),
+            view.retained_object(authorization_at(2, head, epoch)?.reference()?),
             None
         );
     }
