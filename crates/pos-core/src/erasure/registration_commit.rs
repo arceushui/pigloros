@@ -564,6 +564,12 @@ pub trait ArtifactRegistrationPersistencePortV1 {
     /// row's closure is revalidated, so the read costs at most `max` bounded
     /// closure walks.
     ///
+    /// The read need not be one snapshot: an adapter may load bindings, rows
+    /// and closures in separate statements. The catalog is append-only, so a
+    /// concurrent commit can only add bindings and rows; every row and
+    /// closure object already read stays exactly as read, and a binding added
+    /// after the binding read is simply not returned.
+    ///
     /// # Errors
     /// Returns [`ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds`]
     /// when more than `max` rows are bound, never a truncated list, and a

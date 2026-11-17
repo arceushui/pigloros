@@ -663,11 +663,19 @@ pub struct LocalErasureSubmissionBindingV1 {
 /// besides the authority trait (ADR-136 §5 and §6). Both read only the
 /// host-built view.
 pub(crate) trait LocalErasurePreparationV1: Send + Sync {
-    /// Whether the closure of a prospective request of `actor` for `scope`
-    /// fits the 4,096-target bound on this snapshot.
-    fn closure_fits(
+    /// Authenticate a prospective request of the Principal `principal_ref`
+    /// as `actor` against the root grant at the current chain head, then
+    /// answer whether its closure for `scope` fits the 4,096-target bound
+    /// on this snapshot. The host retains nothing before this passes.
+    ///
+    /// # Errors
+    /// `Unauthorized` for a Principal, actor or root grant the authority
+    /// would not admit, `TrustSnapshotInvalid` once new admissions are
+    /// closed, and otherwise the closed read error of the closure.
+    fn admit_submission(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
+        principal_ref: ErasureReferenceV1,
         actor: EntityId,
         scope: ErasureScopeV1,
     ) -> Result<bool, ErasureErrorV1>;
@@ -739,6 +747,8 @@ struct LocalSubmissionRecordsV1 {
     request: ErasureRequestV1,
     /// ERAZ1, ELSEL1 and ELIDEM1, retained before the submission.
     objects: [Vec<u8>; 3],
+    /// The submitting Principal's `principal_ref`.
+    principal_ref: ErasureReferenceV1,
     /// The Local Principal's actor count `A`.
     actors: usize,
 }
@@ -791,6 +801,7 @@ impl LocalSubmissionRecordsV1 {
                 .map(|(request, objects)| Self {
                     request,
                     objects,
+                    principal_ref,
                     actors: authority
                         .chain()
                         .grants()
@@ -877,7 +888,9 @@ pub(crate) enum LocalSubjectRefusalV1 {
 /// Over the installed requests, no request of the subject may `hold` it
 /// (be pre-terminal or have an active attempt), and the subject must have
 /// fewer requests than its lifetime quota
-/// `floor((maximum_requests - reserve) / A)`.
+/// `floor((maximum_requests - reserve) / A)`. The scan stops at the first
+/// request that holds the subject; `holds` decides, so a state it cannot
+/// read still holds it.
 pub(crate) fn local_subject_admission<'state>(
     states: impl Iterator<Item = &'state ErasureVerifiedStateV1>,
     subject: ErasureReferenceV1,
@@ -885,10 +898,11 @@ pub(crate) fn local_subject_admission<'state>(
     holds: impl Fn(&ErasureVerifiedStateV1) -> bool,
 ) -> Result<(), LocalSubjectRefusalV1> {
     let mut count = 0_u64;
-    let mut concurrent = false;
     for state in states.filter(|state| state.request().subject() == subject) {
+        if holds(state) {
+            return Err(LocalSubjectRefusalV1::Concurrent);
+        }
         count += 1;
-        concurrent |= holds(state);
     }
     let quota = u64::try_from(maximum_requests)
         .ok()
@@ -896,9 +910,7 @@ pub(crate) fn local_subject_admission<'state>(
         .zip(u64::try_from(actors).ok())
         .and_then(|(available, actors)| available.checked_div(actors))
         .unwrap_or(0);
-    if concurrent {
-        Err(LocalSubjectRefusalV1::Concurrent)
-    } else if count >= quota {
+    if count >= quota {
         Err(LocalSubjectRefusalV1::QuotaExhausted)
     } else {
         Ok(())
@@ -3413,6 +3425,13 @@ impl ErasureExecutionHostV1 {
         ))
     }
 
+    /// Prepare every ERSE1 admission of one fork and commit them in one batch.
+    ///
+    /// `view` is read once and stays fixed for the whole fork transition. That
+    /// meets the "read after every durable write" contract: the loop only
+    /// prepares (`prepare_fork_admission` returns an uncommitted mutation),
+    /// and the one durable write is `commit_fork_admission` after it, bound to
+    /// the transition's expected inventory generation.
     fn prepare_identified_fork(
         &mut self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -4285,9 +4304,11 @@ impl ErasureCommandSenderV1<'_> {
     /// the Idempotency-Key digest. A request with that id already installed
     /// returns its state when its ELIDEM1 binds the same body, and is a
     /// conflict otherwise. A fresh request must pass the per-subject checks
-    /// against the installed inventory; the host then retains its ERAZ1,
-    /// ELSEL1 and ELIDEM1, builds ERQ1 and submits it, and the authority
-    /// re-checks all of it from its view.
+    /// against the installed inventory, and the authority must admit the
+    /// Principal and actor and find the closure within its bound; only then
+    /// does the host retain its ERAZ1, ELSEL1 and ELIDEM1, build ERQ1 and
+    /// submit it, and the authority re-checks all of it from its view. A
+    /// refused submission retains nothing.
     ///
     /// # Errors
     /// Returns [`LocalErasureSubmitErrorV1::Concurrent`] while another
@@ -4352,7 +4373,12 @@ impl ErasureCommandSenderV1<'_> {
                 |()| {
                     binding
                         .preparation
-                        .closure_fits(view, submission.actor, submission.scope)
+                        .admit_submission(
+                            view,
+                            records.principal_ref,
+                            submission.actor,
+                            submission.scope,
+                        )
                         .map(Ok)
                 },
             )

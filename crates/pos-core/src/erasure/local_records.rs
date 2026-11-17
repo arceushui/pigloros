@@ -549,7 +549,11 @@ pub struct LocalErasureOwnerRowV1 {
 /// The deployment-owned executor an ELB1 bundle permits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalErasureExecutionBindingV1 {
-    /// The executor identifier, 1 to 64 bytes.
+    /// The executor identifier, 1 to 64 bytes of UTF-8.
+    ///
+    /// It has no charset rule, unlike acknowledgement classes and TPS1 key
+    /// ids: it names no key and no class, and is only compared by exact
+    /// bytes with the composed executor's binding.
     pub executor_id: String,
     /// The digest of the executor version.
     pub executor_version_digest: ErasureReferenceV1,
@@ -835,11 +839,15 @@ pub struct LocalErasurePolicyV1 {
     /// Automatic retries of a transient result, at most 16.
     pub auto_retry_max: u64,
     /// Lifetime attempt quota, at most [`LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1`].
+    /// Zero is valid and admits no attempt, which only closes the policy.
     pub quota_attempts: u64,
     /// Request heads reserved store-wide, at most
-    /// [`LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1`].
+    /// [`LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1`]. Zero is valid and reserves
+    /// no head.
     pub store_request_reserve: u64,
-    /// Re-prepares per lifecycle step.
+    /// Re-prepares per lifecycle step. The codec sets no upper bound: ADR-136
+    /// caps none, and an ELP1 is only ever the policy compiled into the
+    /// binary, pinned by `CA(ELP1)`, never one read from an untrusted source.
     pub max_reprepare: u64,
 }
 
