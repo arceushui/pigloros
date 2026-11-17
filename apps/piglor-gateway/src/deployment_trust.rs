@@ -36,7 +36,7 @@ use thiserror::Error;
 pub const RELEASE_TRUST_CREDENTIAL_NAME: &str = "pigloros.release-trust";
 
 /// The largest release-anchor credential accepted.
-pub const MAX_RELEASE_TRUST_CREDENTIAL_BYTES: usize = 4 * 1_024;
+pub const MAX_RELEASE_TRUST_CREDENTIAL_BYTES: usize = 4_096;
 
 /// The fixed path of the deployment trust state store.
 pub const DEPLOYMENT_TRUST_STATE_PATH: &str = "/var/lib/pigloros/trust-state.db";
@@ -114,7 +114,7 @@ fn lower_hex_32(text: &str) -> Option<[u8; 32]> {
         })
         .collect::<Option<Vec<u8>>>()?;
     (nibbles.len() == 64)
-        .then(|| std::array::from_fn(|index| (nibbles[2 * index] << 4) | nibbles[2 * index + 1]))
+        .then(|| std::array::from_fn(|index| nibbles[2 * index] * 16 + nibbles[2 * index + 1]))
 }
 
 #[cfg(test)]
@@ -149,6 +149,16 @@ mod tests {
                 Some(DeploymentTrustErrorV1::ReleaseTrustInvalid)
             );
         }
+    }
+
+    #[test]
+    fn lower_hex_decodes_each_byte_from_its_high_and_low_nibble() {
+        let key = "0123456789abcdef".repeat(4);
+        let expected: [u8; 32] = std::array::from_fn(|index| {
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef][index % 8]
+        });
+        assert_eq!(lower_hex_32(&key), Some(expected));
+        assert_eq!(lower_hex_32(&"fe".repeat(32)), Some([0xfe; 32]));
     }
 
     #[test]

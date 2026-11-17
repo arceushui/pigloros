@@ -175,35 +175,41 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
         Some("provision-local-erasure") => {
             provision_local_erasure_command(&args[2..], credential_directory)
         }
-        Some("fork-admission-provision") => Err(
-            "fork-admission-provision was replaced by the systemd-only provision-local-fork-authority entry point"
-                .into(),
-        ),
         Some("version") => {
             output_stdout!("piglor-gateway {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        _ => {
-            output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]|version>");
-            output_stderr!("  profiles: gateway-mode-local-v1, gateway-mode-air-gapped-v1");
-            output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
-            output_stderr!("  owntracks status <sqlite-path>");
-            output_stderr!("  owntracks rotate <sqlite-path> <owner-key-path>");
-            output_stderr!("  owntracks revoke <sqlite-path>");
-            output_stderr!("  serve --profile gateway-mode-local-v1 127.0.0.1:8080           # Memory store");
-            output_stderr!("  serve --profile gateway-mode-local-v1 127.0.0.1:8080 /tmp/g.db # SQLite store");
-            output_stderr!(
-                "  provision-local-fork-authority is available only to its installed systemd unit"
-            );
-            output_stderr!(
-                "  provision-local-principal is available only to its installed systemd unit"
-            );
-            output_stderr!(
-                "  provision-local-erasure is available only to its installed systemd unit"
-            );
-            Ok(())
-        }
+        command => usage(command),
     }
+}
+
+/// Print the command usage, or reject the retired `fork-admission-provision`
+/// entry point.
+fn usage(command: Option<&str>) -> Result<(), RunError> {
+    if command == Some("fork-admission-provision") {
+        return Err(
+            "fork-admission-provision was replaced by the systemd-only provision-local-fork-authority entry point"
+                .into(),
+        );
+    }
+    output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]|version>");
+    output_stderr!("  profiles: gateway-mode-local-v1, gateway-mode-air-gapped-v1");
+    output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
+    output_stderr!("  owntracks status <sqlite-path>");
+    output_stderr!("  owntracks rotate <sqlite-path> <owner-key-path>");
+    output_stderr!("  owntracks revoke <sqlite-path>");
+    output_stderr!(
+        "  serve --profile gateway-mode-local-v1 127.0.0.1:8080           # Memory store"
+    );
+    output_stderr!(
+        "  serve --profile gateway-mode-local-v1 127.0.0.1:8080 /tmp/g.db # SQLite store"
+    );
+    output_stderr!(
+        "  provision-local-fork-authority is available only to its installed systemd unit"
+    );
+    output_stderr!("  provision-local-principal is available only to its installed systemd unit");
+    output_stderr!("  provision-local-erasure is available only to its installed systemd unit");
+    Ok(())
 }
 
 /// `provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner
