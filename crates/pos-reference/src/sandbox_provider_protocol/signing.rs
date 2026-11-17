@@ -8,15 +8,16 @@
 //! signing oracle.
 //!
 //! [`RuntimeSigned`] is sealed. Its kinds are a subset of the R9 §5 set, and
-//! a kind joins only when its encoder does: RLS1, SAU1, SPR1 and SPY1 now.
-//! RQE1, KOE1, TME1 and RDY1 never do.
+//! a kind joins only when its encoder does: RLS1, SDY1, SPE1, SAU1, SPR1
+//! and SPY1 now. RQE1, KOE1, TME1 and RDY1 never do.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
 use super::codec::signature_message;
 use super::{
-    ExecutionReleaseFields, SandboxAuditRecordFields, SandboxProviderProtocolError,
-    SandboxProviderReceiptFields, SandboxProviderResultFields,
+    ExecutionReleaseFields, SandboxAuditRecordFields, SandboxDescribeResponseFields,
+    SandboxProviderErrorFields, SandboxProviderProtocolError, SandboxProviderReceiptFields,
+    SandboxProviderResultFields,
 };
 
 mod runtime_signed_sealed {
@@ -65,6 +66,21 @@ impl RuntimeSigned for Sau1 {
     }
 }
 
+/// SDY1, the signed `describe` response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sdy1 {}
+
+impl runtime_signed_sealed::Sealed for Sdy1 {}
+
+impl RuntimeSigned for Sdy1 {
+    const MAGIC: &'static str = "SDY1";
+    type Body = SandboxDescribeResponseFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
 /// SPR1, the attempt receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Spr1 {}
@@ -89,6 +105,21 @@ impl runtime_signed_sealed::Sealed for Spy1 {}
 impl RuntimeSigned for Spy1 {
     const MAGIC: &'static str = "SPY1";
     type Body = SandboxProviderResultFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// SPE1, the signed provider error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Spe1 {}
+
+impl runtime_signed_sealed::Sealed for Spe1 {}
+
+impl RuntimeSigned for Spe1 {
+    const MAGIC: &'static str = "SPE1";
+    type Body = SandboxProviderErrorFields;
 
     fn key_id(body: &Self::Body) -> &str {
         &body.runtime_attestation_key_id

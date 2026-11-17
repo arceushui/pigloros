@@ -1682,6 +1682,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_revocation_refuses_every_revision_operation_before_any_lookup() -> TestResult {
+        let provision = provision([
+            GatewayOperationV1::CREATE_PREFERENCE,
+            GatewayOperationV1::READ_PREFERENCE,
+            GatewayOperationV1::CREATE_OPTION_SPEC,
+            GatewayOperationV1::READ_OPTION_SPEC,
+        ])?;
+        let served = served_store(&provision)?;
+        let actor = actor()?;
+        let preference = json!({
+            "schema_version": 1,
+            "weights": [{"dimension": "nature", "weight_micro": 1}],
+        });
+        let (status, created) = send(
+            &served.app,
+            "POST",
+            "/v1/preferences",
+            Some(actor),
+            Some(preference.clone()),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CREATED);
+        record_revocation(&served.path, &provision)?;
+        let read = format!(
+            "/v1/preferences/{}/revisions/1",
+            created["id"].as_str().unwrap_or_default()
+        );
+        let options = json!({
+            "schema_version": 1,
+            "options": [
+                {"key": "coast", "label": "Coast", "tags": []},
+                {"key": "city", "label": "City", "tags": []},
+            ],
+        });
+        for (method, uri, body) in [
+            ("POST", "/v1/preferences".to_owned(), Some(preference)),
+            ("GET", read, None),
+            ("POST", "/v1/option-specs".to_owned(), Some(options)),
+            (
+                "GET",
+                format!("/v1/option-specs/{}/revisions/1", EntityId::new().inner()),
+                None,
+            ),
+        ] {
+            let (status, problem) = send(&served.app, method, &uri, Some(actor), body).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+            assert_eq!(problem["code"], "revoked", "{uri}");
+        }
+        served.gateway.shutdown().await?;
+        drop(served);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_cancelled_request_keeps_its_admitted_mutation_ahead_of_a_revocation() -> TestResult {
         let provision = served_provision()?;
         let served = served_store(&provision)?;

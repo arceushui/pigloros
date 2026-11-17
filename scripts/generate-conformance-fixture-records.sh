@@ -513,7 +513,7 @@ jq -n --argjson digests "${w8h1_digest_object}" '
     {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing", family: "deletion-redaction"},
     {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile", family: "downgrade"},
     {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded", family: "resource-exhaustion"},
-    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission", family: "denied"},
+    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-air-gapped-v1", "live-local-v1"], expected_outcome: "NonDeterministicAdmission", family: "denied"},
     {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded", family: "deletion-redaction"},
     {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure", family: "denied"}
   ] |
