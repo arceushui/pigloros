@@ -1,22 +1,25 @@
 {
-  "name": "draft-option-spec-get",
+  "name": "option-spec-get",
   "operation_id": "getOptionSpecRevision",
   "request": {
     "path": {
       "option_spec_id": "01JC0GATEWAYW9QPT10N00001A",
       "revision": 1
     },
-    "headers": {}
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
   },
   "request_valid": true,
   "response": {
     "status": 200,
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:option-spec-revision",
+      "schema_version": 1,
       "id": "01JC0GATEWAYW9QPT10N00001A",
       "revision": 1,
       "provenance": {
-        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "digest": "a17f60346652f2ace83effe3ce5249ade05697c42d69e105e645dd26090a8da4",
         "origin": "principal-authored"
       },
       "mode_profile": {
@@ -35,6 +38,7 @@
         "state": "available",
         "withheld": []
       },
+      "subject_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
       "options": [
         {
           "key": "coast",
@@ -59,7 +63,7 @@
         }
       ],
       "parent_revision": null,
-      "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+      "digest": "c9dc93da506b572925f99205e3854af8905d81000c8a4fc25f8930d84da84f0a"
     }
   }
 }
