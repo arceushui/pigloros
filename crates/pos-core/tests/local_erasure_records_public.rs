@@ -1814,7 +1814,7 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
 /// `effect_digest` and carries its command, owner reference and closed
 /// error code (ADR-136 §4a); any other owner result is refused.
 #[test]
-fn a_negative_effect_is_bound_only_by_an_elo1_with_its_error_code() -> TestResult {
+fn a_negative_effect_is_bound_only_by_its_matching_elo1() -> TestResult {
     let effect = negative(ErasureErrorV1::BackupInventoryIncomplete);
     let elneg1 = effect.to_canonical_cbor()?;
     let bound_result = LocalErasureOwnerResultV1 {
