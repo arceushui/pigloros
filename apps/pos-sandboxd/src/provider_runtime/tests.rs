@@ -89,7 +89,7 @@ pub(super) fn install_spi1(document: &[u8], seed: &[u8; 32]) -> TestResult {
 }
 
 /// Remove the SPI1 file and its key directory again.
-fn remove_spi1() -> TestResult {
+pub(super) fn remove_spi1() -> TestResult {
     let root = Path::new(SANDBOX_ARTIFACT_ROOT);
     fs::remove_file(root.join("provider-installation.cbor"))?;
     fs::remove_dir_all(root.join("provider-keys"))?;

@@ -101,7 +101,7 @@ const FENCED: u8 = 2;
 const REVOKED: u8 = 3;
 
 /// The end of a control exchange `accepted` at that instant.
-fn exchange_deadline(accepted: Instant) -> Instant {
+pub(super) fn exchange_deadline(accepted: Instant) -> Instant {
     accepted + CONTROL_EXCHANGE
 }
 
@@ -713,14 +713,14 @@ fn record_operation(bytes: &[u8]) -> Option<u8> {
 }
 
 /// A stream whose every read and write ends at `until`.
-struct Deadlined<'a> {
+pub(super) struct Deadlined<'a> {
     stream: &'a UnixStream,
     until: Instant,
 }
 
 impl<'a> Deadlined<'a> {
     /// `stream`, ending at `until`.
-    const fn until(stream: &'a UnixStream, until: Instant) -> Self {
+    pub(super) const fn until(stream: &'a UnixStream, until: Instant) -> Self {
         Self { stream, until }
     }
 

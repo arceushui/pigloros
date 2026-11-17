@@ -313,6 +313,23 @@ RCC1/RCU1 responder lands. Restart reconciliation, which opens admission, is
 the next #1358 slice. The mode reads no environment variable but
 `NOTIFY_SOCKET`.
 
+## Recovery peer mode (#349)
+
+`recovery-peer <32 lowercase hex endpoint ID>` answers one RCC1/RCU1
+exchange of a pending SIR1 (ADR-069 R12 §5), after the root selector proved
+the previous runtime terminated. It reads only the runtime key ID and public
+key of SIR1's previous-provider binding (after checking the SIR1
+self-digest), requires the SPI1 key file to hold that key, binds
+`/run/pigloros/sandbox-selector-recovery/<id>.sock` under the R11 §6 rules,
+sends `READY=1`, and accepts exactly one connection from a root peer. The
+R11 §8 revocation responder answers it with `AuthorityResolution::Recovery`.
+The attempt state is empty only when the registry, under its exclusive
+`flock`, holds no attempt record; the lock is released before RCA1 is
+written. The peer exits after server EOF or on any failure, with no
+registry write, no system-bus or mountfsd call and no process creation.
+Until the selector's recovery operation starts it (#349 B), the mode is
+reached only through argv.
+
 `release_after_ready` is the provider half: it accepts one `ReadyV1` only from
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
 held or observed evidence, rechecks current authority through the

@@ -612,11 +612,13 @@ impl SystemCallFilter {
 
 /// Run the binary for `arguments` (without the program name).
 ///
-/// The modes are `launch-barrier <lpv1-hex>` and `provider-runtime`; neither
-/// returns success. A released adapter replaces the launcher's process image,
-/// and the provider runtime serves until a listener invariant fails. Any
-/// other argument vector exits with status 2; a failure of either mode ends
-/// with a nonzero exit code and one fixed diagnostic on standard error.
+/// The modes are `launch-barrier <lpv1-hex>`, `provider-runtime` and
+/// `recovery-peer <endpoint-id-hex>`. A released adapter replaces the
+/// launcher's process image, and the provider runtime serves until a
+/// listener invariant fails, so neither returns success. The recovery peer
+/// exits with status 0 after it acknowledged its one exchange (ADR-069 R12
+/// §5). Any other argument vector exits with status 2; a failure of any mode
+/// ends with status 1 and one fixed diagnostic on standard error.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
@@ -626,6 +628,13 @@ pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::proc
             let error = provider_runtime::serve_provider_runtime();
             report(&format!("pos-sandboxd: {error}"));
             std::process::ExitCode::FAILURE
+        }
+        [mode, endpoint_id] if mode == provider_runtime::recovery_peer::RECOVERY_PEER_ARGUMENT => {
+            let outcome = provider_runtime::recovery_peer::serve_recovery_peer(endpoint_id);
+            if let Err(error) = outcome {
+                report(&format!("pos-sandboxd: {error}"));
+            }
+            std::process::ExitCode::from(u8::from(outcome.is_err()))
         }
         [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
             let error = lpv1
@@ -637,7 +646,10 @@ pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::proc
             std::process::ExitCode::FAILURE
         }
         _ => {
-            report("usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime");
+            report(
+                "usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime \
+                 | recovery-peer <endpoint-id-hex>",
+            );
             std::process::ExitCode::from(2)
         }
     }
