@@ -2,14 +2,14 @@
 //! (ADR-069 R10 §4.1, §4.5 and §4.6).
 //!
 //! Immediately before `StartTransientUnit` the provider creates the three
-//! unit descriptors ([`open_channels`]): a stdin pipe and a stdout pipe, whose
+//! unit descriptors (`open_channels`): a stdin pipe and a stdout pipe, whose
 //! unit ends block and whose provider ends do not, and a write-only
 //! `/dev/null` checked as the character device 1:3. No call creates a
 //! process. The unit ends go to systemd as `Standard*FileDescriptor`; the
 //! provider keeps one end of each pipe and only writes stdin and only reads
 //! stdout.
 //!
-//! Once `ReleaseV1` was sent, [`AdapterChannels::run`] feeds the verified
+//! Once `ReleaseV1` was sent, `AdapterChannels::run` feeds the verified
 //! input under ELM1 ID 16 and captures at most ELM1\[8\] output bytes, until the
 //! execute path's ending stops both. The capture is fenced: its bytes leave
 //! the [`FencedOutput`] only against the attempt's terminal evidence.
