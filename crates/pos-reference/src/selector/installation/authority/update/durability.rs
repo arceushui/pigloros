@@ -31,7 +31,7 @@ use crate::selector::installation::{
 use crate::selector::SelectorBoundaryError;
 
 const STAGING_NAME: &str = ".installation-update-staging";
-const RECOVERY_LIMIT: usize = 48 * 1024 * 1024;
+pub(super) const RECOVERY_LIMIT: usize = 48 * 1024 * 1024;
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 const PRIVATE_DIRECTORY_MODE: Mode = Mode::RWXU;
 const RECORD_MODE: Mode = Mode::RUSR;
@@ -269,17 +269,39 @@ fn recovery_bytes(
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    let unsigned = Value::Array(vec![
-        Value::Text("SIR1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Bytes(records[0].to_vec()),
-        Value::Bytes(records[1].to_vec()),
-        Value::Bytes(records[2].to_vec()),
+    sir1_envelope(sir1_unsigned(
+        records,
         snapshot.previous_provider_value(),
         snapshot.recovery_slot_value(),
-        attempt_values(snapshot.previous_live_attempt_ids()),
-        attempt_values(snapshot.required_cancelled_attempt_ids()),
-    ]);
+        snapshot.previous_live_attempt_ids(),
+        snapshot.required_cancelled_attempt_ids(),
+    ))
+}
+
+/// The unsigned SIR1 fields, in their CDDL order.
+pub(super) fn sir1_unsigned(
+    [previous, next, rcu1]: [&[u8]; 3],
+    previous_provider: Value,
+    recovery_slot: Value,
+    previous_live_attempt_ids: &[[u8; 16]],
+    required_cancelled_attempt_ids: &[[u8; 16]],
+) -> Value {
+    Value::Array(vec![
+        Value::Text("SIR1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Bytes(previous.to_vec()),
+        Value::Bytes(next.to_vec()),
+        Value::Bytes(rcu1.to_vec()),
+        previous_provider,
+        recovery_slot,
+        attempt_values(previous_live_attempt_ids),
+        attempt_values(required_cancelled_attempt_ids),
+    ])
+}
+
+/// The exact SIR1 envelope bytes and self-digest of `unsigned`, within the
+/// 48 MiB SIR1 bound.
+pub(super) fn sir1_envelope(unsigned: Value) -> Result<(Vec<u8>, [u8; 32]), SelectorBoundaryError> {
     encode_with_limit(&unsigned, RECOVERY_LIMIT)
         .map_err(map_artifact_integrity_failure)
         .and_then(|unsigned_bytes| {
@@ -582,7 +604,7 @@ fn create_staging_file(
     })
 }
 
-fn read_bounded_immutable(
+pub(super) fn read_bounded_immutable(
     root: &File,
     name: &str,
     owner: u32,

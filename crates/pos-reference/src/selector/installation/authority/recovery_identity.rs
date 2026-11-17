@@ -133,6 +133,31 @@ struct PreviousProviderBinding {
 }
 
 impl PreviousProviderBinding {
+    /// Bind the admitted provider's SPM1, binary, contract and role-3 runtime
+    /// key to one runtime's identities and observed main process.
+    fn for_runtime(
+        admitted: &AdmittedSelectorProvider,
+        runtime_instance_id: RuntimeInstanceId,
+        lifecycle_scope_id: LifecycleScopeId,
+        main_pid: u64,
+        main_start_time_ticks: u64,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let provider = admitted.provider().manifest();
+        admitted.runtime_attestation_key().map(|runtime_key| Self {
+            provider_id: provider.provider_id.clone(),
+            provider_manifest_digest: provider.manifest_digest,
+            provider_binary_digest: provider.binary_digest,
+            public_contract_digest: provider.public_contract_digest,
+            runtime_key_id: runtime_key.key_id.clone(),
+            runtime_public_key: runtime_key.public_key,
+            runtime_key_epoch: runtime_key.epoch,
+            runtime_instance_id,
+            lifecycle_scope_id,
+            main_pid,
+            main_start_time_ticks,
+        })
+    }
+
     fn value(&self) -> Value {
         Value::Array(vec![
             Value::Text(self.provider_id.clone()),
@@ -215,11 +240,7 @@ impl RecoveryPeerSlot {
     }
 
     fn value(&self) -> Value {
-        Value::Array(vec![
-            Value::Bytes(self.runtime.0.to_vec()),
-            Value::Bytes(self.lifecycle_scope.0.to_vec()),
-            Value::Bytes(self.endpoint.0.to_vec()),
-        ])
+        recovery_slot_value([self.runtime.0, self.lifecycle_scope.0, self.endpoint.0])
     }
 
     fn verify_reservation(&self) -> Result<(), SelectorBoundaryError> {
@@ -315,28 +336,23 @@ impl InstallationRecoverySnapshot {
         {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        let runtime_key = admitted.runtime_attestation_key()?;
-        let previous_provider = PreviousProviderBinding {
-            provider_id: provider.provider_id.clone(),
-            provider_manifest_digest: provider.manifest_digest,
-            provider_binary_digest: provider.binary_digest,
-            public_contract_digest: provider.public_contract_digest,
-            runtime_key_id: runtime_key.key_id.clone(),
-            runtime_public_key: runtime_key.public_key,
-            runtime_key_epoch: runtime_key.epoch,
-            runtime_instance_id: RuntimeInstanceId(runtime.runtime_instance_id()),
-            lifecycle_scope_id: LifecycleScopeId(runtime.lifecycle_scope_id()),
-            main_pid: runtime.main_pid(),
-            main_start_time_ticks: runtime.main_start_time_ticks(),
-        };
-        RecoveryPeerSlot::allocate(&previous_provider, recovery_directory, recovery_owner).map(
-            |recovery_slot| Self {
-                previous_provider,
-                recovery_slot,
-                previous_live_attempt_ids,
-                required_cancelled_attempt_ids,
-            },
+        PreviousProviderBinding::for_runtime(
+            admitted,
+            runtime.slot.runtime_instance_id,
+            runtime.slot.lifecycle_scope_id,
+            runtime.main_pid(),
+            runtime.main_start_time_ticks(),
         )
+        .and_then(|previous_provider| {
+            RecoveryPeerSlot::allocate(&previous_provider, recovery_directory, recovery_owner).map(
+                |recovery_slot| Self {
+                    previous_provider,
+                    recovery_slot,
+                    previous_live_attempt_ids,
+                    required_cancelled_attempt_ids,
+                },
+            )
+        })
     }
 
     pub(super) fn previous_provider_value(&self) -> Value {
@@ -374,6 +390,84 @@ impl InstallationRecoverySnapshot {
     pub(crate) const fn replace_runtime_public_key_for_test(&mut self, key: [u8; 32]) {
         self.previous_provider.runtime_public_key = key;
     }
+}
+
+/// The previous-provider binding and recovery-peer slot of one pending SIR1,
+/// rebuilt from the previous state's admitted provider.
+///
+/// Only the runtime identities, the observed main process and the slot are
+/// taken from SIR1. Every other binding field comes from the previous SIC1,
+/// so the role-3 runtime key is the one the previous TRS1/RVS1/SPM1 selected,
+/// even when the next RVS1 revokes it (ADR-069 R12 §4.1).
+#[derive(Debug)]
+pub(super) struct PendingRecoveryBinding {
+    previous_provider: PreviousProviderBinding,
+    recovery_peer_slot: [[u8; 16]; 3],
+}
+
+/// The SIR1-recorded identities of the previous runtime and its slot.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RecordedRecoveryRuntime {
+    pub(super) runtime_instance_id: [u8; 16],
+    pub(super) lifecycle_scope_id: [u8; 16],
+    pub(super) main_pid: u64,
+    pub(super) main_start_time_ticks: u64,
+    pub(super) recovery_peer_slot: [[u8; 16]; 3],
+}
+
+impl PendingRecoveryBinding {
+    /// Rebind `recorded` to the previous state's admitted provider.
+    ///
+    /// # Errors
+    /// Rejects a zero main PID, and a zero or repeated ID among the previous
+    /// runtime, its lifecycle scope and the three recovery-slot IDs.
+    pub(super) fn rebind(
+        admitted: &AdmittedSelectorProvider,
+        recorded: RecordedRecoveryRuntime,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let [slot_runtime, slot_scope, slot_endpoint] = recorded.recovery_peer_slot;
+        let mut ids = [
+            recorded.runtime_instance_id,
+            recorded.lifecycle_scope_id,
+            slot_runtime,
+            slot_scope,
+            slot_endpoint,
+        ];
+        ids.sort_unstable();
+        if recorded.main_pid == 0
+            || ids[0] == [0; 16]
+            || ids.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        PreviousProviderBinding::for_runtime(
+            admitted,
+            RuntimeInstanceId(recorded.runtime_instance_id),
+            LifecycleScopeId(recorded.lifecycle_scope_id),
+            recorded.main_pid,
+            recorded.main_start_time_ticks,
+        )
+        .map(|previous_provider| Self {
+            previous_provider,
+            recovery_peer_slot: recorded.recovery_peer_slot,
+        })
+    }
+
+    pub(super) fn previous_provider_value(&self) -> Value {
+        self.previous_provider.value()
+    }
+
+    pub(super) fn previous_provider_digest(&self) -> Result<[u8; 32], SelectorBoundaryError> {
+        self.previous_provider.digest()
+    }
+
+    pub(super) fn recovery_slot_value(&self) -> Value {
+        recovery_slot_value(self.recovery_peer_slot)
+    }
+}
+
+fn recovery_slot_value(ids: [[u8; 16]; 3]) -> Value {
+    Value::Array(ids.map(|id| Value::Bytes(id.to_vec())).to_vec())
 }
 
 fn validate_attempts(ids: &[[u8; 16]]) -> Result<(), SelectorBoundaryError> {
