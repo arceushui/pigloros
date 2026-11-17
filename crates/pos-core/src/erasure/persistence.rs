@@ -3952,6 +3952,22 @@ mod tests {
             })
         };
         let own = admission_of(request)?;
+        // The sealed trait forwards to the same read: nothing before a
+        // manifest records an active attempt, then that attempt's admission.
+        assert_eq!(
+            crate::ErasureRecordedAttemptReadV1::recorded_active_attempt(
+                &TestPersistencePort::new(None, ErasureCasEffectV1::None),
+                request
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            crate::ErasureRecordedAttemptReadV1::recorded_active_attempt(
+                &active_attempt_port(&own)?,
+                request
+            ),
+            Ok(Some(own.clone()))
+        );
         assert_eq!(
             recorded_active_attempt(&active_attempt_port(&own)?, request),
             Ok(Some(own))
