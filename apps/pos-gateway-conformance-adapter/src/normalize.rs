@@ -93,9 +93,11 @@ fn normalize(value: Value, key: Option<&str>) -> Value {
     }
 }
 
-/// The `(member, whether a value of it is masked, placeholder)` rows of the operational text
-/// members that a placeholder replaces whole.
-const TEXT_MASKS: [(&str, fn(&str) -> bool, &str); 4] = [
+/// One `(member, whether a value of it is masked, placeholder)` row.
+type TextMask = (&'static str, fn(&str) -> bool, &'static str);
+
+/// The rows of the operational text members that a placeholder replaces whole.
+const TEXT_MASKS: [TextMask; 4] = [
     ("next_cursor", is_cursor, "<cursor>"),
     ("correlation_id", is_correlation, "<correlation>"),
     ("descriptor_hash", is_hash, "<hash>"),
