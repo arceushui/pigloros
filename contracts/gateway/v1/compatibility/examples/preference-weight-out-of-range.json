@@ -1,0 +1,34 @@
+{
+  "name": "preference-weight-out-of-range",
+  "operation_id": "createPreference",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "schema_version": 1,
+      "weights": [
+        {
+          "dimension": "nature",
+          "weight_micro": 1500000
+        }
+      ]
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "a weight is outside [-1, 1]",
+      "instance": "/v1/preferences",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

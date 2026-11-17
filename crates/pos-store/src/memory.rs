@@ -130,6 +130,7 @@ mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_lineage;
 mod gateway_mode_binding;
+mod gateway_revision;
 mod pipeline_admission;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry;
@@ -391,6 +392,8 @@ pub struct MemoryStore {
     /// Process-local Gateway mode binding and this instance's attached epoch
     /// (ADR-134 §8).
     mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1,
+    /// Gateway-managed Preference and `OptionSpec` revisions (#304).
+    gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -862,6 +865,7 @@ impl MemoryStore {
             erasure_fork_admissions: BTreeMap::new(),
             erasure_fork_recovery_proofs: BTreeMap::new(),
             mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1::default(),
+            gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1::default(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -5509,6 +5513,15 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
             .and_then(|mut registry| {
                 registry.with_decryption_authorization(identity, private_material_digest, operation)
             })
+    }
+}
+
+/// A `MemoryStore` has no store file, and freed heap memory is not zeroed, so
+/// nothing can prove that deleted bytes are gone. The `local-replica`
+/// acknowledgement is therefore always negative (ADR-136 F1).
+impl pos_core::LocalReplicaResidualPortV1 for MemoryStore {
+    fn purge_local_replica_residue(&mut self) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ReplicaNegativeAcknowledgement)
     }
 }
 

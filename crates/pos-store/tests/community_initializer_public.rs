@@ -662,7 +662,9 @@ fn initializer_requests_need_an_installed_state_and_catalogue() -> TestResult {
     let state = csc1(V4_SCHEMA, b"state")?;
     let digest = hex(&p8_ref(&state).digest);
     let exact = grant(1, &initializer_scope(&digest))?;
-    let mut world = World::new(std::slice::from_ref(&exact))?;
+    let unheld = hash(0x44);
+    let unheld_grant = grant(2, &initializer_scope(&hex(unheld.as_bytes())))?;
+    let mut world = World::new(&[exact.clone(), unheld_grant.clone()])?;
     let implementation = implementation()?;
     let roster = [row(
         "Entry-A_1",
@@ -681,14 +683,14 @@ fn initializer_requests_need_an_installed_state_and_catalogue() -> TestResult {
     assert!(world
         .admit(&initialize(), &owner, initializer, exact.grant_id())?
         .is_ok());
-    for (operation, owner, initializer) in [
-        (initialize(), &foreign_owner, initializer),
-        (initialize(), &owner, hash(0x44)),
+    // A grant on the uninstalled digest isolates the installed-State check:
+    // every other gate would admit that request.
+    for (operation, owner, initializer, leaf) in [
+        (initialize(), &foreign_owner, initializer, exact.grant_id()),
+        (initialize(), &owner, unheld, unheld_grant.grant_id()),
     ] {
         assert_eq!(
-            world
-                .admit(&operation, owner, initializer, exact.grant_id())?
-                .err(),
+            world.admit(&operation, owner, initializer, leaf)?.err(),
             Some(Error::EvidenceUnavailable)
         );
     }
