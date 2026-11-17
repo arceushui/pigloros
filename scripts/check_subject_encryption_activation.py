@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Enforce ADR-110 E15's source boundary before subject-encryption activation.
 
-The inventory contains the activation type currently implemented. Extend it
+The inventory contains the activation types and constructors (ADR-137 G2). Extend it
 when another activation constructor lands; pure codecs and role enums are not
 activation types. References to these types stay in file-gated fixtures, so a
 function pointer, inferred return type or struct literal cannot hide a builder.
@@ -19,7 +19,15 @@ from pathlib import Path
 from check_owner_bridge_unsafe_policy import _group_end, scan
 from check_trusted_clock_port_impls import SKIPPED_PARTS, strip_comments
 
-TYPES = ("SubjectEncryptorLock",)
+# ADR-137 G2 adds four activation constructors. Their types (the lease, the
+# owner permit and the lease generation) stay out: ungated code must name them.
+TYPES = (
+    "SubjectEncryptorLock",
+    "acquire_gateway_consent_lease",
+    "mint_owner_consent_v2_permit",
+    "destroy_subject_key",
+    "VolatileSubjectNonceLedgerV1",
+)
 PORTS = ("EnrollmentPort", "UnlockPort")
 NAMES = "|".join((*TYPES, *PORTS))
 TYPE_NAMES = "|".join(TYPES)

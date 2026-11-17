@@ -20,6 +20,27 @@ class ActivationPolicyTests(unittest.TestCase):
             for prefix in ["", "// " + GATE, 'const DOC: &str = r#"' + GATE + '"#;\n', "fn prior() {}\n" + GATE, '#[cfg(any(test, feature = "test-support"))]\n', '#![allow(dead_code)]\n' + GATE, '#![cfg(target_os = "linux")]\n' + GATE]:
                 self.assertTrue(check_source("crates/x/src/fixture.rs", prefix + surface))
 
+    def test_adr_137_constructors_require_the_gate(self):
+        # ADR-137 G2: each constructor is confined to gated files; its type is not.
+        for name in [
+            "acquire_gateway_consent_lease",
+            "mint_owner_consent_v2_permit",
+            "destroy_subject_key",
+            "VolatileSubjectNonceLedgerV1",
+        ]:
+            for source in [
+                f"fn build() {{ owner::{name}(); }}",
+                f"fn build() {{ let f = owner::{name}; }}",
+                f"use owner::{name};",
+            ]:
+                self.assertTrue(check_source("crates/x/src/lib.rs", source), source)
+                self.assertEqual(check_source("crates/x/src/fixture.rs", GATE + source), [], source)
+                self.assertTrue(check_source("apps/x/src/main.rs", GATE + source), source)
+            for source in [f"use owner::{name} as Hidden;", f"use owner::r#{name};"]:
+                self.assertTrue(check_source("crates/x/src/fixture.rs", GATE + source), source)
+        for name in ["GatewayConsentLeaseV1", "OwnerConsentV2PermitV1", "ConsentLeaseGenerationV1"]:
+            self.assertEqual(check_source("crates/x/src/lib.rs", f"fn bind(_: {name}) {{}}"), [], name)
+
     def test_aliases_and_raw_names_do_not_hide_the_surface(self):
         for name in ["SubjectEncryptorLock", "EnrollmentPort", "UnlockPort"]:
             for source in [f"use owner::{name} as Hidden;", f"use owner::{{{name} as Hidden}};", f"use owner::r#{name};", f"type Hidden = owner::{name};"]:
