@@ -1345,7 +1345,7 @@ mod tests {
     const LOCAL_MODE_DIGEST: &str =
         "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f";
     const AIR_GAPPED_MODE_DIGEST: &str =
-        "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
+        "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb";
 
     /// `actor`'s answer to `GET /v1/session` from the production composition
     /// over a store bound to `mode` with its operator network grants and

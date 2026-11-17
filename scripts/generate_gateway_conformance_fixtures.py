@@ -88,7 +88,7 @@ PRINCIPAL_BYTES = bytes([1]) * 16
 # rotation chain in `scripts/check_gateway_contract.py` (`--check` verifies the two agree).
 MODE_PROFILE_DIGESTS = {
     "gateway-mode-air-gapped-v1":
-        "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
+        "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb",
     "gateway-mode-local-v1": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
 }
 # The operations the fixture Local Principal is granted, sorted: what its Session discloses.
