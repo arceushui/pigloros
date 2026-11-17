@@ -4306,7 +4306,7 @@ impl Attempted {
         let unresolved = self
             .obligations
             .iter()
-            .filter(|obligation| negative(*obligation).is_some())
+            .filter(|obligation| negative(obligation).is_some())
             .copied()
             .collect::<Vec<_>>();
         // A partial failure issues exactly at the attempt deadline.
@@ -4319,7 +4319,7 @@ impl Attempted {
             &erasure_signer(),
             1,
         )?;
-        self.store.retain(&[signed.clone()])?;
+        self.store.retain(std::slice::from_ref(&signed))?;
         let address = signature_address(&signed)?;
         let mut host = self.host()?;
         let mut sender = host.command_sender()?;
@@ -4386,7 +4386,7 @@ fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
         },
         ErasureRetryAdmissionInputV1 {
             deadline_position: admitted + admitted,
-            ..retry_input.clone()
+            ..retry_input
         },
     ] {
         assert_eq!(
@@ -4396,7 +4396,6 @@ fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
             Err(ErasureHostErrorV1::Conflict)
         );
     }
-    drop(sender);
     drop(host);
     // A retry is a new admission, so an expired TPS1 or bundle closes it.
     for clock in [after_trust_expiry as fn() -> u64, after_bundle_expiry] {
@@ -4424,7 +4423,6 @@ fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
         sender.submit_local_erasure(&submission(3, ErasureScopeV1::PrivateSubjectData)?),
         Err(LocalErasureSubmitErrorV1::Concurrent)
     );
-    drop(sender);
     drop(host);
     let mut host = attempted.host()?;
     assert_eq!(
