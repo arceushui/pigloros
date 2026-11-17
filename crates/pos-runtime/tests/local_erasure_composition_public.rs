@@ -4480,7 +4480,6 @@ fn a_revoked_pinned_bundle_signs_nothing_and_frees_its_subject() -> TestResult {
                 .lifecycle(),
             ErasureLifecycleV1::Submitted
         );
-        drop(sender);
         assert_eq!(
             lifecycle(&mut host, request)?,
             ErasureLifecycleV1::AwaitingAcknowledgements
@@ -4591,7 +4590,7 @@ impl Attempted {
             &erasure_signer(),
             1,
         )?;
-        self.store.retain(&[signed.clone()])?;
+        self.store.retain(std::slice::from_ref(&signed))?;
         let mut host = self.host()?;
         let complete = host.command_sender()?.finalize_erasure_request(
             self.request,
@@ -4726,7 +4725,7 @@ impl Attempted {
             &erasure_signer(),
             1,
         )?;
-        self.store.retain(&[signed.clone()])?;
+        self.store.retain(std::slice::from_ref(&signed))?;
         let receipt = self
             .store
             .host(case, 4_096)?
@@ -5116,7 +5115,7 @@ impl Attempted {
         let root = if revoked.is_empty() {
             bundle_root()
         } else {
-            new.issued_by = OTHER_ROOT.to_owned();
+            OTHER_ROOT.clone_into(&mut new.issued_by);
             other_root()
         };
         let mut host = self
