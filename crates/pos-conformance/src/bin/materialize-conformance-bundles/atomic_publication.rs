@@ -914,4 +914,22 @@ mod tests {
         ));
         Ok(())
     }
+
+    // The live-staging tests reach this mkdirat failure only when their SIGSTOP lands
+    // before the materializer creates the provider directories, so cover it here on
+    // every run: a parent that is not a directory fails mkdirat with ENOTDIR.
+    #[test]
+    fn directory_creation_failure_is_untrusted() -> Result<(), MaterializationError> {
+        let parent = fs::open(
+            "/dev/null",
+            OFlags::RDONLY.union(OFlags::CLOEXEC),
+            Mode::empty(),
+        )
+        .map_err(map_open_error)?;
+        assert!(matches!(
+            open_or_create_directory(&parent, OsStr::new("child")),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
+        Ok(())
+    }
 }

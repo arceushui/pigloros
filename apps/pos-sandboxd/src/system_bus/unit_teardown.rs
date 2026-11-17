@@ -164,7 +164,7 @@ impl SystemdTransientUnitTransport {
         stopped
     }
 
-    async fn stop_listed_with_root(
+    pub(super) async fn stop_listed_with_root(
         &self,
         unit_name: &TransientServiceUnitName,
         unit_path: &OwnedObjectPath,
@@ -197,7 +197,7 @@ impl SystemdTransientUnitTransport {
 
 impl SystemdTransientUnitTransport {
     /// The listed object's `ControlGroup`, read fresh from the manager.
-    async fn listed_control_group(
+    pub(super) async fn listed_control_group(
         &self,
         unit_path: &OwnedObjectPath,
     ) -> Result<String, SystemdTransientUnitTransportError> {
