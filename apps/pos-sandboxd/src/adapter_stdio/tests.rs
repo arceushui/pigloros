@@ -312,3 +312,26 @@ fn the_capture_never_holds_more_memory_than_its_limit() {
     assert_eq!(bytes.len(), 100_000);
     assert_eq!(bytes.capacity(), 100_000);
 }
+
+#[test]
+fn the_admitted_execution_is_the_production_payload() -> TestResult {
+    let installation =
+        pos_reference::provider_admission::test_support::StagedInstallation::stage_execution()
+            .map_err(|error| error.to_string())?;
+    let ledger = crate::StagingLedger::new(crate::StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (_staging, verified) =
+        crate::test_fixtures::staged_execution::verified_input(&installation, &ledger)
+            .map_err(|error| error.to_string())?;
+    let payload: Arc<dyn AttemptPayload> = verified.entry().retain();
+    let input = installation.input();
+    assert_eq!(payload.input_len(), u64::try_from(input.len())?);
+    let mut read = vec![0; input.len()];
+    payload.read_input_at(&mut read, 0)?;
+    assert_eq!(read, input);
+    // The attempt has one output: it is reserved, or refused, once.
+    assert!(payload.reserve_output().is_some());
+    assert!(payload.reserve_output().is_none());
+    Ok(())
+}

@@ -292,10 +292,14 @@ impl UnitStdio {
                 .open("/dev/null")
                 .map(|file| OwnedFd::from(std::os::fd::OwnedFd::from(file)))
         };
-        Ok(Self {
-            input: null()?,
-            output: null()?,
-            error: null()?,
+        null().and_then(|input| {
+            null().and_then(|output| {
+                null().map(|error| Self {
+                    input,
+                    output,
+                    error,
+                })
+            })
         })
     }
 }
