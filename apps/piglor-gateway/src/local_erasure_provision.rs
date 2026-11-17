@@ -18,8 +18,9 @@
 //!
 //! The command first claims `--out`, an absolute path, as a new file with
 //! mode `0600`; an existing file is refused before anything else happens,
-//! and a claimed file is removed again when a later step fails. Every check
-//! that needs no store write runs next: the `--issued-by` key id must be a
+//! and a claimed file is removed again when a later step fails or panics (a
+//! run killed outright can leave an empty file, which is safe to delete).
+//! Every check that needs no store write runs next: the `--issued-by` key id must be a
 //! current, unrevoked TPS1 root, the installed TPS1 must not revoke the
 //! signer key, the store must record a Local Principal, and the complete
 //! ELB1 must encode. Then the command registers the signer key under
@@ -119,6 +120,9 @@ pub enum LocalErasureProvisionErrorV1 {
          [--signer-epoch <epoch>]"
     )]
     Usage,
+    /// `--out` exists or cannot be created as a new file.
+    #[error("--out must name a new file: it exists or cannot be created")]
+    OutExists,
     /// The signer credential is not a 32-byte Ed25519 seed.
     #[error("the local erasure signer credential is not a 32-byte Ed25519 seed")]
     SignerCredentialInvalid,
@@ -250,7 +254,7 @@ fn number(
 /// Returns an error when `request.out` exists or cannot be created, when a
 /// credential or the deployment trust is unavailable or invalid, when
 /// [`provision_local_erasure`] refuses, or when the file cannot be written.
-/// After a claim, every error removes the claimed file again.
+/// After a claim, every error or panic removes the claimed file again.
 pub fn provision_local_erasure_from_credentials(
     request: &LocalErasureProvisionRequestV1,
     credential_directory: &Path,
@@ -259,7 +263,6 @@ pub fn provision_local_erasure_from_credentials(
     claim_bundle_file(&request.out).and_then(|claimed| {
         credentialed_bundle(request, credential_directory, trust_state)
             .and_then(|bundle| claimed.write(&bundle))
-            .inspect_err(|_| drop(std::fs::remove_file(&request.out)))
     })
 }
 
@@ -315,9 +318,11 @@ fn signer_material(seed: &[u8]) -> Result<SigningKeyMaterial, LocalErasureProvis
 ///
 /// # Errors
 /// Returns a [`LocalErasureProvisionErrorV1`] refusal, or the mode-lock,
-/// offline-writer, store or host error. Nothing is written before every
-/// refusal except [`LocalErasureProvisionErrorV1::SignerRefused`] was ruled
-/// out.
+/// offline-writer, store or host error. Every [`LocalErasureProvisionErrorV1`]
+/// refusal but [`LocalErasureProvisionErrorV1::SignerRefused`] comes before
+/// the first write. A host error opening the Erasure Host Timeline comes
+/// after the signer registration and the store identity are written; both
+/// writes are idempotent, so a re-run repeats them unchanged.
 pub fn provision_local_erasure(
     request: &LocalErasureProvisionRequestV1,
     signer: &SigningKeyMaterial,
@@ -420,14 +425,8 @@ fn write_store(
     snapshot: &ErasureAuthoritySnapshotV1,
 ) -> io::Result<(Vec<u8>, Option<TimelineId>)> {
     let identity = snapshot.store_identity().unwrap_or_else(random_identity);
-    OwnerIdV1::new(request.signer_owner.as_str())
-        .map_err(|_| io::Error::other(LocalErasureProvisionErrorV1::BundleInvalid))
-        .and_then(|owner| {
-            bundle(request, signer, trust, registry, identity)
-                .map_err(|_| io::Error::other(LocalErasureProvisionErrorV1::BundleInvalid))
-                .map(|bundle| (owner, bundle))
-        })
-        .and_then(|(owner, (bundle, host_timeline))| {
+    validated_bundle(request, signer, trust, registry, identity).and_then(
+        |(owner, (bundle, host_timeline))| {
             register_signer(store, owner, request.signer_epoch, signer)
                 .and_then(|()| {
                     store
@@ -438,7 +437,24 @@ fn write_store(
                     let missing = snapshot.timeline(host_timeline).is_none();
                     (bundle, missing.then_some(host_timeline))
                 })
-        })
+        },
+    )
+}
+
+/// The signer owner id and the ELB1 of these values, or
+/// [`LocalErasureProvisionErrorV1::BundleInvalid`].
+fn validated_bundle(
+    request: &LocalErasureProvisionRequestV1,
+    signer: &SigningKeyMaterial,
+    trust: &CurrentTrustPolicyV1,
+    registry: Hash,
+    identity: Hash,
+) -> io::Result<(OwnerIdV1, (Vec<u8>, TimelineId))> {
+    OwnerIdV1::new(request.signer_owner.as_str())
+        .ok()
+        .zip(bundle(request, signer, trust, registry, identity).ok())
+        .ok_or(LocalErasureProvisionErrorV1::BundleInvalid)
+        .map_err(io::Error::other)
 }
 
 /// A new random store identity.
@@ -562,18 +578,34 @@ fn open_host_timeline(sqlite_path: &str, timeline: TimelineId) -> io::Result<()>
 }
 
 /// The claimed `--out` file and its directory.
+///
+/// Dropping it before a completed write, on an error or a panic, removes
+/// the claimed path again.
 struct ClaimedBundleFileV1 {
     file: File,
     directory: File,
+    path: PathBuf,
+    written: bool,
 }
 
 impl ClaimedBundleFileV1 {
     /// Write `bundle`, then sync the file and its directory.
     fn write(mut self, bundle: &[u8]) -> io::Result<()> {
-        self.file
+        let written = self
+            .file
             .write_all(bundle)
             .and_then(|()| self.file.sync_all())
-            .and_then(|()| self.directory.sync_all())
+            .and_then(|()| self.directory.sync_all());
+        self.written = written.is_ok();
+        written
+    }
+}
+
+impl Drop for ClaimedBundleFileV1 {
+    fn drop(&mut self) {
+        if !self.written {
+            drop(std::fs::remove_file(&self.path));
+        }
     }
 }
 
@@ -589,7 +621,15 @@ fn claim_bundle_file(out: &Path) -> io::Result<ClaimedBundleFileV1> {
                 .create_new(true)
                 .mode(0o600)
                 .open(out)
-                .map(|file| ClaimedBundleFileV1 { file, directory })
+                .map_err(|error| {
+                    io::Error::new(error.kind(), LocalErasureProvisionErrorV1::OutExists)
+                })
+                .map(|file| ClaimedBundleFileV1 {
+                    file,
+                    directory,
+                    path: out.to_owned(),
+                    written: false,
+                })
         })
 }
 

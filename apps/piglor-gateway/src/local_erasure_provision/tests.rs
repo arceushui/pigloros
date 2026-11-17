@@ -438,6 +438,7 @@ fn a_provisioned_bundle_signed_by_its_root_composes() -> TestResult {
         .err()
         .ok_or("an existing --out file is refused")?;
     assert_eq!(exists.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&rerun.out)?, bytes);
     Ok(())
 }
 
@@ -638,6 +639,7 @@ fn refusals_have_stable_operator_messages() {
             LocalErasureProvisionErrorV1::Usage,
             "Usage: piglor-gateway provision-local-erasure",
         ),
+        (LocalErasureProvisionErrorV1::OutExists, "--out"),
         (
             LocalErasureProvisionErrorV1::SignerCredentialInvalid,
             "32-byte Ed25519 seed",
@@ -922,18 +924,30 @@ fn a_store_holding_a_request_without_its_host_timeline_is_refused() -> TestResul
     let trust = Deployment::new(&[])?.trust()?;
     let fixture = Fixture::new(true)?;
     fixture.commit_request()?;
+    let refused =
+        crate::startup::erasure_host_failure(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
+            .to_string();
     let error = provision_local_erasure(&fixture.request("o"), &signer(SIGNER_SEED), &trust)
         .err()
         .ok_or("the closed host refuses a store that holds a request")?;
-    assert!(
-        error.to_string().contains("erasure host recovery failed"),
-        "{error}"
-    );
+    assert_eq!(error.to_string(), refused);
+    // The refusal comes after the idempotent signer and identity writes.
     let identity = fixture.store_identity()?.ok_or("no store identity")?;
+    let public_key = SigningKey::from_bytes(&SIGNER_SEED)
+        .verifying_key()
+        .to_bytes();
+    assert_eq!(fixture.registered_signer(1)?, Some(public_key));
     let host_timeline =
         local_erasure_host_timeline_v1(ErasureReferenceV1::from_digest(*identity.as_bytes()))?;
     assert!(!fixture.holds_timeline(host_timeline)?);
     assert_eq!(fixture.request_count()?, 1);
+    // A re-run repeats both writes unchanged and is refused the same way.
+    let again = provision_local_erasure(&fixture.request("o"), &signer(SIGNER_SEED), &trust)
+        .err()
+        .ok_or("a re-run is refused the same way")?;
+    assert_eq!(again.to_string(), refused);
+    assert_eq!(fixture.store_identity()?, Some(identity));
+    assert_eq!(fixture.registered_signer(1)?, Some(public_key));
     Ok(())
 }
 
@@ -956,6 +970,10 @@ fn an_existing_out_file_is_refused_before_any_store_write() -> TestResult {
         .err()
         .ok_or("an existing --out file is refused")?;
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        error.to_string(),
+        LocalErasureProvisionErrorV1::OutExists.to_string()
+    );
     assert_eq!(std::fs::read(&request.out)?, b"operator file");
     assert_eq!(fixture.store_identity()?, None);
     assert_eq!(fixture.registered_signer(1)?, None);

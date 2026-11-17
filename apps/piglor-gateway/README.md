@@ -209,8 +209,10 @@ genesis_digest = "<64 lowercase hex characters>"
 
 The command first claims `--out`, an absolute path, as a new file with mode `0600`: an existing
 file is refused before the store is touched, and the claimed file is removed again if a later step
-fails. `--issued-by` must name a current, unrevoked TPS1 root with the `erasure-bundle/` key id
-prefix, and the TPS1 must not revoke the signer key `erasure-signer/<64 hex>`. Provisioning then
+fails or panics. A run killed outright can leave an empty `--out` behind; it holds no bundle and
+is safe to delete before the next run. `--issued-by` must name a current, unrevoked TPS1 root
+with the `erasure-bundle/` key id prefix, and the TPS1 must not revoke the signer key
+`erasure-signer/<64 hex>`. Provisioning then
 registers the signer key in the key registry under `(--signer-owner, role 2, --signer-epoch)`,
 writes the store's erasure identity once from 32 random bytes, opens the Erasure Host Timeline
 `pigloros.local-erasure.host` (the ULID prefix of `CA("ELHT1", [store_identity])`), and writes the
