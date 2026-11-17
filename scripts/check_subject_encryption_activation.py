@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Enforce ADR-110 E15's source boundary before subject-encryption activation.
 
-The inventory contains the activation types and constructors (ADR-137 G2). Extend it
-when another activation constructor lands; pure codecs and role enums are not
-activation types. References to these types stay in file-gated fixtures, so a
-function pointer, inferred return type or struct literal cannot hide a builder.
+`TYPES` lists the activation surface: the activation type `SubjectEncryptorLock`
+and the ADR-137 G2 activation constructors, three functions and one type.
+Extend it when another activation constructor lands; pure codecs, role enums and
+the lease, permit and generation types are not activation names. References to
+these names stay in file-gated fixtures, so a function pointer, inferred return
+type or struct literal cannot hide a builder.
 Existing protocol-test fakes are exempt from the non-fake
 port rule. The feature-graph checker separately excludes test-support from
 deployable graphs. This source check does not establish activation approval.

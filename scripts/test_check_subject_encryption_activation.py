@@ -38,6 +38,9 @@ class ActivationPolicyTests(unittest.TestCase):
                 self.assertTrue(check_source("apps/x/src/main.rs", GATE + source), source)
             for source in [f"use owner::{name} as Hidden;", f"use owner::r#{name};"]:
                 self.assertTrue(check_source("crates/x/src/fixture.rs", GATE + source), source)
+        # Word boundaries keep longer identifiers that merely contain a name clean.
+        for name in ["destroy_subject_key_v2", "my_destroy_subject_key", "xVolatileSubjectNonceLedgerV1"]:
+            self.assertEqual(check_source("crates/x/src/lib.rs", f"fn build() {{ {name}(); }}"), [], name)
         for name in ["GatewayConsentLeaseV1", "OwnerConsentV2PermitV1", "ConsentLeaseGenerationV1"]:
             self.assertEqual(check_source("crates/x/src/lib.rs", f"fn bind(_: {name}) {{}}"), [], name)
 
