@@ -380,6 +380,9 @@ fn read_record(
             cited,
             ..extracted(*b"CPN1", node.1.node_digest, children)
         }),
+        // `check_shape` identifies a CSR1 as the record without a node that
+        // has exactly two resolved children. A new record family admitted
+        // here must not have that shape unless `check_shape` is revisited.
         _ => Err(Error::InvalidBinding),
     }
 }
@@ -532,7 +535,9 @@ fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
 /// A `StateRevision` input sits at an even ordinal, where only an
 /// `InitialState` node can, so its kind needs no separate check. Likewise
 /// a CSR1 is the only record without a node that has children (CSC1 and
-/// CIS1 have none), so its two resolved children identify it.
+/// CIS1 have none), so its two resolved children identify it. That holds
+/// only because `read_record`'s match is closed: every other record kind
+/// refuses there.
 fn check_shape(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> Result<(), Error> {
     let nodes: Vec<CommunityNativeNodeReferenceV1> = extracted
         .iter()
