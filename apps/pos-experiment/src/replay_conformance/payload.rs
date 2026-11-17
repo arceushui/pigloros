@@ -59,8 +59,15 @@ pub(super) enum ProfileV1 {
 }
 
 impl ProfileV1 {
+    /// The number of profiles. The match is exhaustive, so adding a variant
+    /// fails to compile until this count is revisited, and with it every
+    /// table sized by it ([`Self::IDS`] and the host's EPF1 table).
+    pub(super) const COUNT: usize = match Self::Local {
+        Self::Local | Self::AirGapped | Self::Replay | Self::Live | Self::LiveAirGapped => 5,
+    };
+
     /// The EPF1 profile ids, indexed by [`Self::index`].
-    const IDS: [&'static str; 5] = [
+    const IDS: [&'static str; Self::COUNT] = [
         "deterministic-local-v1",
         "deterministic-air-gapped-v1",
         "replay-v1",

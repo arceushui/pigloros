@@ -63,7 +63,7 @@ pub(super) const SUBJECT_DRIVER: &str = "replay-subject.driver";
 /// key, never a key the snapshot carries, and reports that result.
 pub(super) struct HostV1 {
     /// The EPF1 of each [`ProfileV1`], indexed by [`ProfileV1::index`].
-    profiles: [ExecutionProfileV1; 5],
+    profiles: [ExecutionProfileV1; ProfileV1::COUNT],
     snapshot: TrustPolicySnapshotV1,
     snapshot_digest: [u8; 32],
     operator_key: [u8; 32],
@@ -556,5 +556,37 @@ fn digest_size(value: &DigestSizeV1) -> DigestSizeRecordV1 {
     DigestSizeRecordV1 {
         digest: value.digest.map(|digest| hex(&digest)),
         size: value.size,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    //! The [`ProfileV1`] tables stay aligned with the enum: every variant
+    //! indexes in bounds, carries its serde id and selects its own EPF1.
+
+    use super::*;
+
+    /// Every profile, sized by [`ProfileV1::COUNT`] so a missing entry fails
+    /// to compile.
+    const ALL: [ProfileV1; ProfileV1::COUNT] = [
+        ProfileV1::Local,
+        ProfileV1::AirGapped,
+        ProfileV1::Replay,
+        ProfileV1::Live,
+        ProfileV1::LiveAirGapped,
+    ];
+
+    #[test]
+    fn every_profile_indexes_its_own_id_and_epf1() -> Result<(), Box<dyn std::error::Error>> {
+        let host = HostV1::install().ok_or("the host installs its EPF1 table")?;
+        for (position, profile) in ALL.into_iter().enumerate() {
+            assert_eq!(profile.index(), position);
+            assert!(profile.index() < ProfileV1::COUNT);
+            let named: ProfileV1 = serde_json::from_value(serde_json::Value::from(profile.id()))?;
+            assert_eq!(named, profile);
+            assert_eq!(host.profile(profile).profile_id, profile.id());
+        }
+        Ok(())
     }
 }
