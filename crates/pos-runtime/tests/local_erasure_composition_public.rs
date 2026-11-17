@@ -865,7 +865,7 @@ use pos_core::{
     local_erasure_requester_v1, local_erasure_subject_v1, AuthorityGranteeV1,
     AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
     AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId,
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureApplicabilityDecisionV1, ErasureArtifactClassV1, ErasureCorrectionProvenanceInputV1,
@@ -942,29 +942,60 @@ fn principal_ref() -> TestResult<ErasureReferenceV1> {
     Ok(ErasureReferenceV1::from_digest(*digest.as_bytes()))
 }
 
-/// The recorded root grant: its resources, actors, Timeline and registry.
+/// A principal the Local Principal delegates to.
+fn delegate() -> TestResult<PrincipalRefV1> {
+    PrincipalRefV1::try_new([0x7f; 16], "local").map_err(fail)
+}
+
+/// The recorded root grant: its resources, actions, actors, Timeline,
+/// registry, validity window and delegation depth.
 struct GrantShape {
     resources: Vec<String>,
+    actions: Vec<String>,
     actors: Vec<EntityId>,
     timeline: TimelineId,
     registry: [u8; 32],
+    /// `valid_from_position` and `valid_until_position`.
+    valid: (u64, u64),
+    max_delegation_depth: u8,
 }
 
 impl GrantShape {
     fn standard() -> Self {
         Self {
             resources: vec!["erasure".to_owned(), "timeline".to_owned()],
+            actions: vec!["request".to_owned()],
             actors: vec![actor()],
             timeline: authority_timeline(),
             registry: REGISTRY,
+            valid: (1, u64::MAX),
+            max_delegation_depth: 0,
         }
     }
 
     fn root_grant(&self) -> TestResult<CapabilityGrantV1> {
+        self.grant(grant_id(), 1, None)
+    }
+
+    /// A grant of this shape issued at `issuance`: the Principal's root
+    /// grant to itself, or with `parent` the Principal's delegation of
+    /// `parent` to [`delegate`].
+    fn grant(
+        &self,
+        id: Hash,
+        issuance: u64,
+        parent: Option<Hash>,
+    ) -> TestResult<CapabilityGrantV1> {
         let principal = principal()?;
+        let grantee = if parent.is_some() {
+            delegate()?
+        } else {
+            principal.clone()
+        };
+        let depth = u8::from(parent.is_some());
         let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
             resources: self.resources.clone(),
-            actions: vec!["request".to_owned()],
+            actions: self.actions.clone(),
             purposes: vec!["operation".to_owned()],
             audiences: vec!["gateway".to_owned()],
             actor_entity_ids: self.actors.clone(),
@@ -978,21 +1009,25 @@ impl GrantShape {
         })
         .map_err(fail)?;
         CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-            grant_id: grant_id(),
+            grant_id: id,
             grantor: principal.clone(),
-            grantee: AuthorityGranteeV1::Principal(principal.clone()),
+            grantee: AuthorityGranteeV1::Principal(grantee),
             trust_domain: principal.trust_domain().to_owned(),
             scope,
-            valid_from_position: Seq::from_u64(1),
-            valid_until_position: Seq::from_u64(u64::MAX),
-            parent_grant_id: None,
-            delegation_depth: 0,
-            max_delegation_depth: 0,
-            permitted_delegate_classes: Vec::new(),
+            valid_from_position: Seq::from_u64(self.valid.0.max(issuance)),
+            valid_until_position: Seq::from_u64(self.valid.1),
+            parent_grant_id: parent,
+            delegation_depth: depth,
+            max_delegation_depth: self.max_delegation_depth,
+            permitted_delegate_classes: if self.max_delegation_depth > depth {
+                vec![DelegateClassV1::Principal]
+            } else {
+                Vec::new()
+            },
             consent_references: Vec::new(),
             policy_revision: Hash::from_bytes([0x75; 32]),
             issuance_timeline: self.timeline,
-            issuance_seq: Seq::from_u64(1),
+            issuance_seq: Seq::from_u64(issuance),
             revocation_epoch: 0,
             revocation_fence: None,
             authority_registry_digest: Hash::from_bytes(self.registry),
@@ -1001,16 +1036,24 @@ impl GrantShape {
     }
 }
 
-/// An authority-persistence host over the registry that attests `grant`,
-/// bound to `store`.
+/// An authority-persistence host over the registry of the first of
+/// `grants` that attests all of them, bound to `store`.
 fn bound_authority_host(
     store: &mut SqliteStore,
-    grant: &CapabilityGrantV1,
+    grants: &[&CapabilityGrantV1],
 ) -> TestResult<AuthorityPersistenceHostV1> {
+    let mut bindings = Vec::with_capacity(grants.len());
+    for grant in grants {
+        bindings.push(grant.binding_digest().map_err(fail)?);
+    }
+    bindings.sort_unstable();
     let registry = AuthorityRegistrySnapshotV1::try_new(
-        grant.authority_registry_digest(),
+        grants
+            .first()
+            .ok_or("no grant")?
+            .authority_registry_digest(),
         vec![Hash::from_bytes([0x76; 32])],
-        vec![grant.binding_digest().map_err(fail)?],
+        bindings,
         Vec::new(),
     )
     .map_err(fail)?;
@@ -1031,6 +1074,12 @@ struct LocalStore {
 
 impl LocalStore {
     fn new(shape: &GrantShape) -> TestResult<Self> {
+        Self::with_later_grants(shape, &[])
+    }
+
+    /// A store that records the root grant of `shape`, then each of
+    /// `later` in order.
+    fn with_later_grants(shape: &GrantShape, later: &[CapabilityGrantV1]) -> TestResult<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory
             .path()
@@ -1043,9 +1092,12 @@ impl LocalStore {
         store.init_erasure_store_identity(Hash::from_bytes(STORE_IDENTITY))?;
         register_signer(&mut store, &erasure_signer(), 1)?;
         let grant = shape.root_grant()?;
-        let host = bound_authority_host(&mut store, &grant)?;
-        let permit = host.authorize_grant(&grant).map_err(fail)?;
-        store.issue_capability_grant(permit, &grant).map_err(fail)?;
+        let grants = std::iter::once(&grant).chain(later).collect::<Vec<_>>();
+        let host = bound_authority_host(&mut store, &grants)?;
+        for grant in grants {
+            let permit = host.authorize_grant(grant).map_err(fail)?;
+            store.issue_capability_grant(permit, grant).map_err(fail)?;
+        }
         let head = store
             .load_authority(grant_id())
             .map_err(fail)?
@@ -1064,7 +1116,7 @@ impl LocalStore {
         let mut store = SqliteStore::open(&self.path)?;
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         let grant = shape.root_grant()?;
-        let host = bound_authority_host(&mut store, &grant)?;
+        let host = bound_authority_host(&mut store, &[&grant])?;
         let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
             grant_id: grant.grant_id(),
             authority_timeline: grant.issuance_timeline(),
@@ -1430,34 +1482,130 @@ fn submission_needs_a_local_composition_and_its_principal() -> TestResult {
     Ok(())
 }
 
+/// Assert that `submission` is refused with `error` and retains no ELIDEM1
+/// of key 1, nor the ERAZ1 and ELSEL1 the Principal's own submission of
+/// key 1 at the recorded head would.
+fn refused_without_retention(
+    store: &LocalStore,
+    host: &mut ErasureExecutionHostV1,
+    submission: &LocalErasureSubmissionV1,
+    error: ErasureHostErrorV1,
+) -> TestResult {
+    assert_eq!(
+        host.command_sender()?.submit_local_erasure(submission),
+        Err(LocalErasureSubmitErrorV1::Host(error))
+    );
+    let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
+    let view = host.authority_view()?;
+    for object in [
+        authorization(1, store.head)?.reference()?,
+        LocalErasureSelectorV1 { subject }.reference()?,
+        idempotency(1)?.reference()?,
+    ] {
+        assert_eq!(view.retained_object(object), None);
+    }
+    Ok(())
+}
+
 #[test]
 fn the_root_grant_must_match_the_composition_and_name_the_operation() -> TestResult {
-    let refused = |shape: GrantShape, case: &Case| -> TestResult {
-        let store = LocalStore::new(&shape)?;
+    let refused = |shape: GrantShape, later: &[CapabilityGrantV1], case: &Case| -> TestResult {
+        let store = LocalStore::with_later_grants(&shape, later)?;
         let mut host = store.host(case, 4_096)?;
-        assert_eq!(
-            host.command_sender()?
-                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
-            Err(LocalErasureSubmitErrorV1::Host(
-                ErasureHostErrorV1::AuthorizationDenied
-            ))
-        );
-        Ok(())
+        refused_without_retention(
+            &store,
+            &mut host,
+            &submission(1, ErasureScopeV1::PrivateSubjectData)?,
+            ErasureHostErrorV1::AuthorizationDenied,
+        )
     };
     let case = local_case()?;
     let mut shape = GrantShape::standard();
     shape.resources = vec!["timeline".to_owned()];
-    refused(shape, &case)?;
+    refused(shape, &[], &case)?;
+    let mut shape = GrantShape::standard();
+    shape.actions = vec!["read".to_owned()];
+    refused(shape, &[], &case)?;
     let mut shape = GrantShape::standard();
     shape.actors = vec![other_actor()];
-    refused(shape, &case)?;
+    refused(shape, &[], &case)?;
     let mut shape = GrantShape::standard();
     shape.registry = [0x77; 32];
-    refused(shape, &case)?;
+    refused(shape, &[], &case)?;
     // A root grant on another authority Timeline than the composition's.
     let mut shape = GrantShape::standard();
     shape.timeline = other_timeline();
-    refused(shape, &case)?;
+    refused(shape, &[], &case)?;
+    // A root grant not yet valid at the chain head.
+    let mut shape = GrantShape::standard();
+    shape.valid = (2, u64::MAX);
+    refused(shape, &[], &case)?;
+    // A root grant whose window closed when a later grant on its Timeline
+    // moved the chain head to 2.
+    let later = GrantShape::standard().grant(Hash::from_bytes([0x7e; 32]), 2, None)?;
+    let mut shape = GrantShape::standard();
+    shape.valid = (1, 2);
+    refused(shape, &[later], &case)?;
+    // A delegated grant is no root grant, although its grantor is the
+    // Principal.
+    let mut shape = GrantShape::standard();
+    shape.actions = vec![
+        pos_core::DELEGATE_ACTION_V1.to_owned(),
+        "request".to_owned(),
+    ];
+    shape.max_delegation_depth = 1;
+    let child = shape.grant(Hash::from_bytes([0x7d; 32]), 2, Some(grant_id()))?;
+    let mut delegated = local_case()?;
+    delegated.principal_grant = child.grant_id();
+    refused(shape, &[child], &delegated)?;
+    Ok(())
+}
+
+#[test]
+fn a_refused_submission_retains_nothing() -> TestResult {
+    // Another Principal than the root grant's.
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let mut stranger = submission(1, ErasureScopeV1::PrivateSubjectData)?;
+    stranger.principal = delegate()?;
+    refused_without_retention(
+        &store,
+        &mut host,
+        &stranger,
+        ErasureHostErrorV1::AuthorizationDenied,
+    )?;
+    // A composition whose TPS1 has expired.
+    drop(host);
+    let mut expired = local_case()?;
+    expired.clock = after_trust_expiry;
+    let mut host = store.host(&expired, 4_096)?;
+    refused_without_retention(
+        &store,
+        &mut host,
+        &submission(1, ErasureScopeV1::PrivateSubjectData)?,
+        ErasureHostErrorV1::RecoveryUnavailable,
+    )?;
+    // A revoked root grant.
+    let shape = GrantShape::standard();
+    let store = LocalStore::new(&shape)?;
+    store.revoke(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    refused_without_retention(
+        &store,
+        &mut host,
+        &submission(1, ErasureScopeV1::PrivateSubjectData)?,
+        ErasureHostErrorV1::AuthorizationDenied,
+    )?;
+    // The same store admits the Principal's own submission.
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    host.command_sender()?
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    assert!(host
+        .authority_view()?
+        .retained_object(idempotency(1)?.reference()?)
+        .is_some());
     Ok(())
 }
 
@@ -2632,6 +2780,58 @@ fn a_signed_private_freeze_commits_the_subject_closure() -> TestResult {
         &cells,
         &signed,
     )
+}
+
+#[test]
+fn a_host_timeline_and_its_forks_stay_outside_the_frozen_scope() -> TestResult {
+    let owned = OwnedStore::new()?;
+    // A host Timeline the actor owns, and a Fork of it.
+    let (host_timeline, host_fork) = {
+        let mut sqlite = owned.store.sqlite()?;
+        let host_timeline = sqlite
+            .create_timeline_with_meta(TimelineMeta::root_owned("host", actor()))?
+            .id();
+        let host_fork = sqlite
+            .create_timeline_with_meta(TimelineMeta::forked_from(
+                host_timeline,
+                Seq::ZERO,
+                "host-fork",
+            ))?
+            .id();
+        (host_timeline, host_fork)
+    };
+    let mut hosting = bundle();
+    hosting.host_timelines = vec![host_timeline];
+    let case = Case::signed(&hosting, &bundle_root(), &[])?;
+    let digest = {
+        let mut host = owned.store.host(&case, 4_096)?;
+        prepared(
+            &owned.store,
+            &mut host,
+            1,
+            ErasureScopeV1::PrivateSubjectData,
+        )?
+    };
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::FreezeAuthorization,
+        digest,
+        &erasure_signer(),
+        1,
+    )?;
+    owned.store.retain(std::slice::from_ref(&signed))?;
+    let mut host = owned.store.host(&case, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .freeze_access(request_of(1)?, &freeze(signature_address(&signed)?))?
+            .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    // Only the actor's own Timeline freezes; the host Timeline and its
+    // Fork stay readable.
+    assert_frozen(&mut host, &[owned.owned], host_timeline)?;
+    assert!(host.read_sender()?.timeline(host_fork)?.is_some());
+    assert!(host.read_sender()?.timeline(owned.other)?.is_some());
+    Ok(())
 }
 
 #[test]

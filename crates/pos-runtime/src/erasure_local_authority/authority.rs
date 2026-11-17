@@ -32,6 +32,9 @@ use crate::{ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1};
 /// The grant resource of the `erasure.request` operation (ADR-136 §3).
 const REQUEST_RESOURCE: &str = "erasure";
 
+/// The grant action of the `erasure.request` operation (ADR-136 §3).
+const REQUEST_ACTION: &str = "request";
+
 /// The single-host Local/Air-Gapped erasure authority over one verified
 /// bundle.
 pub(super) struct LocalErasureAuthorityV1 {
@@ -54,15 +57,28 @@ pub(super) struct LocalPrincipalV1 {
 }
 
 impl LocalPrincipalV1 {
-    /// Whether the root grant names `erasure.request` and lets the Principal
-    /// act as `actor`.
-    fn grants_request(&self, actor: EntityId) -> bool {
+    /// Whether the root grant authorizes `erasure.request` by `actor` at
+    /// chain position `position`: it names the `erasure` resource and the
+    /// `request` action, lets the Principal act as `actor`, is valid there
+    /// under core's temporal rule `valid_from <= position < valid_until`,
+    /// and no revocation on its chain is fenced at or before `position`.
+    ///
+    /// The chain's revocations include the grant's own, whose fence is its
+    /// `revocation_fence`, so that fence needs no separate check.
+    fn authorizes(&self, actor: EntityId, position: u64) -> bool {
         let scope = self.grant.scope();
         scope
             .resources()
             .iter()
             .any(|resource| resource == REQUEST_RESOURCE)
+            && scope
+                .actions()
+                .iter()
+                .any(|action| action == REQUEST_ACTION)
             && scope.actor_entity_ids().contains(&actor)
+            && self.grant.valid_from_position().as_u64() <= position
+            && position < self.grant.valid_until_position().as_u64()
+            && !self.revoked_at_or_before(position)
     }
 
     /// Whether the root-grant chain records a revocation fenced at or before
@@ -88,12 +104,16 @@ impl LocalErasureAuthorityV1 {
 
     /// The recorded root grant chain, which must be issued on the composed
     /// authority Timeline under the bundle's registry digest. A root grant is
-    /// self-issued, so its grantor is the Principal itself.
+    /// self-issued, so its grantor is the Principal itself. The chain must
+    /// hold that one grant: core validates that a chain's first grant has
+    /// no parent, so a one-grant chain is a root grant, and a delegated
+    /// grant, whose grantor is its parent's grantee, is refused.
     fn principal(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
     ) -> Result<LocalPrincipalV1, ErasureErrorV1> {
         view.local_principal_authority(self.principal_grant)
+            .filter(|authority| authority.chain().grants().len() == 1)
             .and_then(|authority| {
                 authority
                     .chain()
@@ -139,8 +159,10 @@ impl LocalErasureAuthorityV1 {
                             == self.bundle.authority_registry_digest
                         && authorization.authority_chain == self.authority_timeline
                         && authorization.erq1_request == request.reference()
-                        && principal.grants_request(authorization.actor_entity)
-                        && !principal.revoked_at_or_before(authorization.chain_head_position)
+                        && principal.authorizes(
+                            authorization.actor_entity,
+                            authorization.chain_head_position,
+                        )
                         && (!fresh
                             || (authorization.chain_head_position
                                 == principal.authority.head_position().as_u64()
@@ -192,13 +214,26 @@ impl LocalErasureAuthorityV1 {
 }
 
 impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
-    fn closure_fits(
+    /// New admissions must be open, `principal_ref` must be the root
+    /// grant's Principal, and the grant must authorize `actor` at the
+    /// current chain head, exactly as `authenticate` later re-checks the
+    /// ERAZ1 bound to that head; only then is the closure read.
+    fn admit_submission(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
+        principal_ref: ErasureReferenceV1,
         actor: EntityId,
         scope: ErasureScopeV1,
     ) -> Result<bool, ErasureErrorV1> {
-        Self::closure_fits(self, view, actor, scope)
+        self.admits_new_work()
+            .and_then(|()| self.principal(view))
+            .and_then(|principal| {
+                (principal.principal_ref == principal_ref
+                    && principal.authorizes(actor, principal.authority.head_position().as_u64()))
+                .then_some(())
+                .ok_or(ErasureErrorV1::Unauthorized)
+            })
+            .and_then(|()| Self::closure_fits(self, view, actor, scope))
     }
 
     fn prepare_freeze(
