@@ -179,7 +179,10 @@ fn head_and_root(
     Ok((head, root))
 }
 
-/// Exact ARD1-graph counts of `records`, all reachable, at depth 3.
+/// Exact ARD1-graph counts of `records`, all reachable, at depth 3, or at
+/// depth `records.len()` for a smaller refusal graph: a CGR1 refuses a
+/// depth above its registration count, so the record under test must reach
+/// the extractor through a CGR1 that decodes.
 fn counts(records: &[&CommunityProtectedRecordV1]) -> CommunityGraphCountsV1 {
     let keys: BTreeSet<_> = records
         .iter()
@@ -193,7 +196,7 @@ fn counts(records: &[&CommunityProtectedRecordV1]) -> CommunityGraphCountsV1 {
         registrations: records.len() as u64,
         edges: sum(|record| record.registration().fields().child_artifacts.len()),
         keys: keys.len() as u64,
-        maximum_depth: 3,
+        maximum_depth: 3.min(records.len() as u64),
         registration_bytes: sum(|record| record.registration().canonical_cbor().len()),
         artifact_bytes: sum(|record| record.object().len()),
     }
@@ -470,6 +473,16 @@ fn state_record(
     )?)
 }
 
+/// The producer ordinal and CMB1 envelope of the extra `InitialState` node
+/// `extra` adds beside the graph, if any.
+const fn extra_coordinate(extra: Extra) -> Option<(u64, u8)> {
+    match extra {
+        Extra::None => None,
+        Extra::OtherProducer => Some((2, 0x60)),
+        Extra::SameOrdinal => Some((1, 0x61)),
+    }
+}
+
 /// The extra `InitialState` node `spec` adds beside the graph, if any.
 fn extra_record(
     key: &mut CommunityArtifactProtectorV1,
@@ -477,10 +490,8 @@ fn extra_record(
     initializer: Hash,
     producer_record: &CommunityProtectedRecordV1,
 ) -> Fallible<Option<CommunityProtectedRecordV1>> {
-    let (producer_ordinal, envelope) = match spec.extra {
-        Extra::None => return Ok(None),
-        Extra::OtherProducer => (2, 0x60),
-        Extra::SameOrdinal => (1, 0x61),
+    let Some((producer_ordinal, envelope)) = extra_coordinate(spec.extra) else {
+        return Ok(None);
     };
     let metadata = [cmb1(OPERATION, 11, 0, envelope)];
     let (bytes, _) = node(Node::initial(
@@ -497,9 +508,18 @@ fn extra_record(
     )?))
 }
 
-/// Forge the graph `spec` describes and prepare it.
-fn forge(spec: &Spec) -> Fallible<Result<(), Error>> {
-    let mut key = protector(GENERATION)?;
+/// A protected CPN1 and its reference.
+type ProtectedNode = (CommunityProtectedRecordV1, CommunityNativeNodeReferenceV1);
+
+/// The plain CSC1, CIS1, other CIS1 and CSR1 `spec` describes.
+struct Plain {
+    state_bytes: Vec<u8>,
+    initializer: CommunityInitializationProducerV1,
+    other_initializer: CommunityInitializationProducerV1,
+    revision_bytes: Vec<u8>,
+}
+
+fn plain(spec: &Spec) -> Fallible<Plain> {
     let state_bytes = state(b"state")?;
     let initializer = producer(&state_bytes, hash(4), spec.cis_member)?;
     let other_initializer = producer(&state_bytes, hash(14), spec.cis_member)?;
@@ -510,80 +530,158 @@ fn forge(spec: &Spec) -> Fallible<Result<(), Error>> {
         producer: initializer.digest(),
         owner: spec.csr_owner,
     })?;
-    let state_record = state_record(&mut key, spec, &state_bytes)?;
-    let producer_record = protect(
-        &mut key,
+    Ok(Plain {
+        state_bytes,
+        initializer,
+        other_initializer,
+        revision_bytes,
+    })
+}
+
+/// The protected records of [`Plain`].
+struct Protected {
+    state: CommunityProtectedRecordV1,
+    producer: CommunityProtectedRecordV1,
+    other_producer: CommunityProtectedRecordV1,
+    revision: CommunityProtectedRecordV1,
+}
+
+fn protect_plain(
+    key: &mut CommunityArtifactProtectorV1,
+    spec: &Spec,
+    plain: &Plain,
+) -> Fallible<Protected> {
+    let state = state_record(key, spec, &plain.state_bytes)?;
+    let producer = protect(
+        key,
         Kind::ExecutionProvenance,
-        &initializer.to_canonical_cbor(),
+        &plain.initializer.to_canonical_cbor(),
         &[],
     )?;
-    let other_producer_record = protect(
-        &mut key,
+    let other_producer = protect(
+        key,
         Kind::ExecutionProvenance,
-        &other_initializer.to_canonical_cbor(),
+        &plain.other_initializer.to_canonical_cbor(),
         &[],
     )?;
-    let revision_record = protect(
-        &mut key,
+    let revision = protect(
+        key,
         Kind::StateRevisionOrHead,
-        &revision_bytes,
-        &[&state_record, &producer_record],
+        &plain.revision_bytes,
+        &[&state, &producer],
     )?;
-    let (initial_content, initial_child) = if spec.initial_cites_other_producer {
-        (other_initializer.digest(), &other_producer_record)
+    Ok(Protected {
+        state,
+        producer,
+        other_producer,
+        revision,
+    })
+}
+
+/// The protected `InitialState` node `spec` describes.
+fn initial_node(
+    key: &mut CommunityArtifactProtectorV1,
+    spec: &Spec,
+    plain: &Plain,
+    protected: &Protected,
+) -> Fallible<ProtectedNode> {
+    let (initializer, child) = if spec.initial_cites_other_producer {
+        (plain.other_initializer.digest(), &protected.other_producer)
     } else {
-        (initializer.digest(), &producer_record)
+        (plain.initializer.digest(), &protected.producer)
     };
     let inputs: Vec<CommunityTypedInputRefV1<'static>> =
         spec.initial_inputs.iter().flatten().copied().collect();
-    let (initial_bytes, initial_reference) = node(Node {
+    let (bytes, reference) = node(Node {
         authorization: spec.authorization,
-        ..Node::initial(1, spec.initial_ordinal, initial_content, direct(&inputs))
+        ..Node::initial(1, spec.initial_ordinal, initializer, direct(&inputs))
     })?;
-    let initial_record = protect(
-        &mut key,
-        Kind::ExecutionProvenance,
-        &initial_bytes,
-        &[initial_child],
-    )?;
+    Ok((
+        protect(key, Kind::ExecutionProvenance, &bytes, &[child])?,
+        reference,
+    ))
+}
+
+/// The protected `StateRevision` node `spec` describes, citing `initial`.
+fn revision_node(
+    key: &mut CommunityArtifactProtectorV1,
+    spec: &Spec,
+    plain: &Plain,
+    protected: &Protected,
+    initial: &ProtectedNode,
+) -> Fallible<ProtectedNode> {
     let cited = CommunityNativeNodeReferenceV1 {
-        node_ordinal: spec.cited_ordinal.unwrap_or(initial_reference.node_ordinal),
-        ..initial_reference
+        node_ordinal: spec.cited_ordinal.unwrap_or(initial.1.node_ordinal),
+        ..initial.1
     };
     let native = [CommunityTypedInputRefV1::Native(cited)];
-    let (revision_node, revision_reference) = node(Node {
+    let (bytes, reference) = node(Node {
         kind: CommunityNativeNodeKindV1::StateRevision,
         producer: spec.revision_producer,
         ordinal: spec.revision_ordinal,
-        content: content(*b"CSR1", adr_h("CSR1", &revision_bytes)),
+        content: content(*b"CSR1", adr_h("CSR1", &plain.revision_bytes)),
         index: direct(&native),
         incarnation: INCARNATION,
         authorization: spec.authorization,
     })?;
-    let revision_node_record = protect(
-        &mut key,
-        Kind::ExecutionProvenance,
-        &revision_node,
-        &[&revision_record, &state_record, &initial_record],
-    )?;
-    let extra_record = extra_record(&mut key, spec, initializer.digest(), &producer_record)?;
+    Ok((
+        protect(
+            key,
+            Kind::ExecutionProvenance,
+            &bytes,
+            &[&protected.revision, &protected.state, &initial.0],
+        )?,
+        reference,
+    ))
+}
+
+/// The `InitialState` and `StateRevision` nodes `spec` describes.
+fn nodes(
+    key: &mut CommunityArtifactProtectorV1,
+    spec: &Spec,
+    plain: &Plain,
+    protected: &Protected,
+) -> Fallible<(ProtectedNode, ProtectedNode)> {
+    let initial = initial_node(key, spec, plain, protected)?;
+    let revision = revision_node(key, spec, plain, protected, &initial)?;
+    Ok((initial, revision))
+}
+
+/// Add the extra record `spec` describes and prepare the forged graph.
+fn prepare_forged(
+    key: &mut CommunityArtifactProtectorV1,
+    spec: &Spec,
+    plain: &Plain,
+    protected: &Protected,
+    (initial, revision): (&ProtectedNode, &ProtectedNode),
+) -> Fallible<Result<(), Error>> {
+    let extra = extra_record(key, spec, plain.initializer.digest(), &protected.producer)?;
     let mut records = vec![
-        &state_record,
-        &producer_record,
-        &revision_record,
-        &initial_record,
-        &revision_node_record,
+        &protected.state,
+        &protected.producer,
+        &protected.revision,
+        &initial.0,
+        &revision.0,
     ];
     if spec.initial_cites_other_producer {
-        records.push(&other_producer_record);
+        records.push(&protected.other_producer);
     }
-    records.extend(extra_record.as_ref());
+    records.extend(extra.as_ref());
     let root = if spec.root_is_initial {
-        initial_reference
+        initial.1
     } else {
-        revision_reference
+        revision.1
     };
-    prepare(&records, &[spec.head_member], &[root], &key)
+    prepare(&records, &[spec.head_member], &[root], key)
+}
+
+/// Forge the graph `spec` describes and prepare it.
+fn forge(spec: &Spec) -> Fallible<Result<(), Error>> {
+    let mut key = protector(GENERATION)?;
+    let plain = plain(spec)?;
+    let protected = protect_plain(&mut key, spec, &plain)?;
+    let (initial, revision) = nodes(&mut key, spec, &plain, &protected)?;
+    prepare_forged(&mut key, spec, &plain, &protected, (&initial, &revision))
 }
 
 #[test]
@@ -929,6 +1027,178 @@ fn the_closure_walk_refuses_a_cycle() {
     );
 }
 
+/// One member of the two-member graph: its protected CSC1, CIS1 and CSR1,
+/// its CSR1 bytes and its protected `InitialState` node.
+struct PairMember {
+    state: CommunityProtectedRecordV1,
+    producer: CommunityProtectedRecordV1,
+    revision: CommunityProtectedRecordV1,
+    revision_bytes: Vec<u8>,
+    initial: ProtectedNode,
+}
+
+/// The plain CSC1, CIS1 and CSR1 of the member in `slot`.
+fn pair_plain(
+    slot: u16,
+    member: Hash,
+) -> Fallible<(Vec<u8>, CommunityInitializationProducerV1, Vec<u8>)> {
+    let state_bytes = state(&[b'a' + u8::try_from(slot)?])?;
+    let initializer = producer(&state_bytes, hash(4), member)?;
+    let revision_bytes = revision(Revision {
+        origin: INITIALIZATION,
+        member,
+        state: adr_h("CSC1", &state_bytes),
+        producer: initializer.digest(),
+        owner: COB,
+    })?;
+    Ok((state_bytes, initializer, revision_bytes))
+}
+
+/// The protected CSC1, CIS1 and CSR1 of one member.
+fn pair_records(
+    key: &mut CommunityArtifactProtectorV1,
+    state_bytes: &[u8],
+    initializer: &CommunityInitializationProducerV1,
+    revision_bytes: &[u8],
+) -> Fallible<[CommunityProtectedRecordV1; 3]> {
+    let state = protect(key, Kind::StateContent, state_bytes, &[])?;
+    let producer = protect(
+        key,
+        Kind::ExecutionProvenance,
+        &initializer.to_canonical_cbor(),
+        &[],
+    )?;
+    let revision = protect(
+        key,
+        Kind::StateRevisionOrHead,
+        revision_bytes,
+        &[&state, &producer],
+    )?;
+    Ok([state, producer, revision])
+}
+
+/// The protected `InitialState` node of the member in `slot`.
+fn pair_initial(
+    key: &mut CommunityArtifactProtectorV1,
+    slot: u16,
+    initializer: Hash,
+    producer_record: &CommunityProtectedRecordV1,
+) -> Fallible<ProtectedNode> {
+    let metadata = [cmb1(OPERATION, 11, slot, 0x60 + u8::try_from(slot)?)];
+    let (bytes, reference) = node(Node::initial(
+        1,
+        u32::from(slot) * 2,
+        initializer,
+        direct(&metadata),
+    ))?;
+    Ok((
+        protect(key, Kind::ExecutionProvenance, &bytes, &[producer_record])?,
+        reference,
+    ))
+}
+
+fn pair_member(
+    key: &mut CommunityArtifactProtectorV1,
+    slot: u16,
+    member: Hash,
+) -> Fallible<PairMember> {
+    let (state_bytes, initializer, revision_bytes) = pair_plain(slot, member)?;
+    let [state, producer, revision] =
+        pair_records(key, &state_bytes, &initializer, &revision_bytes)?;
+    let initial = pair_initial(key, slot, initializer.digest(), &producer)?;
+    Ok(PairMember {
+        state,
+        producer,
+        revision,
+        revision_bytes,
+        initial,
+    })
+}
+
+fn pair_members(
+    key: &mut CommunityArtifactProtectorV1,
+    members: [Hash; 2],
+) -> Fallible<Vec<PairMember>> {
+    let mut pair = Vec::new();
+    for slot in 0..2_u16 {
+        pair.push(pair_member(key, slot, members[usize::from(slot)])?);
+    }
+    Ok(pair)
+}
+
+/// The protected `StateRevision` node of the member in `slot`, citing the
+/// other member's `InitialState` digest at its own ordinal with `swap`.
+fn pair_revision_node(
+    key: &mut CommunityArtifactProtectorV1,
+    swap: bool,
+    pair: &[PairMember],
+    slot: usize,
+) -> Fallible<ProtectedNode> {
+    let target = if swap { 1 - slot } else { slot };
+    let member = &pair[slot];
+    let cited = CommunityNativeNodeReferenceV1 {
+        node_ordinal: member.initial.1.node_ordinal,
+        ..pair[target].initial.1
+    };
+    let native = [CommunityTypedInputRefV1::Native(cited)];
+    let (bytes, reference) = node(Node {
+        kind: CommunityNativeNodeKindV1::StateRevision,
+        ordinal: member.initial.1.node_ordinal + 1,
+        content: content(*b"CSR1", adr_h("CSR1", &member.revision_bytes)),
+        ..Node::initial(1, 0, hash(7), direct(&native))
+    })?;
+    Ok((
+        protect(
+            key,
+            Kind::ExecutionProvenance,
+            &bytes,
+            &[&member.revision, &member.state, &pair[target].initial.0],
+        )?,
+        reference,
+    ))
+}
+
+fn pair_revision_nodes(
+    key: &mut CommunityArtifactProtectorV1,
+    swap: bool,
+    pair: &[PairMember],
+) -> Fallible<Vec<ProtectedNode>> {
+    let mut revision_nodes = Vec::new();
+    for slot in 0..pair.len() {
+        revision_nodes.push(pair_revision_node(key, swap, pair, slot)?);
+    }
+    Ok(revision_nodes)
+}
+
+/// Prepare both members' records against a CSH1 over the distinct
+/// `members`, rooted at both `StateRevision` nodes.
+fn prepare_pair(
+    key: &CommunityArtifactProtectorV1,
+    members: [Hash; 2],
+    pair: &[PairMember],
+    revision_nodes: &[ProtectedNode],
+) -> Fallible<Result<(), Error>> {
+    let mut records = Vec::new();
+    for (member, (revision_record, _)) in pair.iter().zip(revision_nodes) {
+        records.extend([
+            &member.state,
+            &member.producer,
+            &member.revision,
+            &member.initial.0,
+            revision_record,
+        ]);
+    }
+    let mut head_members = members.to_vec();
+    head_members.sort();
+    head_members.dedup();
+    let mut roots: Vec<CommunityNativeNodeReferenceV1> = revision_nodes
+        .iter()
+        .map(|(_, reference)| *reference)
+        .collect();
+    roots.sort();
+    prepare(&records, &head_members, &roots, key)
+}
+
 /// Forge a two-member graph, slots 0 and 1. With `swap`, each
 /// `StateRevision` cites the other member's `InitialState` digest at its
 /// own `InitialState`'s ordinal. With `same_member`, both members' CIS1 and
@@ -940,94 +1210,9 @@ fn forge_pair(swap: bool, same_member: bool) -> Fallible<Result<(), Error>> {
     } else {
         [MEMBER, hash(6)]
     };
-    let mut owned = Vec::new();
-    let mut initials = Vec::new();
-    for slot in 0..2_u16 {
-        let state_bytes = state(&[b'a' + u8::try_from(slot)?])?;
-        let initializer = producer(&state_bytes, hash(4), members[usize::from(slot)])?;
-        let state_record = protect(&mut key, Kind::StateContent, &state_bytes, &[])?;
-        let producer_record = protect(
-            &mut key,
-            Kind::ExecutionProvenance,
-            &initializer.to_canonical_cbor(),
-            &[],
-        )?;
-        let revision_bytes = revision(Revision {
-            origin: INITIALIZATION,
-            member: members[usize::from(slot)],
-            state: adr_h("CSC1", &state_bytes),
-            producer: initializer.digest(),
-            owner: COB,
-        })?;
-        let revision_record = protect(
-            &mut key,
-            Kind::StateRevisionOrHead,
-            &revision_bytes,
-            &[&state_record, &producer_record],
-        )?;
-        let metadata = [cmb1(OPERATION, 11, slot, 0x60 + u8::try_from(slot)?)];
-        let (initial_bytes, initial_reference) = node(Node::initial(
-            1,
-            u32::from(slot) * 2,
-            initializer.digest(),
-            direct(&metadata),
-        ))?;
-        let initial_record = protect(
-            &mut key,
-            Kind::ExecutionProvenance,
-            &initial_bytes,
-            &[&producer_record],
-        )?;
-        initials.push(initial_reference);
-        owned.push((
-            state_record,
-            producer_record,
-            revision_record,
-            initial_record,
-            revision_bytes,
-        ));
-    }
-    let mut revision_nodes = Vec::new();
-    let mut roots = Vec::new();
-    for slot in 0..2 {
-        let target = if swap { 1 - slot } else { slot };
-        let cited = CommunityNativeNodeReferenceV1 {
-            node_ordinal: initials[slot].node_ordinal,
-            ..initials[target]
-        };
-        let native = [CommunityTypedInputRefV1::Native(cited)];
-        let (state_record, _, revision_record, _, revision_bytes) = &owned[slot];
-        let (bytes, reference) = node(Node {
-            kind: CommunityNativeNodeKindV1::StateRevision,
-            ordinal: initials[slot].node_ordinal + 1,
-            content: content(*b"CSR1", adr_h("CSR1", revision_bytes)),
-            ..Node::initial(1, 0, hash(7), direct(&native))
-        })?;
-        revision_nodes.push(protect(
-            &mut key,
-            Kind::ExecutionProvenance,
-            &bytes,
-            &[revision_record, state_record, &owned[target].3],
-        )?);
-        roots.push(reference);
-    }
-    let mut records = Vec::new();
-    for ((state_record, producer_record, revision_record, initial_record, _), revision_node) in
-        owned.iter().zip(&revision_nodes)
-    {
-        records.extend([
-            state_record,
-            producer_record,
-            revision_record,
-            initial_record,
-            revision_node,
-        ]);
-    }
-    let mut head_members = members.to_vec();
-    head_members.sort();
-    head_members.dedup();
-    roots.sort();
-    prepare(&records, &head_members, &roots, &key)
+    let pair = pair_members(&mut key, members)?;
+    let revision_nodes = pair_revision_nodes(&mut key, swap, &pair)?;
+    prepare_pair(&key, members, &pair, &revision_nodes)
 }
 
 /// Review M on #1180 at 5c0311385: two members cannot swap their
