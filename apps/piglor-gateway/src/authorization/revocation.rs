@@ -28,7 +28,9 @@ use pos_core::{CorrelationId, EntityId, EventId, TimelineId};
 use serde_json::{json, Value};
 use ulid::Ulid;
 
-use super::{GatewayAuthorization, GatewayConsentV1, GatewayConsentsV1};
+use super::{
+    GatewayAuthorization, GatewayConsentRevocationV1, GatewayConsentV1, GatewayConsentsV1,
+};
 use crate::{
     mode_profile::GatewayProducedUnderV1, Gateway, GatewayError, GatewayOperationPermitV1,
 };
@@ -191,15 +193,20 @@ impl Gateway {
                 .revocation()
                 .is_some_and(|revocation| revocation.key() == Some(revocation_key))
         });
-        if keyed.is_some_and(|keyed| keyed.consent_ref() != consent_ref) {
-            return Err(GatewayError::IngressConflict);
-        }
-        let Some(consent) = consents.named_for(actor, consent_ref) else {
-            return Err(GatewayError::ResourceUnavailable);
-        };
-        if consent.revocation().is_some() {
+        // A key that revoked another consent, and a consent the acting
+        // entity is not a party to, are refused before anything is recorded.
+        let consent = keyed
+            .is_none_or(|keyed| keyed.consent_ref() == consent_ref)
+            .then_some(())
+            .ok_or(GatewayError::IngressConflict)
+            .and_then(|()| {
+                consents
+                    .named_for(actor, consent_ref)
+                    .ok_or(GatewayError::ResourceUnavailable)
+            })?;
+        if let Some(revocation) = consent.revocation() {
             return self
-                .revocation_json(consents.timeline(), principal, &consent)
+                .revocation_json(consents.timeline(), principal, consent_ref, revocation)
                 .await
                 .map(ConsentRevocationOutcomeV1::Original);
         }
@@ -208,39 +215,45 @@ impl Gateway {
         if !matches!(self.store.produced_under(None).await, Ok(Some(_))) {
             return Err(GatewayError::AuthorizationEvidenceUnavailable);
         }
-        self.issue_keyed_consent_revocation(
-            &consents.timeline().to_string(),
-            pos_core::ConsentRevokedV1 {
-                subject_id: consents.subject(),
-                grantee_id: consent.grantee(),
-                grant_seq: consent.grant_seq().as_u64(),
-                fence_seq: consents.head().as_u64().saturating_add(1),
-            },
-            Some(revocation_key),
-        )
-        .await?;
-        let (revoked, _) = self.current_consents(&authorization).await?;
-        let recorded = match revoked.named_for(actor, consent_ref) {
-            Some(consent) => {
-                self.revocation_json(revoked.timeline(), principal, &consent)
-                    .await
-            }
-            None => Err(GatewayError::AuthorizationEvidenceUnavailable),
-        };
-        recorded.map(ConsentRevocationOutcomeV1::Recorded)
+        let event = self
+            .issue_keyed_consent_revocation(
+                &consents.timeline().to_string(),
+                pos_core::ConsentRevokedV1 {
+                    subject_id: consents.subject(),
+                    grantee_id: consent.grantee(),
+                    grant_seq: consent.grant_seq().as_u64(),
+                    fence_seq: consents.head().as_u64().saturating_add(1),
+                },
+                Some(revocation_key),
+            )
+            .await?;
+        // The pinned consents are recomposed before the fence is released.
+        // The consent was unrevoked under the fence, so the appended Event is
+        // its revocation, at the Event's sequence.
+        let refreshed = self.current_consents(&authorization).await;
+        let recorded = self
+            .revocation_json(
+                consents.timeline(),
+                principal,
+                consent_ref,
+                GatewayConsentRevocationV1::new(event.id, event.seq, Some(revocation_key)),
+            )
+            .await;
+        refreshed
+            .and(recorded)
+            .map(ConsentRevocationOutcomeV1::Recorded)
     }
 
-    /// The `ConsentRevocation` of the revoked `consent` of `principal`,
-    /// produced under the binding its revocation's commit records.
+    /// The `ConsentRevocation` of the consent `consent_ref` of `principal`,
+    /// revoked by `revocation` on the consent Timeline `timeline`, produced
+    /// under the binding the revocation's commit records.
     async fn revocation_json(
         &self,
         timeline: TimelineId,
         principal: [u8; 16],
-        consent: &GatewayConsentV1,
+        consent_ref: EventId,
+        revocation: GatewayConsentRevocationV1,
     ) -> Result<Value, GatewayError> {
-        let Some(revocation) = consent.revocation() else {
-            return Err(GatewayError::AuthorizationEvidenceUnavailable);
-        };
         self.store
             .produced_under(Some((timeline, revocation.fence())))
             .await
@@ -249,7 +262,7 @@ impl Gateway {
             .map(|mode| {
                 ConsentRevocationV1 {
                     principal,
-                    consent_ref: consent.consent_ref(),
+                    consent_ref,
                     revocation: revocation.event(),
                     generation: revocation.fence().as_u64(),
                 }
