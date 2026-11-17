@@ -22,17 +22,16 @@ use crate::{ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1
 /// The record tag of retained TPS1 evidence in the erasure object store.
 const RETAINED_TPS1_TAG: &str = "TPS1";
 
-/// The most retained TPS1 objects composition reads. Each freeze and each
-/// retry admission can pin a different TPS1, so this is not one per request
-/// head: it is the store request-head cap, chosen as a fixed read bound.
+/// The most retained TPS1 objects composition reads: the store request-head
+/// cap, chosen as a fixed read bound. No admission retains a TPS1, so the
+/// bound only limits the read of TPS1 objects retained by other means.
 /// A store retaining more TPS1 objects cannot be checked within it and
 /// stays closed with `ErasureTrustAnchorRotated`.
 ///
 /// The read materialises the whole set: at the cap, up to this many
 /// [`pos_core::ERASURE_RETAINED_OBJECT_MAX_BYTES_V1`] objects (about 4 GiB)
 /// are held in memory at once. That worst case is accepted as a one-off
-/// composition cost rather than adding a streaming read to the store port;
-/// a real store retains one TPS1 per trust revision its admissions pinned.
+/// composition cost rather than adding a streaming read to the store port.
 const MAX_RETAINED_TPS1: usize = ERASURE_MAX_INVENTORY_REQUESTS;
 
 /// The closed, payload-free reasons a Local erasure composition stays
@@ -253,13 +252,12 @@ where
 ///
 /// An empty retained set passes even when requests exist. ERQ1 pins no
 /// trust revision (ADR-136 §5): submission references only ERAZ1, ELP1,
-/// ELSEL1 and ELIDEM1, and a TPS1 is retained first with the freeze and
-/// retry admissions that pin one. Requests that are only submitted or
-/// authorized therefore legitimately retain no TPS1. A committed pin
-/// whose TPS1 bytes were removed is refused where that evidence is read,
-/// when recovery resolves the pinned ELB1 and TPS1 by reference. Passing
-/// here admits nothing on its own: this slice composes the closed
-/// authority, which proves only an empty store.
+/// ELSEL1 and ELIDEM1, and no admission retains a TPS1 (a freeze retains
+/// only ELB1 and ELLR1). A store with requests therefore legitimately
+/// retains no TPS1, and the check refuses only a retained TPS1 that the
+/// pinned operator key does not verify. Passing here admits nothing on its
+/// own: this slice composes the closed authority, which proves only an
+/// empty store.
 fn retained_trust_verifies<S>(operator_public_key: [u8; 32], store: &mut S) -> bool
 where
     S: ErasureInventoryPersistencePortV1 + ?Sized,
