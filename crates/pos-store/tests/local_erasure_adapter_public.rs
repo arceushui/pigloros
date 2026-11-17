@@ -749,3 +749,55 @@ fn recipient_export_publications_are_empty_without_a_publication() -> TestResult
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
     empty_publication_contract(&mut store)
 }
+
+/// A key registry that fails to load refuses the tombstone like an absent
+/// one, and the claim stays transactional: the ELO1 is not inserted. Once the
+/// registry loads again the same tombstone commits, so the load error alone
+/// flipped the outcome.
+#[test]
+fn sqlite_tombstone_with_an_unloadable_registry_inserts_no_owner_result() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("unloadable-registry.sqlite3");
+    let path = path
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    seed_pending_destruction(&mut store)?;
+    let peer = rusqlite::Connection::open(path)?;
+    let saved: Vec<u8> = peer.query_row(
+        "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    store.complete_erasure_inventory_snapshot_with_limits(limits()?)?;
+
+    let tombstone = || LocalOwnerEffectV1::KeyTombstone {
+        request: Box::new(key_request()),
+        deletion_receipt: deletion_receipt(&key_request()),
+    };
+    let refused = record("ELO1", 1)?;
+    assert_eq!(
+        store.commit_local_owner_effect(tombstone(), &refused),
+        Err(ErasureErrorV1::KeyDestructionFailed)
+    );
+    assert_eq!(
+        store.read_object(address(&refused)?),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = ?1 WHERE singleton = 1",
+        rusqlite::params![saved],
+    )?;
+    store.complete_erasure_inventory_snapshot_with_limits(limits()?)?;
+    let committed = record("ELO1", 2)?;
+    assert_eq!(
+        store.commit_local_owner_effect(tombstone(), &committed)?,
+        address(&committed)?
+    );
+    Ok(())
+}
