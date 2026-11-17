@@ -1361,6 +1361,8 @@ mod tests {
             String::from("version"),
         ]));
         drop(run_main(&[String::from("piglor-gateway")]));
+        assert!(usage(None).is_ok());
+        assert!(usage(Some("not-a-command")).is_ok());
     }
 
     #[test]
