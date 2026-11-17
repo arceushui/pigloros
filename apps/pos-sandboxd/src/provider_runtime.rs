@@ -23,15 +23,15 @@
 //!
 //! The `provider-runtime` mode, [`serve_provider_runtime`], runs these
 //! steps and step 7 (`reconcile`: the system bus, the exclusive attempt
-//! recovery and the staging directory) before any socket exists. This
-//! runtime is the selector's runtime unit, started by the selector (#1399,
-//! R11 §5.0), so the mode then binds both SIC1 endpoints, execute then
-//! control (`endpoint`, R11 §6), sends `READY=1` (`notify`) and serves both
-//! in state `Starting` (`serving`, R11 §7). Restart reconciliation runs on
-//! its own thread meanwhile (steps 9 to 11): its success opens admission
-//! (`Open`), and its failure leaves `ReconcileFailed` for the life of the
-//! process, with no retry. If that thread cannot be spawned, the runtime
-//! stays `Starting` for the life of the process, which answers exactly as
+//! recovery and the staging directory) before any socket exists. The
+//! selector started this runtime as its runtime unit (#1399, R11 §5.0), so
+//! the mode then binds both SIC1 endpoints, execute then control
+//! (`endpoint`, R11 §6), sends `READY=1` (`notify`) and serves both in state
+//! `Starting` (`serving`, R11 §7). Restart reconciliation runs on its own
+//! thread meanwhile (steps 9 to 11): its success opens admission (`Open`),
+//! and its failure leaves `ReconcileFailed` for the life of the process,
+//! with no retry. If that thread cannot be spawned, the runtime stays
+//! `Starting` for the life of the process, which answers exactly as
 //! `ReconcileFailed` does: admission never opens.
 
 mod endpoint;
