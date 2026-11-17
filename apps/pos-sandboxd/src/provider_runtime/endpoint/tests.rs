@@ -111,6 +111,16 @@ fn binds_an_owner_only_leaf() -> TestResult {
     // Dropping the endpoint removes its own leaf.
     drop(endpoint);
     assert!(!Path::new(EXECUTE).exists());
+    // A leaf replaced by a node that is no socket fails the check, and the
+    // endpoint leaves the replacement in place when it is dropped.
+    let endpoint = bind(EXECUTE)?;
+    fs::remove_file(EXECUTE)?;
+    fs::write(EXECUTE, b"")?;
+    let replaced = identity(EXECUTE)?;
+    assert_eq!(endpoint.verify(), Err(ProviderRuntimeError::UnsafeEndpoint));
+    drop(endpoint);
+    assert_eq!(identity(EXECUTE)?, replaced);
+    fs::remove_file(EXECUTE)?;
     Ok(())
 }
 
@@ -244,6 +254,14 @@ fn endpoints_bind_only_fresh_owner_only_leaves_beneath_safe_directories() -> Tes
     );
     assert!(!Path::new(EXECUTE).exists());
     set_mode(RUNTIME, 0o755)?;
+    // A fresh leaf whose path is too long for a socket address cannot be
+    // bound.
+    let long = format!("{RUNTIME}/{}.sock", "a".repeat(120));
+    assert_eq!(
+        bind(&long).err(),
+        Some(ProviderRuntimeError::EndpointUnavailable)
+    );
+    assert!(!Path::new(&long).exists());
     refuses_unsafe_ancestors()?;
     refuses_every_existing_node()?;
     binds_an_owner_only_leaf()?;

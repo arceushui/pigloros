@@ -20,7 +20,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
 };
 
-use super::{root_peer, Responder};
+use super::{trusted_peer, Admission, Deadlined, Responder};
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::reconcile::ReconcileError;
 use crate::provider_runtime::tests::{
@@ -304,6 +304,10 @@ fn refuses_by_precedence(key: &VerifyingKey, authority: Authority) -> TestResult
     // A record whose magic names no operation of this socket.
     let foreign = request("SPX1", 1, Vec::new(), false)?;
     assert_invalid(&exchange(&[&foreign])?, key, None, Code::InvalidEncoding)?;
+    // A describe record with a trailing byte names its operation in its
+    // magic but is no canonical record: step 1.
+    let trailing = [describe([1; 16], authority)?, vec![0]].concat();
+    assert_invalid(&exchange(&[&trailing])?, key, None, Code::InvalidEncoding)?;
     // Steps 2, 3 and 5.
     let version = request(
         "SDQ1",
@@ -569,17 +573,25 @@ fn refuses_execute_while_starting(key: &VerifyingKey, staged: &StagedInstallatio
     // another version, and EVR1 without its SPX1.
     let trailing = [evaluation, &[0]].concat();
     assert_invalid(&exchange(&[&trailing])?, key, None, Code::InvalidEncoding)?;
-    let mut fields: Value = ciborium::from_reader(evaluation)?;
-    if let Value::Array(values) = &mut fields {
-        values[1] = Value::Integer(2.into());
+    // EVR1 of another version, with a zero request ID, and with another
+    // self-digest.
+    for (field, value, code) in [
+        (1, Value::Integer(2.into()), Code::UnsupportedVersion),
+        (2, Value::Bytes(vec![0; 16]), Code::FieldOutOfBounds),
+        (14, Value::Bytes(vec![0x77; 32]), Code::DigestMismatch),
+    ] {
+        let mut fields: Value = ciborium::from_reader(evaluation)?;
+        if let Value::Array(values) = &mut fields {
+            values[field] = value;
+        }
+        let changed = encode(&fields)?;
+        assert_invalid(
+            &exchange(&[&changed, staged.request()])?,
+            key,
+            Some(1),
+            code,
+        )?;
     }
-    let old_evaluation = encode(&fields)?;
-    assert_invalid(
-        &exchange(&[&old_evaluation, staged.request()])?,
-        key,
-        Some(1),
-        Code::UnsupportedVersion,
-    )?;
     let mut record: Value = ciborium::from_reader(staged.request())?;
     if let Value::Array(values) = &mut record {
         if let Value::Array(unsigned) = &mut values[0] {
@@ -761,6 +773,7 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
+    drops_an_untrusted_peer(&admitted, &signer, retained)?;
     // A failed reconciliation keeps cancel and reconcile refused with 11
     // for the life of the process (invariant 13).
     let failed = OnceLock::from(AdmissionState::ReconcileFailed);
@@ -808,10 +821,61 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
 }
 
 #[test]
-fn only_a_root_peer_is_answered() -> TestResult {
-    // On a non-root host the peer of a socket pair is not root; in the
-    // isolated container it is.
+fn only_the_trusted_peer_uid_is_answered() -> TestResult {
+    // The peer of a socket pair runs as this process's UID.
     let (local, _) = UnixStream::pair()?;
-    assert_eq!(root_peer(&local), rustix::process::geteuid().is_root());
+    let uid = rustix::process::geteuid().as_raw();
+    assert!(trusted_peer(&local, uid));
+    assert!(!trusted_peer(&local, uid + 1));
+    Ok(())
+}
+
+/// Assert that `peer` reads nothing, not even server write EOF, and that
+/// all of `sent` is still unread at `server`: the connection was dropped
+/// before anything was read or written.
+fn assert_dropped_unread(server: &UnixStream, peer: &mut UnixStream, sent: &[u8]) -> TestResult {
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
+    let mut unread = vec![0; sent.len() + 1];
+    let mut reader = server;
+    assert_eq!(reader.read(&mut unread)?, sent.len());
+    assert_eq!(&unread[..sent.len()], sent);
+    Ok(())
+}
+
+/// A peer of another UID gets zero bytes on the execute socket: its request
+/// is not read (R11 §6 step 6).
+fn drops_an_untrusted_peer(
+    admitted: &pos_reference::selector::installation::authority::AdmittedSelectorProvider,
+    signer: &crate::KeyFileRuntimeSigner,
+    retained: Authority,
+) -> TestResult {
+    let starting = OnceLock::new();
+    let untrusted = Responder {
+        peer_uid: rustix::process::geteuid().as_raw() + 1,
+        ..Responder::new(admitted, signer, &starting)
+    };
+    let sent = framed(&[&describe([4; 16], retained)?])?;
+    let (server, mut peer) = UnixStream::pair()?;
+    peer.write_all(&sent)?;
+    untrusted.answer(&server, Admission::Answered);
+    assert_dropped_unread(&server, &mut peer, &sent)
+}
+
+#[test]
+fn a_deadlined_stream_has_nothing_to_flush() -> TestResult {
+    // A Unix stream has no buffered output: flushing writes nothing.
+    let (local, mut peer) = UnixStream::pair()?;
+    Deadlined::new(&local, Duration::from_secs(1)).flush()?;
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
     Ok(())
 }

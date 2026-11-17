@@ -21,7 +21,7 @@
 //!
 //! The authority never changes afterwards (R11 D9): no step is repeated.
 //!
-//! The `provider-runtime` mode, [`serve_provider_runtime`], runs these
+//! The `provider-runtime` mode, `serve_provider_runtime`, runs these
 //! steps and step 7 (`reconcile`: the system bus, the exclusive attempt
 //! recovery and the staging directory) before any socket exists. The
 //! selector started this runtime as its runtime unit (#1399, R11 §5.0), so

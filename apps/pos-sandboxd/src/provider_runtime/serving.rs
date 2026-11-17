@@ -75,6 +75,9 @@ const RECHECK: Timespec = Timespec {
     tv_nsec: 10_000_000,
 };
 
+/// The only UID whose connections either socket answers (R11 §6 step 6).
+const ROOT_UID: u32 = 0;
+
 /// The SPE1 operation codes.
 const DESCRIBE: u8 = 0;
 const EXECUTE: u8 = 1;
@@ -180,12 +183,14 @@ struct Workers<'scope> {
     refusing: Vec<ScopedJoinHandle<'scope, ()>>,
 }
 
-/// The startup authority that answers requests, its one signer, and the
-/// admission state restart reconciliation sets (unset while `Starting`).
+/// The startup authority that answers requests, its one signer, the
+/// admission state restart reconciliation sets (unset while `Starting`),
+/// and the one peer UID it answers.
 pub(super) struct Responder<'a> {
     admitted: &'a AdmittedSelectorProvider,
     signer: &'a KeyFileRuntimeSigner,
     admission: &'a OnceLock<AdmissionState>,
+    peer_uid: u32,
 }
 
 impl<'a> Responder<'a> {
@@ -198,6 +203,7 @@ impl<'a> Responder<'a> {
             admitted,
             signer,
             admission,
+            peer_uid: ROOT_UID,
         }
     }
 
@@ -304,7 +310,7 @@ impl<'a> Responder<'a> {
     /// Answer one execute-socket connection, then send server write EOF. A
     /// peer that is not root is dropped with zero bytes read and written.
     fn answer(&self, stream: &UnixStream, admission: Admission) {
-        if root_peer(stream) {
+        if trusted_peer(stream, self.peer_uid) {
             self.answer_root(stream, admission);
         }
     }
@@ -552,9 +558,10 @@ impl<'a> Responder<'a> {
     }
 }
 
-/// Whether the `SO_PEERCRED` UID of `stream`'s peer is 0 (R11 §6 step 6).
-fn root_peer(stream: &UnixStream) -> bool {
-    rustix::net::sockopt::socket_peercred(stream).is_ok_and(|peer| peer.uid.is_root())
+/// Whether the `SO_PEERCRED` UID of `stream`'s peer is `uid` (R11 §6 step
+/// 6: [`ROOT_UID`] outside tests).
+fn trusted_peer(stream: &UnixStream, uid: u32) -> bool {
+    rustix::net::sockopt::socket_peercred(stream).is_ok_and(|peer| peer.uid.as_raw() == uid)
 }
 
 /// One complete frame, or step 1's refusal.
