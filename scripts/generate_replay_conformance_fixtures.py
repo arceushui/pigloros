@@ -98,7 +98,9 @@ LOCAL = "deterministic-local-v1"
 AIR_GAPPED = "deterministic-air-gapped-v1"
 REPLAY = "replay-v1"
 LIVE = "live-local-v1"
-PROFILES = (LOCAL, AIR_GAPPED, REPLAY, LIVE)
+# ADR-135: the live Air-Gapped family, `deterministic-air-gapped-v1` restricted to LiveUnverified.
+LIVE_AIR_GAPPED = "live-air-gapped-v1"
+PROFILES = (LOCAL, AIR_GAPPED, REPLAY, LIVE, LIVE_AIR_GAPPED)
 CLASSES = ("RecordedReplay", "ProfileRecomputation", "CrossProfileConformance", "LiveUnverified")
 CLAIMS = (
     "Exact",
@@ -592,25 +594,26 @@ def denied_subcases() -> list[SubCase]:
         script=SECRET,
     )
     cross.expect = exact_legs(cross)
-    live = recomputed_case(
-        "den.2",
-        "LIVE-001",
-        "a live run is recorded and never verified exact",
-        "LiveUnverified",
-        (LIVE,),
-        claim="StructuralOnly",
-    )
     payloads, failure = run_script(COUNT, 3)
-    live.expect = [
-        leg(
-            LIVE,
-            "UnverifiableArtifactsMissing",
-            "StructuralOnly",
-            result_digest(recomputed_stream(payloads, failure)),
-            ("ProvenanceMissing", "replay_claim"),
+    lives = []
+    for sub_id, profile, title in (
+        ("den.2", LIVE, "a live run is recorded and never verified exact"),
+        ("den.3", LIVE_AIR_GAPPED, "a live Air-Gapped run is recorded and never verified exact"),
+    ):
+        live = recomputed_case(
+            sub_id, "LIVE-001", title, "LiveUnverified", (profile,), claim="StructuralOnly"
         )
-    ]
-    return [single, cross, live]
+        live.expect = [
+            leg(
+                profile,
+                "UnverifiableArtifactsMissing",
+                "StructuralOnly",
+                result_digest(recomputed_stream(payloads, failure)),
+                ("ProvenanceMissing", "replay_claim"),
+            )
+        ]
+        lives.append(live)
+    return [single, cross, *lives]
 
 
 def malformed_subcases() -> list[SubCase]:
