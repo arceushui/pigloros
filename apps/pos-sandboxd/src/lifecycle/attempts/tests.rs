@@ -1170,6 +1170,31 @@ mod cases {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_revocation_responder_reads_each_live_attempt_of_the_fence() -> TestResult {
+        use crate::provider_runtime::{fenced_attempt_states, AttemptCleanupState};
+        let runtime = Runtime::new()?;
+        started_and_dropped(&runtime, FakeInput::new(7))?;
+        started_and_dropped(&runtime, FakeInput::new(6))?;
+        // Each live attempt in order, neither with its cleanup proved.
+        assert_eq!(
+            fenced_attempt_states(&runtime.lifecycle).await,
+            Some(vec![
+                AttemptCleanupState {
+                    attempt_id: [6; 16],
+                    cleanup_proved: false,
+                },
+                AttemptCleanupState {
+                    attempt_id: [7; 16],
+                    cleanup_proved: false,
+                },
+            ])
+        );
+        // The fence is permanent: no second view.
+        assert_eq!(fenced_attempt_states(&runtime.lifecycle).await, None);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn the_recovery_fence_quiesces_an_attempt_mid_activation() -> TestResult {
         let runtime = Runtime::new()?;
         let fixture = manager(1).await?;

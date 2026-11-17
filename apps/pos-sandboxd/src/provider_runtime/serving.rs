@@ -406,24 +406,27 @@ impl<'a> Responder<'a> {
         }
     }
 
-    /// Answer one control-socket connection of a root peer, `accepted` at
-    /// that instant, through the revocation responder. The exchange closes
-    /// execute admission before anything is read; the responder reports the
-    /// fence and the acknowledgement before each has an effect.
+    /// Answer one control-socket connection, `accepted` at that instant,
+    /// then send server write EOF once an RCA1 was written. A peer that is
+    /// not root is dropped with zero bytes read and written.
     fn exchange(&self, stream: &UnixStream, accepted: Instant) {
-        if root_peer(stream) {
-            self.revocation.observer().advance(EXECUTE_CLOSED);
-            let deadline = exchange_deadline(accepted);
-            match self
-                .revocation
-                .respond(&mut Deadlined::until(stream, deadline), deadline)
-            {
-                ExchangeOutcome::Acknowledged | ExchangeOutcome::Resent => {
-                    stream.shutdown(std::net::Shutdown::Write).ok();
-                }
-                ExchangeOutcome::Refused { .. } => {}
-            }
+        if root_peer(stream) && self.respond(stream, accepted) {
+            stream.shutdown(std::net::Shutdown::Write).ok();
         }
+    }
+
+    /// Answer a root peer's control connection through the revocation
+    /// responder: whether it acknowledged or resent an RCA1. The exchange
+    /// closes execute admission before anything is read; the responder
+    /// reports the fence and the acknowledgement before each has an effect.
+    fn respond(&self, stream: &UnixStream, accepted: Instant) -> bool {
+        self.revocation.observer().advance(EXECUTE_CLOSED);
+        let deadline = exchange_deadline(accepted);
+        matches!(
+            self.revocation
+                .respond(&mut Deadlined::until(stream, deadline), deadline),
+            ExchangeOutcome::Acknowledged | ExchangeOutcome::Resent
+        )
     }
 
     /// Answer a root peer's connection: read it under the initial control
