@@ -21,6 +21,17 @@ pub enum AttemptUnitTermination<'a> {
     Stopped(&'a SystemdAttemptUnitTeardownObservation),
 }
 
+impl AttemptUnitTermination<'_> {
+    /// TME1 `cleanup.empty-basis`: how a stopped unit's cgroup was proved
+    /// empty; `None` when no unit start was requested.
+    const fn empty_basis(self) -> Option<AttemptCgroupEmptyBasis> {
+        match self {
+            Self::Unsubmitted => None,
+            Self::Stopped(observed) => Some(observed.cgroup_empty().basis()),
+        }
+    }
+}
+
 /// The completed live-owner cleanup of one attempt.
 ///
 /// Every protected step was observed in order and the planned intent was
@@ -121,10 +132,7 @@ impl PreparedAttemptDirectory {
         let Ok(mut state) = self.planned.state.lock() else {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         };
-        let empty_basis = match unit {
-            AttemptUnitTermination::Unsubmitted => None,
-            AttemptUnitTermination::Stopped(observed) => Some(observed.cgroup_empty().basis()),
-        };
+        let empty_basis = unit.empty_basis();
         let result = self
             .require_terminal_evidence(unit, root)
             .and_then(|()| self.remove_tree())

@@ -196,6 +196,20 @@ fn installed_provider() -> Result<AdmittedSelectorProvider, StagingError> {
         .map_err(StagingError::from)
 }
 
+/// Read the SPX1 frame and sample when it completed: as the instant the
+/// input deadline is enforced from, and in `CLOCK_MONOTONIC` nanoseconds
+/// as the recorded input start. The clock is sampled after the instant, so
+/// the recorded deadline is never earlier than the enforced one.
+fn completed_frame(
+    reader: &mut impl Read,
+    ledger: &StagingLedger,
+    clock: Clock,
+) -> Result<(RetainedControl, Instant, u64), StagingError> {
+    let record = frame(reader, ledger)?;
+    let completed = Instant::now();
+    Ok((record, completed, clock()?))
+}
+
 pub(super) fn receive(
     stream: &mut UnixStream,
     ledger: &StagingLedger,
@@ -222,11 +236,7 @@ pub(super) fn receive(
     let evaluation_record = frame(&mut reader, ledger)?;
     let evaluation =
         EvaluationRequest::from_canonical_cbor(&evaluation_record.bytes).map_err(invalid)?;
-    let request_record = frame(&mut reader, ledger)?;
-    let spx_completed = Instant::now();
-    // Sampled after the instant, so the recorded deadline is never earlier
-    // than the enforced one.
-    let input_start = clock()?;
+    let (request_record, spx_completed, input_start) = completed_frame(&mut reader, ledger, clock)?;
     let request =
         SandboxExecuteRequest::from_canonical_cbor(&request_record.bytes).map_err(invalid)?;
     require_grant_turn(reader.stream)?;
@@ -862,6 +872,15 @@ mod tests {
     }
 
     #[test]
+    fn the_production_clock_reads_clock_monotonic() -> TestResult {
+        let before = super::super::timespec_ns(rustix::time::clock_gettime(
+            rustix::time::ClockId::Monotonic,
+        ))?;
+        assert!(super::super::monotonic_ns()? >= before);
+        Ok(())
+    }
+
+    #[test]
     fn source_turn_rejects_queued_extra_bytes_and_early_eof_without_consuming() -> TestResult {
         let (mut provider, mut selector) = UnixStream::pair()?;
         require_grant_turn(&provider)?;
@@ -1191,12 +1210,14 @@ mod tests {
         staged.write_input(&mut selector)?;
         selector.shutdown(std::net::Shutdown::Write)?;
         let file = tempfile::tempfile()?;
+        let attempt_id = prepared.request().attempt_id;
         let failed = failed_input(prepared.receive_input(&mut provider, &file))?;
         assert!(
             matches!(failed.error(), StagingError::Io(_)),
             "{:?}",
             failed.error()
         );
+        assert_eq!(failed.attempt_id(), attempt_id);
         assert_eq!(failed.grant().bytes(), sent.as_slice());
         assert!(failed.transfer().is_some_and(|transfer| !transfer.complete));
         assert_eq!(ledger.usage(), super::super::StagingUsage::default());

@@ -3224,7 +3224,9 @@ mod tests {
             Ok(())
         );
 
-        for field in 0..7 {
+        // Fields 7 to 10 are bound to the self-digested SPR1 only by
+        // `receipt_matches_grant`.
+        for field in 0..11 {
             let mut grant = evidence.grant.clone();
             match field {
                 0 => grant.request_id = [99; 16],
@@ -3234,6 +3236,10 @@ mod tests {
                 4 => grant.input_digest = [99; 32],
                 5 => grant.expected_launch_policy_digest = [99; 32],
                 6 => grant.exchange_plan_digests = vec![[99; 32]],
+                7 => grant.trust_epoch = 99,
+                8 => grant.revocation_epoch = 99,
+                9 => grant.policy_epoch = 99,
+                10 => grant.elm1_digest = [99; 32],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(

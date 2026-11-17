@@ -813,11 +813,6 @@ enum Cleaned {
 }
 
 impl Cleaned {
-    /// Whether the attempt is known clean, so it can be reconciled.
-    const fn clean(&self) -> bool {
-        !matches!(self, Self::Unproved)
-    }
-
     /// The removed intent; `None` when nothing was committed.
     fn intent(&self) -> Result<Option<PlannedAttemptIntent>, AttemptLifecycleError> {
         match self {
@@ -972,13 +967,18 @@ impl<I> AttemptLifecycle<I> {
         }
     }
 
-    /// Whether the attempt ended with its cleanup proved.
+    /// Whether the attempt ended clean: its cleanup was proved, it ended
+    /// with nothing committed, or it was already reconciled.
     fn ended_clean(&self, attempt_id: [u8; 16]) -> bool {
-        match lock(&self.attempts).get(&attempt_id) {
-            Some(Slot::Ended { cleaned, .. }) => cleaned.clean(),
-            Some(Slot::Reconciled { .. }) => true,
-            _ => false,
-        }
+        matches!(
+            lock(&self.attempts).get(&attempt_id),
+            Some(
+                Slot::Ended {
+                    cleaned: Cleaned::NothingCommitted | Cleaned::Proved(_),
+                    ..
+                } | Slot::Reconciled { .. }
+            )
+        )
     }
 
     /// Request the cancellation of an attempt under the attempts lock: a
