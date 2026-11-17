@@ -17,6 +17,14 @@ pub(super) fn worker_stage(worker: usize, stage: &str) {
     );
 }
 
+/// One flushed line per window lifecycle or readiness setup phase. A native
+/// call that never returns is then named by the last marker printed before it.
+pub(super) fn lifecycle_stage(stage: &str) {
+    let mut stderr = std::io::stderr().lock();
+    let _logged_or_unavailable = writeln!(stderr, "NATIVE_LIFECYCLE stage={stage}");
+    let _flushed_or_unavailable = stderr.flush();
+}
+
 pub(super) struct Trace {
     case: u64,
     started: Instant,
