@@ -161,7 +161,16 @@ WINDOW = {
 # Values the conformance normalization replaces, restored to valid samples before validation.
 SAMPLE_ULID = "01JC0GATEWAYF1XTVRESAMP1E0"
 SAMPLE_CURSOR = f"v1.{'0' * 64}.{SAMPLE_ULID}.1"
-PLACEHOLDERS = {"<ulid>": SAMPLE_ULID, "<cursor>": SAMPLE_CURSOR, "<message>": "message"}
+PLACEHOLDERS = {
+    "<ulid>": SAMPLE_ULID,
+    "<cursor>": SAMPLE_CURSOR,
+    "<message>": "message",
+    "<correlation>": "5f" * 16,
+    "<hash>": "ab" * 32,
+    # A captured consent or room echoed by a later response.
+    "{consent}": SAMPLE_ULID,
+    "{room}": SAMPLE_ULID,
+}
 
 
 class ContractError(Exception):
@@ -1398,7 +1407,11 @@ def check_fixtures(
                     continue
                 if not isinstance(expect["body"], dict):
                     raise ContractError(f"{where}: every contract response is JSON")
-                concrete = exchange["path"].replace("{timeline}", SAMPLE_ULID)
+                concrete = (
+                    exchange["path"]
+                    .replace("{timeline}", SAMPLE_ULID)
+                    .replace("{room}", SAMPLE_ULID)
+                )
                 template, operation = contract.operation_for(exchange["method"], concrete)
                 body = restore(expect["body"]["json"])
                 errors = contract.response_errors(

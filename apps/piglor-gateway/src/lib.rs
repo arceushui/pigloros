@@ -35,14 +35,17 @@ pub mod owntracks;
 pub mod owntracks_http;
 pub mod problem;
 pub mod revision;
+pub mod scenario_room;
 pub mod startup;
 
 pub use authorization::{
     AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
     GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
-    GatewayAuthorityDenial, GatewayAuthoritySourceV1, GatewayAuthorization,
-    GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
-    GatewayAuthorizationRequest, GatewayAuthorizationTarget, GatewayOperationV1,
+    GatewayAuthorityDenial, GatewayAuthorityRecordV1, GatewayAuthoritySourceV1,
+    GatewayAuthorization, GatewayAuthorizationAudit, GatewayAuthorizationDecision,
+    GatewayAuthorizationError, GatewayAuthorizationRequest, GatewayAuthorizationTarget,
+    GatewayConsentRecordV1, GatewayConsentRevocationV1, GatewayConsentV1,
+    GatewayConsentedAuthorityV1, GatewayConsentsV1, GatewayOperationV1, GatewayPinnedAuthorityV1,
     LocalAuthenticationAdapter, PendingAuthorityDenial, RecordedAuthorityDenial,
     MAX_DENIAL_RECORDS_PER_MINUTE, MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
@@ -3017,6 +3020,21 @@ impl Gateway {
         timeline_id: &str,
         revocation: ConsentRevokedV1,
     ) -> Result<Event, GatewayError> {
+        self.issue_keyed_consent_revocation(timeline_id, revocation, None)
+            .await
+    }
+
+    /// Append one Gateway-owned consent revocation at its durable fence,
+    /// recording `key` as the revocation Event's correlation identity (#309).
+    ///
+    /// # Errors
+    /// Returns a closed Timeline, fence, or bounded append error.
+    pub(crate) async fn issue_keyed_consent_revocation(
+        &self,
+        timeline_id: &str,
+        revocation: ConsentRevokedV1,
+        key: Option<pos_core::CorrelationId>,
+    ) -> Result<Event, GatewayError> {
         let timeline = match parse_timeline_id(timeline_id) {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
@@ -3050,7 +3068,7 @@ impl Gateway {
             .store
             .append_consent_revocation(
                 timeline,
-                revocation.clone(),
+                (revocation.clone(), key),
                 scope,
                 self.consent_authority.append_permit(),
                 self.limits.max_events_per_timeline,
@@ -3173,7 +3191,7 @@ impl Gateway {
                 maximum: MAX_EVENTS_PER_POLL,
             });
         }
-        let id = parse_timeline_id(timeline_id)?;
+        let id = parse_timeline_id(timeline_id).and_then(client_timeline)?;
         // A cursor is derived only from visible Events. Scan in bounded chunks
         // so protected Events cannot hide later public Events in the same page.
         let mut next_seq = from_seq.max(1);
@@ -3435,7 +3453,7 @@ impl Gateway {
         request: HumanActionRequest<'_>,
         authorization: Arc<GatewayAuthorization>,
     ) -> Result<AdmittedAction, GatewayError> {
-        let timeline = match parse_timeline_id(request.timeline_id) {
+        let timeline = match parse_timeline_id(request.timeline_id).and_then(client_timeline) {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
@@ -3712,7 +3730,7 @@ impl Gateway {
         entity_id: &str,
         signal: &SocietySignal,
     ) -> Result<Event, GatewayError> {
-        let timeline = parse_timeline_id(timeline_id)?;
+        let timeline = parse_timeline_id(timeline_id).and_then(client_timeline)?;
         let entity = parse_entity_id(entity_id)?;
         let draft = draft_signal(entity, signal);
         debug_assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
@@ -4084,6 +4102,17 @@ fn encode_gateway_actuator_params(
             encode_actuator_pair_v1(x, z)
                 .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
         })
+}
+
+/// `timeline`, unless it is the Local Principal's consent Timeline (#309):
+/// only the host's consent seams read or append it, so a client append, read
+/// or action naming it is `404 not-found-or-unavailable`.
+fn client_timeline(timeline: TimelineId) -> Result<TimelineId, GatewayError> {
+    if timeline == local_principal::local_principal_consent_timeline() {
+        Err(GatewayError::ResourceUnavailable)
+    } else {
+        Ok(timeline)
+    }
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {

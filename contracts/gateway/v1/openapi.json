@@ -823,18 +823,23 @@
     "/v1/scenario-rooms": {
       "post": {
         "operationId": "createScenarioRoom",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#303",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
-        "tags": [
-          "scenario-room"
-        ],
-        "description": "Draft (#303): Create revision 1 of a Scenario Room from a declarative descriptor (ADR-041 validation, bounds, governance, consent and composition). Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "description": "Create revision 1 of a Scenario Room from a declarative ADR-041 descriptor (#303). The server assigns the room ID and correlation ID, sorts the lists canonically, resolves every plugin against the reviewed host catalogue entry it ships, and computes the three ADR-041 hashes (Redmine #303 amendment of ADR-041). The decision requires `scenario-room.create` for the acting entity and covers every `persona` participant as an actor; `governance_ref` must name the host's governance record.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
           }
         ],
         "requestBody": {
@@ -859,7 +864,7 @@
             }
           },
           "200": {
-            "description": "An exact retry or an identical descriptor: the existing revision.",
+            "description": "An exact retry (the same `Idempotency-Key` and request): the revision it committed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -889,7 +894,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` or `consent-invalid`.",
+            "description": "`unauthorized` (including a `persona` participant the Principal's grant does not cover), `revoked` or `consent-invalid` (a `privacy_export_ref` that names no consent granted to the Principal). The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -899,7 +904,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "description": "`idempotency-conflict`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -919,7 +924,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -929,7 +934,17 @@
             }
           },
           "422": {
-            "description": "`admission-rejected`: governance, composition or Plugin admission failed.",
+            "description": "`admission-rejected`: a plugin the deployment does not bundle at exactly that version, a rule whose first segment names no requested plugin, or a `governance_ref` that names no governance record of the host.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -947,21 +962,26 @@
     "/v1/scenario-rooms/{room_id}/revisions": {
       "post": {
         "operationId": "deriveScenarioRoomRevision",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#303",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
-        "tags": [
-          "scenario-room"
-        ],
-        "description": "Draft (#303): Derive the next immutable revision of a Scenario Room from a parent revision. Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "description": "Derive the next immutable revision of a Scenario Room from its head revision `parent_revision` (#303; ADR-041 sections 5, 7 and 9). A complete new descriptor; there is no automatic merge. Requires `scenario-room.derive`, with the same persona and governance rules as `createScenarioRoom`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/RoomId"
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
           }
         ],
         "requestBody": {
@@ -986,7 +1006,7 @@
             }
           },
           "200": {
-            "description": "An exact retry or an identical descriptor: the existing revision.",
+            "description": "An exact retry, or a derive whose `parent_revision` is no longer the head and whose descriptor equals the revision already derived from that parent (ADR-041 section 7): the existing revision.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1016,7 +1036,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` or `consent-invalid`.",
+            "description": "`unauthorized`, `revoked` or `consent-invalid`, as for `createScenarioRoom`. The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1026,7 +1046,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`, `append-conflict` (stale parent) or `incompatible-profile`.",
+            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1046,7 +1066,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1056,7 +1076,7 @@
             }
           },
           "404": {
-            "description": "`not-found-or-unavailable`.",
+            "description": "`not-found-or-unavailable`: no such room or `parent_revision`, identical for a missing and a protected room.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1066,7 +1086,17 @@
             }
           },
           "422": {
-            "description": "`admission-rejected`.",
+            "description": "`admission-rejected`, as for `createScenarioRoom`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1084,21 +1114,26 @@
     "/v1/scenario-rooms/{room_id}/revisions/{revision}": {
       "get": {
         "operationId": "getScenarioRoomRevision",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#303",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
-        "tags": [
-          "scenario-room"
-        ],
-        "description": "Draft (#303): Inspect one immutable Scenario Room revision. Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "description": "Read one immutable Scenario Room revision (#303). Requires `scenario-room.read` for the acting entity; the decision precedes the lookup, and an unknown room or revision answers like a protected one.",
         "parameters": [
           {
             "$ref": "#/components/parameters/RoomId"
           },
           {
             "$ref": "#/components/parameters/Revision"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
           }
         ],
         "responses": {
@@ -1134,6 +1169,36 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `revoked`: the authority decision precedes any lookup.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: the denial-record bound; retryable, with `Retry-After`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2788,18 +2853,26 @@
     "/v1/me/consent-revocations": {
       "post": {
         "operationId": "revokeConsent",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#309",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
         "tags": [
           "consent"
         ],
-        "description": "Draft (#309): Revoke one of the authenticated subject's consents; future protected work stops. Not served yet; only its golden examples validate. #309 turns it into a served, drift-checked operation.",
+        "description": "Revoke one of the acting Principal's own consents (#309, ADR-039), named by the `EventId` of its `consent.granted.v1` Event (`consent_ref`, D7), as the Principal's `Session` lists it. The revocation is one `consent.revoked.v1` Event on the Principal's consent Timeline; its sequence is the ADR-039 fence. It is recorded after every protected operation admitted before it completes and takes effect before the next decision: from then on every operation the consent governs is `403 revoked`, while the operations no consent governs (among them reading the Session and revoking a consent) stay available. Revocation stops future protected work; it is distinct from erasure and deletes nothing. It is monotonic: revoking a revoked consent returns its original revocation (`200`). The operation itself requires the `consent.revoke` grant like any protected operation.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and it must be the consent's subject or grantee. Without it the revocation is `401 unauthenticated`."
           }
         ],
         "requestBody": {
@@ -2814,7 +2887,7 @@
         },
         "responses": {
           "201": {
-            "description": "The recorded revocation.",
+            "description": "The revocation this request recorded.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2824,7 +2897,7 @@
             }
           },
           "200": {
-            "description": "An exact retry or an already revoked consent: the original revocation.",
+            "description": "The consent was already revoked: its original revocation. An exact retry after a recorded revocation answers this way.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2834,7 +2907,7 @@
             }
           },
           "400": {
-            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "description": "`invalid-request`, including a missing or malformed `Idempotency-Key`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2844,7 +2917,7 @@
             }
           },
           "401": {
-            "description": "`unauthenticated`.",
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2854,37 +2927,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` or `consent-invalid`.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "`idempotency-conflict` or `incompatible-profile`.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`unauthorized` (no grant covers the actor and `consent.revoke`) or `revoked` (the Principal's grant was revoked or expired).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2894,7 +2937,55 @@
             }
           },
           "404": {
-            "description": "`not-found-or-unavailable`: not the subject's consent.",
+            "description": "`not-found-or-unavailable`: the Principal holds no such consent, or the acting entity is neither its subject nor its grantee; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`: the `Idempotency-Key` already named another consent.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: the request body exceeds the Gateway body bound.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state, read its consents or record the denial evidence.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3641,7 +3732,6 @@
         "$id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
         "type": "object",
         "additionalProperties": false,
-        "x-pigloros-maturity": "draft",
         "required": [
           "schema_id",
           "timeline_id",
@@ -4378,10 +4468,9 @@
       },
       "ScenarioRoomInput": {
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-input",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the correlation ID and hashes are server-owned and cannot be supplied. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`).",
+        "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the room ID, revision, correlation ID and hashes are server-owned and cannot be supplied. The server admits the lists sorted (plugins by `plugin_id`, rules by `rule_id`, participants by `entity_id`, initial conditions by `entity_id` then `dimension`) and refuses a duplicate key, a `plugin_id` containing `.`, a `rule_id` whose first `.`-separated segment names no requested plugin, and an initial condition whose `entity_id` is not a participant. Every plugin must be bundled by the deployment at exactly its `version`. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`), measured on the admitted `room.revision.v1` payload.",
         "required": [
           "schema_version",
           "tick_duration_ms",
@@ -4534,7 +4623,6 @@
       },
       "CreateScenarioRoomRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:create-scenario-room-request",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -4548,7 +4636,6 @@
       },
       "DeriveScenarioRoomRevisionRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:derive-scenario-room-revision-request",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "description": "A complete new descriptor derived from `parent_revision`; there is no automatic merge.",
@@ -4569,10 +4656,9 @@
       },
       "ScenarioRoomDescriptor": {
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "The admitted ADR-041 descriptor, the payload of one `room.revision.v1` Event.",
+        "description": "The admitted ADR-041 descriptor: the payload of one `room.revision.v1` Event, encoded as the RFC 8785 bytes of this object. `plugin_composition_hash`, `rule_set_hash` and `descriptor_hash` are defined by the Redmine #303 amendment of ADR-041; a client recomputes `rule_set_hash` and `descriptor_hash` from the members.",
         "required": [
           "room_id",
           "revision",
@@ -4754,9 +4840,8 @@
       },
       "ScenarioRoomRevision": {
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
-        "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. An identical descriptor is deduplicated to the existing revision.",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID), in lower-case hex.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -6602,7 +6687,6 @@
       },
       "ConsentRevocationRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:consent-revocation-request",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -6616,9 +6700,8 @@
       },
       "ConsentRevocation": {
         "$id": "urn:pigloros:gateway:v1:schema:consent-revocation",
-        "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "A recorded consent revocation. `generation` is the authority generation from which it is effective; it stops future protected work and is distinct from erasure.",
+        "description": "A recorded consent revocation (#309). `id` is the `EventId` of its `consent.revoked.v1` Event and `generation` the revocation's ADR-039 fence: its sequence on the Principal's consent Timeline, from which it is effective. It is the consent fence, not the `Session` authority generation (D8): a `Session` read at or after the revocation reports `generation` greater than or equal to it. It stops future protected work the consent governs and is distinct from erasure. `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayConsentRevocation.v1` || 0x00 || the 16 bytes of the 128-bit big-endian value of the Principal's ID (its `Session` `id`) decoded as a Crockford base32 ULID || `generation` as a big-endian u64 || the ASCII `mode_profile.mode_profile_digest` || `mode_profile.binding_epoch` as a big-endian u64), and its origin is `host-derived`. `mode_profile` is the binding the revocation's commit was produced under, so every answer about one revocation is the same.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -6987,7 +7070,7 @@
       "scope": "per-input",
       "origin": "adr",
       "source": "ADR-041 section 1",
-      "surface": "draft",
+      "surface": "served",
       "direction": "request",
       "enforced_by": {
         "runtime": {
@@ -7002,7 +7085,7 @@
       "scope": "structural",
       "origin": "adr",
       "source": "ADR-041 section 1; pos-runtime MAX_REQUIRED_PLUGINS_V1",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -7018,7 +7101,7 @@
       "scope": "structural",
       "origin": "adr",
       "source": "ADR-041 section 1",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -7033,7 +7116,7 @@
       "scope": "structural",
       "origin": "new",
       "source": "chosen by #1313",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -7048,7 +7131,7 @@
       "scope": "structural",
       "origin": "new",
       "source": "chosen by #1313",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -7063,7 +7146,7 @@
       "scope": "operation-wide",
       "origin": "code",
       "source": "pos-runtime counterfactual MAX_SUFFIX_TICK_SPAN",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [

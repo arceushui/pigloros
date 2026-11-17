@@ -1,10 +1,11 @@
 {
-  "name": "draft-scenario-room-caller-correlation-id",
+  "name": "scenario-room-caller-correlation-id",
   "operation_id": "createScenarioRoom",
   "request": {
     "headers": {
       "Idempotency-Key": "client-1-1",
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
     },
     "body": {
       "descriptor": {
@@ -16,17 +17,13 @@
         "intervention_policy": 1,
         "plugins": [
           {
-            "plugin_id": "world",
-            "version": "1.0.0"
-          },
-          {
-            "plugin_id": "society",
-            "version": "1.0.0"
+            "plugin_id": "gateway-world-actions",
+            "version": "0.1.0"
           }
         ],
         "rules": [
           {
-            "rule_id": "society.nudge.scale",
+            "rule_id": "gateway-world-actions.nudge.scale",
             "value_micro": 250000
           }
         ],

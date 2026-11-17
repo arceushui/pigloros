@@ -601,6 +601,68 @@ impl GatewaySessionModeV1 {
     }
 }
 
+/// The GMP1 binding one commit was produced under (ADR-134 §5): the
+/// profile and binding epoch its commit evidence records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GatewayProducedUnderV1 {
+    id: GatewayModeProfileIdV1,
+    digest_hex: String,
+    binding_epoch: NonZeroU64,
+}
+
+impl GatewayProducedUnderV1 {
+    /// The `ModeProfile` disclosure of the binding.
+    pub(crate) fn disclosure(&self) -> serde_json::Value {
+        serde_json::json!({
+            "profile_kind": "gateway-mode-v1",
+            "mode_profile_id": self.id.as_str(),
+            "mode": self.id.mode(),
+            "mode_profile_digest": self.digest_hex,
+            "binding_epoch": self.binding_epoch.get(),
+        })
+    }
+
+    /// The disclosed digest and binding epoch a provenance digest binds.
+    pub(crate) const fn provenance_fields(&self) -> (&str, u64) {
+        (self.digest_hex.as_str(), self.binding_epoch.get())
+    }
+}
+
+/// The binding the commit of segment-local sequence `seq` of `timeline` was
+/// produced under, or with no commit the binding the next commit would be
+/// produced under: the epoch its commit evidence records (the store's
+/// current epoch) and that epoch's history entry, or `None` when the store
+/// records no such epoch or the epoch names no compiled profile.
+pub(crate) fn produced_under_v1(
+    port: &dyn pos_core::GatewayModeBindingPortV1,
+    commit: Option<(pos_core::TimelineId, pos_core::Seq)>,
+) -> Option<GatewayProducedUnderV1> {
+    let epoch = match commit {
+        Some((timeline, seq)) => port.load_commit_epoch(timeline, seq).ok().flatten(),
+        None => port
+            .load_mode_binding()
+            .ok()
+            .flatten()
+            .map(|record| record.binding_epoch()),
+    };
+    epoch.and_then(|epoch| {
+        port.load_mode_binding_history()
+            .ok()
+            .and_then(|history| {
+                history
+                    .into_iter()
+                    .find(|entry| entry.record().binding_epoch() == epoch)
+            })
+            .and_then(|entry| compiled_profile_of(entry.record().profile()).ok())
+            .and_then(|(id, _)| installed_gateway_mode_profile_v1(id).ok())
+            .map(|profile| GatewayProducedUnderV1 {
+                id: profile.id,
+                digest_hex: profile.digest.to_hex(),
+                binding_epoch: epoch,
+            })
+    })
+}
+
 /// The per-Principal `network` posture: `absent` in a mode without network,
 /// else `capability-granted` only for a holder of the network capability.
 const fn network_posture(network_allowed: bool, network_capability: bool) -> &'static str {
@@ -733,6 +795,16 @@ impl GatewayModeBindingV1 {
     /// The signal a stale write fires.
     pub(crate) fn stale_signal(&self) -> Arc<GatewayModeStaleSignalV1> {
         Arc::clone(&self.stale)
+    }
+
+    /// The `ModeProfile` of a commit produced under this binding.
+    #[cfg(test)]
+    pub(crate) fn produced_under(&self) -> GatewayProducedUnderV1 {
+        GatewayProducedUnderV1 {
+            id: self.profile.id,
+            digest_hex: self.profile.digest.to_hex(),
+            binding_epoch: self.binding_epoch,
+        }
     }
 
     /// The current execution mode `Session` discloses.
