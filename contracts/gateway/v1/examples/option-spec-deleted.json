@@ -1,0 +1,27 @@
+{
+  "name": "option-spec-deleted",
+  "operation_id": "getOptionSpecRevision",
+  "request": {
+    "path": {
+      "option_spec_id": "01JC0GATEWAYW9QPT10N00001A",
+      "revision": 1
+    },
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 410,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:deleted",
+      "title": "Deleted",
+      "status": 410,
+      "detail": "the subject erased this revision",
+      "instance": "/v1/option-specs/{option_spec_id}/revisions/{revision}",
+      "code": "deleted",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}
