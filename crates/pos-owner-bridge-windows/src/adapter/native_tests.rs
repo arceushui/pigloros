@@ -424,6 +424,7 @@ impl crate::Native {
 
     pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
         let _port = Self::fixed_port_fixture();
+        trace::lifecycle_stage("port-acquired");
         let root = FixtureRoot::new()?;
         let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
@@ -439,16 +440,25 @@ impl crate::Native {
         let events = Rc::new(Events::default());
         let mut native = session::Session::new(&factory, Rc::clone(&events))?;
         empty_session(native.as_mut());
+        trace::lifecycle_stage("environment");
         lifecycle_environment(&mut native, &factory, &events, &runtime, &folder)?;
+        trace::lifecycle_stage("controller");
         let identity = lifecycle_controller(&mut native, &factory, &events, &runtime)?;
+        trace::lifecycle_stage("document");
         lifecycle_document(&mut native, &factory, &events, &mut listener)?;
+        trace::lifecycle_stage("retirement");
         lifecycle_retirement(&mut native, &factory, &events, identity.browser_pid)?;
         empty_session(native.as_mut());
+        trace::lifecycle_stage("session-drop");
         drop(native);
+        trace::lifecycle_stage("factory-stop");
         factory.stop()?;
+        trace::lifecycle_stage("listener-shutdown");
         listener.shutdown();
         drop(listener);
+        trace::lifecycle_stage("readiness");
         readiness::run(&runtime_path, &root.0);
+        trace::lifecycle_stage("readiness-returned");
         root.remove()?;
         Ok(())
     }
@@ -638,7 +648,9 @@ fn lifecycle_controller(
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     native.fit_controller()?;
     native.show_window()?;
+    trace::lifecycle_stage("controller.focus");
     native.focus_controller()?;
+    trace::lifecycle_stage("controller.focused");
     Ok(identity)
 }
 
@@ -651,14 +663,18 @@ fn lifecycle_document(
 ) -> TestResult {
     listener.begin_navigation();
     events.begin();
+    trace::lifecycle_stage("document.navigate");
     native.navigate_owner()?;
+    trace::lifecycle_stage("document.await-load");
     pump_until(factory, "owner document completion", || {
         events.loaded().is_some()
     })?;
     assert!(!events.invalid());
     assert_eq!(listener.served().count, 1);
     assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
+    trace::lifecycle_stage("document.unacknowledged-buffers");
     exercise_unacknowledged_buffers(factory, session::Session::as_mut(native))?;
+    trace::lifecycle_stage("document.packaged-get");
     exercise_packaged_get_receipt(factory, session::Session::as_mut(native))?;
     Ok(())
 }
@@ -672,15 +688,19 @@ fn lifecycle_retirement(
 ) -> TestResult {
     native.unsubscribe_view()?;
     native.unsubscribe_view()?;
+    trace::lifecycle_stage("retirement.close-controller");
     native.close_controller()?;
     native.close_controller()?;
+    trace::lifecycle_stage("retirement.await-browser-exit");
     pump_until(factory, "browser exit", || {
         events.exited() == Some(browser_pid)
     })?;
     assert!(native.drop_environment().is_err()); // Exit subscription still owned.
     native.unsubscribe_exit()?;
     native.unsubscribe_exit()?;
+    trace::lifecycle_stage("retirement.drop-environment");
     native.drop_environment()?;
+    trace::lifecycle_stage("retirement.destroy-window");
     native.destroy_window()?;
     native.destroy_window()?;
     Ok(())
