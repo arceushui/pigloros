@@ -244,6 +244,18 @@ enum SelectorMode {
 }
 
 impl SelectorMode {
+    /// Serve this mode beside `administrator`: both listeners while
+    /// admitting, and only the pending transaction while a SIR1 is pending.
+    fn serve(self, administrator: OwnedAdministratorListener) -> Result<(), SelectorBoundaryError> {
+        match self {
+            Self::Admitting {
+                composition,
+                evaluator,
+            } => serve_admitting(administrator, composition, evaluator),
+            Self::RecoveryPending(recovery) => recovery.serve(&administrator),
+        }
+    }
+
     fn set_nonblocking(&self) -> Result<(), SelectorBoundaryError> {
         match self {
             Self::Admitting { evaluator, .. } => evaluator.set_nonblocking(),
@@ -534,58 +546,56 @@ impl RootSelectorRuntime {
     /// Returns after closing admission when a fixed listener loses its
     /// retained pathname identity or its accept loop encounters a local error.
     pub fn serve(self) -> Result<(), SelectorBoundaryError> {
-        let Self {
-            administrator,
-            mode,
-        } = self;
-        let (composition, evaluator) = match mode {
-            SelectorMode::Admitting {
-                composition,
-                evaluator,
-            } => (composition, evaluator),
-            SelectorMode::RecoveryPending(recovery) => return recovery.serve(&administrator),
-        };
-        let composition = Arc::new(composition);
-        let administrator = Arc::new(administrator);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let (completed, completion) = std::sync::mpsc::channel();
-        thread::scope(|scope| {
-            let admin_composition = Arc::clone(&composition);
-            let admin_listener = Arc::clone(&administrator);
-            let admin_stopped = Arc::clone(&stopped);
-            let admin_completed = completed.clone();
-            let admin = scope.spawn(move || {
-                let result =
-                    serve_administrator(&admin_listener, &admin_composition, &admin_stopped);
-                let _send_result = admin_completed.send(result);
-                result
-            });
-
-            let evaluator_composition = Arc::clone(&composition);
-            let evaluator_administrator = Arc::clone(&administrator);
-            let evaluator_stopped = Arc::clone(&stopped);
-            let evaluator_completed = completed.clone();
-            let evaluator_thread = scope.spawn(move || {
-                let served = serve_evaluator(
-                    &evaluator,
-                    &evaluator_administrator,
-                    &evaluator_composition,
-                    &evaluator_stopped,
-                );
-                let _send_result = evaluator_completed.send(served.listener);
-                served
-            });
-            drop(completed);
-
-            let first = completion.recv().map_err(selector_unavailable)?;
-            composition.service.admission.close()?;
-            stopped.store(true, Ordering::Release);
-            let admin = admin.join().map_err(selector_unavailable)?;
-            let evaluator = evaluator_thread.join().map_err(selector_unavailable)?;
-            let workers = evaluator.workers.join_all();
-            first.and(admin).and(evaluator.listener).and(workers)
-        })
+        self.mode.serve(self.administrator)
     }
+}
+
+/// Serve the administrative and evaluator listeners of an admitting
+/// selector until a listener invariant fails, then close admission.
+fn serve_admitting(
+    administrator: OwnedAdministratorListener,
+    composition: RootSelectorComposition,
+    evaluator: OwnedSelectorListener,
+) -> Result<(), SelectorBoundaryError> {
+    let composition = Arc::new(composition);
+    let administrator = Arc::new(administrator);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let (completed, completion) = std::sync::mpsc::channel();
+    thread::scope(|scope| {
+        let admin_composition = Arc::clone(&composition);
+        let admin_listener = Arc::clone(&administrator);
+        let admin_stopped = Arc::clone(&stopped);
+        let admin_completed = completed.clone();
+        let admin = scope.spawn(move || {
+            let result = serve_administrator(&admin_listener, &admin_composition, &admin_stopped);
+            let _send_result = admin_completed.send(result);
+            result
+        });
+
+        let evaluator_composition = Arc::clone(&composition);
+        let evaluator_administrator = Arc::clone(&administrator);
+        let evaluator_stopped = Arc::clone(&stopped);
+        let evaluator_completed = completed.clone();
+        let evaluator_thread = scope.spawn(move || {
+            let served = serve_evaluator(
+                &evaluator,
+                &evaluator_administrator,
+                &evaluator_composition,
+                &evaluator_stopped,
+            );
+            let _send_result = evaluator_completed.send(served.listener);
+            served
+        });
+        drop(completed);
+
+        let first = completion.recv().map_err(selector_unavailable)?;
+        composition.service.admission.close()?;
+        stopped.store(true, Ordering::Release);
+        let admin = admin.join().map_err(selector_unavailable)?;
+        let evaluator = evaluator_thread.join().map_err(selector_unavailable)?;
+        let workers = evaluator.workers.join_all();
+        first.and(admin).and(evaluator.listener).and(workers)
+    })
 }
 
 fn serve_administrator(

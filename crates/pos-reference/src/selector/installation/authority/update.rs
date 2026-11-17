@@ -31,6 +31,13 @@ fn map_io_to_boundary_failure<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::Io
 }
 
+/// Whether the monotonic clock has not yet reached `expires_at`.
+fn unexpired(expires_at: Instant) -> bool {
+    !expires_at
+        .saturating_duration_since(Instant::now())
+        .is_zero()
+}
+
 /// SICN1 `challenge-mode`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChallengeMode {
@@ -87,7 +94,7 @@ impl InstallationChallenge {
     /// # Errors
     /// Returns [`SelectorBoundaryError::ArtifactInvalid`] after expiry.
     pub(crate) fn require_live(&self) -> Result<(), SelectorBoundaryError> {
-        (Instant::now() < self.expires_at)
+        unexpired(self.expires_at)
             .then_some(())
             .ok_or(SelectorBoundaryError::ArtifactInvalid)
     }
@@ -180,7 +187,7 @@ impl AuthenticatedSelectorBootstrap {
             })
             .and_then(|(decoded, successor)| {
                 if successor.revocation_update.selector_nonce == decoded.nonce
-                    && Instant::now() < decoded.expires_at
+                    && unexpired(decoded.expires_at)
                 {
                     Ok(ValidatedInstallationUpdate {
                         previous_manifest: self.installed.manifest_bytes().to_vec(),

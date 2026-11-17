@@ -296,13 +296,16 @@ mod tests {
 
     #[test]
     fn an_embedded_record_holds_one_byte_to_exactly_16_mib() {
-        for length in [1, EMBEDDED_RECORD_LIMIT] {
+        // The ADR-069 §4.1 bound itself, independently of the constant.
+        const SIXTEEN_MIB: usize = 16 << 20;
+        assert_eq!(EMBEDDED_RECORD_LIMIT, SIXTEEN_MIB);
+        for length in [1, SIXTEEN_MIB] {
             assert_eq!(
                 record_bytes(&Value::Bytes(vec![7; length])).map(|bytes| bytes.len()),
                 Ok(length)
             );
         }
-        for length in [0, EMBEDDED_RECORD_LIMIT + 1] {
+        for length in [0, SIXTEEN_MIB + 1] {
             assert_eq!(
                 record_bytes(&Value::Bytes(vec![7; length])),
                 Err(ProtocolError::InvalidEncoding)
@@ -316,19 +319,22 @@ mod tests {
 
     #[test]
     fn the_sir1_file_is_read_up_to_exactly_48_mib() -> TestResult {
+        // The ADR-069 §4.1 bound itself, independently of the constant.
+        const FORTY_EIGHT_MIB: usize = 48 << 20;
         let directory = tempfile::tempdir()?;
         let root = File::open(directory.path())?;
         let owner = root.metadata()?.uid();
         let path = directory.path().join(RECOVERY_NAME);
-        for length in [RECOVERY_LIMIT, RECOVERY_LIMIT + 1] {
+        assert_eq!(RECOVERY_LIMIT, FORTY_EIGHT_MIB);
+        for length in [FORTY_EIGHT_MIB, FORTY_EIGHT_MIB + 1] {
             if path.exists() {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
             }
             fs::write(&path, vec![0; length])?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
             let read = read_recovery_record(&root, owner);
-            if length == RECOVERY_LIMIT {
-                assert_eq!(read?.len(), RECOVERY_LIMIT);
+            if length == FORTY_EIGHT_MIB {
+                assert_eq!(read?.len(), FORTY_EIGHT_MIB);
             } else {
                 assert_eq!(read, Err(SelectorBoundaryError::ArtifactInvalid));
             }
