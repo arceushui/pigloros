@@ -293,7 +293,7 @@ jq -e '
     {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing"},
     {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile"},
     {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded"},
-    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission"},
+    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-air-gapped-v1", "live-local-v1"], expected_outcome: "NonDeterministicAdmission"},
     {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded"},
     {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure"}
   ]) and

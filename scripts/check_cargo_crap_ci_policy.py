@@ -87,7 +87,12 @@ TEST_ONLY_EXCLUSIONS = (
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
+    "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
+    # The Windows owner bridge's #[cfg(test)] native harness; its fixtures
+    # (for example Fixture::consuming_step) see run-dependent native coverage.
+    "src/adapter/native_tests.rs",
+    "src/adapter/native_tests/**",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (
