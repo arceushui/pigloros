@@ -19,7 +19,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
 };
 
-use super::{trusted_peer, Admission, Responder};
+use super::{trusted_peer, Admission, Deadlined, Responder};
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::tests::{
     bind_as_provider, encode, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
@@ -298,6 +298,10 @@ fn refuses_by_precedence(key: &VerifyingKey, authority: Authority) -> TestResult
     // A record whose magic names no operation of this socket.
     let foreign = request("SPX1", 1, Vec::new(), false)?;
     assert_invalid(&exchange(&[&foreign])?, key, None, Code::InvalidEncoding)?;
+    // A describe record with a trailing byte names its operation in its
+    // magic but is no canonical record: step 1.
+    let trailing = [describe([1; 16], authority)?, vec![0]].concat();
+    assert_invalid(&exchange(&[&trailing])?, key, None, Code::InvalidEncoding)?;
     // Steps 2, 3 and 5.
     let version = request(
         "SDQ1",
@@ -446,17 +450,25 @@ fn refuses_execute_while_starting(key: &VerifyingKey, staged: &StagedInstallatio
     // another version, and EVR1 without its SPX1.
     let trailing = [evaluation, &[0]].concat();
     assert_invalid(&exchange(&[&trailing])?, key, None, Code::InvalidEncoding)?;
-    let mut fields: Value = ciborium::from_reader(evaluation)?;
-    if let Value::Array(values) = &mut fields {
-        values[1] = Value::Integer(2.into());
+    // EVR1 of another version, with a zero request ID, and with another
+    // self-digest.
+    for (field, value, code) in [
+        (1, Value::Integer(2.into()), Code::UnsupportedVersion),
+        (2, Value::Bytes(vec![0; 16]), Code::FieldOutOfBounds),
+        (14, Value::Bytes(vec![0x77; 32]), Code::DigestMismatch),
+    ] {
+        let mut fields: Value = ciborium::from_reader(evaluation)?;
+        if let Value::Array(values) = &mut fields {
+            values[field] = value;
+        }
+        let changed = encode(&fields)?;
+        assert_invalid(
+            &exchange(&[&changed, staged.request()])?,
+            key,
+            Some(1),
+            code,
+        )?;
     }
-    let old_evaluation = encode(&fields)?;
-    assert_invalid(
-        &exchange(&[&old_evaluation, staged.request()])?,
-        key,
-        Some(1),
-        Code::UnsupportedVersion,
-    )?;
     let mut record: Value = ciborium::from_reader(staged.request())?;
     if let Value::Array(values) = &mut record {
         if let Value::Array(unsigned) = &mut values[0] {
@@ -714,4 +726,18 @@ fn drops_an_untrusted_peer(
     peer.write_all(&sent)?;
     untrusted.answer(&server, Admission::Answered);
     assert_dropped_unread(&server, &mut peer, &sent)
+}
+
+#[test]
+fn a_deadlined_stream_has_nothing_to_flush() -> TestResult {
+    // A Unix stream has no buffered output: flushing writes nothing.
+    let (local, mut peer) = UnixStream::pair()?;
+    Deadlined::new(&local, Duration::from_secs(1)).flush()?;
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
+    Ok(())
 }
