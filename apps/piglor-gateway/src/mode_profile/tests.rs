@@ -341,7 +341,7 @@ fn record_validation_names_each_broken_rule() {
             .validate()
             .is_err_and(|error| error.contains("reviewed meaning")));
     }
-    let mut selection = air_gapped.clone();
+    let mut selection = air_gapped;
     selection.registration_profile_id = "live-local-v1".to_owned();
     assert!(selection
         .validate()
