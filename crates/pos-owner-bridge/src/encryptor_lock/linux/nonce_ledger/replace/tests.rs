@@ -41,12 +41,17 @@ mod cases {
     }
 
     fn image(counter: u64) -> TestResult<Vec<u8>> {
-        use pos_crypto::subject_nonce_ledger::{SubjectNonceLedgerRowV1, SubjectNonceLedgerV1};
+        use pos_crypto::subject_nonce_ledger::{
+            SubjectNonceLedgerRowV1, SubjectNonceLedgerV1, SubjectStoreFileIdV1,
+        };
         Ok(SubjectNonceLedgerV1::new([SubjectNonceLedgerRowV1 {
             owner_id: "subject:00000000000000000000000000000001".to_owned(),
             epoch: 1,
             root_material_digest: [9; 32],
-            store_file_id: [7, 11],
+            store_file_id: SubjectStoreFileIdV1::Linux {
+                device: 7,
+                inode: 11,
+            },
             data_next: counter,
             bootstrap_next: 3,
         }])?
