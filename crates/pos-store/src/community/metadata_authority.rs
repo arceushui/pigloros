@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+use super::attestation::evaluation_snapshot;
 use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1,
 };
@@ -63,7 +64,8 @@ impl MetadataActionV1 {
 
 /// Installed authority inputs, fixed at the trusted composition root.
 pub struct CommunityMetadataAuthorityInputV1 {
-    /// Trusted registry snapshot from the host's authoritative registry.
+    /// Installed registry snapshot: the registry digest and the attested
+    /// as-issued capability bindings of the metadata grant chain.
     pub registry: AuthorityRegistrySnapshotV1,
     /// Authenticated installed owner principal.
     pub principal: AuthenticatedPrincipalResultV1,
@@ -107,6 +109,13 @@ impl CommunityMetadataAuthorityV1 {
     /// the chain the domain has just loaded, and return only an active
     /// decision.
     ///
+    /// The evaluator snapshot is derived for this request (ADR-129 R6.2(8)):
+    /// its authentication binding is the installed owner's, and its
+    /// capability bindings are the loaded chain's current bindings, admitted
+    /// only after every grant's as-issued binding is found in the installed
+    /// registry snapshot. A revocation of another grant on the same authority
+    /// Timeline therefore leaves an untouched metadata grant usable.
+    ///
     /// The request asserts `revocation_state_current: true`. That is
     /// legitimate here: `persisted` and its revocation epoch were read fresh
     /// from the store, with revocation fences applied, under the domain's
@@ -130,8 +139,16 @@ impl CommunityMetadataAuthorityV1 {
             .sample()
             .ok()
             .and_then(|at_time| self.request(persisted, store_incarnation, action, at_time))
-            .map(|request| {
-                AuthorityEvaluatorV1::authorize(&request, persisted.chain(), &self.input.registry)
+            .and_then(|request| {
+                evaluation_snapshot(
+                    &self.input.registry,
+                    self.input.registry.registry_digest(),
+                    self.input.principal.registry_binding_digest(),
+                    persisted,
+                )
+                .map(|snapshot| {
+                    AuthorityEvaluatorV1::authorize(&request, persisted.chain(), &snapshot)
+                })
             })
             .filter(AuthorizationDecisionV1::is_allowed)
             .ok_or(Error::EvidenceUnavailable)

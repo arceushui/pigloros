@@ -7,13 +7,14 @@ use pos_reference::sandbox_provider_protocol::{
     KernelObservationEvidence, LauncherReady, LauncherReadyFields, NamespaceIdentity,
     ReceiptAuthority, RequestedConfigurationEvidence, SandboxArchitecture, SandboxExecutionMode,
     SandboxLimit, SandboxProviderProtocolError as ProtocolError, SandboxProviderReceipt,
-    TerminalCode, TerminationEvidence,
+    SandboxProviderReceiptFields, TerminalCode, TerminationEvidence,
 };
 
 use super::observed::provider_namespaces;
 use super::oracle::{
     edit, filled, integer, self_digest, set, text, unhex, with, wrapped_digest, TestResult,
 };
+use super::response::{runtime_key, sign};
 use super::terminated::at_progress;
 use super::vectors::{
     KOE1_A, KOE1_B, RQE1_A, RQE1_B, TME1_A, TME1_B, TME1_C, TME1_D, TME1_E, TME1_F,
@@ -53,7 +54,7 @@ fn limits(output: u64, work: u64, live: u64, incomplete: u64) -> Vec<SandboxLimi
 }
 
 /// The decoded RQE1, KOE1 and TME1, and the TME1 they succeed.
-type Records = (
+pub(super) type Records = (
     RequestedConfigurationEvidence,
     KernelObservationEvidence,
     TerminationEvidence,
@@ -62,14 +63,14 @@ type Records = (
 
 /// The ELM1 fields besides its limits.
 const BROKER_CAPS: [u8; 32] = [0x61; 32];
-const APT1: [u8; 32] = [0x62; 32];
-const LPS1: [u8; 32] = [0x63; 32];
+pub(super) const APT1: [u8; 32] = [0x62; 32];
+pub(super) const LPS1: [u8; 32] = [0x63; 32];
 const PROFILE: [u8; 32] = [0x64; 32];
 const FIXTURE: [u8; 32] = [0x65; 32];
-const RUNTIME_KEY: &str = "runtime";
+pub(super) const RUNTIME_KEY: &str = "runtime";
 
 /// The ELM1 self-digest of `limits`, by the oracle.
-fn elm1_digest(limits: &[SandboxLimit]) -> TestResult<[u8; 32]> {
+pub(super) fn elm1_digest(limits: &[SandboxLimit]) -> TestResult<[u8; 32]> {
     let limits = limits
         .iter()
         .map(|limit| {
@@ -97,18 +98,18 @@ fn elm1_digest(limits: &[SandboxLimit]) -> TestResult<[u8; 32]> {
 
 /// One attempt's records and what a verifier holds, with the records'
 /// digest bindings kept intact as they are edited.
-struct Fixture {
+pub(super) struct Fixture {
     rqe1: Vec<u8>,
     koe1: Vec<u8>,
     tme1: Vec<u8>,
     previous: Option<Vec<u8>>,
-    ready: Option<LauncherReady>,
-    limits: Vec<SandboxLimit>,
+    pub(super) ready: Option<LauncherReady>,
+    pub(super) limits: Vec<SandboxLimit>,
     broker_caps: [u8; 32],
     mode: SandboxExecutionMode,
     architecture: SandboxArchitecture,
     provider: [NamespaceIdentity; 6],
-    grant: ([u8; 16], [u8; 32]),
+    pub(super) grant: ([u8; 16], [u8; 32]),
     elm1: Option<[u8; 32]>,
 }
 
@@ -135,12 +136,12 @@ impl Fixture {
         Ok(fixture)
     }
 
-    fn released(vector: &str) -> TestResult<Self> {
+    pub(super) fn released(vector: &str) -> TestResult<Self> {
         Self::observed(unhex(vector)?)
     }
 
     /// RQE1-B, KOE1-B and a progress-0 TME1: nothing was started.
-    fn not_started() -> TestResult<Self> {
+    pub(super) fn not_started() -> TestResult<Self> {
         Self::unstarted(at_progress(0)?)
     }
 
@@ -175,22 +176,22 @@ impl Fixture {
         self.rebind().map(|()| self)
     }
 
-    fn rqe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
+    pub(super) fn rqe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
         self.rqe1 = with(&self.rqe1, path, value)?;
         self.rebind().map(|()| self)
     }
 
-    fn koe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
+    pub(super) fn koe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
         self.koe1 = with(&self.koe1, path, value)?;
         self.rebind().map(|()| self)
     }
 
-    fn tme1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
+    pub(super) fn tme1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
         self.tme1 = with(&self.tme1, path, value)?;
         Ok(self)
     }
 
-    fn records(&self) -> TestResult<Records> {
+    pub(super) fn records(&self) -> TestResult<Records> {
         Ok((
             RequestedConfigurationEvidence::from_canonical_cbor(&self.rqe1)?,
             KernelObservationEvidence::from_canonical_cbor(&self.koe1)?,
@@ -246,7 +247,7 @@ impl Fixture {
         ))
     }
 
-    fn accepts(&self) -> TestResult<AttemptEvidence> {
+    pub(super) fn accepts(&self) -> TestResult<AttemptEvidence> {
         Ok(self.verify()??)
     }
 
@@ -677,7 +678,7 @@ type ReceiptChange = (&'static str, Box<dyn Fn(&mut SandboxProviderReceipt)>);
 
 fn receipt(fixture: &Fixture) -> TestResult<SandboxProviderReceipt> {
     let (requested, observed, termination, _) = fixture.records()?;
-    Ok(SandboxProviderReceipt {
+    let record = SandboxProviderReceipt::self_digested(SandboxProviderReceiptFields {
         attempt_id: [0x11; 16],
         authority: ReceiptAuthority {
             agr1_digest: [0x22; 32],
@@ -705,9 +706,12 @@ fn receipt(fixture: &Fixture) -> TestResult<SandboxProviderReceipt> {
         termination_evidence: termination.digest(),
         sau1_digest: [0x4a; 32],
         runtime_attestation_key_id: "runtime".to_owned(),
-        receipt_digest: [0x4b; 32],
-        signature: [0x4c; 64],
-    })
+    })?;
+    let key = runtime_key();
+    Ok(SandboxProviderReceipt::new(
+        sign(record, &key)?,
+        &key.verifying_key(),
+    )?)
 }
 
 #[test]
