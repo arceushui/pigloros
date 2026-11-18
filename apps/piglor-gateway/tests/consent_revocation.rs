@@ -36,7 +36,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
     .test_ok()?;
     let first_gateway = Gateway::unprotected_for_harness(first_host)?;
     let timeline = first_gateway
-        .create_timeline("consent-recovery")
+        .create_timeline("consent-recovery", None)
         .await
         .test_ok()?;
     let subject_id = EntityId::new();
@@ -111,7 +111,7 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
     .test_ok()?;
     let gateway = Gateway::unprotected_for_harness(host)?;
     let timeline = gateway
-        .create_timeline("geo-revocation-fence")
+        .create_timeline("geo-revocation-fence", None)
         .await
         .test_ok()?;
     let subject = EntityId::new();

@@ -33,6 +33,7 @@ use crate::{
         ForkAdmissionSubmissionErrorV1, ForkAdmissionSubmissionV1, ForkAdmissionSubmitterV1,
         ForkClassifierRegistrationV1, ForkDeliveryMarkV1,
     },
+    host_timelines::HostTimelinesV1,
     local_fork_authentication::{
         LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1,
         ResolvedLocalAuthenticationV1,
@@ -175,17 +176,22 @@ pub(super) struct LocalForkAdmissionCoordinatorV1 {
     journal: Box<dyn LocalForkDeliveryJournalV1>,
     /// The serve loop's stale-binding signal (ADR-134 §8).
     stale: std::sync::Arc<crate::mode_profile::GatewayModeStaleSignalV1>,
+    /// The host Timelines of the store, which no Fork may name as its
+    /// parent (ADR-136 §4a).
+    host_timelines: HostTimelinesV1,
 }
 
 impl LocalForkAdmissionCoordinatorV1 {
-    /// Bind the listener-thread authority to its journal submissions and
-    /// to the serve loop's stale-binding signal.
+    /// Bind the listener-thread authority to its journal submissions, to
+    /// the serve loop's stale-binding signal and to the store's host
+    /// Timelines.
     pub(super) const fn new(
         credentials: LocalForkAuthenticationCredentialsV1,
         host: ForkAdmissionHostRecordV1,
         session_identity: Hash,
         journal: Box<dyn LocalForkDeliveryJournalV1>,
         stale: std::sync::Arc<crate::mode_profile::GatewayModeStaleSignalV1>,
+        host_timelines: HostTimelinesV1,
     ) -> Self {
         Self {
             credentials,
@@ -193,6 +199,7 @@ impl LocalForkAdmissionCoordinatorV1 {
             session_identity,
             journal,
             stale,
+            host_timelines,
         }
     }
 
@@ -287,6 +294,16 @@ impl LocalForkAdmissionCoordinatorV1 {
             Ok(command) => command,
             Err(error) => return self.cancel_pending(claim, authentication_code(error)),
         };
+        // A host Timeline is no Fork parent (ADR-136 §4a, owner decision
+        // D10 on #1413): the request is refused before any FAC1 runs, with
+        // the code and the released claim of a parent the store does not
+        // hold.
+        if request
+            .fork_parent()
+            .is_some_and(|parent| self.host_timelines.contains(parent))
+        {
+            return self.cancel_pending(claim, LocalForkAdmissionCodeV1::ParentChanged);
+        }
         match execute_disposition(self.journal.execute(claim, &command)) {
             ExecuteDisposition::Release(result) => self.release_registered(claim, &result, true),
             ExecuteDisposition::Answer(code) => PreparedDeliveryV1::plain(reject(code)),
@@ -947,6 +964,7 @@ mod tests {
                 session.identity(),
                 Box::new(journal),
                 Arc::default(),
+                HostTimelinesV1::new(Some(test_erasure_host())),
             ),
             store,
             session,
@@ -1877,6 +1895,79 @@ mod tests {
             for _ in 0..2 {
                 assert_eq!(response_code(&fixture.submit(request.clone(), 44)?), 6);
             }
+        }
+        Ok(())
+    }
+
+    /// The Erasure Host Timeline of the coordinator fixtures.
+    const fn test_erasure_host() -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([0xe1; 16]))
+    }
+
+    /// ADR-136 §4a and owner decision D10 on #1413: a Fork naming a host
+    /// Timeline as its parent is refused before any FAC1 runs, with the
+    /// response of a parent the store does not hold, and its claim is
+    /// released. The host Timelines exist in the store here, so only the
+    /// host-Timeline check refuses them; an ordinary parent with the same
+    /// descriptor reaches the FAC1 and is held for its classifier (code 6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_refuses_a_host_timeline_as_fork_parent() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        assert_eq!(response_code(&fixture.submit(bind_request(80), 80)?), 0);
+        let unknown = fixture.submit(
+            fork_request(81, TimelineId::new(), 40, 82, "unknown-parent-child"),
+            83,
+        )?;
+        assert_eq!(response_code(&unknown), 4);
+        let ordinary = lock(&fixture.store).create_timeline("ordinary Fork parent")?;
+        let held = fixture.submit(
+            fork_request(84, ordinary.id(), 40, 85, "ordinary-child"),
+            86,
+        )?;
+        assert_eq!(response_code(&held), 6);
+        for (operation, parent) in [
+            (
+                87,
+                crate::local_principal::local_principal_consent_timeline(),
+            ),
+            (
+                88,
+                crate::local_principal::local_principal_authority_timeline(),
+            ),
+            (89, test_erasure_host()),
+        ] {
+            lock(&fixture.store).create_timeline_with_meta(pos_core::TimelineMeta {
+                id: parent,
+                mode: pos_core::TimelineMode::Live,
+                name: Some("host Timeline".to_owned()),
+                owner: None,
+                fork_point: None,
+            })?;
+            let request = completed(
+                &fixture.coordinator,
+                fork_request(operation, parent, 40, operation, "host-child"),
+                operation,
+            )?;
+            let tuple = delivery_tuple(&request)
+                .map_err(|()| io::Error::other("fork request must produce a tuple"))?;
+            let refused = fixture.coordinator.handle(request);
+            assert_eq!(
+                refused.response.to_canonical_cbor(),
+                unknown.response.to_canonical_cbor()
+            );
+            assert!(refused.claim.is_none());
+            assert!(matches!(
+                lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
+                ForkDeliveryClaimOutcomeV1::Owner(_)
+            ));
+            assert!(lock(&fixture.store)
+                .list_timelines()?
+                .iter()
+                .all(|timeline| timeline
+                    .meta
+                    .fork_point
+                    .is_none_or(|(fork_parent, _)| fork_parent != parent)));
         }
         Ok(())
     }

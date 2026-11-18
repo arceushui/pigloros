@@ -231,10 +231,37 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
         Fut: Future<Output = Result<T, GatewayError>> + Send + 'static,
         T: Send + 'static,
     {
+        self.run_as_actor(gateway, target_timeline, move |gateway, _| {
+            operation(gateway)
+        })
+        .await
+    }
+
+    /// [`Self::run`], handing `operation` the actor the decision admitted:
+    /// `None` on a Gateway composition that protects nothing. A mutation
+    /// that records its actor, such as the owner of a new root Timeline
+    /// (ADR-136 §1), takes it from here, never from the request.
+    ///
+    /// # Errors
+    /// Returns the failures of [`Self::run`].
+    pub async fn run_as_actor<T, F, Fut>(
+        self,
+        gateway: &Gateway,
+        target_timeline: Option<TimelineId>,
+        operation: F,
+    ) -> Result<T, GatewayError>
+    where
+        F: FnOnce(Gateway, Option<EntityId>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, GatewayError>> + Send + 'static,
+        T: Send + 'static,
+    {
         let permit = self.authorize(gateway, target_timeline).await?;
+        let actor = permit
+            .decision()
+            .map(GatewayAuthorizationDecision::actor_entity_id);
         let gateway = gateway.clone();
         tokio::spawn(async move {
-            let output = operation(gateway).await;
+            let output = operation(gateway, actor).await;
             drop(permit);
             output
         })
