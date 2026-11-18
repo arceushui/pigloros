@@ -21,7 +21,7 @@ use super::{
 use crate::{
     clock::Seq,
     ids::{EntityId, TimelineId},
-    Hash, KeyDestructionRequestV1,
+    Hash, KeyDestructionRequestV1, KeyTombstoneV1,
 };
 use ciborium::value::Value;
 
@@ -215,6 +215,13 @@ pub enum LocalOwnerEffectV1 {
         /// The tombstone's deletion receipt.
         deletion_receipt: Hash,
     },
+    /// A key tombstone the registry already holds, whatever authorization
+    /// committed it (owner decision Q5 on #1430): an owner command over an
+    /// already destroyed key binds its ELO1 to this tombstone's existing
+    /// deletion receipt. The adapter commits nothing but the ELO1, and only
+    /// while the registry holds exactly this tombstone. Boxed like
+    /// [`Self::KeyTombstone`].
+    ExistingTombstone(Box<KeyTombstoneV1>),
     /// One canonical ELAD1 artifact disposition.
     ArtifactDisposition(Vec<u8>),
     /// One canonical ELCG1 cache generation.
@@ -227,71 +234,118 @@ pub enum LocalOwnerEffectV1 {
     ReplicaPurge(Vec<u8>),
 }
 
-/// One owner effect and its owner-result object, validated for one adapter
-/// transaction.
+/// The fields of one ELO1 owner result except its `effect_digest`.
+///
+/// [`PreparedLocalOwnerEffectV1::new`] derives that digest from the effect
+/// the ELO1 binds, so a committed ELO1 can never name another effect
+/// (owner decision of 2026-11-18 on #1430).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalOwnerResultBindingV1 {
+    /// The ERQ1 request.
+    pub request: ErasureReferenceV1,
+    /// The attempt.
+    pub attempt: ErasureReferenceV1,
+    /// The obligation.
+    pub obligation: ErasureReferenceV1,
+    /// The destruction command.
+    pub command: ErasureReferenceV1,
+    /// The owner reference.
+    pub owner_ref: ErasureReferenceV1,
+    /// `None` for a positive result, else the negative result's closed code.
+    pub error: Option<ErasureErrorV1>,
+}
+
+/// One owner effect and the ELO1 owner result that binds it, validated for
+/// one adapter transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedLocalOwnerEffectV1 {
     key_tombstone: Option<(KeyDestructionRequestV1, Hash)>,
+    existing_tombstone: Option<KeyTombstoneV1>,
     effect_object: Option<ErasureRetainedObjectV1>,
     owner_result: ErasureRetainedObjectV1,
 }
 
 impl PreparedLocalOwnerEffectV1 {
-    /// Validate one effect and its canonical ELO1 owner result.
+    /// Validate one effect and assemble the canonical ELO1 of `binding` that
+    /// binds it.
     ///
-    /// A record effect must carry its own record tag (ELAD1, ELCG1, ELNEG1
-    /// or ELRP1) and the owner result must be an ELO1 record. An ELNEG1 and
-    /// its ELO1 must both be canonical, and the ELO1 must bind the ELNEG1 as
-    /// its `effect_digest` and carry its command, owner reference and closed
-    /// error code (ADR-136 §4a).
+    /// The ELO1 `effect_digest` is derived here, never supplied: the new or
+    /// existing key tombstone's deletion receipt, or the content address `CA(effect)` of
+    /// the ELAD1, ELCG1, ELNEG1 or ELRP1 record (ADR-136 §4a). A record
+    /// effect must carry its own record tag. An ELNEG1 must be canonical and
+    /// carry the binding's command, owner reference and closed error code.
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::InvalidEncoding`] when a record is malformed
     /// or carries another tag, [`ErasureErrorV1::ScopeInvalid`] when one is
     /// over the retained-object bound, and
-    /// [`ErasureErrorV1::ProvenanceMissing`] when an ELO1 does not bind its
-    /// ELNEG1 so.
-    pub fn new(effect: LocalOwnerEffectV1, elo1: &[u8]) -> Result<Self, ErasureErrorV1> {
-        let (key_tombstone, effect_object) = match effect {
+    /// [`ErasureErrorV1::ProvenanceMissing`] when the binding does not carry
+    /// its ELNEG1's command, owner reference and code.
+    pub fn new(
+        effect: LocalOwnerEffectV1,
+        binding: LocalOwnerResultBindingV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let (key_tombstone, existing_tombstone, effect) = match effect {
             LocalOwnerEffectV1::KeyTombstone {
                 request,
                 deletion_receipt,
-            } => (Some((*request, deletion_receipt)), Ok(None)),
-            LocalOwnerEffectV1::ArtifactDisposition(record) => (
+            } => (
+                Some((*request, deletion_receipt)),
                 None,
-                tagged_object(record, "ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
+                Ok((receipt_digest(deletion_receipt), None)),
             ),
-            LocalOwnerEffectV1::CacheGeneration(record) => (
+            LocalOwnerEffectV1::ExistingTombstone(tombstone) => (
                 None,
-                tagged_object(record, "ELCG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
+                Some(*tombstone),
+                Ok((receipt_digest(tombstone.deletion_receipt), None)),
             ),
+            LocalOwnerEffectV1::ArtifactDisposition(record) => {
+                (None, None, record_effect(record, "ELAD1"))
+            }
+            LocalOwnerEffectV1::CacheGeneration(record) => {
+                (None, None, record_effect(record, "ELCG1"))
+            }
             LocalOwnerEffectV1::Negative(record) => (
                 None,
-                negative_bound_by(&record, elo1)
-                    .and_then(|()| tagged_object(record, "ELNEG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1))
-                    .map(Some),
-            ),
-            LocalOwnerEffectV1::ReplicaPurge(record) => (
                 None,
-                tagged_object(record, "ELRP1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
+                negative_bound_by(&record, &binding).and_then(|()| record_effect(record, "ELNEG1")),
             ),
+            LocalOwnerEffectV1::ReplicaPurge(record) => {
+                (None, None, record_effect(record, "ELRP1"))
+            }
         };
-        effect_object
-            .and_then(|effect_object| {
-                tagged_object(elo1.to_vec(), "ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1)
-                    .map(|owner_result| (effect_object, owner_result))
-            })
-            .map(|(effect_object, owner_result)| Self {
+        effect.and_then(|(effect_digest, effect_object)| {
+            LocalErasureOwnerResultV1 {
+                request: binding.request,
+                attempt: binding.attempt,
+                obligation: binding.obligation,
+                command: binding.command,
+                owner_ref: binding.owner_ref,
+                error: binding.error,
+                effect_digest,
+            }
+            .to_canonical_cbor()
+            .and_then(|elo1| tagged_object(elo1, "ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1))
+            .map(|owner_result| Self {
                 key_tombstone,
+                existing_tombstone,
                 effect_object,
                 owner_result,
             })
+        })
     }
 
     /// The key destruction to complete, for a key tombstone effect.
     #[must_use]
     pub const fn key_tombstone(&self) -> Option<(KeyDestructionRequestV1, Hash)> {
         self.key_tombstone
+    }
+
+    /// The tombstone the registry must already hold, for an existing
+    /// tombstone effect.
+    #[must_use]
+    pub const fn existing_tombstone(&self) -> Option<KeyTombstoneV1> {
+        self.existing_tombstone
     }
 
     /// The effect record to retain, for a record effect.
@@ -307,21 +361,36 @@ impl PreparedLocalOwnerEffectV1 {
     }
 }
 
-/// Whether canonical `elo1` binds canonical ELNEG1 `elneg1` (ADR-136 §4a):
-/// an ELO1 whose `effect_digest` is the ELNEG1's content address and whose
-/// command, owner reference and closed error code are the ELNEG1's.
-fn negative_bound_by(elneg1: &[u8], elo1: &[u8]) -> Result<(), ErasureErrorV1> {
-    let negative = LocalErasureNegativeResultV1::from_canonical_cbor(elneg1)?;
-    let owner_result = LocalErasureOwnerResultV1::from_canonical_cbor(elo1)?;
-    if negative.reference() == Ok(owner_result.effect_digest)
-        && owner_result.command == negative.command
-        && owner_result.owner_ref == negative.owner_ref
-        && owner_result.error == Some(negative.error)
-    {
-        Ok(())
-    } else {
-        Err(ErasureErrorV1::ProvenanceMissing)
-    }
+/// A deletion receipt as the ELO1 effect digest of its tombstone.
+const fn receipt_digest(receipt: Hash) -> ErasureReferenceV1 {
+    ErasureReferenceV1::from_digest(*receipt.as_bytes())
+}
+
+/// One record effect of `tag`: its content address and its object.
+fn record_effect(
+    record: Vec<u8>,
+    tag: &str,
+) -> Result<(ErasureReferenceV1, Option<ErasureRetainedObjectV1>), ErasureErrorV1> {
+    tagged_object(record, tag, LOCAL_OWNER_EFFECT_MAX_BYTES_V1)
+        .map(|object| (object.reference(), Some(object)))
+}
+
+/// Whether `binding` carries the command, owner reference and closed error
+/// code of canonical ELNEG1 `elneg1` (ADR-136 §4a).
+fn negative_bound_by(
+    elneg1: &[u8],
+    binding: &LocalOwnerResultBindingV1,
+) -> Result<(), ErasureErrorV1> {
+    LocalErasureNegativeResultV1::from_canonical_cbor(elneg1).and_then(|negative| {
+        if binding.command == negative.command
+            && binding.owner_ref == negative.owner_ref
+            && binding.error == Some(negative.error)
+        {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    })
 }
 
 fn tagged_object(
@@ -351,26 +420,31 @@ mod tests {
         ]))
     }
 
-    /// A canonical ELNEG1 and the negative ELO1 that binds it.
-    fn negative_pair() -> Result<(Vec<u8>, Vec<u8>), ErasureErrorV1> {
+    /// A canonical ELNEG1 and the negative binding that carries it.
+    fn negative_pair() -> Result<(Vec<u8>, LocalOwnerResultBindingV1), ErasureErrorV1> {
         let negative = LocalErasureNegativeResultV1 {
             command: ErasureReferenceV1::from_digest([1; 32]),
             owner_ref: ErasureReferenceV1::from_digest([2; 32]),
             error: ErasureErrorV1::ArtifactDeletionFailed,
         };
-        let owner_result = LocalErasureOwnerResultV1 {
-            request: ErasureReferenceV1::from_digest([3; 32]),
-            attempt: ErasureReferenceV1::from_digest([4; 32]),
-            obligation: ErasureReferenceV1::from_digest([5; 32]),
-            command: negative.command,
-            owner_ref: negative.owner_ref,
-            error: Some(negative.error),
-            effect_digest: negative.reference()?,
-        };
         Ok((
             negative.to_canonical_cbor()?,
-            owner_result.to_canonical_cbor()?,
+            LocalOwnerResultBindingV1 {
+                request: ErasureReferenceV1::from_digest([3; 32]),
+                attempt: ErasureReferenceV1::from_digest([4; 32]),
+                obligation: ErasureReferenceV1::from_digest([5; 32]),
+                command: negative.command,
+                owner_ref: negative.owner_ref,
+                error: Some(negative.error),
+            },
         ))
+    }
+
+    /// The ELO1 a prepared effect assembled.
+    fn elo1(
+        prepared: &PreparedLocalOwnerEffectV1,
+    ) -> Result<LocalErasureOwnerResultV1, ErasureErrorV1> {
+        LocalErasureOwnerResultV1::from_canonical_cbor(prepared.owner_result().canonical_cbor())
     }
 
     fn timeline(seed: u128) -> TimelineId {
@@ -515,88 +589,143 @@ mod tests {
     }
 
     #[test]
-    fn prepared_effect_exposes_its_tombstone_or_effect_record() -> Result<(), ErasureErrorV1> {
-        let (elneg1, elo1) = negative_pair()?;
+    fn prepared_effect_derives_its_elo1_effect_digest() -> Result<(), ErasureErrorV1> {
+        let (elneg1, binding) = negative_pair()?;
         let request = KeyDestructionRequestV1::new(
             KeyIdentityV1::new("owner", KeyRoleV1::SubjectDataEncryption, 1),
             Hash::from_bytes([2; 32]),
             Hash::from_bytes([3; 32]),
         );
         let receipt = Hash::from_bytes([4; 32]);
+        let positive = LocalOwnerResultBindingV1 {
+            error: None,
+            ..binding
+        };
         let tombstone = PreparedLocalOwnerEffectV1::new(
             LocalOwnerEffectV1::KeyTombstone {
                 request: Box::new(request),
                 deletion_receipt: receipt,
             },
-            &elo1,
+            positive,
         )?;
         assert_eq!(tombstone.key_tombstone(), Some((request, receipt)));
+        assert_eq!(tombstone.existing_tombstone(), None);
         assert_eq!(tombstone.effect_object(), None);
-        assert_eq!(tombstone.owner_result().canonical_cbor(), elo1.as_slice());
+        assert_eq!(
+            elo1(&tombstone)?,
+            LocalErasureOwnerResultV1 {
+                request: binding.request,
+                attempt: binding.attempt,
+                obligation: binding.obligation,
+                command: binding.command,
+                owner_ref: binding.owner_ref,
+                error: None,
+                effect_digest: ErasureReferenceV1::from_digest([4; 32]),
+            }
+        );
 
-        for (effect, tag) in [
+        let held = KeyTombstoneV1 {
+            identity: request.identity,
+            destroyed_material_digest: Hash::from_bytes([2; 32]),
+            destruction_digest: Hash::from_bytes([6; 32]),
+            deletion_receipt: Hash::from_bytes([7; 32]),
+        };
+        let existing = PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::ExistingTombstone(Box::new(held)),
+            positive,
+        )?;
+        assert_eq!(existing.existing_tombstone(), Some(held));
+        assert_eq!(existing.key_tombstone(), None);
+        assert_eq!(existing.effect_object(), None);
+        assert_eq!(
+            elo1(&existing)?.effect_digest,
+            ErasureReferenceV1::from_digest([7; 32])
+        );
+
+        for (effect, tag, owner) in [
             (
                 LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", vec![1])?),
                 "ELAD1",
+                positive,
             ),
             (
                 LocalOwnerEffectV1::CacheGeneration(record("ELCG1", vec![1])?),
                 "ELCG1",
+                positive,
             ),
-            (LocalOwnerEffectV1::Negative(elneg1), "ELNEG1"),
+            (LocalOwnerEffectV1::Negative(elneg1), "ELNEG1", binding),
             (
                 LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", vec![1])?),
                 "ELRP1",
+                positive,
             ),
         ] {
-            let prepared = PreparedLocalOwnerEffectV1::new(effect, &elo1)?;
+            let prepared = PreparedLocalOwnerEffectV1::new(effect, owner)?;
+            let object = prepared
+                .effect_object()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             assert_eq!(prepared.key_tombstone(), None);
-            assert_eq!(
-                prepared.effect_object().map(ErasureRetainedObjectV1::tag),
-                Some(tag)
-            );
+            assert_eq!(object.tag(), tag);
             assert_eq!(prepared.owner_result().tag(), "ELO1");
+            assert_eq!(elo1(&prepared)?.effect_digest, object.reference());
+            assert_eq!(elo1(&prepared)?.error, owner.error);
         }
         Ok(())
     }
 
     #[test]
-    fn prepared_effect_refuses_other_tags_and_oversized_owner_results() -> Result<(), ErasureErrorV1>
-    {
-        let elo1 = record("ELO1", vec![1])?;
+    fn prepared_effect_refuses_other_tags_oversized_effects_and_unbound_negatives(
+    ) -> Result<(), ErasureErrorV1> {
+        let (elneg1, binding) = negative_pair()?;
         assert_eq!(
             PreparedLocalOwnerEffectV1::new(
-                LocalOwnerEffectV1::Negative(record("ELCG1", vec![1])?),
-                &elo1
+                LocalOwnerEffectV1::ReplicaPurge(record("ELCG1", vec![1])?),
+                binding
             ),
             Err(ErasureErrorV1::InvalidEncoding)
         );
-        let purge = || record("ELRP1", vec![1]).map(LocalOwnerEffectV1::ReplicaPurge);
+        // Only a canonical ELNEG1 is a negative effect.
         assert_eq!(
-            PreparedLocalOwnerEffectV1::new(purge()?, &record("ELNEG1", vec![1])?),
+            PreparedLocalOwnerEffectV1::new(
+                LocalOwnerEffectV1::Negative(record("ELNEG1", vec![1])?),
+                binding
+            ),
             Err(ErasureErrorV1::InvalidEncoding)
         );
-        // Array head, "ELO1" text and a two-byte byte-string head.
-        let largest = record("ELO1", vec![0; LOCAL_OWNER_RESULT_MAX_BYTES_V1 - 9])?;
-        assert_eq!(largest.len(), LOCAL_OWNER_RESULT_MAX_BYTES_V1);
-        assert_eq!(
-            PreparedLocalOwnerEffectV1::new(purge()?, &largest)?
-                .owner_result()
-                .canonical_cbor(),
-            largest.as_slice()
-        );
-        let over = record("ELO1", vec![0; LOCAL_OWNER_RESULT_MAX_BYTES_V1 - 8])?;
-        assert_eq!(
-            PreparedLocalOwnerEffectV1::new(purge()?, &over),
-            Err(ErasureErrorV1::ScopeInvalid)
-        );
+        // The binding must carry the ELNEG1's command, owner and code.
+        for unbound in [
+            LocalOwnerResultBindingV1 {
+                command: ErasureReferenceV1::from_digest([9; 32]),
+                ..binding
+            },
+            LocalOwnerResultBindingV1 {
+                owner_ref: ErasureReferenceV1::from_digest([9; 32]),
+                ..binding
+            },
+            LocalOwnerResultBindingV1 {
+                error: Some(ErasureErrorV1::ReplicaTimeout),
+                ..binding
+            },
+            LocalOwnerResultBindingV1 {
+                error: None,
+                ..binding
+            },
+        ] {
+            assert_eq!(
+                PreparedLocalOwnerEffectV1::new(
+                    LocalOwnerEffectV1::Negative(elneg1.clone()),
+                    unbound
+                ),
+                Err(ErasureErrorV1::ProvenanceMissing)
+            );
+        }
         // Array head, "ELRP1" text and a two-byte byte-string head.
         let largest_effect = record("ELRP1", vec![0; LOCAL_OWNER_EFFECT_MAX_BYTES_V1 - 10])?;
         assert_eq!(largest_effect.len(), LOCAL_OWNER_EFFECT_MAX_BYTES_V1);
         assert_eq!(
             PreparedLocalOwnerEffectV1::new(
                 LocalOwnerEffectV1::ReplicaPurge(largest_effect.clone()),
-                &elo1
+                binding
             )?
             .effect_object()
             .map(ErasureRetainedObjectV1::canonical_cbor),
@@ -605,7 +734,7 @@ mod tests {
         let over_effect = record("ELRP1", vec![0; LOCAL_OWNER_EFFECT_MAX_BYTES_V1 - 9])?;
         assert_eq!(over_effect.len(), LOCAL_OWNER_EFFECT_MAX_BYTES_V1 + 1);
         assert_eq!(
-            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::ReplicaPurge(over_effect), &elo1),
+            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::ReplicaPurge(over_effect), binding),
             Err(ErasureErrorV1::ScopeInvalid)
         );
         Ok(())
