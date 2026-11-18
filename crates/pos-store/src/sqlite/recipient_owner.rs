@@ -1376,6 +1376,13 @@ impl SqliteStore {
     /// row's source Timeline (ADR-138 §8), so a publication whose Timeline an
     /// erasure request has access-frozen is no longer served.
     ///
+    /// The catalog lookup and owner validation run before the fence because
+    /// the row names the Timeline to fence. That is safe: the fence validates
+    /// the erasure gate and the inventory data version at entry and again
+    /// after the read, and inside the fence the envelope header's Timeline,
+    /// recipient, export ID and head are checked against that same row, so a
+    /// row that no longer matches the object fails closed as unavailable.
+    ///
     /// # Errors
     ///
     /// Returns [`RecipientExportPublicationErrorV1::ArtifactUnavailable`] for
@@ -5518,6 +5525,31 @@ mod tests {
             .store
             .recover_recipient_exports(&fixture.owner)
             .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reader_requires_a_bound_erasure_gate() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        fixture.store.erasure_gate = None;
+        assert!(matches!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, publication.export_id),
+            Err(RecipientExportPublicationErrorV1::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
         Ok(())
     }
 
