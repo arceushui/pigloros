@@ -7694,15 +7694,21 @@ fn a_routine_rotation_waits_for_every_pin_and_a_compromise_does_not() -> TestRes
     let old_signer = owned_bundle(&ALL_CLASSES)?.signer_key_id;
     let compromise = Case::signed(&rotated, &bundle_root(), &[old_signer.as_str()])?;
     assert!(compromise.compose(&mut store.sqlite()?).is_ok());
-    // Under the old bundle the request closes its attempt; it then pins
-    // nothing, and the routine rotation composes.
-    let mut host = store.host(&driver_case()?, 4_096)?;
+    // A request whose attempt closed under the old bundle pins nothing, and
+    // the routine rotation composes. Registering the rotated signer makes it
+    // the registry's active role-2 key, so the old signer can sign no more:
+    // the attempt closes before the rotation is registered.
+    let (closed, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Finalized(_)))?;
+    let mut host = closed.host(&driver_case()?, 4_096)?;
     assert_eq!(
-        finalized(driver().drive(&mut host, request_of(1)?)?)?.lifecycle(),
+        lifecycle(&mut host, request_of(1)?)?,
         ErasureLifecycleV1::PartialFailure
     );
     drop(host);
-    assert!(routine.compose(&mut store.sqlite()?).is_ok());
+    let rotated = rotated_bundle(&closed)?;
+    assert!(Case::signed(&rotated, &bundle_root(), &[])?
+        .compose(&mut closed.sqlite()?)
+        .is_ok());
     Ok(())
 }
 
