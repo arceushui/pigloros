@@ -7525,14 +7525,14 @@ fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
         driver().advance(&mut host)?,
         LocalErasureAdvanceV1 {
             step: LocalErasureStepV1::Idle,
-            deferred: 0
+            deferred: Vec::new()
         }
     );
     submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
     let mut steps = Vec::new();
     loop {
         let advanced = driver().advance(&mut host)?;
-        assert_eq!(advanced.deferred, 0);
+        assert!(advanced.deferred.is_empty());
         match advanced.step {
             LocalErasureStepV1::Idle => break,
             step => steps.push(step),
@@ -7557,7 +7557,7 @@ fn advance_passes_over_a_request_it_cannot_step() -> TestResult {
         foreign.advance(&mut host)?,
         LocalErasureAdvanceV1 {
             step: LocalErasureStepV1::Idle,
-            deferred: 1
+            deferred: vec![request_of(1)?]
         }
     );
     assert_eq!(
@@ -7568,7 +7568,7 @@ fn advance_passes_over_a_request_it_cannot_step() -> TestResult {
         driver().advance(&mut host)?,
         LocalErasureAdvanceV1 {
             step: LocalErasureStepV1::Frozen,
-            deferred: 0
+            deferred: Vec::new()
         }
     );
     Ok(())

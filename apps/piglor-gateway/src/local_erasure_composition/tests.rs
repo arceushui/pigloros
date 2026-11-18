@@ -43,6 +43,7 @@ use crate::Gateway;
 
 const PRINCIPAL_ID: &str = "01JC0GATEWAYQ0CA1PR1NC1PA1";
 const ACTOR: &str = "01JC0GATEWAYQ0CA1ACT0R0000";
+const OTHER_ACTOR: &str = "01JC0GATEWAYQ0CA1ACT0R0001";
 
 /// The provisioning clock: before the fixture TPS1 expires.
 const PROVISIONED_AT: u64 = 1_800_000_000;
@@ -169,6 +170,10 @@ fn principal() -> TestResult<PrincipalRefV1> {
 
 fn actor() -> TestResult<EntityId> {
     Ok(EntityId::from_ulid(Ulid::from_string(ACTOR)?))
+}
+
+fn other_actor() -> TestResult<EntityId> {
+    Ok(EntityId::from_ulid(Ulid::from_string(OTHER_ACTOR)?))
 }
 
 /// The submission of the fixture actor for private subject data.
@@ -465,7 +470,7 @@ fn erasure_world() -> TestResult<World> {
     let fixture = Fixture::new(false)?;
     let provision = LocalPrincipalProvisionV1::try_new(
         &principal()?,
-        [actor()?],
+        [actor()?, other_actor()?],
         [
             GatewayOperationV1::CREATE_TIMELINE,
             GatewayOperationV1::new("erasure.request", "erasure", "request", "operation"),
@@ -484,7 +489,8 @@ fn erasure_world() -> TestResult<World> {
 }
 
 /// A Gateway over the erasure world's host, composed Local, with the
-/// actor's owned root and one request submitted through the host seam
+/// actor's owned root, its request `request` and another actor's request,
+/// both submitted through the host seam
 /// before the host moved into the executor; the world must outlive it.
 struct Submitted {
     _world: World,
@@ -500,11 +506,20 @@ fn submitted() -> TestResult<Submitted> {
     let mut host = world.host(erasure.composition())?;
     host.command_sender()?
         .create_owned_timeline("owned", actor()?)?;
+    host.command_sender()?
+        .create_owned_timeline("other-owned", other_actor()?)?;
     let request = host
         .command_sender()?
         .submit_local_erasure(&submission()?)
         .map_err(|error| format!("{error:?}"))?
         .request();
+    // A second subject's request beside it.
+    host.command_sender()?
+        .submit_local_erasure(&LocalErasureSubmissionV1 {
+            actor: other_actor()?,
+            ..submission()?
+        })
+        .map_err(|error| format!("{error:?}"))?;
     let started = erasure.start(&mut host);
     let gateway = Gateway::new_with_erasure_host(host, None)?;
     Ok(Submitted {
@@ -542,22 +557,29 @@ const fn receipted(lifecycle: Option<ErasureLifecycleV1>) -> bool {
     )
 }
 
-/// The payload-free report of a wake names only the count it deferred.
+/// The payload-free report names only the deferred count, and only when it
+/// differs from the previous wake's.
 #[test]
-fn a_wake_reports_only_the_count_it_deferred() {
-    assert_eq!(deferred_report(0), None);
+fn a_wake_reports_only_a_changed_deferred_count() {
+    assert_eq!(deferred_report(0, 0), None);
+    assert_eq!(deferred_report(2, 2), None);
     assert_eq!(
-        deferred_report(2).as_deref(),
-        Some("piglor-gateway local erasure driver deferred 2 request steps")
+        deferred_report(2, 1).as_deref(),
+        Some("piglor-gateway local erasure driver deferred 2 requests")
+    );
+    assert_eq!(
+        deferred_report(0, 2).as_deref(),
+        Some("piglor-gateway local erasure driver deferred 0 requests")
     );
 }
 
-/// L3 of the #1448 review: a wake takes one step per store command until
-/// none is due, and counts the request steps it deferred. A driver whose
-/// key the store does not register authorizes the request, then defers its
-/// freeze; the deployment's driver then completes it with none deferred.
+/// A wake takes one step per store command until none is due, and counts
+/// each request whose step failed once. A driver whose key the store does
+/// not register authorizes both requests, then fails their freezes: three
+/// failed steps over two requests count two. The deployment's driver then
+/// takes both to their first receipt with none deferred.
 #[tokio::test]
-async fn a_wake_counts_the_request_steps_it_deferred() -> TestResult {
+async fn a_wake_counts_each_deferred_request_once() -> TestResult {
     let Submitted {
         _world,
         gateway,
@@ -569,13 +591,13 @@ async fn a_wake_counts_the_request_steps_it_deferred() -> TestResult {
         OwnerIdV1::from_static("foreign-signer"),
         1,
     )));
-    assert_eq!(wake_once(&gateway.store, &foreign).await, 1);
+    assert_eq!(wake_once(&gateway.store, &foreign, 0).await, 2);
     assert_eq!(
         lifecycle(&gateway, request).await?,
         Some(ErasureLifecycleV1::Authorized)
     );
     let (driver, _) = started.started.ok_or("a Local start has a driver")?;
-    assert_eq!(wake_once(&gateway.store, &Arc::new(driver)).await, 0);
+    assert_eq!(wake_once(&gateway.store, &Arc::new(driver), 2).await, 0);
     assert!(receipted(lifecycle(&gateway, request).await?));
     assert!(gateway.shutdown().await.is_ok());
     Ok(())

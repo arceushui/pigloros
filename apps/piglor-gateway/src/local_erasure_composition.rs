@@ -36,8 +36,8 @@
 //! erasure admission route of the next slice calls it; until then only the
 //! startup run and the tick wake the driver). Each wake submits one driver step per store
 //! command until no request has a step due, so every other Gateway command
-//! interleaves between two steps, and reports how many request steps failed
-//! and were deferred.
+//! interleaves between two steps, and reports on standard error how many
+//! requests had a step fail, whenever that count changes.
 //! A step that purges the local replica runs `VACUUM` inside its one
 //! command and holds every other Gateway command for its duration.
 
@@ -58,11 +58,7 @@ use pos_runtime::{
 };
 use pos_store::{sqlite::SqliteStore, trust_policy_registry::OperatorReleaseTrustV1};
 use thiserror::Error;
-use tokio::{
-    sync::Notify,
-    task::{JoinError, JoinHandle},
-    time::MissedTickBehavior,
-};
+use tokio::{sync::Notify, task::JoinHandle, time::MissedTickBehavior};
 use zeroize::Zeroizing;
 
 pub use crate::deployment_trust::DEPLOYMENT_TRUST_STATE_PATH;
@@ -439,7 +435,7 @@ impl LocalErasureDriverTaskV1 {
     pub async fn stop(self) {
         if let Some((_, task)) = self.running {
             task.abort();
-            let panicked = task.await.err().as_ref().is_some_and(JoinError::is_panic);
+            let panicked = task.await.is_err_and(|error| error.is_panic());
             let mut output = io::stderr().lock();
             drop(writeln!(
                 output,
@@ -460,6 +456,7 @@ async fn drive(
 ) {
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut previous = 0;
     loop {
         // Each arm binds its future's output: the tick's instant, the
         // notification's unit.
@@ -470,34 +467,38 @@ async fn drive(
         let Some(store) = executor.upgrade().filter(StoreExecutor::is_ready) else {
             break;
         };
-        wake_once(&store, &driver).await;
+        previous = wake_once(&store, &driver, previous).await;
     }
 }
 
 /// One wake of the driver: one step per store command until no request has
-/// one due or a command fails. It reports on standard error how many
-/// request steps failed and were deferred to a later wake, when any were,
-/// and returns that count.
-async fn wake_once(store: &StoreExecutor, driver: &Arc<LocalErasureDriverV1>) -> usize {
-    let mut deferred = 0;
+/// one due or a command fails. It returns how many distinct requests had a
+/// step fail and deferred to a later wake, and reports that count on
+/// standard error when it differs from the `previous` wake's.
+async fn wake_once(
+    store: &StoreExecutor,
+    driver: &Arc<LocalErasureDriverV1>,
+    previous: usize,
+) -> usize {
+    let mut deferred = BTreeSet::new();
     while let Ok(Ok(advanced)) = store.advance_local_erasure(driver).await {
-        deferred += advanced.deferred;
+        deferred.extend(advanced.deferred);
         if advanced.step == LocalErasureStepV1::Idle {
             break;
         }
     }
-    if let Some(report) = deferred_report(deferred) {
+    if let Some(report) = deferred_report(deferred.len(), previous) {
         let mut output = io::stderr().lock();
         drop(writeln!(output, "{report}"));
     }
-    deferred
+    deferred.len()
 }
 
-/// The payload-free report of a wake that deferred `deferred` request
-/// steps, `None` when it deferred none.
-fn deferred_report(deferred: usize) -> Option<String> {
-    (deferred > 0)
-        .then(|| format!("piglor-gateway local erasure driver deferred {deferred} request steps"))
+/// The payload-free report of a wake that deferred `deferred` requests,
+/// `None` when the previous wake deferred as many.
+fn deferred_report(deferred: usize, previous: usize) -> Option<String> {
+    (deferred != previous)
+        .then(|| format!("piglor-gateway local erasure driver deferred {deferred} requests"))
 }
 
 #[cfg(test)]

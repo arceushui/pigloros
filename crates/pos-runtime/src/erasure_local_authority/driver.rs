@@ -54,9 +54,9 @@ pub struct LocalErasureAdvanceV1 {
     /// The one transition committed, [`LocalErasureStepV1::Idle`] when none
     /// was.
     pub step: LocalErasureStepV1,
-    /// How many requests were passed over because their step failed,
-    /// committing nothing.
-    pub deferred: usize,
+    /// The requests passed over because their step failed, committing
+    /// nothing, in the host's request order.
+    pub deferred: Vec<ErasureReferenceV1>,
 }
 
 /// The outcome of the startup sweep (ADR-136 §5; owner decision Q13 on
@@ -166,7 +166,7 @@ impl LocalErasureDriverV1 {
     }
 
     /// Commit the one durable transition the first request with one due
-    /// needs, in the host's request order, and return it with the number of
+    /// needs, in the host's request order, and return it with the
     /// requests passed over before it; the step is
     /// [`LocalErasureStepV1::Idle`] when no request has one due.
     ///
@@ -186,14 +186,14 @@ impl LocalErasureDriverV1 {
         host.command_sender()
             .and_then(|mut sender| sender.local_erasure_requests())
             .map(|requests| {
-                let mut deferred = 0;
+                let mut deferred = Vec::new();
                 let step = requests
                     .into_iter()
                     .find_map(|request| match self.step(host, request) {
                         Ok(LocalErasureStepV1::Idle) => None,
                         Ok(step) => Some(step),
                         Err(_) => {
-                            deferred += 1;
+                            deferred.push(request);
                             None
                         }
                     })
