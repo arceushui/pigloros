@@ -1,7 +1,8 @@
 //! The ADR-069 R9 §4.6.5 totality obligation for the public terminal
-//! classifier.
+//! classifier, with the R10 §4.8 rows for the stdin feed and launch failures
+//! 3 to 5.
 //!
-//! An independent oracle restates R9's candidate table, the D5 contradiction
+//! An independent oracle restates R9's candidate table and R10's added rows, the D5 contradiction
 //! order and the literal `Completed` conditions with the closed numeric codes,
 //! which a literal table pins to the R9 numbers.
 //!
@@ -82,11 +83,14 @@ const PROGRESS: [AttemptProgressCode; 3] = [
     AttemptProgressCode::StartedNotReleased,
     AttemptProgressCode::Released,
 ];
-const LAUNCH: [Option<LaunchFailure>; 4] = [
+const LAUNCH: [Option<LaunchFailure>; 7] = [
     None,
     Some(LaunchFailure::RootNotActivated),
     Some(LaunchFailure::PreStartRecheckFailed),
     Some(LaunchFailure::UnitRefFailed),
+    Some(LaunchFailure::OutputReservationRefused),
+    Some(LaunchFailure::StdioChannelFailed),
+    Some(LaunchFailure::AdmissionClosed),
 ];
 const START: [Option<StartJobResult>; 7] = [
     None,
@@ -187,6 +191,8 @@ const CAPTURES: [Option<OutputCaptureFacts>; 5] = [
     Some(capture(true, true)),
 ];
 const OUTPUT_TRANSFERS: [Option<bool>; 3] = [None, Some(true), Some(false)];
+/// `adapter-input` null, complete or incomplete (R10 §4.8 totality).
+const FEEDS: [Option<bool>; 3] = [None, Some(true), Some(false)];
 const BOOLS: [bool; 2] = [false, true];
 
 const fn capture(ceiling_reached: bool, complete_frame: bool) -> OutputCaptureFacts {
@@ -232,6 +238,7 @@ const fn completed() -> TerminationFacts {
         ending: Some(EndingCode::CgroupEmpty),
         barrier_failure: None,
         input_complete: true,
+        adapter_input_complete: Some(true),
         output_capture: Some(capture(false, true)),
         output_transfer_complete: None,
         local_network_termination: None,
@@ -258,6 +265,7 @@ const fn unstarted() -> TerminationFacts {
         service: None,
         ending: None,
         output_capture: None,
+        adapter_input_complete: None,
         work_after: None,
         requested: RequestedConfigurationStatus::NotRequested,
         observed: KernelObservationFacts::NotReached,
@@ -343,7 +351,8 @@ const fn counter_values(counters: &CgroupCounters) -> [u64; 6] {
     ]
 }
 
-/// Missing evidence (R9 O6) and §4.6.3's required fields.
+/// Missing evidence (R9 O6), §4.6.3's required fields and R10's
+/// `adapter-input` at progress 2.
 const fn oracle_missing(facts: &TerminationFacts) -> bool {
     let progress = facts.progress as u8;
     let snapshots = facts.baseline.is_some() && facts.terminal.is_some();
@@ -351,6 +360,7 @@ const fn oracle_missing(facts: &TerminationFacts) -> bool {
         || (progress == 2 && facts.service.is_none())
         || (progress == 2
             && (facts.unit.is_none() || facts.ending.is_none() || facts.output_capture.is_none()))
+        || (progress == 2 && facts.adapter_input_complete.is_none())
         || (progress >= 1 && facts.start_job.is_none())
         || (facts.unit.is_none()
             && matches!(facts.observed, KernelObservationFacts::Observed { .. }))
@@ -394,7 +404,10 @@ fn oracle_code_two(facts: &TerminationFacts, contradiction: Option<u8>) -> bool 
         || (result == Some(3) && facts.terminal.is_some() && !oracle_watchdog_reached(facts));
     contradiction.is_some()
         || facts.cleanup as u8 == 1
-        || code_of(facts.launch_failure, |failure| failure as u8) == Some(2)
+        || in_set(
+            code_of(facts.launch_failure, |failure| failure as u8),
+            &[2, 5],
+        )
         || result == Some(7)
         || enforcement
         || oracle_missing(facts)
@@ -431,11 +444,12 @@ fn oracle_code_ten(facts: &TerminationFacts) -> bool {
         &[1, 2, 3, 4, 5, 10],
     ) || in_set(
         code_of(facts.launch_failure, |failure| failure as u8),
-        &[0, 1],
+        &[0, 1, 3],
     ) || in_set(code_of(facts.start_job, |job| job as u8), &[1, 2, 3, 4, 5])
         || [2, 3].contains(&(facts.requested as u8))
         || (result.is_some_and(|result| ![0, 3, 7, 9].contains(&result)) && exec == Some(0))
         || !facts.input_complete
+        || facts.adapter_input_complete == Some(false)
         || facts.output_transfer_complete == Some(false)
         || in_set(code_of(facts.ending, |ending| ending as u8), &[3, 4])
         || in_set(network, &[1, 2])
@@ -465,7 +479,8 @@ fn oracle_candidates(facts: &TerminationFacts, contradiction: Option<u8>) -> [bo
         in_set(
             code_of(facts.barrier_failure, |failure| failure as u8),
             &[0, 6, 8, 9, 12],
-        ) || in_set(network, &[0, 3, 4]),
+        ) || in_set(network, &[0, 3, 4])
+            || code_of(facts.launch_failure, |failure| failure as u8) == Some(4),
         oracle_code_ten(facts),
     ]
 }
@@ -679,7 +694,7 @@ fn every_lifecycle_code_and_status_is_placed_exactly_once() {
             dimension(&OBSERVATIONS, |facts, value| facts.observed = value),
         ],
     );
-    assert_eq!(points, 3 * 4 * 7 * 14 * 3 * 3 * 4 * 3);
+    assert_eq!(points, 3 * 7 * 7 * 14 * 3 * 3 * 4 * 3);
     assert!(fallbacks > 0);
 }
 
@@ -839,6 +854,7 @@ fn every_transfer_capture_and_network_class_is_placed_exactly_once() {
                 facts.output_transfer_complete = value;
             }),
             dimension(&CAPTURES, |facts, value| facts.output_capture = value),
+            dimension(&FEEDS, |facts, value| facts.adapter_input_complete = value),
             dimension(&NETWORK, |facts, value| {
                 facts.local_network_termination = value;
             }),
@@ -846,7 +862,7 @@ fn every_transfer_capture_and_network_class_is_placed_exactly_once() {
             dimension(&REQUESTED, |facts, value| facts.requested = value),
         ],
     );
-    assert_eq!(points, 3 * 2 * 3 * 5 * 6 * 3 * 4);
+    assert_eq!(points, 3 * 2 * 3 * 5 * 3 * 6 * 3 * 4);
     assert!(fallbacks > 0);
 }
 
@@ -1014,6 +1030,7 @@ impl SplitMix {
             ending: self.pick(&ENDINGS),
             barrier_failure: self.pick(&BARRIERS),
             input_complete: self.below(8) != 0,
+            adapter_input_complete: self.pick(&FEEDS),
             output_capture: self.pick(&CAPTURES),
             output_transfer_complete: self.pick(&OUTPUT_TRANSFERS),
             local_network_termination: self.pick(&NETWORK),
@@ -1395,13 +1412,16 @@ fn a_sigxfsz_crash_is_a_file_limit_and_cpu_throttling_is_never_terminal() {
 
 #[test]
 fn every_coded_field_keeps_its_r9_number() {
-    let numbers: [(u8, u8); 65] = [
+    let numbers: [(u8, u8); 68] = [
         (AttemptProgressCode::NotStarted as u8, 0),
         (AttemptProgressCode::StartedNotReleased as u8, 1),
         (AttemptProgressCode::Released as u8, 2),
         (LaunchFailure::RootNotActivated as u8, 0),
         (LaunchFailure::PreStartRecheckFailed as u8, 1),
         (LaunchFailure::UnitRefFailed as u8, 2),
+        (LaunchFailure::OutputReservationRefused as u8, 3),
+        (LaunchFailure::StdioChannelFailed as u8, 4),
+        (LaunchFailure::AdmissionClosed as u8, 5),
         (StartJobResult::Done as u8, 0),
         (StartJobResult::Canceled as u8, 1),
         (StartJobResult::Timeout as u8, 2),
@@ -1637,5 +1657,66 @@ fn local_network_terminations_keep_their_codes() {
     ];
     for (termination, code) in pairs {
         assert_eq!(LocalNetworkTerminationCode::from(termination), code);
+    }
+}
+
+/// The candidate codes of `facts`, in precedence order.
+fn candidate_codes(facts: &TerminationFacts) -> Vec<u8> {
+    let classification = facts.classify();
+    CODES
+        .into_iter()
+        .filter(|code| classification.candidates().contains(*code))
+        .map(TerminalCode::code)
+        .collect()
+}
+
+#[test]
+fn r10_feed_capture_and_pre_start_rows_select_their_codes() {
+    // TME1-D: one byte over the ceiling, and the adapter exited 1.
+    let over = TerminationFacts {
+        output_capture: Some(capture(true, false)),
+        service: Some(service(
+            ServiceResultCode::ExitCode,
+            MainExitCode::Exited,
+            1,
+        )),
+        ..completed()
+    };
+    // TME1-E: the stdin feed stopped early (`EPIPE`).
+    let short_feed = TerminationFacts {
+        adapter_input_complete: Some(false),
+        ..completed()
+    };
+    // A released attempt with no `adapter-input` lacks evidence.
+    let no_feed = TerminationFacts {
+        adapter_input_complete: None,
+        ..completed()
+    };
+    let launch = |failure| TerminationFacts {
+        launch_failure: Some(failure),
+        ..unstarted()
+    };
+    for (facts, candidates, quarantined) in [
+        (over, vec![7, 8], false),
+        (short_feed, vec![10], false),
+        (no_feed, vec![2], true),
+        // TME1-F: the aggregate ledger refused the output reservation.
+        (
+            launch(LaunchFailure::OutputReservationRefused),
+            vec![10],
+            false,
+        ),
+        (launch(LaunchFailure::StdioChannelFailed), vec![9], false),
+        (launch(LaunchFailure::AdmissionClosed), vec![2], true),
+    ] {
+        check(&facts);
+        assert_eq!(candidate_codes(&facts), candidates, "{facts:?}");
+        let classification = facts.classify();
+        assert_eq!(
+            classification.code().map(TerminalCode::code),
+            candidates.first().copied(),
+            "{facts:?}"
+        );
+        assert_eq!(classification.quarantined(), quarantined, "{facts:?}");
     }
 }

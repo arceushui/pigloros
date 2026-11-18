@@ -1337,7 +1337,9 @@ fn admit_staged(
     store: &mut pos_store::memory::MemoryStore,
     timeline: pos_core::TimelineId,
 ) -> Result<usize, Box<dyn Error>> {
-    let host = LocalScheduledAdmissionHostV1::shared()?;
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )?;
     let revisions = host.observe(registry, store, timeline)?;
     let head = store.logical_head(timeline)?;
     let receipt = host

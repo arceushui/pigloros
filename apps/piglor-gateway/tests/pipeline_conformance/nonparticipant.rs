@@ -115,9 +115,11 @@ impl Driver for ObserverDriver {
 /// Host admission inputs for a port that never commits.
 fn admission(commit_head: Seq) -> ScheduledPassAdmissionV1 {
     let digest = |byte: u8| Hash::from_bytes([byte; 32]);
-    let grant = LocalScheduledAdmissionHostV1::shared()
-        .test_ok()
-        .authority_grant();
+    let grant = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok()
+    .authority_grant();
     ScheduledPassAdmissionV1 {
         attempt_id: PipelineAttemptIdV1::try_new([1; 16]).test_ok(),
         idempotency: AppendIdentity::new(
@@ -283,7 +285,10 @@ fn aborted(aborts: &[Arc<AtomicUsize>; 2]) -> String {
 #[must_use]
 pub fn late_revocation_or_freeze_aborts_the_pass() -> Capture {
     let mut capture = Capture::default();
-    let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("late-revocation").test_ok().id();
         let subject = EntityId::new();
