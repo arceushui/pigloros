@@ -8447,3 +8447,66 @@ fn only_an_export_recipient_command_withdraws() -> TestResult {
         .all(|command| command.destruction.owner != owner));
     Ok(())
 }
+
+use pos_runtime::{
+    local_erasure_signer_rotation_v1, LocalErasureRotationRefusalV1, LocalErasureSignerRotationV1,
+};
+
+/// Whether `store` may register `key` as a role-2 key of the fixture
+/// signer owner under `rotation` and the revoked key ids `revoked`.
+fn signer_rotation(
+    store: &mut SqliteStore,
+    key: [u8; 32],
+    rotation: LocalErasureSignerRotationV1,
+    revoked: &[String],
+) -> Result<(), LocalErasureRotationRefusalV1> {
+    local_erasure_signer_rotation_v1(
+        store,
+        OwnerIdV1::from_static(SIGNER_OWNER),
+        key,
+        rotation,
+        revoked,
+    )
+}
+
+/// Owner decision of 2026-11-18 on #1431: a new role-2 signer key is
+/// registered only while no request pins a bundle, or as a compromise the
+/// installed TPS1 reflects; the registered key itself is an exact re-run.
+#[test]
+fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResult {
+    let new_key = rotated_signer().verifying_key().to_bytes();
+    let old_key = erasure_signer().verifying_key().to_bytes();
+    let revoked = [local_erasure_signer_key_id_v1(&old_key)];
+    let routine = LocalErasureSignerRotationV1::Routine;
+    let compromise = LocalErasureSignerRotationV1::Compromise;
+    let (pinned, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))?;
+    let mut store = pinned.sqlite()?;
+    assert_eq!(
+        signer_rotation(&mut store, new_key, routine, &[]),
+        Err(LocalErasureRotationRefusalV1::Pinned)
+    );
+    assert_eq!(
+        signer_rotation(&mut store, new_key, compromise, &[]),
+        Err(LocalErasureRotationRefusalV1::NotRevoked)
+    );
+    assert_eq!(
+        signer_rotation(&mut store, new_key, compromise, &revoked),
+        Ok(())
+    );
+    assert_eq!(signer_rotation(&mut store, old_key, routine, &[]), Ok(()));
+    assert_eq!(
+        LocalErasureRotationRefusalV1::Pinned.to_string(),
+        "an erasure request pins the current signer's bundle"
+    );
+    assert_eq!(
+        LocalErasureRotationRefusalV1::NotRevoked.to_string(),
+        "the installed TPS1 does not revoke the old signer's bundle"
+    );
+    // Once the attempt closed, nothing pins a bundle.
+    let (closed, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Finalized(_)))?;
+    assert_eq!(
+        signer_rotation(&mut closed.sqlite()?, new_key, routine, &[]),
+        Ok(())
+    );
+    Ok(())
+}
