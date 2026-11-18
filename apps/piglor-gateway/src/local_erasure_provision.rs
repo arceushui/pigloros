@@ -71,6 +71,11 @@
 //! and is registered only once the installed TPS1 revokes the old signer
 //! key and the root or signer of every pinned bundle. A re-run with the
 //! registered key is unchanged (owner decision of 2026-11-18 on #1431).
+//! The pin check and the registration that follows are two steps over the
+//! store, so the command must run with the Gateway stopped: a serving
+//! Gateway could pin a bundle between them. The unit's
+//! `Conflicts=piglor-gateway.service` stops `serve` while it runs; never run
+//! the command beside a serving Gateway by other means.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -172,9 +177,9 @@ pub enum LocalErasureProvisionErrorV1 {
     SignerRefused,
     /// The signer key differs from the one the key registry holds for
     /// `--signer-owner` and its registration is refused: a routine rotation
-    /// while an erasure request pins a bundle, or a `--rotation compromise`
-    /// the installed TPS1 does not reflect (owner decision of 2026-11-18 on
-    /// #1431).
+    /// while an erasure request pins a bundle, a `--rotation compromise`
+    /// the installed TPS1 does not reflect, or a key registry whose current
+    /// signer cannot be read (owner decision of 2026-11-18 on #1431).
     #[error("refused to register a new local erasure signer key: {0}")]
     Rotation(LocalErasureRotationRefusalV1),
 }
