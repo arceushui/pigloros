@@ -160,6 +160,20 @@ fn a_client_root_count_leaves_out_recorded_host_roots() -> Result<(), Box<dyn Er
             let mut commands = host.command_sender()?;
             commands.open_root_timeline(consent, "consent")?;
             commands.open_root_timeline(erasure_host, "erasure-host")?;
+        }
+        // Every recorded host root is a visible root the plain count sees,
+        // so leaving it out never lets the client count drop below the
+        // client roots.
+        {
+            let mut reads = host.read_sender()?;
+            assert_eq!(reads.root_timeline_count_bounded(64)?, 2);
+            assert_eq!(
+                reads.client_root_timeline_count_bounded(64, &host_roots)?,
+                0
+            );
+        }
+        {
+            let mut commands = host.command_sender()?;
             commands.create_timeline("client-1")?;
             commands.create_timeline("client-2")?;
         }

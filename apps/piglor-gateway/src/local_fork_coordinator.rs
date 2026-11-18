@@ -1904,39 +1904,42 @@ mod tests {
         TimelineId::from_ulid(ulid::Ulid::from_bytes([0xe1; 16]))
     }
 
+    /// A Fork request of `operation` on `parent` with the shape
+    /// `(descriptor, cut, attribution_required)`.
+    fn shaped_fork_request(
+        operation: u8,
+        parent_id: TimelineId,
+        (descriptor, cut, attribution_required): (u8, u64, bool),
+    ) -> LocalForkAdmissionRequestV1 {
+        LocalForkAdmissionRequestV1::Fork {
+            operation_id: Hash::from_bytes([operation; 32]),
+            parent_id,
+            cut,
+            descriptor_hash: Hash::from_bytes([descriptor; 32]),
+            composition_hash: Hash::from_bytes([operation; 32]),
+            attribution_required,
+            child_name: "host-child".to_owned(),
+        }
+    }
+
     /// ADR-136 §4a and owner decision D10 on #1413: a Fork naming a host
     /// Timeline as its parent is refused before any FAC1 runs, with the
-    /// response of a parent the store does not hold, and its claim is
-    /// released. The host Timelines exist in the store here, so only the
-    /// host-Timeline check refuses them; an ordinary parent with the same
-    /// descriptor reaches the FAC1 and is held for its classifier (code 6).
+    /// response of a parent the store does not hold, byte for byte for
+    /// every request shape, and its claim is released. The host Timelines
+    /// exist in the store here, so only the host-Timeline check refuses
+    /// them; an ordinary parent with the same request reaches the FAC1 and
+    /// is held for its classifier (code 6).
     #[test]
     #[cfg(target_os = "linux")]
     fn coordinator_refuses_a_host_timeline_as_fork_parent() -> TestResult {
         let mut fixture = fixture(JournalFault::Passthrough)?;
         assert_eq!(response_code(&fixture.submit(bind_request(80), 80)?), 0);
-        let unknown = fixture.submit(
-            fork_request(81, TimelineId::new(), 40, 82, "unknown-parent-child"),
-            83,
-        )?;
-        assert_eq!(response_code(&unknown), 4);
-        let ordinary = lock(&fixture.store).create_timeline("ordinary Fork parent")?;
-        let held = fixture.submit(
-            fork_request(84, ordinary.id(), 40, 85, "ordinary-child"),
-            86,
-        )?;
-        assert_eq!(response_code(&held), 6);
-        for (operation, parent) in [
-            (
-                87,
-                crate::local_principal::local_principal_consent_timeline(),
-            ),
-            (
-                88,
-                crate::local_principal::local_principal_authority_timeline(),
-            ),
-            (89, test_erasure_host()),
-        ] {
+        let host_timelines = [
+            crate::local_principal::local_principal_consent_timeline(),
+            crate::local_principal::local_principal_authority_timeline(),
+            test_erasure_host(),
+        ];
+        for parent in host_timelines {
             lock(&fixture.store).create_timeline_with_meta(pos_core::TimelineMeta {
                 id: parent,
                 mode: pos_core::TimelineMode::Live,
@@ -1944,31 +1947,44 @@ mod tests {
                 owner: None,
                 fork_point: None,
             })?;
-            let request = completed(
-                &fixture.coordinator,
-                fork_request(operation, parent, 40, operation, "host-child"),
-                operation,
-            )?;
-            let tuple = delivery_tuple(&request)
-                .map_err(|()| io::Error::other("fork request must produce a tuple"))?;
-            let refused = fixture.coordinator.handle(request);
-            assert_eq!(
-                refused.response.to_canonical_cbor(),
-                unknown.response.to_canonical_cbor()
-            );
-            assert!(refused.claim.is_none());
-            assert!(matches!(
-                lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
-                ForkDeliveryClaimOutcomeV1::Owner(_)
-            ));
-            assert!(lock(&fixture.store)
-                .list_timelines()?
-                .iter()
-                .all(|timeline| timeline
-                    .meta
-                    .fork_point
-                    .is_none_or(|(fork_parent, _)| fork_parent != parent)));
         }
+        let ordinary = lock(&fixture.store).create_timeline("ordinary Fork parent")?;
+        let held = fixture.submit(shaped_fork_request(81, ordinary.id(), (40, 0, false)), 81)?;
+        assert_eq!(response_code(&held), 6);
+        // The cut beyond the parent head would be a stale fold boundary on a
+        // recorded parent; an absent parent is refused first.
+        for (shape, base) in [((40, 0, false), 90), ((ACCEPTED_DESCRIPTOR, 7, true), 100)] {
+            let unknown =
+                fixture.submit(shaped_fork_request(base, TimelineId::new(), shape), base)?;
+            assert_eq!(response_code(&unknown), 4);
+            for (offset, parent) in (1..).zip(host_timelines) {
+                let operation = base + offset;
+                let request = completed(
+                    &fixture.coordinator,
+                    shaped_fork_request(operation, parent, shape),
+                    operation,
+                )?;
+                let tuple = delivery_tuple(&request)
+                    .map_err(|()| io::Error::other("fork request must produce a tuple"))?;
+                let refused = fixture.coordinator.handle(request);
+                assert_eq!(
+                    refused.response.to_canonical_cbor(),
+                    unknown.response.to_canonical_cbor()
+                );
+                assert!(refused.claim.is_none());
+                assert!(matches!(
+                    lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
+                    ForkDeliveryClaimOutcomeV1::Owner(_)
+                ));
+            }
+        }
+        assert!(lock(&fixture.store)
+            .list_timelines()?
+            .iter()
+            .all(|timeline| timeline
+                .meta
+                .fork_point
+                .is_none_or(|(fork_parent, _)| !host_timelines.contains(&fork_parent))));
         Ok(())
     }
 

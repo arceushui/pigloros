@@ -428,7 +428,16 @@ fn host_timelines_are_outside_the_room_root_ceiling() -> TestResult {
         host_timelines: crate::host_timelines::HostTimelinesV1::new(Some(erasure_host)),
         ..admission()?
     };
-    assert!(shape(&ok(create(&mut host, 1, 1, 1, &two)?)?).0);
+    let created = ok(create(&mut host, 1, 1, 1, &two)?)?;
+    let (committed, stored) = stored_of(&created);
+    assert!(committed);
+    // Owner decision D18 on #1413: a room's Timeline stays unowned, so no
+    // erasure selects it.
+    let room = host
+        .read_sender()?
+        .timeline(stored.timeline)?
+        .ok_or("the room's Timeline is recorded")?;
+    assert!(room.meta.owner.is_none());
     assert_eq!(
         refusal(create(&mut host, 2, 2, 2, &two)?),
         "TimelineCeiling"

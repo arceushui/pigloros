@@ -59,6 +59,8 @@ impl HostTimelinesV1 {
 
     /// Whether `timeline` is a host Timeline.
     pub(crate) fn contains(self, timeline: TimelineId) -> bool {
-        self.roots().contains(&timeline)
+        timeline == local_principal_consent_timeline()
+            || timeline == local_principal_authority_timeline()
+            || self.erasure_host == Some(timeline)
     }
 }

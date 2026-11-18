@@ -18,6 +18,9 @@ pub mod deployment_trust;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
 pub mod executor;
+// Public so its crate-only items satisfy both `unreachable_pub` and
+// `clippy::redundant_pub_crate`: in a private module `pub(crate)` trips the
+// latter and `pub` the former.
 pub mod host_timelines;
 mod http;
 pub mod ledger_config;
@@ -2951,9 +2954,10 @@ impl Gateway {
 
     /// Create a root Timeline, owned by `owner` when one is given.
     ///
-    /// The owner is recorded at creation (ADR-136 §1): a protected
-    /// composition passes the actor its decision admitted, and an
-    /// unprotected one creates an unowned root. Forks, imported child
+    /// The owner is recorded at creation (ADR-136 §1). It is only ever the
+    /// actor a decision admitted ([`operation::AdmittedActorV1`]): a
+    /// protected composition passes it, and an unprotected one creates an
+    /// unowned root. Forks, imported child
     /// Timelines and the host Timelines (the Consent Timeline, the
     /// authority Timeline and the Erasure Host Timeline) do not consume the
     /// root-Timeline ceiling.
@@ -2963,7 +2967,7 @@ impl Gateway {
     pub async fn create_timeline(
         &self,
         name: &str,
-        owner: Option<EntityId>,
+        owner: Option<operation::AdmittedActorV1>,
     ) -> Result<Timeline, GatewayError> {
         let root_count = self.store.root_count(self.limits.max_timelines).await?;
         if root_count >= self.limits.max_timelines {
@@ -2971,7 +2975,13 @@ impl Gateway {
                 maximum: self.limits.max_timelines,
             });
         }
-        Ok(self.store.create(name.to_owned(), owner).await?)
+        Ok(self
+            .store
+            .create(
+                name.to_owned(),
+                owner.map(operation::AdmittedActorV1::entity_id),
+            )
+            .await?)
     }
 
     /// The host Timelines of this Gateway's store.
@@ -3447,7 +3457,8 @@ impl Gateway {
                 ActionRejected::UnknownEventType,
             ));
         }
-        let timeline = parse_timeline_id(timeline_id)?;
+        let timeline =
+            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
         let entity = parse_entity_id(entity_id)?;
         let bytes = json_to_cbor(payload);
         let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), bytes);
@@ -3774,6 +3785,10 @@ impl Gateway {
 
     /// The owned-Event ceiling uses this Timeline's store head. Logical Events
     /// inherited by a Fork are readable but do not consume the Fork's ceiling.
+    ///
+    /// `timeline` is never taken from a client as is: every caller passes it
+    /// through [`Self::client_timeline`] first, so no client append reaches
+    /// a host Timeline.
     async fn append_draft(
         &self,
         timeline: TimelineId,
@@ -4787,6 +4802,30 @@ mod tests {
 
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
+    }
+
+    /// No client append, through any seam, reaches a host Timeline
+    /// (ADR-136 §4a): an action naming one is refused before the store.
+    #[tokio::test]
+    async fn an_action_append_never_reaches_a_host_timeline() {
+        let gateway = memory_gw();
+        for host_timeline in [
+            local_principal::local_principal_consent_timeline(),
+            local_principal::local_principal_authority_timeline(),
+        ] {
+            assert!(matches!(
+                gateway
+                    .append_action(
+                        &host_timeline.to_string(),
+                        &EntityId::new().to_string(),
+                        EVENT_TYPE_ACTION,
+                        &serde_json::json!({}),
+                    )
+                    .await,
+                Err(GatewayError::ResourceUnavailable)
+            ));
+        }
+        drop(gateway);
     }
 
     fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {

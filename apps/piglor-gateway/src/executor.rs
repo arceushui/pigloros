@@ -3232,7 +3232,8 @@ fn execute_root_count_command(
 }
 
 /// Create a root Timeline; the host records `owner` at creation (ADR-136
-/// §1). A test store records no owner.
+/// §1). A test store has no owner seam, so it refuses an owned root rather
+/// than create it unowned.
 fn execute_create_command(
     state: &mut ExecutorState,
     name: &str,
@@ -3243,12 +3244,22 @@ fn execute_create_command(
         reply,
         state.store.execute(
             |host| {
+                // Both arms borrow `sender` mutably, so this cannot be one
+                // `map_or_else` with two closures.
                 host.command_sender().and_then(|mut sender| match owner {
                     Some(owner) => sender.create_owned_timeline(name, owner),
                     None => sender.create_timeline(name),
                 })
             },
-            |store| store.create_timeline(name),
+            |store| {
+                if owner.is_some() {
+                    Err(CoreError::Storage(
+                        "a test store records no Timeline owner".to_owned(),
+                    ))
+                } else {
+                    store.create_timeline(name)
+                }
+            },
         ),
     );
 }
@@ -4589,6 +4600,24 @@ mod tests {
         );
     }
 
+    /// A test store has no owner seam: an owned root is refused, never
+    /// created unowned, and nothing is created.
+    #[tokio::test]
+    async fn a_test_store_refuses_an_owned_root(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        assert!(matches!(
+            executor
+                .create("owned".to_owned(), Some(EntityId::new()))
+                .await,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(_)))
+        ));
+        assert!(matches!(executor.root_count(1).await, Ok(0)));
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+        Ok(())
+    }
+
     async fn expired_queued_command_is_not_executed_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
@@ -4851,6 +4880,29 @@ mod tests {
     }
 
     #[test]
+    fn expired_root_commands_reply() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::RootCount {
+                host_roots: Vec::new(),
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Create {
+                owner: None,
+                name: "expired".to_owned(),
+                reply,
+            },
+            receiver,
+        );
+    }
+
+    #[test]
     fn expired_store_commands_reply() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
@@ -4873,26 +4925,6 @@ mod tests {
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::PendingAppendIdentityCleanup { reply }, receiver);
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::RootCount {
-                host_roots: Vec::new(),
-                maximum: 1,
-                reply,
-            },
-            receiver,
-        );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::Create {
-                owner: None,
-                name: "expired".to_owned(),
-                reply,
-            },
-            receiver,
-        );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
