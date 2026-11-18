@@ -7908,11 +7908,12 @@ fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResu
         signer_rotation(&mut closed.sqlite()?, new_key, compromise, &[]),
         Err(LocalErasureRotationRefusalV1::NotRevoked)
     );
-    // Only the owner's role-2 keys name its current signer: a later key of
-    // another role, without a public key, leaves the old signer current.
+    // Only the owner's role-2 keys name its current signer: a later
+    // encryption key of the owner, which has no public key, leaves the old
+    // signer current.
     closed.register(KeyRegistrationV1::new(
-        KeyIdentityV1::new(SIGNER_OWNER, KeyRoleV1::SubjectAttributionSigning, 9),
-        Hash::from_bytes([0x99; 32]),
+        KeyIdentityV1::new(SIGNER_OWNER, KeyRoleV1::ExportRecipientEncryption, 9),
+        Hash::from_bytes([0x9a; 32]),
         None,
     ))?;
     assert_eq!(
