@@ -216,6 +216,7 @@ async fn valid_credentials_compose_the_local_erasure_authority() -> TestResult {
     assert!(driver.trigger().is_some());
     driver.stop().await;
     assert!(gateway.shutdown().await.is_ok());
+    drop(gateway);
     Ok(())
 }
 
@@ -242,6 +243,7 @@ async fn without_the_flag_the_composition_stays_closed() -> TestResult {
     assert!(driver.trigger().is_none());
     driver.stop().await;
     assert!(gateway.shutdown().await.is_ok());
+    drop(gateway);
     Ok(())
 }
 
@@ -461,6 +463,7 @@ async fn a_skipped_startup_sweep_does_not_fail_startup() -> TestResult {
     let driver = LocalErasureDriverTaskV1::spawn(&gateway, started);
     driver.stop().await;
     assert!(gateway.shutdown().await.is_ok());
+    drop(gateway);
     Ok(())
 }
 
@@ -616,9 +619,8 @@ async fn the_driver_task_drives_a_submitted_request_end_to_end() -> TestResult {
     } = submitted()?;
     // A tick far beyond the deadline: only the startup run and the
     // admission hook wake this driver.
-    let driver =
-        LocalErasureDriverTaskV1::spawn_every(&gateway, started, Duration::from_secs(3_600));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let driver = LocalErasureDriverTaskV1::spawn_every(&gateway, started, Duration::from_hours(1));
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
     loop {
         let lifecycle = lifecycle(&gateway, request).await?;
         if receipted(lifecycle) {

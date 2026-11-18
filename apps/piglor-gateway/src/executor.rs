@@ -2672,8 +2672,9 @@ mod local_erasure_advance_tests {
     #[tokio::test]
     async fn a_store_without_an_erasure_host_cannot_advance() {
         let executor = StoreExecutor::new(Box::new(MemoryStore::new()));
+        let advanced = executor.advance_local_erasure(&driver()).await;
         assert!(matches!(
-            executor.advance_local_erasure(&driver()).await,
+            advanced,
             Ok(Err(ErasureHostErrorV1::RecoveryUnavailable))
         ));
         assert!(executor.shutdown().await.is_ok());
