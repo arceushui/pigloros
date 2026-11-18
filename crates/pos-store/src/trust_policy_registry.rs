@@ -80,6 +80,45 @@ impl AdmittedTrustSnapshotV1 {
     }
 }
 
+/// The authenticated current TPS1 of one deployment trust state store.
+///
+/// It is read evidence for a consumer that verifies records against the
+/// installed policy, such as the ADR-136 Local erasure bundle; it admits
+/// nothing by itself.
+pub struct CurrentTrustPolicyV1 {
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+    snapshot: TrustPolicySnapshotV1,
+    expiry: u64,
+}
+
+impl CurrentTrustPolicyV1 {
+    /// The exact canonical TPS1 bytes the store holds.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The BLAKE3 digest of [`Self::bytes`], the digest TPS1 successors
+    /// chain through `previous_snapshot_digest`.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// The decoded snapshot, authenticated against the release anchor.
+    #[must_use]
+    pub const fn snapshot(&self) -> &TrustPolicySnapshotV1 {
+        &self.snapshot
+    }
+
+    /// `offline_valid_through` as Unix seconds (UTC).
+    #[must_use]
+    pub const fn expiry(&self) -> u64 {
+        self.expiry
+    }
+}
+
 /// Safe, closed TPS1 deployment admission errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrustPolicyRegistryErrorV1 {
@@ -221,6 +260,28 @@ impl DeploymentTrustPolicyRegistryV1 {
             .ok_or(TrustPolicyRegistryErrorV1::CorruptState)
     }
 
+    /// Read the current TPS1 and re-authenticate it against the release
+    /// anchor through the same checks as every admission.
+    ///
+    /// # Errors
+    /// Fails closed when the state file was replaced, is corrupt, no longer
+    /// authenticates against the release anchor, or holds an expiry that is
+    /// not a valid UTC time.
+    pub fn current_trust_policy(&self) -> Result<CurrentTrustPolicyV1, TrustPolicyRegistryErrorV1> {
+        self.ensure_path_identity()
+            .and_then(|()| read_trusted_state(&self.connection, &self.release))
+            .and_then(|stored| {
+                parse_utc_seconds(&stored.snapshot.offline_valid_through)
+                    .ok_or(TrustPolicyRegistryErrorV1::CorruptState)
+                    .map(|expiry| CurrentTrustPolicyV1 {
+                        bytes: stored.bytes,
+                        digest: stored.digest,
+                        snapshot: stored.snapshot,
+                        expiry,
+                    })
+            })
+    }
+
     /// Authenticate current TPS1 and one raw EPF1 before calling the trusted
     /// registration operation while this registry remains mutably borrowed.
     ///
@@ -352,6 +413,24 @@ fn storage_unavailable(_: rusqlite::Error) -> TrustPolicyRegistryErrorV1 {
     TrustPolicyRegistryErrorV1::StorageUnavailable
 }
 
+/// The TPS1 operator-signature context of a deployment trust state store.
+const OPERATOR_SIGNATURE_CONTEXT: &str = "deployment-operator";
+
+/// Whether `exact_tps1` is a canonical TPS1 whose deployment-operator
+/// signature verifies under `operator_public_key`.
+///
+/// This is how retained TPS1 evidence is checked against the currently
+/// pinned operator key (ADR-136 Q17), independently of the TPS1 the state
+/// store currently holds.
+#[must_use]
+pub fn tps1_signed_by_operator_v1(exact_tps1: &[u8], operator_public_key: &[u8; 32]) -> bool {
+    TrustPolicySnapshotV1::from_canonical_cbor(exact_tps1).is_ok_and(|snapshot| {
+        snapshot
+            .verify_operator_signature_v1(operator_public_key, OPERATOR_SIGNATURE_CONTEXT)
+            .is_ok()
+    })
+}
+
 fn authenticate(
     bytes: &[u8],
     release: &OperatorReleaseTrustV1,
@@ -362,7 +441,7 @@ fn authenticate(
         return Err(TrustPolicyRegistryErrorV1::InvalidSnapshot);
     }
     snapshot
-        .verify_operator_signature_v1(&release.operator_public_key, "deployment-operator")
+        .verify_operator_signature_v1(&release.operator_public_key, OPERATOR_SIGNATURE_CONTEXT)
         .map_err(|_| TrustPolicyRegistryErrorV1::InvalidOperatorSignature)?;
     Ok(snapshot)
 }

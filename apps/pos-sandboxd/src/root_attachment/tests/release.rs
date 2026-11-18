@@ -396,4 +396,30 @@ mod cases {
         }
         Ok(())
     }
+
+    /// The #444 evidence driver's production adapters, on an owned root that
+    /// the fake kernel attached: the report names its mount and root, and the
+    /// real host's detach refuses before any unmount, as above.
+    #[cfg(all(
+        feature = "test-support",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[tokio::test]
+    async fn the_evidence_driver_adapters_use_the_production_detach() -> TestResult {
+        use crate::packaged_conformance::{describe, release};
+
+        let tree = prepared_tree()?;
+        let (_kernel, root) = attached_root(&tree.prepared)?;
+        let key = component(&tree.prepared);
+        assert_eq!(
+            describe(&root),
+            format!("41\t/run/pigloros/sandbox/attempts/{key}/root")
+        );
+        assert_eq!(
+            release(root, &tree.prepared).await,
+            Err(ImageActivationError::EvidenceMismatch)
+        );
+        tree.prepared.verify_directory()?;
+        Ok(())
+    }
 }
