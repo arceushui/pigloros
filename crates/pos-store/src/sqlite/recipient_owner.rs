@@ -3235,20 +3235,20 @@ mod tests {
 
     use super::*;
 
-    type RecipientTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    pub(super) type RecipientTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     const TEST_RECIPIENT_EXPORT_DIGEST: ErasureReferenceV1 =
         ErasureReferenceV1::from_digest([241; 32]);
 
-    struct RecipientPublicationFixture {
-        _temporary: tempfile::TempDir,
-        store: SqliteStore,
-        owner: RecipientKeyOwnerV1,
-        authority: ConsentAuthority,
-        token: ConsentCapabilityToken,
-        timeline: TimelineId,
-        descriptor: RecipientKeyDescriptorV1,
-        evaluation: ReplayClaimEvaluationV1,
+    pub(super) struct RecipientPublicationFixture {
+        pub(super) _temporary: tempfile::TempDir,
+        pub(super) store: SqliteStore,
+        pub(super) owner: RecipientKeyOwnerV1,
+        pub(super) authority: ConsentAuthority,
+        pub(super) token: ConsentCapabilityToken,
+        pub(super) timeline: TimelineId,
+        pub(super) descriptor: RecipientKeyDescriptorV1,
+        pub(super) evaluation: ReplayClaimEvaluationV1,
     }
 
     fn owner_fixture() -> Result<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1), CoreError> {
@@ -3289,7 +3289,8 @@ mod tests {
         .map_err(|error| error.to_string().into())
     }
 
-    fn recipient_publication_fixture() -> RecipientTestResult<RecipientPublicationFixture> {
+    pub(super) fn recipient_publication_fixture() -> RecipientTestResult<RecipientPublicationFixture>
+    {
         let (temporary, mut store, owner) = owner_fixture()?;
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         let subject = EntityId::new();
@@ -3335,7 +3336,7 @@ mod tests {
         })
     }
 
-    const fn recipient_publication_request<'a>(
+    pub(super) const fn recipient_publication_request<'a>(
         timeline: TimelineId,
         recipient: RecipientKeyDescriptorV1,
         evaluation: &'a ReplayClaimEvaluationV1,

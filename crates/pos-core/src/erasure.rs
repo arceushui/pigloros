@@ -2864,7 +2864,11 @@ pub trait ErasureInventoryPersistencePortV1 {
     /// [`ErasureErrorV1::KeyDestructionFailed`]: a missing key registry, a
     /// registry refusal, and, on an adapter whose durable state another
     /// connection can change, an inventory changed since the adapter
-    /// installed it. Nothing is committed on error.
+    /// installed it. A recipient-export withdrawal (ADR-138 §5, T3) is
+    /// [`ErasureErrorV1::ProvenanceMissing`] unless its withdrawal row is
+    /// captured, deleted and equal to the ELXW1, or already withdrawn with
+    /// exactly this ELXW1, and [`ErasureErrorV1::ReceiptCommitFailed`] when
+    /// its durable commit is refused. Nothing is committed on error.
     fn commit_local_owner_effect(
         &mut self,
         prepared: PreparedLocalOwnerEffectV1,

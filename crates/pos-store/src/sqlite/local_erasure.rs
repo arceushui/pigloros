@@ -73,10 +73,10 @@ impl SqliteStore {
         &self,
         prepared: &PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        match prepared.recipient_export_withdrawal() {
-            Some(binding) => self.commit_recipient_export_withdrawal(prepared, &binding),
-            None => self.commit_record_owner_effect(prepared),
-        }
+        prepared.recipient_export_withdrawal().map_or_else(
+            || self.commit_record_owner_effect(prepared),
+            |binding| self.commit_recipient_export_withdrawal(prepared, &binding),
+        )
     }
 
     fn commit_record_owner_effect(
@@ -237,9 +237,11 @@ impl SqliteStore {
             if !present {
                 return Ok(None);
             }
-            withdrawal_by_target(&self.conn, target).and_then(|withdrawal| match withdrawal {
-                Some(row) => Ok(Some((row.export_id, row.grantee_owner))),
-                None => catalog_by_target(&self.conn, target, timelines),
+            withdrawal_by_target(&self.conn, target).and_then(|withdrawal| {
+                withdrawal.map_or_else(
+                    || catalog_by_target(&self.conn, target, timelines),
+                    |row| Ok(Some((row.export_id, row.grantee_owner))),
+                )
             })
         })
     }
@@ -297,7 +299,9 @@ fn authority_snapshot_in(
 }
 
 /// At most one category's obligations may name `ELXR1` targets (ADR-138 §5).
-fn export_targets_admitted(export_targets: &[ErasureReferenceV1]) -> Result<(), ErasureErrorV1> {
+const fn export_targets_admitted(
+    export_targets: &[ErasureReferenceV1],
+) -> Result<(), ErasureErrorV1> {
     if export_targets.len() > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
         Err(ErasureErrorV1::ScopeInvalid)
     } else {

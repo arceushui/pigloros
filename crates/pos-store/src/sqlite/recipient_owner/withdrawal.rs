@@ -295,12 +295,18 @@ impl SqliteStore {
             in_immediate_transaction(&self.conn, || {
                 load_withdrawal_row(&self.conn, binding.export_id)
                     .and_then(|row| row.ok_or(ErasureErrorV1::ProvenanceMissing))
-                    .and_then(|row| match row.disposition.as_deref() {
-                        Some(recorded) => disposition
-                            .is_some_and(|disposition| disposition.digest().as_slice() == recorded)
-                            .then_some(())
-                            .ok_or(ErasureErrorV1::ProvenanceMissing),
-                        None => first_withdrawal(&self.conn, &row, binding, prepared),
+                    .and_then(|row| {
+                        row.disposition.as_deref().map_or_else(
+                            || first_withdrawal(&self.conn, &row, binding, prepared),
+                            |recorded| {
+                                disposition
+                                    .is_some_and(|disposition| {
+                                        disposition.digest().as_slice() == recorded
+                                    })
+                                    .then_some(())
+                                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+                            },
+                        )
                     })
                     .and_then(|()| insert_retained(&self.conn, prepared.owner_result()))
             })
@@ -357,9 +363,10 @@ impl SqliteStore {
         subject: &CaptureSubjectV1,
     ) -> CaptureV1 {
         self.usable_custody(grantee_owner.as_str(), None)
-            .map_or(CaptureV1::failed(NO_CUSTODY), |owner| {
-                capture_objects(owner, export_id, subject)
-            })
+            .map_or_else(
+                || CaptureV1::failed(NO_CUSTODY),
+                |owner| capture_objects(owner, export_id, subject),
+            )
     }
 
     /// Record one capture in a durable transaction, after re-checking that
@@ -518,24 +525,35 @@ fn classify_retraction(
     export_id: [u8; 16],
     grantee_owner: &OwnerIdV1,
 ) -> Result<RetractionV1, ErasureErrorV1> {
-    load_withdrawal_row(connection, export_id).and_then(|row| match row {
-        Some(row) => classify_withdrawal_row(connection, row, grantee_owner),
-        None => load_recipient_export_catalog(connection, export_id)
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
-            .and_then(|catalog| {
-                catalog
-                    .filter(|catalog| catalog.owner_id == grantee_owner.as_str())
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
-            .and_then(|catalog| {
-                capture_subject(
-                    catalog.timeline_id,
-                    u64::try_from(catalog.ciphertext_length).ok(),
-                    &catalog.ciphertext_digest,
-                )
-            })
-            .map(RetractionV1::Capture),
+    load_withdrawal_row(connection, export_id).and_then(|row| {
+        row.map_or_else(
+            || classify_catalog_row(connection, export_id, grantee_owner),
+            |row| classify_withdrawal_row(connection, row, grantee_owner),
+        )
     })
+}
+
+/// T1 for an export without a withdrawal row: retract its catalog row.
+fn classify_catalog_row(
+    connection: &Connection,
+    export_id: [u8; 16],
+    grantee_owner: &OwnerIdV1,
+) -> Result<RetractionV1, ErasureErrorV1> {
+    load_recipient_export_catalog(connection, export_id)
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+        .and_then(|catalog| {
+            catalog
+                .filter(|catalog| catalog.owner_id == grantee_owner.as_str())
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+        })
+        .and_then(|catalog| {
+            capture_subject(
+                catalog.timeline_id,
+                u64::try_from(catalog.ciphertext_length).ok(),
+                &catalog.ciphertext_digest,
+            )
+        })
+        .map(RetractionV1::Capture)
 }
 
 fn classify_withdrawal_row(
@@ -619,16 +637,19 @@ fn capture_final(
     subject: &CaptureSubjectV1,
 ) -> EntryV1 {
     let name = recipient_export_final_name(export_id);
-    match recipient_openat2(
+    let opened = recipient_openat2(
         &owner.directory_file,
         name.as_slice(),
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    ) {
+    );
+    match opened {
         Err(rustix::io::Errno::NOENT) => EntryV1::Absent,
-        opened => {
-            let verified = opened.ok().map(File::from).and_then(|file| {
+        opened => opened
+            .ok()
+            .map(File::from)
+            .and_then(|file| {
                 file.metadata()
                     .ok()
                     .filter(|metadata| {
@@ -637,14 +658,9 @@ fn capture_final(
                             && digest_matches(&file, subject)
                     })
                     .map(|metadata| RecipientPrivateFileIdentityV1::from_metadata(&metadata))
-            });
-            match verified {
-                Some(opened) if stat_entry(owner, &name) == EntryV1::Safe(opened) => {
-                    EntryV1::Safe(opened)
-                }
-                _ => EntryV1::Unsafe,
-            }
-        }
+            })
+            .filter(|opened| stat_entry(owner, &name) == EntryV1::Safe(*opened))
+            .map_or(EntryV1::Unsafe, EntryV1::Safe),
     }
 }
 
@@ -712,13 +728,14 @@ fn unlink_captured(
     expected: RecipientPrivateFileIdentityV1,
     length: Option<u64>,
 ) -> Result<(), CoreError> {
-    match recipient_openat2(
+    let opened = recipient_openat2(
         &owner.directory_file,
         name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    ) {
+    );
+    match opened {
         Err(rustix::io::Errno::NOENT) => Ok(()),
         opened => opened
             .map(File::from)
@@ -853,4 +870,301 @@ fn file_identity(bytes: &[u8]) -> Option<RecipientPrivateFileIdentityV1> {
             uid: uid.try_into().unwrap_or_default(),
         }
     })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use pos_core::{
+        ErasureInventoryPersistencePortV1, LocalErasureRecipientExportWithdrawalV1,
+        LocalOwnerEffectV1, LocalOwnerResultBindingV1, TimelineId,
+    };
+
+    use super::super::tests::{
+        recipient_publication_fixture, recipient_publication_request, RecipientPublicationFixture,
+        RecipientTestResult,
+    };
+    use super::super::{
+        current_sqlite_synchronous_level, RecipientExportPublicationErrorV1,
+        RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE, RECIPIENT_RANDOM_OVERRIDE,
+    };
+    use super::*;
+
+    /// One publication of the fixture's grantee, with a second handle on its
+    /// directory attached as custody.
+    fn published() -> RecipientTestResult<(RecipientPublicationFixture, [u8; 16])> {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let export_id = fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?
+            .export_id;
+        let custody =
+            RecipientKeyOwnerV1::open(fixture.owner.directory.clone(), fixture.owner.grantee_id)?;
+        fixture.store.attach_recipient_custody(vec![custody])?;
+        Ok((fixture, export_id))
+    }
+
+    /// The ELXW1 of the recorded row of `export_id`.
+    fn recorded_elxw1(
+        store: &SqliteStore,
+        export_id: [u8; 16],
+        timeline: TimelineId,
+    ) -> RecipientTestResult<Vec<u8>> {
+        let (owner, length, digest, directory, final_identity): (
+            String,
+            u64,
+            Vec<u8>,
+            Vec<u8>,
+            Vec<u8>,
+        ) = store.conn.query_row(
+            "SELECT owner_id, ciphertext_length, ciphertext_digest, directory_identity,
+                    final_identity
+             FROM recipient_export_withdrawals_v1 WHERE export_id = ?1",
+            params![export_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        Ok(LocalErasureRecipientExportWithdrawalV1 {
+            request: ErasureReferenceV1::from_digest([1; 32]),
+            command: ErasureReferenceV1::from_digest([5; 32]),
+            export_id,
+            timeline_id: timeline,
+            grantee_owner: OwnerIdV1::new(owner)?,
+            ciphertext_digest: Hash::from_bytes(digest.as_slice().try_into()?),
+            ciphertext_length: length,
+            directory_identity: directory.as_slice().try_into()?,
+            final_identity: final_identity.as_slice().try_into()?,
+        }
+        .to_canonical_cbor()?)
+    }
+
+    fn prepared(elxw1: Vec<u8>) -> Result<PreparedLocalOwnerEffectV1, ErasureErrorV1> {
+        PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::RecipientExportWithdrawal(elxw1),
+            LocalOwnerResultBindingV1 {
+                request: ErasureReferenceV1::from_digest([1; 32]),
+                attempt: ErasureReferenceV1::from_digest([2; 32]),
+                obligation: ErasureReferenceV1::from_digest([3; 32]),
+                command: ErasureReferenceV1::from_digest([5; 32]),
+                owner_ref: ErasureReferenceV1::from_digest([4; 32]),
+                error: None,
+            },
+        )
+    }
+
+    /// T1, the owner step and T3 are each refused with their closed code,
+    /// with `before` run ahead of each step.
+    fn assert_refused(
+        store: &mut SqliteStore,
+        export_id: [u8; 16],
+        grantee: &OwnerIdV1,
+        before: &dyn Fn(),
+    ) -> RecipientTestResult {
+        let elxw1 = LocalErasureRecipientExportWithdrawalV1 {
+            request: ErasureReferenceV1::from_digest([1; 32]),
+            command: ErasureReferenceV1::from_digest([5; 32]),
+            export_id,
+            timeline_id: TimelineId::new(),
+            grantee_owner: *grantee,
+            ciphertext_digest: Hash::from_bytes([6; 32]),
+            ciphertext_length: 7,
+            directory_identity: [8; 16],
+            final_identity: [9; 20],
+        }
+        .to_canonical_cbor()?;
+        before();
+        assert_eq!(
+            store.begin_recipient_export_withdrawal(export_id, grantee),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        before();
+        assert_eq!(
+            store.delete_recipient_export_ciphertext(export_id),
+            Err(ErasureErrorV1::ArtifactDeletionFailed)
+        );
+        before();
+        assert_eq!(
+            store.commit_local_owner_effect(prepared(elxw1)?),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_withdrawal_step_commits_under_full_and_restores_the_level() -> RecipientTestResult {
+        let (mut fixture, export_id) = published()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL")?;
+        let normal = current_sqlite_synchronous_level(&fixture.store.conn)?;
+        WITHDRAWAL_OBSERVED_SYNCHRONOUS.with(|observed| observed.borrow_mut().clear());
+        let grantee = fixture.descriptor.identity().owner_id;
+        assert_eq!(
+            fixture
+                .store
+                .begin_recipient_export_withdrawal(export_id, &grantee)?,
+            RecipientExportWithdrawalStateV1::Retracted {
+                capture_status: CAPTURED,
+                objects_deleted: false,
+            }
+        );
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            normal
+        );
+        fixture
+            .store
+            .delete_recipient_export_ciphertext(export_id)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            normal
+        );
+        let elxw1 = recorded_elxw1(&fixture.store, export_id, fixture.timeline)?;
+        fixture.store.commit_local_owner_effect(prepared(elxw1)?)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            normal
+        );
+        let observed = WITHDRAWAL_OBSERVED_SYNCHRONOUS.with(std::cell::RefCell::take);
+        assert_eq!(observed.len(), 3);
+        assert!(observed.iter().all(|level| *level >= 2), "{observed:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn every_withdrawal_step_refuses_an_unwritable_connection() -> RecipientTestResult {
+        let (mut fixture, export_id) = published()?;
+        let grantee = fixture.descriptor.identity().owner_id;
+        // An open outer transaction.
+        fixture.store.conn.execute_batch("BEGIN")?;
+        assert_refused(&mut fixture.store, export_id, &grantee, &|| {})?;
+        fixture.store.conn.execute_batch("ROLLBACK")?;
+        // An `is_readonly` error.
+        WITHDRAWAL_READONLY_FAILURE.with(|failure| failure.set(true));
+        let readonly_error = assert_refused(&mut fixture.store, export_id, &grantee, &|| {});
+        WITHDRAWAL_READONLY_FAILURE.with(|failure| failure.set(false));
+        readonly_error?;
+        // A read-back below FULL.
+        assert_refused(&mut fixture.store, export_id, &grantee, &|| {
+            RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|level| level.set(Some(1)));
+        })?;
+        // A read-only handle whose writer reservation connection is absent.
+        let path = fixture
+            .store
+            .conn
+            .path()
+            .ok_or("database path is unavailable")?
+            .to_owned();
+        let mut read_only = SqliteStore::open_read_only(&path)?;
+        read_only.writer_reservation_connection = None;
+        assert_refused(&mut read_only, export_id, &grantee, &|| {})?;
+        // Nothing was retracted.
+        assert!(load_withdrawal_row(&fixture.store.conn, export_id)?.is_none());
+        assert_eq!(
+            fixture
+                .store
+                .begin_recipient_export_withdrawal(export_id, &grantee)?,
+            RecipientExportWithdrawalStateV1::Retracted {
+                capture_status: CAPTURED,
+                objects_deleted: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_retraction_rechecks_its_catalog_row_inside_its_transaction() -> RecipientTestResult {
+        let (mut fixture, export_id) = published()?;
+        let path = fixture
+            .store
+            .conn
+            .path()
+            .ok_or("database path is unavailable")?
+            .to_owned();
+        WITHDRAWAL_BEFORE_RECORD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let changed = Connection::open(path).and_then(|connection| {
+                    connection.execute(
+                        "UPDATE recipient_export_catalog_v1
+                         SET ciphertext_length = ciphertext_length + 1",
+                        [],
+                    )
+                });
+                assert_eq!(changed.ok(), Some(1));
+            }));
+        });
+        let grantee = fixture.descriptor.identity().owner_id;
+        assert_eq!(
+            fixture
+                .store
+                .begin_recipient_export_withdrawal(export_id, &grantee),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        assert!(load_withdrawal_row(&fixture.store.conn, export_id)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_final_object_replaced_before_the_record_is_unsafe() -> RecipientTestResult {
+        let (mut fixture, export_id) = published()?;
+        let final_path = fixture
+            .owner
+            .directory
+            .join(String::from_utf8(recipient_export_final_name(export_id))?);
+        WITHDRAWAL_BEFORE_RECORD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let fresh = final_path.with_extension("replacement");
+                let replaced = std::fs::read(&final_path)
+                    .and_then(|bytes| std::fs::write(&fresh, bytes))
+                    .and_then(|()| std::fs::rename(fresh, final_path));
+                assert!(replaced.is_ok());
+            }));
+        });
+        let grantee = fixture.descriptor.identity().owner_id;
+        assert_eq!(
+            fixture
+                .store
+                .begin_recipient_export_withdrawal(export_id, &grantee)?,
+            RecipientExportWithdrawalStateV1::Retracted {
+                capture_status: UNSAFE,
+                objects_deleted: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_reservation_refuses_a_withdrawn_export_id() -> RecipientTestResult {
+        let (mut fixture, export_id) = published()?;
+        let grantee = fixture.descriptor.identity().owner_id;
+        fixture
+            .store
+            .begin_recipient_export_withdrawal(export_id, &grantee)?;
+        fixture
+            .store
+            .delete_recipient_export_ciphertext(export_id)?;
+        let elxw1 = recorded_elxw1(&fixture.store, export_id, fixture.timeline)?;
+        fixture.store.commit_local_owner_effect(prepared(elxw1)?)?;
+        assert!(load_recipient_export_catalog(&fixture.store.conn, export_id)?.is_none());
+        RECIPIENT_RANDOM_OVERRIDE.with(|bytes| *bytes.borrow_mut() = Some(export_id.to_vec()));
+        assert!(matches!(
+            fixture.store.reserve_recipient_export_id(&fixture.owner),
+            Err(RecipientExportPublicationErrorV1::IdentifierCollision)
+        ));
+        Ok(())
+    }
 }
