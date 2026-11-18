@@ -447,6 +447,9 @@ pub enum LocalErasureRotationRefusalV1 {
     /// A compromise the installed TPS1 does not reflect: the old signer
     /// key or a pinned bundle is not revoked.
     NotRevoked,
+    /// The key registry cannot be read, or its current signer record of
+    /// the owner carries no public key, so the old signer is unknown.
+    SignerUnknown,
 }
 
 impl std::fmt::Display for LocalErasureRotationRefusalV1 {
@@ -454,6 +457,7 @@ impl std::fmt::Display for LocalErasureRotationRefusalV1 {
         formatter.write_str(match self {
             Self::Pinned => "an erasure request pins the current signer's bundle",
             Self::NotRevoked => "the installed TPS1 does not revoke the old signer's bundle",
+            Self::SignerUnknown => "the key registry's current signer cannot be read",
         })
     }
 }
@@ -474,14 +478,17 @@ impl std::error::Error for LocalErasureRotationRefusalV1 {}
 ///   key ids are `revoked`, revokes the old signer key and the root or
 ///   signer of every pinned bundle.
 ///
-/// A store without a readable key registry holds no old signer, and the
-/// registration that follows refuses it.
+/// A key registry that cannot be read, or whose current signer record of
+/// the owner carries no public key, fails closed: the old signer is
+/// unknown, so nothing is registered.
 ///
 /// # Errors
 /// [`LocalErasureRotationRefusalV1::Pinned`] for a routine rotation while
 /// a request pins a bundle, or when the pins cannot be read;
 /// [`LocalErasureRotationRefusalV1::NotRevoked`] for a compromise the
-/// installed TPS1 does not reflect.
+/// installed TPS1 does not reflect;
+/// [`LocalErasureRotationRefusalV1::SignerUnknown`] when the current signer
+/// cannot be read.
 pub fn local_erasure_signer_rotation_v1<S>(
     store: &mut S,
     owner: OwnerIdV1,
@@ -492,36 +499,60 @@ pub fn local_erasure_signer_rotation_v1<S>(
 where
     S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + EventStore + ?Sized,
 {
-    let old = store
+    store
         .load_key_registry()
         .ok()
-        .flatten()
+        .ok_or(LocalErasureRotationRefusalV1::SignerUnknown)
         .and_then(|registry| {
             registry
-                .key_records()
-                .filter(|record| {
-                    record.identity.owner_id == owner
-                        && record.identity.role == KeyRoleV1::TimelineIntegritySigning
+                .and_then(|registry| {
+                    registry
+                        .key_records()
+                        .filter(|record| {
+                            record.identity.owner_id == owner
+                                && record.identity.role == KeyRoleV1::TimelineIntegritySigning
+                        })
+                        .max_by_key(|record| record.identity.epoch)
                 })
-                .max_by_key(|record| record.identity.epoch)
-                .and_then(|record| record.public_verification_key)
-                .map(|key| *key.as_bytes())
-        });
-    old.filter(|old| *old != signer_public_key)
-        .map_or(Ok(()), |old| {
-            bundle_pins(store, revoked)
-                .ok_or(LocalErasureRotationRefusalV1::Pinned)
-                .and_then(|pins| match rotation {
-                    LocalErasureSignerRotationV1::Routine => pins
-                        .is_empty()
-                        .then_some(())
-                        .ok_or(LocalErasureRotationRefusalV1::Pinned),
-                    LocalErasureSignerRotationV1::Compromise => (revoked
-                        .contains(&local_erasure_signer_key_id_v1(&old))
-                        && pins.iter().all(|&(_, revoked)| revoked))
-                    .then_some(())
-                    .ok_or(LocalErasureRotationRefusalV1::NotRevoked),
+                .map_or(Ok(()), |record| {
+                    record
+                        .public_verification_key
+                        .map(|key| *key.as_bytes())
+                        .ok_or(LocalErasureRotationRefusalV1::SignerUnknown)
+                        .and_then(|old| {
+                            if old == signer_public_key {
+                                Ok(())
+                            } else {
+                                rotation_refusal(store, old, rotation, revoked)
+                            }
+                        })
                 })
+        })
+}
+
+/// The rotation rule for a signer key other than `old`, the owner's
+/// current one.
+fn rotation_refusal<S>(
+    store: &mut S,
+    old: [u8; 32],
+    rotation: LocalErasureSignerRotationV1,
+    revoked: &[String],
+) -> Result<(), LocalErasureRotationRefusalV1>
+where
+    S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + ?Sized,
+{
+    bundle_pins(store, revoked)
+        .ok_or(LocalErasureRotationRefusalV1::Pinned)
+        .and_then(|pins| match rotation {
+            LocalErasureSignerRotationV1::Routine => pins
+                .is_empty()
+                .then_some(())
+                .ok_or(LocalErasureRotationRefusalV1::Pinned),
+            LocalErasureSignerRotationV1::Compromise => (revoked
+                .contains(&local_erasure_signer_key_id_v1(&old))
+                && pins.iter().all(|&(_, revoked)| revoked))
+            .then_some(())
+            .ok_or(LocalErasureRotationRefusalV1::NotRevoked),
         })
 }
 
