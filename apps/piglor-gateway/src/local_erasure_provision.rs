@@ -447,6 +447,7 @@ fn provision_store(
                     store
                         .erasure_authority_snapshot_with_limits(
                             ErasureRecoveryLimitsV1::compiled_maximum(),
+                            &[],
                         )
                         .map_err(io::Error::other)
                         .and_then(|snapshot| {

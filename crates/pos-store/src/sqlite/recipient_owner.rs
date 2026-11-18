@@ -41,6 +41,9 @@ use super::{
 #[cfg(feature = "test-support")]
 use super::{RecipientExportPublicationTestArtifactsV1, RecipientExportPublicationTestFaultV1};
 
+mod withdrawal;
+pub use withdrawal::RecipientCustodyAttachErrorV1;
+
 const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
     RecipientExportDecryptionErrorV1::Registry(KeyRegistryErrorV1::RegistryUnavailable);
 /// Passed to the decryption port for an absent identity, or a destroyed one
@@ -1324,6 +1327,10 @@ impl SqliteStore {
             ensure_recipient_export_catalog(&self.conn)?;
             fresh_recipient_export_id().and_then(|export_id| {
                 recipient_export_catalog_contains(&self.conn, export_id)
+                    .and_then(|catalog_contains| {
+                        recipient_export_withdrawal_contains(&self.conn, export_id)
+                            .map(|withdrawal_contains| catalog_contains || withdrawal_contains)
+                    })
                     .map_err(RecipientExportPublicationErrorV1::Store)
                     .and_then(|catalog_contains| {
                         recipient_export_pending_contains(&self.conn, export_id)
@@ -1375,7 +1382,8 @@ impl SqliteStore {
     /// # Errors
     ///
     /// Returns [`RecipientExportPublicationErrorV1::ArtifactUnavailable`] for
-    /// an absent, malformed, or digest-mismatched catalog object.
+    /// an absent, malformed, or digest-mismatched catalog object, and for a
+    /// publication an ADR-138 recipient-export withdrawal has retracted.
     pub fn read_recipient_export(
         &self,
         owner: &RecipientKeyOwnerV1,
@@ -1384,6 +1392,9 @@ impl SqliteStore {
         validate_owner_directory(owner)?;
         let stored = load_recipient_export_catalog(&self.conn, export_id)?
             .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        if recipient_export_withdrawal_contains(&self.conn, export_id)? {
+            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+        }
         let expected = stored
             .validate_for(owner)
             .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
@@ -1970,7 +1981,41 @@ fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreEr
             CREATE INDEX IF NOT EXISTS recipient_export_pending_owner_v1
                 ON recipient_export_pending_v1 (owner_id, export_id);
             CREATE INDEX IF NOT EXISTS recipient_export_catalog_timeline_v1
-                ON recipient_export_catalog_v1 (timeline_id, export_id);",
+                ON recipient_export_catalog_v1 (timeline_id, export_id);
+            CREATE TABLE IF NOT EXISTS recipient_export_withdrawals_v1 (
+                export_id BLOB NOT NULL PRIMARY KEY CHECK (length(export_id) = 16),
+                target BLOB NOT NULL UNIQUE CHECK (length(target) = 32),
+                owner_id TEXT NOT NULL,
+                timeline_id TEXT NOT NULL,
+                ciphertext_length INTEGER NOT NULL,
+                ciphertext_digest BLOB NOT NULL CHECK (length(ciphertext_digest) = 32),
+                directory_identity BLOB NULL
+                    CHECK (directory_identity IS NULL OR length(directory_identity) = 16),
+                final_identity BLOB NULL
+                    CHECK (final_identity IS NULL OR length(final_identity) = 20),
+                staging_identity BLOB NULL
+                    CHECK (staging_identity IS NULL OR length(staging_identity) = 20),
+                capture_status INTEGER NOT NULL CHECK (capture_status IN (0, 1, 2, 3)),
+                objects_deleted INTEGER NOT NULL CHECK (objects_deleted IN (0, 1)),
+                disposition BLOB NULL CHECK (disposition IS NULL OR length(disposition) = 32),
+                committed_elo1 BLOB NULL
+                    CHECK (committed_elo1 IS NULL OR length(committed_elo1) = 32)
+            );",
+        )
+        .map_err(storage_error)
+}
+
+/// Whether an ADR-138 withdrawal row names `export_id`; such an identity is
+/// never served nor reserved again. The table is created with the catalog.
+fn recipient_export_withdrawal_contains(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recipient_export_withdrawals_v1 WHERE export_id = ?1)",
+            rusqlite::params![export_id.as_slice()],
+            |row| row.get(0),
         )
         .map_err(storage_error)
 }

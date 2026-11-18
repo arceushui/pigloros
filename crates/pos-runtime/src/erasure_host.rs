@@ -1307,7 +1307,7 @@ impl<'host> HostedCoordinatorPortV1<'host> {
                 || {
                     self.store
                         .borrow_mut()
-                        .erasure_authority_snapshot_with_limits(self.limits)
+                        .erasure_authority_snapshot_with_limits(self.limits, &[])
                         .map(|snapshot| {
                             let view = Rc::new(ErasureAuthoritySnapshotViewV1::new(
                                 snapshot,
@@ -3541,7 +3541,7 @@ impl ErasureExecutionHostV1 {
         let inventory = self.inventory.clone();
         self.store
             .host_store()
-            .erasure_authority_snapshot_with_limits(self.recovery_limits)
+            .erasure_authority_snapshot_with_limits(self.recovery_limits, &[])
             .map(|snapshot| {
                 HostAuthorityViewV1::detached(ErasureAuthoritySnapshotViewV1::new(
                     snapshot,
@@ -6090,7 +6090,7 @@ mod tests {
     fn empty_authority_view() -> Result<HostAuthorityViewV1<'static>, ErasureErrorV1> {
         ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
             .and_then(|inventory| {
-                pos_core::ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None)
+                pos_core::ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None, Vec::new())
             })
             .map(|snapshot| {
                 HostAuthorityViewV1::detached(ErasureAuthoritySnapshotViewV1::new(
@@ -7395,9 +7395,11 @@ mod tests {
         fn erasure_authority_snapshot_with_limits(
             &mut self,
             limits: ErasureRecoveryLimitsV1,
+            export_targets: &[ErasureReferenceV1],
         ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
             self.authority_snapshot_calls += 1;
-            self.inner.erasure_authority_snapshot_with_limits(limits)
+            self.inner
+                .erasure_authority_snapshot_with_limits(limits, export_targets)
         }
 
         fn retain_erasure_object(
@@ -7447,6 +7449,30 @@ mod tests {
             max: usize,
         ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
             self.inner.recipient_export_publications(timelines, max)
+        }
+
+        fn begin_recipient_export_withdrawal(
+            &mut self,
+            export_id: [u8; 16],
+            grantee_owner: &pos_core::OwnerIdV1,
+        ) -> Result<pos_core::RecipientExportWithdrawalStateV1, ErasureErrorV1> {
+            self.inner
+                .begin_recipient_export_withdrawal(export_id, grantee_owner)
+        }
+
+        fn delete_recipient_export_ciphertext(
+            &mut self,
+            export_id: [u8; 16],
+        ) -> Result<(), ErasureErrorV1> {
+            self.inner.delete_recipient_export_ciphertext(export_id)
+        }
+
+        fn recipient_export_by_target(
+            &mut self,
+            target: ErasureReferenceV1,
+            timelines: &[TimelineId],
+        ) -> Result<Option<([u8; 16], pos_core::OwnerIdV1)>, ErasureErrorV1> {
+            self.inner.recipient_export_by_target(target, timelines)
         }
 
         fn begin_protected_effect_interval(

@@ -4,11 +4,16 @@
 //!
 //! Every fallible check runs before the first mutation, so an error leaves
 //! the store unchanged, matching the `SQLite` adapter's transactions.
+//!
+//! `MemoryStore` has no recipient-export publication path (ADR-138 §6): its
+//! snapshot holds no withdrawal row and a withdrawal effect names an unknown
+//! `export_id`.
 
 use pos_core::{
     store::EventStore, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureErrorV1,
     ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
     ErasureRetainedObjectV1, Hash, KeyTombstoneV1, PreparedLocalOwnerEffectV1,
+    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
 };
 
 use super::MemoryStore;
@@ -17,7 +22,11 @@ impl MemoryStore {
     pub(super) fn local_erasure_authority_snapshot(
         &mut self,
         limits: ErasureRecoveryLimitsV1,
+        export_targets: &[ErasureReferenceV1],
     ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+        if export_targets.len() > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
         // The authority read never rebinds the installed inventory generation.
         let installed = self.erasure_inventory_generation;
         let inventory = self.complete_erasure_inventory_snapshot_with_limits(limits);
@@ -33,7 +42,12 @@ impl MemoryStore {
                 })
                 .collect::<Vec<_>>();
             timelines.sort_unstable_by_key(|row| row.id);
-            ErasureAuthoritySnapshotV1::new(inventory, timelines, self.erasure_store_identity)
+            ErasureAuthoritySnapshotV1::new(
+                inventory,
+                timelines,
+                self.erasure_store_identity,
+                Vec::new(),
+            )
         })
     }
 
@@ -53,8 +67,13 @@ impl MemoryStore {
         prepared: &PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         prepared
-            .effect_object()
-            .map_or(Ok(()), |object| self.retainable(object))
+            .recipient_export_withdrawal()
+            .map_or(Ok(()), |_| Err(ErasureErrorV1::ProvenanceMissing))
+            .and_then(|()| {
+                prepared
+                    .effect_object()
+                    .map_or(Ok(()), |object| self.retainable(object))
+            })
             .and_then(|()| self.retainable(prepared.owner_result()))
             .and_then(|()| {
                 prepared

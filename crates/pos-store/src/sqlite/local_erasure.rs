@@ -1,7 +1,8 @@
 //! `SQLite` adapter for the single-host erasure authority (ADR-136 §2.5 and
 //! §4a): the authority snapshot, retained objects, owner effects, the
-//! write-once erasure store identity, the startup sweep and the
-//! recipient-export publication read.
+//! write-once erasure store identity, the startup sweep, the
+//! recipient-export publication read and the recipient-export withdrawal
+//! reads (ADR-138 §5).
 //!
 //! The authority snapshot reads the erasure inventory, every Timeline's owner
 //! and Fork relation and the store identity in one read transaction. Every
@@ -11,10 +12,12 @@
 use std::collections::BTreeSet;
 
 use pos_core::{
-    error::CoreError, store::EventStore, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1,
-    ErasureErrorV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1, Hash,
+    error::CoreError, local_erasure_export_recipient_v1, store::EventStore,
+    ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureErrorV1,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1, Hash,
     KeyDestructionRequestV1, KeyTombstoneV1, OwnerIdV1, PreparedLocalOwnerEffectV1,
-    RecipientExportPublicationRowV1, Seq, TimelineId,
+    RecipientExportPublicationRowV1, RecipientExportWithdrawalRowV1, Seq, TimelineId,
+    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -26,22 +29,31 @@ use super::{
 
 type TimelineSqlRowV1 = (String, Option<String>, Option<String>, Option<i64>);
 
+/// The recipient-export withdrawal table (ADR-138 §3). It is created with
+/// the recipient-export catalog, so a store that never published has neither.
+pub(super) const RECIPIENT_EXPORT_WITHDRAWALS: &str = "recipient_export_withdrawals_v1";
+
 impl SqliteStore {
     pub(super) fn local_erasure_authority_snapshot(
         &mut self,
         limits: ErasureRecoveryLimitsV1,
+        export_targets: &[ErasureReferenceV1],
     ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
-        self.conn
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(map_erasure_receipt_failure)
-            .and_then(|transaction| {
-                authority_snapshot_in(&transaction, limits).and_then(|snapshot| {
-                    transaction
-                        .commit()
-                        .map(|()| snapshot)
-                        .map_err(map_erasure_receipt_failure)
+        export_targets_admitted(export_targets).and_then(|()| {
+            self.conn
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(map_erasure_receipt_failure)
+                .and_then(|transaction| {
+                    authority_snapshot_in(&transaction, limits, export_targets).and_then(
+                        |snapshot| {
+                            transaction
+                                .commit()
+                                .map(|()| snapshot)
+                                .map_err(map_erasure_receipt_failure)
+                        },
+                    )
                 })
-            })
+        })
     }
 
     pub(super) fn local_erasure_retain(
@@ -54,7 +66,20 @@ impl SqliteStore {
         })
     }
 
+    /// Commit one owner effect. A recipient-export withdrawal commits through
+    /// its own durable T3 (ADR-138 §5); every other effect commits in one
+    /// immediate transaction or savepoint.
     pub(super) fn local_erasure_commit_owner_effect(
+        &self,
+        prepared: &PreparedLocalOwnerEffectV1,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        match prepared.recipient_export_withdrawal() {
+            Some(binding) => self.commit_recipient_export_withdrawal(prepared, &binding),
+            None => self.commit_record_owner_effect(prepared),
+        }
+    }
+
+    fn commit_record_owner_effect(
         &self,
         prepared: &PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -178,7 +203,7 @@ impl SqliteStore {
         max: usize,
     ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
         let selected: BTreeSet<TimelineId> = timelines.iter().copied().collect();
-        recipient_export_catalog_present(&self.conn).and_then(|present| {
+        table_present(&self.conn, "recipient_export_catalog_v1").and_then(|present| {
             if !present {
                 return Ok(Vec::new());
             }
@@ -196,6 +221,26 @@ impl SqliteStore {
                         },
                     )
                 })
+        })
+    }
+
+    /// Resolve one `ELXR1` target (ADR-138 §5): the withdrawal row with that
+    /// target first, else the first catalog row of `timelines` whose
+    /// recomputed `ELXR1` equals it. A store without the withdrawal table
+    /// never published, so it resolves nothing.
+    pub(super) fn local_erasure_recipient_export_by_target(
+        &self,
+        target: ErasureReferenceV1,
+        timelines: &[TimelineId],
+    ) -> Result<Option<([u8; 16], OwnerIdV1)>, ErasureErrorV1> {
+        table_present(&self.conn, RECIPIENT_EXPORT_WITHDRAWALS).and_then(|present| {
+            if !present {
+                return Ok(None);
+            }
+            withdrawal_by_target(&self.conn, target).and_then(|withdrawal| match withdrawal {
+                Some(row) => Ok(Some((row.export_id, row.grantee_owner))),
+                None => catalog_by_target(&self.conn, target, timelines),
+            })
         })
     }
 
@@ -232,19 +277,148 @@ impl SqliteStore {
     }
 }
 
-/// Read the inventory, every Timeline row and the store identity inside one
-/// caller-owned read transaction, so all three describe one store state.
+/// Read the inventory, every Timeline row, the store identity and the
+/// withdrawal rows of `export_targets` inside one caller-owned read
+/// transaction, so all four describe one store state.
 fn authority_snapshot_in(
     transaction: &rusqlite::Transaction<'_>,
     limits: ErasureRecoveryLimitsV1,
+    export_targets: &[ErasureReferenceV1],
 ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
     sqlite_erasure_inventory_snapshot(transaction, limits).and_then(|inventory| {
         timeline_rows(transaction, limits).and_then(|timelines| {
             read_store_identity(transaction).and_then(|identity| {
-                ErasureAuthoritySnapshotV1::new(inventory, timelines, identity)
+                withdrawal_rows(transaction, export_targets).and_then(|withdrawals| {
+                    ErasureAuthoritySnapshotV1::new(inventory, timelines, identity, withdrawals)
+                })
             })
         })
     })
+}
+
+/// At most one category's obligations may name `ELXR1` targets (ADR-138 §5).
+fn export_targets_admitted(export_targets: &[ErasureReferenceV1]) -> Result<(), ErasureErrorV1> {
+    if export_targets.len() > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
+        Err(ErasureErrorV1::ScopeInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+/// The withdrawal rows of the distinct `export_targets` that have one, in
+/// increasing target order.
+fn withdrawal_rows(
+    connection: &Connection,
+    export_targets: &[ErasureReferenceV1],
+) -> Result<Vec<RecipientExportWithdrawalRowV1>, ErasureErrorV1> {
+    let targets: BTreeSet<ErasureReferenceV1> = export_targets.iter().copied().collect();
+    table_present(connection, RECIPIENT_EXPORT_WITHDRAWALS).and_then(|present| {
+        targets
+            .into_iter()
+            .filter(|_| present)
+            .filter_map(|target| withdrawal_by_target(connection, target).transpose())
+            .map(|row| {
+                row.map(|row| RecipientExportWithdrawalRowV1 {
+                    target: row.target,
+                    export_id: row.export_id,
+                    disposition: row.disposition,
+                    committed_elo1: row.committed_elo1,
+                })
+            })
+            .collect()
+    })
+}
+
+/// The target-indexed columns of one withdrawal row.
+struct TargetedWithdrawalV1 {
+    target: ErasureReferenceV1,
+    export_id: [u8; 16],
+    grantee_owner: OwnerIdV1,
+    disposition: Option<ErasureReferenceV1>,
+    committed_elo1: Option<ErasureReferenceV1>,
+}
+
+type TargetedWithdrawalSqlV1 = (Vec<u8>, String, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// The withdrawal row whose `target` column is `target`; a malformed row is
+/// [`ErasureErrorV1::ProvenanceMissing`].
+fn withdrawal_by_target(
+    connection: &Connection,
+    target: ErasureReferenceV1,
+) -> Result<Option<TargetedWithdrawalV1>, ErasureErrorV1> {
+    connection
+        .query_row(
+            "SELECT export_id, owner_id, disposition, committed_elo1
+             FROM recipient_export_withdrawals_v1 WHERE target = ?1",
+            params![target.digest().as_slice()],
+            |row| TargetedWithdrawalSqlV1::try_from(row),
+        )
+        .optional()
+        .map_err(map_erasure_receipt_failure)
+        .and_then(|row| {
+            row.map(|(export_id, owner, disposition, committed_elo1)| {
+                <[u8; 16]>::try_from(export_id)
+                    .ok()
+                    .zip(OwnerIdV1::new(owner).ok())
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+                    .and_then(|(export_id, grantee_owner)| {
+                        disposition
+                            .map(reference_from_sql)
+                            .transpose()
+                            .and_then(|disposition| {
+                                committed_elo1.map(reference_from_sql).transpose().map(
+                                    |committed_elo1| TargetedWithdrawalV1 {
+                                        target,
+                                        export_id,
+                                        grantee_owner,
+                                        disposition,
+                                        committed_elo1,
+                                    },
+                                )
+                            })
+                    })
+            })
+            .transpose()
+        })
+}
+
+/// The first catalog row of `timelines`, in Timeline then `export_id` order,
+/// whose recomputed `CA("ELXR1", [export_id, owner_id])` is `target`.
+fn catalog_by_target(
+    connection: &Connection,
+    target: ErasureReferenceV1,
+    timelines: &[TimelineId],
+) -> Result<Option<([u8; 16], OwnerIdV1)>, ErasureErrorV1> {
+    let selected: BTreeSet<TimelineId> = timelines.iter().copied().collect();
+    selected
+        .into_iter()
+        .map(|timeline| timeline_publications(connection, timeline, usize::MAX))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|publications| {
+            publications
+                .into_iter()
+                .flatten()
+                .map(|row| {
+                    local_erasure_export_recipient_v1(row.export_id, &row.grantee_owner).map(
+                        |candidate| {
+                            (candidate == target).then_some((row.export_id, row.grantee_owner))
+                        },
+                    )
+                })
+                .find_map(Result::transpose)
+                .transpose()
+        })
+}
+
+/// Whether the store holds the named table.
+pub(super) fn table_present(connection: &Connection, table: &str) -> Result<bool, ErasureErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get(0),
+        )
+        .map_err(map_erasure_receipt_failure)
 }
 
 /// Run one write in its own immediate transaction, or a savepoint inside an
@@ -314,17 +488,6 @@ fn timeline_row(row: &TimelineSqlRowV1) -> Option<ErasureAuthorityTimelineRowV1>
             owner,
             fork_point,
         })
-}
-
-fn recipient_export_catalog_present(connection: &Connection) -> Result<bool, ErasureErrorV1> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema
-             WHERE type = 'table' AND name = 'recipient_export_catalog_v1')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(map_erasure_receipt_failure)
 }
 
 /// The first `limit` publications of one Timeline in `export_id` order.
@@ -397,7 +560,7 @@ fn read_store_identity(connection: &Connection) -> Result<Option<Hash>, ErasureE
 /// Insert one object into the shared erasure object store. Only a newly
 /// inserted object becomes a sweep candidate, so a coordinator object is
 /// never marked; an existing address must hold exactly these bytes.
-fn insert_retained(
+pub(super) fn insert_retained(
     connection: &Connection,
     object: &ErasureRetainedObjectV1,
 ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -534,14 +697,14 @@ mod tests {
         let started: i64 =
             transaction.query_row("SELECT count(*) FROM timelines", [], |row| row.get(0))?;
         SqliteStore::open(path)?.create_timeline("during")?;
-        let snapshot = authority_snapshot_in(&transaction, limits)?;
+        let snapshot = authority_snapshot_in(&transaction, limits, &[])?;
         assert_eq!(started, 1);
         assert_eq!(snapshot.inventory().topology().len(), 1);
         assert_eq!(snapshot.timelines().len(), 1);
         drop(transaction);
         assert_eq!(
             store
-                .local_erasure_authority_snapshot(limits)?
+                .local_erasure_authority_snapshot(limits, &[])?
                 .timelines()
                 .len(),
             2

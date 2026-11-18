@@ -13,15 +13,20 @@
 //!
 //! [`LocalOwnerEffectV1`] is one durable single-host owner effect that an
 //! adapter commits in the same transaction as its owner-result object.
+//!
+//! [`RecipientExportWithdrawalRowV1`] and
+//! [`RecipientExportWithdrawalBindingV1`] carry ADR-138's recipient-export
+//! withdrawal state into the snapshot and the owner-effect commit.
 
 use super::{
     decode_limited, domain_digest, ErasureErrorV1, ErasurePersistenceInventorySnapshotV1,
     ErasureReferenceV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
+    LocalErasureRecipientExportWithdrawalV1,
 };
 use crate::{
     clock::Seq,
     ids::{EntityId, TimelineId},
-    Hash, KeyDestructionRequestV1, KeyTombstoneV1,
+    Hash, KeyDestructionRequestV1, KeyTombstoneV1, OwnerIdV1,
 };
 use ciborium::value::Value;
 
@@ -44,7 +49,8 @@ pub const ERASURE_RECORD_TAG_MIN_BYTES_V1: usize = 2;
 /// The longest record tag of a retained object, in bytes.
 pub const ERASURE_RECORD_TAG_MAX_BYTES_V1: usize = 8;
 
-/// The largest ELAD1, ELCG1, ELNEG1 or ELRP1 owner-effect record (ADR-136 §4a).
+/// The largest ELAD1, ELCG1, ELNEG1, ELRP1 or ELXW1 owner-effect record
+/// (ADR-136 §4a, ADR-138 §5).
 pub const LOCAL_OWNER_EFFECT_MAX_BYTES_V1: usize = 1024;
 
 /// The largest ELO1 owner-result record (ADR-136 §4).
@@ -61,6 +67,24 @@ pub struct ErasureAuthorityTimelineRowV1 {
     pub fork_point: Option<(TimelineId, Seq)>,
 }
 
+/// The recipient-export withdrawal row of one requested `ELXR1` target
+/// (ADR-138 §3 and §5).
+///
+/// A row without a `disposition` is retracted: its publication is no longer
+/// served but is not yet withdrawn. A withdrawn row carries `CA(ELXW1)` and
+/// the address of the ELO1 that first committed it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecipientExportWithdrawalRowV1 {
+    /// `CA("ELXR1", [export_id, grantee_owner])`.
+    pub target: ErasureReferenceV1,
+    /// The 16-byte export identity.
+    pub export_id: [u8; 16],
+    /// `CA(ELXW1)` once withdrawn.
+    pub disposition: Option<ErasureReferenceV1>,
+    /// `CA(ELO1)` of the first commit, once withdrawn.
+    pub committed_elo1: Option<ErasureReferenceV1>,
+}
+
 /// One same-snapshot read of everything the single-host authority may
 /// evaluate as evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,10 +92,14 @@ pub struct ErasureAuthoritySnapshotV1 {
     inventory: ErasurePersistenceInventorySnapshotV1,
     timelines: Vec<ErasureAuthorityTimelineRowV1>,
     store_identity: Option<Hash>,
+    recipient_export_withdrawals: Vec<RecipientExportWithdrawalRowV1>,
 }
 
 impl ErasureAuthoritySnapshotV1 {
     /// Package one adapter read.
+    ///
+    /// `recipient_export_withdrawals` holds the withdrawal rows of the
+    /// requested `export_targets` that exist (ADR-138 §5).
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::ProvenanceMissing`] unless the Timeline rows
@@ -81,6 +109,7 @@ impl ErasureAuthoritySnapshotV1 {
         inventory: ErasurePersistenceInventorySnapshotV1,
         timelines: Vec<ErasureAuthorityTimelineRowV1>,
         store_identity: Option<Hash>,
+        recipient_export_withdrawals: Vec<RecipientExportWithdrawalRowV1>,
     ) -> Result<Self, ErasureErrorV1> {
         if timelines
             .iter()
@@ -91,6 +120,7 @@ impl ErasureAuthoritySnapshotV1 {
                 inventory,
                 timelines,
                 store_identity,
+                recipient_export_withdrawals,
             })
         } else {
             Err(ErasureErrorV1::ProvenanceMissing)
@@ -122,6 +152,13 @@ impl ErasureAuthoritySnapshotV1 {
     #[must_use]
     pub const fn store_identity(&self) -> Option<Hash> {
         self.store_identity
+    }
+
+    /// The withdrawal rows of the requested `export_targets`, one per target
+    /// that has one, in increasing target order.
+    #[must_use]
+    pub fn recipient_export_withdrawals(&self) -> &[RecipientExportWithdrawalRowV1] {
+        &self.recipient_export_withdrawals
     }
 }
 
@@ -232,6 +269,44 @@ pub enum LocalOwnerEffectV1 {
     Negative(Vec<u8>),
     /// One canonical ELRP1 local-replica purge, committed after the purge.
     ReplicaPurge(Vec<u8>),
+    /// One canonical ELXW1 recipient-export withdrawal (ADR-138 §5),
+    /// committed after its owner step deleted the captured objects.
+    RecipientExportWithdrawal(Vec<u8>),
+}
+
+/// The fields of one ELXW1 that its first commit compares with the
+/// withdrawal row (ADR-138 §5, T3), parsed once by
+/// [`PreparedLocalOwnerEffectV1::new`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecipientExportWithdrawalBindingV1 {
+    /// The 16-byte export identity.
+    pub export_id: [u8; 16],
+    /// The Timeline the export was published from.
+    pub timeline_id: TimelineId,
+    /// The recipient owner of the grantee the export was encrypted for.
+    pub grantee_owner: OwnerIdV1,
+    /// The BLAKE3 digest of the complete stored ciphertext.
+    pub ciphertext_digest: Hash,
+    /// The stored ciphertext length in bytes.
+    pub ciphertext_length: u64,
+    /// The custody directory's big-endian `(device, inode)`.
+    pub directory_identity: [u8; 16],
+    /// The deleted final object's big-endian `(device, inode, uid)`.
+    pub final_identity: [u8; 20],
+}
+
+impl From<&LocalErasureRecipientExportWithdrawalV1> for RecipientExportWithdrawalBindingV1 {
+    fn from(record: &LocalErasureRecipientExportWithdrawalV1) -> Self {
+        Self {
+            export_id: record.export_id,
+            timeline_id: record.timeline_id,
+            grantee_owner: record.grantee_owner,
+            ciphertext_digest: record.ciphertext_digest,
+            ciphertext_length: record.ciphertext_length,
+            directory_identity: record.directory_identity,
+            final_identity: record.final_identity,
+        }
+    }
 }
 
 /// The fields of one ELO1 owner result except its `effect_digest`.
@@ -261,6 +336,7 @@ pub struct LocalOwnerResultBindingV1 {
 pub struct PreparedLocalOwnerEffectV1 {
     key_tombstone: Option<(KeyDestructionRequestV1, Hash)>,
     existing_tombstone: Option<KeyTombstoneV1>,
+    recipient_export_withdrawal: Option<RecipientExportWithdrawalBindingV1>,
     effect_object: Option<ErasureRetainedObjectV1>,
     owner_result: ErasureRetainedObjectV1,
 }
@@ -271,9 +347,11 @@ impl PreparedLocalOwnerEffectV1 {
     ///
     /// The ELO1 `effect_digest` is derived here, never supplied: the new or
     /// existing key tombstone's deletion receipt, or the content address `CA(effect)` of
-    /// the ELAD1, ELCG1, ELNEG1 or ELRP1 record (ADR-136 §4a). A record
+    /// the ELAD1, ELCG1, ELNEG1, ELRP1 or ELXW1 record (ADR-136 §4a). A record
     /// effect must carry its own record tag. An ELNEG1 must be canonical and
-    /// carry the binding's command, owner reference and closed error code.
+    /// carry the binding's command, owner reference and closed error code. An
+    /// ELXW1 must be canonical, and its fields are kept for the adapter's
+    /// row checks (ADR-138 §5, T3).
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::InvalidEncoding`] when a record is malformed
@@ -285,33 +363,48 @@ impl PreparedLocalOwnerEffectV1 {
         effect: LocalOwnerEffectV1,
         binding: LocalOwnerResultBindingV1,
     ) -> Result<Self, ErasureErrorV1> {
-        let (key_tombstone, existing_tombstone, effect) = match effect {
+        let (key_tombstone, existing_tombstone, recipient_export_withdrawal, effect) = match effect
+        {
             LocalOwnerEffectV1::KeyTombstone {
                 request,
                 deletion_receipt,
             } => (
                 Some((*request, deletion_receipt)),
                 None,
+                None,
                 Ok((receipt_digest(deletion_receipt), None)),
             ),
             LocalOwnerEffectV1::ExistingTombstone(tombstone) => (
                 None,
                 Some(*tombstone),
+                None,
                 Ok((receipt_digest(tombstone.deletion_receipt), None)),
             ),
             LocalOwnerEffectV1::ArtifactDisposition(record) => {
-                (None, None, record_effect(record, "ELAD1"))
+                (None, None, None, record_effect(record, "ELAD1"))
             }
             LocalOwnerEffectV1::CacheGeneration(record) => {
-                (None, None, record_effect(record, "ELCG1"))
+                (None, None, None, record_effect(record, "ELCG1"))
             }
             LocalOwnerEffectV1::Negative(record) => (
+                None,
                 None,
                 None,
                 negative_bound_by(&record, &binding).and_then(|()| record_effect(record, "ELNEG1")),
             ),
             LocalOwnerEffectV1::ReplicaPurge(record) => {
-                (None, None, record_effect(record, "ELRP1"))
+                (None, None, None, record_effect(record, "ELRP1"))
+            }
+            LocalOwnerEffectV1::RecipientExportWithdrawal(record) => {
+                let withdrawal =
+                    LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor(&record)
+                        .map(|elxw1| RecipientExportWithdrawalBindingV1::from(&elxw1));
+                (
+                    None,
+                    None,
+                    withdrawal.as_ref().ok().copied(),
+                    withdrawal.and_then(|_| record_effect(record, "ELXW1")),
+                )
             }
         };
         effect
@@ -322,6 +415,7 @@ impl PreparedLocalOwnerEffectV1 {
             .map(|(effect_object, owner_result)| Self {
                 key_tombstone,
                 existing_tombstone,
+                recipient_export_withdrawal,
                 effect_object,
                 owner_result,
             })
@@ -338,6 +432,13 @@ impl PreparedLocalOwnerEffectV1 {
     #[must_use]
     pub const fn existing_tombstone(&self) -> Option<KeyTombstoneV1> {
         self.existing_tombstone
+    }
+
+    /// The parsed ELXW1 fields, for a recipient-export withdrawal effect
+    /// (ADR-138 §5, T3); [`Self::effect_object`] is then the ELXW1 itself.
+    #[must_use]
+    pub const fn recipient_export_withdrawal(&self) -> Option<RecipientExportWithdrawalBindingV1> {
+        self.recipient_export_withdrawal
     }
 
     /// The effect record to retain, for a record effect.
@@ -583,16 +684,30 @@ mod tests {
             },
         ];
         let identity = Hash::from_bytes([5; 32]);
-        let snapshot =
-            ErasureAuthoritySnapshotV1::new(inventory.clone(), rows.clone(), Some(identity))?;
+        let withdrawals = vec![RecipientExportWithdrawalRowV1 {
+            target: ErasureReferenceV1::from_digest([6; 32]),
+            export_id: [7; 16],
+            disposition: None,
+            committed_elo1: None,
+        }];
+        let snapshot = ErasureAuthoritySnapshotV1::new(
+            inventory.clone(),
+            rows.clone(),
+            Some(identity),
+            withdrawals.clone(),
+        )?;
         assert_eq!(snapshot.inventory(), &inventory);
+        assert_eq!(
+            snapshot.recipient_export_withdrawals(),
+            withdrawals.as_slice()
+        );
         assert_eq!(snapshot.timelines(), rows.as_slice());
         assert_eq!(snapshot.timeline(first), Some(&rows[0]));
         assert_eq!(snapshot.timeline(second), Some(&rows[1]));
         assert_eq!(snapshot.timeline(timeline(3)), None);
         assert_eq!(snapshot.store_identity(), Some(identity));
         assert_eq!(
-            ErasureAuthoritySnapshotV1::new(inventory, rows[..1].to_vec(), None),
+            ErasureAuthoritySnapshotV1::new(inventory, rows[..1].to_vec(), None, Vec::new()),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())

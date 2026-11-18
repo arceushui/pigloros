@@ -371,7 +371,7 @@ where
     S: ErasureInventoryPersistencePortV1 + ?Sized,
 {
     store
-        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum(), &[])
         .is_ok_and(|snapshot| {
             snapshot.inventory().request_heads().is_empty()
                 || store
@@ -394,7 +394,10 @@ where
 {
     bundle.reference().is_ok_and(|current| {
         store
-            .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+            .erasure_authority_snapshot_with_limits(
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+                &[],
+            )
             .is_ok_and(|snapshot| {
                 snapshot
                     .inventory()
