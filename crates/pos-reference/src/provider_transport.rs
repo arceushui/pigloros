@@ -1440,7 +1440,7 @@ fn stage_output(
     match result.output.as_ref() {
         Some(descriptor) => {
             let validator = PayloadStreamValidator::new(
-                result.result_digest,
+                result.result_digest(),
                 request.request.request_id,
                 request.attempt_id,
                 PayloadDirection::Output,
