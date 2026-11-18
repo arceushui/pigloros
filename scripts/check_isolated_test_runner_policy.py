@@ -44,14 +44,28 @@ NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
 NAMESPACE_RUNNER = "air-gapped-namespace.sh"
 NAMESPACE_HELPER = "air_gapped_seccomp_exec.py"
 NAMESPACE_DIGESTS = {
-    NAMESPACE_RUNNER: "fdf4de1050bb49fbb3872811fe157b45606e87e0246221252fbc9068b475ea1b",
+    NAMESPACE_RUNNER: "3c775924c0e1a8cc17eca4f15921a5339f00ea5b4547f3f601e6d345703c65fa",
     NAMESPACE_HELPER: "5ac85eff890ffc95977879725d9104e78b997f658f889810d13d67a19dc0890d",
 }
+# The owner accepted this class on 2026-11-16 (#1400, #1422) with these owners, and the two
+# in-crate test sources #1423 needs for the Air-Gapped bind and serve tests.
 NAMESPACE_OWNER_ROOTS = (
     "apps/piglor-gateway/tests/",
     "apps/pos-gateway-conformance-adapter/tests/",
+    "apps/piglor-gateway/src/mode_profile/tests.rs",
+    "apps/piglor-gateway/src/main.rs",
 )
 NAMESPACE_SUDO = "exec sudo -n -E unshare --net"
+# The two capability shapes: none, or exactly CAP_NET_ADMIN for --hold-network-capability.
+NAMESPACE_CAPABILITIES = (
+    "CAPABILITIES=(--bounding-set=-all --inh-caps=-all --ambient-caps=-all)\n"
+    "if [[ ${1:-} == --hold-network-capability ]]; then\n"
+    "  shift\n"
+    "  CAPABILITIES=(--bounding-set=-all,+net_admin --inh-caps=-all,+net_admin"
+    " --ambient-caps=-all,+net_admin)\n"
+    "fi\n"
+    "readonly CAPABILITIES\n"
+)
 # The one other mention of sudo: the check that it exists before the fallback.
 NAMESPACE_SUDO_GUARD = (
     "command -v sudo >/dev/null || {\n"
@@ -65,7 +79,10 @@ NAMESPACE_FRAGMENTS = (
     "exec unshare --user --map-root-user --net",
     NAMESPACE_SUDO,
     'setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups "${DROP[@]}"',
-    "readonly DROP=(--no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all)",
+    # Every capability is dropped, or, with --hold-network-capability (owner decision 2026-11-17,
+    # #1423), every capability but CAP_NET_ADMIN.
+    NAMESPACE_CAPABILITIES,
+    'readonly DROP=(--no-new-privs "${CAPABILITIES[@]}")',
     "readonly LOOPBACK_UP='ip link set lo up && exec \"$@\"'",
     'readonly HELPER=$(realpath -- "$(dirname -- "$0")/air_gapped_seccomp_exec.py")',
     'python3 "$HELPER" "$@"',
@@ -279,8 +296,15 @@ def check_namespace_runner(scripts: Path) -> None:
         raise SystemExit(f"{runner_path}: recursive host-path deletion is forbidden")
     for fragment in NAMESPACE_FRAGMENTS:
         require(runner, fragment, runner_path)
-    # Both shapes, the user namespace and the sudo fallback, bring `lo` up, drop every
-    # capability and run the program under the helper.
+    # CAP_NET_ADMIN is the only capability ever raised, the capability sets are chosen once,
+    # and the fallback switches back to exactly the invoking user.
+    raised = re.findall(r"[+]([a-z_]+)", code)
+    if set(raised) != {"net_admin"} or code.count("CAPABILITIES=(") != 2:
+        raise SystemExit(f"{runner_path}: raises a capability other than CAP_NET_ADMIN")
+    if code.count("--reuid") != 1 or code.count("--regid") != 1 or "keep-caps" in code:
+        raise SystemExit(f"{runner_path}: the fallback must switch back to the invoking user")
+    # Both shapes, the user namespace and the sudo fallback, bring `lo` up, drop the
+    # capabilities and run the program under the helper.
     for fragment in ('sh -c "$LOOPBACK_UP" sh', '"${DROP[@]}"', 'python3 "$HELPER" "$@"'):
         if code.count(fragment) != 2:
             raise SystemExit(f"{runner_path}: both namespace shapes must use {fragment}")
