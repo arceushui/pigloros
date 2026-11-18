@@ -9,6 +9,8 @@ use pos_crypto::preference_weights::{
     MAX_PREFERENCE_WEIGHTS_PLAINTEXT_BYTES,
 };
 
+use zeroize::Zeroize;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const HALF_HALF: [u8; 3] = [0xf9, 0x38, 0x00];
@@ -413,4 +415,15 @@ fn rejections_are_payload_free_messages() {
     ] {
         assert_eq!(error.to_string(), message);
     }
+}
+
+#[test]
+fn a_weight_zeroizes_to_positive_zero() {
+    let mut weight = Weight {
+        score: -0.75,
+        confidence: 0.5,
+    };
+    weight.zeroize();
+    assert_eq!(weight.score.to_bits(), 0);
+    assert_eq!(weight.confidence.to_bits(), 0);
 }

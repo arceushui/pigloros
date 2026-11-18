@@ -90,6 +90,13 @@ pub struct PreferenceWeightV1 {
     pub confidence: f64,
 }
 
+impl Zeroize for PreferenceWeightV1 {
+    fn zeroize(&mut self) {
+        self.score.zeroize();
+        self.confidence.zeroize();
+    }
+}
+
 impl PreferenceWeightV1 {
     fn is_admitted(self) -> bool {
         in_range(self.score, -1.0) && in_range(self.confidence, 0.0)
@@ -214,17 +221,7 @@ pub fn validate_preference_weights(plaintext: &[u8]) -> Result<(), PreferenceWei
 /// Sorting is in place and decoding never grows the vector past its initial
 /// capacity, so no unwiped copy of a weight is left in a freed buffer.
 #[derive(Clone, PartialEq)]
-struct Dimensions(Vec<(String, PreferenceWeightV1)>);
-
-impl Drop for Dimensions {
-    fn drop(&mut self) {
-        for (name, weight) in &mut self.0 {
-            name.zeroize();
-            weight.score.zeroize();
-            weight.confidence.zeroize();
-        }
-    }
-}
+struct Dimensions(Zeroizing<Vec<(String, PreferenceWeightV1)>>);
 
 /// A complete, valid Preference weight set in its deterministic key order.
 ///
@@ -248,7 +245,7 @@ impl PreferenceWeightsV1 {
     pub fn new(
         dimensions: Vec<(String, PreferenceWeightV1)>,
     ) -> Result<Self, PreferenceWeightsErrorV1> {
-        let mut dimensions = Dimensions(dimensions);
+        let mut dimensions = Dimensions(Zeroizing::new(dimensions));
         dimensions.0.sort_unstable_by(|(left, _), (right, _)| {
             left.len().cmp(&right.len()).then_with(|| left.cmp(right))
         });
@@ -270,7 +267,9 @@ impl PreferenceWeightsV1 {
     /// # Errors
     /// As [`validate_preference_weights`].
     pub fn decode(plaintext: &[u8]) -> Result<Self, PreferenceWeightsErrorV1> {
-        let mut dimensions = Dimensions(Vec::with_capacity(MAX_PREFERENCE_DIMENSIONS));
+        let mut dimensions = Dimensions(Zeroizing::new(Vec::with_capacity(
+            MAX_PREFERENCE_DIMENSIONS,
+        )));
         let parsed = parse(plaintext, &mut |name, weight| {
             dimensions.0.push((name.to_owned(), weight));
         });
@@ -290,7 +289,7 @@ impl PreferenceWeightsV1 {
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         let mut output = Zeroizing::new(Vec::with_capacity(MAX_PREFERENCE_WEIGHTS_PLAINTEXT_BYTES));
         subject_cbor::head(&mut output, 5, self.dimensions.0.len() as u64);
-        for (name, weight) in &self.dimensions.0 {
+        for (name, weight) in &*self.dimensions.0 {
             subject_cbor::text(&mut output, name);
             subject_cbor::head(&mut output, 4, 2);
             subject_cbor::float(&mut output, weight.score);
