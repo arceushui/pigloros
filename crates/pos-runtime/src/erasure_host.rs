@@ -6541,6 +6541,14 @@ mod tests {
                 .sweep_unreferenced_erasure_objects(tags, keep, max)
         }
 
+        fn retained_erasure_objects(
+            &mut self,
+            tag: &str,
+            max: usize,
+        ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+            self.inner.retained_erasure_objects(tag, max)
+        }
+
         fn begin_protected_effect_interval(
             &self,
         ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {

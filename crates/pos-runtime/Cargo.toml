@@ -48,6 +48,8 @@ pos-plugin-publisher = { path = "../pos-plugin-publisher" }
 
 [dev-dependencies]
 ciborium = { workspace = true }
+# The Local erasure composition tests sign TPS1 and ELB1S fixtures.
+ed25519-dalek = { workspace = true }
 # The rigged test store mints a foreign receipt with the adapter seal.
 pos-core = { path = "../pos-core", features = [
   "authority-trust-root",

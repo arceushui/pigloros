@@ -90,6 +90,15 @@ pub mod world_replay;
 pub mod world_replay_handle;
 pub mod world_transform;
 
+/// Append the lowercase hexadecimal form of `bytes` to `out`.
+pub(crate) fn append_hex(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+}
+
 /// Write the preferred definite-length CBOR header for one major type.
 pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     let prefix = major << 5;
@@ -424,11 +433,15 @@ pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, extract_adapter_admission_registration_v1,
     extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
-    inspect_artifact_registration_graph_v1, prepare_artifact_registration_batch_v1,
-    selected_obligations_reference, validate_artifact_registration_catalog_graph_v1,
-    AdapterArtifactRegistrationErrorV1, ArtifactChildEdgeV1, ArtifactClaimInputV1,
-    ArtifactDataClassV1, ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1,
-    ArtifactOptionalityV1, ArtifactRedactionStateV1, ArtifactRegistrationCatalogRowV1,
+    inspect_artifact_registration_graph_v1, local_erasure_bundle_signing_message_v1,
+    local_erasure_coordinator_v1, local_erasure_owner_ref_v1,
+    local_erasure_receipt_body_reference_v1, local_erasure_receipt_body_v1,
+    local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
+    prepare_artifact_registration_batch_v1, selected_obligations_reference,
+    validate_artifact_registration_catalog_graph_v1, AdapterArtifactRegistrationErrorV1,
+    ArtifactChildEdgeV1, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactRedactionStateV1, ArtifactRegistrationCatalogRowV1,
     ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
     ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1,
     ArtifactRegistrationGraphSummaryV1, ArtifactRegistrationInputV1,
@@ -475,13 +488,19 @@ pub use erasure::{
     ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
     ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
     ErasureVerifiedTopologyObservationV1, ErasureVerifiedTopologyProofV1, EvaluatedArtifactClaimV1,
-    LocalOwnerEffectV1, PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
-    PreparedErasureCasV1, PreparedErasureForkAdmissionV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PreparedLocalOwnerEffectV1, RegisteredArtifactV1,
-    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, ReproManifestArtifactRegistrationErrorV1,
-    ReproManifestRootRegistrationInputV1, StoredErasureManifestV1,
-    ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
-    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
+    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
+    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
+    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
+    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
+    LocalErasureTrustAnchorV1, LocalOwnerEffectV1, PreparedArtifactRegistrationBatchV1,
+    PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PreparedLocalOwnerEffectV1,
+    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+    ReproManifestArtifactRegistrationErrorV1, ReproManifestRootRegistrationInputV1,
+    StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+    ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_BUNDLE_ROOT_PREFIX_V1,
     ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
     ERASURE_FORK_RECOVERY_PROOF_MAX_BYTES, ERASURE_FORK_RECOVERY_PROOF_TAG_V1,
     ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1, ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
@@ -500,9 +519,11 @@ pub use erasure::{
     ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
     ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
-    LOCAL_OWNER_EFFECT_MAX_BYTES_V1, LOCAL_OWNER_RESULT_MAX_BYTES_V1, MAX_ARTIFACT_GRAPH_DEPTH_V1,
-    MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, ERASURE_SIGNER_KEY_PREFIX_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    LOCAL_OWNER_RESULT_MAX_BYTES_V1, MAX_ARTIFACT_GRAPH_DEPTH_V1, MAX_ARTIFACT_GRAPH_EDGES_V1,
+    MAX_ARTIFACT_GRAPH_KEYS_V1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
     MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
     MAX_ARTIFACT_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_CHILDREN_V1,
     MAX_ARTIFACT_REGISTRATION_KEYS_V1,
