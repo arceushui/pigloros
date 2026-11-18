@@ -69,26 +69,36 @@ fn has_transient_negative(
         })
 }
 
-/// The transition rule each acknowledgement class registers for its
-/// target before erasure (ADR-136 §5 and §7): a destroyed key removes the
-/// evidence it encrypted, a redacted artifact or a committed cache
-/// generation redacts its views, and every other class, the local replica
-/// and the classes that are always negative, preserves the exact claim.
-fn transition_rule(ack_class: &str) -> ArtifactTransitionRuleV1 {
+/// The transition rule each acknowledgement class of the compiled ELP1
+/// registers for its target before erasure, and whether its rows carry
+/// `CA(ELD1)` as their retained disclosure (ADR-136 §5 and §7), or `None`
+/// for a class the compiled ELP1 does not name.
+///
+/// A destroyed key removes the evidence it encrypted; a redacted artifact
+/// or a committed cache generation redacts its views; a purged local replica
+/// and the classes that are always negative preserve the exact claim. Only
+/// the backup and timeline-payload rows disclose their retained class.
+fn class_rule(ack_class: &str) -> Option<(ArtifactTransitionRuleV1, bool)> {
     match ack_class {
-        "key-registry" => ArtifactTransitionRuleV1::Remove,
+        "key-registry" => Some((ArtifactTransitionRuleV1::Remove, false)),
         "artifact-store" | "managed-report" | "client-cache-signal" => {
-            ArtifactTransitionRuleV1::RedactViews
+            Some((ArtifactTransitionRuleV1::RedactViews, false))
         }
-        _ => ArtifactTransitionRuleV1::PreserveExact,
+        "export-recipient" | "local-replica" => {
+            Some((ArtifactTransitionRuleV1::PreserveExact, false))
+        }
+        "timeline-payload" | "local-backup-inventory" => {
+            Some((ArtifactTransitionRuleV1::PreserveExact, true))
+        }
+        _ => None,
     }
 }
 
-/// Whether a row of `ack_class` carries `CA(ELD1)` as its retained
-/// disclosure (ADR-136 §7): only the backup and timeline-payload rows,
-/// whose classes are always disclosed as retained.
-fn discloses(ack_class: &str) -> bool {
-    matches!(ack_class, "local-backup-inventory" | "timeline-payload")
+/// Whether attempt `ordinal` is due (owner decision Q10 on #1431): attempt
+/// 0 always; a retry only after a latest attempt with a `transient`
+/// negative, and only up to `auto_retry_max` retries, ordinals 1 to 3.
+const fn attempt_due(ordinal: u64, transient: bool) -> bool {
+    ordinal == 0 || (ordinal <= LOCAL_ERASURE_AUTO_RETRY_MAX_V1 && transient)
 }
 
 impl LocalErasureAuthorityV1 {
@@ -114,10 +124,8 @@ impl LocalErasureAuthorityV1 {
         progress: &ErasureRecordedProgressV1,
     ) -> Result<Option<(ErasureRetryAdmissionV1, Vec<u8>)>, ErasureErrorV1> {
         let ordinal = progress.completed_attempt_count;
-        if ordinal != 0
-            && (ordinal > LOCAL_ERASURE_AUTO_RETRY_MAX_V1
-                || !has_transient_negative(view, progress))
-        {
+        let transient = ordinal != 0 && has_transient_negative(view, progress);
+        if !attempt_due(ordinal, transient) {
             return Ok(None);
         }
         let unresolved = progress
@@ -185,7 +193,7 @@ impl LocalErasureAuthorityV1 {
     /// inventory row whose replay claim the #185 `ReplayClaimEvaluatorV1`
     /// derives (ADR-136 §7): its target registered as a required artifact
     /// of the request's data class under its class's transition rule
-    /// (`transition_rule`), applied when the obligation has a positive
+    /// (`class_rule`), applied when the obligation has a positive
     /// acknowledgement and retained otherwise, from `Exact`. A row carries
     /// its command as reason, its acknowledgement evidence and its own
     /// address as provenance, and, for a backup or timeline-payload row
@@ -194,7 +202,8 @@ impl LocalErasureAuthorityV1 {
     ///
     /// # Errors
     /// `PolicyConflict` without an active attempt, `ScopeInvalid` for an
-    /// obligation whose owner the bundle does not name, otherwise the
+    /// obligation whose owner the bundle does not name or whose class the
+    /// compiled ELP1 does not name, otherwise the
     /// closed evaluation or encoding error of a row.
     pub(super) fn receipt_input(
         &self,
@@ -256,8 +265,9 @@ impl LocalErasureAuthorityV1 {
             .owners
             .iter()
             .find(|row| row.owner_ref == obligation.owner())
+            .and_then(|row| class_rule(&row.ack_class).map(|rule| (row, rule)))
             .ok_or(ErasureErrorV1::ScopeInvalid)
-            .and_then(|row| {
+            .and_then(|(row, (transition_rule, discloses))| {
                 ReplayClaimEvaluatorV1::evaluate(
                     ErasureReplayClaimV1::Exact,
                     &[ArtifactClaimInputV1 {
@@ -269,14 +279,14 @@ impl LocalErasureAuthorityV1 {
                                 .then_some(target.key_role),
                             obligation.owner(),
                             ArtifactOptionalityV1::Required,
-                            transition_rule(&row.ack_class),
+                            transition_rule,
                         ),
                         current_claim: ErasureReplayClaimV1::Exact,
                         state,
                     }],
                 )
                 .and_then(|evaluation| {
-                    discloses(&row.ack_class)
+                    discloses
                         .then(|| LocalErasureDisclosureV1 {
                             ack_class: row.ack_class.clone(),
                             policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
@@ -361,4 +371,39 @@ fn receipt_of(
         },
         disclosures,
     )
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::erasure_local_authority::LOCAL_ERASURE_CLASSIFICATION_V1;
+
+    #[test]
+    fn every_classified_acknowledgement_class_has_a_rule() {
+        for (_, _, _, ack_class) in LOCAL_ERASURE_CLASSIFICATION_V1 {
+            assert!(class_rule(ack_class).is_some(), "{ack_class}");
+        }
+        assert_eq!(
+            class_rule("key-registry"),
+            Some((ArtifactTransitionRuleV1::Remove, false))
+        );
+        assert_eq!(
+            class_rule("local-backup-inventory"),
+            Some((ArtifactTransitionRuleV1::PreserveExact, true))
+        );
+        assert_eq!(class_rule("unclassified"), None);
+    }
+
+    #[test]
+    fn only_attempt_0_and_three_transient_retries_are_due() {
+        assert!(attempt_due(0, false));
+        for ordinal in 1..=LOCAL_ERASURE_AUTO_RETRY_MAX_V1 {
+            assert!(attempt_due(ordinal, true), "{ordinal}");
+            // A permanent negative is never retried automatically.
+            assert!(!attempt_due(ordinal, false), "{ordinal}");
+        }
+        assert_eq!(LOCAL_ERASURE_AUTO_RETRY_MAX_V1, 3);
+        assert!(!attempt_due(LOCAL_ERASURE_AUTO_RETRY_MAX_V1 + 1, true));
+    }
 }

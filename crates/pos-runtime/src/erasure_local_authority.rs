@@ -163,7 +163,9 @@ impl ErasureCoordinatorCompositionV1 {
     /// an active attempt the bundle that attempt names. A compromise is
     /// always accepted: a pinned bundle whose root or signer the installed
     /// TPS1 revokes can never sign again, so it does not hold the rotation
-    /// back (ADR-136 §5). When the store holds any erasure request, every
+    /// back (ADR-136 §5). Expiry is no revocation: a request pinning an
+    /// expired bundle blocks a routine rotation until the TPS1 revokes that
+    /// bundle's root or signer (Q12). When the store holds any erasure request, every
     /// retained TPS1 must verify under the pinned operator key.
     ///
     /// A composition only admits new work: recovery of committed evidence

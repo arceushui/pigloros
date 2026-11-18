@@ -8,23 +8,23 @@
 
 use pos_core::{
     ErasureAuthorityExecutionV1, ErasureErrorV1, ErasureHostErrorV1, ErasureOwnerCommandV1,
-    ErasureOwnerResultV1, ErasureReferenceV1, TimelineId,
+    ErasureOwnerResultV1, ErasureReferenceV1,
 };
 
 use crate::{ErasureCommandSenderV1, ErasureExecutionHostV1};
 
 /// The single-host erasure executor of one store.
 ///
-/// It destroys keys under the store's Erasure Host Timeline, which the
-/// composition root supplies: the host-owned root Timeline every bundle of
-/// the store lists in `host_timelines`. A caller that executes single
-/// commands must keep [`Self::replay`]'s order: the local replica runs only
-/// after every other owner of the attempt, and is otherwise refused with
+/// It destroys keys under the store's Erasure Host Timeline, which the host
+/// derives inside each owner command as `ELHT1` of the store's erasure store
+/// identity: the host-owned root Timeline every bundle of the store lists in
+/// `host_timelines`. No caller supplies that Timeline (owner decision of
+/// 2026-11-18 on #1431). A caller that executes single commands must keep
+/// [`Self::replay`]'s order: the local replica runs only after every other
+/// owner of the attempt, and is otherwise refused with
 /// [`ErasureErrorV1::PolicyConflict`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LocalErasureExecutorV1 {
-    host_timeline: TimelineId,
-}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LocalErasureExecutorV1;
 
 /// The execution error of a host command that made no owner result
 /// durable: `PolicyConflict` for a command that cannot run yet or at all
@@ -39,13 +39,6 @@ const fn execution_error(error: ErasureHostErrorV1) -> ErasureErrorV1 {
 }
 
 impl LocalErasureExecutorV1 {
-    /// An executor that fences key destruction on `host_timeline`, the
-    /// store's Erasure Host Timeline.
-    #[must_use]
-    pub const fn new(host_timeline: TimelineId) -> Self {
-        Self { host_timeline }
-    }
-
     /// Replay the dispatch outbox of `request`: execute every command of
     /// its active attempt that has no acknowledgement yet, in the outbox's
     /// order (keys first, the local replica last), and return their owner
@@ -58,7 +51,6 @@ impl LocalErasureExecutorV1 {
     /// The payload-free host error of the outbox read, or of the first
     /// command that made no owner result durable; the replay stops there.
     pub fn replay(
-        &self,
         host: &mut ErasureExecutionHostV1,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureOwnerResultV1>, ErasureHostErrorV1> {
@@ -68,7 +60,7 @@ impl LocalErasureExecutorV1 {
                 .and_then(|commands| {
                     commands
                         .iter()
-                        .map(|command| self.run(&mut sender, command))
+                        .map(|command| Self::run(&mut sender, command))
                         .collect()
                 })
         })
@@ -79,11 +71,10 @@ impl LocalErasureExecutorV1 {
     /// error: the path [`super::LocalErasureDriverV1`] runs each outbox
     /// command on.
     pub(super) fn run(
-        self,
         sender: &mut ErasureCommandSenderV1<'_>,
         command: &ErasureOwnerCommandV1,
     ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
-        sender.execute_local_owner(command, self.host_timeline)
+        sender.execute_local_owner(command)
     }
 }
 
@@ -109,7 +100,7 @@ impl ErasureAuthorityExecutionV1 for LocalErasureExecutorV1 {
     ) -> Result<ErasureOwnerResultV1, ErasureErrorV1> {
         context
             .command_sender()
-            .and_then(|mut sender| self.run(&mut sender, command))
+            .and_then(|mut sender| Self::run(&mut sender, command))
             .map_err(execution_error)
     }
 }

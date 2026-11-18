@@ -15,6 +15,8 @@ use crate::erasure_authority_view::{
     ErasureViewListErrorV1, HostAuthorityViewV1, VIEW_LIST_MAX,
 };
 
+#[cfg(target_os = "linux")]
+use pos_core::ErasureRecordedProgressV1;
 use pos_core::{
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     store::{
@@ -34,18 +36,18 @@ use pos_core::{
     ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1,
     ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
     ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptV1,
-    ErasureRecordedProgressV1, ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureTopologyTransitionPermitV1, ErasureVerifiedEmptyInventoryQueryV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
-    ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId,
-    ForkAdmissionErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1,
-    ForkAdmissionRecoveryProofV1, ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash,
-    KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyRegistryStateV1, OwnTracksIngressInputV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
-    Timeline, TimelineId, TimelineMeta, TimelineMode, WallTime,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureTopologyTransitionPermitV1,
+    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
+    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, ForkAdmissionErrorV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
+    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, KeyDestructionBeginOutcomeV1,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta,
+    TimelineMode, WallTime,
 };
 use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
@@ -785,6 +787,7 @@ pub(crate) trait LocalErasurePreparationV1: Send + Sync {
     ///
     /// # Errors
     /// The closed error of an attempt that cannot be built.
+    #[cfg(target_os = "linux")]
     fn prepare_attempt(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -798,6 +801,7 @@ pub(crate) trait LocalErasurePreparationV1: Send + Sync {
     ///
     /// # Errors
     /// The closed error of a receipt that cannot be built.
+    #[cfg(target_os = "linux")]
     fn prepare_receipt(
         &self,
         erq1: &ErasureRequestV1,

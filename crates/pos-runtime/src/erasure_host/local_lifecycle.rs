@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use pos_core::{
     local_erasure_host_timeline_v1, local_erasure_receipt_body_reference_v1, ErasureErrorV1,
-    ErasureHostErrorV1, ErasurePersistencePortV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
-    ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureReferenceV1, ErasureRequestV1,
-    ErasureStateV1, ErasureVerifiedInventoryV1, KeyRegistryStateV1, LocalErasureOwnerResultV1,
-    LocalErasureRejectionV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, TimelineId,
-    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    ErasureHostErrorV1, ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptProvenanceV1,
+    ErasureReceiptV1, ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureReferenceV1,
+    ErasureRequestV1, ErasureStateV1, ErasureVerifiedInventoryV1, KeyRegistryStateV1,
+    LocalErasureOwnerResultV1, LocalErasureRejectionV1, LocalErasureSignaturePurposeV1,
+    LocalErasureSignatureV1, TimelineId, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
 };
 
 use super::{
@@ -130,6 +130,25 @@ impl ErasureCommandSenderV1<'_> {
                 .map(|state| state.request().clone())
                 .ok_or(ErasureHostErrorV1::Conflict)
                 .map(|erq1| (installed, erq1))
+        })
+    }
+
+    /// The lifecycle of `request` in the installed inventory, which the
+    /// signer requires to be `authorized` before it signs a freeze.
+    ///
+    /// # Errors
+    /// [`ErasureHostErrorV1::Conflict`] for a request the inventory does not
+    /// hold; otherwise the host's readiness error.
+    pub(crate) fn local_request_lifecycle(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<ErasureLifecycleV1, ErasureHostErrorV1> {
+        self.host.ready_state().and_then(|(_, _, installed)| {
+            installed
+                .states()
+                .find(|state| state.request().reference() == request)
+                .map(pos_core::ErasureVerifiedStateV1::lifecycle)
+                .ok_or(ErasureHostErrorV1::Conflict)
         })
     }
 
@@ -325,35 +344,32 @@ impl ErasureCommandSenderV1<'_> {
     /// sweep is skipped, never failed, when any read fails or a tag holds
     /// more than 4,096 objects.
     pub(crate) fn sweep_local_erasure_objects(&mut self) -> Option<usize> {
-        self.local_erasure_requests()
-            .ok()
-            .and_then(|requests| {
-                requests
-                    .iter()
-                    .map(|request| self.committed_signatures(*request))
-                    .collect::<Option<Vec<_>>>()
-                    .map(|lists| {
-                        (
-                            requests,
-                            lists.into_iter().flatten().collect::<BTreeSet<_>>(),
-                        )
-                    })
-            })
-            .and_then(|(requests, committed)| {
-                let store = self.host.store.host_store();
-                store
-                    .retained_erasure_objects("ELO1", SWEEP_MAX)
-                    .ok()
-                    .zip(store.retained_erasure_objects("ELS1", SWEEP_MAX).ok())
-                    .and_then(|(results, signatures)| {
-                        sweep_keep(&requests, committed, &results, &signatures)
-                    })
-                    .and_then(|keep| {
-                        store
-                            .sweep_unreferenced_erasure_objects(&SWEPT_TAGS, &keep, SWEEP_MAX)
-                            .ok()
-                    })
-            })
+        self.sweep_inputs().and_then(|(requests, committed)| {
+            let store = self.host.store.host_store();
+            store
+                .retained_erasure_objects("ELO1", SWEEP_MAX)
+                .ok()
+                .zip(store.retained_erasure_objects("ELS1", SWEEP_MAX).ok())
+                .and_then(|(results, signatures)| {
+                    sweep_keep(&requests, committed, &results, &signatures)
+                })
+                .and_then(|keep| {
+                    store
+                        .sweep_unreferenced_erasure_objects(&SWEPT_TAGS, &keep, SWEEP_MAX)
+                        .ok()
+                })
+        })
+    }
+
+    /// Every installed request and the receipt signatures they reference.
+    fn sweep_inputs(&mut self) -> Option<(Vec<ErasureReferenceV1>, BTreeSet<ErasureReferenceV1>)> {
+        self.local_erasure_requests().ok().and_then(|requests| {
+            requests
+                .iter()
+                .map(|request| self.committed_signatures(*request))
+                .collect::<Option<Vec<_>>>()
+                .map(|lists| (requests, lists.into_iter().flatten().collect()))
+        })
     }
 
     /// The ELS1 addresses the receipts of `request` reference: the
@@ -412,6 +428,23 @@ fn predecessor(
         })
 }
 
+/// Decode every retained object of one record type with its address, or
+/// `None` when one does not decode.
+fn decoded<R>(
+    objects: &[Vec<u8>],
+    decode: impl Fn(&[u8]) -> Result<R, ErasureErrorV1>,
+    address: impl Fn(&R) -> Result<ErasureReferenceV1, ErasureErrorV1>,
+) -> Option<Vec<(ErasureReferenceV1, R)>> {
+    objects
+        .iter()
+        .map(|bytes| {
+            decode(bytes.as_slice())
+                .and_then(|record| address(&record).map(|reference| (reference, record)))
+                .ok()
+        })
+        .collect()
+}
+
 /// The sweep's `keep` list: `committed`, every ELO1 of one of `requests`
 /// with the effect it binds, and every purpose-1 ELS1 over such an ELO1;
 /// `None` when a retained ELO1 or ELS1 does not decode.
@@ -421,42 +454,32 @@ fn sweep_keep(
     results: &[Vec<u8>],
     signatures: &[Vec<u8>],
 ) -> Option<Vec<ErasureReferenceV1>> {
-    results
-        .iter()
-        .map(|bytes| {
-            LocalErasureOwnerResultV1::from_canonical_cbor(bytes)
-                .and_then(|result| result.reference().map(|address| (address, result)))
-                .ok()
-        })
-        .collect::<Option<Vec<_>>>()
-        .zip(
-            signatures
-                .iter()
-                .map(|bytes| {
-                    LocalErasureSignatureV1::from_canonical_cbor(bytes)
-                        .and_then(|signature| {
-                            signature.reference().map(|address| (address, signature))
-                        })
-                        .ok()
-                })
-                .collect::<Option<Vec<_>>>(),
-        )
-        .map(|(results, signatures)| {
-            let kept = results
-                .iter()
-                .filter(|(_, result)| requests.contains(&result.request))
-                .collect::<Vec<_>>();
-            let addresses = kept
-                .iter()
-                .map(|(address, _)| *address)
-                .collect::<BTreeSet<_>>();
-            committed.extend(signatures.iter().filter_map(|(address, signature)| {
-                (signature.purpose == LocalErasureSignaturePurposeV1::OwnerResult
-                    && addresses.contains(&signature.signed_digest))
-                .then_some(*address)
-            }));
-            committed.extend(kept.iter().map(|(_, result)| result.effect_digest));
-            committed.extend(addresses);
-            committed.into_iter().collect()
-        })
+    decoded(
+        results,
+        LocalErasureOwnerResultV1::from_canonical_cbor,
+        LocalErasureOwnerResultV1::reference,
+    )
+    .zip(decoded(
+        signatures,
+        LocalErasureSignatureV1::from_canonical_cbor,
+        LocalErasureSignatureV1::reference,
+    ))
+    .map(|(results, signatures)| {
+        let kept = results
+            .iter()
+            .filter(|(_, result)| requests.contains(&result.request))
+            .collect::<Vec<_>>();
+        let addresses = kept
+            .iter()
+            .map(|(address, _)| *address)
+            .collect::<BTreeSet<_>>();
+        committed.extend(signatures.iter().filter_map(|(address, signature)| {
+            (signature.purpose == LocalErasureSignaturePurposeV1::OwnerResult
+                && addresses.contains(&signature.signed_digest))
+            .then_some(*address)
+        }));
+        committed.extend(kept.iter().map(|(_, result)| result.effect_digest));
+        committed.extend(addresses);
+        committed.into_iter().collect()
+    })
 }

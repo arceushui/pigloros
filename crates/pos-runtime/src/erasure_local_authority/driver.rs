@@ -176,8 +176,12 @@ impl LocalErasureDriverV1 {
 
     /// Commit the one durable transition `request` needs next.
     ///
-    /// - `submitted`: authorize it under its ERAZ1, or, when that ERAZ1 no
-    ///   longer verifies, reject it under a retained ELREJ1.
+    /// - `submitted`: authorize it under its ERAZ1, or, when the authority
+    ///   refuses that ERAZ1 with `AuthorizationDenied`, reject it under a
+    ///   retained ELREJ1. The rejection is permanent, whatever the cause,
+    ///   including a root-grant chain that advanced while the host was
+    ///   down: the subject must resubmit (owner decision (c) of the #1431
+    ///   review).
     /// - `authorized`: freeze it under a purpose-0 ELS1 over the prepared
     ///   body, after the preparation retained ELB1, ELLR1, TPS1 and ELB1S;
     ///   or commit the freeze rejection of a closure over its bound under
@@ -224,7 +228,9 @@ impl LocalErasureDriverV1 {
     }
 
     /// Authorize a submitted request, or reject it at the authorize stage
-    /// when its ERAZ1 no longer verifies.
+    /// when its ERAZ1 no longer verifies. Every `AuthorizationDenied` at
+    /// this stage is a permanent rejection that needs a resubmission; any
+    /// other error defers the step.
     fn authorize(
         host: &mut ErasureExecutionHostV1,
         request: ErasureReferenceV1,
@@ -289,18 +295,11 @@ impl LocalErasureDriverV1 {
         host.command_sender()
             .and_then(|mut sender| {
                 sender
-                    .local_erasure_host_timeline()
-                    .and_then(|host_timeline| {
-                        sender
-                            .dispatched_owner_commands(request)
-                            .map(|commands| (host_timeline, commands))
-                    })
-                    .and_then(|(host_timeline, commands)| {
+                    .dispatched_owner_commands(request)
+                    .and_then(|commands| {
                         commands
                             .first()
-                            .map(|command| {
-                                LocalErasureExecutorV1::new(host_timeline).run(&mut sender, command)
-                            })
+                            .map(|command| LocalErasureExecutorV1::run(&mut sender, command))
                             .transpose()
                     })
             })

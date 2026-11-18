@@ -11,9 +11,9 @@
 //! that the host verified what it signs, not merely that the driver asked.
 
 use pos_core::{
-    local_erasure_signature_message_v1, CanonicalBytes, ErasureHostErrorV1, ErasureReferenceV1,
-    KeyIdentityV1, KeyRoleV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1,
-    LocalErasureSignerIdentityV1, OwnerIdV1,
+    local_erasure_signature_message_v1, CanonicalBytes, ErasureHostErrorV1, ErasureLifecycleV1,
+    ErasureReferenceV1, KeyIdentityV1, KeyRoleV1, LocalErasureSignaturePurposeV1,
+    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, OwnerIdV1,
 };
 use pos_crypto::key_roles::{sign_for_registered_role, SigningKeyMaterial};
 
@@ -24,8 +24,9 @@ use crate::{ErasureCommandSenderV1, ErasureExecutionHostV1};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalErasureSigningRequestV1 {
     /// Purpose 0: the ERFA1-AUTH `body` digest of the freeze of `request`,
-    /// which must equal the body the freeze of the current snapshot admits
-    /// under the compiled ELP1 and the bundle.
+    /// which must be `authorized`, and `body` must equal the body the
+    /// freeze of the current snapshot admits under the compiled ELP1 and
+    /// the bundle.
     FreezeAuthorization {
         /// The ERQ1 request to freeze.
         request: ErasureReferenceV1,
@@ -146,7 +147,9 @@ fn rederived(
 ) -> Result<(LocalErasureSignaturePurposeV1, ErasureReferenceV1), ErasureHostErrorV1> {
     match request {
         LocalErasureSigningRequestV1::FreezeAuthorization { request, body } => sender
-            .local_freeze_preparation(request)
+            .local_request_lifecycle(request)
+            .and_then(|lifecycle| refused_unless(lifecycle == ErasureLifecycleV1::Authorized))
+            .and_then(|()| sender.local_freeze_preparation(request))
             .and_then(|(preparation, _)| {
                 refused_unless(preparation == LocalFreezePreparationV1::Sign(body))
             })
