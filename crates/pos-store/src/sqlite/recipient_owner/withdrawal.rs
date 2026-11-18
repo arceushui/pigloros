@@ -199,8 +199,12 @@ impl SqliteStore {
         if self.recipient_custody.is_some() {
             return Err(RecipientCustodyAttachErrorV1::AlreadyAttached);
         }
-        let grantees: BTreeSet<EntityId> = owners.iter().map(|owner| owner.grantee_id).collect();
-        if grantees.len() != owners.len() {
+        let grantees = owners
+            .iter()
+            .map(|owner| owner.grantee_id)
+            .collect::<BTreeSet<EntityId>>()
+            .len();
+        if grantees != owners.len() {
             return Err(RecipientCustodyAttachErrorV1::DuplicateGrantee);
         }
         self.claim_recipient_custody(&owners)
@@ -668,12 +672,12 @@ fn capture_final(
 /// yields the catalog digest.
 fn digest_matches(file: &File, subject: &CaptureSubjectV1) -> bool {
     let mut hasher = blake3::Hasher::new();
-    std::io::copy(
+    let copied = std::io::copy(
         &mut file.take(subject.ciphertext_length.saturating_add(1)),
         &mut hasher,
     )
-    .ok()
-        == Some(subject.ciphertext_length)
+    .ok();
+    copied == Some(subject.ciphertext_length)
         && hasher.finalize().as_bytes() == subject.ciphertext_digest.as_bytes()
 }
 

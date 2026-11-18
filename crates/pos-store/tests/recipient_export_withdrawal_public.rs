@@ -104,6 +104,7 @@ impl Fixture {
         let grantee = EntityId::new();
         let owner = RecipientKeyOwnerV1::open(directory, grantee)?;
         let descriptor = store.enroll_recipient_key(&owner)?;
+        let evaluation = evaluation()?;
         Ok(Self {
             temporary,
             store,
@@ -111,7 +112,7 @@ impl Fixture {
             authority,
             grantee,
             descriptor,
-            evaluation: evaluation()?,
+            evaluation,
         })
     }
 
@@ -179,7 +180,8 @@ impl Fixture {
 
     fn attach(&mut self) -> TestResult {
         let custody = self.custody()?;
-        Ok(self.store.attach_recipient_custody(vec![custody])?)
+        self.store.attach_recipient_custody(vec![custody])?;
+        Ok(())
     }
 
     /// A new store on the fixture's database, as after a restart.
@@ -999,8 +1001,10 @@ fn targets_resolve_through_the_scoped_catalog_then_the_withdrawal_row() -> TestR
 #[test]
 fn a_snapshot_reads_at_most_one_category_of_targets_on_both_adapters() -> TestResult {
     let (mut fixture, _) = published()?;
+    let mut memory = MemoryStore::new();
     assert_target_bound(&mut fixture.store)?;
-    assert_target_bound(&mut MemoryStore::new())
+    assert_target_bound(&mut memory)?;
+    Ok(())
 }
 
 /// Exactly 4,096 targets are read; one more is refused.
