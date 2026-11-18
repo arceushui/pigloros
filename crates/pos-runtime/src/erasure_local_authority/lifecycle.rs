@@ -275,8 +275,9 @@ impl LocalErasureAuthorityV1 {
                             target.artifact_class,
                             obligation.reference(),
                             data_class,
-                            (obligation.category() == ErasureInventoryCategoryV1::Key)
-                                .then_some(target.key_role),
+                            // `evaluate` reads no key role; only the
+                            // destruction diagnostic weighs key dependencies.
+                            None,
                             obligation.owner(),
                             ArtifactOptionalityV1::Required,
                             transition_rule,

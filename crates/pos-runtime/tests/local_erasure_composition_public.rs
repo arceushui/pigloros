@@ -8502,10 +8502,26 @@ fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResu
         LocalErasureRotationRefusalV1::NotRevoked.to_string(),
         "the installed TPS1 does not revoke the old signer's bundle"
     );
-    // Once the attempt closed, nothing pins a bundle.
+    // Once the attempt closed, nothing pins a bundle; a compromise still
+    // needs the TPS1 to revoke the old signer.
     let (closed, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Finalized(_)))?;
     assert_eq!(
         signer_rotation(&mut closed.sqlite()?, new_key, routine, &[]),
+        Ok(())
+    );
+    assert_eq!(
+        signer_rotation(&mut closed.sqlite()?, new_key, compromise, &[]),
+        Err(LocalErasureRotationRefusalV1::NotRevoked)
+    );
+    // Only the owner's role-2 keys name its current signer: a later key of
+    // another role, without a public key, leaves the old signer current.
+    closed.register(KeyRegistrationV1::new(
+        KeyIdentityV1::new(SIGNER_OWNER, KeyRoleV1::SubjectAttributionSigning, 9),
+        Hash::from_bytes([0x99; 32]),
+        None,
+    ))?;
+    assert_eq!(
+        signer_rotation(&mut closed.sqlite()?, old_key, routine, &[]),
         Ok(())
     );
     Ok(())
