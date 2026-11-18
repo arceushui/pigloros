@@ -5843,10 +5843,12 @@ use pos_core::{
 };
 use pos_runtime::LocalErasureExecutorV1;
 
-/// The Erasure Host Timeline of these stores: an unowned root Timeline at
-/// a fixed identity, which the executor fences key destruction on.
-const fn erasure_host_timeline() -> TimelineId {
-    TimelineId::from_ulid(Ulid::from_bytes([0x8d; 16]))
+/// `ELHT1` of the fixture store identity: the Erasure Host Timeline the
+/// bundle must list and the executor fences key destruction on.
+fn erasure_host_timeline() -> TestResult<TimelineId> {
+    Ok(pos_core::local_erasure_host_timeline_v1(
+        ErasureReferenceV1::from_digest(STORE_IDENTITY),
+    )?)
 }
 
 /// The actor's owned root Timeline of the Memory store, at a fixed
@@ -5855,21 +5857,21 @@ const fn memory_owned_timeline() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([0x8e; 16]))
 }
 
-const fn executor() -> LocalErasureExecutorV1 {
-    LocalErasureExecutorV1::new(erasure_host_timeline())
+fn executor() -> TestResult<LocalErasureExecutorV1> {
+    Ok(LocalErasureExecutorV1::new(erasure_host_timeline()?))
 }
 
-fn host_timeline_meta() -> TimelineMeta {
-    TimelineMeta {
-        id: erasure_host_timeline(),
+fn host_timeline_meta() -> TestResult<TimelineMeta> {
+    Ok(TimelineMeta {
+        id: erasure_host_timeline()?,
         ..TimelineMeta::root("erasure-host")
-    }
+    })
 }
 
 /// The bundle naming every owner and listing the Erasure Host Timeline.
 fn executor_bundle() -> TestResult<LocalErasureBundleV1> {
     let mut bundle = owned_bundle(&ALL_CLASSES)?;
-    bundle.host_timelines = vec![erasure_host_timeline()];
+    bundle.host_timelines = vec![erasure_host_timeline()?];
     Ok(bundle)
 }
 
@@ -5879,7 +5881,7 @@ fn executor_attempted(owned: OwnedStore, extra: Vec<Cell>) -> TestResult<Attempt
     owned
         .store
         .sqlite()?
-        .create_timeline_with_meta(host_timeline_meta())?;
+        .create_timeline_with_meta(host_timeline_meta()?)?;
     Attempted::frozen(owned.store, owned.owned, extra, executor_bundle()?)
 }
 
@@ -6106,7 +6108,7 @@ fn every_owner_class_commits_its_effect_and_elo1_at_the_host_seam() -> TestResul
         host.command_sender()?.dispatched_owner_commands(request)?,
         expected
     );
-    let results = executor().replay(&mut host, request).map_err(fail)?;
+    let results = executor()?.replay(&mut host, request).map_err(fail)?;
     // Keys first, the local replica after every other owner.
     assert_eq!(
         results
@@ -6123,7 +6125,7 @@ fn every_owner_class_commits_its_effect_and_elo1_at_the_host_seam() -> TestResul
     assert_eq!(outcomes(&results)?, expected_outcomes(None));
     // A replay is idempotent: every owner returns the same owner result.
     assert_eq!(
-        executor().replay(&mut host, request).map_err(fail)?,
+        executor()?.replay(&mut host, request).map_err(fail)?,
         results
     );
     // No owner outcome poisoned the host.
@@ -6144,7 +6146,7 @@ fn the_outbox_replays_only_unacknowledged_commands() -> TestResult {
     let request = attempted.request;
     let backup = {
         let mut host = attempted.dispatched()?;
-        let results = executor().replay(&mut host, request).map_err(fail)?;
+        let results = executor()?.replay(&mut host, request).map_err(fail)?;
         *results
             .iter()
             .find(|result| {
@@ -6176,7 +6178,7 @@ fn the_outbox_replays_only_unacknowledged_commands() -> TestResult {
         .iter()
         .all(|command| command.destruction.obligation != obligation.reference()));
     assert_eq!(
-        executor().replay(&mut host, request).map_err(fail)?.len(),
+        executor()?.replay(&mut host, request).map_err(fail)?.len(),
         outbox.len()
     );
     Ok(())
@@ -6203,7 +6205,7 @@ fn memory_store(retained: &[Vec<u8>]) -> TestResult<(MemoryStore, u64)> {
         id: memory_owned_timeline(),
         ..TimelineMeta::root_owned("owned-0", actor())
     })?;
-    store.create_timeline_with_meta(host_timeline_meta())?;
+    store.create_timeline_with_meta(host_timeline_meta()?)?;
     let mut registry = store.load_key_registry()?.ok_or("no key registry")?;
     registry
         .register_key(KeyRegistrationV1::new(
@@ -6283,7 +6285,7 @@ fn a_memory_store_runs_every_owner_class_as_sqlite_does() -> TestResult {
         );
         sender.dispatch_erasure_destruction(request, &attempt)?;
     }
-    let results = executor().replay(&mut host, request).map_err(fail)?;
+    let results = executor()?.replay(&mut host, request).map_err(fail)?;
     // A Memory store has no file a purge could prove clean, so its local
     // replica is the permanent negative; every other class answers as on
     // SQLite.
@@ -6292,11 +6294,11 @@ fn a_memory_store_runs_every_owner_class_as_sqlite_does() -> TestResult {
         expected_outcomes(Some(ErasureErrorV1::ReplicaNegativeAcknowledgement))
     );
     assert_eq!(
-        executor().replay(&mut host, request).map_err(fail)?,
+        executor()?.replay(&mut host, request).map_err(fail)?,
         results
     );
     let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
-    let sqlite = executor()
+    let sqlite = executor()?
         .replay(&mut attempted.dispatched()?, attempted.request)
         .map_err(fail)?;
     assert_eq!(outcomes(&sqlite)?, expected_outcomes(None));
@@ -6318,11 +6320,11 @@ fn the_local_replica_runs_last_and_a_held_store_is_a_transient_negative() -> Tes
     // F1: the purge waits for every other owner of the attempt.
     for (index, other) in others.iter().enumerate() {
         assert_eq!(
-            executor().execute(replica, &mut host),
+            executor()?.execute(replica, &mut host),
             Err(ErasureErrorV1::PolicyConflict),
             "before owner {index}"
         );
-        executor().execute(other, &mut host).map_err(fail)?;
+        executor()?.execute(other, &mut host).map_err(fail)?;
     }
     let reader = rusqlite::Connection::open(&attempted.store.path)?;
     reader.execute_batch("BEGIN")?;
@@ -6331,11 +6333,11 @@ fn the_local_replica_runs_last_and_a_held_store_is_a_transient_negative() -> Tes
     assert!(timelines > 0);
     // The purge runs outside every fence; a held store is the one
     // transient code.
-    let held = executor().execute(replica, &mut host).map_err(fail)?;
+    let held = executor()?.execute(replica, &mut host).map_err(fail)?;
     assert_eq!(held.error(), Some(ErasureErrorV1::ReplicaTimeout));
     reader.execute_batch("COMMIT")?;
     drop(reader);
-    let purged = executor().execute(replica, &mut host).map_err(fail)?;
+    let purged = executor()?.execute(replica, &mut host).map_err(fail)?;
     assert_eq!(purged.error(), None);
     drop(host);
     attempted.assert_effect(&held)?;
@@ -6352,7 +6354,7 @@ fn a_replica_check_that_cannot_read_the_store_is_a_host_error() -> TestResult {
     let (replica, others) = outbox.split_last().ok_or("the outbox is empty")?;
     let mut key = None;
     for other in others {
-        let result = executor().execute(other, &mut host).map_err(fail)?;
+        let result = executor()?.execute(other, &mut host).map_err(fail)?;
         if other.destruction.category == ErasureInventoryCategoryV1::Key {
             key = Some(result.owner_result());
         }
@@ -6371,7 +6373,7 @@ fn a_replica_check_that_cannot_read_the_store_is_a_host_error() -> TestResult {
         [digest.as_slice()],
     )?;
     assert_eq!(
-        executor().execute(replica, &mut host),
+        executor()?.execute(replica, &mut host),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     peer.execute(
@@ -6389,7 +6391,7 @@ fn a_replica_check_that_cannot_read_the_store_is_a_host_error() -> TestResult {
         [],
     )?;
     assert_eq!(
-        executor().execute(replica, &mut host),
+        executor()?.execute(replica, &mut host),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     peer.execute(
@@ -6399,7 +6401,7 @@ fn a_replica_check_that_cannot_read_the_store_is_a_host_error() -> TestResult {
     drop(peer);
     // Readable again, the replica runs.
     assert_eq!(
-        executor()
+        executor()?
             .execute(replica, &mut host)
             .map_err(fail)?
             .error(),
@@ -6456,17 +6458,17 @@ fn an_unreadable_key_registry_commits_no_owner_result() -> TestResult {
     )?;
     // A store failure is a host error, never a durable negative.
     assert_eq!(
-        executor().execute(&key, &mut host),
+        executor()?.execute(&key, &mut host),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
         host.command_sender()?
-            .destroy_key_for_erasure(&key, subject_key(1)?, erasure_host_timeline())
+            .destroy_key_for_erasure(&key, subject_key(1)?, erasure_host_timeline()?)
             .map(drop),
         Err(ErasureHostErrorV1::AdapterFailure)
     );
     assert_eq!(
-        executor().replay(&mut host, attempted.request).map(drop),
+        executor()?.replay(&mut host, attempted.request).map(drop),
         Err(ErasureHostErrorV1::AdapterFailure)
     );
     peer.execute(
@@ -6484,7 +6486,7 @@ fn an_unreadable_key_registry_commits_no_owner_result() -> TestResult {
     );
     // Once the registry reads again, the same command destroys the key.
     let mut host = attempted.host()?;
-    let destroyed = executor().execute(&key, &mut host).map_err(fail)?;
+    let destroyed = executor()?.execute(&key, &mut host).map_err(fail)?;
     assert_eq!(destroyed.error(), None);
     drop(host);
     attempted.assert_effect(&destroyed)
@@ -6503,7 +6505,7 @@ fn a_host_without_an_authority_has_no_outbox() -> TestResult {
         Err(ErasureHostErrorV1::AuthorizationDenied)
     );
     assert_eq!(
-        executor().replay(&mut host, reference(0x42)).map(drop),
+        executor()?.replay(&mut host, reference(0x42)).map(drop),
         Err(ErasureHostErrorV1::AuthorizationDenied)
     );
     Ok(())
@@ -6521,14 +6523,14 @@ fn key_destruction_completes_a_pending_phase_left_by_a_crash() -> TestResult {
     // The crash: the pending phase of the command's destruction committed,
     // its tombstone did not.
     host.command_sender()?.begin_key_registry_destruction(
-        erasure_host_timeline(),
+        erasure_host_timeline()?,
         subject_key_destruction(Hash::from_bytes(key.destruction.command.digest()))?,
     )?;
-    let completed = executor().execute(&key, &mut host).map_err(fail)?;
+    let completed = executor()?.execute(&key, &mut host).map_err(fail)?;
     assert_eq!(completed.error(), None);
     // A repeat is the same owner result, bound to the same tombstone.
     assert_eq!(
-        executor().execute(&key, &mut host).map_err(fail)?,
+        executor()?.execute(&key, &mut host).map_err(fail)?,
         completed
     );
     drop(host);
@@ -6546,21 +6548,21 @@ fn a_key_destroyed_under_another_authorization_binds_its_existing_receipt() -> T
     )?;
     let foreign = subject_key_destruction(Hash::from_bytes([0x99; 32]))?;
     host.command_sender()?
-        .begin_key_registry_destruction(erasure_host_timeline(), foreign)?;
+        .begin_key_registry_destruction(erasure_host_timeline()?, foreign)?;
     // Pending under another authorization: the permanent negative.
-    let refused = executor().execute(&key, &mut host).map_err(fail)?;
+    let refused = executor()?.execute(&key, &mut host).map_err(fail)?;
     assert_eq!(refused.error(), Some(ErasureErrorV1::KeyDestructionFailed));
     let receipt = deletion_receipt(&foreign);
     host.command_sender()?.complete_key_registry_destruction(
-        erasure_host_timeline(),
+        erasure_host_timeline()?,
         foreign,
         receipt,
     )?;
     // Tombstoned under that authorization: positive, bound to its receipt.
-    let destroyed = executor().execute(&key, &mut host).map_err(fail)?;
+    let destroyed = executor()?.execute(&key, &mut host).map_err(fail)?;
     assert_eq!(destroyed.error(), None);
     assert_eq!(
-        executor().execute(&key, &mut host).map_err(fail)?,
+        executor()?.execute(&key, &mut host).map_err(fail)?,
         destroyed
     );
     drop(host);
@@ -6590,12 +6592,12 @@ fn only_a_dispatched_key_command_destroys_and_only_under_an_open_fence() -> Test
     let mut host = attempted.host()?;
     // Before dispatch no attempt is active: nothing runs.
     assert_eq!(
-        executor().execute(&key, &mut host),
+        executor()?.execute(&key, &mut host),
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
         host.command_sender()?
-            .destroy_key_for_erasure(&key, subject_key(1)?, erasure_host_timeline())
+            .destroy_key_for_erasure(&key, subject_key(1)?, erasure_host_timeline()?)
             .map(drop),
         Err(ErasureHostErrorV1::Conflict)
     );
@@ -6619,7 +6621,7 @@ fn only_a_dispatched_key_command_destroys_and_only_under_an_open_fence() -> Test
     ] {
         assert_eq!(
             sender
-                .destroy_key_for_erasure(command, identity, erasure_host_timeline())
+                .destroy_key_for_erasure(command, identity, erasure_host_timeline()?)
                 .map(drop),
             Err(ErasureHostErrorV1::Conflict)
         );
@@ -6632,7 +6634,7 @@ fn only_a_dispatched_key_command_destroys_and_only_under_an_open_fence() -> Test
         Err(ErasureHostErrorV1::AccessFrozen)
     );
     let destroyed =
-        sender.destroy_key_for_erasure(&key, subject_key(1)?, erasure_host_timeline())?;
+        sender.destroy_key_for_erasure(&key, subject_key(1)?, erasure_host_timeline()?)?;
     assert_eq!(destroyed.error(), None);
     drop(host);
     attempted.assert_effect(&destroyed)
@@ -6672,7 +6674,7 @@ fn a_consistent_command_outside_the_attempt_is_not_dispatched() -> TestResult {
         .dispatched_owner_commands(request)?
         .is_empty());
     assert_eq!(
-        executor().execute(&command, &mut host),
+        executor()?.execute(&command, &mut host),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -6705,7 +6707,7 @@ fn an_artifact_is_redacted_only_once_every_key_it_depends_on_is_tombstoned() -> 
             .map(|(target, _, _)| target.artifact_digest)
             .ok_or("no keyed recording")?;
         let attempted = executor_attempted(owned, extra)?;
-        let results = executor()
+        let results = executor()?
             .replay(&mut attempted.dispatched()?, attempted.request)
             .map_err(fail)?;
         let community = pos_core::local_erasure_key_digest_v1(&community_key())?;
