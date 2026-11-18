@@ -11,7 +11,7 @@ use pos_core::{
     ErasureOwnerResultV1, ErasureReferenceV1, TimelineId,
 };
 
-use crate::ErasureExecutionHostV1;
+use crate::{ErasureCommandSenderV1, ErasureExecutionHostV1};
 
 /// The single-host erasure executor of one store.
 ///
@@ -68,10 +68,22 @@ impl LocalErasureExecutorV1 {
                 .and_then(|commands| {
                     commands
                         .iter()
-                        .map(|command| sender.execute_local_owner(command, self.host_timeline))
+                        .map(|command| self.run(&mut sender, command))
                         .collect()
                 })
         })
+    }
+
+    /// Run the owner work of one dispatched `command` as one Local owner
+    /// host command of `sender`'s host, keeping the payload-free host
+    /// error: the path [`super::LocalErasureDriverV1`] runs each outbox
+    /// command on.
+    pub(super) fn run(
+        self,
+        sender: &mut ErasureCommandSenderV1<'_>,
+        command: &ErasureOwnerCommandV1,
+    ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
+        sender.execute_local_owner(command, self.host_timeline)
     }
 }
 
@@ -97,7 +109,7 @@ impl ErasureAuthorityExecutionV1 for LocalErasureExecutorV1 {
     ) -> Result<ErasureOwnerResultV1, ErasureErrorV1> {
         context
             .command_sender()
-            .and_then(|mut sender| sender.execute_local_owner(command, self.host_timeline))
+            .and_then(|mut sender| self.run(&mut sender, command))
             .map_err(execution_error)
     }
 }

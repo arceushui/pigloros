@@ -36,16 +36,16 @@ use pos_core::{
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
     ErasureObligationInputV1, ErasureObligationV1, ErasureOwnerCommandV1, ErasureOwnerResultV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecordedAttemptReadV1,
-    ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureRecordedScopeReadV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureRecordedProgressV1, ErasureRecordedScopeReadV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, EventStore, Hash, KeyDestructionRequestV1,
     KeyIdentityV1, KeyRegistryStateV1, LocalErasureArtifactDispositionV1,
-    LocalErasureCacheGenerationV1, LocalErasureNegativeResultV1, LocalErasureRedactionV1,
-    LocalErasureReplicaPurgeV1, LocalOwnerEffectV1, LocalOwnerResultBindingV1,
-    PreparedLocalOwnerEffectV1, TimelineId,
+    LocalErasureCacheGenerationV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
+    LocalErasureRedactionV1, LocalErasureReplicaPurgeV1, LocalOwnerEffectV1,
+    LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1, TimelineId,
 };
 
-use super::{map_erasure_error, ErasureCommandSenderV1, ErasureHostStore, HostedCoordinatorPortV1};
+use super::{map_erasure_error, ErasureCommandSenderV1, ErasureHostStore};
 use crate::erasure_authority_view::VIEW_LIST_MAX;
 
 use ErasureInventoryCategoryV1::{Artifact, Backup, Key, Replica};
@@ -150,33 +150,12 @@ impl ErasureCommandSenderV1<'_> {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureOwnerCommandV1>, ErasureHostErrorV1> {
-        let limits = self.host.recovery_limits;
-        let authority = self.host.authority.clone();
-        self.host
-            .ensure_generation_with_inventory(self.generation)
-            .and_then(|installed| {
-                authority
-                    .ok_or(ErasureHostErrorV1::AuthorizationDenied)
-                    .map(|authority| (installed, authority))
-            })
-            .and_then(|(installed, authority)| {
-                let port = HostedCoordinatorPortV1::new(
-                    self.host.store.host_store(),
-                    authority.as_ref(),
-                    limits,
-                )
-                .with_verified_inventory(installed);
-                let persistence: &dyn ErasurePersistencePortV1 = &port;
-                persistence
-                    .recorded_progress(&port, &port, request)
-                    .map_err(map_erasure_error)
-            })
-            .map(|progress| {
-                let mut commands =
-                    progress.map_or_else(Vec::new, |progress| outbox(request, &progress));
-                commands.sort_by_key(|command| execution_rank(command.destruction.category));
-                commands
-            })
+        self.recorded_local_progress(request).map(|progress| {
+            let mut commands =
+                progress.map_or_else(Vec::new, |progress| outbox(request, &progress));
+            commands.sort_by_key(|command| execution_rank(command.destruction.category));
+            commands
+        })
     }
 
     /// Destroy the key of one `key-registry` command (ADR-136 §4a).
@@ -264,6 +243,37 @@ impl ErasureCommandSenderV1<'_> {
                 OwnerWorkV1::Refused(error) => {
                     negative(self.host.store.host_store(), command, error)
                 }
+            })
+    }
+
+    /// Re-derive the owner result `owner_result` names before the Local
+    /// signer signs it (ADR-136 §5 purpose 1; owner decision of 2026-11-18
+    /// on #1431).
+    ///
+    /// The retained ELO1 must answer a command the request's active attempt
+    /// dispatches, rebuilt from its retained obligation, and must be exactly
+    /// the ELO1 one of the Local executor's outcomes for that command
+    /// assembles: its `effect_digest` is `CA(effect)` of that effect by the
+    /// `PreparedLocalOwnerEffectV1` rule, the deletion receipt of the key's
+    /// tombstone or the address of its ELAD1, ELCG1, ELNEG1 or ELRP1. The
+    /// effect must be committed: the registry holds that tombstone, or the
+    /// store holds that exact record.
+    ///
+    /// # Errors
+    /// [`ErasureHostErrorV1::AuthorizationDenied`] for an ELO1 or obligation
+    /// that cannot be read, an ELO1 whose effect digest no committed effect
+    /// of its command yields; [`ErasureHostErrorV1::Conflict`] for a command
+    /// the active attempt does not dispatch; otherwise the payload-free read
+    /// error.
+    pub(crate) fn verified_owner_result(
+        &mut self,
+        owner_result: ErasureReferenceV1,
+    ) -> Result<(), ErasureHostErrorV1> {
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| bound_command(self.host.store.host_store(), owner_result))
+            .and_then(|command| {
+                committed_owner_result(self.host.store.host_store(), &command, owner_result)
             })
     }
 
@@ -919,4 +929,79 @@ fn purged_replica(
             ErasureErrorV1::ReplicaNegativeAcknowledgement,
         ),
     }
+}
+
+/// The command the retained ELO1 `owner_result` answers, rebuilt from its
+/// retained obligation and the attempt the ELO1 names.
+///
+/// # Errors
+/// [`ErasureHostErrorV1::AuthorizationDenied`] when the ELO1 or its
+/// obligation cannot be read.
+fn bound_command(
+    store: &dyn ErasureHostStore,
+    owner_result: ErasureReferenceV1,
+) -> Result<ErasureOwnerCommandV1, ErasureHostErrorV1> {
+    ErasurePersistencePortV1::read_object(store, owner_result)
+        .and_then(|bytes| LocalErasureOwnerResultV1::from_canonical_cbor(&bytes))
+        .and_then(|elo1| {
+            store
+                .read_object(elo1.obligation)
+                .and_then(|bytes| ErasureObligationV1::from_canonical_cbor(&bytes))
+                .map(|obligation| ErasureOwnerCommandV1 {
+                    request: elo1.request,
+                    destruction: ErasureDestructionCommandV1::from_obligation(
+                        &obligation,
+                        elo1.attempt,
+                    ),
+                })
+        })
+        .ok()
+        .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+}
+
+/// Whether `owner_result` is the ELO1 of a committed outcome of the
+/// dispatched `command`.
+///
+/// # Errors
+/// [`ErasureHostErrorV1::Conflict`] unless the active attempt dispatches
+/// `command`; [`ErasureHostErrorV1::AuthorizationDenied`] when no committed
+/// effect of `command` yields `owner_result`; otherwise the payload-free
+/// read error.
+fn committed_owner_result(
+    store: &mut dyn ErasureHostStore,
+    command: &ErasureOwnerCommandV1,
+    owner_result: ErasureReferenceV1,
+) -> Result<(), ErasureHostErrorV1> {
+    owner_work(store, command)
+        .and_then(|(_, active)| {
+            committed_scope(store, command.request).and_then(|(commitment, _)| {
+                loaded_registry(store).map(|registry| {
+                    (
+                        (commitment.reference(), active.admitted_position()),
+                        registry,
+                    )
+                })
+            })
+        })
+        .and_then(|(scope, registry)| {
+            candidate_effects(command, scope, registry.as_ref())
+                .into_iter()
+                .filter_map(|(error, effect)| {
+                    effect
+                        .and_then(|effect| {
+                            PreparedLocalOwnerEffectV1::new(effect, owner_binding(command, error))
+                        })
+                        .ok()
+                })
+                .find(|prepared| prepared.owner_result().reference() == owner_result)
+                .filter(|prepared| {
+                    prepared.effect_object().is_none_or(|effect| {
+                        store
+                            .read_object(effect.reference())
+                            .is_ok_and(|bytes| bytes == effect.canonical_cbor())
+                    })
+                })
+                .map(drop)
+                .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+        })
 }

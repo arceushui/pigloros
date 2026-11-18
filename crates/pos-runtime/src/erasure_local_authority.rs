@@ -3,27 +3,39 @@
 //! This module holds the ELP1 policy and the executor binding (ELEXV1)
 //! compiled into this binary, the composition-time verification of the
 //! installed ELB1/ELB1S bundle against the profile's TPS1 anchor and the
-//! store (ADR-136 §4, *Bundle*), the verify-only `LocalErasureAuthorityV1`
-//! that composition installs over the verified bundle, from submission
-//! through freeze to attempt, acknowledgement and receipt admission, and the
-//! `LocalErasureExecutorV1` that runs the owner work of dispatched commands.
-//! The signer and driver of ADR-136 §1 are later slices of the same module.
+//! store (ADR-136 §4, *Bundle*) with its routine-rotation and compromise
+//! rules (§5), the verify-only `LocalErasureAuthorityV1` that composition
+//! installs over the verified bundle, from submission through freeze to
+//! attempt, acknowledgement and receipt admission, the
+//! `LocalErasureExecutorV1` that runs the owner work of dispatched
+//! commands, the role-2 `LocalErasureSignerV1` that re-derives every
+//! preimage before it signs, and `LocalErasureDriverV1`, the only lifecycle
+//! caller.
+//!
+//! Before every freeze the driver's preparation retains the installed TPS1
+//! and the bundle's ELB1S beside ELB1 and ELLR1 (ADR-136 Q9). ELTA1, the
+//! operator-key lookup hint, is not retained yet: it needs the append-only
+//! operator-key history #448 has to deliver first (ADR-136 Q17).
 
 mod authority;
 mod binding;
 mod destruction;
+mod driver;
 mod executor;
 mod freeze;
+mod lifecycle;
 mod policy;
+mod signer;
 
 use std::sync::Arc;
 
 use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
     local_erasure_host_timeline_v1, CanonicalBytes, ErasureInventoryPersistencePortV1,
-    ErasureRecoveryLimitsV1, ErasureReferenceV1, EventStore, Hash, KeyIdentityV1, KeyRoleV1,
-    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureExecutionBindingV1, OwnerIdV1,
-    PublicKey, Signature, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasurePersistencePortV1, ErasureRecordedAttemptReadV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, EventStore, Hash, KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1,
+    LocalErasureBundleV1, LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature,
+    TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_crypto::signing::{verify, verifying_key_from_public_key};
 use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
@@ -36,6 +48,7 @@ pub use binding::{
     local_erasure_execution_binding_v1, LOCAL_ERASURE_EXECUTOR_ID_V1,
     LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1, LOCAL_ERASURE_EXECUTOR_VERSION_V1,
 };
+pub use driver::{LocalErasureDriverV1, LocalErasureStepV1, LocalErasureSweepV1};
 pub use executor::LocalErasureExecutorV1;
 pub use policy::{
     compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
@@ -44,15 +57,17 @@ pub use policy::{
     LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_QUOTA_ATTEMPTS_V1,
     LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
 };
+pub use signer::{LocalErasureSignerV1, LocalErasureSigningRequestV1};
 
 /// The record tag of retained TPS1 evidence in the erasure object store.
 const RETAINED_TPS1_TAG: &str = "TPS1";
 
 /// The most retained TPS1 objects composition reads: the store request-head
-/// cap, chosen as a fixed read bound. No admission retains a TPS1, so the
-/// bound only limits the read of TPS1 objects retained by other means.
-/// A store retaining more TPS1 objects cannot be checked within it and
-/// stays closed with `ErasureTrustAnchorRotated`.
+/// cap, chosen as a fixed read bound. Each freeze retains the TPS1 installed
+/// at its preparation, and the store is content-addressed, so the set holds
+/// one object per installed TPS1 that froze a request. A store retaining
+/// more TPS1 objects cannot be checked within it and stays closed with
+/// `ErasureTrustAnchorRotated`.
 ///
 /// The read materialises the whole set: at the cap, up to this many
 /// [`pos_core::ERASURE_RETAINED_OBJECT_MAX_BYTES_V1`] objects (about 4 GiB)
@@ -76,8 +91,10 @@ pub enum LocalErasureCompositionErrorV1 {
     /// The bundle names another policy than the one compiled into this
     /// binary, or another executor, Local Principal registry, store identity
     /// or live signer key than this deployment and store, its
-    /// `host_timelines` omit the store's Erasure Host Timeline, or the
-    /// store identity or key registry cannot be read.
+    /// `host_timelines` omit the store's Erasure Host Timeline, the store
+    /// identity, key registry or pinned trust cannot be read, or it is a
+    /// routine rotation refused while a request pins another bundle the
+    /// installed TPS1 does not revoke (owner decision Q12 on #1431).
     BundleMismatch,
     /// The installed TPS1 revokes the bundle root or the bundle signer.
     TrustRevoked,
@@ -140,9 +157,14 @@ impl ErasureCoordinatorCompositionV1 {
     /// Timeline of its store identity
     /// ([`pos_core::local_erasure_host_timeline_v1`]), the fence of key
     /// destruction for erasure; and the key registry must hold its role-2
-    /// signer key live, not destroyed. When the store holds any erasure
-    /// request, every retained TPS1 must verify under the pinned operator
-    /// key.
+    /// signer key live, not destroyed. A routine rotation is refused while
+    /// any request pins another bundle: a frozen request before its first
+    /// attempt pins the bundle its obligation set names, and a request with
+    /// an active attempt the bundle that attempt names. A compromise is
+    /// always accepted: a pinned bundle whose root or signer the installed
+    /// TPS1 revokes can never sign again, so it does not hold the rotation
+    /// back (ADR-136 §5). When the store holds any erasure request, every
+    /// retained TPS1 must verify under the pinned operator key.
     ///
     /// A composition only admits new work: recovery of committed evidence
     /// verifies against the ELB1 it pins by reference, never this check.
@@ -160,11 +182,17 @@ impl ErasureCoordinatorCompositionV1 {
         store: &mut S,
     ) -> Result<Self, LocalErasureCompositionErrorV1>
     where
-        S: ErasureInventoryPersistencePortV1 + EventStore + ?Sized,
+        S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + EventStore + ?Sized,
     {
+        let revoked = &inputs.trust.snapshot().revoked_key_ids;
         verified_bundle(inputs)
             .and_then(|bundle| matches_store(&bundle, store).map(|()| bundle))
             .and_then(lists_its_host_timeline)
+            .and_then(|bundle| {
+                rotation_admitted(&bundle, revoked, store)
+                    .then_some(bundle)
+                    .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
+            })
             .and_then(|bundle| {
                 retained_trust_verifies(inputs.operator_public_key, store)
                     .then_some(bundle)
@@ -178,7 +206,11 @@ impl ErasureCoordinatorCompositionV1 {
                             bundle_reference: bundle.reference().ok(),
                             bundle,
                             trust_expiry: inputs.trust.expiry(),
-                            revoked_key_ids: inputs.trust.snapshot().revoked_key_ids.clone(),
+                            revoked_key_ids: revoked.clone(),
+                            retained_trust: vec![
+                                inputs.trust.bytes().to_vec(),
+                                inputs.bundle_signature.to_vec(),
+                            ],
                             clock: inputs.clock,
                             principal_grant: inputs.principal_grant,
                             authority_timeline: inputs.authority_timeline,
@@ -323,10 +355,10 @@ fn lists_its_host_timeline(
 ///
 /// An empty retained set passes even when requests exist. ERQ1 pins no
 /// trust revision (ADR-136 §5): submission references only ERAZ1, ELP1,
-/// ELSEL1 and ELIDEM1, and no admission retains a TPS1 (a freeze retains
-/// only ELB1 and ELLR1). A store with requests therefore legitimately
-/// retains no TPS1, and the check refuses only a retained TPS1 that the
-/// pinned operator key does not verify. A committed freeze pins its trust
+/// ELSEL1 and ELIDEM1, and only a freeze retains a TPS1, the one installed
+/// at its preparation. A store whose requests are not frozen therefore
+/// legitimately retains no TPS1, and the check refuses only a retained TPS1
+/// that the pinned operator key does not verify. A committed freeze pins its trust
 /// as `CA(ELB1)`, and recovery resolves only that ELB1 by reference: the
 /// verified bundle, or after a rotation the retained ELB1 bytes. Recovery
 /// resolves no TPS1, so retained TPS1 bytes are checked only here. Passing
@@ -347,5 +379,75 @@ where
                             .iter()
                             .all(|tps1| tps1_signed_by_operator_v1(tps1, &operator_public_key))
                     })
+        })
+}
+
+/// The ADR-136 §5 rotation rule: `bundle` is admitted unless a request pins
+/// another bundle that the installed TPS1 does not revoke (owner decision
+/// Q12 on #1431). A store whose inventory or pinned trust cannot be read
+/// admits no rotation.
+fn rotation_admitted<S>(bundle: &LocalErasureBundleV1, revoked: &[String], store: &mut S) -> bool
+where
+    S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + ?Sized,
+{
+    bundle.reference().is_ok_and(|current| {
+        store
+            .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+            .is_ok_and(|snapshot| {
+                snapshot
+                    .inventory()
+                    .request_heads()
+                    .iter()
+                    .all(|(request, _)| {
+                        pinned_trust(&*store, *request).is_ok_and(|pinned| {
+                            pinned.is_none_or(|trust| {
+                                trust == current || pins_revoked_bundle(&*store, trust, revoked)
+                            })
+                        })
+                    })
+            })
+    })
+}
+
+/// The bundle one request pins (ADR-136 §5, *What a pin is*): its active
+/// attempt's, or, frozen before its first attempt, its obligation set's.
+/// A request before freeze, or after an attempt with none active, pins
+/// none.
+fn pinned_trust<S>(
+    store: &S,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureReferenceV1>, pos_core::ErasureErrorV1>
+where
+    S: ErasurePersistencePortV1 + ?Sized,
+{
+    store.recorded_active_attempt(request).and_then(|active| {
+        active.map_or_else(
+            || {
+                ErasurePersistencePortV1::attempt_index_count(store, request).and_then(|attempts| {
+                    if attempts == 0 {
+                        store.recorded_obligation_trust(request)
+                    } else {
+                        Ok(None)
+                    }
+                })
+            },
+            |attempt| Ok(Some(attempt.trust())),
+        )
+    })
+}
+
+/// Whether `trust` names a retained ELB1 whose root or signer the installed
+/// TPS1 revokes (ADR-136 §5, *Compromise*).
+fn pins_revoked_bundle<S>(store: &S, trust: ErasureReferenceV1, revoked: &[String]) -> bool
+where
+    S: ErasurePersistencePortV1 + ?Sized,
+{
+    ErasurePersistencePortV1::read_object(store, trust)
+        .ok()
+        .and_then(|bytes| LocalErasureBundleV1::from_canonical_cbor(&bytes).ok())
+        .is_some_and(|pinned| {
+            revoked
+                .iter()
+                .any(|key_id| *key_id == pinned.issued_by || *key_id == pinned.signer_key_id)
         })
 }
