@@ -14,6 +14,7 @@
 //! piglor-gateway provision-local-erasure <sqlite-path>
 //!     --issued-by <erasure-bundle/...> --signer-owner <owner-id> --out <absolute-path>
 //!     [--expiry <unix-seconds, default 0>] [--signer-epoch <epoch, default 1>]
+//!     [--rotation <routine|compromise, default routine>]
 //! ```
 //!
 //! The command first claims `--out`, an absolute path, as a new file with
@@ -61,7 +62,15 @@
 //!
 //! **Rotation.** A routine rotation re-runs the command with a new signer
 //! credential and a higher `--signer-epoch`; the key registry refuses another
-//! key for a registered identity, a lower epoch and a reused key.
+//! key for a registered identity, a lower epoch and a reused key. A new
+//! epoch becomes the registry's only active signing key, so the old signer
+//! can sign nothing more, even for a request pinned to its bundle. A new
+//! key is therefore registered only when no erasure request pins a bundle
+//! (the ADR-136 §5 pin rule composition applies); otherwise the command
+//! refuses before any write. A compromise passes `--rotation compromise`
+//! and is registered only once the installed TPS1 revokes the old signer
+//! key and the root or signer of every pinned bundle. A re-run with the
+//! registered key is unchanged (owner decision of 2026-11-18 on #1431).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -81,7 +90,8 @@ use pos_core::{
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
-    local_erasure_execution_binding_v1, ErasureCoordinatorCompositionV1,
+    local_erasure_execution_binding_v1, local_erasure_signer_rotation_v1,
+    ErasureCoordinatorCompositionV1, LocalErasureRotationRefusalV1, LocalErasureSignerRotationV1,
     LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_POLICY_REFERENCE_V1,
 };
 use pos_store::{sqlite::SqliteStore, trust_policy_registry::CurrentTrustPolicyV1, StoreConfig};
@@ -106,10 +116,11 @@ pub const LOCAL_ERASURE_HOST_TIMELINE_NAME: &str = "pigloros.local-erasure.host"
 const MAX_CREDENTIAL_BYTES: usize = crate::deployment_trust::MAX_RELEASE_TRUST_CREDENTIAL_BYTES;
 
 /// The command's flags, each given at most once.
-const FLAGS: [&str; 5] = [
+const FLAGS: [&str; 6] = [
     "--expiry",
     "--issued-by",
     "--out",
+    "--rotation",
     "--signer-epoch",
     "--signer-owner",
 ];
@@ -121,7 +132,7 @@ pub enum LocalErasureProvisionErrorV1 {
     #[error(
         "Usage: piglor-gateway provision-local-erasure <sqlite-path> --issued-by <key-id> \
          --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] \
-         [--signer-epoch <epoch>]"
+         [--signer-epoch <epoch>] [--rotation routine|compromise]"
     )]
     Usage,
     /// `--out` exists, or its directory or the new file cannot be opened.
@@ -159,6 +170,13 @@ pub enum LocalErasureProvisionErrorV1 {
          under another epoch"
     )]
     SignerRefused,
+    /// The signer key differs from the one the key registry holds for
+    /// `--signer-owner` and its registration is refused: a routine rotation
+    /// while an erasure request pins a bundle, or a `--rotation compromise`
+    /// the installed TPS1 does not reflect (owner decision of 2026-11-18 on
+    /// #1431).
+    #[error("refused to register a new local erasure signer key: {0}")]
+    Rotation(LocalErasureRotationRefusalV1),
 }
 
 /// One parsed `provision-local-erasure` command line.
@@ -176,6 +194,8 @@ pub struct LocalErasureProvisionRequestV1 {
     pub signer_owner: String,
     /// The signer key epoch.
     pub signer_epoch: u64,
+    /// How a signer key other than the registered one is registered.
+    pub rotation: LocalErasureSignerRotationV1,
 }
 
 impl LocalErasureProvisionRequestV1 {
@@ -199,6 +219,7 @@ impl LocalErasureProvisionRequestV1 {
                         expiry: number(&values, "--expiry", 0)?,
                         signer_owner: required(&values, "--signer-owner")?.to_owned(),
                         signer_epoch: number(&values, "--signer-epoch", 1)?,
+                        rotation: rotation(&values)?,
                     })
                 })
             })
@@ -233,6 +254,17 @@ fn absolute(path: &str) -> Result<PathBuf, LocalErasureProvisionErrorV1> {
     Some(PathBuf::from(path))
         .filter(|path| path.is_absolute())
         .ok_or(LocalErasureProvisionErrorV1::Usage)
+}
+
+/// `--rotation`: `routine`, the default, or `compromise`.
+fn rotation(
+    values: &BTreeMap<&str, &str>,
+) -> Result<LocalErasureSignerRotationV1, LocalErasureProvisionErrorV1> {
+    match values.get("--rotation").copied() {
+        None | Some("routine") => Ok(LocalErasureSignerRotationV1::Routine),
+        Some("compromise") => Ok(LocalErasureSignerRotationV1::Compromise),
+        Some(_) => Err(LocalErasureProvisionErrorV1::Usage),
+    }
 }
 
 fn number(
@@ -470,16 +502,25 @@ fn write_store(
     let identity = snapshot.store_identity().unwrap_or_else(random_identity);
     validated_bundle(request, signer, trust, registry, identity).and_then(
         |(owner, (bundle, host_timeline))| {
-            register_signer(store, owner, request.signer_epoch, signer)
-                .and_then(|()| {
-                    store
-                        .init_erasure_store_identity(identity)
-                        .map_err(io::Error::other)
-                })
-                .map(|_| {
-                    let missing = snapshot.timeline(host_timeline).is_none();
-                    (bundle, missing.then_some(host_timeline))
-                })
+            local_erasure_signer_rotation_v1(
+                store,
+                owner,
+                *signer.public_verification_key().as_bytes(),
+                request.rotation,
+                &trust.snapshot().revoked_key_ids,
+            )
+            .map_err(LocalErasureProvisionErrorV1::Rotation)
+            .map_err(io::Error::other)
+            .and_then(|()| register_signer(store, owner, request.signer_epoch, signer))
+            .and_then(|()| {
+                store
+                    .init_erasure_store_identity(identity)
+                    .map_err(io::Error::other)
+            })
+            .map(|_| {
+                let missing = snapshot.timeline(host_timeline).is_none();
+                (bundle, missing.then_some(host_timeline))
+            })
         },
     )
 }
