@@ -6268,6 +6268,72 @@ fn the_local_replica_runs_last_and_a_held_store_is_a_transient_negative() -> Tes
     attempted.assert_effect(&purged)
 }
 
+#[test]
+fn a_replica_check_that_cannot_read_the_store_is_a_host_error() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let mut host = attempted.dispatched()?;
+    let outbox = host
+        .command_sender()?
+        .dispatched_owner_commands(attempted.request)?;
+    let (replica, others) = outbox.split_last().ok_or("the outbox is empty")?;
+    let mut key = None;
+    for other in others {
+        let result = executor().execute(other, &mut host).map_err(fail)?;
+        if other.destruction.category == ErasureInventoryCategoryV1::Key {
+            key = Some(result.owner_result());
+        }
+    }
+    let digest = key.ok_or("no key owner result")?.digest();
+    let peer = rusqlite::Connection::open(&attempted.store.path)?;
+    let saved: Vec<u8> = peer.query_row(
+        "SELECT object_cbor FROM erasure_evidence WHERE reference_digest = ?1",
+        [digest.as_slice()],
+        |row| row.get(0),
+    )?;
+    // An owner result the store cannot read is a host error, never a
+    // refusal of the replica.
+    peer.execute(
+        "UPDATE erasure_evidence SET object_cbor = 7 WHERE reference_digest = ?1",
+        [digest.as_slice()],
+    )?;
+    assert_eq!(
+        executor().execute(replica, &mut host),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    peer.execute(
+        "UPDATE erasure_evidence SET object_cbor = ?2 WHERE reference_digest = ?1",
+        rusqlite::params![digest.as_slice(), saved],
+    )?;
+    // So is a key registry it cannot read.
+    let registry: Vec<u8> = peer.query_row(
+        "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    assert_eq!(
+        executor().execute(replica, &mut host),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = ?1 WHERE singleton = 1",
+        rusqlite::params![registry],
+    )?;
+    drop(peer);
+    // Readable again, the replica runs.
+    assert_eq!(
+        executor()
+            .execute(replica, &mut host)
+            .map_err(fail)?
+            .error(),
+        None
+    );
+    Ok(())
+}
+
 /// The ELO1 a negative `error` of `command` would commit.
 fn negative_owner_result(
     command: &ErasureOwnerCommandV1,

@@ -17,7 +17,10 @@ use crate::ErasureExecutionHostV1;
 ///
 /// It destroys keys under the store's Erasure Host Timeline, which the
 /// composition root supplies: the host-owned root Timeline every bundle of
-/// the store lists in `host_timelines`.
+/// the store lists in `host_timelines`. A caller that executes single
+/// commands must keep [`Self::replay`]'s order: the local replica runs only
+/// after every other owner of the attempt, and is otherwise refused with
+/// [`ErasureErrorV1::PolicyConflict`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalErasureExecutorV1 {
     host_timeline: TimelineId,
@@ -76,6 +79,11 @@ impl ErasureAuthorityExecutionV1 for LocalErasureExecutorV1 {
     type Context = ErasureExecutionHostV1;
 
     /// Run the owner work of `command` as one Local owner host command.
+    ///
+    /// Commands must run in the order [`LocalErasureExecutorV1::replay`]
+    /// runs them: the local replica only after every other owner of the
+    /// attempt has an owner result. A local replica run out of that order
+    /// returns [`ErasureErrorV1::PolicyConflict`] and purges nothing.
     ///
     /// # Errors
     /// [`ErasureErrorV1::PolicyConflict`] when `command` is not dispatched
