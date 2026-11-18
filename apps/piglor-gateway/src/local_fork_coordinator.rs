@@ -35,8 +35,8 @@ use crate::{
     },
     host_timelines::HostTimelinesV1,
     local_fork_authentication::{
-        LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1,
-        ResolvedLocalAuthenticationV1,
+        AuthenticatedUnixPeerV1, LocalForkAuthenticationCredentialsV1,
+        LocalForkAuthenticationErrorV1, ResolvedLocalAuthenticationV1,
     },
     local_fork_listener::{
         read_completed_request, write_response, CompletedLocalForkAdmissionV1,
@@ -281,34 +281,43 @@ impl LocalForkAdmissionCoordinatorV1 {
         completed: CompletedLocalForkAdmissionV1,
         claim: ForkDeliveryClaimV1,
     ) -> PreparedDeliveryV1 {
-        let request = completed.request;
-        let authentication = match self
-            .credentials
-            .produce(completed.peer)
-            .and_then(|evidence| self.credentials.resolve(evidence))
-        {
-            Ok(authentication) => authentication,
-            Err(error) => return self.cancel_pending(claim, authentication_code(error)),
-        };
-        let command = match self.command(&request, &authentication) {
+        let command = match self.admitted_command(&completed.request, completed.peer) {
             Ok(command) => command,
-            Err(error) => return self.cancel_pending(claim, authentication_code(error)),
+            Err(code) => return self.cancel_pending(claim, code),
         };
-        // A host Timeline is no Fork parent (ADR-136 §4a, owner decision
-        // D10 on #1413): the request is refused before any FAC1 runs, with
-        // the code and the released claim of a parent the store does not
-        // hold.
-        if request
-            .fork_parent()
-            .is_some_and(|parent| self.host_timelines.contains(parent))
-        {
-            return self.cancel_pending(claim, LocalForkAdmissionCodeV1::ParentChanged);
-        }
         match execute_disposition(self.journal.execute(claim, &command)) {
             ExecuteDisposition::Release(result) => self.release_registered(claim, &result, true),
             ExecuteDisposition::Answer(code) => PreparedDeliveryV1::plain(reject(code)),
             ExecuteDisposition::CancelThenAnswer(code) => self.cancel_pending(claim, code),
         }
+    }
+
+    /// The authenticated FAC1 command of `request` from `peer`, or the code
+    /// that refuses it before any FAC1 runs.
+    ///
+    /// A host Timeline is no Fork parent (ADR-136 §4a, owner decision D10
+    /// on #1413): such a request is refused with the code of a parent the
+    /// store does not hold.
+    fn admitted_command(
+        &self,
+        request: &LocalForkAdmissionRequestV1,
+        peer: AuthenticatedUnixPeerV1,
+    ) -> Result<ForkAdmissionHostCommandV1, LocalForkAdmissionCodeV1> {
+        self.credentials
+            .produce(peer)
+            .and_then(|evidence| self.credentials.resolve(evidence))
+            .and_then(|authentication| self.command(request, &authentication))
+            .map_err(authentication_code)
+            .and_then(|command| {
+                if request
+                    .fork_parent()
+                    .is_some_and(|parent| self.host_timelines.contains(parent))
+                {
+                    Err(LocalForkAdmissionCodeV1::ParentChanged)
+                } else {
+                    Ok(command)
+                }
+            })
     }
 
     /// Definite failures before FAC1 cannot retain a live Pending claim.
