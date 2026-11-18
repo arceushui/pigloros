@@ -31,11 +31,11 @@ use std::sync::Arc;
 
 use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
-    local_erasure_host_timeline_v1, CanonicalBytes, ErasureInventoryPersistencePortV1,
-    ErasurePersistencePortV1, ErasureRecordedAttemptReadV1, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, EventStore, Hash, KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1,
-    LocalErasureBundleV1, LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature,
-    TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
+    local_erasure_host_timeline_v1, local_erasure_signer_key_id_v1, CanonicalBytes,
+    ErasureInventoryPersistencePortV1, ErasurePersistencePortV1, ErasureRecordedAttemptReadV1,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, EventStore, Hash, KeyIdentityV1, KeyRoleV1,
+    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureExecutionBindingV1, OwnerIdV1,
+    PublicKey, Signature, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_crypto::signing::{verify, verifying_key_from_public_key};
 use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
@@ -393,22 +393,136 @@ where
     S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + ?Sized,
 {
     bundle.reference().is_ok_and(|current| {
-        store
-            .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
-            .is_ok_and(|snapshot| {
-                snapshot
-                    .inventory()
-                    .request_heads()
-                    .iter()
-                    .all(|(request, _)| {
-                        pinned_trust(&*store, *request).is_ok_and(|pinned| {
-                            pinned.is_none_or(|trust| {
-                                trust == current || pins_revoked_bundle(&*store, trust, revoked)
-                            })
-                        })
-                    })
-            })
+        bundle_pins(store, revoked).is_some_and(|pins| {
+            pins.iter()
+                .all(|&(trust, revoked)| trust == current || revoked)
+        })
     })
+}
+
+/// Every bundle a request of the store pins, each with whether the
+/// installed TPS1 revokes its root or signer; `None` when the inventory or
+/// a pinned trust cannot be read.
+fn bundle_pins<S>(store: &mut S, revoked: &[String]) -> Option<Vec<(ErasureReferenceV1, bool)>>
+where
+    S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + ?Sized,
+{
+    store
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .ok()
+        .and_then(|snapshot| {
+            snapshot
+                .inventory()
+                .request_heads()
+                .iter()
+                .map(|(request, _)| pinned_trust(&*store, *request).ok())
+                .collect::<Option<Vec<_>>>()
+        })
+        .map(|pins| {
+            pins.into_iter()
+                .flatten()
+                .map(|trust| (trust, pins_revoked_bundle(&*store, trust, revoked)))
+                .collect()
+        })
+}
+
+/// How `provision-local-erasure` registers a role-2 signer key that
+/// differs from the one the key registry holds for its owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalErasureSignerRotationV1 {
+    /// A routine rotation: allowed only while no request pins a bundle.
+    Routine,
+    /// A compromise: allowed only once the installed TPS1 revokes the old
+    /// signer key and the root or signer of every pinned bundle.
+    Compromise,
+}
+
+/// Why a role-2 signer key may not be registered on an erasure store
+/// (owner decision of 2026-11-18 on #1431).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalErasureRotationRefusalV1 {
+    /// A routine rotation while a request pins a bundle, or a store whose
+    /// pins cannot be read.
+    Pinned,
+    /// A compromise the installed TPS1 does not reflect: the old signer
+    /// key or a pinned bundle is not revoked.
+    NotRevoked,
+}
+
+impl std::fmt::Display for LocalErasureRotationRefusalV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Pinned => "an erasure request pins the current signer's bundle",
+            Self::NotRevoked => "the installed TPS1 does not revoke the old signer's bundle",
+        })
+    }
+}
+
+impl std::error::Error for LocalErasureRotationRefusalV1 {}
+
+/// Whether the store may register `signer_public_key` as a role-2 signer
+/// key of `owner` (owner decision of 2026-11-18 on #1431).
+///
+/// Registering a new epoch makes it the registry's only active signing key
+/// for its owner, so the old signer can sign nothing more, not even for a
+/// request pinned to its bundle. The key the registry holds at the
+/// owner's highest epoch (an exact re-run), or the owner's first key, is
+/// always allowed. Any other key is a rotation:
+/// - a routine rotation is refused while any request pins a bundle (the
+///   `local()` pin rule, ADR-136 §5);
+/// - a compromise is allowed only when the installed TPS1, whose revoked
+///   key ids are `revoked`, revokes the old signer key and the root or
+///   signer of every pinned bundle.
+///
+/// A store without a readable key registry holds no old signer, and the
+/// registration that follows refuses it.
+///
+/// # Errors
+/// [`LocalErasureRotationRefusalV1::Pinned`] for a routine rotation while
+/// a request pins a bundle, or when the pins cannot be read;
+/// [`LocalErasureRotationRefusalV1::NotRevoked`] for a compromise the
+/// installed TPS1 does not reflect.
+pub fn local_erasure_signer_rotation_v1<S>(
+    store: &mut S,
+    owner: OwnerIdV1,
+    signer_public_key: [u8; 32],
+    rotation: LocalErasureSignerRotationV1,
+    revoked: &[String],
+) -> Result<(), LocalErasureRotationRefusalV1>
+where
+    S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + EventStore + ?Sized,
+{
+    let old = store
+        .load_key_registry()
+        .ok()
+        .flatten()
+        .and_then(|registry| {
+            registry
+                .key_records()
+                .filter(|record| {
+                    record.identity.owner_id == owner
+                        && record.identity.role == KeyRoleV1::TimelineIntegritySigning
+                })
+                .max_by_key(|record| record.identity.epoch)
+                .and_then(|record| record.public_verification_key)
+                .map(|key| *key.as_bytes())
+        });
+    old.filter(|old| *old != signer_public_key)
+        .map_or(Ok(()), |old| {
+            bundle_pins(store, revoked)
+                .ok_or(LocalErasureRotationRefusalV1::Pinned)
+                .and_then(|pins| match rotation {
+                    LocalErasureSignerRotationV1::Routine => pins
+                        .is_empty()
+                        .then_some(())
+                        .ok_or(LocalErasureRotationRefusalV1::Pinned),
+                    LocalErasureSignerRotationV1::Compromise => (revoked
+                        .contains(&local_erasure_signer_key_id_v1(&old))
+                        && pins.iter().all(|&(_, revoked)| revoked))
+                    .then_some(())
+                    .ok_or(LocalErasureRotationRefusalV1::NotRevoked),
+                })
+        })
 }
 
 /// The bundle one request pins (ADR-136 §5, *What a pin is*): its active
