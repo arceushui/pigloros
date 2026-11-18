@@ -63,8 +63,6 @@ KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "{", "!"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 # ``<<`` but not the ``<<<`` here-string, which has no body.
 HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
-# ANSI-C quoting ($'...') allows \' inside; shlex does not know it.
-ANSI_C_STRING = re.compile(r"\$'(?:[^'\\]|\\.)*'")
 
 # Wrappers that run their remaining arguments as a command, with the options
 # that take a separate value word. A ``--long=value`` or attached short value
@@ -145,8 +143,13 @@ def split_heredocs(command: str) -> tuple[str, list[str]]:
     return "\n".join(out), expanding
 
 
-def strip_comments(text: str) -> str:
-    """Remove ``#`` comments: only a ``#`` that starts a word, outside quotes."""
+def normalize(text: str) -> str:
+    """Drop ``#`` comments and fold ANSI-C ``$'...'`` strings into a literal.
+
+    One quote-aware pass: a ``#`` starts a comment only at the start of a
+    word outside quotes, and ``$'`` opens an ANSI-C string (in which ``\\'``
+    does not end it) only outside quotes; shlex knows neither rule.
+    """
     out: list[str] = []
     index, quote, length = 0, "", len(text)
     while index < length:
@@ -159,9 +162,18 @@ def strip_comments(text: str) -> str:
             continue
         elif char == '"':
             quote = "" if quote == '"' else '"'
-        elif char == "'" and not quote:
+        elif quote:
+            pass
+        elif char == "'":
             quote = "'"
-        elif char == "#" and not quote and (index == 0 or text[index - 1] in " \t\n;&|()"):
+        elif char == "$" and text.startswith("'", index + 1):
+            end = index + 2
+            while end < length and text[end] != "'":
+                end += 2 if text[end] == "\\" else 1
+            out.append("'ansi-c'")
+            index = end + 1
+            continue
+        elif char == "#" and (index == 0 or text[index - 1] in " \t\n;&|()"):
             newline = text.find("\n", index)
             index = length if newline == -1 else newline
             continue
@@ -226,8 +238,7 @@ def substitutions(text: str) -> list[str]:
 
 
 def tokenize(command: str) -> list[str]:
-    literal = strip_comments(ANSI_C_STRING.sub("'ansi-c'", command))
-    lexer = shlex.shlex(literal, posix=True, punctuation_chars=PUNCTUATION)
+    lexer = shlex.shlex(normalize(command), posix=True, punctuation_chars=PUNCTUATION)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""

@@ -73,6 +73,8 @@ class PastMistakes(unittest.TestCase):
             "env --split-string='cargo build'",
             "cat <<< foo\ncargo test",
             "echo $'it\\'s'; cargo test",
+            "echo 'a$'; cargo test; echo 'b'",
+            "echo \"a\" 'US$'; cargo build; echo 'x'",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.DENY)
@@ -116,6 +118,7 @@ class PastMistakes(unittest.TestCase):
             "git pull --rebase=merges",
             "git log a#b; git push -f",
             "git commit --am",
+            "echo \"a\" 'US$'; git commit --no-verify; echo 'x'",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.ASK)
@@ -160,6 +163,8 @@ class AllowedCommands(unittest.TestCase):
             "ls > out.txt 2>&1",
             "grep -c x <<< 'cargo build'",
             "printf $'a\\tb\\n'",
+            "echo '$'\"'\"; git status",
+            "echo \\$'x'; git status",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(decision(command))
