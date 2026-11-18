@@ -26,6 +26,7 @@ struct Fixture {
     authority: ConsentAuthority,
     token: pos_core::ConsentCapabilityToken,
     timeline: pos_core::TimelineId,
+    unaffected_timeline: pos_core::TimelineId,
     descriptor: pos_core::RecipientKeyDescriptorV1,
     evaluation: pos_core::ReplayClaimEvaluationV1,
     gate: Arc<ErasureContainmentGateV1>,
@@ -80,14 +81,20 @@ fn fixture(export_permitted: bool) -> TestResult<Fixture> {
     let grantee = EntityId::new();
     let timeline =
         store.create_timeline_with_meta(TimelineMeta::root_owned("recipient-export", subject))?;
-    store.append(
-        timeline.id(),
-        &[EventDraft::new(
-            EntityId::new(),
-            Kind::new("recipient.export.public.v1"),
-            CanonicalBytes::from_static(b"encrypted-recipient-export"),
-        )],
-    )?;
+    let unaffected_timeline = store.create_timeline_with_meta(TimelineMeta::root_owned(
+        "recipient-export-unaffected",
+        subject,
+    ))?;
+    for source in [timeline.id(), unaffected_timeline.id()] {
+        store.append(
+            source,
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("recipient.export.public.v1"),
+                CanonicalBytes::from_static(b"encrypted-recipient-export"),
+            )],
+        )?;
+    }
 
     let authority = ConsentAuthority::new();
     store.bind_consent_authority(authority.append_permit())?;
@@ -102,6 +109,7 @@ fn fixture(export_permitted: bool) -> TestResult<Fixture> {
         authority,
         token,
         timeline: timeline.id(),
+        unaffected_timeline: unaffected_timeline.id(),
         descriptor,
         evaluation: evaluation()?,
         gate,
@@ -378,5 +386,101 @@ fn publication_rejects_a_destroyed_recipient_key() -> TestResult {
             KeyRegistryErrorV1::Destroyed
         ))
     ));
+    Ok(())
+}
+
+fn publish_affected_and_unaffected(
+    fixture: &mut Fixture,
+) -> TestResult<(
+    pos_store::sqlite::PublishedRecipientExportV1,
+    pos_store::sqlite::PublishedRecipientExportV1,
+)> {
+    let affected = fixture.store.publish_recipient_export(
+        &fixture.authority,
+        &fixture.owner,
+        &request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        ),
+    )?;
+    let unaffected_token = fixture.authority.record_grant_on_timeline(
+        fixture.unaffected_timeline,
+        &grant(fixture.token.subject_id(), fixture.token.grantee_id(), true),
+    );
+    let unaffected = fixture.store.publish_recipient_export(
+        &fixture.authority,
+        &fixture.owner,
+        &request(
+            fixture.unaffected_timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &unaffected_token,
+        ),
+    )?;
+    Ok((affected, unaffected))
+}
+
+/// ADR-138 acceptance test 12: after `AccessFrozen`, an affected publication
+/// is refused and an unaffected one is still served.
+#[test]
+fn reader_refuses_an_access_frozen_publication_and_serves_an_unaffected_one() -> TestResult {
+    let mut fixture = fixture(true)?;
+    let (affected, unaffected) = publish_affected_and_unaffected(&mut fixture)?;
+    let held = fixture
+        .store
+        .read_recipient_export(&fixture.owner, affected.export_id)?;
+
+    fixture.gate.freeze_timeline_for_test(fixture.timeline);
+
+    assert!(matches!(
+        fixture
+            .store
+            .read_recipient_export(&fixture.owner, affected.export_id),
+        Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+    ));
+    let served = fixture
+        .store
+        .read_recipient_export(&fixture.owner, unaffected.export_id)?;
+    assert_eq!(u64::try_from(served.len())?, unaffected.ciphertext_length);
+    let decrypted = fixture.store.decrypt_recipient_export(
+        &fixture.owner,
+        &served,
+        unaffected.export_id,
+        unaffected.recipient,
+    )?;
+    assert_eq!(decrypted.export.timeline.id(), fixture.unaffected_timeline);
+
+    // Decryption stays unfenced: bytes the caller already holds still open.
+    let decrypted = fixture.store.decrypt_recipient_export(
+        &fixture.owner,
+        &held,
+        affected.export_id,
+        affected.recipient,
+    )?;
+    assert_eq!(decrypted.export.timeline.id(), fixture.timeline);
+    Ok(())
+}
+
+#[test]
+fn reader_keeps_an_unrecoverable_containment_boundary_a_store_failure() -> TestResult {
+    let mut fixture = fixture(true)?;
+    let (affected, unaffected) = publish_affected_and_unaffected(&mut fixture)?;
+
+    fixture.gate.block_timeline(fixture.timeline);
+
+    assert!(matches!(
+        fixture
+            .store
+            .read_recipient_export(&fixture.owner, affected.export_id),
+        Err(RecipientExportPublicationErrorV1::Store(
+            CoreError::ErasureContainmentUnavailable
+        ))
+    ));
+    assert!(fixture
+        .store
+        .read_recipient_export(&fixture.owner, unaffected.export_id)
+        .is_ok());
     Ok(())
 }

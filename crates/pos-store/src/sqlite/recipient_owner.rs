@@ -1372,10 +1372,16 @@ impl SqliteStore {
     /// This returns only the encrypted TRX1 bytes. It never decrypts or imports
     /// the candidate Timeline into the local event store.
     ///
+    /// The ciphertext is read inside the erasure `Read` fence on the catalog
+    /// row's source Timeline (ADR-138 §8), so a publication whose Timeline an
+    /// erasure request has access-frozen is no longer served.
+    ///
     /// # Errors
     ///
     /// Returns [`RecipientExportPublicationErrorV1::ArtifactUnavailable`] for
-    /// an absent, malformed, or digest-mismatched catalog object.
+    /// an absent, malformed, or digest-mismatched catalog object, and for a
+    /// publication whose source Timeline is access-frozen. Any other erasure
+    /// containment failure is [`RecipientExportPublicationErrorV1::Store`].
     pub fn read_recipient_export(
         &self,
         owner: &RecipientKeyOwnerV1,
@@ -1387,24 +1393,13 @@ impl SqliteStore {
         let expected = stored
             .validate_for(owner)
             .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
-        let encoded =
-            read_recipient_export_ciphertext(owner, export_id, expected.ciphertext_length)
-                .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
-        if pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes())
-            != expected.ciphertext_digest
-        {
-            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
-        }
-        let envelope = RecipientTimelineExportV1::decode(&encoded)
-            .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
-        if envelope.header.export_id != export_id
-            || envelope.header.recipient != expected.recipient
-            || envelope.header.timeline_id != expected.timeline_id
-            || envelope.header.local_head != expected.local_head
-        {
-            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
-        }
-        Ok(encoded)
+        self.with_erasure_read_fence(
+            expected.timeline_id,
+            ErasureProtectedOperationV1::Read,
+            |_| Ok(read_verified_recipient_export(owner, export_id, &expected)),
+        )
+        .map_err(refuse_access_frozen_recipient_export)
+        .flatten()
     }
 
     /// Recover one bounded batch of pending staging and final ciphertext files.
@@ -2347,6 +2342,39 @@ fn write_recipient_export_ciphertext(
                 })
         })
     })
+}
+
+/// Read one catalog-bound ciphertext object and verify every immutable binding.
+fn read_verified_recipient_export(
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+    expected: &ValidatedRecipientExportCatalogV1,
+) -> Result<Vec<u8>, RecipientExportPublicationErrorV1> {
+    let encoded = read_recipient_export_ciphertext(owner, export_id, expected.ciphertext_length)
+        .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+    if pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes()) != expected.ciphertext_digest
+    {
+        return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+    }
+    let envelope = RecipientTimelineExportV1::decode(&encoded)
+        .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+    if envelope.header.export_id != export_id
+        || envelope.header.recipient != expected.recipient
+        || envelope.header.timeline_id != expected.timeline_id
+        || envelope.header.local_head != expected.local_head
+    {
+        return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+    }
+    Ok(encoded)
+}
+
+/// Refuse an access-frozen publication as unavailable (ADR-138 §8); every
+/// other containment or store failure stays a closed store error.
+fn refuse_access_frozen_recipient_export(error: CoreError) -> RecipientExportPublicationErrorV1 {
+    match error {
+        CoreError::ErasureAccessFrozen => RecipientExportPublicationErrorV1::ArtifactUnavailable,
+        other => RecipientExportPublicationErrorV1::Store(other),
+    }
 }
 
 fn read_recipient_export_ciphertext(
