@@ -51,6 +51,10 @@ name = "authority_public"
 required-features = ["authority-trust-root"]
 
 [[test]]
+name = "community_authority_catalogue_public"
+required-features = ["authority-trust-root"]
+
+[[test]]
 name = "fork_ancestry_public"
 required-features = ["test-support"]
 
