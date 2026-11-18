@@ -8129,11 +8129,14 @@ fn an_unresolvable_export_target_is_a_permanent_negative() -> TestResult {
 }
 
 /// ADR-138 acceptance test 3: a crash after T1, after the unlink or after
-/// T2 leaves a retracted export no serving read returns. A replay on a host
-/// restarted without the captured directory's custody cannot run the owner
-/// step, so it is negative (§4, §7); the replay with that custody completes
-/// the withdrawal with exactly the ELXW1 and ELO1 an uninterrupted run
-/// computes from the recorded capture.
+/// T2 leaves a retracted export no serving read returns, and the replay
+/// completes the withdrawal with exactly the ELXW1 and ELO1 an uninterrupted
+/// run computes from the recorded capture.
+///
+/// Before T2 the owner step must still run, and it accepts an absent name
+/// only through the captured directory's custody (§5): a replay on a host
+/// restarted without that custody is negative until custody is attached.
+/// After T2 the file work is done, so the replay completes without custody.
 #[test]
 fn a_crash_inside_a_withdrawal_completes_with_identical_bytes() -> TestResult {
     for crash in ["after T1", "after the unlink", "after T2"] {
@@ -8150,13 +8153,17 @@ fn a_crash_inside_a_withdrawal_completes_with_identical_bytes() -> TestResult {
             }
         }
         assert!(export.unavailable(&store)?, "{crash}");
-        assert_eq!(
-            replayed_export(&mut store.host(&driver_case()?, 4_096)?)?.error(),
-            Some(ErasureErrorV1::ArtifactDeletionFailed),
-            "{crash}"
-        );
-        let result =
-            replayed_export(&mut store.custody_host(&driver_case()?, vec![export.custody()?])?)?;
+        let without_custody = replayed_export(&mut store.host(&driver_case()?, 4_096)?)?;
+        let result = if crash == "after T2" {
+            without_custody
+        } else {
+            assert_eq!(
+                without_custody.error(),
+                Some(ErasureErrorV1::ArtifactDeletionFailed),
+                "{crash}"
+            );
+            replayed_export(&mut store.custody_host(&driver_case()?, vec![export.custody()?])?)?
+        };
         let expected = prepared_withdrawal(
             &expected_elxw1(&store, &export, &command)?,
             positive_binding(&command),

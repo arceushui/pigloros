@@ -283,35 +283,57 @@ impl SqliteStore {
     /// directory and record the deletion, then return the captured binding
     /// the ELXW1 of this withdrawal carries. A row whose binding does not
     /// parse is refused before anything is unlinked.
+    ///
+    /// Once T2 has committed, the owner step's file work is done: a repeat
+    /// returns the recorded binding without custody, re-validation or any
+    /// unlink, so a crash after T2 completes on a host restarted without
+    /// the captured directory.
     pub(in crate::sqlite) fn delete_captured_recipient_export(
         &self,
         export_id: [u8; 16],
     ) -> Result<RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
         self.with_withdrawal_durability(ErasureErrorV1::ArtifactDeletionFailed, || {
             load_withdrawal_row(&self.conn, export_id)
+                .and_then(|row| row.ok_or(ErasureErrorV1::ArtifactDeletionFailed))
                 .and_then(|row| {
-                    row.and_then(|row| row_binding(export_id, &row).zip(self.captured_objects(row)))
-                        .ok_or(ErasureErrorV1::ArtifactDeletionFailed)
-                })
-                .and_then(|(binding, captured)| {
-                    unlink_captured_objects(&captured, export_id)
-                        .map(|()| binding)
-                        .map_err(|_| ErasureErrorV1::ArtifactDeletionFailed)
-                })
-                .and_then(|binding| {
-                    in_immediate_transaction(&self.conn, || {
-                        self.conn
-                            .execute(
-                                "UPDATE recipient_export_withdrawals_v1 SET objects_deleted = 1
-                                 WHERE export_id = ?1",
-                                params![export_id.as_slice()],
-                            )
-                            .map(|_| binding)
-                            .map_err(map_erasure_receipt_failure)
-                    })
+                    if row.objects_deleted && row.disposition.is_none() {
+                        row_binding(export_id, &row).ok_or(ErasureErrorV1::ArtifactDeletionFailed)
+                    } else {
+                        self.unlink_and_record(export_id, row)
+                    }
                 })
         })
         .map_err(|_| ErasureErrorV1::ArtifactDeletionFailed)
+    }
+
+    /// Unlink the captured objects of a retracted, captured `row` through
+    /// its attached, re-validated custody, sync their directory, and commit
+    /// T2.
+    fn unlink_and_record(
+        &self,
+        export_id: [u8; 16],
+        row: WithdrawalRowV1,
+    ) -> Result<RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
+        row_binding(export_id, &row)
+            .zip(self.captured_objects(row))
+            .ok_or(ErasureErrorV1::ArtifactDeletionFailed)
+            .and_then(|(binding, captured)| {
+                unlink_captured_objects(&captured, export_id)
+                    .map(|()| binding)
+                    .map_err(|_| ErasureErrorV1::ArtifactDeletionFailed)
+            })
+            .and_then(|binding| {
+                in_immediate_transaction(&self.conn, || {
+                    self.conn
+                        .execute(
+                            "UPDATE recipient_export_withdrawals_v1 SET objects_deleted = 1
+                             WHERE export_id = ?1",
+                            params![export_id.as_slice()],
+                        )
+                        .map(|_| binding)
+                        .map_err(map_erasure_receipt_failure)
+                })
+            })
     }
 
     /// ADR-138 T3: commit the ELXW1 disposition and its ELO1.
@@ -1364,6 +1386,23 @@ mod tests {
             .store
             .delete_recipient_export_ciphertext(export_id)?;
         assert!(!final_path.exists());
+        // After T2 a repeat unlinks nothing, but still refuses a binding
+        // that does not parse.
+        fixture.store.conn.execute_batch(
+            "UPDATE recipient_export_withdrawals_v1 SET timeline_id = 'not-a-timeline'",
+        )?;
+        assert_eq!(
+            fixture.store.delete_recipient_export_ciphertext(export_id),
+            Err(ErasureErrorV1::ArtifactDeletionFailed)
+        );
+        fixture.store.conn.execute(
+            "UPDATE recipient_export_withdrawals_v1 SET timeline_id = ?1",
+            params![fixture.timeline.to_string()],
+        )?;
+        assert_eq!(
+            fixture.store.delete_recipient_export_ciphertext(export_id),
+            Ok(binding)
+        );
         let elxw1 = recorded_elxw1(&fixture.store, export_id, fixture.timeline)?;
         assert_eq!(
             binding,
