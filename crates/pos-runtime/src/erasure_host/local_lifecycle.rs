@@ -124,12 +124,12 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
     ) -> Result<(Arc<ErasureVerifiedInventoryV1>, ErasureRequestV1), ErasureHostErrorV1> {
         self.host.ready_state().and_then(|(_, _, installed)| {
-            installed
+            let erq1 = installed
                 .states()
                 .find(|state| state.request().reference() == request)
                 .map(|state| state.request().clone())
-                .ok_or(ErasureHostErrorV1::Conflict)
-                .map(|erq1| (installed, erq1))
+                .ok_or(ErasureHostErrorV1::Conflict);
+            erq1.map(|erq1| (installed, erq1))
         })
     }
 
