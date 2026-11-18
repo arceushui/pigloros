@@ -5594,6 +5594,7 @@ dependencies = [
  "axum",
  "blake3",
  "ciborium",
+ "ed25519-dalek",
  "libc",
  "piglor-ledger",
  "pos-conformance",
