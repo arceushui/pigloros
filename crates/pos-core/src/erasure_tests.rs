@@ -1850,3 +1850,44 @@ fn poisoned_containment_fence_fails_closed() {
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 }
+
+#[test]
+fn artifact_class_and_inventory_category_convert_to_their_stable_codes() {
+    let classes = [
+        ErasureArtifactClassV1::TimelineReplay,
+        ErasureArtifactClassV1::ReproManifest,
+        ErasureArtifactClassV1::CausalTrace,
+        ErasureArtifactClassV1::CalibrationReport,
+        ErasureArtifactClassV1::Export,
+        ErasureArtifactClassV1::ForkOrSnapshot,
+        ErasureArtifactClassV1::ConformanceReport,
+    ];
+    for (expected, class) in (0_u64..).zip(classes) {
+        assert_eq!(u64::from(class), class.code());
+        assert_eq!(u64::from(class), expected);
+    }
+    for (expected, category) in (0_u64..).zip(ErasureInventoryCategoryV1::CANONICAL) {
+        assert_eq!(u64::from(category), category.code());
+        assert_eq!(u64::from(category), expected);
+    }
+}
+
+#[test]
+fn verified_inventory_states_yield_every_member_state() -> Result<(), ErasureErrorV1> {
+    let timeline = TimelineId::new();
+    let state = verified_state_for_containment(ErasureLifecycleV1::Submitted, None, Vec::new())?;
+    let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+        vec![(
+            state.clone(),
+            ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                reference(5),
+                Vec::new(),
+                vec![timeline],
+            ),
+        )],
+        vec![timeline],
+        4,
+    )?;
+    assert_eq!(inventory.states().collect::<Vec<_>>(), vec![&state]);
+    Ok(())
+}

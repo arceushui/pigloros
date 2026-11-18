@@ -6,6 +6,7 @@ use super::{
     validate_horizon, CommunityLifecycleErrorV1 as Error, CommunityPassKeyV1, Result,
     MAX_COMMUNITY_PASS_KEY_BYTES_V1,
 };
+use crate::append_hex;
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, Hash, KeyIdentityV1, KeyRegistryErrorV1,
     KeyRoleV1, OwnerIdV1, TimelineId,
@@ -387,14 +388,6 @@ pub(super) fn derive_key_owner(
         }
     }
     OwnerIdV1::from_borrowed(&text).map_err(owner_error)
-}
-
-pub(super) fn append_hex(out: &mut String, bytes: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 15)]));
-    }
 }
 
 const fn owner_error(_: KeyRegistryErrorV1) -> Error {
