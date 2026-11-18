@@ -644,3 +644,68 @@ fn erasure_publication_reads_fail_closed_for_malformed_catalog_rows() -> TestRes
     }
     Ok(())
 }
+
+/// Rewrite exactly one catalog column of one publication, keeping its
+/// ciphertext, length and digest intact.
+fn tamper_catalog_column(
+    fixture: &Fixture,
+    export_id: [u8; 16],
+    assignment: &str,
+    value: &dyn rusqlite::ToSql,
+) -> TestResult {
+    let updated = rusqlite::Connection::open(fixture.temporary.path().join("recipient.sqlite"))?
+        .execute(
+            &format!("UPDATE recipient_export_catalog_v1 SET {assignment} WHERE export_id = ?2"),
+            rusqlite::params![value, export_id.as_slice()],
+        )?;
+    assert_eq!(updated, 1);
+    Ok(())
+}
+
+/// Each envelope header binding is checked against the catalog row on its own:
+/// a row that still passes owner validation but names another recipient key,
+/// source Timeline or local head than the stored object is unavailable.
+#[test]
+fn reader_refuses_a_catalog_row_that_disagrees_with_one_header_binding() -> TestResult {
+    let mut fixture = fixture(true)?;
+    let mut other_public_key = fixture.descriptor.public_key();
+    other_public_key[0] ^= 1;
+    let other_recipient = pos_core::RecipientKeyDescriptorV1::for_grantee(
+        fixture.token.grantee_id(),
+        fixture.descriptor.identity().epoch,
+        other_public_key,
+    )?
+    .encode();
+    let other_timeline = fixture.unaffected_timeline.to_string();
+    let tampers: [(&str, &dyn rusqlite::ToSql); 3] = [
+        ("recipient_descriptor = ?1", &other_recipient),
+        ("timeline_id = ?1", &other_timeline),
+        ("local_head = local_head + ?1", &1_i64),
+    ];
+    for (assignment, value) in tampers {
+        let request = request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        fixture
+            .store
+            .read_recipient_export(&fixture.owner, publication.export_id)?;
+        tamper_catalog_column(&fixture, publication.export_id, assignment, value)?;
+        assert!(
+            matches!(
+                fixture
+                    .store
+                    .read_recipient_export(&fixture.owner, publication.export_id),
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+            ),
+            "tampered catalog column `{assignment}` was served"
+        );
+    }
+    Ok(())
+}
