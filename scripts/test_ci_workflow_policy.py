@@ -259,6 +259,13 @@ PREFLIGHT_POLICY_STEPS = {
             ),
         },
         {
+            "name": "Check authority trust-root seal policy",
+            "run": (
+                "python scripts/check_authority_trust_root_seal.py\n"
+                "python scripts/test_check_authority_trust_root_seal.py\n"
+            ),
+        },
+        {
             "name": "Check trusted-clock port implementation policy",
             "run": (
                 "python scripts/check_trusted_clock_port_impls.py\n"

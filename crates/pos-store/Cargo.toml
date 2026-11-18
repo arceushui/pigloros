@@ -42,7 +42,10 @@ pos-plugin-content = { path = "../pos-plugin-content" }
 ed25519-dalek = { workspace = true }
 pos-plugin-release = { path = "../pos-plugin-release" }
 sha2 = { workspace = true }
-pos-core = { path = "../pos-core", features = ["test-support"] }
+pos-core = { path = "../pos-core", features = [
+  "authority-trust-root",
+  "test-support",
+] }
 # Test-only PMF1 projection fixtures for the Plugin trust registry vectors.
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
 # Test-only SQLite limit control injects query binding failures.

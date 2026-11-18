@@ -211,7 +211,11 @@ impl Rig {
         let mut publisher = World::new()?;
         let material = trust_material(&publisher, &publisher.material()?);
         let address = publisher.publish(Shape::first())?.address().clone();
-        let eval = CommunityEvaluationWorldV1::open(&material).map_err(|e| format!("{e:?}"))?;
+        let eval = CommunityEvaluationWorldV1::open(
+            &material,
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
         Ok(Self {
             publisher,
             material,
@@ -487,8 +491,13 @@ fn an_unfinished_pass_rejects_a_new_request_without_touching_members() -> TestRe
         rig.eval.plugins_mut().compose_non_participant_drivers()?;
         let mut host = CommunityPluginHostV1::new(vec![member]);
         let timeline = rig.eval.pass_timeline;
-        let observed = observe(&mut rig.eval.pass_host, &rig.eval.plugins, timeline)
-            .map_err(|e| format!("{e:?}"))?;
+        let observed = observe(
+            rig.eval.local,
+            &mut rig.eval.pass_host,
+            &rig.eval.plugins,
+            timeline,
+        )
+        .map_err(|e| format!("{e:?}"))?;
         let drafts = rig.eval.plugins.step_all_anchored_with_events(
             timeline,
             &observed.chain,
@@ -550,8 +559,13 @@ fn a_poisoned_driver_rejects_a_new_pass_without_touching_members() -> TestResult
     rig.eval.plugins_mut().compose_non_participant_drivers()?;
     let mut host = CommunityPluginHostV1::new(vec![member]);
     let timeline = rig.eval.pass_timeline;
-    let observed = observe(&mut rig.eval.pass_host, &rig.eval.plugins, timeline)
-        .map_err(|e| format!("{e:?}"))?;
+    let observed = observe(
+        rig.eval.local,
+        &mut rig.eval.pass_host,
+        &rig.eval.plugins,
+        timeline,
+    )
+    .map_err(|e| format!("{e:?}"))?;
     rig.eval
         .plugins
         .step_all_anchored(timeline, &observed.chain, observed.head)?;

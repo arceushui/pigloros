@@ -306,7 +306,7 @@ fn commit_pass(
     timeline: TimelineId,
     tick: u64,
 ) -> Option<()> {
-    LocalScheduledAdmissionHostV1::shared()
+    LocalScheduledAdmissionHostV1::shared(&crate::AUTHORITY_TRUST_ROOT)
         .ok()
         .and_then(|host| {
             let revisions = host.observe(registry, store, timeline).ok();
