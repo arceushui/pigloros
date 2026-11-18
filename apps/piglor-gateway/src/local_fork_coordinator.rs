@@ -1952,7 +1952,9 @@ mod tests {
         let held = fixture.submit(shaped_fork_request(81, ordinary.id(), (40, 0, false)), 81)?;
         assert_eq!(response_code(&held), 6);
         // The cut beyond the parent head would be a stale fold boundary on a
-        // recorded parent; an absent parent is refused first.
+        // recorded parent. The code-4 expectation for an absent parent rests
+        // on the in-memory store's parent gate (`admitted_fork_parent_gate`)
+        // running before its cut check, so every shape answers code 4.
         for (shape, base) in [((40, 0, false), 90), ((ACCEPTED_DESCRIPTOR, 7, true), 100)] {
             let unknown =
                 fixture.submit(shaped_fork_request(base, TimelineId::new(), shape), base)?;

@@ -64,3 +64,27 @@ impl HostTimelinesV1 {
             || self.erasure_host == Some(timeline)
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::HostTimelinesV1;
+    use pos_core::TimelineId;
+
+    /// Every listed root is a host Timeline and nothing else is, with and
+    /// without an Erasure Host Timeline.
+    #[test]
+    fn contains_exactly_the_listed_roots() {
+        let erasure_host = TimelineId::new();
+        for (host_timelines, count) in [
+            (HostTimelinesV1::new(None), 2),
+            (HostTimelinesV1::new(Some(erasure_host)), 3),
+        ] {
+            let roots = host_timelines.roots();
+            assert_eq!(roots.len(), count);
+            assert!(roots.iter().all(|root| host_timelines.contains(*root)));
+            assert!(!host_timelines.contains(TimelineId::new()));
+        }
+        assert!(!HostTimelinesV1::new(None).contains(erasure_host));
+    }
+}
