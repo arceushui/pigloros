@@ -385,20 +385,24 @@ fn dispatched_admission(
     command: &ErasureOwnerCommandV1,
 ) -> Result<ErasureRetryAdmissionV1, ErasureHostErrorV1> {
     let destruction = command.destruction;
+    // A command whose fields do not even form an obligation is not
+    // dispatched.
     let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
         category: destruction.category,
         target: destruction.target,
         owner: destruction.owner,
         command_identity: destruction.command,
     })
-    .map(|obligation| obligation.reference());
+    .map(|obligation| obligation.reference())
+    .ok();
     store
         .recorded_active_attempt(command.request)
-        .and_then(|active| obligation.map(|obligation| (active, obligation)))
         .map_err(map_erasure_error)
-        .and_then(|(active, obligation)| {
+        .and_then(|active| {
             active
-                .filter(|active| dispatches(active, command, obligation))
+                .zip(obligation)
+                .filter(|(active, obligation)| dispatches(active, command, *obligation))
+                .map(|(active, _)| active)
                 .ok_or(ErasureHostErrorV1::Conflict)
         })
 }
@@ -802,14 +806,50 @@ fn has_owner_result(
                 .and_then(|effect| {
                     PreparedLocalOwnerEffectV1::new(effect, owner_binding(command, error))
                 })
-                .map(|prepared| prepared.owner_result().reference())
+                .and_then(|prepared| retained(store, prepared.owner_result().reference()))
         })
-        .collect::<Result<Vec<_>, _>>()
+        .find(|probe| *probe != Ok(false))
+        .unwrap_or(Ok(false))
         .map_err(map_erasure_error)
-        .map(|owner_results| {
-            owner_results
-                .into_iter()
-                .any(|owner_result| store.read_object(owner_result).is_ok())
+}
+
+/// Whether the store retains the object at `reference`.
+///
+/// # Errors
+/// The store's read error, other than the absence of the object.
+fn retained(
+    store: &dyn ErasureHostStore,
+    reference: ErasureReferenceV1,
+) -> Result<bool, ErasureErrorV1> {
+    match store.read_object(reference) {
+        Ok(_) => Ok(true),
+        Err(ErasureErrorV1::ProvenanceMissing) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether the obligation at `obligation` of `attempt` has a retained ELO1.
+fn obligation_has_owner_result(
+    store: &dyn ErasureHostStore,
+    request: ErasureReferenceV1,
+    (attempt, obligation): (ErasureReferenceV1, ErasureReferenceV1),
+    scope: (ErasureReferenceV1, u64),
+    registry: Option<&KeyRegistryStateV1>,
+) -> Result<bool, ErasureHostErrorV1> {
+    store
+        .read_object(obligation)
+        .and_then(|bytes| ErasureObligationV1::from_canonical_cbor(&bytes))
+        .map_err(map_erasure_error)
+        .and_then(|obligation| {
+            has_owner_result(
+                store,
+                &ErasureOwnerCommandV1 {
+                    request,
+                    destruction: ErasureDestructionCommandV1::from_obligation(&obligation, attempt),
+                },
+                scope,
+                registry,
+            )
         })
 }
 
@@ -835,18 +875,13 @@ fn others_executed(
                 .iter()
                 .filter(|obligation| **obligation != command.destruction.obligation)
                 .map(|obligation| {
-                    store
-                        .read_object(*obligation)
-                        .and_then(|bytes| ErasureObligationV1::from_canonical_cbor(&bytes))
-                        .map_err(map_erasure_error)
-                        .map(|obligation| ErasureOwnerCommandV1 {
-                            request: command.request,
-                            destruction: ErasureDestructionCommandV1::from_obligation(
-                                &obligation,
-                                attempt,
-                            ),
-                        })
-                        .and_then(|other| has_owner_result(store, &other, scope, registry.as_ref()))
+                    obligation_has_owner_result(
+                        store,
+                        command.request,
+                        (attempt, *obligation),
+                        scope,
+                        registry.as_ref(),
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()
         })
