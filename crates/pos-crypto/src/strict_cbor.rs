@@ -345,7 +345,8 @@ const DOUBLE_FRACTION: u64 = (1 << 52) - 1;
 fn narrowed(double: u64, exponent_bits: u64, fraction_bits: u64) -> Option<u64> {
     let bias = (1 << (exponent_bits - 1)) - 1;
     let exponent = (double >> 52) & 0x7ff;
-    let significand = (double & DOUBLE_FRACTION) | (u64::from(exponent != 0) << 52);
+    // The implicit bit 52 lies above the 52 fraction bits, so the sum sets it.
+    let significand = (double & DOUBLE_FRACTION) + (u64::from(exponent != 0) << 52);
     let normal = exponent + bias > 1023;
     let (target, shift) = if normal {
         (exponent + bias - 1023, 52 - fraction_bits)
