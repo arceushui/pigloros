@@ -184,10 +184,12 @@ pub fn unowned_output_parity() -> Capture {
             )
             .test_ok();
         register_eval(&mut first_party, 64, &EvalDiagnosticsV1::default());
-        LocalScheduledAdmissionHostV1::shared()
-            .test_ok()
-            .observe(&first_party, backend.as_mut(), timeline)
-            .test_ok();
+        LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        )
+        .test_ok()
+        .observe(&first_party, backend.as_mut(), timeline)
+        .test_ok();
         let persona = expect_err(stage(
             &mut first_party,
             backend.as_ref(),

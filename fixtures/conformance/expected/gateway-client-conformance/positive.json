@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "185dfb08990ad0bff6e4844a029b0a556fab8e4e890c2d0adc83fd896536c0d5",
+  "input_blake3_digest": "6a93a9a7fe5c9d68249140330c80394a325888b56faf3540f8786b33f13139a6",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",
@@ -10,12 +10,12 @@
       {
         "mode": "local",
         "outcome": "pass",
-        "actual_digest": "7b7d809b608ca8001cf680baaca13b83258d6d7c332b1673a0473d15760daac1"
+        "actual_digest": "1dc539f23bfc1e07cbb44aed607bcb2097cf27d2f095a9ffb9bd4eede2d53540"
       },
       {
         "mode": "air-gapped",
         "outcome": "pass",
-        "actual_digest": "7b7d809b608ca8001cf680baaca13b83258d6d7c332b1673a0473d15760daac1"
+        "actual_digest": "1dc539f23bfc1e07cbb44aed607bcb2097cf27d2f095a9ffb9bd4eede2d53540"
       }
     ]
   },

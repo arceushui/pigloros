@@ -6298,6 +6298,7 @@ name = "pos-sandboxd"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ciborium",
  "ed25519-dalek",
  "futures-util",
  "netlink-packet-core",
@@ -6315,6 +6316,7 @@ dependencies = [
  "tokio",
  "zbus",
  "zbus_systemd",
+ "zeroize",
  "zlink",
 ]
 
@@ -9246,9 +9248,9 @@ dependencies = [
 
 [[package]]
 name = "zbus"
-version = "6.0.0"
+version = "6.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "266223222c9d81e5966455a9da0783e35d56a7ccab79a03c2366b2d98f8fc8a9"
+checksum = "6b4aae740b23927ceabed962431abab2cdefb9f7f885e5bbab062da09bf580e4"
 dependencies = [
  "async-trait",
  "bitflags 2.13.2",
