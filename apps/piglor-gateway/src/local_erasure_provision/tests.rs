@@ -38,23 +38,23 @@ use crate::mode_profile::{
 };
 use crate::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-const BUNDLE_ROOT: &str = "erasure-bundle/local";
+pub(crate) const BUNDLE_ROOT: &str = "erasure-bundle/local";
 const UNPREFIXED_ROOT: &str = "local-root";
 const SIGNER_OWNER: &str = "pigloros.local-erasure-signer";
-const SIGNER_SEED: [u8; 32] = [0x64; 32];
-const ROTATED_SEED: [u8; 32] = [0x65; 32];
-const PRINCIPAL: &str = "principal_id = \"01JC0GATEWAYQ0CA1PR1NC1PA1\"\n\
+pub(crate) const SIGNER_SEED: [u8; 32] = [0x64; 32];
+pub(crate) const ROTATED_SEED: [u8; 32] = [0x65; 32];
+pub(crate) const PRINCIPAL: &str = "principal_id = \"01JC0GATEWAYQ0CA1PR1NC1PA1\"\n\
     trust_domain = \"local\"\n\
     actor_entity_ids = [\"01JC0GATEWAYQ0CA1ACT0R0000\"]\n\
     operations = [\"timeline.create\"]\n";
 
-fn operator() -> SigningKey {
+pub(crate) fn operator() -> SigningKey {
     SigningKey::from_bytes(&[0x61; 32])
 }
 
-fn bundle_root() -> SigningKey {
+pub(crate) fn bundle_root() -> SigningKey {
     SigningKey::from_bytes(&[0x62; 32])
 }
 
@@ -62,7 +62,7 @@ fn unprefixed_root() -> SigningKey {
     SigningKey::from_bytes(&[0x63; 32])
 }
 
-fn signer(seed: [u8; 32]) -> SigningKeyMaterial {
+pub(crate) fn signer(seed: [u8; 32]) -> SigningKeyMaterial {
     SigningKeyMaterial::new(SigningKey::from_bytes(&seed))
 }
 
@@ -91,21 +91,21 @@ fn root(key_id: &str, key: &SigningKey) -> TrustPolicyRootV1 {
 
 /// A provisioned deployment trust state store and its release anchor
 /// credential.
-struct Deployment {
+pub(crate) struct Deployment {
     _directory: tempfile::TempDir,
-    state: PathBuf,
-    release: String,
+    pub(crate) state: PathBuf,
+    pub(crate) release: String,
 }
 
 impl Deployment {
     /// A genesis TPS1 whose roots are an `erasure-bundle/` root and an
     /// unprefixed root and which revokes `revoked` (sorted).
-    fn new(revoked: &[&str]) -> TestResult<Self> {
+    pub(crate) fn new(revoked: &[&str]) -> TestResult<Self> {
         Self::valid_through(revoked, "9999-12-31T23:59:59Z")
     }
 
     /// [`Self::new`] with the TPS1 `offline_valid_through` `valid_through`.
-    fn valid_through(revoked: &[&str], valid_through: &str) -> TestResult<Self> {
+    pub(crate) fn valid_through(revoked: &[&str], valid_through: &str) -> TestResult<Self> {
         let draft = pos_conformance::draft_trust_policy_snapshot_bytes_v1()?;
         let mut snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&draft)?;
         snapshot.trust_roots = vec![
@@ -135,7 +135,7 @@ impl Deployment {
         })
     }
 
-    fn trust(&self) -> TestResult<CurrentTrustPolicyV1> {
+    pub(crate) fn trust(&self) -> TestResult<CurrentTrustPolicyV1> {
         let release = release_trust_from_credential(self.release.as_bytes())?;
         Ok(load_deployment_trust_v1(&self.state, release)?)
     }
@@ -143,13 +143,13 @@ impl Deployment {
 
 /// A Gateway store bound to the Local mode, with or without its Local
 /// Principal.
-struct Fixture {
-    directory: tempfile::TempDir,
-    path: String,
+pub(crate) struct Fixture {
+    pub(crate) directory: tempfile::TempDir,
+    pub(crate) path: String,
 }
 
 impl Fixture {
-    fn new(principal: bool) -> TestResult<Self> {
+    pub(crate) fn new(principal: bool) -> TestResult<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory
             .path()
@@ -173,7 +173,7 @@ impl Fixture {
         Ok(Self { directory, path })
     }
 
-    fn request(&self, out: &str) -> LocalErasureProvisionRequestV1 {
+    pub(crate) fn request(&self, out: &str) -> LocalErasureProvisionRequestV1 {
         LocalErasureProvisionRequestV1 {
             sqlite_path: self.path.clone(),
             out: self.directory.path().join(out),
@@ -185,7 +185,11 @@ impl Fixture {
     }
 
     /// A protected credential directory `directory` holding `credentials`.
-    fn credentials(&self, directory: &str, credentials: &[(&str, &[u8])]) -> TestResult<PathBuf> {
+    pub(crate) fn credentials(
+        &self,
+        directory: &str,
+        credentials: &[(&str, &[u8])],
+    ) -> TestResult<PathBuf> {
         let directory = self.directory.path().join(directory);
         std::fs::create_dir(&directory)?;
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;

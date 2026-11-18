@@ -20,8 +20,10 @@ macro_rules! output_stderr {
     }};
 }
 
-#[cfg(target_os = "linux")]
-use piglor_gateway::deployment_trust::DEPLOYMENT_TRUST_STATE_PATH;
+use piglor_gateway::local_erasure_composition::{
+    LocalErasureDriverTaskV1, LocalErasureServeInputsV1, LocalErasureServeV1, LocalErasureStartV1,
+    DEPLOYMENT_TRUST_STATE_PATH,
+};
 #[cfg(target_os = "linux")]
 use piglor_gateway::local_erasure_provision::{
     provision_local_erasure_from_credentials, LocalErasureProvisionRequestV1,
@@ -47,7 +49,6 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_runtime::ErasureCoordinatorCompositionV1;
 use pos_store::StoreConfig;
 use std::{
     collections::BTreeSet,
@@ -149,9 +150,9 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
         }
         Some("serve") => {
             let request = parse_serve_request(&args[2..])?;
-            let fork_credentials = request
+            let credentials = request
                 .args
-                .require_local_fork_authority
+                .uses_credentials()
                 .then(|| {
                     credential_directory_from(
                         credential_directory.clone(),
@@ -164,7 +165,7 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
                 .build()?;
             rt.block_on(serve_request(
                 &request,
-                fork_credentials.as_deref(),
+                credentials.as_deref(),
                 shutdown,
                 environment,
             ))
@@ -192,7 +193,7 @@ fn usage(command: Option<&str>) -> Result<(), RunError> {
                 .into(),
         );
     }
-    output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]|version>");
+    output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority] [--require-local-erasure]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]|version>");
     output_stderr!("  profiles: gateway-mode-local-v1, gateway-mode-air-gapped-v1");
     output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
     output_stderr!("  owntracks status <sqlite-path>");
@@ -300,6 +301,14 @@ struct ServeArgs {
     sqlite_path: Option<String>,
     owntracks_owner_key: Option<PathBuf>,
     require_local_fork_authority: bool,
+    require_local_erasure: bool,
+}
+
+impl ServeArgs {
+    /// Whether the serve reads the serve unit's systemd credentials.
+    const fn uses_credentials(&self) -> bool {
+        self.require_local_fork_authority || self.require_local_erasure
+    }
 }
 
 /// Raw `serve` flags before address and storage validation.
@@ -307,6 +316,7 @@ struct ServeFlags {
     positional: Vec<String>,
     owner_key: Option<PathBuf>,
     require_local_fork_authority: bool,
+    require_local_erasure: bool,
 }
 
 fn parse_serve_flags(args: &[String]) -> Result<ServeFlags, RunError> {
@@ -314,6 +324,7 @@ fn parse_serve_flags(args: &[String]) -> Result<ServeFlags, RunError> {
         positional: Vec::new(),
         owner_key: None,
         require_local_fork_authority: false,
+        require_local_erasure: false,
     };
     let mut index = 0;
     while index < args.len() {
@@ -331,6 +342,12 @@ fn parse_serve_flags(args: &[String]) -> Result<ServeFlags, RunError> {
                 return Err("Local Fork authority option may be specified once".into());
             }
             flags.require_local_fork_authority = true;
+            index += 1;
+        } else if args[index] == "--require-local-erasure" {
+            if flags.require_local_erasure {
+                return Err("Local erasure option may be specified once".into());
+            }
+            flags.require_local_erasure = true;
             index += 1;
         } else {
             flags.positional.push(args[index].clone());
@@ -356,11 +373,15 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, RunError> {
     if flags.require_local_fork_authority && sqlite_path.is_none() {
         return Err("Fork admission requires an SQLite path".into());
     }
+    if flags.require_local_erasure && sqlite_path.is_none() {
+        return Err("Local erasure requires an SQLite path".into());
+    }
     Ok(ServeArgs {
         addr,
         sqlite_path,
         owntracks_owner_key: flags.owner_key,
         require_local_fork_authority: flags.require_local_fork_authority,
+        require_local_erasure: flags.require_local_erasure,
     })
 }
 
@@ -476,7 +497,7 @@ where
 /// the `OwnTracks` owner key come from the verified composition only.
 async fn serve_request(
     request: &ServeRequest,
-    fork_credentials: Option<&Path>,
+    credentials: Option<&Path>,
     shutdown: impl Future<Output = ()> + Send + 'static,
     environment: LedgerEnvironment,
 ) -> Result<(), RunError> {
@@ -496,7 +517,7 @@ async fn serve_request(
     let served = serve_locked(
         request,
         composition,
-        fork_credentials,
+        credentials,
         owner_key.as_ref(),
         shutdown,
         environment,
@@ -506,16 +527,20 @@ async fn serve_request(
     served
 }
 
-/// Serve the Fork-admission deployment when it has credentials (parsing
-/// already required its `SQLite` store), else the HTTP Gateway alone.
+/// Serve the Fork-admission deployment when it requires the Local Fork
+/// authority (parsing already required its `SQLite` store), else the HTTP
+/// Gateway alone. `credentials` is the validated serve unit directory, given
+/// exactly when the serve requires the Local Fork authority or the Local
+/// erasure authority.
 async fn serve_locked(
     request: &ServeRequest,
     composition: GatewayServeCompositionV1,
-    fork_credentials: Option<&Path>,
+    credentials: Option<&Path>,
     owner_key: Option<&OwnTracksOwnerKey>,
     shutdown: impl Future<Output = ()> + Send + 'static,
     environment: LedgerEnvironment,
 ) -> Result<(), RunError> {
+    let fork_credentials = credentials.filter(|_| request.args.require_local_fork_authority);
     match request.args.sqlite_path.as_deref().zip(fork_credentials) {
         #[cfg(target_os = "linux")]
         Some(deployment) => {
@@ -531,7 +556,16 @@ async fn serve_locked(
         }
         #[cfg(not(target_os = "linux"))]
         Some(_) => Err("fork admission requires Linux Unix peer credentials".into()),
-        None => serve_http(request, composition, owner_key, shutdown, environment).await,
+        None => {
+            serve_http(
+                request,
+                (composition, local_erasure_inputs(request, credentials)),
+                owner_key,
+                shutdown,
+                environment,
+            )
+            .await
+        }
     }
 }
 
@@ -549,40 +583,83 @@ const fn host_store(owner_key: Option<&OwnTracksOwnerKey>) -> GatewayHostStoreV1
     }
 }
 
-/// Open the one erasure host of the store with the closed composition and
-/// bind it to the requested execution mode (predicate 5).
+/// The Local erasure inputs of a plain HTTP serve: present exactly when it
+/// requires the Local erasure authority, the only reason a plain HTTP serve
+/// has a credential directory (parsing already required its `SQLite`
+/// store).
+fn local_erasure_inputs<'a>(
+    request: &'a ServeRequest,
+    credentials: Option<&'a Path>,
+) -> Option<LocalErasureServeInputsV1<'a>> {
+    request.args.sqlite_path.as_deref().zip(credentials).map(
+        |(sqlite_path, credential_directory)| LocalErasureServeInputsV1 {
+            sqlite_path,
+            credential_directory,
+            trust_state: Path::new(DEPLOYMENT_TRUST_STATE_PATH),
+            with_fork_authority: false,
+        },
+    )
+}
+
+/// Open the one erasure host of the store with `erasure`'s composition,
+/// bind it to the requested execution mode (predicate 5), and start the
+/// erasure authority on it.
 fn open_bound_host(
     request: &ServeRequest,
     composition: GatewayServeCompositionV1,
     owner_key: Option<&OwnTracksOwnerKey>,
-) -> Result<(pos_runtime::ErasureExecutionHostV1, GatewayModeBindingV1), RunError> {
+    erasure: LocalErasureServeV1,
+) -> Result<
+    (
+        pos_runtime::ErasureExecutionHostV1,
+        GatewayModeBindingV1,
+        LocalErasureStartV1,
+    ),
+    RunError,
+> {
     let mut host = open_recovered_erasure_host(
         store_config(request.args.sqlite_path.as_deref()),
         host_store(owner_key),
-        &ErasureCoordinatorCompositionV1::closed(),
+        erasure.composition(),
     )?;
     let mode = bind_gateway_mode_v1(request.profile, composition, &mut host)?;
-    Ok((host, mode))
+    let erasure = erasure.start(&mut host);
+    Ok((host, mode, erasure))
 }
 
+/// ADR-136 §4a: the erasure authority is composed under the store lock and
+/// before the host opens; a Local composition that cannot be composed
+/// refuses startup, never falling back to the closed one (D9 on #1413).
 async fn serve_http(
     request: &ServeRequest,
-    composition: GatewayServeCompositionV1,
+    (composition, erasure): (
+        GatewayServeCompositionV1,
+        Option<LocalErasureServeInputsV1<'_>>,
+    ),
     owner_key: Option<&OwnTracksOwnerKey>,
     shutdown: impl Future<Output = ()> + Send + 'static,
     environment: LedgerEnvironment,
 ) -> Result<(), RunError> {
-    let (host, mode) = open_bound_host(request, composition, owner_key)?;
+    let erasure = LocalErasureServeV1::for_serve(erasure)?;
+    let (host, mode, erasure) = open_bound_host(request, composition, owner_key, erasure)?;
     let (ledger_view, ledger_write) = load_ledger_with_environment(environment)?;
     // D1 on #302: every protected route requires the Local Principal the
     // store records; an unprovisioned store answers them `401`.
     let gateway = local_gateway(host, owner_key, &mode)?;
-    serve_gateway(gateway, &mode, shutdown, (ledger_view, ledger_write)).await
+    serve_gateway(
+        gateway,
+        &mode,
+        shutdown,
+        (ledger_view, ledger_write),
+        erasure,
+    )
+    .await
 }
 
-/// ADR-109 r9: one erasure host serves HTTP and the Fork listener, and the
-/// binary composes only the closed erasure authority. The managed
-/// credentials are decoded before the database opens.
+/// ADR-109 r9: one erasure host serves HTTP and the Fork listener, with the
+/// Local erasure authority under `--require-local-erasure` and the closed
+/// one otherwise. The managed credentials are decoded before the database
+/// opens.
 #[cfg(target_os = "linux")]
 async fn serve_fork_admission(
     request: &ServeRequest,
@@ -603,6 +680,10 @@ async fn serve_fork_admission(
                 environment.source.map(PathBuf::from),
                 environment.write_enabled,
             ),
+            local_erasure_trust_state: request
+                .args
+                .require_local_erasure
+                .then_some(Path::new(DEPLOYMENT_TRUST_STATE_PATH)),
         },
         shutdown,
     )
@@ -614,6 +695,7 @@ async fn serve_gateway(
     mode: &GatewayModeBindingV1,
     shutdown: impl Future<Output = ()> + Send + 'static,
     (ledger_view, ledger_write): (LedgerView, LedgerWriteMode),
+    erasure: LocalErasureStartV1,
 ) -> Result<(), RunError> {
     let addr = mode.tcp_addr();
     let app = bound_router(
@@ -631,10 +713,14 @@ async fn serve_gateway(
         Ok(listener) => listener,
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
+    // The Local erasure driver runs once the listener is bound and stops
+    // before the executor drains.
+    let driver = LocalErasureDriverTaskV1::spawn(&gateway, erasure);
     announce_listening(addr);
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_or_stale(shutdown, mode))
         .await;
+    driver.stop().await;
     let shutdown_result = gateway.shutdown().await;
     drop(gateway);
     finish_run(serve_result, shutdown_result)
@@ -1156,6 +1242,60 @@ mod tests {
                 "127.0.0.1:0".to_owned(),
                 database.display().to_string(),
                 "--require-local-fork-authority".to_owned(),
+            ],
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+            None,
+        )
+        .test_err()?;
+        assert!(error.to_string().contains("CREDENTIALS_DIRECTORY"));
+        assert!(!database.exists());
+        Ok(())
+    }
+
+    /// D1 on #1413: `--require-local-erasure` is given once, needs the
+    /// `SQLite` store, and reads the serve unit's credential directory.
+    #[test]
+    fn local_erasure_requires_sqlite_and_the_gateway_credential_directory(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let missing_sqlite =
+            parse_serve_args(&["--require-local-erasure".to_owned()]).test_err()?;
+        assert_eq!(
+            missing_sqlite.to_string(),
+            "Local erasure requires an SQLite path"
+        );
+        let parsed = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "/private/store.db".to_owned(),
+            "--require-local-erasure".to_owned(),
+        ])
+        .test_ok()?;
+        assert!(parsed.require_local_erasure);
+        assert!(!parsed.require_local_fork_authority);
+        assert!(parsed.uses_credentials());
+        let repeated = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "/private/store.db".to_owned(),
+            "--require-local-erasure".to_owned(),
+            "--require-local-erasure".to_owned(),
+        ])
+        .test_err()?;
+        assert_eq!(
+            repeated.to_string(),
+            "Local erasure option may be specified once"
+        );
+
+        let directory = tempfile::tempdir().test_ok()?;
+        let database = directory.path().join("gateway.db");
+        let error = run_with_args_and_shutdown_with_environment_and_credentials(
+            &[
+                "piglor-gateway".to_owned(),
+                "serve".to_owned(),
+                "--profile".to_owned(),
+                "gateway-mode-local-v1".to_owned(),
+                "127.0.0.1:0".to_owned(),
+                database.display().to_string(),
+                "--require-local-erasure".to_owned(),
             ],
             Box::pin(async {}),
             LedgerEnvironment::default(),
@@ -1881,6 +2021,36 @@ mod erasure_gate_coverage_tests {
         Ok(())
     }
 
+    /// D9 on #1413: a plain HTTP serve that requires the Local erasure
+    /// authority refuses to start without its credentials, before the
+    /// erasure host opens the database; it never falls back to the closed
+    /// composition.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_erasure_startup_fails_before_the_database_without_credentials(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let sqlite_path = database.to_string_lossy();
+        let mut request = local_request("127.0.0.1:0".parse()?, Some(sqlite_path.as_ref()), None);
+        request.args.require_local_erasure = true;
+        let refused = serve_request(
+            &request,
+            Some(&directory.path().join("missing-credentials")),
+            async {},
+            LedgerEnvironment::default(),
+        )
+        .await
+        .err()
+        .ok_or("served without its erasure credentials")?;
+        assert_eq!(
+            refused.to_string(),
+            "the local erasure credentials are unavailable or invalid"
+        );
+        assert!(!database.exists());
+        Ok(())
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn fork_admission_fails_closed_off_linux(
@@ -2285,6 +2455,7 @@ fn local_request(
             sqlite_path: sqlite_path.map(str::to_owned),
             owntracks_owner_key: owner_key.map(Path::to_path_buf),
             require_local_fork_authority: false,
+            require_local_erasure: false,
         },
         profile: GatewayModeProfileIdV1::Local,
         network_grants,

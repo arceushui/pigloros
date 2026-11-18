@@ -50,6 +50,13 @@ use crate::local_fork_classifier_profile::{
 
 const AUTH_CREDENTIAL_NAME: &str = "pigloros.fork-admission-auth";
 const HOST_CREDENTIAL_NAME: &str = "pigloros.fork-admission-host-signer";
+/// The ADR-107 r6 managed-service credential names, sorted: FACR1, FAHK1
+/// and the FCP1 classifier profile.
+pub(crate) const MANAGED_CREDENTIAL_NAMES: [&str; 3] = [
+    AUTH_CREDENTIAL_NAME,
+    HOST_CREDENTIAL_NAME,
+    CLASSIFIER_PROFILE_CREDENTIAL_NAME,
+];
 const FAHK1_BYTES: usize = 42;
 const PRIVATE_CREDENTIAL_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_CREDENTIAL_FILE_MODE: u32 = 0o400;
@@ -118,12 +125,17 @@ impl LocalForkAuthenticationCredentialsV1 {
     /// FACR1/FAHK1 are validated before FCP1 is strictly decoded. The profile
     /// plaintext is zeroized after parsing; only the immutable parsed profile
     /// is returned, for the protected coordinator alone.
+    ///
+    /// The directory holds exactly these three names and `alongside`, the
+    /// credentials another composition of the same unit reads, such as the
+    /// Local erasure credentials of `serve --require-local-erasure`.
     pub(super) fn load_managed(
         directory: &Path,
         service_uid: u32,
+        alongside: &[&str],
     ) -> Result<(Self, ForkClassifierProfileV1), LocalForkAuthenticationErrorV1> {
         let directory = open_credential_directory(directory, service_uid)?;
-        managed_credential_names(&directory)?;
+        managed_credential_names(&directory, alongside)?;
         let auth_bytes = Zeroizing::new(read_credential(
             &directory,
             AUTH_CREDENTIAL_NAME,
@@ -706,18 +718,20 @@ fn credential_names(directory: &File) -> Result<(), LocalForkAuthenticationError
     })
 }
 
-/// ADR-107 r6 managed service: exactly the FACR1, FAHK1, and FCP1 names.
-/// A missing, fourth, or swapped-in name rejects before any file is read.
-fn managed_credential_names(directory: &File) -> Result<(), LocalForkAuthenticationErrorV1> {
+/// ADR-107 r6 managed service: exactly the FACR1, FAHK1, and FCP1 names
+/// and `alongside`. A missing, unexpected, or swapped-in name rejects
+/// before any file is read.
+fn managed_credential_names(
+    directory: &File,
+    alongside: &[&str],
+) -> Result<(), LocalForkAuthenticationErrorV1> {
+    let mut expected = MANAGED_CREDENTIAL_NAMES.to_vec();
+    expected.extend_from_slice(alongside);
+    expected.sort_unstable();
     sorted_credential_names(directory).and_then(|names| {
-        (names
-            == [
-                AUTH_CREDENTIAL_NAME,
-                HOST_CREDENTIAL_NAME,
-                CLASSIFIER_PROFILE_CREDENTIAL_NAME,
-            ])
-        .then_some(())
-        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        (names == expected)
+            .then_some(())
+            .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
     })
 }
 

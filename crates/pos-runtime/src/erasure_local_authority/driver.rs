@@ -154,6 +154,36 @@ impl LocalErasureDriverV1 {
             })
     }
 
+    /// Commit the one durable transition the first request with one due
+    /// needs, in the host's request order, and return it;
+    /// [`LocalErasureStepV1::Idle`] when no request has one due.
+    ///
+    /// A request whose step fails is passed over: its step committed
+    /// nothing and it resumes on a later call. A serving host calls this
+    /// once per store command, so every other command of the host
+    /// interleaves between two transitions (ADR-136 §5; owner decision D7
+    /// of 2026-11-18 on #1413).
+    ///
+    /// # Errors
+    /// The payload-free error of a host whose requests cannot be listed.
+    pub fn advance(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+    ) -> Result<LocalErasureStepV1, ErasureHostErrorV1> {
+        host.command_sender()
+            .and_then(|mut sender| sender.local_erasure_requests())
+            .map(|requests| {
+                requests
+                    .into_iter()
+                    .find_map(|request| {
+                        self.step(host, request)
+                            .ok()
+                            .filter(|step| *step != LocalErasureStepV1::Idle)
+                    })
+                    .unwrap_or(LocalErasureStepV1::Idle)
+            })
+    }
+
     /// Step `request` until nothing is due, and return the last step taken,
     /// [`LocalErasureStepV1::Idle`] when none was.
     ///

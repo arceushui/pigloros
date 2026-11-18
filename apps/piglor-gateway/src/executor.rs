@@ -2551,6 +2551,149 @@ impl<T: Send + 'static> WorkerCommandV1 for RevisionCommand<T> {
     }
 }
 
+/// The result of one Local erasure driver step on the host store.
+#[cfg(target_os = "linux")]
+type LocalErasureAdvanceV1 = Result<pos_runtime::LocalErasureStepV1, ErasureHostErrorV1>;
+
+/// One Local erasure driver step (ADR-136 §5; owner decision D7 of
+/// 2026-11-18 on #1413): the one durable transition the first due request
+/// needs, as one Write-class command, so every other store command
+/// interleaves between two transitions. Only the test-only `Generic` and
+/// `Gateway` stores lack an erasure host; they answer unavailable.
+#[cfg(target_os = "linux")]
+struct LocalErasureAdvanceCommand {
+    driver: Arc<pos_runtime::LocalErasureDriverV1>,
+    reply: oneshot::Sender<Result<LocalErasureAdvanceV1, StoreExecutorError>>,
+}
+
+#[cfg(target_os = "linux")]
+impl WorkerCommandV1 for LocalErasureAdvanceCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self { driver, reply } = *self;
+        let advanced = match &mut state.store {
+            ExecutorStore::Host(host, _) => driver.advance(host.as_mut()),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                Err(ErasureHostErrorV1::RecoveryUnavailable)
+            }
+        };
+        drop(reply.send(Ok(advanced)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl StoreExecutor {
+    /// Run one step of `driver` on the host store.
+    ///
+    /// # Errors
+    /// The executor error of a command that did not run; the inner result
+    /// is the driver's.
+    pub(crate) async fn advance_local_erasure(
+        &self,
+        driver: &Arc<pos_runtime::LocalErasureDriverV1>,
+    ) -> Result<LocalErasureAdvanceV1, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            LocalErasureAdvanceCommand {
+                driver: Arc::clone(driver),
+                reply,
+            }
+        )))
+    }
+}
+
+/// Test-only: a closure over the host store's erasure host.
+#[cfg(test)]
+type HostProbeV1<T> = Box<dyn FnOnce(&mut ErasureExecutionHostV1) -> T + Send>;
+
+/// Test-only: run a closure on the host store's erasure host.
+#[cfg(test)]
+struct HostProbeForTestV1<T> {
+    probe: HostProbeV1<T>,
+    reply: oneshot::Sender<Result<Option<T>, StoreExecutorError>>,
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl<T: Send + 'static> WorkerCommandV1 for HostProbeForTestV1<T> {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self { probe, reply } = *self;
+        let probed = match &mut state.store {
+            ExecutorStore::Host(host, _) => Some(probe(host.as_mut())),
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
+        };
+        drop(reply.send(Ok(probed)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl StoreExecutor {
+    /// Run `probe` on the host store's erasure host as one command; `None`
+    /// for a store without one.
+    pub(crate) async fn probe_host_for_test<T: Send + 'static>(
+        &self,
+        probe: impl FnOnce(&mut ErasureExecutionHostV1) -> T + Send + 'static,
+    ) -> Result<Option<T>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            HostProbeForTestV1 {
+                probe: Box::new(probe),
+                reply,
+            }
+        )))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod local_erasure_advance_tests {
+    use super::{LocalErasureAdvanceCommand, StoreExecutor, StoreExecutorError, WorkerCommandV1};
+    use pos_core::{ErasureHostErrorV1, OwnerIdV1};
+    use pos_crypto::key_roles::SigningKeyMaterial;
+    use pos_runtime::{LocalErasureDriverV1, LocalErasureSignerV1};
+    use pos_store::memory::MemoryStore;
+    use std::sync::Arc;
+
+    fn driver() -> Arc<LocalErasureDriverV1> {
+        Arc::new(LocalErasureDriverV1::new(LocalErasureSignerV1::new(
+            SigningKeyMaterial::new(ed25519_dalek::SigningKey::from_bytes(&[0x41; 32])),
+            OwnerIdV1::from_static("test-signer"),
+            1,
+        )))
+    }
+
+    #[tokio::test]
+    async fn a_store_without_an_erasure_host_cannot_advance() {
+        let executor = StoreExecutor::new(Box::new(MemoryStore::new()));
+        assert!(matches!(
+            executor.advance_local_erasure(&driver()).await,
+            Ok(Err(ErasureHostErrorV1::RecoveryUnavailable))
+        ));
+        assert!(executor.shutdown().await.is_ok());
+    }
+
+    #[test]
+    fn an_expired_advance_answers_the_deadline() {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        Box::new(LocalErasureAdvanceCommand {
+            driver: driver(),
+            reply,
+        })
+        .expire_unrun();
+        assert!(matches!(
+            result.blocking_recv(),
+            Ok(Err(StoreExecutorError::DeadlineExceeded))
+        ));
+    }
+}
+
 /// Test-only worker command that does nothing.
 #[cfg(test)]
 struct WorkerNoopForTestV1;
