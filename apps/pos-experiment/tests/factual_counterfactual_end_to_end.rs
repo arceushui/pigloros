@@ -581,7 +581,9 @@ fn run_pass<B: Backend>(
     registry: &mut PluginRegistry,
     timeline: TimelineId,
 ) -> TestResult<FactualHeadV1> {
-    let host = LocalScheduledAdmissionHostV1::shared()?;
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )?;
     let revisions = host.observe(registry, store, timeline)?;
     let events = store.read(timeline, SeqRange::all())?;
     let ancestry = fork_ancestry(&*store, timeline)?;
