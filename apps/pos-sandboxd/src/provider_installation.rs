@@ -211,4 +211,10 @@ impl RuntimeKey {
             Err(ProviderInstallationError::KeyMismatch)
         }
     }
+
+    /// The one R9 runtime-attestation signer of this key, for the
+    /// SPM1-admitted `key_id`.
+    pub(crate) fn into_signer(self, key_id: String) -> crate::KeyFileRuntimeSigner {
+        crate::KeyFileRuntimeSigner::from_signing_key(self.key, key_id)
+    }
 }

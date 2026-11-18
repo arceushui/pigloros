@@ -53,7 +53,7 @@ pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
     AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, RevocationAcknowledgement,
-    RevocationUpdateRequest, SandboxRevocationUpdateError,
+    RevocationAcknowledgementFields, RevocationUpdateRequest, SandboxRevocationUpdateError,
 };
 
 pub(crate) fn attempt_values(attempts: &[[u8; 16]]) -> ciborium::value::Value {
@@ -116,7 +116,7 @@ pub use operations::{
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
     SandboxReconcileRequest, SandboxReconcileResponse,
 };
-pub use signing::{Rls1, RuntimeSigned, Sdy1, SelfDigested, Spe1, Verified};
+pub use signing::{Rca1, Rls1, RuntimeSigned, Sdy1, SelfDigested, Spe1, Verified};
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
     CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,
