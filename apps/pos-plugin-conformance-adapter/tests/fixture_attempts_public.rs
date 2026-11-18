@@ -154,7 +154,8 @@ fn subcase_ids(attempt: &CaseAttempt) -> TestResult<Vec<String>> {
 
 /// The observation of `attempt` with `/bin/false` as the worker program.
 fn observe_without_worker(attempt: &CaseAttempt) -> TestResult<SubjectResult> {
-    let runner = SupervisorRunnerV1::with_program("/bin/false").ok_or("a relative program")?;
+    let runner = SupervisorRunnerV1::with_program("/bin/false", &TEST_TRUST_ROOT)
+        .ok_or("a relative program")?;
     let mut stream = Vec::new();
     write_attempt(&mut stream, attempt)?;
     let mut out = Vec::new();
@@ -224,3 +225,7 @@ fn the_denied_sub_cases_split_into_link_failures_and_refusals_before_a_launch() 
     );
     Ok(())
 }
+
+/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
+const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();

@@ -351,6 +351,7 @@ fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
     .test_ok();
     let grant_binding = grant.binding_digest().test_ok();
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![hash_from_repeated_byte(45)],
         vec![grant_binding],
