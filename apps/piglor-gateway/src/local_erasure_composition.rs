@@ -356,9 +356,7 @@ impl LocalErasureServeV1 {
         LocalErasureStartV1 {
             started: self.driver.map(|driver| {
                 let sweep = LocalErasureDriverV1::sweep(host);
-                let mut output = io::stderr().lock();
-                drop(writeln!(
-                    output,
+                announce(&format!(
                     "piglor-gateway local erasure startup sweep: {sweep:?}"
                 ));
                 (driver, sweep)
@@ -436,9 +434,7 @@ impl LocalErasureDriverTaskV1 {
         if let Some((_, task)) = self.running {
             task.abort();
             let panicked = task.await.is_err_and(|error| error.is_panic());
-            let mut output = io::stderr().lock();
-            drop(writeln!(
-                output,
+            announce(&format!(
                 "piglor-gateway local erasure driver stopped (panicked: {panicked})"
             ));
         }
@@ -488,10 +484,15 @@ async fn wake_once(
         }
     }
     if let Some(report) = deferred_report(deferred.len(), previous) {
-        let mut output = io::stderr().lock();
-        drop(writeln!(output, "{report}"));
+        announce(&report);
     }
     deferred.len()
+}
+
+/// Write one payload-free line to standard error; the stream's lock is
+/// released at the end of the write.
+fn announce(line: &str) {
+    drop(writeln!(io::stderr().lock(), "{line}"));
 }
 
 /// The payload-free report of a wake that deferred `deferred` requests,
