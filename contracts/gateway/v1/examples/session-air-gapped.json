@@ -14,14 +14,14 @@
       "id": "01JC0GATEWAYW90PR1NC1PA1A1",
       "generation": 1,
       "provenance": {
-        "digest": "efa3d28d4fdf63f313238437173f6d11db25895696c70ee3e4ab69e4bc3d9f01",
+        "digest": "2afa28000b9e9e07ca166e750249f84cc68c0bf04293c4e0ffc21557e719ed1a",
         "origin": "host-derived"
       },
       "mode_profile": {
         "profile_kind": "gateway-mode-v1",
         "mode_profile_id": "gateway-mode-air-gapped-v1",
         "mode": "air-gapped",
-        "mode_profile_digest": "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
+        "mode_profile_digest": "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb",
         "binding_epoch": 1,
         "network_grants": [],
         "network": "absent"
