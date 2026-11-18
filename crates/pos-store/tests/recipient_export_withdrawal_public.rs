@@ -125,7 +125,7 @@ impl Fixture {
         self.temporary.path().join("recipient.sqlite")
     }
 
-    fn grantee_owner(&self) -> OwnerIdV1 {
+    const fn grantee_owner(&self) -> OwnerIdV1 {
         self.descriptor.identity().owner_id
     }
 
@@ -484,7 +484,7 @@ fn t3_withdraws_once_and_every_replay_is_byte_identical() -> TestResult {
     let mut reopened = fixture.reopen()?;
     assert_eq!(
         reopened.retained_erasure_objects("ELXW1", 4)?,
-        [record.clone()]
+        std::slice::from_ref(&record)
     );
     assert_eq!(
         reopened.begin_recipient_export_withdrawal(export_id, &grantee)?,

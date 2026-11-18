@@ -6667,6 +6667,46 @@ fn only_a_dispatched_key_command_destroys_and_only_under_an_open_fence() -> Test
     attempted.assert_effect(&destroyed)
 }
 
+#[test]
+fn a_consistent_command_outside_the_attempt_is_not_dispatched() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let request = attempted.request;
+    // A `local-backup-inventory` obligation of the store target: every
+    // field derives correctly, but the frozen closure has no Backup cell
+    // for that target, so the attempt never dispatched it.
+    let target = store_target()?;
+    let category = ErasureInventoryCategoryV1::Backup;
+    let outside = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category,
+        target,
+        owner: pos_core::local_erasure_owner_ref_v1(
+            ErasureReferenceV1::from_digest(STORE_IDENTITY),
+            u64::from(category),
+            "local-backup-inventory",
+        )?,
+        command_identity: destruction_command_reference(request, target),
+    })?;
+    assert!(!attempted.obligations.contains(&outside));
+    let command = ErasureOwnerCommandV1 {
+        request,
+        destruction: ErasureDestructionCommandV1::from_obligation(
+            &outside,
+            attempted.attempt.reference(),
+        ),
+    };
+    let mut host = attempted.dispatched()?;
+    // The attempt has other unresolved obligations, none of them this one.
+    assert!(!host
+        .command_sender()?
+        .dispatched_owner_commands(request)?
+        .is_empty());
+    assert_eq!(
+        executor().execute(&command, &mut host),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
 /// The actor's role-7 community key the bound ARD1 recording depends on.
 fn community_key() -> KeyIdentityV1 {
     KeyIdentityV1::new("community:x", KeyRoleV1::CommunityArtifactEncryption, 1)
@@ -7711,15 +7751,21 @@ fn a_routine_rotation_waits_for_every_pin_and_a_compromise_does_not() -> TestRes
     let old_signer = owned_bundle(&ALL_CLASSES)?.signer_key_id;
     let compromise = Case::signed(&rotated, &bundle_root(), &[old_signer.as_str()])?;
     assert!(compromise.compose(&mut store.sqlite()?).is_ok());
-    // Under the old bundle the request closes its attempt; it then pins
-    // nothing, and the routine rotation composes.
-    let mut host = store.host(&driver_case()?, 4_096)?;
+    // A request whose attempt closed under the old bundle pins nothing, and
+    // the routine rotation composes. Registering the rotated signer makes it
+    // the registry's active role-2 key, so the old signer can sign no more:
+    // the attempt closes before the rotation is registered.
+    let (closed, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Finalized(_)))?;
+    let mut host = closed.host(&driver_case()?, 4_096)?;
     assert_eq!(
-        finalized(driver().drive(&mut host, request_of(1)?)?)?.lifecycle(),
+        lifecycle(&mut host, request_of(1)?)?,
         ErasureLifecycleV1::PartialFailure
     );
     drop(host);
-    assert!(routine.compose(&mut store.sqlite()?).is_ok());
+    let rotated = rotated_bundle(&closed)?;
+    assert!(Case::signed(&rotated, &bundle_root(), &[])?
+        .compose(&mut closed.sqlite()?)
+        .is_ok());
     Ok(())
 }
 
