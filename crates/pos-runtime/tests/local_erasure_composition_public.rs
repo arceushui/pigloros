@@ -1119,6 +1119,7 @@ fn bound_authority_host(
     }
     bindings.sort_unstable();
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         grants
             .first()
             .ok_or("no grant")?
