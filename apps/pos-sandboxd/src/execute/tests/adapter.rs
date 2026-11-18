@@ -146,7 +146,8 @@ impl FakeHost {
         let report = Arc::clone(&self.stdio_report);
         let released = Arc::clone(&self.released);
         let kept = Arc::clone(&self.systemd_held);
-        thread::spawn(move || {
+        let reads_input = script.input == InputUse::Read;
+        let adapter = move || {
             let identities = (identity(&input), identity(&output));
             let mine = [number(&input), number(&output)];
             let mut input = File::from(input);
@@ -189,7 +190,15 @@ impl FakeHost {
             }
             drop(output);
             done.store(true, Ordering::SeqCst);
-        });
+        };
+        // An adapter that never reads its input writes its output before the
+        // unit starts, so it is on the channel however early the attempt
+        // ends; one that reads waits for the feed on its own thread.
+        if reads_input {
+            thread::spawn(adapter);
+        } else {
+            adapter();
+        }
     }
 
     fn stdio_report(&self) -> StdioReport {
