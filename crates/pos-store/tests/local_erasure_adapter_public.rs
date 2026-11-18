@@ -321,6 +321,36 @@ fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
     Ok(())
 }
 
+/// A negative effect commits with the ELO1 carrying its closed error code.
+fn negative_owner_effect(store: &mut impl LocalErasureStore) -> TestResult {
+    let negative = LocalErasureNegativeResultV1 {
+        command: ErasureReferenceV1::from_digest([12; 32]),
+        owner_ref: ErasureReferenceV1::from_digest([13; 32]),
+        error: ErasureErrorV1::ArtifactDeletionFailed,
+    };
+    let elneg1 = negative.to_canonical_cbor()?;
+    let negative_elo1 = LocalErasureOwnerResultV1 {
+        request: ErasureReferenceV1::from_digest([14; 32]),
+        attempt: ErasureReferenceV1::from_digest([15; 32]),
+        obligation: ErasureReferenceV1::from_digest([16; 32]),
+        command: negative.command,
+        owner_ref: negative.owner_ref,
+        error: Some(negative.error),
+        effect_digest: negative.reference()?,
+    }
+    .to_canonical_cbor()?;
+    assert_eq!(
+        store.commit_local_owner_effect(
+            LocalOwnerEffectV1::Negative(elneg1.clone()),
+            &negative_elo1
+        )?,
+        address(&negative_elo1)?
+    );
+    assert_eq!(store.read_object(address(&negative_elo1)?)?, negative_elo1);
+    assert_eq!(store.read_object(address(&elneg1)?)?, elneg1);
+    Ok(())
+}
+
 fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
     seed_pending_destruction(store)?;
     for (effect, tag, seed) in [
@@ -352,33 +382,7 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         );
     }
 
-    // A negative effect commits with the ELO1 carrying its closed error code.
-    let negative = LocalErasureNegativeResultV1 {
-        command: ErasureReferenceV1::from_digest([12; 32]),
-        owner_ref: ErasureReferenceV1::from_digest([13; 32]),
-        error: ErasureErrorV1::ArtifactDeletionFailed,
-    };
-    let elneg1 = negative.to_canonical_cbor()?;
-    let negative_elo1 = LocalErasureOwnerResultV1 {
-        request: ErasureReferenceV1::from_digest([14; 32]),
-        attempt: ErasureReferenceV1::from_digest([15; 32]),
-        obligation: ErasureReferenceV1::from_digest([16; 32]),
-        command: negative.command,
-        owner_ref: negative.owner_ref,
-        error: Some(negative.error),
-        effect_digest: negative.reference()?,
-    }
-    .to_canonical_cbor()?;
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::Negative(elneg1.clone()),
-            &negative_elo1
-        )?,
-        address(&negative_elo1)?
-    );
-    assert_eq!(store.read_object(address(&negative_elo1)?)?, negative_elo1);
-    assert_eq!(store.read_object(address(&elneg1)?)?, elneg1);
-
+    negative_owner_effect(store)?;
     owner_effect_bounds(store)?;
 
     // A record effect under the wrong tag, or a non-ELO1 owner result,
