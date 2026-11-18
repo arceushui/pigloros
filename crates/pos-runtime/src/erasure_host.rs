@@ -792,14 +792,15 @@ pub(crate) trait LocalErasurePreparationV1: Send + Sync {
         progress: &ErasureRecordedProgressV1,
     ) -> Result<Option<(ErasureRetryAdmissionV1, Vec<u8>)>, ErasureErrorV1>;
 
-    /// The receipt input that closes the active attempt of `progress`, and
-    /// the ELD1 disclosures it names, which must be retained before it is
-    /// finalized.
+    /// The receipt input that closes the active attempt of `progress`, the
+    /// progress of `erq1`, and the ELD1 disclosures it names, which must be
+    /// retained before it is finalized.
     ///
     /// # Errors
     /// The closed error of a receipt that cannot be built.
     fn prepare_receipt(
         &self,
+        erq1: &ErasureRequestV1,
         progress: &ErasureRecordedProgressV1,
     ) -> Result<(ErasureReceiptInputV1, Vec<Vec<u8>>), ErasureErrorV1>;
 

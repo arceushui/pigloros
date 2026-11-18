@@ -6903,6 +6903,54 @@ fn acknowledged_classes(steps: &[LocalErasureStepV1]) -> TestResult<Vec<&'static
     Ok(classes)
 }
 
+/// Assert every inventory row of `receipt` carries the replay claim the
+/// #185 `ReplayClaimEvaluatorV1` derives for its class and outcome, and
+/// `CA(ELD1)` only on backup and timeline-payload rows (ADR-136 §7).
+fn assert_evaluated_rows(receipt: &ErasureReceiptV1) -> TestResult {
+    let rows = receipt.inventories();
+    let positives = receipt
+        .acknowledgements()
+        .iter()
+        .filter(|acknowledgement| {
+            acknowledgement.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged
+        })
+        .map(|acknowledgement| (acknowledgement.target, acknowledgement.owner))
+        .collect::<Vec<_>>();
+    let mut weakest = ErasureReplayClaimV1::Exact;
+    for row in rows
+        .artifacts
+        .iter()
+        .chain(&rows.keys)
+        .chain(&rows.replicas)
+        .chain(&rows.backups)
+    {
+        let class = class_of(row.transition.owner)?;
+        let positive = positives.contains(&(row.target, row.transition.owner));
+        let expected = match (class, positive) {
+            ("key-registry", true) => ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+            ("client-cache-signal" | "artifact-store" | "managed-report", true) => {
+                ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+            }
+            _ => ErasureReplayClaimV1::Exact,
+        };
+        assert_eq!(row.transition.from, ErasureReplayClaimV1::Exact, "{class}");
+        assert_eq!(row.transition.to, expected, "{class}");
+        weakest = weakest.weakened_to(expected);
+        let disclosure = if matches!(class, "local-backup-inventory" | "timeline-payload") {
+            pos_core::LocalErasureDisclosureV1 {
+                ack_class: class.to_owned(),
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            }
+            .reference()?
+        } else {
+            reference(0)
+        };
+        assert_eq!(row.retained_disclosure, disclosure, "{class}");
+    }
+    assert_eq!(receipt.replay_claim(), weakest);
+    Ok(())
+}
+
 /// Acceptance test 1 (Q16): a full lifecycle on `SQLite`, closed and
 /// reopened before every step, commits exactly the ERS1 and ERC1 bytes of
 /// an uninterrupted run.
@@ -6933,6 +6981,12 @@ fn a_driven_lifecycle_has_identical_bytes_across_close_and_reopen() -> TestResul
     // never retried automatically.
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     assert_eq!(receipt.issue_position(), LOCAL_ERASURE_ATTEMPT_WINDOW_V1);
+    // The destroyed key leaves its evidence missing.
+    assert_evaluated_rows(&receipt)?;
+    assert_eq!(
+        receipt.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
     let mut host = store.host(&driver_case()?, 4_096)?;
     assert_eq!(
         driver().step(&mut host, request_of(1)?)?,
@@ -6956,6 +7010,11 @@ fn memory_and_sqlite_differ_only_in_the_local_replica_row() -> TestResult {
     let memory = finalized(driver().drive(&mut host, request)?)?;
     assert_eq!(driver().step(&mut host, request)?, LocalErasureStepV1::Idle);
     for receipt in [&memory, &sqlite] {
+        assert_evaluated_rows(receipt)?;
+        assert_eq!(
+            receipt.replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
         assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
         assert_eq!(receipt.issue_position(), LOCAL_ERASURE_ATTEMPT_WINDOW_V1);
         assert_eq!(receipt.inventories().replicas.len(), 1);
@@ -7154,6 +7213,12 @@ fn a_request_whose_every_owner_succeeds_completes() -> TestResult {
     let receipt = finalized(driver().drive(&mut host, request_of(1)?)?)?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(receipt.issue_position(), 2 + 2);
+    // The cache generation redacts the views; no row discloses an ELD1.
+    assert_evaluated_rows(&receipt)?;
+    assert_eq!(
+        receipt.replay_claim(),
+        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+    );
     Ok(())
 }
 

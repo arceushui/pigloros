@@ -10,13 +10,14 @@
 //! objects no committed record references and no active attempt needs.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use pos_core::{
     local_erasure_host_timeline_v1, local_erasure_receipt_body_reference_v1, ErasureErrorV1,
     ErasureHostErrorV1, ErasurePersistencePortV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
-    ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureReferenceV1, ErasureStateV1,
-    KeyRegistryStateV1, LocalErasureOwnerResultV1, LocalErasureRejectionV1,
-    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, TimelineId,
+    ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureStateV1, ErasureVerifiedInventoryV1, KeyRegistryStateV1, LocalErasureOwnerResultV1,
+    LocalErasureRejectionV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, TimelineId,
     ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
 };
 
@@ -113,6 +114,25 @@ impl ErasureCommandSenderV1<'_> {
             })
     }
 
+    /// The installed inventory and the ERQ1 of `request` in it.
+    ///
+    /// # Errors
+    /// [`ErasureHostErrorV1::Conflict`] for a request the inventory does not
+    /// hold; otherwise the host's readiness error.
+    fn installed_request(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<(Arc<ErasureVerifiedInventoryV1>, ErasureRequestV1), ErasureHostErrorV1> {
+        self.host.ready_state().and_then(|(_, _, installed)| {
+            installed
+                .states()
+                .find(|state| state.request().reference() == request)
+                .map(|state| state.request().clone())
+                .ok_or(ErasureHostErrorV1::Conflict)
+                .map(|erq1| (installed, erq1))
+        })
+    }
+
     /// The attempt of `request` due after `progress`, which has no active
     /// attempt, with the ELB1 it pins retained.
     fn due_attempt(
@@ -121,16 +141,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         progress: &ErasureRecordedProgressV1,
     ) -> Result<LocalAttemptPreparationV1, ErasureHostErrorV1> {
-        self.host
-            .ready_state()
-            .and_then(|(_, _, installed)| {
-                installed
-                    .states()
-                    .find(|state| state.request().reference() == request)
-                    .map(|state| state.request().clone())
-                    .ok_or(ErasureHostErrorV1::Conflict)
-                    .map(|erq1| (installed, erq1))
-            })
+        self.installed_request(request)
             .and_then(|(installed, erq1)| {
                 self.with_local_view(installed, |view| {
                     binding.preparation.prepare_attempt(view, &erq1, progress)
@@ -170,10 +181,12 @@ impl ErasureCommandSenderV1<'_> {
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)
             .and_then(|binding| {
                 self.manifested_progress(request).and_then(|progress| {
-                    binding
-                        .preparation
-                        .prepare_receipt(&progress)
-                        .map_err(map_erasure_error)
+                    self.installed_request(request).and_then(|(_, erq1)| {
+                        binding
+                            .preparation
+                            .prepare_receipt(&erq1, &progress)
+                            .map_err(map_erasure_error)
+                    })
                 })
             })
             .and_then(|(input, disclosures)| {

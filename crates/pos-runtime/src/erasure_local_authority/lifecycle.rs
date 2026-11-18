@@ -7,23 +7,28 @@
 //! before it signs, so the driver cannot choose any of them.
 
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
     ErasureArtifactTransitionV1, ErasureErrorV1, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureRecordedProgressV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
     LocalErasureDisclosureV1, LocalErasureOwnerResultV1, LocalErasureSignatureV1,
-    LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    RegisteredArtifactV1, ReplayClaimEvaluatorV1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 
 use super::authority::LocalErasureAuthorityV1;
-use super::freeze::LOCAL_FREEZE_POSITION;
+use super::freeze::{data_class, LOCAL_FREEZE_POSITION};
 use super::{LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_POLICY_REFERENCE_V1};
 use crate::ErasureAuthorityReadViewV1;
 
 /// A component a driver-built receipt input leaves to core, which fills it
 /// from the committed record before the receipt is previewed or admitted.
 const CORE_FILLED: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0; 32]);
+
+/// The retained disclosure of a row that discloses nothing (ADR-136 §7:
+/// only backup and timeline-payload rows carry `CA(ELD1)`).
+const NO_DISCLOSURE: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0; 32]);
 
 /// Whether the effective acknowledgement inventory of `progress` holds a
 /// positive acknowledgement of `obligation`.
@@ -64,20 +69,26 @@ fn has_transient_negative(
         })
 }
 
-/// The replay claim a positive owner result leaves its target with: a
-/// destroyed key leaves the artifacts it encrypted missing, a redacted
-/// artifact or a committed cache generation leaves only redacted views,
-/// and a purged local replica changes no replay claim.
-const fn claim_after(category: ErasureInventoryCategoryV1) -> ErasureReplayClaimV1 {
-    match category {
-        ErasureInventoryCategoryV1::Key => ErasureReplayClaimV1::UnverifiableArtifactsMissing,
-        ErasureInventoryCategoryV1::Artifact => {
-            ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+/// The transition rule each acknowledgement class registers for its
+/// target before erasure (ADR-136 §5 and §7): a destroyed key removes the
+/// evidence it encrypted, a redacted artifact or a committed cache
+/// generation redacts its views, and every other class, the local replica
+/// and the classes that are always negative, preserves the exact claim.
+fn transition_rule(ack_class: &str) -> ArtifactTransitionRuleV1 {
+    match ack_class {
+        "key-registry" => ArtifactTransitionRuleV1::Remove,
+        "artifact-store" | "managed-report" | "client-cache-signal" => {
+            ArtifactTransitionRuleV1::RedactViews
         }
-        ErasureInventoryCategoryV1::Replica | ErasureInventoryCategoryV1::Backup => {
-            ErasureReplayClaimV1::Exact
-        }
+        _ => ArtifactTransitionRuleV1::PreserveExact,
     }
+}
+
+/// Whether a row of `ack_class` carries `CA(ELD1)` as its retained
+/// disclosure (ADR-136 §7): only the backup and timeline-payload rows,
+/// whose classes are always disclosed as retained.
+fn discloses(ack_class: &str) -> bool {
+    matches!(ack_class, "local-backup-inventory" | "timeline-payload")
 }
 
 impl LocalErasureAuthorityV1 {
@@ -164,26 +175,33 @@ impl LocalErasureAuthorityV1 {
     }
 
     /// The receipt input that closes the active attempt of `progress` once
-    /// every command of it is acknowledged, and its ELD1 disclosures.
+    /// every command of `erq1`'s attempt is acknowledged, and its ELD1
+    /// disclosures.
     ///
     /// The attempt is complete when every frozen obligation has a positive
     /// acknowledgement; its receipt then issues at the position its
     /// executed obligations reach, otherwise a partial failure issues at
     /// the attempt's deadline (ADR-136 §6). Every frozen obligation is one
-    /// inventory row, from `Exact` to the claim its positive result leaves
-    /// (`claim_after`) or unchanged, carrying its command as reason, its
-    /// acknowledgement evidence and its own address as provenance, and
-    /// `CA(ELD1)` of its acknowledgement class as its retained disclosure.
-    /// Core fills every other field from the committed record.
+    /// inventory row whose replay claim the #185 `ReplayClaimEvaluatorV1`
+    /// derives (ADR-136 §7): its target registered as a required artifact
+    /// of the request's data class under its class's transition rule
+    /// (`transition_rule`), applied when the obligation has a positive
+    /// acknowledgement and retained otherwise, from `Exact`. A row carries
+    /// its command as reason, its acknowledgement evidence and its own
+    /// address as provenance, and, for a backup or timeline-payload row
+    /// only, `CA(ELD1)` of its class as its retained disclosure. Core fills
+    /// every other field from the committed record.
     ///
     /// # Errors
     /// `PolicyConflict` without an active attempt, `ScopeInvalid` for an
     /// obligation whose owner the bundle does not name, otherwise the
-    /// closed encoding error of a disclosure.
+    /// closed evaluation or encoding error of a row.
     pub(super) fn receipt_input(
         &self,
+        erq1: &ErasureRequestV1,
         progress: &ErasureRecordedProgressV1,
     ) -> Result<(ErasureReceiptInputV1, Vec<Vec<u8>>), ErasureErrorV1> {
+        let data_class = data_class(erq1.scope());
         progress
             .active
             .as_ref()
@@ -192,7 +210,7 @@ impl LocalErasureAuthorityV1 {
                 progress
                     .obligations
                     .iter()
-                    .map(|obligation| self.inventory_row(progress, obligation))
+                    .map(|obligation| self.inventory_row(progress, obligation, data_class))
                     .collect::<Result<Vec<_>, _>>()
                     .map(|rows| {
                         let complete = progress.obligations.iter().all(|obligation| {
@@ -216,20 +234,23 @@ impl LocalErasureAuthorityV1 {
             })
     }
 
-    /// The inventory row of one frozen obligation and its ELD1 bytes.
+    /// The inventory row of one frozen obligation, and its ELD1 bytes when
+    /// it carries one.
     fn inventory_row(
         &self,
         progress: &ErasureRecordedProgressV1,
         obligation: &ErasureObligationV1,
-    ) -> Result<(ErasureInventoryResultV1, Vec<u8>), ErasureErrorV1> {
+        data_class: ArtifactDataClassV1,
+    ) -> Result<(ErasureInventoryResultV1, Option<Vec<u8>>), ErasureErrorV1> {
         let acknowledgement = progress
             .effective
             .iter()
             .find(|acknowledgement| acknowledgement.obligation() == obligation.reference());
-        let to = if positively_acknowledged(progress, obligation.reference()) {
-            claim_after(obligation.category())
+        let target = obligation.target();
+        let state = if positively_acknowledged(progress, obligation.reference()) {
+            ArtifactStateV1::TransitionApplied
         } else {
-            ErasureReplayClaimV1::Exact
+            ArtifactStateV1::Retained
         };
         self.bundle
             .owners
@@ -237,21 +258,43 @@ impl LocalErasureAuthorityV1 {
             .find(|row| row.owner_ref == obligation.owner())
             .ok_or(ErasureErrorV1::ScopeInvalid)
             .and_then(|row| {
-                let disclosure = LocalErasureDisclosureV1 {
-                    ack_class: row.ack_class.clone(),
-                    policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-                };
-                disclosure.to_canonical_cbor().and_then(|bytes| {
-                    disclosure
-                        .reference()
-                        .map(|retained_disclosure| (retained_disclosure, bytes))
+                ReplayClaimEvaluatorV1::evaluate(
+                    ErasureReplayClaimV1::Exact,
+                    &[ArtifactClaimInputV1 {
+                        registration: RegisteredArtifactV1::new(
+                            target.artifact_class,
+                            obligation.reference(),
+                            data_class,
+                            (obligation.category() == ErasureInventoryCategoryV1::Key)
+                                .then_some(target.key_role),
+                            obligation.owner(),
+                            ArtifactOptionalityV1::Required,
+                            transition_rule(&row.ack_class),
+                        ),
+                        current_claim: ErasureReplayClaimV1::Exact,
+                        state,
+                    }],
+                )
+                .and_then(|evaluation| {
+                    discloses(&row.ack_class)
+                        .then(|| LocalErasureDisclosureV1 {
+                            ack_class: row.ack_class.clone(),
+                            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                        })
+                        .map(|disclosure| {
+                            disclosure.to_canonical_cbor().and_then(|bytes| {
+                                disclosure.reference().map(|reference| (reference, bytes))
+                            })
+                        })
+                        .transpose()
+                        .map(|disclosure| (evaluation.replay_claim(), disclosure))
                 })
             })
-            .map(|(retained_disclosure, bytes)| {
+            .map(|(to, disclosure)| {
                 (
                     ErasureInventoryResultV1 {
                         category: obligation.category(),
-                        target: obligation.target(),
+                        target,
                         transition: ErasureArtifactTransitionV1 {
                             from: ErasureReplayClaimV1::Exact,
                             to,
@@ -261,9 +304,11 @@ impl LocalErasureAuthorityV1 {
                                 .map_or(CORE_FILLED, ErasureAcknowledgementProvenanceV1::evidence),
                             provenance: obligation.reference(),
                         },
-                        retained_disclosure,
+                        retained_disclosure: disclosure
+                            .as_ref()
+                            .map_or(NO_DISCLOSURE, |(reference, _)| *reference),
                     },
-                    bytes,
+                    disclosure.map(|(_, bytes)| bytes),
                 )
             })
     }
@@ -272,7 +317,7 @@ impl LocalErasureAuthorityV1 {
 /// The receipt input of `rows`, each with its ELD1 bytes, and the distinct
 /// disclosures to retain.
 fn receipt_of(
-    rows: Vec<(ErasureInventoryResultV1, Vec<u8>)>,
+    rows: Vec<(ErasureInventoryResultV1, Option<Vec<u8>>)>,
     lifecycle: ErasureLifecycleV1,
     issue_position: u64,
 ) -> (ErasureReceiptInputV1, Vec<Vec<u8>>) {
@@ -290,7 +335,7 @@ fn receipt_of(
             ErasureInventoryCategoryV1::Replica => inventories.replicas.push(row),
             ErasureInventoryCategoryV1::Backup => inventories.backups.push(row),
         }
-        disclosures.push(disclosure);
+        disclosures.extend(disclosure);
     }
     disclosures.sort_unstable();
     disclosures.dedup();

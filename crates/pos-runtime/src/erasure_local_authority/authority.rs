@@ -298,9 +298,10 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
 
     fn prepare_receipt(
         &self,
+        erq1: &ErasureRequestV1,
         progress: &ErasureRecordedProgressV1,
     ) -> Result<(ErasureReceiptInputV1, Vec<Vec<u8>>), ErasureErrorV1> {
-        self.receipt_input(progress)
+        self.receipt_input(erq1, progress)
     }
 
     fn holds_subject(
