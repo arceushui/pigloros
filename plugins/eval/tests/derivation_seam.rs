@@ -186,7 +186,10 @@ fn pass(
     timeline: TimelineId,
     token: &ConsentCapabilityToken,
 ) -> usize {
-    let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok();
     let revisions = host.observe(registry, &mut *store, timeline).test_ok();
     let (head, drafts) = stage(registry, &*store, timeline, token).test_ok();
     if drafts.is_empty() {
@@ -685,7 +688,10 @@ fn persona_cannot_emit_eval_records_and_nothing_commits() {
             .iter()
             .any(|kind| kind.as_str().starts_with("eval.")));
 
-        let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+        let host = LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        )
+        .test_ok();
         let _revisions = host.observe(&registry, store.as_mut(), timeline).test_ok();
         assert!(matches!(
             stage(&mut registry, store.as_ref(), timeline, &token),

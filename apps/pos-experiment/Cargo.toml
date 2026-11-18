@@ -81,7 +81,11 @@ required-features = ["test-support"]
 
 [dependencies]
 zeroize = { workspace = true, optional = true }
-pos-core = { path = "../../crates/pos-core" }
+# The local experiment composition root mints the trust-root seal (ADR-129 A5.9,
+# #1374; scripts/check_authority_trust_root_seal.py).
+pos-core = { path = "../../crates/pos-core", features = [
+  "authority-trust-root",
+] }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }
 pos-state = { path = "../../crates/pos-state" }
@@ -111,7 +115,10 @@ tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 
 [dev-dependencies]
-pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+pos-core = { path = "../../crates/pos-core", features = [
+  "authority-trust-root",
+  "test-support",
+] }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 # `test-support` gives the replay provider-dispatch vectors (ADR-062 Revision 8, #1296) the signed
 # in-memory CFB1 corpus builder of `pos-reference`'s public tests.

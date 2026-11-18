@@ -1,3 +1,4 @@
+#![cfg(any(test, feature = "test-support"))]
 //! Public conformance of the test-support `SubjectDataEncryption` consumer over
 //! the Memory and `SQLite` adapters.
 //!

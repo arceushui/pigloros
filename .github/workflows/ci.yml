@@ -60,7 +60,9 @@ env:
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
 # any Cargo-heavy work. The core gates then run together; core-gate releases
-# at most eight heavy standard jobs plus the lightweight cargo-crap analysis.
+# at most eight heavy standard jobs. The lightweight cargo-crap analysis starts
+# as soon as hosted coverage (and the native lane, when in scope) succeeds, so
+# main publishes its trusted baseline without waiting for the other core jobs.
 # Mutation and the ASan shards follow standard-gate as the final expensive
 # stage and run beside each other. The native Windows owner lane starts after
 # the ledger Windows runner and runs beside every other stage: only cargo-crap
@@ -979,22 +981,24 @@ jobs:
 
   cargo-crap:
     name: cargo-crap
+    # Starts from coverage, not core-gate: the score depends only on the LCOV
+    # inputs, and ci-gate still requires core-gate. On main this publishes the
+    # trusted baseline that pull requests wait for as early as possible.
     needs:
       - ci_change_scope
       - coverage
-      - core-gate
       - owner-bridge-windows
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
     # The native lane must succeed unless the trusted scope explicitly left it
     # out of this pull request.
-    if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     # Budget: the pre-steps (full-history checkout, install-action, LCOV
-    # downloads), the resolver step's 130-minute bound on waiting for main's
+    # downloads), the resolver step's 45-minute bound on waiting for main's
     # trusted baseline (see that step), then scoring and uploads, all within
-    # 150 minutes.
-    timeout-minutes: 150
+    # 70 minutes.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1035,14 +1039,15 @@ jobs:
         run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
-      # Polls up to 120 minutes while main's ci.yml run for the trusted base is
+      # Polls up to 30 minutes while main's ci.yml run for the trusted base is
       # still producing its cargo-crap baseline, then falls back to the nearest
       # first-parent main ancestor's baseline (fetch-depth 0 above provides that
-      # history), then fails closed as before. The extra minutes cover the last
-      # poll, GitHub API retry backoff and the ancestor walk.
+      # history), then fails closed as before. The extra 15 minutes cover the
+      # last poll and the 30-commit ancestor walk even when GitHub API calls
+      # need retries; a step that still runs out of time fails closed.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
-        timeout-minutes: 130
+        timeout-minutes: 45
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
@@ -1111,6 +1116,7 @@ jobs:
           --exclude 'src/provider_lifecycle/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
+          --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1161,6 +1167,7 @@ jobs:
           --exclude 'src/provider_lifecycle/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
+          --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1780,6 +1787,10 @@ jobs:
         run: |
           python scripts/check_counterfactual_adapter_seal.py
           python scripts/test_check_counterfactual_adapter_seal.py
+      - name: Check authority trust-root seal policy
+        run: |
+          python scripts/check_authority_trust_root_seal.py
+          python scripts/test_check_authority_trust_root_seal.py
       - name: Check trusted-clock port implementation policy
         run: |
           python scripts/check_trusted_clock_port_impls.py
