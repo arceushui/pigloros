@@ -7093,21 +7093,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!selected_before_write.contains(&write_ordinal));
         assert_eq!(write_burst_counters, vec![8]);
-        assert_eq!(
-            &operations.lock().test_ok()?[..10],
-            &[
-                "root_count",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "create",
-            ]
-        );
+        let expected = [["root_count"].as_slice(), &["read"; 8], &["create"]].concat();
+        assert_eq!(&operations.lock().test_ok()?[..10], expected.as_slice());
         executor.shutdown().await.test_ok()?;
 
         drop(executor);

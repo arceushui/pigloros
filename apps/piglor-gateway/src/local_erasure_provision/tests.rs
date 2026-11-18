@@ -1263,7 +1263,7 @@ fn a_new_signer_key_is_registered_only_as_the_tps1_allows() -> TestResult {
     // the new one.
     let old_signer = signer_key_id(SIGNER_SEED);
     let revoking = Deployment::new(&[old_signer.as_str()])?;
-    let mut revoked = compromise.clone();
+    let mut revoked = compromise;
     revoked.out = fixture.directory.path().join("c");
     provision_local_erasure(
         &revoked,
