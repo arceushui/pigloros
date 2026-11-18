@@ -6239,6 +6239,7 @@ dependencies = [
 name = "pos-reference"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake3",
  "ciborium",
  "ciborium-ll",
