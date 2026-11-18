@@ -8,7 +8,13 @@ use super::{
 use crate::{encode_bytes, encode_hash, encode_head, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
 
+/// Reference schema ID of the code-0 initializer set `L` (R6.4, P6).
+pub const COMMUNITY_INITIALIZER_SET_SCHEMA_V1: u32 = 0x4341_0004;
 const MAX_RECORD: usize = 1_048_576;
+// The largest `L`, a plain literal: array head 1 and 64 refs of at most 49
+// bytes (array head 1, schema ID 5, length head 9 and digest 34).
+const MAX_SET_BYTES: usize = 3_137;
+const _: () = assert!(MAX_COMMUNITY_MEMBERS_V1 == 64);
 const RECOVERY_WINDOW: u64 = 86_400_000_000;
 const OWNER: [u64; 4] = [1, 0, 65_536, 65_536];
 const GRAPH: [u64; 10] = [
@@ -303,6 +309,29 @@ impl<'a> CommunityDurableProfileV1<'a> {
                 Err(Error::InvalidBinding)
             }
         })
+    }
+}
+
+/// The code-0 CGI1 `admitted_initializer_ref` of a roster (R6.1(7), P6).
+///
+/// It is `[0x4341_0004, len(L), H("InitializerSet", L)]`, where `L` is the
+/// preferred array of the roster rows' `initializer_artifact_ref`s in roster
+/// order.
+///
+/// The ref commits to the installed roster only; it admits no initializer
+/// and resolves no State.
+#[must_use]
+pub fn community_initializer_set_ref_v1(profile: &CommunityDurableProfileV1<'_>) -> ArtifactRefV1 {
+    let roster = profile.as_input().roster;
+    let mut set = Vec::with_capacity(MAX_SET_BYTES);
+    encode_head(&mut set, 4, roster.len() as u64);
+    for member in roster {
+        encode_artifact_ref(&mut set, member.initializer);
+    }
+    ArtifactRefV1 {
+        schema_id: COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+        byte_length: set.len() as u64,
+        digest: *digest(b"PiglorOS.Community.InitializerSet.v1\0", &set).as_bytes(),
     }
 }
 
