@@ -11,7 +11,7 @@ use ciborium::value::Value;
 use super::{
     array, bytes32, decode_limited, digest, domain_digest, encode_limited, evidence::string,
     header, strictly_increasing, text, uint, unsigned, ArtifactDataClassV1, ErasureArtifactClassV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReferenceV1,
+    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReferenceV1, ErasureScopeV1,
     ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
 };
 use crate::ids::{EntityId, TimelineId};
@@ -286,8 +286,221 @@ pub fn local_erasure_owner_ref_v1(
 pub fn local_erasure_coordinator_v1(
     store_identity: ErasureReferenceV1,
 ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-    encode_limited(&Value::Array(vec![digest(store_identity)]), KIB)
-        .map(|bytes| ErasureReferenceV1::from_digest(domain_digest("ELCOORD1", &bytes)))
+    tagged("ELCOORD1", vec![digest(store_identity)])
+}
+
+/// `CA(tag, fields)`: the domain-tagged digest of one canonical array.
+fn tagged(tag: &str, fields: Vec<Value>) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    encode_limited(&Value::Array(fields), KIB)
+        .map(|bytes| ErasureReferenceV1::from_digest(domain_digest(tag, &bytes)))
+}
+
+/// `CA("ERSUB1", [principal_ref, actor_entity])`, the minimized subject of
+/// one acting entity of one Local Principal (ADR-136 §4).
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_subject_v1(
+    principal_ref: ErasureReferenceV1,
+    actor_entity: EntityId,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged(
+        "ERSUB1",
+        vec![
+            digest(principal_ref),
+            bytes_value(&actor_entity.inner().to_bytes()),
+        ],
+    )
+}
+
+/// `CA("ELRQR1", [principal_ref])`, the ERQ1 requester of one Local
+/// Principal (ADR-136 §4).
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_requester_v1(
+    principal_ref: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELRQR1", vec![digest(principal_ref)])
+}
+
+/// `CA("ELBODY1", [scope class code])`, the ELIDEM1 body digest of one
+/// request body (ADR-136 §4). `impact_acknowledged` is the constant `true`,
+/// so the scope class is the whole body.
+///
+/// Only the two destruction-eligible classes form a body: a retained-only
+/// scope is refused before any ERQ1 exists (ADR-136 Q4).
+///
+/// # Errors
+/// Returns [`ErasureErrorV1::ScopeInvalid`] for an always-retained scope
+/// class, or the canonical encoding error.
+pub fn local_erasure_body_digest_v1(
+    scope: ErasureScopeV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    require(matches!(
+        scope,
+        ErasureScopeV1::PrivateSubjectData | ErasureScopeV1::ConsentedSharedData
+    ))
+    .and_then(|()| tagged("ELBODY1", vec![uint(scope.code())]))
+}
+
+/// The `erasure_id` of one submission: the 128-bit prefix of
+/// `CA("ELID1", [principal_ref, actor_entity, idempotency_key_digest])`,
+/// read as a ULID (ADR-136 §4). Its time bits carry no meaning.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_id_v1(
+    principal_ref: ErasureReferenceV1,
+    actor_entity: EntityId,
+    idempotency_key_digest: ErasureReferenceV1,
+) -> Result<ulid::Ulid, ErasureErrorV1> {
+    tagged(
+        "ELID1",
+        vec![
+            digest(principal_ref),
+            bytes_value(&actor_entity.inner().to_bytes()),
+            digest(idempotency_key_digest),
+        ],
+    )
+    .map(|reference| {
+        let mut prefix = [0; 16];
+        prefix.copy_from_slice(&reference.digest()[..16]);
+        ulid::Ulid::from_bytes(prefix)
+    })
+}
+
+/// `CA("ERQ1-ID", [erasure_id])`, the ERQ1 request reference of one
+/// `erasure_id` (ADR-136 §4).
+///
+/// The `erasure_id` is encoded as a 16-byte byte string of the ULID's bytes,
+/// as ERAZ1 encodes entity and Timeline ids.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_request_v1(
+    erasure_id: ulid::Ulid,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ERQ1-ID", vec![bytes_value(&erasure_id.to_bytes())])
+}
+
+/// `CA("ELRS1", [store_identity])`, the replica set of the single local
+/// store. Every Local target carries it (ADR-136 amendment, target
+/// identity).
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_replica_set_v1(
+    store_identity: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELRS1", vec![digest(store_identity)])
+}
+
+/// `CA("ELRID1", [store_identity])`, the single local replica. Every Local
+/// target carries it.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_replica_id_v1(
+    store_identity: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELRID1", vec![digest(store_identity)])
+}
+
+/// `CA("ELKEY1", [owner_id, role, epoch])`, the target key digest of one
+/// key-registry identity. The owner id is its UTF-8 bytes and the role its
+/// key-registry code.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_key_digest_v1(
+    identity: &crate::KeyIdentityV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged(
+        "ELKEY1",
+        vec![
+            bytes_value(identity.owner_id.as_str().as_bytes()),
+            uint(u64::from(identity.role.code())),
+            uint(identity.epoch),
+        ],
+    )
+}
+
+/// `CA("ELTP1", [timeline_id])`, the `timeline-payload` target artifact of
+/// one affected Timeline.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_timeline_payload_v1(
+    timeline: TimelineId,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELTP1", vec![bytes_value(&timeline.inner().to_bytes())])
+}
+
+/// `CA("ELXR1", [export_id, grantee_owner])`, the `export-recipient` target
+/// artifact of one recipient-export publication and its grantee. The owner
+/// id is its UTF-8 bytes.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_export_recipient_v1(
+    export_id: [u8; 16],
+    grantee_owner: &crate::OwnerIdV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged(
+        "ELXR1",
+        vec![
+            bytes_value(&export_id),
+            bytes_value(grantee_owner.as_str().as_bytes()),
+        ],
+    )
+}
+
+/// `CA("ELST1", [store_identity])`, the target artifact of the one store
+/// target every request carries (`client-cache-signal` and `local-replica`).
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_store_target_v1(
+    store_identity: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELST1", vec![digest(store_identity)])
+}
+
+/// `CA("ELFS1", [child_timeline_id])`, the scope reference of one Fork
+/// child. It is request-independent and unique per child.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_fork_scope_v1(
+    child: TimelineId,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELFS1", vec![bytes_value(&child.inner().to_bytes())])
+}
+
+/// `CA("ELFX1", [request, parent, child, lineage_rule])`, the ERSE1
+/// admission provenance of one Fork child of an affected parent.
+///
+/// It is a pure digest that recovery recomputes from ERSE1 and the child's
+/// `fork_point`; nothing is retained.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_fork_admission_v1(
+    request: ErasureReferenceV1,
+    parent: TimelineId,
+    child: TimelineId,
+    lineage_rule: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged(
+        "ELFX1",
+        vec![
+            digest(request),
+            bytes_value(&parent.inner().to_bytes()),
+            bytes_value(&child.inner().to_bytes()),
+            digest(lineage_rule),
+        ],
+    )
 }
 
 /// One ELB1 owner row: an acknowledgement class served by one owner.

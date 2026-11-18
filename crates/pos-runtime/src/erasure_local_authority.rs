@@ -1,23 +1,39 @@
 //! The single-host Local/Air-Gapped erasure authority (ADR-136).
 //!
-//! This slice holds the composition-time verification of the installed
-//! ELB1/ELB1S bundle against the profile's TPS1 anchor and the store
-//! (ADR-136 §4, *Bundle*). The authority, executor, signer and driver of
-//! ADR-136 §1 are later slices of the same module.
+//! This module holds the ELP1 policy compiled into this binary, the
+//! composition-time verification of the installed ELB1/ELB1S bundle against
+//! the profile's TPS1 anchor and the store (ADR-136 §4, *Bundle*), and the
+//! verify-only `LocalErasureAuthorityV1` that composition installs over the
+//! verified bundle. The executor, signer and driver of ADR-136 §1 are later
+//! slices of the same module.
+
+mod authority;
+mod freeze;
+mod policy;
 
 use std::sync::Arc;
 
 use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1, CanonicalBytes,
     ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, EventStore,
-    KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature,
+    Hash, KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature, TimelineId,
     ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_crypto::signing::{verify, verifying_key_from_public_key};
 use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
 
-use crate::{ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1};
+use crate::erasure_host::{LocalErasurePreparationV1, LocalErasureSubmissionBindingV1};
+use crate::ErasureCoordinatorCompositionV1;
+use authority::LocalErasureAuthorityV1;
+
+pub use policy::{
+    compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
+    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
+    LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
+    LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
+};
 
 /// The record tag of retained TPS1 evidence in the erasure object store.
 const RETAINED_TPS1_TAG: &str = "TPS1";
@@ -47,8 +63,9 @@ pub enum LocalErasureCompositionErrorV1 {
     /// ELB1 or ELB1S is not canonical, ELB1S names another bundle, no TPS1
     /// root carries the `issued_by` key id, or the root signature is invalid.
     BundleInvalid,
-    /// The bundle names another policy, executor, Local Principal registry,
-    /// store identity or live signer key than this binary and store, or the
+    /// The bundle names another policy than the one compiled into this
+    /// binary, or another executor, Local Principal registry, store identity
+    /// or live signer key than this deployment and store, or the
     /// store identity or key registry cannot be read.
     BundleMismatch,
     /// The installed TPS1 revokes the bundle root or the bundle signer.
@@ -87,11 +104,16 @@ pub struct LocalErasureCompositionInputsV1<'a> {
     /// The authority registry digest of the Local Principal the store
     /// records.
     pub authority_registry_digest: ErasureReferenceV1,
-    /// `CA(ELP1)` of the policy compiled into this binary.
-    pub policy: ErasureReferenceV1,
     /// The composed executor, or `None` for a root that composes no
     /// executor and therefore skips the `execution_binding` check.
     pub execution_binding: Option<&'a LocalErasureExecutionBindingV1>,
+    /// The leaf grant id of the Local Principal's root grant.
+    pub principal_grant: Hash,
+    /// The authority Timeline the root grant is issued on.
+    pub authority_timeline: TimelineId,
+    /// The clock new admissions read, in Unix seconds (UTC): an expired
+    /// TPS1 or bundle closes new admissions only.
+    pub clock: fn() -> u64,
 }
 
 impl ErasureCoordinatorCompositionV1 {
@@ -100,19 +122,20 @@ impl ErasureCoordinatorCompositionV1 {
     ///
     /// The bundle must be signed, over `["ELB1-SIG", 1, CA(ELB1)]`, by the
     /// current TPS1 root its `issued_by` names; neither that root nor the
-    /// signer may be revoked; its Local Principal registry digest, policy,
-    /// execution binding and store identity must equal this deployment's;
-    /// and the key registry must hold its role-2 signer key live, not
-    /// destroyed. When the store holds any erasure request, every retained
-    /// TPS1 must verify under the pinned operator key.
+    /// signer may be revoked; its policy must be
+    /// [`compiled_local_erasure_policy_v1`]; its Local Principal registry
+    /// digest, execution binding and store identity must equal this
+    /// deployment's; and the key registry must hold its role-2 signer key
+    /// live, not destroyed. When the store holds any erasure request, every
+    /// retained TPS1 must verify under the pinned operator key.
     ///
     /// A composition only admits new work: recovery of committed evidence
-    /// verifies against the retained ELB1 and TPS1, never this check.
+    /// verifies against the ELB1 it pins by reference, never this check.
     ///
     /// The coordinator identity is `CA("ELCOORD1", [store_identity])`. The
-    /// composed authority is still the closed authority: it proves only an
-    /// empty store until the `LocalErasureAuthorityV1` slice installs the
-    /// verified bundle.
+    /// composed authority is `LocalErasureAuthorityV1` over the verified
+    /// bundle, and the composition carries the Local submission inputs the
+    /// host's `submit_local_erasure` needs.
     ///
     /// # Errors
     /// Returns the [`LocalErasureCompositionErrorV1`] that keeps the root
@@ -135,7 +158,25 @@ impl ErasureCoordinatorCompositionV1 {
                 local_erasure_coordinator_v1(bundle.store_identity)
                     .ok()
                     .and_then(|coordinator| {
-                        Self::new(Arc::new(ClosedErasureCoordinatorAuthorityV1), coordinator).ok()
+                        let authority = Arc::new(LocalErasureAuthorityV1 {
+                            bundle,
+                            trust_expiry: inputs.trust.expiry(),
+                            clock: inputs.clock,
+                            principal_grant: inputs.principal_grant,
+                            authority_timeline: inputs.authority_timeline,
+                        });
+                        let binding = LocalErasureSubmissionBindingV1 {
+                            principal_grant: inputs.principal_grant,
+                            authority_timeline: inputs.authority_timeline,
+                            authority_registry_digest: authority.bundle.authority_registry_digest,
+                            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                            store_request_reserve: LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
+                            preparation: Arc::clone(&authority)
+                                as Arc<dyn LocalErasurePreparationV1>,
+                        };
+                        Self::new(authority, coordinator)
+                            .ok()
+                            .map(|composition| composition.with_local_submission(binding))
                     })
                     .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
             })
@@ -177,7 +218,7 @@ fn verified_bundle(
         .and_then(|bundle| {
             let binds_deployment = bundle.authority_registry_digest
                 == inputs.authority_registry_digest
-                && bundle.policy == inputs.policy
+                && bundle.policy == LOCAL_ERASURE_POLICY_REFERENCE_V1
                 && inputs
                     .execution_binding
                     .is_none_or(|binding| *binding == bundle.execution_binding);
@@ -255,9 +296,12 @@ where
 /// ELSEL1 and ELIDEM1, and no admission retains a TPS1 (a freeze retains
 /// only ELB1 and ELLR1). A store with requests therefore legitimately
 /// retains no TPS1, and the check refuses only a retained TPS1 that the
-/// pinned operator key does not verify. Passing here admits nothing on its
-/// own: this slice composes the closed authority, which proves only an
-/// empty store.
+/// pinned operator key does not verify. A committed freeze pins its trust
+/// as `CA(ELB1)`, and recovery resolves only that ELB1 by reference: the
+/// verified bundle, or after a rotation the retained ELB1 bytes. Recovery
+/// resolves no TPS1, so retained TPS1 bytes are checked only here. Passing
+/// here only lets the root compose: every admission of the composed
+/// authority still applies its own trust, bundle and grant checks.
 fn retained_trust_verifies<S>(operator_public_key: [u8; 32], store: &mut S) -> bool
 where
     S: ErasureInventoryPersistencePortV1 + ?Sized,

@@ -1306,3 +1306,174 @@ fn the_coordinator_identity_is_the_domain_tagged_digest_of_the_store_identity() 
     );
     Ok(())
 }
+
+/// `CA(tag, ·)` over hand-encoded canonical CBOR: BLAKE3 over the tag, a zero
+/// byte and the array bytes.
+fn content_address(tag: &str, array: &[u8]) -> ErasureReferenceV1 {
+    let mut preimage = tag.as_bytes().to_vec();
+    preimage.push(0);
+    preimage.extend_from_slice(array);
+    ErasureReferenceV1::from_digest(*blake3::hash(&preimage).as_bytes())
+}
+
+/// The canonical CBOR of a 32-byte and a 16-byte byte string.
+fn bstr32(bytes: [u8; 32]) -> Vec<u8> {
+    let mut encoded = vec![0x58, 0x20];
+    encoded.extend_from_slice(&bytes);
+    encoded
+}
+
+fn bstr16(bytes: [u8; 16]) -> Vec<u8> {
+    let mut encoded = vec![0x50];
+    encoded.extend_from_slice(&bytes);
+    encoded
+}
+
+#[test]
+fn the_submission_values_are_domain_tagged_digests_of_their_inputs() -> TestResult {
+    let principal = [0x61; 32];
+    let actor = [0x62; 16];
+    let key = [0x63; 32];
+    let principal_ref = ErasureReferenceV1::from_digest(principal);
+    let actor_entity = EntityId::from_ulid(Ulid::from_bytes(actor));
+    let key_digest = ErasureReferenceV1::from_digest(key);
+
+    let subject = [vec![0x82], bstr32(principal), bstr16(actor)].concat();
+    assert_eq!(
+        pos_core::local_erasure_subject_v1(principal_ref, actor_entity)?,
+        content_address("ERSUB1", &subject)
+    );
+    let requester = [vec![0x81], bstr32(principal)].concat();
+    assert_eq!(
+        pos_core::local_erasure_requester_v1(principal_ref)?,
+        content_address("ELRQR1", &requester)
+    );
+    assert_eq!(
+        pos_core::local_erasure_body_digest_v1(pos_core::ErasureScopeV1::PrivateSubjectData)?,
+        content_address("ELBODY1", &[0x81, 0x00])
+    );
+    assert_eq!(
+        pos_core::local_erasure_body_digest_v1(pos_core::ErasureScopeV1::ConsentedSharedData)?,
+        content_address("ELBODY1", &[0x81, 0x01])
+    );
+    // A retained-only scope forms no body.
+    for retained in [
+        pos_core::ErasureScopeV1::PublicRecord,
+        pos_core::ErasureScopeV1::Aggregate,
+        pos_core::ErasureScopeV1::StructuralAuditMetadata,
+    ] {
+        assert_eq!(
+            pos_core::local_erasure_body_digest_v1(retained),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    let elid1 = [vec![0x83], bstr32(principal), bstr16(actor), bstr32(key)].concat();
+    let mut prefix = [0; 16];
+    prefix.copy_from_slice(&content_address("ELID1", &elid1).digest()[..16]);
+    let erasure_id = pos_core::local_erasure_id_v1(principal_ref, actor_entity, key_digest)?;
+    assert_eq!(erasure_id, Ulid::from_bytes(prefix));
+    assert_eq!(
+        pos_core::local_erasure_request_v1(erasure_id)?,
+        content_address("ERQ1-ID", &[vec![0x81], bstr16(prefix)].concat())
+    );
+
+    // Each input changes the id: another key, actor or Principal.
+    for other in [
+        pos_core::local_erasure_id_v1(principal_ref, actor_entity, reference(0x64))?,
+        pos_core::local_erasure_id_v1(
+            principal_ref,
+            EntityId::from_ulid(Ulid::from_bytes([0x65; 16])),
+            key_digest,
+        )?,
+        pos_core::local_erasure_id_v1(reference(0x66), actor_entity, key_digest)?,
+    ] {
+        assert_ne!(other, erasure_id);
+    }
+    Ok(())
+}
+
+#[test]
+fn the_target_and_fork_values_are_domain_tagged_digests_of_their_inputs() -> TestResult {
+    let store = [0x71; 32];
+    let store_identity = ErasureReferenceV1::from_digest(store);
+    let one_digest = [vec![0x81], bstr32(store)].concat();
+    assert_eq!(
+        pos_core::local_erasure_replica_set_v1(store_identity)?,
+        content_address("ELRS1", &one_digest)
+    );
+    assert_eq!(
+        pos_core::local_erasure_replica_id_v1(store_identity)?,
+        content_address("ELRID1", &one_digest)
+    );
+    assert_eq!(
+        pos_core::local_erasure_store_target_v1(store_identity)?,
+        content_address("ELST1", &one_digest)
+    );
+
+    // ELKEY1 = [owner_id bytes, role code, epoch]: "subject:x" is a 9-byte
+    // string, role 7 and epoch 24 the smallest two-byte unsigned integer.
+    let identity = pos_core::KeyIdentityV1::new(
+        "subject:x",
+        pos_core::KeyRoleV1::CommunityArtifactEncryption,
+        24,
+    );
+    let key = [
+        vec![0x83, 0x49],
+        b"subject:x".to_vec(),
+        vec![0x07, 0x18, 0x18],
+    ]
+    .concat();
+    assert_eq!(
+        pos_core::local_erasure_key_digest_v1(&identity)?,
+        content_address("ELKEY1", &key)
+    );
+
+    let timeline = [0x72; 16];
+    let timeline_id = pos_core::TimelineId::from_ulid(Ulid::from_bytes(timeline));
+    let one_timeline = [vec![0x81], bstr16(timeline)].concat();
+    assert_eq!(
+        pos_core::local_erasure_timeline_payload_v1(timeline_id)?,
+        content_address("ELTP1", &one_timeline)
+    );
+    assert_eq!(
+        pos_core::local_erasure_fork_scope_v1(timeline_id)?,
+        content_address("ELFS1", &one_timeline)
+    );
+
+    let export = [0x73; 16];
+    let grantee = pos_core::OwnerIdV1::new("recipient:y").map_err(|error| error.to_string())?;
+    let recipient = [
+        vec![0x82],
+        bstr16(export),
+        vec![0x4b],
+        b"recipient:y".to_vec(),
+    ]
+    .concat();
+    assert_eq!(
+        pos_core::local_erasure_export_recipient_v1(export, &grantee)?,
+        content_address("ELXR1", &recipient)
+    );
+
+    let request = [0x74; 32];
+    let parent = [0x75; 16];
+    let rule = [0x76; 32];
+    let admission = [
+        vec![0x84],
+        bstr32(request),
+        bstr16(parent),
+        bstr16(timeline),
+        bstr32(rule),
+    ]
+    .concat();
+    assert_eq!(
+        pos_core::local_erasure_fork_admission_v1(
+            ErasureReferenceV1::from_digest(request),
+            pos_core::TimelineId::from_ulid(Ulid::from_bytes(parent)),
+            timeline_id,
+            ErasureReferenceV1::from_digest(rule),
+        )?,
+        content_address("ELFX1", &admission)
+    );
+    Ok(())
+}

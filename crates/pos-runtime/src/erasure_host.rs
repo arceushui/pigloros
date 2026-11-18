@@ -5,7 +5,11 @@ mod world_replay_read;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::authorization_cache::{AuthorizationCacheKeyV1, AuthorizationCacheV1};
-use crate::erasure_authority_view::{ErasureAuthorityReadViewV1, ErasureAuthoritySnapshotViewV1};
+use crate::erasure_authority_view::{
+    export_read_error, registration_read_error, ErasureAuthorityReadViewV1,
+    ErasureAuthoritySnapshotViewV1, ErasureAuthorityStoreReadsV1, ErasureRecordedScopeV1,
+    ErasureViewListErrorV1, HostAuthorityViewV1, VIEW_LIST_MAX,
+};
 
 use pos_core::{
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
@@ -38,6 +42,13 @@ use pos_core::{
     PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
     PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta,
     TimelineMode, WallTime,
+};
+use pos_core::{
+    local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
+    local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureLifecycleV1,
+    ErasureRequestInputV1, ErasureScopeV1, LocalErasureAuthorizationV1, LocalErasureIdempotencyV1,
+    LocalErasureSelectorV1, PrincipalRefV1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 #[cfg(target_os = "linux")]
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
@@ -630,6 +641,303 @@ pub struct ErasureCoordinatorCompositionV1 {
     authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
     coordinator: ErasureReferenceV1,
     world_replay_verifier: Option<Arc<dyn WorldReplayVerifierV1>>,
+    local_submission: Option<LocalErasureSubmissionBindingV1>,
+}
+
+/// What the host needs to build a Local erasure submission (ADR-136 §6).
+///
+/// It holds the Local Principal root grant and its authority Timeline, the
+/// verified bundle's registry digest, the compiled policy and its
+/// request-head reserve, and the Local authority's preparation seam. Only a
+/// verified Local composition carries it.
+#[derive(Clone)]
+pub struct LocalErasureSubmissionBindingV1 {
+    pub(crate) principal_grant: Hash,
+    pub(crate) authority_timeline: TimelineId,
+    pub(crate) authority_registry_digest: ErasureReferenceV1,
+    pub(crate) policy: ErasureReferenceV1,
+    pub(crate) store_request_reserve: u64,
+    pub(crate) preparation: Arc<dyn LocalErasurePreparationV1>,
+}
+
+/// The pure Local erasure evaluations the host asks of the Local authority
+/// besides the authority trait (ADR-136 §5 and §6). They read only the
+/// host-built view.
+pub(crate) trait LocalErasurePreparationV1: Send + Sync {
+    /// Authenticate a prospective request of the Principal `principal_ref`
+    /// as `actor` against the root grant at the current chain head. The
+    /// host answers no replay, runs no per-subject check and retains
+    /// nothing before this passes.
+    ///
+    /// # Errors
+    /// `Unauthorized` for a Principal, actor or root grant the authority
+    /// would not admit.
+    fn authenticate_submission(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        principal_ref: ErasureReferenceV1,
+        actor: EntityId,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Whether new admissions are open. Closed admissions refuse a fresh
+    /// request but not the exact replay of an installed one.
+    ///
+    /// # Errors
+    /// `TrustSnapshotInvalid` once the installed TPS1 or the bundle has
+    /// expired.
+    fn submissions_open(&self) -> Result<(), ErasureErrorV1>;
+
+    /// Whether the closure of an authenticated prospective request of
+    /// `actor` for `scope` fits the 4,096-target bound on this snapshot.
+    ///
+    /// # Errors
+    /// The closed read error of the closure.
+    fn submission_fits(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        actor: EntityId,
+        scope: ErasureScopeV1,
+    ) -> Result<bool, ErasureErrorV1>;
+
+    /// The ERFA1-AUTH body digest the freeze of `request` admits on this
+    /// view, which a purpose-0 ELS1 must sign, and the objects to retain
+    /// before the freeze commits.
+    fn prepare_freeze(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        request: ErasureReferenceV1,
+    ) -> Result<(ErasureReferenceV1, Vec<Vec<u8>>), ErasureErrorV1>;
+}
+
+/// One Local erasure submission from the Gateway (ADR-136 §6).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalErasureSubmissionV1 {
+    /// The authenticated Local Principal.
+    pub principal: PrincipalRefV1,
+    /// The acting entity.
+    pub actor: EntityId,
+    /// The requested scope class.
+    pub scope: ErasureScopeV1,
+    /// The digest of the request's Idempotency-Key.
+    pub idempotency_key_digest: ErasureReferenceV1,
+}
+
+/// The typed refusals of [`ErasureCommandSenderV1::submit_local_erasure`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalErasureSubmitErrorV1 {
+    /// Another request of the subject has not reached its first receipt;
+    /// retryable.
+    Concurrent,
+    /// The subject has used its lifetime request quota.
+    QuotaExhausted,
+    /// The closure on the submission snapshot exceeds 4,096 targets
+    /// (ADR-136 Q10); no request was written.
+    ScopeTooLarge,
+    /// The host refused or failed the submission.
+    Host(ErasureHostErrorV1),
+}
+
+impl From<ErasureHostErrorV1> for LocalErasureSubmitErrorV1 {
+    fn from(error: ErasureHostErrorV1) -> Self {
+        Self::Host(error)
+    }
+}
+
+impl From<LocalSubjectRefusalV1> for LocalErasureSubmitErrorV1 {
+    fn from(refusal: LocalSubjectRefusalV1) -> Self {
+        match refusal {
+            LocalSubjectRefusalV1::Concurrent => Self::Concurrent,
+            LocalSubjectRefusalV1::QuotaExhausted => Self::QuotaExhausted,
+        }
+    }
+}
+
+/// The records the host builds for one Local submission.
+struct LocalSubmissionRecordsV1 {
+    request: ErasureRequestV1,
+    /// ERAZ1, ELSEL1 and ELIDEM1, retained before the submission.
+    objects: [Vec<u8>; 3],
+    /// The submitting Principal's `principal_ref`.
+    principal_ref: ErasureReferenceV1,
+    /// The Local Principal's actor count `A`.
+    actors: usize,
+}
+
+impl LocalSubmissionRecordsV1 {
+    /// Build ERAZ1, ELSEL1, ELIDEM1 and ERQ1 for `submission` from the root
+    /// grant chain `authority` (ADR-136 §4).
+    fn prepare(
+        submission: &LocalErasureSubmissionV1,
+        binding: &LocalErasureSubmissionBindingV1,
+        authority: &PersistedAuthorityV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let actor = submission.actor;
+        local_principal_reference(&submission.principal).and_then(|principal_ref| {
+            local_erasure_id_v1(principal_ref, actor, submission.idempotency_key_digest)
+                .and_then(local_erasure_request_v1)
+                .and_then(|request| {
+                    local_erasure_subject_v1(principal_ref, actor).and_then(|subject| {
+                        local_erasure_body_digest_v1(submission.scope).map(|body_digest| {
+                            (
+                                LocalErasureAuthorizationV1 {
+                                    principal_ref,
+                                    actor_entity: actor,
+                                    operation: LOCAL_ERASURE_REQUEST_OPERATION.to_owned(),
+                                    authority_registry_digest: binding.authority_registry_digest,
+                                    authority_chain: binding.authority_timeline,
+                                    chain_head_position: authority.head_position().as_u64(),
+                                    revocation_epoch: authority.revocation_epoch(),
+                                    erq1_request: request,
+                                },
+                                LocalErasureSelectorV1 { subject },
+                                LocalErasureIdempotencyV1 {
+                                    idempotency_key_digest: submission.idempotency_key_digest,
+                                    body_digest,
+                                },
+                            )
+                        })
+                    })
+                })
+                .and_then(|(authorization, selector, idempotency)| {
+                    Self::encode(
+                        submission,
+                        binding,
+                        principal_ref,
+                        &authorization,
+                        &selector,
+                        &idempotency,
+                    )
+                })
+                .map(|(request, objects)| Self {
+                    request,
+                    objects,
+                    principal_ref,
+                    actors: authority
+                        .chain()
+                        .grants()
+                        .last()
+                        .map_or(0, |grant| grant.scope().actor_entity_ids().len()),
+                })
+        })
+    }
+
+    /// Encode ERAZ1, ELSEL1 and ELIDEM1, and build the ERQ1 that names them.
+    fn encode(
+        submission: &LocalErasureSubmissionV1,
+        binding: &LocalErasureSubmissionBindingV1,
+        principal_ref: ErasureReferenceV1,
+        authorization: &LocalErasureAuthorizationV1,
+        selector: &LocalErasureSelectorV1,
+        idempotency: &LocalErasureIdempotencyV1,
+    ) -> Result<(ErasureRequestV1, [Vec<u8>; 3]), ErasureErrorV1> {
+        authorization
+            .to_canonical_cbor()
+            .and_then(|eraz1| selector.to_canonical_cbor().map(|elsel1| [eraz1, elsel1]))
+            .and_then(|[eraz1, elsel1]| {
+                idempotency
+                    .to_canonical_cbor()
+                    .map(|elidem1| [eraz1, elsel1, elidem1])
+            })
+            .and_then(|objects| {
+                selector
+                    .reference()
+                    .and_then(|selector| {
+                        local_erasure_requester_v1(principal_ref)
+                            .map(|requester| (selector, requester))
+                    })
+                    .and_then(|(selector, requester)| {
+                        authorization
+                            .reference()
+                            .map(|authorization| (selector, requester, authorization))
+                    })
+                    .and_then(|(selector_reference, requester, authorization_reference)| {
+                        idempotency.reference().and_then(|provenance| {
+                            ErasureRequestV1::new(ErasureRequestInputV1 {
+                                request: authorization.erq1_request,
+                                subject: selector.subject,
+                                scope: submission.scope,
+                                selectors: vec![selector_reference],
+                                requester,
+                                authorization: authorization_reference,
+                                policy: binding.policy,
+                                request_position: 0,
+                                horizon_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+                                provenance,
+                            })
+                        })
+                    })
+                    .map(|request| (request, objects))
+            })
+    }
+}
+
+/// The Gateway operation an ERAZ1 authorizes (ADR-136 §3).
+pub(crate) const LOCAL_ERASURE_REQUEST_OPERATION: &str = "erasure.request";
+
+/// `principal_ref`: the ADR-099 digest of the Local Principal (owner
+/// decision Q1 of 2026-11-16 on #1403).
+pub(crate) fn local_principal_reference(
+    principal: &PrincipalRefV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    pos_core::fork_authentication::principal_digest_v1(principal)
+        .map(|digest| ErasureReferenceV1::from_digest(*digest.as_bytes()))
+        .map_err(|_| ErasureErrorV1::Unauthorized)
+}
+
+/// Why one subject may not submit another request (ADR-136 §6).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalSubjectRefusalV1 {
+    /// Another request of the subject is pre-terminal.
+    Concurrent,
+    /// The subject's requests already reach its quota.
+    QuotaExhausted,
+}
+
+/// Whether a request of this lifecycle has not reached its first receipt
+/// (ADR-136 §6).
+///
+/// No destruction attempt can be admitted before attempt admission lands,
+/// so a `partial-failure` request never has an active one.
+pub(crate) const fn is_pre_terminal(lifecycle: ErasureLifecycleV1) -> bool {
+    matches!(
+        lifecycle,
+        ErasureLifecycleV1::Submitted
+            | ErasureLifecycleV1::Authorized
+            | ErasureLifecycleV1::AccessFrozen
+            | ErasureLifecycleV1::DestructionDispatched
+            | ErasureLifecycleV1::AwaitingAcknowledgements
+    )
+}
+
+/// The ADR-136 §6 admission checks of one more request of `subject`.
+///
+/// Over the installed requests, the subject may have no pre-terminal
+/// request, and fewer than its lifetime quota
+/// `floor((maximum_requests - reserve) / A)`.
+pub(crate) fn local_subject_admission<'state>(
+    states: impl Iterator<Item = &'state ErasureVerifiedStateV1>,
+    subject: ErasureReferenceV1,
+    (maximum_requests, reserve, actors): (usize, u64, usize),
+) -> Result<(), LocalSubjectRefusalV1> {
+    let mut count = 0_u64;
+    let mut concurrent = false;
+    for state in states.filter(|state| state.request().subject() == subject) {
+        count += 1;
+        concurrent |= is_pre_terminal(state.lifecycle());
+    }
+    let quota = u64::try_from(maximum_requests)
+        .ok()
+        .and_then(|maximum| maximum.checked_sub(reserve))
+        .zip(u64::try_from(actors).ok())
+        .and_then(|(available, actors)| available.checked_div(actors))
+        .unwrap_or(0);
+    if concurrent {
+        Err(LocalSubjectRefusalV1::Concurrent)
+    } else if count >= quota {
+        Err(LocalSubjectRefusalV1::QuotaExhausted)
+    } else {
+        Ok(())
+    }
 }
 
 impl ErasureCoordinatorCompositionV1 {
@@ -649,7 +957,27 @@ impl ErasureCoordinatorCompositionV1 {
             authority,
             coordinator,
             world_replay_verifier: None,
+            local_submission: None,
         })
+    }
+
+    /// The composed authority, for public tests that evaluate it directly
+    /// over a host-built view.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn authority(&self) -> &dyn ErasureCoordinatorAuthorityV1 {
+        self.authority.as_ref()
+    }
+
+    /// Bind the Local erasure submission inputs of a verified Local
+    /// composition.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_local_submission(
+        mut self,
+        binding: LocalErasureSubmissionBindingV1,
+    ) -> Self {
+        self.local_submission = Some(binding);
+        self
     }
 
     /// Install the native World Replay verifier for this composition root.
@@ -676,6 +1004,7 @@ impl ErasureCoordinatorCompositionV1 {
             authority: Arc::new(ClosedErasureCoordinatorAuthorityV1),
             coordinator: ErasureReferenceV1::from_digest([0xee; 32]),
             world_replay_verifier: None,
+            local_submission: None,
         }
     }
 
@@ -696,6 +1025,77 @@ struct HostedCoordinatorPortV1<'host> {
     /// The authority view of the current store snapshot; cleared by every
     /// durable write through this port.
     view: RefCell<Option<Rc<ErasureAuthoritySnapshotViewV1>>>,
+    /// The host's installed verified inventory, for a lifecycle command; none
+    /// while the host recovers.
+    inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
+}
+
+impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
+    fn retained_object(&self, reference: ErasureReferenceV1) -> Option<Vec<u8>> {
+        self.try_borrow()
+            .ok()
+            .and_then(|store| store.read_object(reference).ok())
+    }
+
+    fn local_principal_authority(&self, grant: Hash) -> Option<PersistedAuthorityV1> {
+        self.try_borrow()
+            .ok()
+            .and_then(|store| store.load_authority(grant).ok())
+    }
+
+    fn recorded_scope(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1> {
+        self.try_borrow()
+            .ok()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|store| {
+                pos_core::ErasureRecordedScopeReadV1::recorded_scope(&**store, request)
+            })
+    }
+
+    fn artifact_registrations(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Vec<pos_core::ArtifactRegistrationCatalogRowV1>, ErasureViewListErrorV1> {
+        self.try_borrow()
+            .ok()
+            .ok_or(ErasureViewListErrorV1::Read(
+                ErasureErrorV1::ProvenanceMissing,
+            ))
+            .and_then(|store| {
+                pos_core::EventStore::artifact_registrations_for_timeline(
+                    &**store,
+                    timeline,
+                    VIEW_LIST_MAX,
+                )
+                .map_err(registration_read_error)
+            })
+    }
+
+    fn recipient_export_publications(
+        &self,
+        timelines: &[TimelineId],
+    ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureViewListErrorV1> {
+        self.try_borrow_mut()
+            .ok()
+            .ok_or(ErasureViewListErrorV1::Read(
+                ErasureErrorV1::ProvenanceMissing,
+            ))
+            .and_then(|mut store| {
+                store
+                    .recipient_export_publications(timelines, VIEW_LIST_MAX)
+                    .map_err(export_read_error)
+            })
+    }
+
+    fn key_registry(&self) -> Result<Option<pos_core::KeyRegistryStateV1>, ErasureErrorV1> {
+        self.try_borrow()
+            .ok()
+            .and_then(|store| store.load_key_registry().ok())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
 }
 
 impl<'host> HostedCoordinatorPortV1<'host> {
@@ -710,7 +1110,14 @@ impl<'host> HostedCoordinatorPortV1<'host> {
             topology_candidate: None,
             limits,
             view: RefCell::new(None),
+            inventory: None,
         }
+    }
+
+    /// Give the authority view the host's installed verified inventory.
+    fn with_verified_inventory(mut self, inventory: Arc<ErasureVerifiedInventoryV1>) -> Self {
+        self.inventory = Some(inventory);
+        self
     }
 
     /// Observe one request's topology through the authority, for the pending
@@ -724,36 +1131,40 @@ impl<'host> HostedCoordinatorPortV1<'host> {
             self.topology_candidate.as_ref().map_or_else(
                 || {
                     self.authority
-                        .verified_topology_observation(view.as_ref(), request, manifest)
+                        .verified_topology_observation(&view, request, manifest)
                 },
                 |candidate| {
                     self.authority.verified_topology_observation_for_candidate(
-                        view.as_ref(),
-                        request,
-                        manifest,
-                        candidate,
+                        &view, request, manifest, candidate,
                     )
                 },
             )
         })
     }
 
-    /// The read-only authority view of the current store snapshot.
-    fn authority_view(&self) -> Result<Rc<ErasureAuthoritySnapshotViewV1>, ErasureErrorV1> {
+    /// The read-only authority view of the current store snapshot, whose
+    /// object and authority reads run inside this host command.
+    fn authority_view(&self) -> Result<HostAuthorityViewV1<'_>, ErasureErrorV1> {
         let cached = self.view.borrow().clone();
-        cached.map_or_else(
-            || {
-                self.store
-                    .borrow_mut()
-                    .erasure_authority_snapshot_with_limits(self.limits)
-                    .map(|snapshot| {
-                        let view = Rc::new(ErasureAuthoritySnapshotViewV1::new(snapshot));
-                        *self.view.borrow_mut() = Some(Rc::clone(&view));
-                        view
-                    })
-            },
-            Ok,
-        )
+        cached
+            .map_or_else(
+                || {
+                    self.store
+                        .borrow_mut()
+                        .erasure_authority_snapshot_with_limits(self.limits)
+                        .map(|snapshot| {
+                            let view = Rc::new(ErasureAuthoritySnapshotViewV1::new(
+                                snapshot,
+                                self.limits.maximum_requests(),
+                                self.inventory.clone(),
+                            ));
+                            *self.view.borrow_mut() = Some(Rc::clone(&view));
+                            view
+                        })
+                },
+                Ok,
+            )
+            .map(|snapshot| HostAuthorityViewV1::attached(snapshot, &self.store))
     }
 
     fn with_topology_candidate(mut self, candidate: &TimelineMeta) -> Self {
@@ -928,11 +1339,8 @@ impl ErasureFreezeAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
-            self.authority.validate_freeze_authorization_with_view(
-                view.as_ref(),
-                admission,
-                authorization,
-            )
+            self.authority
+                .validate_freeze_authorization_with_view(&view, admission, authorization)
         })
     }
 }
@@ -944,7 +1352,7 @@ impl ErasureRecoveryAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .validate_scope_extension_with_view(view.as_ref(), extension)
+                .validate_scope_extension_with_view(&view, extension)
         })
     }
 
@@ -954,7 +1362,7 @@ impl ErasureRecoveryAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .validate_administrative_resolution_with_view(view.as_ref(), resolution)
+                .validate_administrative_resolution_with_view(&view, resolution)
         })
     }
 }
@@ -982,13 +1390,13 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .verified_topology_observation(view.as_ref(), request, manifest_digest)
+                .verified_topology_observation(&view, request, manifest_digest)
         })
     }
 
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         self.authority_view()
-            .and_then(|view| self.authority.authenticate(view.as_ref(), request))
+            .and_then(|view| self.authority.authenticate(&view, request))
     }
 
     fn admit_authorization(
@@ -999,7 +1407,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .admit_authorization(view.as_ref(), request, provenance, decision)
+                .admit_authorization(&view, request, provenance, decision)
         })
     }
 
@@ -1010,7 +1418,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .admit_corrected_submission(view.as_ref(), request, correction)
+                .admit_corrected_submission(&view, request, correction)
         })
     }
 
@@ -1021,7 +1429,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .admit_atomic_freeze(view.as_ref(), request, requested)
+                .admit_atomic_freeze(&view, request, requested)
         })
     }
 
@@ -1029,10 +1437,8 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         &self,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority_view().and_then(|view| {
-            self.authority
-                .admit_scope_extension(view.as_ref(), extension)
-        })
+        self.authority_view()
+            .and_then(|view| self.authority.admit_scope_extension(&view, extension))
     }
 
     fn admit_fork_scope_extension(
@@ -1042,7 +1448,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .admit_fork_scope_extension(view.as_ref(), extension, input)
+                .admit_fork_scope_extension(&view, extension, input)
         })
     }
 
@@ -1052,7 +1458,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .admit_administrative_resolution(view.as_ref(), resolution)
+                .admit_administrative_resolution(&view, resolution)
         })
     }
 
@@ -1063,7 +1469,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     ) -> Result<(), ErasureErrorV1> {
         self.authority_view().and_then(|view| {
             self.authority
-                .dispatch_destruction(view.as_ref(), request, commands)
+                .dispatch_destruction(&view, request, commands)
         })
     }
 
@@ -1072,22 +1478,20 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
         self.authority_view()
-            .and_then(|view| self.authority.admit_attempt(view.as_ref(), admission))
+            .and_then(|view| self.authority.admit_attempt(&view, admission))
     }
 
     fn admit_acknowledgement(
         &self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority_view().and_then(|view| {
-            self.authority
-                .admit_acknowledgement(view.as_ref(), acknowledgement)
-        })
+        self.authority_view()
+            .and_then(|view| self.authority.admit_acknowledgement(&view, acknowledgement))
     }
 
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
         self.authority_view()
-            .and_then(|view| self.authority.admit_receipt(view.as_ref(), input))
+            .and_then(|view| self.authority.admit_receipt(&view, input))
     }
 }
 
@@ -1376,6 +1780,7 @@ pub struct ErasureExecutionHostV1 {
     authority: Option<Arc<dyn ErasureCoordinatorAuthorityV1>>,
     coordinator: Option<ErasureReferenceV1>,
     world_replay_verifier: Option<Arc<dyn WorldReplayVerifierV1>>,
+    local_submission: Option<LocalErasureSubmissionBindingV1>,
     inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
     recovery_limits: ErasureRecoveryLimitsV1,
     state: HostStateV1,
@@ -1458,6 +1863,7 @@ impl ErasureExecutionHostV1 {
             authority: None,
             coordinator: None,
             world_replay_verifier: None,
+            local_submission: None,
             inventory: None,
             recovery_limits: ErasureRecoveryLimitsV1::compiled_maximum(),
             state: HostStateV1::Closed,
@@ -1557,6 +1963,8 @@ impl ErasureExecutionHostV1 {
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
         host.world_replay_verifier = composition.world_replay_verifier();
+        host.local_submission
+            .clone_from(&composition.local_submission);
         host.install_inventory_from_coordinator_with_limits(limits)?;
         Ok(host)
     }
@@ -1619,6 +2027,8 @@ impl ErasureExecutionHostV1 {
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
         host.world_replay_verifier = composition.world_replay_verifier();
+        host.local_submission
+            .clone_from(&composition.local_submission);
         host.install_inventory_from_coordinator_with_limits(limits)
             .map(|_| host)
     }
@@ -2918,13 +3328,39 @@ impl ErasureExecutionHostV1 {
         })
     }
 
+    /// The read-only authority view of this ready host's current store
+    /// snapshot: the same view the host passes into every authority method
+    /// (ADR-136 companion §2.6).
+    ///
+    /// Only the host builds a view, so a caller can evaluate an authority
+    /// over the store's real evidence but can never hand it fabricated
+    /// evidence.
+    ///
+    /// # Errors
+    /// Returns [`ErasureHostErrorV1::RecoveryUnavailable`] for a host that is
+    /// not ready, or the payload-free error of an unreadable snapshot.
+    pub fn authority_view(
+        &mut self,
+    ) -> Result<impl ErasureAuthorityReadViewV1 + use<>, ErasureHostErrorV1> {
+        self.ready_state()
+            .and_then(|_| self.host_authority_view().map_err(map_erasure_error))
+    }
+
     /// The read-only authority view of the current store snapshot, for an
     /// authority call made outside the coordinator port.
-    fn host_authority_view(&mut self) -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
+    fn host_authority_view(&mut self) -> Result<HostAuthorityViewV1<'static>, ErasureErrorV1> {
+        let maximum_requests = self.recovery_limits.maximum_requests();
+        let inventory = self.inventory.clone();
         self.store
             .host_store()
             .erasure_authority_snapshot_with_limits(self.recovery_limits)
-            .map(ErasureAuthoritySnapshotViewV1::new)
+            .map(|snapshot| {
+                HostAuthorityViewV1::detached(ErasureAuthoritySnapshotViewV1::new(
+                    snapshot,
+                    maximum_requests,
+                    inventory,
+                ))
+            })
     }
 
     fn recover_identified_fork(
@@ -3063,7 +3499,7 @@ impl ErasureExecutionHostV1 {
             &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
         ) -> Result<T, ErasureErrorV1>,
     ) -> Result<(T, ErasureReferenceV1), ErasureHostErrorV1> {
-        let (_, maximum_requests, _) = self.ready_state()?;
+        let (_, maximum_requests, installed) = self.ready_state()?;
         let limits = self.recovery_limits;
         let authority = self
             .authority
@@ -3080,7 +3516,8 @@ impl ErasureExecutionHostV1 {
                     self.store.host_store(),
                     authority.as_ref(),
                     limits,
-                );
+                )
+                .with_verified_inventory(Arc::clone(&installed));
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
                 match transition(&mut state_machine).and_then(|result| {
                     state_machine
@@ -3858,6 +4295,191 @@ impl ErasureCommandSenderV1<'_> {
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
         self.apply_state_command(&HostedCoordinatorCommandV1::submit(request, provenance))
+    }
+
+    /// Submit one Local erasure request (ADR-136 §6).
+    ///
+    /// The host derives the `erasure_id` from the Principal, the actor and
+    /// the Idempotency-Key digest. The authority first authenticates the
+    /// Principal and actor against the root grant at the current chain
+    /// head, so a caller it would not admit learns nothing of any request
+    /// or subject. A request with that id already installed then returns
+    /// its state when its ELIDEM1 binds the same body, and is a conflict
+    /// otherwise; this exact replay is answered even once new admissions
+    /// have closed, since expiry closes new admissions only. A fresh
+    /// request needs new admissions open, must pass the per-subject checks
+    /// against the installed inventory, and the authority must find the
+    /// closure within its bound; only then does the host retain its ERAZ1,
+    /// ELSEL1 and ELIDEM1, build ERQ1 and submit it, and the authority
+    /// re-checks all of it from its view. A refused submission retains
+    /// nothing.
+    ///
+    /// # Errors
+    /// Returns [`LocalErasureSubmitErrorV1::Concurrent`] while another
+    /// request of the subject is pre-terminal,
+    /// [`LocalErasureSubmitErrorV1::QuotaExhausted`] once the subject's
+    /// quota is used, [`LocalErasureSubmitErrorV1::ScopeTooLarge`] for a
+    /// closure over its bound, and otherwise a payload-free host error: a
+    /// host with no Local composition or Local Principal record, and a
+    /// Principal, actor or root grant the authority does not authorize at
+    /// the chain head, refuse with
+    /// [`ErasureHostErrorV1::AuthorizationDenied`]; a fresh request once
+    /// the installed TPS1 or the bundle has expired is
+    /// [`ErasureHostErrorV1::RecoveryUnavailable`]; and an Idempotency-Key
+    /// reused for another body, or a retained-only scope, is a
+    /// [`ErasureHostErrorV1::Conflict`].
+    pub fn submit_local_erasure(
+        &mut self,
+        submission: &LocalErasureSubmissionV1,
+    ) -> Result<ErasureStateV1, LocalErasureSubmitErrorV1> {
+        let binding = self
+            .host
+            .local_submission
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let (installed, records) = self
+            .host
+            .ensure_generation(self.generation)
+            .and_then(|()| self.host.ready_state())
+            .and_then(|(_, _, installed)| {
+                self.host
+                    .store
+                    .host_store()
+                    .load_authority(binding.principal_grant)
+                    .map_err(|_| ErasureHostErrorV1::AuthorizationDenied)
+                    .and_then(|authority| {
+                        LocalSubmissionRecordsV1::prepare(submission, &binding, &authority)
+                            .map_err(map_erasure_error)
+                    })
+                    .map(|records| (installed, records))
+            })?;
+        let limits = (
+            self.host.recovery_limits.maximum_requests(),
+            binding.store_request_reserve,
+            records.actors,
+        );
+        let preparation = &binding.preparation;
+        let request = &records.request;
+        // `Some` is the answer to an exact replay; `None` admits a fresh
+        // request whose records may now be retained.
+        let replayed = self
+            .with_local_view(Arc::clone(&installed), |view| {
+                preparation.authenticate_submission(
+                    view,
+                    records.principal_ref,
+                    submission.actor,
+                )?;
+                if let Some(state) = installed
+                    .states()
+                    .find(|state| state.request().reference() == request.reference())
+                {
+                    return Ok((state.request().provenance() == request.provenance())
+                        .then(|| Some(state.state().clone()))
+                        .ok_or(LocalErasureSubmitErrorV1::Host(
+                            ErasureHostErrorV1::Conflict,
+                        )));
+                }
+                preparation.submissions_open()?;
+                if let Err(refusal) =
+                    local_subject_admission(installed.states(), request.subject(), limits)
+                {
+                    return Ok(Err(refusal.into()));
+                }
+                preparation
+                    .submission_fits(view, submission.actor, submission.scope)
+                    .map(|fits| {
+                        fits.then_some(None)
+                            .ok_or(LocalErasureSubmitErrorV1::ScopeTooLarge)
+                    })
+            })
+            .map_err(LocalErasureSubmitErrorV1::from)
+            .and_then(std::convert::identity)?;
+        if let Some(state) = replayed {
+            return Ok(state);
+        }
+        records
+            .objects
+            .iter()
+            .try_for_each(|object| {
+                self.host
+                    .store
+                    .host_store()
+                    .retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
+                    .map(drop)
+            })
+            .map_err(|error| LocalErasureSubmitErrorV1::Host(map_erasure_error(error)))?;
+        let provenance = records.request.provenance();
+        self.submit_erasure_request(records.request, provenance)
+            .map_err(LocalErasureSubmitErrorV1::Host)
+    }
+
+    /// Prepare the access freeze of one Local erasure request (ADR-136 §5).
+    ///
+    /// The Local authority recomputes the freeze the current snapshot admits
+    /// and returns `CA(ERFA1-AUTH)`, the body a purpose-0 ELS1 must sign.
+    /// The host first retains the bundle and lineage-rule records the freeze
+    /// will reference; nothing else is written. The signed ELS1 is then
+    /// retained and named as the provenance of [`Self::freeze_access`].
+    ///
+    /// # Errors
+    /// [`ErasureHostErrorV1::AuthorizationDenied`] on a host without a Local
+    /// composition; otherwise the payload-free error of a freeze the
+    /// authority would not admit, including a closure over its bound, which
+    /// `freeze_access` commits as a rejection.
+    pub fn prepare_local_freeze(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        let binding = self
+            .host
+            .local_submission
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| self.host.ready_state())
+            .and_then(|(_, _, installed)| {
+                self.with_local_view(installed, |view| {
+                    binding.preparation.prepare_freeze(view, request)
+                })
+            })
+            .and_then(|(digest, objects)| {
+                objects
+                    .iter()
+                    .try_for_each(|object| {
+                        self.host
+                            .store
+                            .host_store()
+                            .retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
+                            .map(drop)
+                    })
+                    .map(|()| digest)
+                    .map_err(map_erasure_error)
+            })
+    }
+
+    /// Evaluate the Local authority's preparation seam over a view of the
+    /// current store snapshot whose reads run inside this host command.
+    fn with_local_view<T>(
+        &mut self,
+        installed: Arc<ErasureVerifiedInventoryV1>,
+        evaluate: impl FnOnce(&dyn ErasureAuthorityReadViewV1) -> Result<T, ErasureErrorV1>,
+    ) -> Result<T, ErasureHostErrorV1> {
+        let limits = self.host.recovery_limits;
+        let authority = self.host.authority.clone();
+        authority
+            .ok_or(ErasureErrorV1::Unauthorized)
+            .and_then(|authority| {
+                HostedCoordinatorPortV1::new(
+                    self.host.store.host_store(),
+                    authority.as_ref(),
+                    limits,
+                )
+                .with_verified_inventory(installed)
+                .authority_view()
+                .and_then(|view| evaluate(&view))
+            })
+            .map_err(map_erasure_error)
     }
 
     /// Authenticate and persist an authorization decision through the
@@ -5204,12 +5826,16 @@ mod tests {
         ErasureReferenceV1::from_digest([seed; 32])
     }
 
-    fn empty_authority_view() -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
+    fn empty_authority_view() -> Result<HostAuthorityViewV1<'static>, ErasureErrorV1> {
         ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
             .and_then(|inventory| {
                 pos_core::ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None)
             })
-            .map(ErasureAuthoritySnapshotViewV1::new)
+            .map(|snapshot| {
+                HostAuthorityViewV1::detached(ErasureAuthoritySnapshotViewV1::new(
+                    snapshot, 1, None,
+                ))
+            })
     }
 
     fn verified_empty_inventory(
@@ -8257,7 +8883,8 @@ mod tests {
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             );
             let first = port.authority_view()?;
-            assert!(Rc::ptr_eq(&first, &port.authority_view()?));
+            let second = port.authority_view()?;
+            assert_eq!(first.snapshot_generation(), second.snapshot_generation());
         }
         assert_eq!(store.authority_snapshot_calls, 1);
 
