@@ -723,6 +723,33 @@ fn sqlite_authority_snapshot_does_not_rebind_a_stale_inventory() -> TestResult {
     Ok(())
 }
 
+/// A store that never published a recipient export answers every
+/// publication read with the empty list, at any bound: `MemoryStore` has no
+/// publication path and a fresh `SQLite` store has no publication catalog.
+fn empty_publication_contract(store: &mut impl LocalErasureStore) -> TestResult {
+    let timelines = [
+        TimelineId::from_ulid(Ulid::from(7_u128)),
+        TimelineId::from_ulid(Ulid::from(3_u128)),
+    ];
+    assert!(store
+        .recipient_export_publications(&timelines, 0)?
+        .is_empty());
+    assert!(store.recipient_export_publications(&[], 4_096)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn recipient_export_publications_are_empty_without_a_publication() -> TestResult {
+    empty_publication_contract(&mut MemoryStore::new())?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("publications.sqlite3");
+    let path = path
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    empty_publication_contract(&mut store)
+}
+
 /// A key registry that fails to load refuses the tombstone like an absent
 /// one, and the claim stays transactional: the ELO1 is not inserted. Once the
 /// registry loads again the same tombstone commits, so the load error alone
