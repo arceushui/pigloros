@@ -648,16 +648,15 @@ fn erasure_publication_reads_fail_closed_for_malformed_catalog_rows() -> TestRes
 /// Rewrite exactly one catalog column of one publication, keeping its
 /// ciphertext, length and digest intact.
 fn tamper_catalog_column(
-    fixture: &Fixture,
+    database: &std::path::Path,
     export_id: [u8; 16],
     assignment: &str,
     value: &dyn rusqlite::ToSql,
 ) -> TestResult {
-    let updated = rusqlite::Connection::open(fixture.temporary.path().join("recipient.sqlite"))?
-        .execute(
-            &format!("UPDATE recipient_export_catalog_v1 SET {assignment} WHERE export_id = ?2"),
-            rusqlite::params![value, export_id.as_slice()],
-        )?;
+    let updated = rusqlite::Connection::open(database)?.execute(
+        &format!("UPDATE recipient_export_catalog_v1 SET {assignment} WHERE export_id = ?2"),
+        rusqlite::params![value, export_id.as_slice()],
+    )?;
     assert_eq!(updated, 1);
     Ok(())
 }
@@ -665,6 +664,10 @@ fn tamper_catalog_column(
 /// Each envelope header binding is checked against the catalog row on its own:
 /// a row that still passes owner validation but names another recipient key,
 /// source Timeline or local head than the stored object is unavailable.
+///
+/// The rows are tampered while no store is open and read through a reopened
+/// store, because a bound erasure gate refuses any read after another
+/// connection commits (its inventory data-version check).
 #[test]
 fn reader_refuses_a_catalog_row_that_disagrees_with_one_header_binding() -> TestResult {
     let mut fixture = fixture(true)?;
@@ -682,30 +685,46 @@ fn reader_refuses_a_catalog_row_that_disagrees_with_one_header_binding() -> Test
         ("timeline_id = ?1", &other_timeline),
         ("local_head = local_head + ?1", &1_i64),
     ];
-    for (assignment, value) in tampers {
+    let mut export_ids = Vec::new();
+    for _ in 0..=tampers.len() {
         let request = request(
             fixture.timeline,
             fixture.descriptor,
             &fixture.evaluation,
             &fixture.token,
         );
-        let publication =
+        export_ids.push(
             fixture
                 .store
-                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
-        fixture
-            .store
-            .read_recipient_export(&fixture.owner, publication.export_id)?;
-        tamper_catalog_column(&fixture, publication.export_id, assignment, value)?;
-        assert!(
-            matches!(
-                fixture
-                    .store
-                    .read_recipient_export(&fixture.owner, publication.export_id),
-                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
-            ),
-            "tampered catalog column `{assignment}` was served"
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?
+                .export_id,
         );
     }
+    let Fixture {
+        temporary,
+        store,
+        owner,
+        ..
+    } = fixture;
+    drop(store);
+    let database = temporary.path().join("recipient.sqlite");
+    for ((assignment, value), export_id) in tampers.iter().zip(&export_ids) {
+        tamper_catalog_column(&database, *export_id, assignment, *value)?;
+    }
+    let mut reopened = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    reopened.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+
+    for ((assignment, _), export_id) in tampers.iter().zip(&export_ids) {
+        let result = reopened.read_recipient_export(&owner, *export_id);
+        assert!(
+            matches!(
+                result,
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+            ),
+            "tampered catalog column `{assignment}` read as {result:?}"
+        );
+    }
+    let untouched = export_ids.last().ok_or("no untouched publication")?;
+    assert!(reopened.read_recipient_export(&owner, *untouched).is_ok());
     Ok(())
 }
