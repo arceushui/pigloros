@@ -6920,9 +6920,10 @@ fn reopened_run(
     let case = driver_case()?;
     interrupt(&mut store.host(&case, 4_096)?)?;
     let mut steps = Vec::new();
+    let driver = driver();
     loop {
         let mut host = store.host(&case, 4_096)?;
-        match driver().step(&mut host, request)? {
+        match driver.step(&mut host, request)? {
             LocalErasureStepV1::Idle => break,
             step => steps.push(step),
         }
