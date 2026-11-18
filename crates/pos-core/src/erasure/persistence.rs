@@ -411,30 +411,112 @@ pub(super) fn recorded_scope<P: ErasurePersistencePortV1 + ?Sized>(
         .and_then(|manifest| {
             manifest
                 .and_then(|manifest| manifest.scope)
-                .map(|scope| {
-                    port.read_object(scope)
+                .map(|reference| {
+                    port.read_object(reference)
                         .and_then(|bytes| ErasureScopeCommitmentV1::from_canonical_cbor(&bytes))
                         .and_then(|scope| {
-                            port.scope_index_count(request)
-                                .and_then(|count| {
-                                    (0..count)
-                                        .map(|ordinal| {
-                                            port.scope_node_ref(request, ordinal)
-                                                .and_then(|node| {
-                                                    node.ok_or(ErasureErrorV1::ProvenanceMissing)
-                                                })
-                                                .and_then(|node| port.read_object(node))
-                                                .and_then(|bytes| ScopeNodeV1::decode(&bytes))
-                                                .and_then(|node| port.read_object(node.extension))
-                                                .and_then(|bytes| {
-                                                    ErasureScopeExtensionV1::from_canonical_cbor(
-                                                        &bytes,
-                                                    )
-                                                })
-                                        })
-                                        .collect::<Result<Vec<_>, _>>()
-                                })
+                            (scope.reference() == reference)
+                                .then_some(scope)
+                                .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        })
+                        .and_then(|scope| {
+                            recorded_scope_extensions(port, request, reference)
                                 .map(|extensions| (scope, extensions))
+                        })
+                })
+                .transpose()
+        })
+}
+
+/// The ERSE1 chain of `request` under the committed scope `scope`, in
+/// ordinal order, each node and extension checked by [`load_scope_link`]
+/// exactly as recovery checks them.
+fn recorded_scope_extensions<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+    scope: ErasureReferenceV1,
+) -> Result<Vec<ErasureScopeExtensionV1>, ErasureErrorV1> {
+    port.scope_index_count(request).and_then(|count| {
+        (0..count)
+            .try_fold(
+                (Vec::new(), None),
+                |(mut extensions, predecessor), ordinal| {
+                    port.scope_node_ref(request, ordinal)
+                        .and_then(|node| node.ok_or(ErasureErrorV1::ProvenanceMissing))
+                        .and_then(|node| {
+                            load_scope_link(
+                                port,
+                                node,
+                                ScopeLinkV1 {
+                                    request,
+                                    scope: Some(scope),
+                                    ordinal,
+                                    predecessor,
+                                },
+                            )
+                            .map_err(RecoveryFailureV1::error)
+                            .map(|(_, extension)| {
+                                extensions.push(extension);
+                                (extensions, Some(node))
+                            })
+                        })
+                },
+            )
+            .map(|(extensions, _)| extensions)
+    })
+}
+
+/// Read the admission of a request's active attempt through its current
+/// manifest, without validating the record.
+pub(super) fn recorded_active_attempt<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
+    port.read_manifest(request)
+        .and_then(|stored| {
+            stored
+                .map(|stored| ManifestV1::decode(stored.canonical_cbor()))
+                .transpose()
+        })
+        .and_then(|manifest| {
+            manifest
+                .and_then(|manifest| manifest.active)
+                .map(|active| {
+                    port.read_object(active.admission)
+                        .and_then(|bytes| ErasureRetryAdmissionV1::from_canonical_cbor(&bytes))
+                        .and_then(|admission| {
+                            (admission.reference() == active.admission
+                                && admission.request() == request)
+                                .then_some(admission)
+                                .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        })
+                })
+                .transpose()
+        })
+}
+
+/// Read the trust revision of a request's frozen obligation set through its
+/// current manifest, without validating the record.
+pub(super) fn recorded_obligation_trust<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+    port.read_manifest(request)
+        .and_then(|stored| {
+            stored
+                .map(|stored| ManifestV1::decode(stored.canonical_cbor()))
+                .transpose()
+        })
+        .and_then(|manifest| {
+            manifest
+                .and_then(|manifest| manifest.obligation_set)
+                .map(|reference| {
+                    port.read_object(reference)
+                        .and_then(|bytes| ErasureObligationSetV1::from_canonical_cbor(&bytes))
+                        .and_then(|set| {
+                            (set.reference() == reference)
+                                .then_some(set.trust())
+                                .ok_or(ErasureErrorV1::ProvenanceMissing)
                         })
                 })
                 .transpose()
@@ -556,8 +638,8 @@ fn validate_receipt_obligations(
         .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))
 }
 
-fn read_recovery_object(
-    port: &dyn ErasurePersistencePortV1,
+fn read_recovery_object<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
     reference: ErasureReferenceV1,
 ) -> Result<Vec<u8>, RecoveryFailureV1> {
     port.read_object(reference)
@@ -573,8 +655,8 @@ fn validate_recovery_object_address(
         .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, expected))
 }
 
-fn load_recovery_object<T>(
-    port: &dyn ErasurePersistencePortV1,
+fn load_recovery_object<T, P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
     reference: ErasureReferenceV1,
     decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1>,
     address: impl FnOnce(&T) -> ErasureReferenceV1,
@@ -584,6 +666,47 @@ fn load_recovery_object<T>(
         .and_then(|value| {
             validate_recovery_object_address(reference, address(&value)).map(|()| value)
         })
+}
+
+/// What one scope-chain node must link: its request, the committed scope,
+/// its ordinal and its predecessor node.
+#[derive(Clone, Copy)]
+struct ScopeLinkV1 {
+    request: ErasureReferenceV1,
+    scope: Option<ErasureReferenceV1>,
+    ordinal: u64,
+    predecessor: Option<ErasureReferenceV1>,
+}
+
+/// Load the scope-chain node at `reference` and the ERSE1 it names, each
+/// checked against its address, and require the node to make `link`.
+/// Recovery and the recorded-scope read both use it, so their checks
+/// cannot diverge.
+fn load_scope_link<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    reference: ErasureReferenceV1,
+    link: ScopeLinkV1,
+) -> Result<(ScopeNodeV1, ErasureScopeExtensionV1), RecoveryFailureV1> {
+    load_recovery_object(port, reference, ScopeNodeV1::decode, |value| {
+        value.reference
+    })
+    .and_then(|node| {
+        load_recovery_object(
+            port,
+            node.extension,
+            ErasureScopeExtensionV1::from_canonical_cbor,
+            ErasureScopeExtensionV1::reference,
+        )
+        .map(|extension| (node, extension))
+    })
+    .and_then(|(node, extension)| {
+        (node.request == link.request
+            && Some(node.scope) == link.scope
+            && node.ordinal == link.ordinal
+            && node.predecessor == link.predecessor)
+            .then_some((node, extension))
+            .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, reference))
+    })
 }
 
 macro_rules! load_optional_recovery_object {
@@ -1935,25 +2058,16 @@ impl RecoveredErasureV1 {
                 .ok_or_else(|| {
                     RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
                 })?;
-            let node = load_recovery_object(port, reference, ScopeNodeV1::decode, |value| {
-                value.reference
-            })?;
-            let extension = load_recovery_object(
+            let (node, extension) = load_scope_link(
                 port,
-                node.extension,
-                ErasureScopeExtensionV1::from_canonical_cbor,
-                ErasureScopeExtensionV1::reference,
+                reference,
+                ScopeLinkV1 {
+                    request: self.request.reference(),
+                    scope: self.manifest.scope,
+                    ordinal,
+                    predecessor: predecessor_node,
+                },
             )?;
-            if node.request != self.request.reference()
-                || Some(node.scope) != self.manifest.scope
-                || node.ordinal != ordinal
-                || node.predecessor != predecessor_node
-            {
-                return Err(RecoveryFailureV1::new(
-                    ErasureErrorV1::ProvenanceMissing,
-                    reference,
-                ));
-            }
             if extension.request() != self.request.reference()
                 || extension.scope_commitment() != node.scope
                 || Some(extension.lineage_rule()) != lineage_rule
@@ -3431,6 +3545,8 @@ mod tests {
         resolution_count_error: Option<ErasureErrorV1>,
         resolution_references: Vec<Result<Option<ErasureReferenceV1>, ErasureErrorV1>>,
         objects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+        manifest: Option<StoredErasureManifestV1>,
+        scope_nodes: Vec<ErasureReferenceV1>,
     }
 
     impl TestPersistencePort {
@@ -3442,6 +3558,8 @@ mod tests {
                 resolution_count_error: None,
                 resolution_references: Vec::new(),
                 objects: BTreeMap::new(),
+                manifest: None,
+                scope_nodes: Vec::new(),
             }
         }
     }
@@ -3460,7 +3578,7 @@ mod tests {
             &self,
             _request: ErasureReferenceV1,
         ) -> Result<Option<StoredErasureManifestV1>, ErasureErrorV1> {
-            Ok(None)
+            Ok(self.manifest.clone())
         }
 
         fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
@@ -3499,13 +3617,16 @@ mod tests {
         fn scope_node_ref(
             &self,
             _request: ErasureReferenceV1,
-            _ordinal: u64,
+            ordinal: u64,
         ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-            Ok(None)
+            Ok(usize::try_from(ordinal)
+                .ok()
+                .and_then(|ordinal| self.scope_nodes.get(ordinal))
+                .copied())
         }
 
         fn scope_index_count(&self, _request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-            Ok(0)
+            Ok(u64::try_from(self.scope_nodes.len()).unwrap_or(u64::MAX))
         }
 
         fn administrative_resolution_ref(
@@ -3548,6 +3669,297 @@ mod tests {
         ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
             Err(ErasureErrorV1::PolicyConflict)
         }
+    }
+
+    /// A port whose manifest records `admission` as its active attempt.
+    fn active_attempt_port(
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<TestPersistencePort, ErasureErrorV1> {
+        let manifest = encode_limited(
+            &manifest_value(Value::Array(vec![
+                uint(0),
+                digest(admission.reference()),
+                Value::Array(Vec::new()),
+            ])),
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+        )?;
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        port.manifest = Some(StoredErasureManifestV1::new(
+            ErasureReferenceV1::from_digest(domain_digest(ERCRP1, &manifest)),
+            manifest,
+        )?);
+        port.objects
+            .insert(admission.reference(), admission.to_canonical_cbor()?);
+        Ok(port)
+    }
+
+    #[test]
+    fn a_recorded_active_attempt_must_belong_to_its_request() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let admission_of = |owner| {
+            ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+                request: owner,
+                attempt_ordinal: 0,
+                source_receipt: None,
+                unresolved_obligations: Vec::new(),
+                command_identities: Vec::new(),
+                policy: reference(4),
+                trust: reference(5),
+                admitted_position: 2,
+                deadline_position: 3,
+                authorization_provenance: reference(6),
+            })
+        };
+        let own = admission_of(request)?;
+        // The sealed trait forwards to the same read: nothing before a
+        // manifest records an active attempt, then that attempt's admission.
+        assert_eq!(
+            crate::ErasureRecordedAttemptReadV1::recorded_active_attempt(
+                &TestPersistencePort::new(None, ErasureCasEffectV1::None),
+                request
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            crate::ErasureRecordedAttemptReadV1::recorded_active_attempt(
+                &active_attempt_port(&own)?,
+                request
+            ),
+            Ok(Some(own.clone()))
+        );
+        assert_eq!(
+            recorded_active_attempt(&active_attempt_port(&own)?, request),
+            Ok(Some(own))
+        );
+        // A forged manifest naming another request's admission is refused.
+        let foreign = admission_of(reference(9))?;
+        assert_eq!(
+            recorded_active_attempt(&active_attempt_port(&foreign)?, request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    /// The manifest of `manifest_value` without an active attempt, with
+    /// `field` set to `reference`.
+    fn manifest_naming(field: usize, reference: ErasureReferenceV1) -> Value {
+        let mut manifest = manifest_value(Value::Null);
+        if let Value::Array(fields) = &mut manifest {
+            fields[field] = digest(reference);
+        }
+        manifest
+    }
+
+    /// A port whose stored manifest is `manifest` and whose objects are
+    /// `objects`.
+    fn manifest_port(
+        manifest: &Value,
+        objects: Vec<(ErasureReferenceV1, Vec<u8>)>,
+    ) -> Result<TestPersistencePort, ErasureErrorV1> {
+        let bytes = encode_limited(manifest, ERASURE_COORDINATOR_RECORD_MAX_BYTES)?;
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        port.manifest = Some(StoredErasureManifestV1::new(
+            ErasureReferenceV1::from_digest(domain_digest(ERCRP1, &bytes)),
+            bytes,
+        )?);
+        port.objects.extend(objects);
+        Ok(port)
+    }
+
+    #[test]
+    fn the_recorded_obligation_trust_is_the_frozen_sets_own() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let set_of = |trust| {
+            ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+                request,
+                obligations: Vec::new(),
+                policy: reference(6),
+                trust,
+            })
+        };
+        let set = set_of(reference(0x70))?;
+        let other = set_of(reference(0x71))?;
+        let named = manifest_naming(12, set.reference());
+        // No manifest, or a manifest without an obligation set: no trust.
+        let empty = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        assert_eq!(recorded_obligation_trust(&empty, request), Ok(None));
+        assert_eq!(
+            recorded_obligation_trust(
+                &manifest_port(&manifest_value(Value::Null), Vec::new())?,
+                request
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            recorded_obligation_trust(
+                &manifest_port(&named, vec![(set.reference(), set.to_canonical_cbor()?)])?,
+                request
+            ),
+            Ok(Some(reference(0x70)))
+        );
+        // A missing or undecodable set, or another set under its address,
+        // fails closed.
+        assert_eq!(
+            recorded_obligation_trust(&manifest_port(&named, Vec::new())?, request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert!(recorded_obligation_trust(
+            &manifest_port(&named, vec![(set.reference(), vec![0])])?,
+            request
+        )
+        .is_err());
+        assert_eq!(
+            recorded_obligation_trust(
+                &manifest_port(&named, vec![(set.reference(), other.to_canonical_cbor()?)])?,
+                request
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        // The sealed trait forwards to the same read.
+        assert_eq!(
+            crate::ErasureRecordedAttemptReadV1::recorded_obligation_trust(
+                &manifest_port(&named, vec![(set.reference(), set.to_canonical_cbor()?)])?,
+                request
+            ),
+            Ok(Some(reference(0x70)))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_recorded_scope_is_the_committed_scope_itself() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let committed = scope(request)?;
+        let other = scope(reference(2))?;
+        let named = manifest_naming(7, committed.reference());
+        // No manifest, or a manifest without a committed scope: no scope.
+        assert_eq!(
+            recorded_scope(
+                &TestPersistencePort::new(None, ErasureCasEffectV1::None),
+                request
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            recorded_scope(
+                &manifest_port(&manifest_value(Value::Null), Vec::new())?,
+                request
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            recorded_scope(
+                &manifest_port(
+                    &named,
+                    vec![(committed.reference(), other.to_canonical_cbor()?)]
+                )?,
+                request
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            recorded_scope(
+                &manifest_port(
+                    &named,
+                    vec![(committed.reference(), committed.to_canonical_cbor()?)]
+                )?,
+                request
+            ),
+            Ok(Some((committed, Vec::new())))
+        );
+        Ok(())
+    }
+
+    /// A port whose scope index lists `nodes`, each stored under its own
+    /// address, and which holds `objects`.
+    fn chain_port(
+        nodes: &[ScopeNodeV1],
+        objects: Vec<(ErasureReferenceV1, Vec<u8>)>,
+    ) -> Result<TestPersistencePort, ErasureErrorV1> {
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        for node in nodes {
+            let bytes = node.canonical_cbor()?;
+            let address = addressed(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, &bytes);
+            port.objects.insert(address, bytes);
+            port.scope_nodes.push(address);
+        }
+        port.objects.extend(objects);
+        Ok(port)
+    }
+
+    #[test]
+    fn the_recorded_scope_chain_is_linked_like_recovery() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let scope = reference(0x60);
+        let extension_of = |fork| {
+            ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+                request,
+                scope_commitment: scope,
+                fork,
+                child_timeline: crate::TimelineId::new(),
+                lineage_rule: reference(50),
+                predecessor_extension: None,
+                admission_provenance: reference(51),
+            })
+        };
+        let first = extension_of(reference(0x61))?;
+        let second = extension_of(reference(0x62))?;
+        let node = |extension: &ErasureScopeExtensionV1, ordinal, predecessor| ScopeNodeV1 {
+            request,
+            scope,
+            extension: extension.reference(),
+            ordinal,
+            predecessor,
+            reference: reference(0),
+        };
+        let first_node = node(&first, 0, None);
+        let first_address = addressed(
+            ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+            &first_node.canonical_cbor()?,
+        );
+        let second_node = node(&second, 1, Some(first_address));
+        let objects = vec![
+            (first.reference(), first.to_canonical_cbor()?),
+            (second.reference(), second.to_canonical_cbor()?),
+        ];
+        let linked = chain_port(&[first_node, second_node], objects.clone())?;
+        assert_eq!(
+            recorded_scope_extensions(&linked, request, scope),
+            Ok(vec![first, second])
+        );
+        let missing = Err(ErasureErrorV1::ProvenanceMissing);
+        // Another committed scope does not own this chain.
+        assert_eq!(
+            recorded_scope_extensions(&linked, request, reference(0x5f)),
+            missing
+        );
+        // The second node must name the first as its predecessor.
+        let unlinked = chain_port(&[first_node, node(&second, 1, None)], objects.clone())?;
+        assert_eq!(
+            recorded_scope_extensions(&unlinked, request, scope),
+            missing
+        );
+        // Another extension stored under a node's extension address.
+        let swapped = chain_port(
+            &[first_node],
+            vec![(first.reference(), second.to_canonical_cbor()?)],
+        )?;
+        assert_eq!(recorded_scope_extensions(&swapped, request, scope), missing);
+        // A node of another request, or at another ordinal.
+        for wrong in [
+            ScopeNodeV1 {
+                request: reference(2),
+                ..first_node
+            },
+            ScopeNodeV1 {
+                ordinal: 1,
+                ..first_node
+            },
+        ] {
+            let port = chain_port(&[wrong], objects.clone())?;
+            assert_eq!(recorded_scope_extensions(&port, request, scope), missing);
+        }
+        Ok(())
     }
 
     fn resolution_fixture(

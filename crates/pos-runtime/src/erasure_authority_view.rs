@@ -4,9 +4,10 @@ use std::{cell::OnceCell, rc::Rc, sync::Arc};
 
 use pos_core::{
     ArtifactRegistrationCatalogRowV1, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1,
-    ErasureErrorV1, ErasureReferenceV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureVerifiedInventoryV1, ErasureVerifiedStateV1, Hash, KeyIdentityV1, KeyRegistryStateV1,
-    OwnerIdV1, PersistedAuthorityV1, RecipientExportPublicationRowV1, TimelineId,
+    ErasureErrorV1, ErasureReferenceV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateV1, Hash,
+    KeyIdentityV1, KeyRegistryStateV1, OwnerIdV1, PersistedAuthorityV1,
+    RecipientExportPublicationRowV1, TimelineId,
 };
 
 /// The committed ERSC1 of one request and its ERSE1 chain in ordinal order.
@@ -73,6 +74,34 @@ pub trait ErasureAuthorityReadViewV1: view_sealed::Sealed {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1>;
+
+    /// The admission of one request's active attempt, `Ok(None)` when it
+    /// has none.
+    ///
+    /// It is read inside the host command that built this view, and carries
+    /// the trust revision the attempt pins (ADR-136 §5).
+    ///
+    /// # Errors
+    /// [`ErasureErrorV1::ProvenanceMissing`] outside a host command, or the
+    /// closed read error of a recorded attempt.
+    fn active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1>;
+
+    /// The trust revision one request's frozen obligation set pins,
+    /// `Ok(None)` before freeze.
+    ///
+    /// It is read inside the host command that built this view. Core
+    /// recovery requires every attempt of the request to pin it.
+    ///
+    /// # Errors
+    /// [`ErasureErrorV1::ProvenanceMissing`] outside a host command, or the
+    /// closed read error of a recorded obligation set.
+    fn frozen_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
 
     /// Every ARD1 registration bound to `timeline`, in registration-address
     /// order (companion §2.6 `artifact_registrations`).
@@ -163,6 +192,18 @@ pub(crate) trait ErasureAuthorityStoreReadsV1 {
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1>;
 
+    /// The admission of one request's active attempt.
+    fn active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1>;
+
+    /// The trust of one request's frozen obligation set.
+    fn frozen_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
+
     /// The ARD1 rows bound to one Timeline, at most [`VIEW_LIST_MAX`].
     fn artifact_registrations(
         &self,
@@ -196,6 +237,20 @@ impl ErasureAuthorityStoreReadsV1 for DetachedStoreReadsV1 {
         &self,
         _request: ErasureReferenceV1,
     ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn active_attempt(
+        &self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn frozen_trust(
+        &self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 
@@ -337,6 +392,20 @@ impl ErasureAuthorityReadViewV1 for HostAuthorityViewV1<'_> {
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureRecordedScopeV1>, ErasureErrorV1> {
         self.reads.recorded_scope(request)
+    }
+
+    fn active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
+        self.reads.active_attempt(request)
+    }
+
+    fn frozen_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.reads.frozen_trust(request)
     }
 
     fn artifact_registrations(
