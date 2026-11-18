@@ -725,11 +725,16 @@ fn managed_credential_names(
     directory: &File,
     alongside: &[&str],
 ) -> Result<(), LocalForkAuthenticationErrorV1> {
-    let mut expected = MANAGED_CREDENTIAL_NAMES.to_vec();
-    expected.extend_from_slice(alongside);
-    expected.sort_unstable();
+    let expected = MANAGED_CREDENTIAL_NAMES
+        .iter()
+        .chain(alongside)
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     sorted_credential_names(directory).and_then(|names| {
-        (names == expected)
+        names
+            .iter()
+            .map(String::as_str)
+            .eq(expected)
             .then_some(())
             .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
     })

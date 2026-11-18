@@ -39,6 +39,7 @@
 //! command and holds every other Gateway command for its duration.
 
 use std::{
+    collections::BTreeSet,
     io::{self, Write as _},
     path::Path,
     sync::Arc,
@@ -152,9 +153,13 @@ fn credentials(
     directory: &Path,
     alongside: &[&str],
 ) -> Result<LocalErasureCredentialsV1, LocalErasureServeErrorV1> {
-    let mut names = LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES.to_vec();
-    names.extend_from_slice(alongside);
-    names.sort_unstable();
+    let names = LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES
+        .iter()
+        .chain(alongside)
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     crate::local_fork_authentication::open_exact_credentials(
         directory,
         &names,
@@ -376,6 +381,11 @@ impl LocalErasureDriverTaskV1 {
     /// ends once the executor is no longer open.
     #[must_use]
     pub fn spawn(gateway: &Gateway, started: LocalErasureStartV1) -> Self {
+        Self::spawn_every(gateway, started, LOCAL_ERASURE_DRIVER_TICK)
+    }
+
+    /// [`Self::spawn`] with the tick `every`.
+    fn spawn_every(gateway: &Gateway, started: LocalErasureStartV1, every: Duration) -> Self {
         Self {
             running: started.started.map(|(driver, _)| {
                 let wake = Arc::new(Notify::new());
@@ -383,6 +393,7 @@ impl LocalErasureDriverTaskV1 {
                     gateway.store.downgrade(),
                     Arc::new(driver),
                     Arc::clone(&wake),
+                    every,
                 ));
                 (LocalErasureTriggerV1(wake), task)
             }),
@@ -407,8 +418,13 @@ impl LocalErasureDriverTaskV1 {
 /// The driver loop: wake on a tick or an admission, then submit one step
 /// per store command until no request has one due; end once the executor
 /// is gone or no longer open.
-async fn drive(executor: WeakStoreExecutor, driver: Arc<LocalErasureDriverV1>, wake: Arc<Notify>) {
-    let mut tick = tokio::time::interval(LOCAL_ERASURE_DRIVER_TICK);
+async fn drive(
+    executor: WeakStoreExecutor,
+    driver: Arc<LocalErasureDriverV1>,
+    wake: Arc<Notify>,
+    every: Duration,
+) {
+    let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {

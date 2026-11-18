@@ -419,7 +419,7 @@ fn erasure_world() -> TestResult<World> {
 
 /// D7: a request submitted through the host seam is driven to its first
 /// receipt by the driver task's startup run, one step per store command;
-/// once the executor stops, the next wake ends the task.
+/// once the executor stops, the next admission wake ends the task.
 #[tokio::test]
 async fn the_driver_task_drives_a_submitted_request_end_to_end() -> TestResult {
     let world = erasure_world()?;
@@ -435,7 +435,10 @@ async fn the_driver_task_drives_a_submitted_request_end_to_end() -> TestResult {
         .request();
     let started = erasure.start(&mut host);
     let gateway = Gateway::new_with_erasure_host(host, None)?;
-    let driver = LocalErasureDriverTaskV1::spawn(&gateway, started);
+    // A tick far beyond the deadline: only the startup run and the
+    // admission hook wake this driver.
+    let driver =
+        LocalErasureDriverTaskV1::spawn_every(&gateway, started, Duration::from_secs(3_600));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let lifecycle = gateway
