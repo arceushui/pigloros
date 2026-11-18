@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Produce #444 part (a) packaged-closure evidence (ADR-087 gate 5) on a
-# GitHub-hosted runner of the guest's own architecture.
+# Produce #444 parts (a) and (b) packaged-closure evidence (ADR-087 gate 5)
+# on a GitHub-hosted runner of the guest's own architecture.
 #
 #   build ARCH OUT   realise the pinned guest and record its store identities
 #   boot ARCH OUT    boot it once under QEMU TCG in an empty network namespace
@@ -22,7 +22,11 @@ provenance_files=(
   deploy/nixos/modules/mountfsd-activation.nix
   deploy/nixos/qemu-evidence/guest.nix
   deploy/nixos/qemu-evidence/collect-evidence.sh
+  deploy/nixos/qemu-evidence/build-images.sh
   deploy/nixos/dev-trust/root-hash-dev-test.crt
+  deploy/nixos/dev-trust/root-hash-dev-test.key
+  deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt
+  deploy/nixos/dev-trust/root-hash-untrusted-dev-test.key
 )
 
 usage() {
@@ -70,7 +74,8 @@ build() {
   fi
   python3 -I "${root}/scripts/check_qemu_closure_evidence.py" extract-certificate-list \
     "${dev}/vmlinux" "${out}/host/system-certificate-list"
-  local names=(vm toplevel kernel kernelDev systemd qemu trustedCertificate kernelConfig collector collectorUnit)
+  local names=(vm toplevel kernel kernelDev systemd qemu trustedCertificate kernelConfig collector collectorUnit
+    conformance images)
   local paths=() name
   for name in "${names[@]}"; do
     paths+=("$(store_path "${name}" "${out}")")
@@ -79,6 +84,15 @@ build() {
   nix path-info --json --json-format 2 --recursive "$(store_path toplevel "${out}")" \
     >"${out}/host/toplevel-closure.json"
   cp -- "$(store_path trustedCertificate "${out}")" "${out}/host/system-trusted-keys.pem"
+  # Part (b): the three signed images, the tampered byte's offset and both
+  # signer certificates the guest ran, for the checker's independent reading.
+  mkdir "${out}/host/images"
+  local images file
+  images="$(store_path images "${out}")"
+  for file in positive.raw tampered.raw wrong-key.raw tampered-offset positive.der wrong-key.der \
+    root-hash.txt; do
+    cp -- "${images}/${file}" "${out}/host/images/${file}"
+  done
   cp -- "$(store_path kernelConfig "${out}")" "${out}/host/kernel-config"
   record_provenance "${out}"
 }

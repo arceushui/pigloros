@@ -843,7 +843,7 @@ fn decode_staged_provider_result(
             };
             Ok(DecodedSelectorReply {
                 observation: Ok(observation),
-                provenance: Some(receipt.receipt_digest),
+                provenance: Some(receipt.receipt_digest()),
             })
         })(),
         SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
@@ -961,7 +961,7 @@ fn result_matches_evidence(
         && grant.attempt_id == result.attempt_id
         && receipt.attempt_id == result.attempt_id
         && result.agr1_digest == Some(grant.grant_digest)
-        && result.spr1_digest == Some(receipt.receipt_digest)
+        && result.spr1_digest == Some(receipt.receipt_digest())
         && grant.runtime_attestation_key_id == receipt.runtime_attestation_key_id
         && receipt.runtime_attestation_key_id == result.runtime_attestation_key_id
 }
@@ -2892,7 +2892,7 @@ mod tests {
                     result: SubjectResult::Unavailable,
                     usage: ResourceUsage::default(),
                 }),
-                provenance: Some(evidence.receipt.receipt_digest),
+                provenance: Some(evidence.receipt.receipt_digest()),
             })
         );
         for index in [2_usize, 3] {

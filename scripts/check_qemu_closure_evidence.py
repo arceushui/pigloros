@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify #444 part (a) packaged-closure evidence from one QEMU TCG boot.
+"""Verify #444 parts (a) and (b) packaged-closure evidence from one QEMU TCG boot.
 
 ADR-087 gate 5 (Parts A.1, C.1, C.3 and D.1) asks #444 to record, on the
 packaged NixOS 26.05 closure and on both architectures:
@@ -19,6 +19,28 @@ packaged NixOS 26.05 closure and on both architectures:
   SYSTEMD_MOUNTFSD_*, SYSTEMD_PROC_CMDLINE or SYSTEMD_VERITY_SHARING
   override, outside any container.
 
+Part (b) runs the production admission, registry and activation path
+(`pos-sandboxd-conformance`) against the packaged mountfsd and kernel:
+
+- the images: wrong-key carries the positive image's root hash and salt,
+  and tampered differs from positive in exactly one root data byte;
+- positive: an image signed by the trusted key mounts as read-only EROFS
+  from a dm-verity device (same major:minor; mountfsd's source is the
+  /proc/self/fd path of the node it opened) whose
+  live table carries the image's root hash and
+  salt and a non-empty root_hash_sig_key_desc, over the three loopNpK
+  partitions of one loop device whose backing file resolves in the
+  provider's namespace; the file reads back byte for byte; detach and
+  directory removal leave no loop or dm device;
+- tampered: one flipped data byte mounts, then fails its read with EIO and
+  a dm-verity corruption message, and is released the same way;
+- wrong-key, alone and with its certificate in /run/verity.d: mountfsd
+  refuses, and no device remains;
+- one raw MountImage reply carries the image's size, 512-byte sectors and
+  the effective image policy root=signed:=absent, and its devices go away
+  once its descriptors close. It runs first, so that its first MountImage
+  also loads what mountfsd's probing needs before the timed driver cases.
+
 scripts/qemu-closure-evidence.sh only records. This checker owns every
 judgement and derives the expected key description from the certificate
 itself, independently of the kernel. A published artifact can be checked
@@ -29,7 +51,7 @@ repository at the tested commit.
 Usage:
 
   check_qemu_closure_evidence.py --architecture ARCH --certificate PEM \
-      --flake-lock LOCK --verdict OUT EVIDENCE_DIR
+      --untrusted-certificate PEM --flake-lock LOCK --verdict OUT EVIDENCE_DIR
   check_qemu_closure_evidence.py extract-certificate-list VMLINUX OUT
 
 The second form is the producer's: it copies `system_certificate_list` out
@@ -58,7 +80,7 @@ KERNEL_SERIES = "6.12"
 ARCHITECTURES = {"x86_64": "bzImage", "aarch64": "Image"}
 STORE_PATH = re.compile(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+")
 STORE_NAMES = ("vm", "toplevel", "kernel", "kernelDev", "systemd", "qemu", "trustedCertificate",
-               "kernelConfig", "collector", "collectorUnit")
+               "kernelConfig", "collector", "collectorUnit", "conformance", "images")
 REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
 # The reviewed inputs whose exact bytes the evidence depends on; the host
 # records their SHA-256 in host/provenance next to the tested commit.
@@ -71,7 +93,11 @@ PROVENANCE_FILES = (
     "deploy/nixos/modules/mountfsd-activation.nix",
     "deploy/nixos/qemu-evidence/guest.nix",
     "deploy/nixos/qemu-evidence/collect-evidence.sh",
+    "deploy/nixos/qemu-evidence/build-images.sh",
     "deploy/nixos/dev-trust/root-hash-dev-test.crt",
+    "deploy/nixos/dev-trust/root-hash-dev-test.key",
+    "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt",
+    "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.key",
 )
 COLLECTOR_PROGRAM = "bin/piglor-qemu-evidence"
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -115,16 +141,36 @@ HOST_FILES = {
     "flake-metadata.json", "store-paths.json", "path-info.json", "toplevel-closure.json",
     "system-trusted-keys.pem", "runner", "serial-console.log", "qemu-argv", "qemu-exe",
     "qemu-net-dev", "vm-exit-status", "provenance", "kernel-config", "qemu-query-kvm.json",
-    "vm-cleanup", "system-certificate-list",
+    "vm-cleanup", "system-certificate-list", "images",
 }
+# Part (b): the images the guest ran, copied from the recorded store path.
+HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-offset", "positive.der",
+                    "wrong-key.der", "root-hash.txt"}
 GUEST_FILES = {
     "status", "collector", "boot-id", "mountinfo", "uname-machine", "uname-release", "systemctl-version", "current-system",
     "booted-system", "booted-kernel", "systemd-package", "detect-virt-vm",
     "detect-virt-container", "container-markers", "proc-cmdline", "kernel-config",
     "kernel-log", "proc-keys", "builtin-trusted-keys", "verity-d", "mountfsd-units",
     "mountfsd-service-properties", "mountfsd-socket-properties", "manager-environment",
-    "pid1-namespaces",
+    "pid1-namespaces", "cases",
 }
+DRIVER_CASES = ("positive", "tampered", "wrong-key", "verity-d")
+MOUNTED_CASES = ("positive", "tampered")
+DRIVER_FILES = {"arguments", "report", "driver-stderr", "driver-status", "timing", "devices-before",
+                "devices-after", "runtime-after"}
+HELD_FILES = {"devices-held", "mountinfo-held", "dm-table-held", "readback"}
+REPLY_FILES = {"devices-before", "reply", "stderr", "status", "timing", "devices-after"}
+CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
+ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
+PLANTED_CERTIFICATE = "/run/verity.d/piglor-untrusted.crt"
+# The effective policy packaged systemd v260.5 returned on both architectures
+# (run 43854451008): the request without its filesystem flags, which the
+# provider accepts (ADR-087 Part A.1).
+REPLY_POLICY = "root=signed:=absent"
+# mountfsd mounts the dm-verity node it opened through a descriptor, so the
+# mount's source is that descriptor's /proc path, as recorded in that run.
+MOUNT_SOURCE = re.compile(r"/proc/self/fd/[0-9]+")
+READBACK_BLOCKS = 16
 PROCESS_FILES = {"exe", "environ", "namespaces"}
 OID_COMMON_NAME = "2.5.4.3"
 OID_ORGANIZATION = "2.5.4.10"
@@ -340,6 +386,10 @@ class Evidence:
             if found != expected:
                 missing, extra = sorted(expected - found), sorted(found - expected)
                 raise EvidenceError(f"{name}/ files differ: missing {missing}, unexpected {extra}")
+        self._inventory_cases()
+        found = {path.name for path in (self.root / "host" / "images").iterdir()}
+        if found != HOST_IMAGE_FILES:
+            raise EvidenceError(f"host/images/ differs: {sorted(found)}")
         processes = sorted(path.name for path in (self.root / "guest" / "processes").iterdir())
         for pid in processes:
             directory = self.root / "guest" / "processes" / pid
@@ -351,6 +401,17 @@ class Evidence:
         if "SHA256SUMS" in top:
             self._verify_manifest()
         return processes
+
+    def _inventory_cases(self) -> None:
+        cases = self.root / "guest" / "cases"
+        if {path.name for path in cases.iterdir()} != CASE_ENTRIES:
+            raise EvidenceError("guest/cases/ does not hold exactly the part (b) cases")
+        for name in DRIVER_CASES:
+            found = {path.name for path in (cases / name).iterdir()}
+            if found not in (DRIVER_FILES, DRIVER_FILES | HELD_FILES):
+                raise EvidenceError(f"malformed case record: {name}: {sorted(found)}")
+        if {path.name for path in (cases / "mountfsd-reply").iterdir()} != REPLY_FILES:
+            raise EvidenceError("malformed case record: mountfsd-reply")
 
     def _verify_manifest(self) -> None:
         """A sealed artifact must match its manifest, file for file."""
@@ -441,7 +502,7 @@ def check_store_identity(evidence: Evidence, architecture: str, lock: dict) -> d
         if not isinstance(info, dict) or not isinstance(info.get("narHash"), str):
             raise EvidenceError(f"path-info.json lacks {name}")
         nar_hashes[name] = info["narHash"]
-    for name in ("toplevel", "kernel", "systemd", "collector", "collectorUnit"):
+    for name in ("toplevel", "kernel", "systemd", "collector", "collectorUnit", "conformance", "images"):
         if paths[name].removeprefix("/nix/store/") not in closure:
             raise EvidenceError(f"the toplevel closure lacks {name}")
     # The vmlinux the certificate list came from is the booted kernel's own
@@ -790,6 +851,262 @@ def check_mountfsd(evidence: Evidence, systemd: str) -> dict:
         raise EvidenceError("mountfsd's main process and at least one worker must be recorded")
     return {"service": service, "socket": socket, "processes": executables}
 
+# --- Part (b): MountImage cases -------------------------------------------------
+
+
+def readback_bytes() -> bytes:
+    """The readback file build-images.sh writes, derived independently."""
+    blocks = []
+    for index in range(READBACK_BLOCKS):
+        marker = f"PiglorOS #444 readback block {index:04d}\n".encode()
+        blocks.append(marker + b"." * (4095 - len(marker)) + b"\n")
+    return b"".join(blocks)
+
+
+def image_verity(image: bytes) -> tuple[str, str, range]:
+    """(root hash, salt, root partition byte range) of a systemd-repart DDI:
+    the salt from the verity superblock of its second GPT partition, the root
+    hash from the JSON in its third, both as lowercase hex."""
+    if image[512:520] != b"EFI PART":
+        raise EvidenceError("the recorded image has no 512-byte-sector GPT")
+    first, count, size = struct.unpack_from("<QII", image, 512 + 72)
+    entries, extents = [], []
+    for index in range(count):
+        entry = image[first * 512 + index * size:first * 512 + (index + 1) * size]
+        if len(entry) < 48:
+            raise EvidenceError("the recorded image's GPT is cut off")
+        if entry[:16] != bytes(16):
+            start, last = struct.unpack_from("<QQ", entry, 32)
+            entries.append(image[start * 512:(last + 1) * 512])
+            extents.append(range(start * 512, (last + 1) * 512))
+    if len(entries) != 3:
+        raise EvidenceError("the recorded image does not have exactly three partitions")
+    verity, signature = entries[1], entries[2]
+    # cryptsetup's `struct verity_sb`: signature, version and hash type at
+    # 0, 8 and 12, the salt size at 80 and the salt from 88.
+    if len(verity) < 120:
+        raise EvidenceError("the recorded image's verity partition is shorter than its superblock and salt")
+    if verity[:8] != b"verity\0\0":
+        raise EvidenceError("the recorded image's verity partition has no verity superblock")
+    if struct.unpack_from("<II", verity, 8) != (1, 1):
+        raise EvidenceError("the recorded image's verity superblock is not version 1 with hash type 1")
+    if struct.unpack_from("<H", verity, 80)[0] != 32:
+        raise EvidenceError("the recorded image's verity salt is not 32 bytes")
+    try:
+        root_hash = json.loads(signature.split(b"\0", 1)[0])["rootHash"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise EvidenceError("the recorded image's signature partition has no rootHash") from error
+    if not isinstance(root_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", root_hash):
+        raise EvidenceError("the recorded image's rootHash is not 64 lowercase hex digits")
+    return root_hash, verity[88:120].hex(), extents[0]
+
+
+def device_records(evidence: Evidence, name: str) -> tuple[list[list[str]], list[list[str]]]:
+    loops, mappers = [], []
+    for line in evidence.text(name).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 6 or fields[0] not in ("loop", "dm"):
+            raise EvidenceError(f"malformed {name} line: {line!r}")
+        (loops if fields[0] == "loop" else mappers).append(fields[1:])
+    return loops, mappers
+
+
+def require_no_devices(evidence: Evidence, name: str) -> None:
+    loops, mappers = device_records(evidence, name)
+    if loops or mappers:
+        raise EvidenceError(f"{name} shows a loop or device-mapper device: {loops + mappers}")
+
+
+def report_lines(evidence: Evidence, case: str) -> list[list[str]]:
+    if evidence.line(f"guest/cases/{case}/driver-status") != "0":
+        raise EvidenceError(f"the {case} driver did not complete its protocol")
+    return [line.split("\t") for line in evidence.text(f"guest/cases/{case}/report").splitlines()]
+
+
+def check_arguments(evidence: Evidence, case: str, images: str, signer: str, description: str) -> None:
+    expected = f"{images}/{case if case != 'verity-d' else 'wrong-key'}.raw\n{images}/{signer}.der\n{description}\n"
+    if evidence.text(f"guest/cases/{case}/arguments") != expected:
+        raise EvidenceError(f"the {case} driver did not get the recorded image, signer and description")
+
+
+def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]) -> dict:
+    """ADR-087 D.1 / Q7.13 / Q8.4: the live mount, dm-verity table and topology."""
+    base = f"guest/cases/{case}"
+    loops, mappers = device_records(evidence, f"{base}/devices-held")
+    if len(loops) != 1 or len(mappers) != 1:
+        raise EvidenceError(f"the held {case} root is not exactly one loop and one dm device")
+    (loop, backing, resolved, _, partitions), (mapper, dm_name, dm_uuid, device, slaves) = loops[0], mappers[0]
+    if not re.fullmatch(r"\d+:\d+", device):
+        raise EvidenceError(f"the {case} dm device number {device!r} is malformed")
+    if not re.fullmatch(r"/var/lib/pigloros/sandbox/images/[0-9a-f]{64}", backing) or resolved != backing:
+        raise EvidenceError(f"the {case} loop backing file {backing!r} does not resolve in this namespace")
+    if partitions != ",".join(f"{loop}p{index}" for index in (1, 2, 3)):
+        raise EvidenceError(f"the {case} loop device does not carry the three loopNpK partitions")
+    if not dm_uuid.startswith("CRYPT-VERITY-") or slaves != f"{loop}p1,{loop}p2":
+        raise EvidenceError(f"the {case} dm device is not a CRYPT-VERITY- device over loopNp1 and loopNp2")
+    tables = [line for line in evidence.text(f"{base}/dm-table-held").splitlines()
+              if line.startswith(f"{dm_name}: ")]
+    if len(tables) != 1:
+        raise EvidenceError(f"dm-table-held has no single table for {dm_name}")
+    table = tables[0].split()[1:]
+    if len(table) < 15 or table[2:4] != ["verity", "1"] or table[6:8] != ["4096", "4096"] \
+            or table[10] != "sha256":
+        raise EvidenceError(f"the {case} live table is not a format-1 sha256 verity table: {table}")
+    if (table[11], table[12]) != verity:
+        raise EvidenceError(f"the {case} live table's root hash or salt differs from the image")
+    optional = table[14:]
+    if not table[13].isdigit() or int(table[13]) != len(optional):
+        raise EvidenceError(f"the {case} live table's optional arguments are miscounted")
+    if "root_hash_sig_key_desc" not in optional \
+            or optional.index("root_hash_sig_key_desc") + 1 >= len(optional):
+        raise EvidenceError(f"the {case} live table has no root_hash_sig_key_desc")
+    signature_key = optional[optional.index("root_hash_sig_key_desc") + 1]
+    mounts = []
+    for line in evidence.text(f"{base}/mountinfo-held").splitlines():
+        left, _, right = line.partition(" - ")
+        fields, tail = left.split(), right.split()
+        if len(fields) >= 6 and unescape_mount_field(fields[4]) == root:
+            mounts.append((fields[2], fields[5].split(","), tail[:1],
+                           unescape_mount_field(tail[1]) if len(tail) > 1 else None))
+    if len(mounts) != 1 or mounts[0][0] != device or "ro" not in mounts[0][1] \
+            or mounts[0][2] != ["erofs"] or not MOUNT_SOURCE.fullmatch(mounts[0][3] or ""):
+        raise EvidenceError(f"the {case} root is not mounted once as read-only EROFS from its "
+                            f"dm-verity device {device}: {mounts}")
+    return {"loop": loop, "backing_file": backing, "partitions": partitions, "dm": mapper,
+            "dm_name": dm_name, "dm_uuid": dm_uuid, "dm_device": device, "table": " ".join(table),
+            "root_hash_sig_key_desc": signature_key}
+
+
+def readback_records(evidence: Evidence, case: str) -> dict[str, tuple[str, str]]:
+    records = {}
+    for line in evidence.text(f"guest/cases/{case}/readback").splitlines():
+        what, status, digest = tab_fields(line, 3, "readback")
+        records[what] = (status, digest)
+    if sorted(records) != ["block-0", "file"]:
+        raise EvidenceError(f"the {case} readback does not cover the file and its first block")
+    return records
+
+
+def recorded_seconds(evidence: Evidence, case: str, what: str) -> float:
+    """A case's recorded duration in seconds: kept in the verdict, not judged."""
+    match = re.fullmatch(rf"{what}-seconds\t([0-9]+\.[0-9]{{2}})", evidence.line(f"guest/cases/{case}/timing"))
+    if not match:
+        raise EvidenceError(f"malformed {case} timing")
+    return float(match.group(1))
+
+
+def activation_seconds(evidence: Evidence, case: str) -> float:
+    """Seconds from the driver's start to its activation report."""
+    return recorded_seconds(evidence, case, "activation")
+
+
+def check_mounted_case(evidence: Evidence, case: str, root_verity: tuple[str, str]) -> dict:
+    base = f"guest/cases/{case}"
+    report = report_lines(evidence, case)
+    if len(report) != 3 or report[0][:2] != ["activation", "mounted"] or len(report[0]) != 4 \
+            or not report[0][2].isdigit() or not ATTEMPT_ROOT.fullmatch(report[0][3]) \
+            or report[1:] != [["release", "detached"], ["removal", "removed"]]:
+        raise EvidenceError(f"the {case} case did not mount, detach and remove: {report}")
+    held = check_held(evidence, case, report[0][3], root_verity)
+    expected = readback_bytes()
+    block = hashlib.sha256(expected[:4096]).hexdigest()
+    records = readback_records(evidence, case)
+    if records["block-0"] != ("0", block):
+        raise EvidenceError(f"the {case} root's first readback block differs")
+    if case == "positive" and records["file"] != ("0", hashlib.sha256(expected).hexdigest()):
+        raise EvidenceError("the positive root's readback file differs from the image's")
+    if case == "tampered" and (records["file"][0] == "0" or "Input/output error" not in records["file"][1]):
+        raise EvidenceError("the tampered root's readback did not fail with EIO")
+    for name in ("devices-before", "devices-after"):
+        require_no_devices(evidence, f"{base}/{name}")
+    check_runtime_after(evidence, case)
+    return {"report": report, "held": held, "readback": records,
+            "activation_seconds": activation_seconds(evidence, case)}
+
+
+def check_refused_case(evidence: Evidence, case: str) -> dict:
+    base = f"guest/cases/{case}"
+    report = report_lines(evidence, case)
+    if report != [["activation", "refused", "MethodRejected"], ["release", "none"], ["removal", "removed"]]:
+        raise EvidenceError(f"mountfsd did not refuse the {case} case: {report}")
+    for name in ("devices-before", "devices-after"):
+        require_no_devices(evidence, f"{base}/{name}")
+    check_runtime_after(evidence, case)
+    return {"report": report, "activation_seconds": activation_seconds(evidence, case)}
+
+
+def check_runtime_after(evidence: Evidence, case: str) -> None:
+    """The attempt directory is gone; the registry keeps its records for (c)."""
+    for line in evidence.text(f"guest/cases/{case}/runtime-after").splitlines():
+        path = tab_fields(line, 3, "runtime-after")[0]
+        if path.startswith("sandbox/attempts/"):
+            raise EvidenceError(f"the {case} attempt directory remains: {path}")
+
+
+def check_mountfsd_reply(evidence: Evidence, image_size: int) -> dict:
+    base = "guest/cases/mountfsd-reply"
+    if evidence.line(f"{base}/status") != "0":
+        raise EvidenceError("the raw MountImage call failed")
+    reply = evidence.json(f"{base}/reply")
+    if not isinstance(reply, dict):
+        raise EvidenceError("the raw MountImage reply is not an object")
+    for key, expected in (("imageSize", image_size), ("sectorSize", 512)):
+        if not isinstance(reply.get(key), int) or isinstance(reply.get(key), bool) or reply[key] != expected:
+            raise EvidenceError(f"the raw MountImage reply's {key} is not {expected}")
+    if reply.get("imagePolicy") != REPLY_POLICY:
+        raise EvidenceError(f"the raw MountImage reply's imagePolicy {reply.get('imagePolicy')!r} is not "
+                            f"{REPLY_POLICY}")
+    partitions = reply.get("partitions")
+    if not isinstance(partitions, list) or [
+        (partition.get("designator"), partition.get("fileSystemType"))
+        for partition in partitions if isinstance(partition, dict)
+    ] != [("root", "erofs")]:
+        raise EvidenceError("the raw MountImage reply does not describe exactly one EROFS root")
+    for name in ("devices-before", "devices-after"):
+        require_no_devices(evidence, f"{base}/{name}")
+    return {"imageSize": reply["imageSize"], "sectorSize": reply["sectorSize"],
+            "imagePolicy": reply.get("imagePolicy"),
+            "cold_mountimage_seconds": recorded_seconds(evidence, "mountfsd-reply", "mountimage")}
+
+
+def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
+                untrusted: tuple[bytes, str]) -> dict:
+    """#444 part (b): real MountImage, readback, failure closure and cleanup."""
+    if evidence.raw("host/images/positive.der") != trusted[0] \
+            or evidence.raw("host/images/wrong-key.der") != untrusted[0]:
+        raise EvidenceError("the images were not signed with the committed dev/test certificates")
+    positive = evidence.raw("host/images/positive.raw")
+    root_hash, salt, root_extent = image_verity(positive)
+    verity = (root_hash, salt)
+    if evidence.text("host/images/root-hash.txt") != root_hash:
+        raise EvidenceError("root-hash.txt differs from the image's signed root hash")
+    if image_verity(evidence.raw("host/images/wrong-key.raw"))[:2] != verity:
+        raise EvidenceError("the wrong-key image does not carry the positive image's root hash and salt")
+    tampered = evidence.raw("host/images/tampered.raw")
+    offset = evidence.line("host/images/tampered-offset")
+    if not offset.isdigit() or len(tampered) != len(positive) or int(offset) not in root_extent \
+            or [index for index in range(len(positive)) if positive[index] != tampered[index]] != [int(offset)]:
+        raise EvidenceError("the tampered image does not differ from the positive one in exactly one "
+                            "root data byte at the recorded offset")
+    images = paths["images"]
+    for case, signer, description in (
+        ("positive", "positive", trusted[1]), ("tampered", "tampered", trusted[1]),
+        ("wrong-key", "wrong-key", untrusted[1]), ("verity-d", "wrong-key", untrusted[1]),
+    ):
+        check_arguments(evidence, case, images, signer, description)
+    if evidence.text("guest/cases/verity-d-planted") != f"{PLANTED_CERTIFICATE}\tf\n":
+        raise EvidenceError("the verity-d case did not plant exactly the untrusted certificate")
+    if not re.search(r"device-mapper: verity: \S+: data block \d+ is corrupted",
+                     evidence.text("guest/cases/kernel-log")):
+        raise EvidenceError("the kernel log shows no dm-verity data block corruption")
+    return {
+        "root_hash": root_hash, "salt": salt, "tampered_offset": int(offset),
+        **{case: check_mounted_case(evidence, case, verity) for case in MOUNTED_CASES},
+        **{case: check_refused_case(evidence, case) for case in ("wrong-key", "verity-d")},
+        "mountfsd_reply": check_mountfsd_reply(evidence, len(positive)),
+    }
+
+
 
 def sha256_file(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -825,11 +1142,15 @@ def check_provenance(evidence: Evidence, repository: pathlib.Path) -> dict:
 
 
 def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
-          repository: pathlib.Path = REPOSITORY) -> dict:
+          repository: pathlib.Path = REPOSITORY, *, untrusted_certificate: str) -> dict:
     if architecture not in ARCHITECTURES:
         raise EvidenceError(f"unsupported architecture {architecture!r}")
     der = pem_certificate(certificate)
     description = kernel_key_description(der)
+    untrusted_der = pem_certificate(untrusted_certificate)
+    untrusted = (untrusted_der, kernel_key_description(untrusted_der))
+    if untrusted[1] == description:
+        raise EvidenceError("the untrusted certificate carries the trusted key description")
     evidence = Evidence(root)
     provenance = check_provenance(evidence, repository)
     identity = check_store_identity(evidence, architecture, lock)
@@ -851,6 +1172,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "compiled_in_certificate_list": check_certificate_list(evidence, der),
         "verity_d": check_verity_d(evidence, paths["systemd"]),
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
+        "mount_image_cases": check_cases(evidence, paths, (der, description), untrusted),
     }
 
 
@@ -876,6 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--architecture", required=True)
     parser.add_argument("--certificate", required=True, type=pathlib.Path)
+    parser.add_argument("--untrusted-certificate", required=True, type=pathlib.Path)
     parser.add_argument("--flake-lock", required=True, type=pathlib.Path)
     parser.add_argument("--verdict", required=True, type=pathlib.Path)
     parser.add_argument("evidence", type=pathlib.Path)
@@ -883,7 +1206,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         verdict = check(arguments.evidence, arguments.architecture,
                         arguments.certificate.read_text(encoding="utf-8"),
-                        json.loads(arguments.flake_lock.read_text(encoding="utf-8")))
+                        json.loads(arguments.flake_lock.read_text(encoding="utf-8")),
+                        untrusted_certificate=arguments.untrusted_certificate.read_text(encoding="utf-8"))
         with arguments.verdict.open("x", encoding="utf-8") as output:
             json.dump(verdict, output, indent=2, sort_keys=True)
             output.write("\n")

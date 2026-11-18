@@ -24,7 +24,7 @@ SCOPED_JOB_IF = (
     "github.event_name != 'pull_request') }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && "
+    "${{ !cancelled() && needs.coverage.result == 'success' && "
     "(needs.owner-bridge-windows.result == 'success' || "
     "(needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
@@ -121,8 +121,8 @@ ANALYZE_COMMAND = (
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
-# Standard-stage jobs start from core-gate, beside cargo-crap: none consumes
-# cargo-crap output, so the native Windows lane that cargo-crap waits for never
+# Standard-stage jobs start from core-gate; cargo-crap starts from coverage.
+# None consumes cargo-crap output, so the native Windows lane that cargo-crap waits for never
 # delays or hides their findings. ci-gate requires cargo-crap directly.
 STAGED_MAIN_JOBS = {
     "rustdoc": ["ci_change_scope", "core-gate"],
@@ -231,7 +231,7 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
         ("BASELINE_RETRY_ATTEMPTS=30\n", "baseline retry attempts changed"),
         ("BASELINE_RETRY_DELAY_SECONDS=10\n", "baseline retry delay changed"),
         ("MAIN_RUN_POLL_DELAY_SECONDS=60\n", "main run poll delay changed"),
-        ("BASELINE_WAIT_LIMIT_SECONDS=7200\n", "baseline wait bound changed"),
+        ("BASELINE_WAIT_LIMIT_SECONDS=1800\n", "baseline wait bound changed"),
         ("MAIN_RUN_REGISTRATION_LIMIT_SECONDS=600\n", "main run registration window changed"),
         ("GH_API_ATTEMPTS=3\n", "GitHub API attempts changed"),
         ("GH_API_RETRY_DELAY_SECONDS=30\n", "GitHub API retry delay changed"),
@@ -486,15 +486,15 @@ def check_workflow(
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
     require(
-        job.get("needs") == ["ci_change_scope", "coverage", "core-gate", "owner-bridge-windows"],
-        "cargo-crap must wait for every core gate, hosted coverage and the native lane",
+        job.get("needs") == ["ci_change_scope", "coverage", "owner-bridge-windows"],
+        "cargo-crap must wait for hosted coverage and the native lane",
     )
     require(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
         "cargo-crap must skip documentation-only pull requests",
     )
     require(job.get("runs-on") == "ubuntu-24.04", "cargo-crap runner changed")
-    require(job.get("timeout-minutes") == 150, "cargo-crap timeout changed")
+    require(job.get("timeout-minutes") == 70, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
     require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
@@ -569,7 +569,7 @@ def check_workflow(
         == {
             "name": "Resolve trusted cargo-crap baseline",
             "id": "baseline",
-            "timeout-minutes": 130,
+            "timeout-minutes": 45,
             "env": {
                 "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
                 "EVENT_NAME": "${{ github.event_name }}",

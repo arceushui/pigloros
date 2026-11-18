@@ -21,7 +21,7 @@ use pos_core::{
     ErasureFreezeFailureV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
     ErasureInventoryObservationV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedTopologyObservationV1,
@@ -104,6 +104,9 @@ pub enum PublicCoordinatorOperation {
     ValidateFreezeAuthorization,
     ValidateScopeExtension,
     ValidateAdministrativeResolution,
+    ValidateAttemptAdmission,
+    ValidateAcknowledgement,
+    ValidateReceipt,
     AdmitAuthorization,
     AdmitCorrectedSubmission,
     AdmitAtomicFreeze,
@@ -294,6 +297,7 @@ pub struct PublicCoordinatorPort {
     attempt_admissions: Rc<RefCell<u64>>,
     dispatch_calls: Rc<RefCell<u64>>,
     operation_fault_hits: Rc<Cell<u64>>,
+    verifier_calls: Rc<Cell<[u64; 3]>>,
     allow_overbound_recovery_errors: bool,
     topology_observation: Rc<RefCell<Option<VerifiedTopologyObservation>>>,
     topology_manifest_override: Rc<RefCell<Option<ErasureReferenceV1>>>,
@@ -310,6 +314,7 @@ impl PublicCoordinatorPort {
             attempt_admissions: Rc::new(RefCell::new(0)),
             dispatch_calls: Rc::new(RefCell::new(0)),
             operation_fault_hits: Rc::new(Cell::new(0)),
+            verifier_calls: Rc::new(Cell::new([0; 3])),
             allow_overbound_recovery_errors: false,
             topology_observation: Rc::new(RefCell::new(None)),
             topology_manifest_override: Rc::new(RefCell::new(None)),
@@ -400,6 +405,26 @@ impl PublicCoordinatorPort {
     #[must_use]
     pub fn operation_fault_hits(&self) -> u64 {
         self.operation_fault_hits.get()
+    }
+
+    /// The host recovery verifier calls so far, shared by every clone of
+    /// this port: attempt admissions, acknowledgements and receipts.
+    #[must_use]
+    pub fn verifier_calls(&self) -> [u64; 3] {
+        self.verifier_calls.get()
+    }
+
+    /// Count one recovery verifier call of `kind` (an index into
+    /// [`Self::verifier_calls`]), then apply any configured fault.
+    fn verify(
+        &self,
+        kind: usize,
+        operation: PublicCoordinatorOperation,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut calls = self.verifier_calls.get();
+        calls[kind] = calls[kind].saturating_add(1);
+        self.verifier_calls.set(calls);
+        self.maybe_fail(operation)
     }
 
     fn maybe_fail(&self, operation: PublicCoordinatorOperation) -> Result<(), ErasureErrorV1> {
@@ -1556,6 +1581,29 @@ impl ErasureRecoveryAuthorizationVerifierV1 for PublicCoordinatorPort {
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         self.maybe_fail(PublicCoordinatorOperation::ValidateAdministrativeResolution)
+    }
+
+    fn validate_attempt_admission(
+        &self,
+        _request: &ErasureRequestV1,
+        _admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.verify(0, PublicCoordinatorOperation::ValidateAttemptAdmission)
+    }
+
+    fn validate_acknowledgement(
+        &self,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.verify(1, PublicCoordinatorOperation::ValidateAcknowledgement)
+    }
+
+    fn validate_receipt(
+        &self,
+        _attempt: &ErasureRetryAdmissionV1,
+        _receipt: &ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.verify(2, PublicCoordinatorOperation::ValidateReceipt)
     }
 }
 

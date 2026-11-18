@@ -85,26 +85,26 @@ pub use admission::{
     SandboxAdmissionError, SandboxImageProofError, SandboxProviderAdmissionInputs,
     SelectorGrantCommitment, VerifiedSandboxImageProof,
 };
-pub use audit::SandboxAuditRecord;
+pub use audit::{SandboxAuditRecord, SandboxAuditRecordFields};
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
     SandboxProviderManifest, SandboxSyscallSet, SignedImageManifest,
 };
 pub use evidence::{
-    AdmissionLedger, AttemptEvidence, AttemptEvidenceContext, BlockIdentity, CgroupEmptyBasis,
-    CgroupSources, CleanupRecord, DbusProperty, DbusValue, DeviceNumber, EffectiveLimitRecord,
-    KernelObservationEvidence, KernelObservationEvidenceFields, KernelObservationStatus,
-    LocalNetworkRecord, NamespaceIdentity, ObservedKernelState, OutputCaptureRecord,
-    RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields, RootMount,
-    TerminationEvidence, TerminationEvidenceFields, TransferRecord,
+    AdmissionLedger, AttemptEvidence, AttemptEvidenceContext, AttemptResponse, BlockIdentity,
+    CgroupEmptyBasis, CgroupSources, CleanupRecord, DbusProperty, DbusValue, DeviceNumber,
+    EffectiveLimitRecord, KernelObservationEvidence, KernelObservationEvidenceFields,
+    KernelObservationStatus, LocalNetworkRecord, NamespaceIdentity, ObservedKernelState,
+    OutputCaptureRecord, RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields,
+    RootMount, TerminationEvidence, TerminationEvidenceFields, TransferRecord,
 };
 pub use execution::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
     PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
     SandboxPayloadChunk, SandboxProviderError, SandboxProviderErrorCode,
-    SandboxProviderErrorFields, SandboxProviderReceipt, SandboxProviderResult,
-    SandboxTerminalOutcome,
+    SandboxProviderErrorFields, SandboxProviderReceipt, SandboxProviderReceiptFields,
+    SandboxProviderResult, SandboxProviderResultFields, SandboxTerminalOutcome,
 };
 pub use launch::{
     blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
@@ -116,7 +116,9 @@ pub use operations::{
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
     SandboxReconcileRequest, SandboxReconcileResponse,
 };
-pub use signing::{Rca1, Rls1, RuntimeSigned, Sdy1, SelfDigested, Spe1, Verified};
+pub use signing::{
+    Rca1, Rls1, RuntimeSigned, Sau1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Verified,
+};
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
     CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,
