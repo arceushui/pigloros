@@ -61,7 +61,10 @@ SEPARATOR_CHARS = set(";|&()\n")
 PUNCTUATION = "();<>|&\n"
 KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "{", "!"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
-HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# ``<<`` but not the ``<<<`` here-string, which has no body.
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# ANSI-C quoting ($'...') allows \' inside; shlex does not know it.
+ANSI_C_STRING = re.compile(r"\$'(?:[^'\\]|\\.)*'")
 
 # Wrappers that run their remaining arguments as a command, with the options
 # that take a separate value word. A ``--long=value`` or attached short value
@@ -223,7 +226,8 @@ def substitutions(text: str) -> list[str]:
 
 
 def tokenize(command: str) -> list[str]:
-    lexer = shlex.shlex(strip_comments(command), posix=True, punctuation_chars=PUNCTUATION)
+    literal = strip_comments(ANSI_C_STRING.sub("'ansi-c'", command))
+    lexer = shlex.shlex(literal, posix=True, punctuation_chars=PUNCTUATION)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""

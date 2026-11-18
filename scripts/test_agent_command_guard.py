@@ -71,6 +71,8 @@ class PastMistakes(unittest.TestCase):
             "echo x#; cargo build",
             "env -S'cargo build'",
             "env --split-string='cargo build'",
+            "cat <<< foo\ncargo test",
+            "echo $'it\\'s'; cargo test",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.DENY)
@@ -156,6 +158,8 @@ class AllowedCommands(unittest.TestCase):
             'echo "$(echo "a)b")"',
             "echo hi # && cargo build",
             "ls > out.txt 2>&1",
+            "grep -c x <<< 'cargo build'",
+            "printf $'a\\tb\\n'",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(decision(command))
