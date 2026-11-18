@@ -648,6 +648,8 @@ jobs:
             "${RUNNER_TEMP}/conformance-non-linux.log"
       - name: Check pos-store without the Linux-only Plugin trust registry
         run: cargo check -p pos-store --locked
+      - name: Check the Gateway's closed erasure composition
+        run: cargo check -p piglor-gateway --locked
       - name: Exercise unsupported recipient export decryption boundary
         run: cargo test -p pos-store --test recipient_export_decryption_unsupported_public --locked -- --include-ignored
 

@@ -1,13 +1,19 @@
 # cargo-mutants already skips `#[cfg(test)]` code. These test-only fixture
 # modules are compiled outside `#[cfg(test)]` only so that the `test-support`
 # feature can expose them to other crates' privileged public-seam tests; they
-# get the same treatment. Never list production code here.
+# get the same treatment. Never list production code here, except the owner
+# exceptions below.
 exclude_globs = [
   "crates/pos-reference/src/selector/installation/fixture.rs",
   "crates/pos-reference/src/provider_admission/test_support.rs",
-  # Owner decision 2026-11-14, the one production exception: the WebView2 shim
+  # Owner decision 2026-11-14, the first production exception: the WebView2 shim
   # is `cfg(windows)` only, so this Linux gate can neither build nor test it
   # and would report every mutant as missed. ADR-110 qualifies the shim by the
   # native `owner-bridge-windows` job and its coverage floors instead.
   "crates/pos-owner-bridge-windows/src/**",
+  # Owner decision 2026-11-19, the second production exception: the closed
+  # erasure-composition stub is `cfg(not(target_os = "linux"))` only, so this
+  # Linux gate never builds it and would report every mutant as missed. The
+  # macOS `conformance-non-linux` job compiles it instead.
+  "apps/piglor-gateway/src/local_erasure_composition_closed.rs",
 ]
