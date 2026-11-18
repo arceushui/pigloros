@@ -32,10 +32,11 @@ import os
 import re
 import shlex
 import sys
+from typing import Optional, Tuple
 
 DENY = "deny"
 ASK = "ask"
-Verdict = "tuple[str, str] | None"  # annotation alias (postponed evaluation)
+Verdict = Optional[Tuple[str, str]]
 
 CARGO_ALLOWED = {"generate-lockfile", "--version", "-V"}
 CARGO_REASON = (
@@ -56,7 +57,8 @@ REWRITE_REASON = (
 PARSE_REASON = "The guard could not parse this command; confirm it by hand."
 
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
-OPERATORS = {"&&", "||", ";", "|", "&", "|&", ";;", ";&", "(", ")", "\n"}
+SEPARATOR_CHARS = set(";|&()\n")
+PUNCTUATION = "();<>|&\n"
 KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "{", "!"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
@@ -140,6 +142,50 @@ def split_heredocs(command: str) -> tuple[str, list[str]]:
     return "\n".join(out), expanding
 
 
+def strip_comments(text: str) -> str:
+    """Remove ``#`` comments: only a ``#`` that starts a word, outside quotes."""
+    out: list[str] = []
+    index, quote, length = 0, "", len(text)
+    while index < length:
+        char = text[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif char == "\\":
+            out.append(text[index:index + 2])
+            index += 2
+            continue
+        elif char == '"':
+            quote = "" if quote == '"' else '"'
+        elif char == "'" and not quote:
+            quote = "'"
+        elif char == "#" and not quote and (index == 0 or text[index - 1] in " \t\n;&|()"):
+            newline = text.find("\n", index)
+            index = length if newline == -1 else newline
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def matching_paren(text: str, start: int) -> int:
+    """Index just past the ``)`` that closes the ``(`` before ``start``."""
+    depth, quote, index, length = 1, "", start, len(text)
+    while index < length and depth:
+        char = text[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif char == "\\":
+            index += 1
+        elif char == '"':
+            quote = "" if quote == '"' else '"'
+        elif char == "'" and not quote:
+            quote = "'"
+        elif not quote and char in "()":
+            depth += 1 if char == "(" else -1
+        index += 1
+    return index
+
+
 def substitutions(text: str) -> list[str]:
     """Bodies of $(...), <(...), >(...) and `...` that the shell expands.
 
@@ -162,10 +208,7 @@ def substitutions(text: str) -> list[str]:
         elif char == "'" and not quote:
             quote = "'"
         elif char in "$<>" and text.startswith("(", index + 1):
-            depth, end = 1, index + 2
-            while end < length and depth:
-                depth += {"(": 1, ")": -1}.get(text[end], 0)
-                end += 1
+            end = matching_paren(text, index + 2)
             bodies.append(text[index + 2:end - 1])
             index = end
             continue
@@ -180,17 +223,32 @@ def substitutions(text: str) -> list[str]:
 
 
 def tokenize(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lexer = shlex.shlex(strip_comments(command), posix=True, punctuation_chars=PUNCTUATION)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    lexer.commenters = "#"
+    lexer.commenters = ""
     return list(lexer)
+
+
+def is_separator(token: str) -> bool:
+    """A punctuation run such as ``;``, ``&&``, ``)\\n`` ends a command.
+
+    shlex groups adjacent punctuation into one token, so ``a;\\nb`` yields
+    ``;\\n``. Redirections (``>``, ``2>&1``'s ``>&``) start with ``<`` or ``>``
+    and keep their target word in the command.
+    """
+    return (
+        bool(token)
+        and set(token) <= set(PUNCTUATION)
+        and bool(set(token) & SEPARATOR_CHARS)
+        and token[0] not in "<>"
+    )
 
 
 def segments(tokens: list[str]) -> list[list[str]]:
     result: list[list[str]] = [[]]
     for token in tokens:
-        if token in OPERATORS:
+        if is_separator(token):
             result.append([])
         else:
             result[-1].append(token)
@@ -221,6 +279,20 @@ def check_find(words: list[str], depth: int) -> Verdict:
     return merge_verdicts(*verdicts)
 
 
+def split_string(args: list[str]) -> str | None:
+    """The command string of ``env -S``/``--split-string``, in any spelling."""
+    for index, word in enumerate(args):
+        if word in {"-S", "--split-string"}:
+            return args[index + 1] if index + 1 < len(args) else ""
+        if word.startswith("--split-string="):
+            return word.split("=", 1)[1]
+        if word.startswith("-S"):
+            return word[2:]
+        if not word.startswith("-"):
+            return None
+    return None
+
+
 def check_words(words: list[str], depth: int = 0) -> Verdict:
     if depth > 4:
         return None
@@ -231,8 +303,8 @@ def check_words(words: list[str], depth: int = 0) -> Verdict:
         elif head in STRING_WRAPPERS:
             rest = skip_options(words[1:], WRAPPERS.get(head, set()))
             return check_command(" ".join(rest), depth + 1)
-        elif head == "env" and any(w in {"-S", "--split-string"} for w in words[1:2]):
-            return check_command(words[2] if len(words) > 2 else "", depth + 1)
+        elif head == "env" and split_string(words[1:]) is not None:
+            return check_command(split_string(words[1:]) or "", depth + 1)
         elif head in WRAPPERS:
             words = skip_options(words[1:], WRAPPERS[head])
             words = words[POSITIONAL_PREFIX.get(head, 0):]
@@ -266,7 +338,7 @@ def check_cargo(args: list[str]) -> Verdict:
 
 def abbreviates(word: str, options: set[str]) -> bool:
     name = word.split("=", 1)[0]
-    return len(name) > 4 and any(option.startswith(name) for option in options)
+    return len(name) >= 4 and any(option.startswith(name) for option in options)
 
 
 def config_verdict(assignment: str) -> Verdict:

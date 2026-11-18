@@ -63,6 +63,14 @@ class PastMistakes(unittest.TestCase):
             'git commit -m "$(cargo build)"',
             "cat <<EOF\n$(cargo build)\nEOF",
             "cargo \\\n  build",
+            "(cd x)\ncargo build",
+            "git status;\ncargo build",
+            "true &&\ncargo build",
+            "echo $#; cargo build",
+            "echo ${#a}; cargo build",
+            "echo x#; cargo build",
+            "env -S'cargo build'",
+            "env --split-string='cargo build'",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.DENY)
@@ -104,6 +112,8 @@ class PastMistakes(unittest.TestCase):
             "git -c pull.rebase=true pull",
             "git pull -r",
             "git pull --rebase=merges",
+            "git log a#b; git push -f",
+            "git commit --am",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.ASK)
@@ -142,6 +152,10 @@ class AllowedCommands(unittest.TestCase):
             "git commit -F - <<'EOF'\n$(cargo build)\nEOF",
             "nice -n 10 git status",
             "timeout 60 gh run watch 1",
+            "echo $(echo ')')",
+            'echo "$(echo "a)b")"',
+            "echo hi # && cargo build",
+            "ls > out.txt 2>&1",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(decision(command))
