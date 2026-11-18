@@ -2344,7 +2344,7 @@ mod tests {
     const LOCAL_MODE_DIGEST: &str =
         "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f";
     const AIR_GAPPED_MODE_DIGEST: &str =
-        "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
+        "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb";
 
     /// `actor`'s answer to `GET /v1/session` from the production composition
     /// over a store bound to `mode` with its operator network grants and
@@ -3512,14 +3512,15 @@ mod tests {
         drop(app);
 
         // Under a later binding epoch, the answer still names the binding
-        // the revocation was produced under.
+        // the revocation was produced under. This test host has a network
+        // path, so the Air-Gapped no-route predicate is vouched for here.
         crate::mode_profile::migrate_gateway_mode_v1(
             path,
             crate::mode_profile::GatewayModeProfileIdV1::Local,
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
         )?;
         let mut host = sqlite_host(path)?;
-        let mode = crate::mode_profile::bind_gateway_mode_v1(
+        let mode = crate::mode_profile::test_bind_vouched(
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
             crate::mode_profile::GatewayServeCompositionV1 {
                 tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),

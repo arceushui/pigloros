@@ -1967,11 +1967,49 @@ mod erasure_gate_coverage_tests {
         Ok(())
     }
 
+    /// Set only for a test re-executed inside the Air-Gapped test shape.
+    const IN_AIR_GAPPED_NAMESPACE: &str = "PIGLOROS_AIR_GAPPED_TEST_NAMESPACE";
+
+    /// Run `body` as the test `name` of this module inside the ADR-135 §4 test
+    /// shape (#1422), where the Air-Gapped mode's `air-gapped-no-route`
+    /// predicate holds: the parent re-executes this test binary under
+    /// `scripts/air-gapped-namespace.sh` and requires the child to pass.
+    fn in_air_gapped_namespace(
+        name: &str,
+        body: impl FnOnce() -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if std::env::var_os(IN_AIR_GAPPED_NAMESPACE).is_some() {
+            return body();
+        }
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/air-gapped-namespace.sh");
+        let test = format!("erasure_gate_coverage_tests::{name}");
+        let status = std::process::Command::new(script)
+            .arg(std::env::current_exe()?)
+            .args(["--exact", test.as_str(), "--nocapture"])
+            .env(IN_AIR_GAPPED_NAMESPACE, "1")
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{test} failed in the Air-Gapped test namespace: {status}").into())
+        }
+    }
+
     /// ADR-134 §8: the first `serve` binds an empty store; a restart in
     /// another mode and a served store locked by `migrate-mode` are refused,
-    /// and `migrate-mode` switches the mode.
+    /// and `migrate-mode` switches the mode. It runs in the Air-Gapped test
+    /// shape, where the Air-Gapped mode can serve (ADR-135 §4).
     #[test]
     fn the_store_binding_survives_restarts_and_changes_only_by_migration(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        in_air_gapped_namespace(
+            "the_store_binding_survives_restarts_and_changes_only_by_migration",
+            store_binding_survives_restarts_and_changes_only_by_migration,
+        )
+    }
+
+    fn store_binding_survives_restarts_and_changes_only_by_migration(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("gateway.db");
@@ -2113,7 +2151,7 @@ mod erasure_gate_coverage_tests {
         use pos_core::GatewayModeBindingPortV1 as _;
         use std::time::Duration;
         const AIR_GAPPED_DIGEST: &str =
-            "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
+            "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb";
         let directory = tempfile::tempdir()?;
         let path = directory
             .path()
