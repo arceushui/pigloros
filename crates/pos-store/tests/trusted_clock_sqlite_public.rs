@@ -106,7 +106,10 @@ fn authenticated(byte: u8) -> AuthenticatedPrincipalResultV1 {
         expires_at: WallTime::from_micros(FAR),
         binding_digest: Hash::from_bytes([7; 32]),
     };
-    ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
+    ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        draft,
+    ))
 }
 
 fn mono(offsets: &[Duration]) -> ScriptedGuardMonotonicSourceV1 {

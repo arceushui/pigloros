@@ -237,7 +237,9 @@ pub fn pass(
     timeline: TimelineId,
     token: Option<&ConsentCapabilityToken>,
 ) -> Result<usize, RuntimeError> {
-    let host = LocalScheduledAdmissionHostV1::shared()?;
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )?;
     let revisions = host.observe(registry, &mut *store, timeline)?;
     let (head, drafts) = stage(registry, &*store, timeline, token)?;
     if drafts.is_empty() {

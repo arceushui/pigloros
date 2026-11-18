@@ -44,9 +44,11 @@ pub type LocalErasureClassificationRowV1 = (
 const ARD1_ROWS: usize = 7 * 2 * 3;
 
 /// The rows of the other sources: `client-cache-signal` and `local-replica`
-/// for both data classes, `timeline-payload` for private data, and
-/// `export-recipient` for consented exports.
-const SOURCE_ROWS: usize = 2 * 2 + 1 + 1;
+/// for both data classes (four), `timeline-payload` for private data (one),
+/// and `export-recipient` for consented exports (one). A literal, since
+/// `2 * 2` and `2 + 2` are the same count; the table's array length checks
+/// it.
+const SOURCE_ROWS: usize = 6;
 
 /// The number of ELP1 classification rows.
 pub const LOCAL_ERASURE_CLASSIFICATION_COUNT_V1: usize = ARD1_ROWS + SOURCE_ROWS;
