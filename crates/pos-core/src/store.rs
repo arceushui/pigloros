@@ -424,6 +424,23 @@ pub trait EventStore: Send {
         Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
     }
 
+    /// Read every artifact-registration row bound to one source Timeline.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when more than `max` rows are
+    /// bound, a bound row is corrupt, or the backend cannot determine the
+    /// current rows.
+    fn artifact_registrations_for_timeline(
+        &self,
+        _timeline: TimelineId,
+        _max: usize,
+    ) -> Result<
+        Vec<crate::ArtifactRegistrationCatalogRowV1>,
+        crate::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+    }
+
     /// Open or resume an exact local adapter-recording session in this store.
     ///
     /// # Errors
@@ -2755,6 +2772,14 @@ mod tests {
                 &unsupported_catalog_store,
                 &crate::OwnerIdV1::from_static("unsupported-event-store-test"),
                 Hash::zero(),
+            ),
+            Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+        );
+        assert_eq!(
+            EventStore::artifact_registrations_for_timeline(
+                &unsupported_catalog_store,
+                TimelineId::new(),
+                1,
             ),
             Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
         );
