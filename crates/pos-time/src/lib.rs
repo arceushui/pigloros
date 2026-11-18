@@ -620,7 +620,10 @@ pub mod test_support {
             expires_at: WallTime::from_micros(expires_at),
             binding_digest: Hash::from_bytes([7; 32]),
         };
-        test_ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
+        test_ok(AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            draft,
+        ))
     }
 
     /// Spin-acquire [`EXECUTOR_SERIAL`], yielding between attempts, and return

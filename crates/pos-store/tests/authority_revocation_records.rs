@@ -176,6 +176,7 @@ fn host_for(grants: &[&CapabilityGrantV1]) -> AuthorityPersistenceHostV1 {
         .collect::<Vec<_>>();
     bindings.sort_unstable();
     AuthorityPersistenceHostV1::new(&ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         REGISTRY,
         vec![hash(200)],
         bindings,
@@ -390,6 +391,7 @@ fn a_view_another_host_cannot_attest_or_that_conflicts_fails_closed() {
         // A host whose registry attests only the root cannot persist a view
         // whose revocation history names a grant outside its registry.
         let root_only = AuthorityPersistenceHostV1::new(&ok(AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             REGISTRY,
             vec![hash(200)],
             vec![ok(grants.root.binding_digest())],
