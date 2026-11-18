@@ -63,10 +63,13 @@ type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 type RunError = Box<dyn std::error::Error + Send + Sync>;
 
 const GATEWAY_CREDENTIAL_DIRECTORY: &str = "/run/credentials/piglor-gateway.service";
+#[cfg(any(target_os = "linux", test))]
 const PROVISION_CREDENTIAL_DIRECTORY: &str =
     "/run/credentials/piglor-gateway-fork-admission-provision.service";
+#[cfg(any(target_os = "linux", test))]
 const LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY: &str =
     "/run/credentials/piglor-gateway-local-principal-provision.service";
+#[cfg(any(target_os = "linux", test))]
 const LOCAL_ERASURE_CREDENTIAL_DIRECTORY: &str =
     "/run/credentials/piglor-gateway-local-erasure-provision.service";
 const FORK_ADMISSION_SOCKET: &str = "/run/pigloros/fork-admission.sock";

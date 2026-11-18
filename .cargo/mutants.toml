@@ -14,6 +14,6 @@ exclude_globs = [
   # Owner decision 2026-11-19, the second production exception: the closed
   # erasure-composition stub is `cfg(not(target_os = "linux"))` only, so this
   # Linux gate never builds it and would report every mutant as missed. The
-  # macOS `conformance-non-linux` job compiles it instead.
+  # macOS `conformance-non-linux` job compiles the Gateway with it instead.
   "apps/piglor-gateway/src/local_erasure_composition_closed.rs",
 ]
