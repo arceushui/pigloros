@@ -7956,11 +7956,11 @@ fn sign_owner_result(
 ) -> TestResult<Result<ErasureReferenceV1, ErasureHostErrorV1>> {
     let signer = signer_of(erasure_signer(), 1);
     let mut host = store.host(&driver_case()?, 4_096)?;
-    let signed = signer.sign(
+    let answer = signer.sign(
         &mut host,
         LocalErasureSigningRequestV1::OwnerResult { owner_result },
     );
-    Ok(signed)
+    Ok(answer)
 }
 
 /// ADR-138 acceptance test 1, and ADR-136 acceptance test 3 as ADR-138 §2

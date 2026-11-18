@@ -1013,8 +1013,8 @@ fn others_executed(
     committed_scope(store, command.request)
         .and_then(|(commitment, _)| loaded_registry(store).map(|registry| (commitment, registry)))
         .and_then(|(commitment, registry)| {
-            other_commands(store, command, active).and_then(|others| {
-                let targets = others
+            other_commands(store, command, active).and_then(|remaining| {
+                let targets = remaining
                     .iter()
                     .filter(|other| {
                         other.destruction.target.artifact_class == ErasureArtifactClassV1::Export
@@ -1023,7 +1023,7 @@ fn others_executed(
                     .collect::<Vec<_>>();
                 recorded_withdrawals(store, limits, &targets).and_then(|withdrawn| {
                     let scope = (commitment.reference(), active.admitted_position());
-                    others
+                    remaining
                         .iter()
                         .map(|other| {
                             has_owner_result(store, other, scope, registry.as_ref(), &withdrawn)

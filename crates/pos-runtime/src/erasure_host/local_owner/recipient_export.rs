@@ -257,10 +257,9 @@ pub(super) fn withdrawal_bound(
     owner_result: ErasureReferenceV1,
     timelines: &[TimelineId],
 ) -> bool {
-    let record = &recorded.record;
-    local_erasure_export_recipient_v1(record.export_id, &record.grantee_owner)
-        == Ok(recorded.target)
-        && timelines.contains(&record.timeline_id)
+    let elxw1 = &recorded.record;
+    local_erasure_export_recipient_v1(elxw1.export_id, &elxw1.grantee_owner) == Ok(recorded.target)
+        && timelines.contains(&elxw1.timeline_id)
         && (recorded.committed_elo1 != Some(owner_result)
-            || record.command == command.destruction.command)
+            || elxw1.command == command.destruction.command)
 }
