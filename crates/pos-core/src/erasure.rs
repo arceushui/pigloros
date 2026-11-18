@@ -2737,6 +2737,94 @@ pub trait ErasureInventoryPersistencePortV1 {
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
+
+    /// Read the complete erasure inventory, the owner and Fork relation of
+    /// every Timeline in its topology, and the erasure store identity in one
+    /// adapter snapshot (ADR-136 §2.5).
+    ///
+    /// The read is evidence for the erasure authority's read view, never a
+    /// trust root. Unlike the inventory snapshot it does not rebind the
+    /// adapter's installed inventory generation.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, validation or admission error; a Timeline
+    /// row set that does not match the topology is
+    /// [`ErasureErrorV1::ProvenanceMissing`].
+    fn erasure_authority_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1>;
+
+    /// Retain one canonical record in the shared content-addressed erasure
+    /// object store and return its address (ADR-136 §4).
+    ///
+    /// The insert is idempotent and the object is non-authoritative until a
+    /// committed record references it.
+    ///
+    /// # Errors
+    /// Returns a closed validation error for a malformed or over-limit
+    /// record (see [`ErasureRetainedObjectV1::new`]), or a persistence error.
+    fn retain_erasure_object(
+        &mut self,
+        canonical: &[u8],
+        max_bytes: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+
+    /// Commit one single-host owner effect and its ELO1 owner result in one
+    /// adapter transaction, and return the ELO1 address (ADR-136 §4a).
+    ///
+    /// Repeating a committed key tombstone is idempotent and returns the ELO1
+    /// address again, bound to the existing tombstone.
+    ///
+    /// # Errors
+    /// Returns a closed validation error for a malformed record, or a
+    /// persistence error. Every key-tombstone failure is the one closed
+    /// [`ErasureErrorV1::KeyDestructionFailed`]: a missing key registry, a
+    /// registry refusal, and, on an adapter whose durable state another
+    /// connection can change, an inventory changed since the adapter
+    /// installed it. Nothing is committed on error.
+    fn commit_local_owner_effect(
+        &mut self,
+        effect: LocalOwnerEffectV1,
+        elo1: &[u8],
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+
+    /// Read the write-once erasure store identity.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error.
+    fn erasure_store_identity(&mut self) -> Result<Option<crate::Hash>, ErasureErrorV1>;
+
+    /// Write the erasure store identity once and return the recorded value.
+    ///
+    /// An identical second write returns the recorded value.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] for a different identity,
+    /// or a closed persistence error.
+    fn init_erasure_store_identity(
+        &mut self,
+        id: crate::Hash,
+    ) -> Result<crate::Hash, ErasureErrorV1>;
+
+    /// Delete at most `max` retained objects whose tag is in `tags` and whose
+    /// address is not in `keep`, in increasing address order, and return how
+    /// many were deleted. Only objects newly inserted by
+    /// [`Self::retain_erasure_object`] or [`Self::commit_local_owner_effect`]
+    /// are candidates; an address the coordinator wrote first never is.
+    ///
+    /// The adapter does not know which retained objects committed records
+    /// reference: sweep safety rests entirely on the caller's `keep` list,
+    /// which must hold every referenced and every active-attempt object.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error; nothing is deleted on error.
+    fn sweep_unreferenced_erasure_objects(
+        &mut self,
+        tags: &[&str],
+        keep: &[ErasureReferenceV1],
+        max: usize,
+    ) -> Result<usize, ErasureErrorV1>;
 }
 
 /// Adapter capability for the single atomic `ERSE1` and child-Fork commit.
@@ -3734,6 +3822,13 @@ pub trait ErasureRecoveryErrorQueryV1 {
     ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1>;
 }
 
+mod authority_snapshot;
+pub use authority_snapshot::{
+    ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureRetainedObjectV1,
+    LocalOwnerEffectV1, PreparedLocalOwnerEffectV1, ERASURE_RECORD_TAG_MAX_BYTES_V1,
+    ERASURE_RECORD_TAG_MIN_BYTES_V1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    LOCAL_OWNER_EFFECT_MAX_BYTES_V1, LOCAL_OWNER_RESULT_MAX_BYTES_V1,
+};
 mod receipt;
 pub use receipt::target_closure_digest;
 mod artifact;
@@ -7460,20 +7555,63 @@ mod coverage_paths {
         Ok(())
     }
 
+    struct LegacyInventoryPersistencePort;
+
+    impl ErasureInventoryPersistencePortV1 for LegacyInventoryPersistencePort {
+        fn complete_erasure_inventory_snapshot(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+        }
+
+        fn erasure_authority_snapshot_with_limits(
+            &mut self,
+            _limits: ErasureRecoveryLimitsV1,
+        ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn retain_erasure_object(
+            &mut self,
+            _canonical: &[u8],
+            _max_bytes: usize,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn commit_local_owner_effect(
+            &mut self,
+            _effect: LocalOwnerEffectV1,
+            _elo1: &[u8],
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn erasure_store_identity(&mut self) -> Result<Option<crate::Hash>, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn init_erasure_store_identity(
+            &mut self,
+            _id: crate::Hash,
+        ) -> Result<crate::Hash, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn sweep_unreferenced_erasure_objects(
+            &mut self,
+            _tags: &[&str],
+            _keep: &[ErasureReferenceV1],
+            _max: usize,
+        ) -> Result<usize, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
     #[test]
     fn limit_aware_inventory_queries_fail_closed_without_an_override() -> Result<(), ErasureErrorV1>
     {
-        struct LegacyInventoryPersistencePort;
-
-        impl ErasureInventoryPersistencePortV1 for LegacyInventoryPersistencePort {
-            fn complete_erasure_inventory_snapshot(
-                &mut self,
-                _maximum_requests: usize,
-            ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-                ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
-            }
-        }
-
         struct LegacyInventoryQuery(Option<ErasureVerifiedInventoryV1>);
 
         impl ErasureVerifiedInventoryQueryV1 for LegacyInventoryQuery {

@@ -131,6 +131,7 @@ mod fork_replay;
 mod fork_replay_lineage;
 mod gateway_mode_binding;
 mod gateway_revision;
+mod local_erasure;
 mod pipeline_admission;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry;
@@ -337,6 +338,11 @@ pub struct MemoryStore {
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
     erasure_evidence: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    /// Record tag of every evidence object retained for the single-host
+    /// erasure authority (ADR-136 §4); only these are sweep candidates.
+    erasure_retained_objects: BTreeMap<ErasureReferenceV1, String>,
+    /// The write-once erasure store identity (ADR-136 §4).
+    erasure_store_identity: Option<Hash>,
     /// Exact immutable artifact bytes and ARD1 rows visible in each local owner catalog.
     artifact_registrations: BTreeMap<Hash, ArtifactRegistrationCatalogRowV1>,
     /// Unique immutable identity index for `(owner, class, artifact digest)`.
@@ -836,6 +842,8 @@ impl MemoryStore {
             imported_fork_attributions: HashMap::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
+            erasure_retained_objects: BTreeMap::new(),
+            erasure_store_identity: None,
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
@@ -3917,6 +3925,46 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
             })?;
         self.erasure_inventory_generation = Some(snapshot.generation());
         Ok(snapshot)
+    }
+
+    fn erasure_authority_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+        self.local_erasure_authority_snapshot(limits)
+    }
+
+    fn retain_erasure_object(
+        &mut self,
+        canonical: &[u8],
+        max_bytes: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_retain(canonical, max_bytes)
+    }
+
+    fn commit_local_owner_effect(
+        &mut self,
+        effect: pos_core::LocalOwnerEffectV1,
+        elo1: &[u8],
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_commit_owner_effect(effect, elo1)
+    }
+
+    fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
+        Ok(self.local_erasure_store_identity())
+    }
+
+    fn init_erasure_store_identity(&mut self, id: Hash) -> Result<Hash, ErasureErrorV1> {
+        self.local_erasure_init_store_identity(id)
+    }
+
+    fn sweep_unreferenced_erasure_objects(
+        &mut self,
+        tags: &[&str],
+        keep: &[ErasureReferenceV1],
+        max: usize,
+    ) -> Result<usize, ErasureErrorV1> {
+        Ok(self.local_erasure_sweep(tags, keep, max))
     }
 }
 

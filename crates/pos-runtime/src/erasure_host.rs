@@ -2,9 +2,10 @@
 
 mod world_replay_read;
 
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::authorization_cache::{AuthorizationCacheKeyV1, AuthorizationCacheV1};
+use crate::erasure_authority_view::{ErasureAuthorityReadViewV1, ErasureAuthoritySnapshotViewV1};
 
 use pos_core::{
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
@@ -253,18 +254,50 @@ type HostStoreObjectV1 = dyn ErasureHostStore;
 ///
 /// Implementations are Plugins at the runtime composition boundary: they
 /// authenticate Principal, capability, policy, trust, topology, quota, and
-/// external-destruction evidence, but they never receive or own the durable
-/// [`pos_core::store::EventStore`]. The execution host joins this authority
-/// with its one private adapter when it invokes the core state machine.
-pub trait ErasureCoordinatorAuthorityV1:
-    ErasureFreezeAuthorizationVerifierV1 + ErasureRecoveryAuthorizationVerifierV1 + Send + Sync
-{
+/// external-destruction evidence. They never receive or own the durable
+/// [`pos_core::store::EventStore`] or any signing key; every method receives
+/// only a read-only snapshot view (ADR-136 companion §2.4). The execution host
+/// joins this authority with its one private adapter when it invokes the core
+/// state machine.
+pub trait ErasureCoordinatorAuthorityV1: Send + Sync {
+    /// Validate the #187-owned authorization evidence of one atomic freeze.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, policy, trust, or evidence error.
+    fn validate_freeze_authorization_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Validate one recovered future-Fork scope extension.
+    ///
+    /// # Errors
+    /// Returns a closed lineage, authorization, or provenance error.
+    fn validate_scope_extension_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Validate one recovered administrative resolution.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, policy, trust, or provenance error.
+    fn validate_administrative_resolution_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
     /// Resolve one manifest revision against the authoritative Timeline/Fork topology.
     ///
     /// # Errors
     /// Returns a closed topology, policy, trust, or provenance error.
     fn verified_topology_observation(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1>;
@@ -277,6 +310,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed topology, policy, trust, or provenance error.
     fn verified_topology_observation_for_candidate(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _manifest_digest: ErasureReferenceV1,
         _candidate: &TimelineMeta,
@@ -288,7 +322,11 @@ pub trait ErasureCoordinatorAuthorityV1:
     ///
     /// # Errors
     /// Returns a closed Principal, capability, policy, or trust error.
-    fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1>;
+    fn authenticate(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        request: &ErasureRequestV1,
+    ) -> Result<(), ErasureErrorV1>;
 
     /// Authenticate an authorization or rejection decision.
     ///
@@ -296,6 +334,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed authorization, policy, trust, or provenance error.
     fn admit_authorization(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
@@ -307,6 +346,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed authorization, policy, trust, or provenance error.
     fn admit_corrected_submission(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         request: &ErasureRequestV1,
         correction: &ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1>;
@@ -317,6 +357,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed scope, authorization, policy, trust, or evidence error.
     fn admit_atomic_freeze(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1>;
@@ -327,6 +368,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed lineage, authorization, or provenance error.
     fn admit_scope_extension(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1>;
 
@@ -336,6 +378,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed lineage, scope, authorization, or generation error.
     fn admit_fork_scope_extension(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         extension: &ErasureScopeExtensionV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1>;
@@ -346,6 +389,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed lineage, scope, policy, trust, or provenance error.
     fn resolve_fork_child_scope(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         parent: TimelineId,
         child: &TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
@@ -356,6 +400,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed lineage, scope, authorization, or provenance error.
     fn resolve_fork_scope_extension(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1>;
@@ -366,6 +411,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed authorization, policy, trust, or provenance error.
     fn admit_administrative_resolution(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1>;
 
@@ -375,6 +421,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed delivery or external-system error.
     fn dispatch_destruction(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1>;
@@ -385,6 +432,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed authorization, quota, policy, or trust error.
     fn admit_attempt(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1>;
 
@@ -394,6 +442,7 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed owner, evidence, authorization, or provenance error.
     fn admit_acknowledgement(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1>;
 
@@ -401,7 +450,11 @@ pub trait ErasureCoordinatorAuthorityV1:
     ///
     /// # Errors
     /// Returns a closed policy, trust, signature, or provenance error.
-    fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
+    fn admit_receipt(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        input: &ErasureReceiptInputV1,
+    ) -> Result<(), ErasureErrorV1>;
 }
 
 /// A deliberately closed authority used when a deployment has not supplied
@@ -416,47 +469,52 @@ pub trait ErasureCoordinatorAuthorityV1:
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ClosedErasureCoordinatorAuthorityV1;
 
-impl ErasureFreezeAuthorizationVerifierV1 for ClosedErasureCoordinatorAuthorityV1 {
-    fn validate_freeze_authorization(
+impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
+    fn validate_freeze_authorization_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _admission: &ErasureFreezeAdmissionEvidenceV1,
         _authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
-}
 
-impl ErasureRecoveryAuthorizationVerifierV1 for ClosedErasureCoordinatorAuthorityV1 {
-    fn validate_scope_extension(
+    fn validate_scope_extension_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 
-    fn validate_administrative_resolution(
+    fn validate_administrative_resolution_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
-}
 
-impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
     fn verified_topology_observation(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 
-    fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+    fn authenticate(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+    ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 
     fn admit_authorization(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _provenance: ErasureReferenceV1,
         _decision: ErasureAuthorizationDecisionV1,
@@ -466,6 +524,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn admit_corrected_submission(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: &ErasureRequestV1,
         _correction: &ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -474,6 +533,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn admit_atomic_freeze(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -482,6 +542,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn admit_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -489,6 +550,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn admit_fork_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
         _input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -497,6 +559,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn resolve_fork_child_scope(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _parent: TimelineId,
         _child: &TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -505,6 +568,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn resolve_fork_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _requirement: ErasureForkScopeRequirementV1,
         _input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -513,6 +577,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn admit_administrative_resolution(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -520,6 +585,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn dispatch_destruction(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
@@ -528,6 +594,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn admit_attempt(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -535,12 +602,17 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 
     fn admit_acknowledgement(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 
-    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+    fn admit_receipt(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _input: &ErasureReceiptInputV1,
+    ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
 }
@@ -620,18 +692,68 @@ struct HostedCoordinatorPortV1<'host> {
     store: RefCell<&'host mut dyn ErasureHostStore>,
     authority: &'host dyn ErasureCoordinatorAuthorityV1,
     topology_candidate: Option<TimelineMeta>,
+    limits: ErasureRecoveryLimitsV1,
+    /// The authority view of the current store snapshot; cleared by every
+    /// durable write through this port.
+    view: RefCell<Option<Rc<ErasureAuthoritySnapshotViewV1>>>,
 }
 
 impl<'host> HostedCoordinatorPortV1<'host> {
     fn new(
         store: &'host mut dyn ErasureHostStore,
         authority: &'host dyn ErasureCoordinatorAuthorityV1,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Self {
         Self {
             store: RefCell::new(store),
             authority,
             topology_candidate: None,
+            limits,
+            view: RefCell::new(None),
         }
+    }
+
+    /// Observe one request's topology through the authority, for the pending
+    /// topology candidate when there is one.
+    fn request_topology_observation(
+        &self,
+        request: ErasureReferenceV1,
+        manifest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        self.authority_view().and_then(|view| {
+            self.topology_candidate.as_ref().map_or_else(
+                || {
+                    self.authority
+                        .verified_topology_observation(view.as_ref(), request, manifest)
+                },
+                |candidate| {
+                    self.authority.verified_topology_observation_for_candidate(
+                        view.as_ref(),
+                        request,
+                        manifest,
+                        candidate,
+                    )
+                },
+            )
+        })
+    }
+
+    /// The read-only authority view of the current store snapshot.
+    fn authority_view(&self) -> Result<Rc<ErasureAuthoritySnapshotViewV1>, ErasureErrorV1> {
+        let cached = self.view.borrow().clone();
+        cached.map_or_else(
+            || {
+                self.store
+                    .borrow_mut()
+                    .erasure_authority_snapshot_with_limits(self.limits)
+                    .map(|snapshot| {
+                        let view = Rc::new(ErasureAuthoritySnapshotViewV1::new(snapshot));
+                        *self.view.borrow_mut() = Some(Rc::clone(&view));
+                        view
+                    })
+            },
+            Ok,
+        )
     }
 
     fn with_topology_candidate(mut self, candidate: &TimelineMeta) -> Self {
@@ -673,17 +795,8 @@ impl<'host> HostedCoordinatorPortV1<'host> {
                             .map_err(|_| ErasureErrorV1::ScopeInvalid)
                             .and_then(|()| {
                                 for (request, manifest) in &request_heads {
-                                    let topology_observation =
-                                        match self.topology_candidate.as_ref() {
-                                            Some(candidate) => self
-                                                .authority
-                                                .verified_topology_observation_for_candidate(
-                                                    *request, *manifest, candidate,
-                                                )?,
-                                            None => self.authority.verified_topology_observation(
-                                                *request, *manifest,
-                                            )?,
-                                        }
+                                    let topology_observation = self
+                                        .request_topology_observation(*request, *manifest)?
                                         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
                                     if topology_observation
                                         .bindings()
@@ -795,6 +908,7 @@ impl ErasurePersistencePortV1 for HostedCoordinatorPortV1<'_> {
         &mut self,
         object: PreparedErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1> {
+        self.view.get_mut().take();
         self.store.get_mut().append_recovery_error(object)
     }
 
@@ -802,6 +916,7 @@ impl ErasurePersistencePortV1 for HostedCoordinatorPortV1<'_> {
         &mut self,
         mutation: PreparedErasureCasV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.view.get_mut().take();
         self.store.get_mut().compare_and_swap(mutation)
     }
 }
@@ -812,8 +927,13 @@ impl ErasureFreezeAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority
-            .validate_freeze_authorization(admission, authorization)
+        self.authority_view().and_then(|view| {
+            self.authority.validate_freeze_authorization_with_view(
+                view.as_ref(),
+                admission,
+                authorization,
+            )
+        })
     }
 }
 
@@ -822,15 +942,20 @@ impl ErasureRecoveryAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
         &self,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority.validate_scope_extension(extension)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .validate_scope_extension_with_view(view.as_ref(), extension)
+        })
     }
 
     fn validate_administrative_resolution(
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority
-            .validate_administrative_resolution(resolution)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .validate_administrative_resolution_with_view(view.as_ref(), resolution)
+        })
     }
 }
 
@@ -855,12 +980,15 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        self.authority
-            .verified_topology_observation(request, manifest_digest)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .verified_topology_observation(view.as_ref(), request, manifest_digest)
+        })
     }
 
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-        self.authority.authenticate(request)
+        self.authority_view()
+            .and_then(|view| self.authority.authenticate(view.as_ref(), request))
     }
 
     fn admit_authorization(
@@ -869,8 +997,10 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority
-            .admit_authorization(request, provenance, decision)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .admit_authorization(view.as_ref(), request, provenance, decision)
+        })
     }
 
     fn admit_corrected_submission(
@@ -878,8 +1008,10 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         request: &ErasureRequestV1,
         correction: &ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority
-            .admit_corrected_submission(request, correction)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .admit_corrected_submission(view.as_ref(), request, correction)
+        })
     }
 
     fn admit_atomic_freeze(
@@ -887,14 +1019,20 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-        self.authority.admit_atomic_freeze(request, requested)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .admit_atomic_freeze(view.as_ref(), request, requested)
+        })
     }
 
     fn admit_scope_extension(
         &self,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority.admit_scope_extension(extension)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .admit_scope_extension(view.as_ref(), extension)
+        })
     }
 
     fn admit_fork_scope_extension(
@@ -902,14 +1040,20 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         extension: &ErasureScopeExtensionV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority.admit_fork_scope_extension(extension, input)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .admit_fork_scope_extension(view.as_ref(), extension, input)
+        })
     }
 
     fn admit_administrative_resolution(
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority.admit_administrative_resolution(resolution)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .admit_administrative_resolution(view.as_ref(), resolution)
+        })
     }
 
     fn dispatch_destruction(
@@ -917,25 +1061,33 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         request: ErasureReferenceV1,
         commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
-        self.authority.dispatch_destruction(request, commands)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .dispatch_destruction(view.as_ref(), request, commands)
+        })
     }
 
     fn admit_attempt(
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        self.authority.admit_attempt(admission)
+        self.authority_view()
+            .and_then(|view| self.authority.admit_attempt(view.as_ref(), admission))
     }
 
     fn admit_acknowledgement(
         &self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authority.admit_acknowledgement(acknowledgement)
+        self.authority_view().and_then(|view| {
+            self.authority
+                .admit_acknowledgement(view.as_ref(), acknowledgement)
+        })
     }
 
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        self.authority.admit_receipt(input)
+        self.authority_view()
+            .and_then(|view| self.authority.admit_receipt(view.as_ref(), input))
     }
 }
 
@@ -1962,9 +2114,12 @@ impl ErasureExecutionHostV1 {
             .flatten()
             .ok_or(ErasureErrorV1::ProvenanceMissing)
             .and_then(|child| {
-                let port =
-                    HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref())
-                        .with_topology_candidate(&child.meta);
+                let port = HostedCoordinatorPortV1::new(
+                    self.store.host_store(),
+                    authority.as_ref(),
+                    limits,
+                )
+                .with_topology_candidate(&child.meta);
                 ErasureCoordinatorStateMachineV1::new(port, *coordinator)
                     .verified_inventory_with_limits(limits)
             })
@@ -2082,7 +2237,8 @@ impl ErasureExecutionHostV1 {
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let inventory = {
-            let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+            let port =
+                HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref(), limits);
             let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
             state_machine
                 .verified_inventory_with_limits(limits)
@@ -2357,13 +2513,15 @@ impl ErasureExecutionHostV1 {
         let authority = self.authority.clone().ok_or(ErasureErrorV1::Unauthorized)?;
         let coordinator = self.coordinator.ok_or(ErasureErrorV1::Unauthorized)?;
         let candidate_inventory = {
-            let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref())
-                .with_topology_candidate(candidate);
+            let port =
+                HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref(), limits)
+                    .with_topology_candidate(candidate);
             let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
             state_machine.verified_inventory_with_limits(limits)?
         };
         let current_durable_inventory = {
-            let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+            let port =
+                HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref(), limits);
             let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
             state_machine.verified_inventory_with_limits(limits)?
         };
@@ -2752,13 +2910,25 @@ impl ErasureExecutionHostV1 {
         input: &IdentifiedForkTransitionInput<'_>,
         permit: &ErasureTopologyTransitionPermitV1,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
-        if let Some(recovered) = input.recovered.as_ref() {
-            return Self::recover_identified_fork(input, recovered);
-        }
-        self.prepare_identified_fork(input, permit)
+        self.host_authority_view().and_then(|view| {
+            if let Some(recovered) = input.recovered.as_ref() {
+                return Self::recover_identified_fork(&view, input, recovered);
+            }
+            self.prepare_identified_fork(&view, input, permit)
+        })
+    }
+
+    /// The read-only authority view of the current store snapshot, for an
+    /// authority call made outside the coordinator port.
+    fn host_authority_view(&mut self) -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
+        self.store
+            .host_store()
+            .erasure_authority_snapshot_with_limits(self.recovery_limits)
+            .map(ErasureAuthoritySnapshotViewV1::new)
     }
 
     fn recover_identified_fork(
+        view: &dyn ErasureAuthorityReadViewV1,
         input: &IdentifiedForkTransitionInput<'_>,
         recovered: &ErasureForkRecoveryV1,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
@@ -2771,10 +2941,11 @@ impl ErasureExecutionHostV1 {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let retry_child = recovered_child.clone();
-        let child_scope = input
-            .context
-            .authority
-            .resolve_fork_child_scope(input.context.parent, &retry_child)?;
+        let child_scope = input.context.authority.resolve_fork_child_scope(
+            view,
+            input.context.parent,
+            &retry_child,
+        )?;
         if child_scope != recovered.child_scope() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -2802,10 +2973,11 @@ impl ErasureExecutionHostV1 {
             .map_err(stale_error)?;
         for requirement in requirements {
             let requirement = requirement.map_err(stale_error)?;
-            let extension = input
-                .context
-                .authority
-                .resolve_fork_scope_extension(requirement.requirement(), &retry_input)?;
+            let extension = input.context.authority.resolve_fork_scope_extension(
+                view,
+                requirement.requirement(),
+                &retry_input,
+            )?;
             if extension != *requirement.extension() {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
@@ -2816,8 +2988,16 @@ impl ErasureExecutionHostV1 {
         ))
     }
 
+    /// Prepare every ERSE1 admission of one fork and commit them in one batch.
+    ///
+    /// `view` is read once and stays fixed for the whole fork transition. That
+    /// meets the "read after every durable write" contract: the loop only
+    /// prepares (`prepare_fork_admission` returns an uncommitted mutation),
+    /// and the one durable write is `commit_fork_admission` after it, bound to
+    /// the transition's expected inventory generation.
     fn prepare_identified_fork(
         &mut self,
+        view: &dyn ErasureAuthorityReadViewV1,
         input: &IdentifiedForkTransitionInput<'_>,
         permit: &ErasureTopologyTransitionPermitV1,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
@@ -2825,10 +3005,11 @@ impl ErasureExecutionHostV1 {
             .context
             .current_inventory
             .fork_scope_requirements(input.context.parent)?;
-        let child_scope = input
-            .context
-            .authority
-            .resolve_fork_child_scope(input.context.parent, input.child)?;
+        let child_scope = input.context.authority.resolve_fork_child_scope(
+            view,
+            input.context.parent,
+            input.child,
+        )?;
         let admission_input = ErasureForkAdmissionInputV1 {
             operation: input.context.operation,
             expected_inventory_generation: input.context.current_generation,
@@ -2836,8 +3017,11 @@ impl ErasureExecutionHostV1 {
             child: input.child.clone(),
         };
         let admissions = {
-            let port =
-                HostedCoordinatorPortV1::new(self.store.host_store(), input.context.authority);
+            let port = HostedCoordinatorPortV1::new(
+                self.store.host_store(),
+                input.context.authority,
+                self.recovery_limits,
+            );
             let mut state_machine =
                 ErasureCoordinatorStateMachineV1::new(port, input.context.coordinator);
             requirements
@@ -2846,7 +3030,7 @@ impl ErasureExecutionHostV1 {
                     input
                         .context
                         .authority
-                        .resolve_fork_scope_extension(requirement, &admission_input)
+                        .resolve_fork_scope_extension(view, requirement, &admission_input)
                         .and_then(|extension| {
                             state_machine.prepare_fork_admission(
                                 requirement.request(),
@@ -2892,8 +3076,11 @@ impl ErasureExecutionHostV1 {
         let mut transition_failure = None;
         let publication = {
             let mut fenced_transition = |_permit: &ErasureTopologyTransitionPermitV1| {
-                let port =
-                    HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+                let port = HostedCoordinatorPortV1::new(
+                    self.store.host_store(),
+                    authority.as_ref(),
+                    limits,
+                );
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
                 match transition(&mut state_machine).and_then(|result| {
                     state_machine
@@ -4520,8 +4707,11 @@ impl ErasureReadSenderV1<'_> {
             return Err(ErasureHostErrorV1::AuthorizationDenied);
         };
         let state = {
-            let port =
-                HostedCoordinatorPortV1::new(self.host.store.host_store(), authority.as_ref());
+            let port = HostedCoordinatorPortV1::new(
+                self.host.store.host_store(),
+                authority.as_ref(),
+                self.host.recovery_limits,
+            );
             let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
             ErasureVerifiedStateQueryV1::verified_state(&mut state_machine, request)
                 .map_err(map_erasure_error)?
@@ -5012,6 +5202,14 @@ mod tests {
     use std::{cell::Cell, time::Duration};
     const fn reference(seed: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([seed; 32])
+    }
+
+    fn empty_authority_view() -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
+        ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+            .and_then(|inventory| {
+                pos_core::ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None)
+            })
+            .map(ErasureAuthoritySnapshotViewV1::new)
     }
 
     fn verified_empty_inventory(
@@ -5733,6 +5931,7 @@ mod tests {
         transition_lookup_calls: Arc<std::sync::atomic::AtomicUsize>,
         lineage_read_calls: Arc<std::sync::atomic::AtomicUsize>,
         inventory_snapshot_calls: usize,
+        authority_snapshot_calls: usize,
         fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
 
@@ -6300,6 +6499,48 @@ mod tests {
     }
 
     impl pos_core::ErasureInventoryPersistencePortV1 for FaultStoreV1 {
+        fn erasure_authority_snapshot_with_limits(
+            &mut self,
+            limits: ErasureRecoveryLimitsV1,
+        ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+            self.authority_snapshot_calls += 1;
+            self.inner.erasure_authority_snapshot_with_limits(limits)
+        }
+
+        fn retain_erasure_object(
+            &mut self,
+            canonical: &[u8],
+            max_bytes: usize,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            self.inner.retain_erasure_object(canonical, max_bytes)
+        }
+
+        fn commit_local_owner_effect(
+            &mut self,
+            effect: pos_core::LocalOwnerEffectV1,
+            elo1: &[u8],
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            self.inner.commit_local_owner_effect(effect, elo1)
+        }
+
+        fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
+            self.inner.erasure_store_identity()
+        }
+
+        fn init_erasure_store_identity(&mut self, id: Hash) -> Result<Hash, ErasureErrorV1> {
+            self.inner.init_erasure_store_identity(id)
+        }
+
+        fn sweep_unreferenced_erasure_objects(
+            &mut self,
+            tags: &[&str],
+            keep: &[ErasureReferenceV1],
+            max: usize,
+        ) -> Result<usize, ErasureErrorV1> {
+            self.inner
+                .sweep_unreferenced_erasure_objects(tags, keep, max)
+        }
+
         fn begin_protected_effect_interval(
             &self,
         ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
@@ -7076,35 +7317,35 @@ mod tests {
     static UNUSED_COORDINATOR_AUTHORITY: UnusedCoordinatorAuthorityV1 =
         UnusedCoordinatorAuthorityV1::rejecting();
 
-    impl ErasureFreezeAuthorizationVerifierV1 for UnusedCoordinatorAuthorityV1 {
-        fn validate_freeze_authorization(
+    impl ErasureCoordinatorAuthorityV1 for UnusedCoordinatorAuthorityV1 {
+        fn validate_freeze_authorization_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _admission: &ErasureFreezeAdmissionEvidenceV1,
             _authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
-    }
 
-    impl ErasureRecoveryAuthorizationVerifierV1 for UnusedCoordinatorAuthorityV1 {
-        fn validate_scope_extension(
+        fn validate_scope_extension_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn validate_administrative_resolution(
+        fn validate_administrative_resolution_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
-    }
 
-    impl ErasureCoordinatorAuthorityV1 for UnusedCoordinatorAuthorityV1 {
         fn verified_topology_observation(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -7115,12 +7356,17 @@ mod tests {
             )))
         }
 
-        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        fn authenticate(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+        ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_authorization(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _provenance: ErasureReferenceV1,
             _decision: ErasureAuthorizationDecisionV1,
@@ -7130,6 +7376,7 @@ mod tests {
 
         fn admit_corrected_submission(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: &ErasureRequestV1,
             _correction: &ErasureCorrectionProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7138,6 +7385,7 @@ mod tests {
 
         fn admit_atomic_freeze(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -7146,6 +7394,7 @@ mod tests {
 
         fn admit_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7153,6 +7402,7 @@ mod tests {
 
         fn admit_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7161,6 +7411,7 @@ mod tests {
 
         fn resolve_fork_child_scope(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -7170,6 +7421,7 @@ mod tests {
 
         fn resolve_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _requirement: ErasureForkScopeRequirementV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -7178,6 +7430,7 @@ mod tests {
 
         fn admit_administrative_resolution(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7185,6 +7438,7 @@ mod tests {
 
         fn dispatch_destruction(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _commands: &[ErasureDestructionCommandV1],
         ) -> Result<(), ErasureErrorV1> {
@@ -7193,6 +7447,7 @@ mod tests {
 
         fn admit_attempt(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _admission: &ErasureRetryAdmissionV1,
         ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7200,12 +7455,17 @@ mod tests {
 
         fn admit_acknowledgement(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _acknowledgement: &ErasureAcknowledgementProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        fn admit_receipt(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _input: &ErasureReceiptInputV1,
+        ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
     }
@@ -7216,35 +7476,35 @@ mod tests {
         candidate_missing: std::sync::atomic::AtomicBool,
     }
 
-    impl ErasureFreezeAuthorizationVerifierV1 for RejectedCoordinatorAuthorityV1 {
-        fn validate_freeze_authorization(
+    impl ErasureCoordinatorAuthorityV1 for RejectedCoordinatorAuthorityV1 {
+        fn validate_freeze_authorization_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _admission: &ErasureFreezeAdmissionEvidenceV1,
             _authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
-    }
 
-    impl ErasureRecoveryAuthorizationVerifierV1 for RejectedCoordinatorAuthorityV1 {
-        fn validate_scope_extension(
+        fn validate_scope_extension_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn validate_administrative_resolution(
+        fn validate_administrative_resolution_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
-    }
 
-    impl ErasureCoordinatorAuthorityV1 for RejectedCoordinatorAuthorityV1 {
         fn verified_topology_observation(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -7262,6 +7522,7 @@ mod tests {
 
         fn verified_topology_observation_for_candidate(
             &self,
+            view: &dyn ErasureAuthorityReadViewV1,
             request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
             candidate: &TimelineMeta,
@@ -7281,15 +7542,20 @@ mod tests {
                     unaffected.push(candidate.id);
                 }
             }
-            self.verified_topology_observation(request, manifest_digest)
+            self.verified_topology_observation(view, request, manifest_digest)
         }
 
-        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        fn authenticate(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+        ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
         fn admit_authorization(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _provenance: ErasureReferenceV1,
             _decision: ErasureAuthorizationDecisionV1,
@@ -7299,6 +7565,7 @@ mod tests {
 
         fn admit_corrected_submission(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: &ErasureRequestV1,
             _correction: &ErasureCorrectionProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7307,6 +7574,7 @@ mod tests {
 
         fn admit_atomic_freeze(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -7315,6 +7583,7 @@ mod tests {
 
         fn admit_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7322,6 +7591,7 @@ mod tests {
 
         fn admit_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7330,6 +7600,7 @@ mod tests {
 
         fn resolve_fork_child_scope(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -7338,6 +7609,7 @@ mod tests {
 
         fn resolve_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _requirement: ErasureForkScopeRequirementV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -7346,6 +7618,7 @@ mod tests {
 
         fn admit_administrative_resolution(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7353,6 +7626,7 @@ mod tests {
 
         fn dispatch_destruction(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _commands: &[ErasureDestructionCommandV1],
         ) -> Result<(), ErasureErrorV1> {
@@ -7361,6 +7635,7 @@ mod tests {
 
         fn admit_attempt(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _admission: &ErasureRetryAdmissionV1,
         ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7368,12 +7643,17 @@ mod tests {
 
         fn admit_acknowledgement(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _acknowledgement: &ErasureAcknowledgementProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        fn admit_receipt(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _input: &ErasureReceiptInputV1,
+        ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
     }
@@ -7513,35 +7793,35 @@ mod tests {
         }
     }
 
-    impl ErasureFreezeAuthorizationVerifierV1 for ActiveTopologyAuthorityV1 {
-        fn validate_freeze_authorization(
+    impl ErasureCoordinatorAuthorityV1 for ActiveTopologyAuthorityV1 {
+        fn validate_freeze_authorization_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             admission: &ErasureFreezeAdmissionEvidenceV1,
             authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
             authorization.verify_admission_body_binding(admission)
         }
-    }
 
-    impl ErasureRecoveryAuthorizationVerifierV1 for ActiveTopologyAuthorityV1 {
-        fn validate_scope_extension(
+        fn validate_scope_extension_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn validate_administrative_resolution(
+        fn validate_administrative_resolution_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
-    }
 
-    impl ErasureCoordinatorAuthorityV1 for ActiveTopologyAuthorityV1 {
         fn verified_topology_observation(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -7555,6 +7835,7 @@ mod tests {
 
         fn verified_topology_observation_for_candidate(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
             candidate: &TimelineMeta,
@@ -7574,12 +7855,17 @@ mod tests {
             Ok(Some(self.topology_observation(manifest_digest, timelines)))
         }
 
-        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        fn authenticate(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+        ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
         fn admit_authorization(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _provenance: ErasureReferenceV1,
             _decision: ErasureAuthorizationDecisionV1,
@@ -7589,6 +7875,7 @@ mod tests {
 
         fn admit_corrected_submission(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: &ErasureRequestV1,
             _correction: &ErasureCorrectionProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7597,6 +7884,7 @@ mod tests {
 
         fn admit_atomic_freeze(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             request: ErasureReferenceV1,
             requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -7605,6 +7893,7 @@ mod tests {
 
         fn admit_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7612,6 +7901,7 @@ mod tests {
 
         fn admit_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7620,6 +7910,7 @@ mod tests {
 
         fn resolve_fork_child_scope(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -7628,6 +7919,7 @@ mod tests {
 
         fn resolve_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             requirement: ErasureForkScopeRequirementV1,
             input: &ErasureForkAdmissionInputV1,
         ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -7650,6 +7942,7 @@ mod tests {
 
         fn admit_administrative_resolution(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7657,6 +7950,7 @@ mod tests {
 
         fn dispatch_destruction(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _commands: &[ErasureDestructionCommandV1],
         ) -> Result<(), ErasureErrorV1> {
@@ -7665,6 +7959,7 @@ mod tests {
 
         fn admit_attempt(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _admission: &ErasureRetryAdmissionV1,
         ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7672,59 +7967,69 @@ mod tests {
 
         fn admit_acknowledgement(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _acknowledgement: &ErasureAcknowledgementProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        fn admit_receipt(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _input: &ErasureReceiptInputV1,
+        ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
     }
 
     struct ForkChildAuthorityV1;
 
-    impl ErasureFreezeAuthorizationVerifierV1 for ForkChildAuthorityV1 {
-        fn validate_freeze_authorization(
+    impl ErasureCoordinatorAuthorityV1 for ForkChildAuthorityV1 {
+        fn validate_freeze_authorization_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _admission: &ErasureFreezeAdmissionEvidenceV1,
             _authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
-    }
 
-    impl ErasureRecoveryAuthorizationVerifierV1 for ForkChildAuthorityV1 {
-        fn validate_scope_extension(
+        fn validate_scope_extension_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn validate_administrative_resolution(
+        fn validate_administrative_resolution_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
-    }
 
-    impl ErasureCoordinatorAuthorityV1 for ForkChildAuthorityV1 {
         fn verified_topology_observation(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        fn authenticate(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+        ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_authorization(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _provenance: ErasureReferenceV1,
             _decision: ErasureAuthorizationDecisionV1,
@@ -7734,6 +8039,7 @@ mod tests {
 
         fn admit_corrected_submission(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: &ErasureRequestV1,
             _correction: &ErasureCorrectionProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7742,6 +8048,7 @@ mod tests {
 
         fn admit_atomic_freeze(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -7750,6 +8057,7 @@ mod tests {
 
         fn admit_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7757,6 +8065,7 @@ mod tests {
 
         fn admit_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -7765,6 +8074,7 @@ mod tests {
 
         fn resolve_fork_child_scope(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -7773,6 +8083,7 @@ mod tests {
 
         fn resolve_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _requirement: ErasureForkScopeRequirementV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -7781,6 +8092,7 @@ mod tests {
 
         fn admit_administrative_resolution(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7788,6 +8100,7 @@ mod tests {
 
         fn dispatch_destruction(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _commands: &[ErasureDestructionCommandV1],
         ) -> Result<(), ErasureErrorV1> {
@@ -7796,6 +8109,7 @@ mod tests {
 
         fn admit_attempt(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _admission: &ErasureRetryAdmissionV1,
         ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
@@ -7803,12 +8117,17 @@ mod tests {
 
         fn admit_acknowledgement(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _acknowledgement: &ErasureAcknowledgementProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
 
-        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        fn admit_receipt(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _input: &ErasureReceiptInputV1,
+        ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
     }
@@ -7879,7 +8198,11 @@ mod tests {
     #[test]
     fn hosted_coordinator_port_delegates_empty_persistence_reads() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &UNUSED_COORDINATOR_AUTHORITY,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
         let request = ErasureReferenceV1::from_digest([71; 32]);
         assert_eq!(port.resolve_state(request)?, None);
         assert_eq!(port.read_manifest(request)?, None);
@@ -7909,10 +8232,68 @@ mod tests {
     }
 
     #[test]
+    fn hosted_port_reads_one_authority_view_until_a_durable_write() -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        {
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                &UNUSED_COORDINATOR_AUTHORITY,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
+            let first = port.authority_view()?;
+            assert!(Rc::ptr_eq(&first, &port.authority_view()?));
+        }
+        assert_eq!(store.authority_snapshot_calls, 1);
+
+        // Submit writes one CAS; the rejection's authority call must read a
+        // fresh view of the store that now holds the request.
+        let authority = RejectedCoordinatorAuthorityV1::default();
+        let request = coordinator_request()?;
+        {
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                &authority,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
+            let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+            coordinator.submit(request.clone(), request.provenance())?;
+            coordinator.reject(request.reference(), reference(31))?;
+        }
+        assert_eq!(store.authority_snapshot_calls, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_port_drops_its_authority_view_after_a_recovery_error() {
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        {
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                &UNUSED_COORDINATOR_AUTHORITY,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
+            let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+            for _ in 0..2 {
+                assert_eq!(
+                    coordinator.verified_inventory(4),
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                );
+            }
+        }
+        // Each failed recovery appends its recovery error, so the second
+        // recovery reads a fresh view instead of the cached one.
+        assert_eq!(store.authority_snapshot_calls, 2);
+    }
+
+    #[test]
     fn hosted_coordinator_port_retains_recovery_failures() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
         let request = reference(34);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &UNUSED_COORDINATOR_AUTHORITY,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
         assert_eq!(
             coordinator.verified_inventory(4),
@@ -7926,7 +8307,11 @@ mod tests {
     #[test]
     fn hosted_coordinator_port_fails_closed_for_unverified_request_topology() {
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
-        let port = HostedCoordinatorPortV1::new(&mut store, &ForkChildAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &ForkChildAuthorityV1,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::Unauthorized)
@@ -7940,7 +8325,11 @@ mod tests {
             ..Default::default()
         };
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
-        let port = HostedCoordinatorPortV1::new(&mut store, &authority);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &authority,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::ProvenanceMissing)
@@ -7955,8 +8344,12 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
         let candidate = TimelineMeta::root("missing-candidate");
-        let port = HostedCoordinatorPortV1::new(&mut store, &authority)
-            .with_topology_candidate(&candidate);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &authority,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .with_topology_candidate(&candidate);
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::ProvenanceMissing)
@@ -7988,16 +8381,18 @@ mod tests {
     }
 
     #[test]
-    fn default_candidate_observation_fails_closed() {
+    fn default_candidate_observation_fails_closed() -> Result<(), ErasureErrorV1> {
         assert_eq!(
             ErasureCoordinatorAuthorityV1::verified_topology_observation_for_candidate(
                 &UnusedCoordinatorAuthorityV1::rejecting(),
+                &empty_authority_view()?,
                 reference(1),
                 reference(2),
                 &TimelineMeta::root("candidate"),
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        Ok(())
     }
 
     fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
@@ -8130,7 +8525,11 @@ mod tests {
         let request = coordinator_request().map_err(map_erasure_error)?;
         let request_reference = request.reference();
         let rejected = {
-            let port = HostedCoordinatorPortV1::new(&mut store, authority.as_ref());
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                authority.as_ref(),
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
             let mut coordinator = ErasureCoordinatorStateMachineV1::new(
                 port,
                 ErasureReferenceV1::from_digest([30; 32]),
@@ -8175,7 +8574,11 @@ mod tests {
         let request = coordinator_request().map_err(map_erasure_error)?;
         let request_reference = request.reference();
         {
-            let port = HostedCoordinatorPortV1::new(&mut store, authority.as_ref());
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                authority.as_ref(),
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
             let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
             coordinator
                 .submit(request.clone(), request.provenance())
@@ -8330,7 +8733,11 @@ mod tests {
     fn hosted_coordinator_port_delegates_submission_and_scope_authority(
     ) -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &ForkChildAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &ForkChildAuthorityV1,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
         let request = ErasureReferenceV1::from_digest([71; 32]);
         let request_object = coordinator_request()?;
         let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
@@ -8368,11 +8775,91 @@ mod tests {
         Ok(())
     }
 
+    /// The hosted port passes the authority's freeze-authorization and Fork
+    /// scope-extension refusals through unchanged.
+    #[test]
+    fn hosted_coordinator_port_propagates_freeze_and_fork_extension_refusals(
+    ) -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &ForkChildAuthorityV1,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
+        let request = reference(82);
+        let applicability_matrix = ErasureInventoryCategoryV1::CANONICAL
+            .into_iter()
+            .map(|category| {
+                ErasureFreezeApplicabilityRowV1::new(
+                    category,
+                    0,
+                    ErasureApplicabilityDecisionV1::Inapplicable,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let admission =
+            ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+                request,
+                scope_commitment: reference(83),
+                obligation_set: reference(84),
+                applicability_matrix,
+                freeze_position: 1,
+                policy: reference(85),
+                trust: reference(86),
+                authorization_provenance: reference(87),
+            })?;
+        let authorization =
+            ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+                admission_body_digest: admission.authorization_body_digest()?,
+                policy: reference(85),
+                trust: reference(86),
+                evidence: vec![1],
+            })?;
+        assert_eq!(
+            port.validate_freeze_authorization(&admission, &authorization),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: reference(83),
+            fork: reference(88),
+            child_timeline: child,
+            lineage_rule: reference(89),
+            predecessor_extension: None,
+            admission_provenance: reference(90),
+        })?;
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(88),
+            expected_inventory_generation: reference(91),
+            child_scope: reference(92),
+            child: TimelineMeta {
+                id: child,
+                mode: TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: Some((parent, Seq::ZERO)),
+            },
+        };
+        assert_eq!(
+            port.admit_fork_scope_extension(&extension, &input),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        Ok(())
+    }
+
     #[test]
     fn hosted_coordinator_port_delegates_resolution_and_destruction_authority(
     ) -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &UNUSED_COORDINATOR_AUTHORITY,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
         let request = ErasureReferenceV1::from_digest([71; 32]);
         let resolution =
             ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
@@ -8407,7 +8894,11 @@ mod tests {
     fn hosted_coordinator_port_delegates_attempt_and_receipt_authority(
     ) -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
+        let port = HostedCoordinatorPortV1::new(
+            &mut store,
+            &UNUSED_COORDINATOR_AUTHORITY,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        );
         let request = ErasureReferenceV1::from_digest([71; 32]);
         let retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
             request,
@@ -8490,6 +8981,7 @@ mod tests {
                 transition_lookup_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 lineage_read_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 inventory_snapshot_calls: 0,
+                authority_snapshot_calls: 0,
                 fork_recovery_override: None,
             },
             resolve_control,
@@ -10431,7 +10923,9 @@ mod tests {
     }
 
     #[test]
-    fn identified_fork_recovery_rejects_incomplete_authoritative_state() {
+    fn identified_fork_recovery_rejects_incomplete_authoritative_state(
+    ) -> Result<(), ErasureErrorV1> {
+        let view = empty_authority_view()?;
         let parent = TimelineId::new();
         let child = TimelineId::new();
         let operation = reference(60);
@@ -10465,7 +10959,7 @@ mod tests {
             recovered: Some(recovered.clone()),
         };
         assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(&changed_input, &recovered),
+            ErasureExecutionHostV1::recover_identified_fork(&view, &changed_input, &recovered,),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
@@ -10494,10 +10988,31 @@ mod tests {
             recovered: Some(recovered.clone()),
         };
         assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(&missing_inventory_input, &recovered),
+            ErasureExecutionHostV1::recover_identified_fork(
+                &view,
+                &missing_inventory_input,
+                &recovered,
+            ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
+        assert_stale_generation_prepare_fails(
+            &view,
+            parent,
+            &current_inventory,
+            &resolving_authority,
+        );
+        Ok(())
+    }
+
+    /// Preparing an identified Fork against a stale generation fails the
+    /// topology transition with `StaleGeneration`.
+    fn assert_stale_generation_prepare_fails(
+        view: &dyn ErasureAuthorityReadViewV1,
+        parent: TimelineId,
+        current_inventory: &ErasureVerifiedInventoryV1,
+        authority: &UnusedCoordinatorAuthorityV1,
+    ) {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
@@ -10512,8 +11027,8 @@ mod tests {
                 name: "stale-generation",
                 current_generation: reference(254),
                 maximum_requests: 4,
-                current_inventory: &current_inventory,
-                authority: &resolving_authority,
+                current_inventory,
+                authority,
                 coordinator: reference(64),
             },
             child: &prepare_child,
@@ -10522,7 +11037,7 @@ mod tests {
         let gate = Arc::clone(&host.gate);
         let mut transition_failure = None;
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
-            let result = host.prepare_identified_fork(&prepare_input, permit);
+            let result = host.prepare_identified_fork(view, &prepare_input, permit);
             if let Err(error) = &result {
                 transition_failure = Some(*error);
             }
