@@ -310,15 +310,19 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 }
 
-/// The binary64 value of half-precision `bits`.
+/// The binary64 value of half-precision `bits` with a finite exponent.
+///
+/// An all-ones exponent (an infinity or a NaN) decodes as the finite value
+/// `(1024 + fraction) * 2^6`, at least 65,536. No half holds that value, so the
+/// shortest-form check in [`Reader::float`] refuses it, as it refuses every
+/// infinity and NaN.
 fn half(bits: u16) -> f64 {
     let fraction = f64::from(bits & 0x3ff);
     let exponent = i32::from((bits >> 10) & 0x1f);
-    let magnitude = match exponent {
-        0 => fraction * 2_f64.powi(-24),
-        // All-ones exponent: an infinity, or a NaN carrying the fraction.
-        31 => f64::from_bits(0x7ff0_0000_0000_0000 | (u64::from(bits & 0x3ff) << 42)),
-        _ => (fraction + 1024.0) * 2_f64.powi(exponent - 25),
+    let magnitude = if exponent == 0 {
+        fraction * 2_f64.powi(-24)
+    } else {
+        (fraction + 1024.0) * 2_f64.powi(exponent - 25)
     };
     if bits & 0x8000 == 0 {
         magnitude
