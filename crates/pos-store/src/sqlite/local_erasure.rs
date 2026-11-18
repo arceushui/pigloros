@@ -75,7 +75,19 @@ impl SqliteStore {
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         prepared.recipient_export_withdrawal().map_or_else(
             || self.commit_record_owner_effect(prepared),
-            |binding| self.commit_recipient_export_withdrawal(prepared, &binding),
+            |binding| {
+                #[cfg(target_os = "linux")]
+                {
+                    self.commit_recipient_export_withdrawal(prepared, &binding)
+                }
+                // ADR-138 T3 without Linux custody: no withdrawal row can
+                // exist, so the `export_id` is unknown (ADR-138 §6).
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = binding;
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                }
+            },
         )
     }
 

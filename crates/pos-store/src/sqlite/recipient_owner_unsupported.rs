@@ -7,18 +7,10 @@
 //! ADR-098 allows a target without the required custody durability
 //! guarantees to report recipient custody as unsupported rather than weaken
 //! those guarantees.
-//!
-//! No publication can exist here, so every ADR-138 recipient-export
-//! withdrawal step answers exactly as the Linux adapter answers an unknown
-//! `export_id` (ADR-138 §6), and no custody can be attached.
 
 use std::path::PathBuf;
 
-use pos_core::{
-    ConsentAuthority, CoreError, EntityId, ErasureErrorV1, ErasureReferenceV1, Hash, OwnerIdV1,
-    PreparedLocalOwnerEffectV1, RecipientExportWithdrawalBindingV1,
-    RecipientExportWithdrawalStateV1, RecipientKeyDescriptorV1,
-};
+use pos_core::{ConsentAuthority, CoreError, EntityId, Hash, RecipientKeyDescriptorV1};
 use pos_crypto::recipient_export::DecryptedTimelineExportV1;
 
 use super::{
@@ -144,33 +136,5 @@ impl SqliteStore {
         _authorization_digest: Hash,
     ) -> Result<(), CoreError> {
         Err(CoreError::Storage(UNSUPPORTED.to_owned()))
-    }
-}
-
-impl SqliteStore {
-    /// ADR-138 T1: no publication exists, so every `export_id` is unknown.
-    pub(in crate::sqlite) const fn retract_recipient_export(
-        &self,
-        _export_id: [u8; 16],
-        _grantee_owner: &OwnerIdV1,
-    ) -> Result<RecipientExportWithdrawalStateV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
-    }
-
-    /// ADR-138 owner step: nothing was ever captured.
-    pub(in crate::sqlite) const fn delete_captured_recipient_export(
-        &self,
-        _export_id: [u8; 16],
-    ) -> Result<RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ArtifactDeletionFailed)
-    }
-
-    /// ADR-138 T3: no withdrawal row exists, so the `export_id` is unknown.
-    pub(in crate::sqlite) const fn commit_recipient_export_withdrawal(
-        &self,
-        _prepared: &PreparedLocalOwnerEffectV1,
-        _binding: &RecipientExportWithdrawalBindingV1,
-    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
     }
 }
