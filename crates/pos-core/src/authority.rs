@@ -536,6 +536,15 @@ impl AuthorityRegistrySnapshotV1 {
         self.registry_digest
     }
 
+    /// The strictly ordered capability-grant bindings this snapshot attests.
+    ///
+    /// Read-only: it cannot construct a grant, a snapshot or an
+    /// authentication result (ADR-129 R6.2(5)).
+    #[must_use]
+    pub fn capability_bindings(&self) -> &[Hash] {
+        &self.capability_bindings
+    }
+
     fn trusts_authentication(&self, request: &AuthorizationRequestV1) -> bool {
         request.authority_registry_digest == self.registry_digest
             && self

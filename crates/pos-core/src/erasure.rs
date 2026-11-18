@@ -3964,8 +3964,9 @@ pub use authority_snapshot::{
 };
 pub use local_records::{
     local_erasure_body_digest_v1, local_erasure_bundle_signing_message_v1,
-    local_erasure_coordinator_v1, local_erasure_export_recipient_v1,
-    local_erasure_fork_admission_v1, local_erasure_fork_scope_v1, local_erasure_id_v1,
+    local_erasure_coordinator_v1, local_erasure_executor_version_v1,
+    local_erasure_export_recipient_v1, local_erasure_fork_admission_v1,
+    local_erasure_fork_scope_v1, local_erasure_host_timeline_v1, local_erasure_id_v1,
     local_erasure_key_digest_v1, local_erasure_owner_ref_v1,
     local_erasure_receipt_body_reference_v1, local_erasure_receipt_body_v1,
     local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_request_v1,
