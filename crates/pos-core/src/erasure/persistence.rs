@@ -16,16 +16,16 @@ use super::{
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceV1,
     ErasureIndexInsertV1, ErasureLifecycleV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
-    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateResolverV1, ErasureStateV1, ErasureVerifiedStateV1, PreparedErasureCasV1,
-    RecoveryFailureV1, StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
-    ERASURE_ATTEMPT_HISTORY_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
-    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
-    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, VERSION,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecordedProgressV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateV1,
+    ErasureVerifiedStateV1, PreparedErasureCasV1, RecoveryFailureV1, StoredErasureManifestV1,
+    ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
+    ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
+    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -523,6 +523,25 @@ pub(super) fn recorded_obligation_trust<P: ErasurePersistencePortV1 + ?Sized>(
         })
 }
 
+/// Read a request's attempt progress through its current manifest by the
+/// complete core recovery of the request, under the host's verifiers.
+pub(super) fn recorded_progress(
+    port: &dyn ErasurePersistencePortV1,
+    verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+    recovery_verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
+    port.read_manifest(request).and_then(|stored| {
+        stored
+            .map(|stored| {
+                RecoveredErasureV1::recover(port, verifier, recovery_verifier, request, &stored)
+                    .map_err(RecoveryFailureV1::error)
+                    .and_then(|recovered| recovered.progress(port))
+            })
+            .transpose()
+    })
+}
+
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(domain_digest(tag, bytes))
 }
@@ -994,6 +1013,22 @@ impl RecoveredErasureV1 {
         validate_correction(port, &foundation.request, evidence.correction.as_ref())?;
         validate_state_provenance(port, &foundation.state, &manifest, stored.digest())?;
 
+        let mut recovered =
+            Self::from_recovered_parts(manifest, stored.digest(), foundation, evidence);
+        recovered.recover_attempts(port, recovery_verifier)?;
+        recovered.recover_scope(port, recovery_verifier)?;
+        recovered.recover_administrative_resolutions(port, recovery_verifier)?;
+        Ok(recovered)
+    }
+
+    /// The recovered record of one verified manifest, foundation and fixed
+    /// evidence, before its attempt, scope and resolution histories.
+    fn from_recovered_parts(
+        manifest: ManifestV1,
+        manifest_digest: ErasureReferenceV1,
+        foundation: RecoveredFoundationV1,
+        evidence: RecoveredFixedEvidenceV1,
+    ) -> Self {
         let RecoveredFoundationV1 {
             request,
             state,
@@ -1011,9 +1046,8 @@ impl RecoveredErasureV1 {
             obligations,
         } = evidence;
 
-        let mut recovered = Self {
-            manifest: manifest.clone(),
-            manifest_digest: stored.digest(),
+        Self {
+            manifest_digest,
             request,
             state,
             targets,
@@ -1037,11 +1071,29 @@ impl RecoveredErasureV1 {
             authorize_provenance: manifest.authorize_provenance,
             dispatch_provenance: manifest.dispatch_provenance,
             scope_extensions: Vec::new(),
-        };
-        recovered.recover_attempts(port, recovery_verifier)?;
-        recovered.recover_scope(port, recovery_verifier)?;
-        recovered.recover_administrative_resolutions(port, recovery_verifier)?;
-        Ok(recovered)
+            manifest,
+        }
+    }
+
+    /// The attempt progress of this record; its latest receipt was read and
+    /// bound by recovery.
+    fn progress(
+        self,
+        port: &dyn ErasurePersistencePortV1,
+    ) -> Result<ErasureRecordedProgressV1, ErasureErrorV1> {
+        self.latest_receipt
+            .map(|reference| {
+                port.read_object(reference)
+                    .and_then(|bytes| ErasureReceiptV1::from_canonical_cbor(&bytes))
+            })
+            .transpose()
+            .map(|latest_receipt| ErasureRecordedProgressV1 {
+                obligations: self.obligations,
+                effective: self.effective.into_values().collect(),
+                active: self.active.map(|active| active.admission),
+                completed_attempt_count: self.completed_attempt_count,
+                latest_receipt,
+            })
     }
 
     pub(super) const fn state(&self) -> &ErasureStateV1 {
@@ -4011,6 +4063,48 @@ mod tests {
                 request
             ),
             Ok(Some(reference(0x70)))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_recorded_progress_needs_a_recoverable_manifest() -> Result<(), ErasureErrorV1> {
+        fn read(
+            port: &dyn ErasurePersistencePortV1,
+            request: ErasureReferenceV1,
+        ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
+            recorded_progress(
+                port,
+                &AcceptFreezeVerifier,
+                &RecoveryVerifier::ACCEPT,
+                request,
+            )
+        }
+        let request = reference(1);
+        // No manifest: no progress.
+        let empty = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        assert_eq!(read(&empty, request), Ok(None));
+        // A manifest whose request object is not retained fails closed, as
+        // core recovery does, and the sealed trait forwards to the read.
+        let unretained = manifest_port(&manifest_value(Value::Null), Vec::new())?;
+        assert_eq!(
+            read(&unretained, request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let port: &dyn ErasurePersistencePortV1 = &unretained;
+        assert_eq!(
+            crate::ErasureRecordedProgressReadV1::recorded_progress(
+                port,
+                &AcceptFreezeVerifier,
+                &RecoveryVerifier::ACCEPT,
+                request
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        // A manifest naming another request is refused before any read.
+        assert_eq!(
+            read(&unretained, reference(2)),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())
     }

@@ -5,15 +5,19 @@ use ciborium::value::Value;
 use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
     local_erasure_owner_ref_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
-    ArtifactDataClassV1, EntityId, ErasureErrorV1, ErasureReferenceV1, ErasureRetainedObjectV1,
+    ArtifactDataClassV1, EntityId, ErasureArtifactClassV1, ErasureErrorV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRetainedObjectV1, LocalErasureArtifactDispositionV1,
     LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
-    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
-    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
-    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
-    LocalErasureTrustAnchorV1, TimelineId, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
-    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
-    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
+    LocalErasureCacheGenerationV1, LocalErasureClassificationV1, LocalErasureDisclosureV1,
+    LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1, LocalErasureLineageRuleV1,
+    LocalErasureNegativeResultV1, LocalErasureOwnerResultV1, LocalErasureOwnerRowV1,
+    LocalErasurePolicyV1, LocalErasureRedactionV1, LocalErasureRejectionV1,
+    LocalErasureReplicaPurgeV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
+    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
+    LocalOwnerEffectV1, PreparedLocalOwnerEffectV1, TimelineId,
+    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
+    LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
 };
 use ulid::Ulid;
 
@@ -1474,6 +1478,404 @@ fn the_target_and_fork_values_are_domain_tagged_digests_of_their_inputs() -> Tes
             ErasureReferenceV1::from_digest(rule),
         )?,
         content_address("ELFX1", &admission)
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-136 §4a owner-effect records: ELAD1, ELCG1, ELNEG1 and ELRP1 (owner
+// decision Q3 on #1412).
+// ---------------------------------------------------------------------------
+
+const ARTIFACT_CLASSES: [ErasureArtifactClassV1; 7] = [
+    ErasureArtifactClassV1::TimelineReplay,
+    ErasureArtifactClassV1::ReproManifest,
+    ErasureArtifactClassV1::CausalTrace,
+    ErasureArtifactClassV1::CalibrationReport,
+    ErasureArtifactClassV1::Export,
+    ErasureArtifactClassV1::ForkOrSnapshot,
+    ErasureArtifactClassV1::ConformanceReport,
+];
+
+const REPLAY_CLAIMS: [ErasureReplayClaimV1; 5] = [
+    ErasureReplayClaimV1::Exact,
+    ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+    ErasureReplayClaimV1::StructuralOnly,
+    ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+    ErasureReplayClaimV1::IncompatibleProfile,
+];
+
+const fn disposition(
+    artifact_class: ErasureArtifactClassV1,
+    redaction: LocalErasureRedactionV1,
+    replay_claim_to: ErasureReplayClaimV1,
+) -> LocalErasureArtifactDispositionV1 {
+    LocalErasureArtifactDispositionV1 {
+        request: reference(40),
+        artifact_class,
+        artifact_digest: reference(41),
+        redaction,
+        replay_claim_to,
+    }
+}
+
+const fn cache_generation(generation: u64) -> LocalErasureCacheGenerationV1 {
+    LocalErasureCacheGenerationV1 {
+        request: reference(42),
+        scope_commitment: reference(43),
+        generation,
+    }
+}
+
+const fn negative(error: ErasureErrorV1) -> LocalErasureNegativeResultV1 {
+    LocalErasureNegativeResultV1 {
+        command: reference(44),
+        owner_ref: reference(45),
+        error,
+    }
+}
+
+const REPLICA_PURGE: LocalErasureReplicaPurgeV1 = LocalErasureReplicaPurgeV1 {
+    request: reference(46),
+    command: reference(47),
+    replica_id: reference(48),
+};
+
+#[test]
+fn owner_effect_records_round_trip_and_refuse_corruption() -> TestResult {
+    for (artifact_class, redaction, replay_claim_to) in [
+        (
+            ARTIFACT_CLASSES[0],
+            LocalErasureRedactionV1::Redacted,
+            REPLAY_CLAIMS[0],
+        ),
+        (
+            ARTIFACT_CLASSES[6],
+            LocalErasureRedactionV1::Destroyed,
+            REPLAY_CLAIMS[4],
+        ),
+    ] {
+        assert_codec(
+            &disposition(artifact_class, redaction, replay_claim_to),
+            LocalErasureArtifactDispositionV1::to_canonical_cbor,
+            LocalErasureArtifactDispositionV1::from_canonical_cbor,
+            LocalErasureArtifactDispositionV1::reference,
+        )?;
+    }
+    for generation in [0, u64::MAX] {
+        assert_codec(
+            &cache_generation(generation),
+            LocalErasureCacheGenerationV1::to_canonical_cbor,
+            LocalErasureCacheGenerationV1::from_canonical_cbor,
+            LocalErasureCacheGenerationV1::reference,
+        )?;
+    }
+    for error in [
+        ErasureErrorV1::ArtifactDeletionFailed,
+        ErasureErrorV1::BackupInventoryIncomplete,
+        ErasureErrorV1::ReplicaTimeout,
+    ] {
+        assert_codec(
+            &negative(error),
+            LocalErasureNegativeResultV1::to_canonical_cbor,
+            LocalErasureNegativeResultV1::from_canonical_cbor,
+            LocalErasureNegativeResultV1::reference,
+        )?;
+    }
+    assert_codec(
+        &REPLICA_PURGE,
+        LocalErasureReplicaPurgeV1::to_canonical_cbor,
+        LocalErasureReplicaPurgeV1::from_canonical_cbor,
+        LocalErasureReplicaPurgeV1::reference,
+    )
+}
+
+/// The record `value` with field `index` replaced by the integer `code`.
+fn with_code(
+    value: &Value,
+    index: usize,
+    code: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut changed = value.clone();
+    if let Value::Array(items) = &mut changed {
+        items[index] = Value::Integer(code.into());
+    }
+    encode(&changed)
+}
+
+#[test]
+fn owner_effect_codes_are_closed_mappings() -> TestResult {
+    // Every artifact class, redaction and replay claim survives a round
+    // trip under its own code.
+    for (class_code, artifact_class) in (0_u64..).zip(ARTIFACT_CLASSES) {
+        for (redaction_code, redaction) in (0_u64..).zip([
+            LocalErasureRedactionV1::Redacted,
+            LocalErasureRedactionV1::Destroyed,
+        ]) {
+            for (claim_code, replay_claim_to) in (0_u64..).zip(REPLAY_CLAIMS) {
+                let record = disposition(artifact_class, redaction, replay_claim_to);
+                let golden = Cbor::default()
+                    .record("ELAD1", 5)
+                    .bytes(&[40; 32])
+                    .uint(class_code)
+                    .bytes(&[41; 32])
+                    .uint(redaction_code)
+                    .uint(claim_code)
+                    .0;
+                assert_eq!(record.to_canonical_cbor()?, golden);
+                assert_eq!(
+                    LocalErasureArtifactDispositionV1::from_canonical_cbor(&golden)?,
+                    record
+                );
+            }
+        }
+    }
+    // One past each closed range is refused.
+    let value: Value = ciborium::from_reader(
+        disposition(
+            ARTIFACT_CLASSES[0],
+            LocalErasureRedactionV1::Redacted,
+            REPLAY_CLAIMS[0],
+        )
+        .to_canonical_cbor()?
+        .as_slice(),
+    )?;
+    for (index, code) in [(3, 7), (5, 2), (6, 5)] {
+        assert_eq!(
+            LocalErasureArtifactDispositionV1::from_canonical_cbor(&with_code(
+                &value, index, code
+            )?),
+            Err(ErasureErrorV1::InvalidEncoding),
+            "{index}"
+        );
+    }
+    let value: Value = ciborium::from_reader(
+        negative(ErasureErrorV1::ReplicaTimeout)
+            .to_canonical_cbor()?
+            .as_slice(),
+    )?;
+    assert_eq!(
+        LocalErasureNegativeResultV1::from_canonical_cbor(&with_code(&value, 4, 17)?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        LocalErasureNegativeResultV1::from_canonical_cbor(&with_code(&value, 4, 16)?)?,
+        negative(ErasureErrorV1::StaleGeneration)
+    );
+    Ok(())
+}
+
+#[test]
+fn owner_effect_records_are_bounded_at_one_kib() {
+    assert_size_bound(
+        LocalErasureArtifactDispositionV1::from_canonical_cbor,
+        1_024,
+    );
+    assert_size_bound(LocalErasureCacheGenerationV1::from_canonical_cbor, 1_024);
+    assert_size_bound(LocalErasureNegativeResultV1::from_canonical_cbor, 1_024);
+    assert_size_bound(LocalErasureReplicaPurgeV1::from_canonical_cbor, 1_024);
+    assert_eq!(LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 1_024);
+}
+
+#[test]
+fn owner_effect_records_match_hand_written_golden_vectors() -> TestResult {
+    assert_golden(
+        &disposition(
+            ErasureArtifactClassV1::CalibrationReport,
+            LocalErasureRedactionV1::Destroyed,
+            ErasureReplayClaimV1::StructuralOnly,
+        ),
+        "ELAD1",
+        &Cbor::default()
+            .record("ELAD1", 5)
+            .bytes(&[40; 32])
+            .uint(3)
+            .bytes(&[41; 32])
+            .uint(1)
+            .uint(2)
+            .0,
+        LocalErasureArtifactDispositionV1::to_canonical_cbor,
+        LocalErasureArtifactDispositionV1::from_canonical_cbor,
+        LocalErasureArtifactDispositionV1::reference,
+    )?;
+    assert_golden(
+        &cache_generation(300),
+        "ELCG1",
+        &Cbor::default()
+            .record("ELCG1", 3)
+            .bytes(&[42; 32])
+            .bytes(&[43; 32])
+            .uint(300)
+            .0,
+        LocalErasureCacheGenerationV1::to_canonical_cbor,
+        LocalErasureCacheGenerationV1::from_canonical_cbor,
+        LocalErasureCacheGenerationV1::reference,
+    )?;
+    assert_golden(
+        &negative(ErasureErrorV1::ArtifactDeletionFailed),
+        "ELNEG1",
+        &Cbor::default()
+            .record("ELNEG1", 3)
+            .bytes(&[44; 32])
+            .bytes(&[45; 32])
+            .uint(8)
+            .0,
+        LocalErasureNegativeResultV1::to_canonical_cbor,
+        LocalErasureNegativeResultV1::from_canonical_cbor,
+        LocalErasureNegativeResultV1::reference,
+    )?;
+    assert_golden(
+        &REPLICA_PURGE,
+        "ELRP1",
+        &Cbor::default()
+            .record("ELRP1", 3)
+            .bytes(&[46; 32])
+            .bytes(&[47; 32])
+            .bytes(&[48; 32])
+            .0,
+        LocalErasureReplicaPurgeV1::to_canonical_cbor,
+        LocalErasureReplicaPurgeV1::from_canonical_cbor,
+        LocalErasureReplicaPurgeV1::reference,
+    )
+}
+
+#[test]
+fn each_owner_effect_retains_only_its_own_record() -> TestResult {
+    let elo1 = LocalErasureOwnerResultV1 {
+        request: reference(46),
+        attempt: reference(49),
+        obligation: reference(50),
+        command: reference(47),
+        owner_ref: reference(51),
+        error: None,
+        effect_digest: REPLICA_PURGE.reference()?,
+    }
+    .to_canonical_cbor()?;
+    let elad1 = disposition(
+        ARTIFACT_CLASSES[3],
+        LocalErasureRedactionV1::Redacted,
+        REPLAY_CLAIMS[2],
+    )
+    .to_canonical_cbor()?;
+    let elcg1 = cache_generation(7).to_canonical_cbor()?;
+    let elneg1 = negative(ErasureErrorV1::BackupInventoryIncomplete).to_canonical_cbor()?;
+    let elrp1 = REPLICA_PURGE.to_canonical_cbor()?;
+    let owner_result = ErasureRetainedObjectV1::new(&elo1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
+    for (effect, record, tag) in [
+        (
+            LocalOwnerEffectV1::ArtifactDisposition(elad1.clone()),
+            &elad1,
+            "ELAD1",
+        ),
+        (
+            LocalOwnerEffectV1::CacheGeneration(elcg1.clone()),
+            &elcg1,
+            "ELCG1",
+        ),
+        (
+            LocalOwnerEffectV1::ReplicaPurge(elrp1.clone()),
+            &elrp1,
+            "ELRP1",
+        ),
+    ] {
+        let prepared = PreparedLocalOwnerEffectV1::new(effect, &elo1)?;
+        let retained = prepared.effect_object().ok_or("no effect object")?;
+        assert_eq!(retained.tag(), tag);
+        assert_eq!(retained.canonical_cbor(), record.as_slice());
+        assert_eq!(
+            retained.reference(),
+            ErasureRetainedObjectV1::new(record, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?.reference()
+        );
+        assert_eq!(prepared.owner_result(), &owner_result);
+        assert!(prepared.key_tombstone().is_none());
+    }
+    // The ELO1 binds the ELRP1 by its content address.
+    assert_eq!(
+        LocalErasureOwnerResultV1::from_canonical_cbor(&elo1)?.effect_digest,
+        ErasureRetainedObjectV1::new(&elrp1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?.reference()
+    );
+    // A record under another variant's tag is refused.
+    for effect in [
+        LocalOwnerEffectV1::ReplicaPurge(elneg1),
+        LocalOwnerEffectV1::Negative(elrp1.clone()),
+        LocalOwnerEffectV1::CacheGeneration(elrp1),
+        LocalOwnerEffectV1::ArtifactDisposition(elcg1),
+        LocalOwnerEffectV1::ReplicaPurge(elad1),
+    ] {
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(effect, &elo1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+/// An ELNEG1 commits only with a negative ELO1 that binds it as its
+/// `effect_digest` and carries its command, owner reference and closed
+/// error code (ADR-136 §4a); any other owner result is refused.
+#[test]
+fn a_negative_effect_is_bound_only_by_its_matching_elo1() -> TestResult {
+    let effect = negative(ErasureErrorV1::BackupInventoryIncomplete);
+    let elneg1 = effect.to_canonical_cbor()?;
+    let bound_result = LocalErasureOwnerResultV1 {
+        request: reference(46),
+        attempt: reference(49),
+        obligation: reference(50),
+        command: effect.command,
+        owner_ref: effect.owner_ref,
+        error: Some(effect.error),
+        effect_digest: effect.reference()?,
+    };
+    let elo1 = |error| {
+        LocalErasureOwnerResultV1 {
+            error,
+            ..bound_result
+        }
+        .to_canonical_cbor()
+    };
+    let bound = elo1(Some(ErasureErrorV1::BackupInventoryIncomplete))?;
+    let prepared =
+        PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), &bound)?;
+    assert_eq!(
+        prepared
+            .effect_object()
+            .map(ErasureRetainedObjectV1::canonical_cbor),
+        Some(elneg1.as_slice())
+    );
+    assert_eq!(prepared.owner_result().canonical_cbor(), bound.as_slice());
+    // Another closed code, a positive result, or another command, owner
+    // reference or effect digest, each alone, does not bind the ELNEG1.
+    for other in [
+        elo1(Some(ErasureErrorV1::ArtifactDeletionFailed))?,
+        elo1(None)?,
+        LocalErasureOwnerResultV1 {
+            command: reference(51),
+            ..bound_result
+        }
+        .to_canonical_cbor()?,
+        LocalErasureOwnerResultV1 {
+            owner_ref: reference(51),
+            ..bound_result
+        }
+        .to_canonical_cbor()?,
+        LocalErasureOwnerResultV1 {
+            effect_digest: reference(51),
+            ..bound_result
+        }
+        .to_canonical_cbor()?,
+    ] {
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), &other),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    // An owner result that is not a canonical ELO1 is refused.
+    assert_eq!(
+        PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::Negative(elneg1),
+            &REPLICA_PURGE.to_canonical_cbor()?
+        ),
+        Err(ErasureErrorV1::InvalidEncoding)
     );
     Ok(())
 }

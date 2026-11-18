@@ -4750,6 +4750,51 @@ impl ErasureCommandSenderV1<'_> {
         self.apply_receipt_command(request, input)
     }
 
+    /// The ERC1 [`Self::finalize_erasure_request`] would commit for `input`.
+    ///
+    /// Core builds it with finalize's own normalization over the installed
+    /// generation's committed record, so a signer can sign the exact ERCB1
+    /// that finalize later admits (ADR-136 §5 purpose 2). Byte equality holds
+    /// only for an input finalize accepts: the preview runs no receipt
+    /// admission, so the signer still learns from finalize whether the signed
+    /// receipt was admitted.
+    ///
+    /// Nothing is admitted, written, retained or published. The read takes
+    /// no transition fence: it relies on this sender's exclusive `&mut`
+    /// borrow of the single-writer host, so no command can commit between
+    /// its recovery and its result. A refused preview never poisons the host;
+    /// like every sender command, the generation check still closes a host
+    /// whose gate diverged from its installed inventory.
+    ///
+    /// # Errors
+    /// Returns a payload-free stale-generation, authorization, conflict or
+    /// recovery error.
+    pub fn preview_erasure_receipt(
+        &mut self,
+        request: ErasureReferenceV1,
+        input: &ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
+        let limits = self.host.recovery_limits;
+        let composition = self.host.authority.clone().zip(self.host.coordinator);
+        self.host
+            .ensure_generation_with_inventory(self.generation)
+            .and_then(|installed| {
+                composition
+                    .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+                    .and_then(|(authority, coordinator)| {
+                        let port = HostedCoordinatorPortV1::new(
+                            self.host.store.host_store(),
+                            authority.as_ref(),
+                            limits,
+                        )
+                        .with_verified_inventory(installed);
+                        ErasureCoordinatorStateMachineV1::new(port, coordinator)
+                            .preview_receipt(request, input.clone())
+                            .map_err(map_erasure_error)
+                    })
+            })
+    }
+
     /// Recover the original durable Fork result after a lost reply or restart.
     ///
     /// This operation never allocates a child or writes ERSE1 evidence. A
@@ -10178,6 +10223,56 @@ mod tests {
             host.install_inventory_from_coordinator(4),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
+    }
+
+    #[test]
+    fn receipt_preview_is_read_only_and_needs_both_recovery_credentials(
+    ) -> Result<(), ErasureHostErrorV1> {
+        let mut fixture = rejected_host_with_resolve_control()?;
+        let request = fixture.request;
+        let input = lifecycle_receipt(request, 40);
+        // A recoverable record without an attempt has no receipt to preview,
+        // and an unknown request has no record: both refusals keep the host
+        // ready.
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(request, &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(reference(41), &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(fixture.host.status(), ErasureHostStatusV1::Ready);
+
+        fixture.host.authority = None;
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(request, &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        fixture.host.authority = Some(fixture.authority.clone());
+        fixture.host.coordinator = None;
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .preview_erasure_receipt(request, &input)
+                .map(drop),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(fixture.host.status(), ErasureHostStatusV1::Ready);
+        Ok(())
     }
 
     #[test]

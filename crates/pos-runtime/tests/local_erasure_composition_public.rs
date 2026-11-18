@@ -4150,7 +4150,6 @@ impl Attempted {
             attempts,
             attempt_results: Mutex::new(Vec::new()),
             frozen_trusts: Mutex::new(Vec::new()),
-            receipts: Mutex::new(Vec::new()),
             lenient,
         });
         let composition = ErasureCoordinatorCompositionV1::new(
@@ -4174,38 +4173,35 @@ impl Attempted {
     }
 
     /// `CA(ERCB1)` of the receipt that finalizing the active attempt with
-    /// `input` would commit under `case`: a probe host records the
-    /// normalized input core hands the receipt admission, which the Local
-    /// authority refuses unsigned.
+    /// `input` would commit under `case`, previewed by the host from the
+    /// committed record as a signer re-derives it. The Local authority
+    /// refuses the unsigned input itself.
     fn receipt_body_under(
         &self,
         case: &Case,
         input: &ErasureReceiptInputV1,
     ) -> TestResult<ErasureReferenceV1> {
-        let (mut host, probe) = self.probe_host(case, Vec::new())?;
+        let mut host = self.store.host(case, 4_096)?;
+        let mut sender = host.command_sender()?;
+        let receipt = sender.preview_erasure_receipt(self.request, input)?;
         assert_eq!(
-            host.command_sender()?
+            sender
                 .finalize_erasure_request(self.request, input)
                 .map(drop),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        drop(host);
-        let captured = probe
-            .receipts
-            .lock()
-            .map_err(|_| "receipt capture poisoned")?
-            .pop()
-            .ok_or("no receipt admission")?;
-        let receipt = ErasureReceiptV1::new(captured)?;
+        // The refused finalize committed nothing: the preview is unchanged.
+        assert_eq!(
+            sender.preview_erasure_receipt(self.request, input)?,
+            receipt
+        );
         Ok(local_erasure_receipt_body_reference_v1(&receipt)?)
     }
 }
 
 /// The Local authority, probed inside real host commands: each attempt
 /// admission also evaluates `attempts` and records the frozen trust of its
-/// request over the same host-built view, and each receipt admission
-/// records the normalized ERC1 input, so a test can sign the ERCB1 a
-/// signer re-derives from the committed record.
+/// request over the same host-built view.
 ///
 /// A `lenient` probe accepts every attempt, acknowledgement and receipt,
 /// at admission and at recovery, whatever the Local authority decides. It
@@ -4216,7 +4212,6 @@ struct Probe {
     attempts: Vec<ErasureRetryAdmissionV1>,
     attempt_results: Mutex<Vec<Result<(), ErasureErrorV1>>>,
     frozen_trusts: Mutex<Vec<Result<Option<ErasureReferenceV1>, ErasureErrorV1>>>,
-    receipts: Mutex<Vec<ErasureReceiptInputV1>>,
     lenient: bool,
 }
 
@@ -4490,11 +4485,7 @@ impl ErasureCoordinatorAuthorityV1 for Probe {
         view: &dyn ErasureAuthorityReadViewV1,
         input: &ErasureReceiptInputV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.receipts
-            .lock()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)
-            .map(|mut receipts| receipts.push(input.clone()))
-            .and_then(|()| self.decide(self.local.authority().admit_receipt(view, input)))
+        self.decide(self.local.authority().admit_receipt(view, input))
     }
 }
 
@@ -4746,8 +4737,23 @@ fn a_complete_receipt_issues_signed_at_its_reached_position() -> TestResult {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
     }
-    let receipt =
-        sender.finalize_erasure_request(request, &receipt_input(obligations, 7, address))?;
+    let signed_input = receipt_input(obligations, 7, address);
+    let previewed = sender.preview_erasure_receipt(request, &signed_input)?;
+    let receipt = sender.finalize_erasure_request(request, &signed_input)?;
+    // The host previews exactly the receipt finalize commits, byte for byte,
+    // and after the commit the preview is finalize's exact retry.
+    assert_eq!(previewed.to_canonical_cbor()?, receipt.to_canonical_cbor()?);
+    assert_eq!(local_erasure_receipt_body_reference_v1(&previewed)?, body);
+    assert_eq!(
+        sender.preview_erasure_receipt(request, &signed_input)?,
+        receipt
+    );
+    assert_eq!(
+        sender
+            .preview_erasure_receipt(request, &receipt_input(obligations, 7, reference(0xee)))
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(receipt.issue_position(), 7);
     assert_eq!(receipt.signature(), address);

@@ -8,7 +8,8 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureErrorV1, ErasureInventoryPersistencePortV1,
     ErasurePersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1,
     EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, LocalOwnerEffectV1, Seq, TimelineId, TimelineMeta, TimelineMode,
+    KeyRegistryStateV1, KeyRoleV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
+    LocalOwnerEffectV1, Seq, TimelineId, TimelineMeta, TimelineMode,
     ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
     LOCAL_OWNER_RESULT_MAX_BYTES_V1,
 };
@@ -273,17 +274,18 @@ fn seed_pending_destruction(store: &mut impl LocalErasureStore) -> TestResult {
 }
 
 /// Each owner record has its own ADR-136 size bound: exactly the bound is
-/// admitted and one byte over is refused.
+/// admitted and one byte over is refused. An ELNEG1 commits only as a
+/// canonical record bound by its ELO1, so its own decoder bounds it.
 fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
     for (tag, bound, seed) in [
         ("ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 30),
         ("ELCG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 31),
-        ("ELNEG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 32),
+        ("ELRP1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 33),
     ] {
         let effect = |bytes: Vec<u8>| match tag {
             "ELAD1" => LocalOwnerEffectV1::ArtifactDisposition(bytes),
             "ELCG1" => LocalOwnerEffectV1::CacheGeneration(bytes),
-            _ => LocalOwnerEffectV1::Negative(bytes),
+            _ => LocalOwnerEffectV1::ReplicaPurge(bytes),
         };
         let at_bound = sized_record(tag, bound)?;
         assert_eq!(at_bound.len(), bound);
@@ -304,18 +306,48 @@ fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
     assert_eq!(at_bound.len(), LOCAL_OWNER_RESULT_MAX_BYTES_V1);
     assert_eq!(
         store.commit_local_owner_effect(
-            LocalOwnerEffectV1::Negative(record("ELNEG1", 40)?),
+            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 40)?),
             &at_bound
         )?,
         address(&at_bound)?
     );
     assert_eq!(
         store.commit_local_owner_effect(
-            LocalOwnerEffectV1::Negative(record("ELNEG1", 41)?),
+            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 41)?),
             &sized_record("ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1 + 1)?
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    Ok(())
+}
+
+/// A negative effect commits with the ELO1 carrying its closed error code.
+fn negative_owner_effect(store: &mut impl LocalErasureStore) -> TestResult {
+    let negative = LocalErasureNegativeResultV1 {
+        command: ErasureReferenceV1::from_digest([12; 32]),
+        owner_ref: ErasureReferenceV1::from_digest([13; 32]),
+        error: ErasureErrorV1::ArtifactDeletionFailed,
+    };
+    let elneg1 = negative.to_canonical_cbor()?;
+    let negative_elo1 = LocalErasureOwnerResultV1 {
+        request: ErasureReferenceV1::from_digest([14; 32]),
+        attempt: ErasureReferenceV1::from_digest([15; 32]),
+        obligation: ErasureReferenceV1::from_digest([16; 32]),
+        command: negative.command,
+        owner_ref: negative.owner_ref,
+        error: Some(negative.error),
+        effect_digest: negative.reference()?,
+    }
+    .to_canonical_cbor()?;
+    assert_eq!(
+        store.commit_local_owner_effect(
+            LocalOwnerEffectV1::Negative(elneg1.clone()),
+            &negative_elo1
+        )?,
+        address(&negative_elo1)?
+    );
+    assert_eq!(store.read_object(address(&negative_elo1)?)?, negative_elo1);
+    assert_eq!(store.read_object(address(&elneg1)?)?, elneg1);
     Ok(())
 }
 
@@ -333,9 +365,9 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
             11,
         ),
         (
-            LocalOwnerEffectV1::Negative(record("ELNEG1", 1)?),
-            "ELNEG1",
-            12,
+            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 1)?),
+            "ELRP1",
+            13,
         ),
     ] {
         let elo1 = record("ELO1", seed)?;
@@ -350,6 +382,7 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         );
     }
 
+    negative_owner_effect(store)?;
     owner_effect_bounds(store)?;
 
     // A record effect under the wrong tag, or a non-ELO1 owner result,
@@ -364,8 +397,15 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
     );
     assert_eq!(
         store.commit_local_owner_effect(
-            LocalOwnerEffectV1::Negative(record("ELNEG1", 2)?),
+            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 2)?),
             &record("ELS1", 2)?
+        ),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        store.commit_local_owner_effect(
+            LocalOwnerEffectV1::ReplicaPurge(record("ELNEG1", 3)?),
+            &refused
         ),
         Err(ErasureErrorV1::InvalidEncoding)
     );
