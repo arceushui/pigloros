@@ -314,25 +314,17 @@ impl PreparedLocalOwnerEffectV1 {
                 (None, None, record_effect(record, "ELRP1"))
             }
         };
-        effect.and_then(|(effect_digest, effect_object)| {
-            LocalErasureOwnerResultV1 {
-                request: binding.request,
-                attempt: binding.attempt,
-                obligation: binding.obligation,
-                command: binding.command,
-                owner_ref: binding.owner_ref,
-                error: binding.error,
-                effect_digest,
-            }
-            .to_canonical_cbor()
-            .and_then(|elo1| tagged_object(elo1, "ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1))
-            .map(|owner_result| Self {
+        effect
+            .and_then(|(effect_digest, effect_object)| {
+                owner_result_object(&binding, effect_digest)
+                    .map(|owner_result| (effect_object, owner_result))
+            })
+            .map(|(effect_object, owner_result)| Self {
                 key_tombstone,
                 existing_tombstone,
                 effect_object,
                 owner_result,
             })
-        })
     }
 
     /// The key destruction to complete, for a key tombstone effect.
@@ -359,6 +351,24 @@ impl PreparedLocalOwnerEffectV1 {
     pub const fn owner_result(&self) -> &ErasureRetainedObjectV1 {
         &self.owner_result
     }
+}
+
+/// The canonical ELO1 of `binding` over `effect_digest`.
+fn owner_result_object(
+    binding: &LocalOwnerResultBindingV1,
+    effect_digest: ErasureReferenceV1,
+) -> Result<ErasureRetainedObjectV1, ErasureErrorV1> {
+    LocalErasureOwnerResultV1 {
+        request: binding.request,
+        attempt: binding.attempt,
+        obligation: binding.obligation,
+        command: binding.command,
+        owner_ref: binding.owner_ref,
+        error: binding.error,
+        effect_digest,
+    }
+    .to_canonical_cbor()
+    .and_then(|elo1| tagged_object(elo1, "ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1))
 }
 
 /// A deletion receipt as the ELO1 effect digest of its tombstone.

@@ -7,8 +7,8 @@
 //! durable. A negative owner outcome is an owner result, not an error.
 
 use pos_core::{
-    ErasureAuthorityExecutionV1, ErasureErrorV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
-    ErasureOwnerCommandV1, ErasureOwnerResultV1, ErasureReferenceV1, TimelineId,
+    ErasureAuthorityExecutionV1, ErasureErrorV1, ErasureHostErrorV1, ErasureOwnerCommandV1,
+    ErasureOwnerResultV1, ErasureReferenceV1, TimelineId,
 };
 
 use crate::ErasureExecutionHostV1;
@@ -23,23 +23,16 @@ pub struct LocalErasureExecutorV1 {
     host_timeline: TimelineId,
 }
 
-/// The order a replay runs the owners of one attempt in: keys first, so an
-/// artifact whose keys the attempt destroys is then redacted (Q7); the
-/// single local replica last, after every other owner of the request (F1).
-const fn execution_rank(category: ErasureInventoryCategoryV1) -> u8 {
-    match category {
-        ErasureInventoryCategoryV1::Key => 0,
-        ErasureInventoryCategoryV1::Artifact => 1,
-        ErasureInventoryCategoryV1::Backup => 2,
-        ErasureInventoryCategoryV1::Replica => 3,
-    }
-}
-
 /// The execution error of a host command that made no owner result
-/// durable: the command was not dispatched in the request's active attempt,
-/// the host is not ready, or the store refused the write.
-const fn execution_failure(_error: ErasureHostErrorV1) -> ErasureErrorV1 {
-    ErasureErrorV1::ProvenanceMissing
+/// durable: `PolicyConflict` for a command that cannot run yet or at all
+/// (not dispatched in its request's active attempt, or a local replica
+/// before every other owner), `ProvenanceMissing` for a host that is not
+/// ready or a store that could not be read or written.
+const fn execution_error(error: ErasureHostErrorV1) -> ErasureErrorV1 {
+    match error {
+        ErasureHostErrorV1::Conflict => ErasureErrorV1::PolicyConflict,
+        _ => ErasureErrorV1::ProvenanceMissing,
+    }
 }
 
 impl LocalErasureExecutorV1 {
@@ -51,32 +44,31 @@ impl LocalErasureExecutorV1 {
     }
 
     /// Replay the dispatch outbox of `request`: execute every command of
-    /// its active attempt that has no acknowledgement yet, keys first and
-    /// the local replica last, and return their owner results in that
-    /// order.
+    /// its active attempt that has no acknowledgement yet, in the outbox's
+    /// order (keys first, the local replica last), and return their owner
+    /// results in that order.
     ///
     /// The outbox is durable before dispatch, so a crash anywhere in a
     /// replay is recovered by replaying again: every owner is idempotent.
     ///
     /// # Errors
-    /// [`ErasureErrorV1::ProvenanceMissing`] when the outbox cannot be read
-    /// or a command made no owner result durable; the replay stops at that
-    /// command.
+    /// The payload-free host error of the outbox read, or of the first
+    /// command that made no owner result durable; the replay stops there.
     pub fn replay(
-        &mut self,
+        &self,
         host: &mut ErasureExecutionHostV1,
         request: ErasureReferenceV1,
-    ) -> Result<Vec<ErasureOwnerResultV1>, ErasureErrorV1> {
-        host.command_sender()
-            .and_then(|mut sender| sender.dispatched_owner_commands(request))
-            .map_err(execution_failure)
-            .and_then(|mut commands| {
-                commands.sort_by_key(|command| execution_rank(command.destruction.category));
-                commands
-                    .iter()
-                    .map(|command| self.execute(command, host))
-                    .collect()
-            })
+    ) -> Result<Vec<ErasureOwnerResultV1>, ErasureHostErrorV1> {
+        host.command_sender().and_then(|mut sender| {
+            sender
+                .dispatched_owner_commands(request)
+                .and_then(|commands| {
+                    commands
+                        .iter()
+                        .map(|command| sender.execute_local_owner(command, self.host_timeline))
+                        .collect()
+                })
+        })
     }
 }
 
@@ -86,9 +78,10 @@ impl ErasureAuthorityExecutionV1 for LocalErasureExecutorV1 {
     /// Run the owner work of `command` as one Local owner host command.
     ///
     /// # Errors
-    /// [`ErasureErrorV1::ProvenanceMissing`] when `command` is not
-    /// dispatched in its request's active attempt, the host is not ready,
-    /// or no owner result could be made durable.
+    /// [`ErasureErrorV1::PolicyConflict`] when `command` is not dispatched
+    /// in its request's active attempt, or is a local replica that comes
+    /// before another owner of the attempt; [`ErasureErrorV1::ProvenanceMissing`]
+    /// when the host is not ready or no owner result could be made durable.
     fn execute(
         &mut self,
         command: &ErasureOwnerCommandV1,
@@ -97,6 +90,6 @@ impl ErasureAuthorityExecutionV1 for LocalErasureExecutorV1 {
         context
             .command_sender()
             .and_then(|mut sender| sender.execute_local_owner(command, self.host_timeline))
-            .map_err(execution_failure)
+            .map_err(execution_error)
     }
 }

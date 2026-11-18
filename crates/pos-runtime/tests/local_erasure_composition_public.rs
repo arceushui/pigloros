@@ -5765,6 +5765,7 @@ use pos_core::{
     ErasureAuthorityExecutionV1, ErasureOwnerCommandV1, ErasureOwnerResultV1,
     ErasureRecordedScopeReadV1, LocalErasureArtifactDispositionV1, LocalErasureCacheGenerationV1,
     LocalErasureNegativeResultV1, LocalErasureRedactionV1, LocalErasureReplicaPurgeV1,
+    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1,
 };
 use pos_runtime::LocalErasureExecutorV1;
 
@@ -6009,7 +6010,8 @@ fn every_owner_class_commits_its_effect_and_elo1_at_the_host_seam() -> TestResul
             .is_empty());
     }
     let mut host = attempted.dispatched()?;
-    // The outbox is every obligation of attempt 0, in its order.
+    // The outbox is every obligation of attempt 0, keys first and the local
+    // replica last, otherwise in the attempt's order.
     let mut expected = Vec::new();
     for obligation in &attempted.obligations {
         expected.push(ErasureOwnerCommandV1 {
@@ -6020,6 +6022,12 @@ fn every_owner_class_commits_its_effect_and_elo1_at_the_host_seam() -> TestResul
             ),
         });
     }
+    expected.sort_by_key(|command| match command.destruction.category {
+        ErasureInventoryCategoryV1::Key => 0,
+        ErasureInventoryCategoryV1::Artifact => 1,
+        ErasureInventoryCategoryV1::Backup => 2,
+        ErasureInventoryCategoryV1::Replica => 3,
+    });
     assert_eq!(
         host.command_sender()?.dispatched_owner_commands(request)?,
         expected
@@ -6222,14 +6230,26 @@ fn a_memory_store_runs_every_owner_class_as_sqlite_does() -> TestResult {
 }
 
 #[test]
-fn a_reader_holding_the_store_makes_the_local_replica_a_transient_negative() -> TestResult {
+fn the_local_replica_runs_last_and_a_held_store_is_a_transient_negative() -> TestResult {
     let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
     let mut host = attempted.dispatched()?;
-    let replica = command_of(
-        &mut host,
-        attempted.request,
-        ErasureInventoryCategoryV1::Replica,
-    )?;
+    let outbox = host
+        .command_sender()?
+        .dispatched_owner_commands(attempted.request)?;
+    let (replica, others) = outbox.split_last().ok_or("the outbox is empty")?;
+    assert_eq!(
+        replica.destruction.category,
+        ErasureInventoryCategoryV1::Replica
+    );
+    // F1: the purge waits for every other owner of the attempt.
+    for (index, other) in others.iter().enumerate() {
+        assert_eq!(
+            executor().execute(replica, &mut host),
+            Err(ErasureErrorV1::PolicyConflict),
+            "before owner {index}"
+        );
+        executor().execute(other, &mut host).map_err(fail)?;
+    }
     let reader = rusqlite::Connection::open(&attempted.store.path)?;
     reader.execute_batch("BEGIN")?;
     let timelines: i64 =
@@ -6237,15 +6257,116 @@ fn a_reader_holding_the_store_makes_the_local_replica_a_transient_negative() -> 
     assert!(timelines > 0);
     // The purge runs outside every fence; a held store is the one
     // transient code.
-    let held = executor().execute(&replica, &mut host).map_err(fail)?;
+    let held = executor().execute(replica, &mut host).map_err(fail)?;
     assert_eq!(held.error(), Some(ErasureErrorV1::ReplicaTimeout));
     reader.execute_batch("COMMIT")?;
     drop(reader);
-    let purged = executor().execute(&replica, &mut host).map_err(fail)?;
+    let purged = executor().execute(replica, &mut host).map_err(fail)?;
     assert_eq!(purged.error(), None);
     drop(host);
     attempted.assert_effect(&held)?;
     attempted.assert_effect(&purged)
+}
+
+/// The ELO1 a negative `error` of `command` would commit.
+fn negative_owner_result(
+    command: &ErasureOwnerCommandV1,
+    error: ErasureErrorV1,
+) -> TestResult<ErasureReferenceV1> {
+    let destruction = command.destruction;
+    let prepared = PreparedLocalOwnerEffectV1::new(
+        LocalOwnerEffectV1::Negative(
+            LocalErasureNegativeResultV1 {
+                command: destruction.command,
+                owner_ref: destruction.owner,
+                error,
+            }
+            .to_canonical_cbor()?,
+        ),
+        LocalOwnerResultBindingV1 {
+            request: command.request,
+            attempt: destruction.provenance,
+            obligation: destruction.obligation,
+            command: destruction.command,
+            owner_ref: destruction.owner,
+            error: Some(error),
+        },
+    )?;
+    Ok(prepared.owner_result().reference())
+}
+
+#[test]
+fn an_unreadable_key_registry_commits_no_owner_result() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let mut host = attempted.dispatched()?;
+    let key = command_of(
+        &mut host,
+        attempted.request,
+        ErasureInventoryCategoryV1::Key,
+    )?;
+    let peer = rusqlite::Connection::open(&attempted.store.path)?;
+    let saved: Vec<u8> = peer.query_row(
+        "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    // A store failure is a host error, never a durable negative.
+    assert_eq!(
+        executor().execute(&key, &mut host),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        host.command_sender()?
+            .destroy_key_for_erasure(&key, subject_key(1)?, erasure_host_timeline())
+            .map(drop),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+    assert_eq!(
+        executor().replay(&mut host, attempted.request).map(drop),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = ?1 WHERE singleton = 1",
+        rusqlite::params![saved],
+    )?;
+    drop(peer);
+    drop(host);
+    assert_eq!(
+        ErasurePersistencePortV1::read_object(
+            &attempted.store.sqlite()?,
+            negative_owner_result(&key, ErasureErrorV1::KeyDestructionFailed)?
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    // Once the registry reads again, the same command destroys the key.
+    let mut host = attempted.host()?;
+    let destroyed = executor().execute(&key, &mut host).map_err(fail)?;
+    assert_eq!(destroyed.error(), None);
+    drop(host);
+    attempted.assert_effect(&destroyed)
+}
+
+#[test]
+fn a_host_without_an_authority_has_no_outbox() -> TestResult {
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    assert_eq!(
+        host.command_sender()?
+            .dispatched_owner_commands(reference(0x42))
+            .map(drop),
+        Err(ErasureHostErrorV1::AuthorizationDenied)
+    );
+    assert_eq!(
+        executor().replay(&mut host, reference(0x42)).map(drop),
+        Err(ErasureHostErrorV1::AuthorizationDenied)
+    );
+    Ok(())
 }
 
 #[test]
@@ -6330,7 +6451,7 @@ fn only_a_dispatched_key_command_destroys_and_only_under_an_open_fence() -> Test
     // Before dispatch no attempt is active: nothing runs.
     assert_eq!(
         executor().execute(&key, &mut host),
-        Err(ErasureErrorV1::ProvenanceMissing)
+        Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
         host.command_sender()?
