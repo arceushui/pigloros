@@ -34,9 +34,15 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod declaration;
 mod gmp1;
+mod no_route;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+pub use no_route::{
+    check_air_gapped_no_route_v1, AirGappedHostFactV1, AirGappedHostFactsV1,
+    AirGappedNoRouteDenialV1,
+};
 
 use std::{
     collections::BTreeSet,
@@ -59,7 +65,7 @@ use pos_core::{
 };
 use pos_runtime::ErasureExecutionHostV1;
 
-use gmp1::{Gmp1RecordV1, AIR_GAPPED_MODE_PROFILE_ID, LOCAL_MODE_PROFILE_ID};
+use gmp1::{Gmp1RecordV1, AIR_GAPPED_MODE_PROFILE_ID, AIR_GAPPED_NO_ROUTE, LOCAL_MODE_PROFILE_ID};
 
 mod compiled {
     include!(concat!(env!("OUT_DIR"), "/gateway_mode_profiles.rs"));
@@ -117,6 +123,10 @@ pub enum GatewayModeErrorV1 {
     /// `LEDGER_SOURCE` names a network source.
     #[error("LEDGER_SOURCE must be a local filesystem path")]
     NetworkLedgerSource,
+    /// Startup predicate 6, `air-gapped-no-route`, found a network path or a
+    /// network capability (ADR-135 §4).
+    #[error("air-gapped-no-route refused the Air-Gapped mode: {0}")]
+    NetworkPathPresent(AirGappedNoRouteDenialV1),
     /// The store refused or failed the binding operation.
     #[error("store execution-mode binding failed: {0}")]
     Store(#[from] pos_core::GatewayModeBindingErrorV1),
@@ -330,7 +340,7 @@ fn decode_gmp1(bytes: &[u8]) -> Option<Gmp1RecordV1> {
         ingress: small_list(ingress)?,
         startup_predicates: small_list(predicates)?,
         revocation_freshness: small(&freshness)?,
-        registration_profile_id: optional_text(registration).ok()?,
+        registration_profile_id: text(registration)?,
         previous_mode_profile_digest: optional_digest(previous).ok()?,
     };
     (record.validate().is_ok() && record.encode() == bytes).then_some(record)
@@ -351,15 +361,6 @@ fn small_list(value: Value) -> Option<Vec<u8>> {
         .into_array()
         .ok()
         .and_then(|items| items.iter().map(small).collect())
-}
-
-/// A text or `null` field; `Err` for any other value.
-fn optional_text(value: Value) -> Result<Option<String>, ()> {
-    if value.is_null() {
-        Ok(None)
-    } else {
-        text(value).map(Some).ok_or(())
-    }
 }
 
 /// A 32-byte string or `null` field; `Err` for any other value.
@@ -392,8 +393,12 @@ pub(crate) fn installed_gateway_mode_profile_v1(
     .and_then(|()| GatewayModeProfileV1::decode(id, bytes))
 }
 
-/// Run startup predicates 1 to 4, the pure configuration checks, for `id`
-/// before any lock, store, ledger or listener (ADR-134 §4).
+/// Run the step-2 startup predicates of `id` before any lock or store.
+///
+/// These are predicates 1 to 4, the pure configuration checks, and, for a
+/// profile that declares it, predicate 6 `air-gapped-no-route` over this
+/// process's `/proc/self` facts; they run before any lock, store, ledger or
+/// listener (ADR-134 §4, ADR-135 §4).
 ///
 /// # Errors
 /// Returns the first refused predicate.
@@ -412,6 +417,23 @@ fn verify_predicates(
     listeners_within_ingress(profile, composition)
         .and_then(|()| network_features_granted(profile, composition))
         .and_then(|()| no_network_ledger_source(composition))
+        .and_then(|()| air_gapped_no_route(profile))
+}
+
+/// Predicate 6: a profile that declares `air-gapped-no-route` runs only in a
+/// loopback-only namespace without network capabilities, read from this
+/// process's own `/proc/self` facts and never from caller input.
+fn air_gapped_no_route(profile: &GatewayModeProfileV1) -> Result<(), GatewayModeErrorV1> {
+    if profile
+        .record
+        .startup_predicates
+        .contains(&AIR_GAPPED_NO_ROUTE)
+    {
+        check_air_gapped_no_route_v1(&AirGappedHostFactsV1::read())
+            .map_err(GatewayModeErrorV1::NetworkPathPresent)
+    } else {
+        Ok(())
+    }
 }
 
 const fn refuse(refused: bool, error: GatewayModeErrorV1) -> Result<(), GatewayModeErrorV1> {
@@ -579,6 +601,68 @@ impl GatewaySessionModeV1 {
     }
 }
 
+/// The GMP1 binding one commit was produced under (ADR-134 §5): the
+/// profile and binding epoch its commit evidence records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GatewayProducedUnderV1 {
+    id: GatewayModeProfileIdV1,
+    digest_hex: String,
+    binding_epoch: NonZeroU64,
+}
+
+impl GatewayProducedUnderV1 {
+    /// The `ModeProfile` disclosure of the binding.
+    pub(crate) fn disclosure(&self) -> serde_json::Value {
+        serde_json::json!({
+            "profile_kind": "gateway-mode-v1",
+            "mode_profile_id": self.id.as_str(),
+            "mode": self.id.mode(),
+            "mode_profile_digest": self.digest_hex,
+            "binding_epoch": self.binding_epoch.get(),
+        })
+    }
+
+    /// The disclosed digest and binding epoch a provenance digest binds.
+    pub(crate) const fn provenance_fields(&self) -> (&str, u64) {
+        (self.digest_hex.as_str(), self.binding_epoch.get())
+    }
+}
+
+/// The binding the commit of segment-local sequence `seq` of `timeline` was
+/// produced under, or with no commit the binding the next commit would be
+/// produced under: the epoch its commit evidence records (the store's
+/// current epoch) and that epoch's history entry, or `None` when the store
+/// records no such epoch or the epoch names no compiled profile.
+pub(crate) fn produced_under_v1(
+    port: &dyn pos_core::GatewayModeBindingPortV1,
+    commit: Option<(pos_core::TimelineId, pos_core::Seq)>,
+) -> Option<GatewayProducedUnderV1> {
+    let epoch = match commit {
+        Some((timeline, seq)) => port.load_commit_epoch(timeline, seq).ok().flatten(),
+        None => port
+            .load_mode_binding()
+            .ok()
+            .flatten()
+            .map(|record| record.binding_epoch()),
+    };
+    epoch.and_then(|epoch| {
+        port.load_mode_binding_history()
+            .ok()
+            .and_then(|history| {
+                history
+                    .into_iter()
+                    .find(|entry| entry.record().binding_epoch() == epoch)
+            })
+            .and_then(|entry| compiled_profile_of(entry.record().profile()).ok())
+            .and_then(|(id, _)| installed_gateway_mode_profile_v1(id).ok())
+            .map(|profile| GatewayProducedUnderV1 {
+                id: profile.id,
+                digest_hex: profile.digest.to_hex(),
+                binding_epoch: epoch,
+            })
+    })
+}
+
 /// The per-Principal `network` posture: `absent` in a mode without network,
 /// else `capability-granted` only for a holder of the network capability.
 const fn network_posture(network_allowed: bool, network_capability: bool) -> &'static str {
@@ -704,13 +788,23 @@ impl GatewayModeBindingV1 {
 
     /// The ADR-058 profile this mode's own Plugin registration selects
     /// (field 9); it never authorizes.
-    pub(crate) fn registration_profile_id(&self) -> Option<&str> {
-        self.profile.record.registration_profile_id.as_deref()
+    pub(crate) fn registration_profile_id(&self) -> &str {
+        &self.profile.record.registration_profile_id
     }
 
     /// The signal a stale write fires.
     pub(crate) fn stale_signal(&self) -> Arc<GatewayModeStaleSignalV1> {
         Arc::clone(&self.stale)
+    }
+
+    /// The `ModeProfile` of a commit produced under this binding.
+    #[cfg(test)]
+    pub(crate) fn produced_under(&self) -> GatewayProducedUnderV1 {
+        GatewayProducedUnderV1 {
+            id: self.profile.id,
+            digest_hex: self.profile.digest.to_hex(),
+            binding_epoch: self.binding_epoch,
+        }
     }
 
     /// The current execution mode `Session` discloses.
@@ -750,11 +844,18 @@ pub fn bind_gateway_mode_v1(
 ) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
     installed_gateway_mode_profile_v1(id)
         .and_then(|profile| verify_predicates(&profile, &composition).map(|()| profile))
-        .and_then(|profile| {
-            bind_store(host.gateway_mode_binding(), &profile).map(|record| {
-                GatewayModeBindingV1::new(profile, composition, record.binding_epoch())
-            })
-        })
+        .and_then(|profile| bind_verified(profile, composition, host))
+}
+
+/// Bind, attach or rotate `host`'s store to `profile`, whose predicates over
+/// `composition` hold, and return the handle at the store's binding epoch.
+fn bind_verified(
+    profile: GatewayModeProfileV1,
+    composition: GatewayServeCompositionV1,
+    host: &mut ErasureExecutionHostV1,
+) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
+    bind_store(host.gateway_mode_binding(), &profile)
+        .map(|record| GatewayModeBindingV1::new(profile, composition, record.binding_epoch()))
 }
 
 /// The Gateway error of a failed host binding check: a store bound to
@@ -1098,6 +1199,20 @@ pub(crate) fn test_binding_of(
     let profile = installed_gateway_mode_profile_v1(id)
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
     GatewayModeBindingV1::new(profile, composition, NonZeroU64::MIN)
+}
+
+/// Bind `host`'s store to the compiled `id` over `composition` exactly as
+/// [`bind_gateway_mode_v1`] does (bind, attach or rotate, at the store's real
+/// epoch), with the ADR-134 §4 host predicates the caller vouches for.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn test_bind_vouched(
+    id: GatewayModeProfileIdV1,
+    composition: GatewayServeCompositionV1,
+    host: &mut ErasureExecutionHostV1,
+) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
+    installed_gateway_mode_profile_v1(id)
+        .and_then(|profile| bind_verified(profile, composition, host))
 }
 
 /// Attach `host`'s adapter to the binding of `mode`, as `serve` does before

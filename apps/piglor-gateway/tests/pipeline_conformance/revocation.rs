@@ -164,8 +164,14 @@ impl Grants {
             .collect::<Vec<_>>();
         bindings.sort_unstable();
         AuthorityPersistenceHostV1::new(
-            &AuthorityRegistrySnapshotV1::try_new(REGISTRY, vec![digest(200)], bindings, vec![])
-                .test_ok(),
+            &AuthorityRegistrySnapshotV1::try_new(
+                &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+                REGISTRY,
+                vec![digest(200)],
+                bindings,
+                vec![],
+            )
+            .test_ok(),
         )
     }
 

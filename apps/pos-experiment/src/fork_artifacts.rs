@@ -506,7 +506,7 @@ fn execute(
             scheduler_position: lane.position,
         })
         .collect();
-    let grant = LocalScheduledAdmissionHostV1::shared()
+    let grant = LocalScheduledAdmissionHostV1::shared(&crate::AUTHORITY_TRUST_ROOT)
         .ok()
         .map(LocalScheduledAdmissionHostV1::authority_grant);
     plan(fixture, root, cut)
