@@ -7905,3 +7905,54 @@ fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResu
     );
     Ok(())
 }
+
+/// The rotation rule fails closed: pins that cannot be read refuse both a
+/// routine rotation and a compromise, and composition refuses the rotated
+/// bundle; a key registry that cannot be read leaves the old signer
+/// unknown and refuses every new key.
+#[test]
+fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
+    let new_key = rotated_signer().verifying_key().to_bytes();
+    let old_key = erasure_signer().verifying_key().to_bytes();
+    let revoked = [local_erasure_signer_key_id_v1(&old_key)];
+    let (pinned, steps) = driven_until(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))?;
+    let Some(LocalErasureStepV1::Dispatched(admission)) = steps.last() else {
+        return Err("no dispatch".into());
+    };
+    overwrite_object(&pinned, admission.reference(), &[0])?;
+    for (rotation, revoked) in [
+        (LocalErasureSignerRotationV1::Routine, &[][..]),
+        (LocalErasureSignerRotationV1::Compromise, &revoked[..]),
+    ] {
+        assert_eq!(
+            signer_rotation(&mut pinned.sqlite()?, new_key, rotation, revoked),
+            Err(LocalErasureRotationRefusalV1::Pinned)
+        );
+    }
+    let rotated = rotated_bundle(&pinned)?;
+    assert_eq!(
+        Case::signed(&rotated, &bundle_root(), &[revoked[0].as_str()])?
+            .refusal(&mut pinned.sqlite()?),
+        Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+
+    let unread = driver_store()?;
+    rusqlite::Connection::open(&unread.path)?.execute(
+        "UPDATE key_registry SET state_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    for rotation in [
+        LocalErasureSignerRotationV1::Routine,
+        LocalErasureSignerRotationV1::Compromise,
+    ] {
+        assert_eq!(
+            signer_rotation(&mut unread.sqlite()?, new_key, rotation, &revoked),
+            Err(LocalErasureRotationRefusalV1::SignerUnknown)
+        );
+    }
+    assert_eq!(
+        LocalErasureRotationRefusalV1::SignerUnknown.to_string(),
+        "the key registry's current signer cannot be read"
+    );
+    Ok(())
+}
