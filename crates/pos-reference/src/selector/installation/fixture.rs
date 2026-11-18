@@ -160,8 +160,8 @@ fn provider_trust(authority: &ProviderAuthority, signing: &ImageSigning) -> Test
             integer(2),
             Value::Array(keys),
             Value::Array(vec![Value::Array(vec![
-                digest(Sha256::digest(signing.certificate).into()),
-                Value::Text(signing.key_description.to_owned()),
+                digest(Sha256::digest(&signing.certificate).into()),
+                Value::Text(signing.key_description.clone()),
                 integer(2),
             ])]),
             Value::Text("root".to_owned()),
@@ -415,8 +415,8 @@ fn image_manifest(
                 Value::Bytes(Sha256::digest(der).to_vec()),
                 Value::Bytes(der.to_vec()),
             ]),
-            digest(Sha256::digest(signing.certificate).into()),
-            Value::Text(signing.key_description.to_owned()),
+            digest(Sha256::digest(&signing.certificate).into()),
+            Value::Text(signing.key_description.clone()),
             Value::Text("/adapter".to_owned()),
             digest(*blake3::hash(executable).as_bytes()),
             Value::Array(arguments.iter().cloned().map(Value::Text).collect()),
@@ -679,8 +679,8 @@ pub(crate) struct ImageSigning {
     pub(crate) architecture: SandboxArchitecture,
     pub(crate) root_hash: [u8; 32],
     pub(crate) proof: Vec<u8>,
-    pub(crate) certificate: &'static [u8],
-    pub(crate) key_description: &'static str,
+    pub(crate) certificate: Vec<u8>,
+    pub(crate) key_description: String,
 }
 
 impl ImageSigning {
@@ -717,8 +717,8 @@ impl ImageSigning {
             architecture,
             root_hash: hex_digest(root_hash)?,
             proof: proof.to_vec(),
-            certificate,
-            key_description,
+            certificate: certificate.to_vec(),
+            key_description: key_description.to_owned(),
         })
     }
 }
