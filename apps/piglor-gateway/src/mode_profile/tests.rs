@@ -14,10 +14,41 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const DECLARATION: &str =
     include_str!("../../../../contracts/gateway/v1/execution-mode-profiles.json");
 const LOCAL_GMP1_HEX: &str = "8c64474d50310175676174657761792d6d6f64652d6c6f63616c2d763165312e302e3001f583010203850102030405026d6c6976652d6c6f63616c2d763101f6";
-const AIR_GAPPED_GMP1_HEX: &str = "8c64474d503101781a676174657761792d6d6f64652d6169722d6761707065642d763165312e302e3002f482010385010203040501f601f6";
+/// GMP1 `gateway-mode-air-gapped-v1` 2.0.0, the exact 108 bytes of ADR-135
+/// §7.3: tag 6 in field 7, `live-air-gapped-v1` in field 9 and the 1.0.0
+/// digest in field 11.
+const AIR_GAPPED_GMP1_HEX: &str = "8c64474d503101781a676174657761792d6d6f64652d6169722d6761707065642d763165322e302e3002f48201038601020304050601726c6976652d6169722d6761707065642d7631015820455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
 const LOCAL_DIGEST_HEX: &str = "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f";
 const AIR_GAPPED_DIGEST_HEX: &str =
+    "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb";
+/// The digest of the replaced Air-Gapped 1.0.0 record (ADR-134 golden).
+const AIR_GAPPED_1_0_0_DIGEST_HEX: &str =
     "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
+/// Set only for a test re-executed inside the Air-Gapped test shape.
+const IN_AIR_GAPPED_NAMESPACE: &str = "PIGLOROS_AIR_GAPPED_TEST_NAMESPACE";
+
+/// Run `body` as the test `name` of this module inside the ADR-135 §4 test
+/// shape (#1422): the parent re-executes this test binary under
+/// `scripts/air-gapped-namespace.sh` and requires the child to pass, so the
+/// Air-Gapped profile's `air-gapped-no-route` predicate holds there.
+fn in_air_gapped_namespace(name: &str, body: impl FnOnce() -> TestResult) -> TestResult {
+    if std::env::var_os(IN_AIR_GAPPED_NAMESPACE).is_some() {
+        return body();
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/air-gapped-namespace.sh");
+    let test = format!("mode_profile::tests::{name}");
+    let status = std::process::Command::new(script)
+        .arg(std::env::current_exe()?)
+        .args(["--exact", test.as_str(), "--nocapture"])
+        .env(IN_AIR_GAPPED_NAMESPACE, "1")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{test} failed in the Air-Gapped test namespace: {status}").into())
+    }
+}
 
 fn hex(bytes: &[u8]) -> String {
     bytes
@@ -189,10 +220,24 @@ fn the_build_rejects_every_unreviewed_declaration() {
             "\"previous_mode_profile_digest\": null",
             "\"previous_mode_profile_digest\": \"abcd\"",
         ),
-        declaration_with("\"registration_profile_id\": null,\n", ""),
+        declaration_with("\"registration_profile_id\": \"live-air-gapped-v1\",\n", ""),
         declaration_with(
+            "\"registration_profile_id\": \"live-air-gapped-v1\"",
+            "\"registration_profile_id\": \"live-air-gapped-v1\",\n      \"capability_ids\": []",
+        ),
+        declaration_with(
+            "\"registration_profile_id\": \"live-air-gapped-v1\"",
             "\"registration_profile_id\": null",
-            "\"registration_profile_id\": null,\n      \"capability_ids\": []",
+        ),
+        declaration_with(
+            "\"registration_profile_id\": \"live-local-v1\"",
+            "\"registration_profile_id\": \"live-air-gapped-v1\"",
+        ),
+        declaration_with(",\n        \"air-gapped-no-route\"", ""),
+        declaration_with("\"air-gapped-no-route\"", "\"bundle-closure-verified\""),
+        declaration_with(
+            "\"store-mode-binding\"\n      ],\n      \"revocation_freshness\": \"observed-persisted\"",
+            "\"store-mode-binding\",\n        \"air-gapped-no-route\"\n      ],\n      \"revocation_freshness\": \"observed-persisted\"",
         ),
         declaration_with("\"gateway-mode-local-v1\"", "\"gateway-mode-remote-v1\""),
         declaration_with(
@@ -213,7 +258,7 @@ fn the_build_rejects_every_unreviewed_declaration() {
         );
     }
     assert!(compile_declaration_v1(&declaration_with(
-        "\"registration_profile_id\": null",
+        "\"registration_profile_id\": \"live-air-gapped-v1\"",
         "\"registration_profile_id\": \"live-local-v1\""
     ))
     .is_err());
@@ -226,10 +271,50 @@ fn a_reviewed_revision_carries_its_previous_digest_in_field_eleven() -> TestResu
         "\"previous_mode_profile_digest\": null",
         &format!("\"previous_mode_profile_digest\": \"{previous}\""),
     ))?;
-    let air_gapped = &compiled[0].1;
-    assert!(hex(air_gapped).ends_with(&format!("5820{previous}")));
-    let decoded = decode_gmp1(air_gapped).ok_or("revision does not decode")?;
+    let local = &compiled[1].1;
+    assert!(hex(local).ends_with(&format!("5820{previous}")));
+    let decoded = decode_gmp1(local).ok_or("revision does not decode")?;
     assert_eq!(decoded.previous_mode_profile_digest, Some([0xab; 32]));
+    // Air-Gapped 2.0.0 names the 1.0.0 digest it replaces (ADR-135 §7.3).
+    let air_gapped = profile(GatewayModeProfileIdV1::AirGapped).record;
+    assert_eq!(air_gapped.semantic_version, "2.0.0");
+    assert_eq!(
+        air_gapped
+            .previous_mode_profile_digest
+            .map(|digest| hex(&digest)),
+        Some(AIR_GAPPED_1_0_0_DIGEST_HEX.to_owned())
+    );
+    Ok(())
+}
+
+/// ADR-135 §7.6: a store bound to Air-Gapped 1.0.0 rotates one hop to 2.0.0
+/// at its first bind under this release.
+#[test]
+fn an_air_gapped_1_0_0_store_rotates_one_hop_to_2_0_0() -> TestResult {
+    let mut previous_digest = [0; 32];
+    for (index, byte) in previous_digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&AIR_GAPPED_1_0_0_DIGEST_HEX[2 * index..2 * index + 2], 16)?;
+    }
+    let previous = GatewayModeProfileRefV1::try_new(AIR_GAPPED_MODE_PROFILE_ID, previous_digest)?;
+    let mut store = MemoryStore::new();
+    store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(previous))?;
+    let rotated = bind_store(&mut store, &profile(GatewayModeProfileIdV1::AirGapped))?;
+    assert_eq!(rotated.binding_epoch().get(), 2);
+    assert_eq!(
+        hex(&rotated.profile().profile_digest()),
+        AIR_GAPPED_DIGEST_HEX
+    );
+    assert_eq!(
+        store
+            .load_mode_binding_history()?
+            .iter()
+            .map(pos_core::GatewayModeBindingHistoryEntryV1::kind)
+            .collect::<Vec<_>>(),
+        [
+            GatewayModeBindingKindV1::Bind,
+            GatewayModeBindingKindV1::Rotate
+        ]
+    );
     Ok(())
 }
 
@@ -242,9 +327,23 @@ fn record_validation_names_each_broken_rule() {
     assert!(unknown
         .validate()
         .is_err_and(|error| error.contains("unknown")));
-    let mut predicates = valid.clone();
-    predicates.startup_predicates = vec![1, 2, 3, 4];
-    assert!(predicates
+    let air_gapped = profile(GatewayModeProfileIdV1::AirGapped).record;
+    assert_eq!(air_gapped.validate(), Ok(()));
+    // Tag 6 belongs to the Air-Gapped profile alone (ADR-135 §7.1).
+    for (record, predicates) in [
+        (&valid, vec![1, 2, 3, 4]),
+        (&valid, vec![1, 2, 3, 4, 5, AIR_GAPPED_NO_ROUTE]),
+        (&air_gapped, vec![1, 2, 3, 4, 5]),
+    ] {
+        let mut changed = record.clone();
+        changed.startup_predicates = predicates;
+        assert!(changed
+            .validate()
+            .is_err_and(|error| error.contains("reviewed meaning")));
+    }
+    let mut selection = air_gapped;
+    selection.registration_profile_id = "live-local-v1".to_owned();
+    assert!(selection
         .validate()
         .is_err_and(|error| error.contains("reviewed meaning")));
     for (version, accepted) in [
@@ -306,9 +405,13 @@ fn the_decoder_accepts_only_exact_canonical_records() {
         assert!(decode_gmp1(&encoded(wrong)).is_none(), "field {index}");
     }
     let air_gapped = gmp1_items(GatewayModeProfileIdV1::AirGapped);
-    let mut short_digest = air_gapped;
+    let mut short_digest = air_gapped.clone();
     short_digest[11] = Value::Bytes(vec![1; 31]);
     assert!(decode_gmp1(&encoded(short_digest)).is_none());
+    // Field 9 is required: no profile selects nothing (ADR-135 §7.5).
+    let mut unselected = air_gapped;
+    unselected[9] = Value::Null;
+    assert!(decode_gmp1(&encoded(unselected)).is_none());
     let mut non_canonical = local.to_vec();
     non_canonical[0] = 0x9f;
     non_canonical.push(0xff);
@@ -375,7 +478,14 @@ fn identifiers_and_grants_parse_from_their_closed_text() {
 }
 
 #[test]
-fn startup_predicates_enforce_d6_in_both_modes() {
+fn startup_predicates_enforce_d6_in_both_modes() -> TestResult {
+    in_air_gapped_namespace("startup_predicates_enforce_d6_in_both_modes", || {
+        startup_predicates_table();
+        Ok(())
+    })
+}
+
+fn startup_predicates_table() {
     use GatewayModeErrorV1 as E;
     use GatewayModeProfileIdV1::{AirGapped, Local};
     use GatewayNetworkGrantV1::{OwnTracks, PublicReadOnly};
@@ -507,6 +617,13 @@ fn a_one_hop_rotation_advances_the_epoch() -> TestResult {
 
 #[test]
 fn the_first_serve_binds_an_empty_store_and_a_restart_attaches() -> TestResult {
+    in_air_gapped_namespace(
+        "the_first_serve_binds_an_empty_store_and_a_restart_attaches",
+        first_serve_binds_and_restart_attaches,
+    )
+}
+
+fn first_serve_binds_and_restart_attaches() -> TestResult {
     let (_directory, path) = temporary_database()?;
     let mut first = sqlite_host(&path)?;
     bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, loopback(), &mut first)?;
@@ -556,6 +673,13 @@ fn binding_refuses_a_d6_violation_and_a_populated_unbound_store() -> TestResult 
 
 #[test]
 fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
+    in_air_gapped_namespace(
+        "a_stale_process_cannot_commit_after_a_migration",
+        stale_process_cannot_commit_after_migration,
+    )
+}
+
+fn stale_process_cannot_commit_after_migration() -> TestResult {
     let (_directory, path) = temporary_database()?;
     let mut serving = sqlite_host(&path)?;
     bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, loopback(), &mut serving)?;
@@ -574,7 +698,7 @@ fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
         GatewayModeProfileIdV1::Local,
         GatewayModeProfileIdV1::AirGapped,
     )?;
-    assert!(audit.contains("to gateway-mode-air-gapped-v1 (455883a4"));
+    assert!(audit.contains("to gateway-mode-air-gapped-v1 (d1513a33"));
     assert!(audit.ends_with("at binding epoch 2"));
     // The append commits nothing, and the stale adapter instance is told why.
     let refused = serving
@@ -751,14 +875,14 @@ fn the_handle_discloses_only_its_revision_inputs_and_selection() {
         ],
     );
     assert_eq!(format!("{local:?}"), "GatewayModeBindingV1 { .. }");
-    assert_eq!(local.registration_profile_id(), Some("live-local-v1"));
+    assert_eq!(local.registration_profile_id(), "live-local-v1");
     let revision = local.revision_input();
     assert_eq!(hex(revision.fields()[0]), LOCAL_DIGEST_HEX);
     assert_eq!(revision.fields()[1], [EPF1_EXPLICIT_ABSENT]);
     assert_eq!(revision.fields()[2], [0x01, 0x02]);
     assert!(!revision.revocation_current_by_construction());
     let air_gapped = test_binding(GatewayModeProfileIdV1::AirGapped, []);
-    assert_eq!(air_gapped.registration_profile_id(), None);
+    assert_eq!(air_gapped.registration_profile_id(), "live-air-gapped-v1");
     let revision = air_gapped.revision_input();
     assert_eq!(hex(revision.fields()[0]), AIR_GAPPED_DIGEST_HEX);
     assert!(revision.fields()[2].is_empty());
@@ -864,8 +988,13 @@ fn the_handle_owns_the_verified_listeners_and_its_host() -> TestResult {
             pos_core::GatewayModeBindingErrorV1::Unbound
         ))
     );
+    // Another host bound to the other mode; its startup predicates are not
+    // under test here.
     let mut other = memory_host()?;
-    bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut other)?;
+    bind_test_store(
+        other.gateway_mode_binding(),
+        GatewayModeProfileIdV1::AirGapped,
+    )?;
     assert_eq!(
         mode.verify_host(&mut other),
         Err(GatewayModeErrorV1::ModeMismatch)
