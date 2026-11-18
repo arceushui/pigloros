@@ -261,7 +261,10 @@ attempts first, then rotate. After a key compromise, revoke the old signer key
 `erasure-signer/<64 hex>` (and the bundle root, if it is compromised too) in the installed TPS1, then
 re-run with `--rotation compromise`: the command registers the new key only once the TPS1 revokes the
 old signer key and the root or signer of every pinned bundle. Requests pinned to the revoked bundle
-stay contained. A re-run with the registered key changes nothing. The
+stay contained. A re-run with the registered key changes nothing. The pin check and the key registration are
+two steps, so run the command only with the Gateway stopped: a serving Gateway could pin a bundle
+between them. The unit's `Conflicts=piglor-gateway.service` does this; never run it beside a
+serving Gateway by other means. The
 command holds the store lock shared, like every offline writer; the unit's
 `Conflicts=piglor-gateway.service` stops `serve` while it updates the key registry. The unit writes
 `/var/lib/pigloros/local-erasure-bundle.elb1` for the root `erasure-bundle/local`: move the file
