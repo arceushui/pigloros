@@ -10233,14 +10233,33 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         export_id: [u8; 16],
         grantee_owner: &pos_core::OwnerIdV1,
     ) -> Result<pos_core::RecipientExportWithdrawalStateV1, ErasureErrorV1> {
-        self.retract_recipient_export(export_id, grantee_owner)
+        #[cfg(target_os = "linux")]
+        {
+            self.retract_recipient_export(export_id, grantee_owner)
+        }
+        // ADR-138 T1 without Linux custody: no publication can exist, so every
+        // `export_id` is unknown (ADR-138 §6).
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (export_id, grantee_owner);
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
     }
 
     fn delete_recipient_export_ciphertext(
         &mut self,
         export_id: [u8; 16],
     ) -> Result<(), ErasureErrorV1> {
-        self.delete_captured_recipient_export(export_id)
+        #[cfg(target_os = "linux")]
+        {
+            self.delete_captured_recipient_export(export_id)
+        }
+        // ADR-138 owner step without Linux custody: nothing was ever captured.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = export_id;
+            Err(ErasureErrorV1::ArtifactDeletionFailed)
+        }
     }
 
     fn recipient_export_by_target(
