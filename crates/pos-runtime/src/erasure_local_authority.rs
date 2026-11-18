@@ -457,7 +457,9 @@ impl std::fmt::Display for LocalErasureRotationRefusalV1 {
         formatter.write_str(match self {
             Self::Pinned => "an erasure request pins the current signer's bundle",
             Self::NotRevoked => "the installed TPS1 does not revoke the old signer's bundle",
-            Self::SignerUnknown => "the key registry's current signer cannot be read",
+            Self::SignerUnknown => {
+                "the key registry or its current signer's public key cannot be read"
+            }
         })
     }
 }
@@ -487,8 +489,8 @@ impl std::error::Error for LocalErasureRotationRefusalV1 {}
 /// a request pins a bundle, or when the pins cannot be read;
 /// [`LocalErasureRotationRefusalV1::NotRevoked`] for a compromise the
 /// installed TPS1 does not reflect;
-/// [`LocalErasureRotationRefusalV1::SignerUnknown`] when the current signer
-/// cannot be read.
+/// [`LocalErasureRotationRefusalV1::SignerUnknown`] when the key registry
+/// cannot be read or its current signer record carries no public key.
 pub fn local_erasure_signer_rotation_v1<S>(
     store: &mut S,
     owner: OwnerIdV1,

@@ -363,50 +363,8 @@ impl PreparedLocalOwnerEffectV1 {
         effect: LocalOwnerEffectV1,
         binding: LocalOwnerResultBindingV1,
     ) -> Result<Self, ErasureErrorV1> {
-        let (key_tombstone, existing_tombstone, recipient_export_withdrawal, effect) = match effect
-        {
-            LocalOwnerEffectV1::KeyTombstone {
-                request,
-                deletion_receipt,
-            } => (
-                Some((*request, deletion_receipt)),
-                None,
-                None,
-                Ok((receipt_digest(deletion_receipt), None)),
-            ),
-            LocalOwnerEffectV1::ExistingTombstone(tombstone) => (
-                None,
-                Some(*tombstone),
-                None,
-                Ok((receipt_digest(tombstone.deletion_receipt), None)),
-            ),
-            LocalOwnerEffectV1::ArtifactDisposition(record) => {
-                (None, None, None, record_effect(record, "ELAD1"))
-            }
-            LocalOwnerEffectV1::CacheGeneration(record) => {
-                (None, None, None, record_effect(record, "ELCG1"))
-            }
-            LocalOwnerEffectV1::Negative(record) => (
-                None,
-                None,
-                None,
-                negative_bound_by(&record, &binding).and_then(|()| record_effect(record, "ELNEG1")),
-            ),
-            LocalOwnerEffectV1::ReplicaPurge(record) => {
-                (None, None, None, record_effect(record, "ELRP1"))
-            }
-            LocalOwnerEffectV1::RecipientExportWithdrawal(record) => {
-                let withdrawal =
-                    LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor(&record)
-                        .map(|elxw1| RecipientExportWithdrawalBindingV1::from(&elxw1));
-                (
-                    None,
-                    None,
-                    withdrawal.as_ref().ok().copied(),
-                    withdrawal.and_then(|_| record_effect(record, "ELXW1")),
-                )
-            }
-        };
+        let (key_tombstone, existing_tombstone, recipient_export_withdrawal, effect) =
+            effect_parts(effect, &binding);
         effect
             .and_then(|(effect_digest, effect_object)| {
                 owner_result_object(&binding, effect_digest)
@@ -453,6 +411,62 @@ impl PreparedLocalOwnerEffectV1 {
         &self.owner_result
     }
 }
+
+/// The tombstones, the recipient-export withdrawal binding and the ELO1
+/// effect digest and object of one owner effect, with an ELNEG1 checked
+/// against `binding`.
+fn effect_parts(effect: LocalOwnerEffectV1, binding: &LocalOwnerResultBindingV1) -> EffectPartsV1 {
+    match effect {
+        LocalOwnerEffectV1::KeyTombstone {
+            request,
+            deletion_receipt,
+        } => (
+            Some((*request, deletion_receipt)),
+            None,
+            None,
+            Ok((receipt_digest(deletion_receipt), None)),
+        ),
+        LocalOwnerEffectV1::ExistingTombstone(tombstone) => (
+            None,
+            Some(*tombstone),
+            None,
+            Ok((receipt_digest(tombstone.deletion_receipt), None)),
+        ),
+        LocalOwnerEffectV1::ArtifactDisposition(record) => {
+            (None, None, None, record_effect(record, "ELAD1"))
+        }
+        LocalOwnerEffectV1::CacheGeneration(record) => {
+            (None, None, None, record_effect(record, "ELCG1"))
+        }
+        LocalOwnerEffectV1::Negative(record) => (
+            None,
+            None,
+            None,
+            negative_bound_by(&record, binding).and_then(|()| record_effect(record, "ELNEG1")),
+        ),
+        LocalOwnerEffectV1::ReplicaPurge(record) => {
+            (None, None, None, record_effect(record, "ELRP1"))
+        }
+        LocalOwnerEffectV1::RecipientExportWithdrawal(record) => {
+            let withdrawal = LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor(&record)
+                .map(|elxw1| RecipientExportWithdrawalBindingV1::from(&elxw1));
+            (
+                None,
+                None,
+                withdrawal.as_ref().ok().copied(),
+                withdrawal.and_then(|_| record_effect(record, "ELXW1")),
+            )
+        }
+    }
+}
+
+/// The parts [`effect_parts`] splits one owner effect into.
+type EffectPartsV1 = (
+    Option<(KeyDestructionRequestV1, Hash)>,
+    Option<KeyTombstoneV1>,
+    Option<RecipientExportWithdrawalBindingV1>,
+    Result<(ErasureReferenceV1, Option<ErasureRetainedObjectV1>), ErasureErrorV1>,
+);
 
 /// The canonical ELO1 of `binding` over `effect_digest`.
 fn owner_result_object(
