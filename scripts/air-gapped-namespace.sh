@@ -14,6 +14,12 @@
 # permissions and SO_PEERCRED stay unchanged. Neither shape reproduces the deployment unit's
 # InaccessiblePaths= or its exact RestrictAddressFamilies= set; #462 verifies those.
 #
+# With --hold-network-capability as its first argument (owner decision 2026-11-17, #1423), the shape
+# is the same except that PROGRAM holds exactly CAP_NET_ADMIN (bounding, inheritable and
+# ambient sets of that one capability), so a test can prove the Air-Gapped mode refuses a
+# process that could configure its network. In the sudo fallback it still runs as the
+# invoking user, never as real root.
+#
 # This is a test harness and never a production override: the Gateway reads only /proc/self.
 #
 # bash -p reads no BASH_ENV or ENV file and imports no shell functions; the fixed PATH below
@@ -24,8 +30,15 @@ set -euo pipefail
 readonly RUNNER_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH=$RUNNER_PATH
 
+CAPABILITIES=(--bounding-set=-all --inh-caps=-all --ambient-caps=-all)
+if [[ ${1:-} == --hold-network-capability ]]; then
+  shift
+  CAPABILITIES=(--bounding-set=-all,+net_admin --inh-caps=-all,+net_admin --ambient-caps=-all,+net_admin)
+fi
+readonly CAPABILITIES
+
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 PROGRAM [ARGUMENT...]" >&2
+  echo "usage: $0 [--hold-network-capability] PROGRAM [ARGUMENT...]" >&2
   exit 2
 fi
 
@@ -37,7 +50,7 @@ for tool in unshare ip setpriv python3; do
 done
 
 readonly HELPER=$(realpath -- "$(dirname -- "$0")/air_gapped_seccomp_exec.py")
-readonly DROP=(--no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all)
+readonly DROP=(--no-new-privs "${CAPABILITIES[@]}")
 # Bring `lo` up while CAP_NET_ADMIN is still held, then exec the rest of the arguments.
 readonly LOOPBACK_UP='ip link set lo up && exec "$@"'
 

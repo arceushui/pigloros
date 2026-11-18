@@ -34,6 +34,33 @@ use serde_json::{json, Value};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// Set only for a test re-executed inside the Air-Gapped test shape.
+const IN_AIR_GAPPED_NAMESPACE: &str = "PIGLOROS_AIR_GAPPED_TEST_NAMESPACE";
+
+/// Run `body` as the test `name` of this binary inside the ADR-135 §4 test
+/// shape (#1422): the `authorized-air-gapped` composition binds the
+/// Air-Gapped mode, whose `air-gapped-no-route` predicate holds only there.
+/// The parent re-executes this test binary under
+/// `scripts/air-gapped-namespace.sh` and requires the child to pass.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn in_air_gapped_namespace(name: &str, body: impl FnOnce() -> TestResult) -> TestResult {
+    if std::env::var_os(IN_AIR_GAPPED_NAMESPACE).is_some() {
+        return body();
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/air-gapped-namespace.sh");
+    let status = std::process::Command::new(script)
+        .arg(std::env::current_exe()?)
+        .args(["--exact", name, "--nocapture"])
+        .env(IN_AIR_GAPPED_NAMESPACE, "1")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{name} failed in the Air-Gapped test namespace: {status}").into())
+    }
+}
+
 const BINARY: &str = env!("CARGO_BIN_EXE_pos-gateway-conformance-adapter");
 const LAYER: &str = "gateway-client-conformance";
 const OUTPUT_LIMIT: u64 = 1_048_576;
@@ -225,6 +252,13 @@ fn wanted_steps_and_events(attempt: &CaseAttempt) -> TestResult<(u64, u64)> {
 
 #[test]
 fn every_family_meets_its_oracle_identically_in_local_and_air_gapped() -> TestResult {
+    in_air_gapped_namespace(
+        "every_family_meets_its_oracle_identically_in_local_and_air_gapped",
+        every_family_meets_its_oracle_identically_in_local_and_air_gapped_body,
+    )
+}
+
+fn every_family_meets_its_oracle_identically_in_local_and_air_gapped_body() -> TestResult {
     for family in FAMILIES {
         let mut observed = Vec::new();
         for mode in MODES {
@@ -272,6 +306,13 @@ fn every_family_meets_its_oracle_identically_in_local_and_air_gapped() -> TestRe
 
 #[test]
 fn other_claim_layers_and_replay_or_fork_modes_are_unavailable() -> TestResult {
+    in_air_gapped_namespace(
+        "other_claim_layers_and_replay_or_fork_modes_are_unavailable",
+        other_claim_layers_and_replay_or_fork_modes_are_unavailable_body,
+    )
+}
+
+fn other_claim_layers_and_replay_or_fork_modes_are_unavailable_body() -> TestResult {
     let mut other_layer = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     other_layer.claim_layer = ClaimLayer::PluginConformance;
     let unavailable = SubjectObservation {
@@ -288,6 +329,13 @@ fn other_claim_layers_and_replay_or_fork_modes_are_unavailable() -> TestResult {
 
 #[test]
 fn a_schema_member_other_than_the_pinned_one_is_not_executed() -> TestResult {
+    in_air_gapped_namespace(
+        "a_schema_member_other_than_the_pinned_one_is_not_executed",
+        a_schema_member_other_than_the_pinned_one_is_not_executed_body,
+    )
+}
+
+fn a_schema_member_other_than_the_pinned_one_is_not_executed_body() -> TestResult {
     let mut foreign = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     foreign.schema = artifact(read(&format!(
         "providers/{LAYER}/schemas/denied.schema.json"
@@ -407,6 +455,13 @@ fn grammar_violations() -> Vec<Rewrite> {
 
 #[test]
 fn payloads_outside_the_grammar_are_payload_invalid() -> TestResult {
+    in_air_gapped_namespace(
+        "payloads_outside_the_grammar_are_payload_invalid",
+        payloads_outside_the_grammar_are_payload_invalid_body,
+    )
+}
+
+fn payloads_outside_the_grammar_are_payload_invalid_body() -> TestResult {
     let base = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     let invalid = SubjectObservation {
         result: failure(PAYLOAD_INVALID),
@@ -424,6 +479,13 @@ fn payloads_outside_the_grammar_are_payload_invalid() -> TestResult {
 
 #[test]
 fn payloads_at_the_grammar_bounds_are_executed() -> TestResult {
+    in_air_gapped_namespace(
+        "payloads_at_the_grammar_bounds_are_executed",
+        payloads_at_the_grammar_bounds_are_executed_body,
+    )
+}
+
+fn payloads_at_the_grammar_bounds_are_executed_body() -> TestResult {
     let base = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     let at_bounds = with_payload(base, |p| {
         let exchange = json!({
@@ -454,6 +516,13 @@ fn payloads_at_the_grammar_bounds_are_executed() -> TestResult {
 
 #[test]
 fn a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch() -> TestResult {
+    in_air_gapped_namespace(
+        "a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch",
+        a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch_body,
+    )
+}
+
+fn a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch_body() -> TestResult {
     let base = attempt(FixtureFamily::Denied, ExecutionMode::Local)?;
     let mismatch = with_payload(base.clone(), |p| {
         p["subcases"][0]["exchanges"][1]["expect"]["status"] = json!(402);
@@ -486,6 +555,13 @@ fn a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch() -> TestResu
 
 #[test]
 fn a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle() -> TestResult {
+    in_air_gapped_namespace(
+        "a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle",
+        a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle_body,
+    )
+}
+
+fn a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle_body() -> TestResult {
     let base = attempt(FixtureFamily::DeletionRedaction, ExecutionMode::Local)?;
     let canary = with_payload(base, |p| p["subcases"][0]["canary"] = json!("piglor.com"))?;
     let SubjectResult::Output(bytes) = observation(&canary)?.result else {
@@ -678,6 +754,13 @@ impl Write for Closed {
 
 #[test]
 fn wire_and_output_faults_have_their_exit_codes() -> TestResult {
+    in_air_gapped_namespace(
+        "wire_and_output_faults_have_their_exit_codes",
+        wire_and_output_faults_have_their_exit_codes_body,
+    )
+}
+
+fn wire_and_output_faults_have_their_exit_codes_body() -> TestResult {
     assert_eq!(
         run(b"not EAI1".as_slice(), Vec::new()),
         Err(AdapterRunErrorV1::Wire)
@@ -723,6 +806,13 @@ fn spawn(input: &[u8]) -> TestResult<std::process::Output> {
 
 #[test]
 fn the_binary_runs_one_attempt_through_its_process_boundary() -> TestResult {
+    in_air_gapped_namespace(
+        "the_binary_runs_one_attempt_through_its_process_boundary",
+        the_binary_runs_one_attempt_through_its_process_boundary_body,
+    )
+}
+
+fn the_binary_runs_one_attempt_through_its_process_boundary_body() -> TestResult {
     let mut stream = Vec::new();
     write_attempt(
         &mut stream,
