@@ -285,35 +285,7 @@ impl PreparedLocalOwnerEffectV1 {
         effect: LocalOwnerEffectV1,
         binding: LocalOwnerResultBindingV1,
     ) -> Result<Self, ErasureErrorV1> {
-        let (key_tombstone, existing_tombstone, effect) = match effect {
-            LocalOwnerEffectV1::KeyTombstone {
-                request,
-                deletion_receipt,
-            } => (
-                Some((*request, deletion_receipt)),
-                None,
-                Ok((receipt_digest(deletion_receipt), None)),
-            ),
-            LocalOwnerEffectV1::ExistingTombstone(tombstone) => (
-                None,
-                Some(*tombstone),
-                Ok((receipt_digest(tombstone.deletion_receipt), None)),
-            ),
-            LocalOwnerEffectV1::ArtifactDisposition(record) => {
-                (None, None, record_effect(record, "ELAD1"))
-            }
-            LocalOwnerEffectV1::CacheGeneration(record) => {
-                (None, None, record_effect(record, "ELCG1"))
-            }
-            LocalOwnerEffectV1::Negative(record) => (
-                None,
-                None,
-                negative_bound_by(&record, &binding).and_then(|()| record_effect(record, "ELNEG1")),
-            ),
-            LocalOwnerEffectV1::ReplicaPurge(record) => {
-                (None, None, record_effect(record, "ELRP1"))
-            }
-        };
+        let (key_tombstone, existing_tombstone, effect) = effect_parts(effect, &binding);
         effect
             .and_then(|(effect_digest, effect_object)| {
                 owner_result_object(&binding, effect_digest)
@@ -352,6 +324,43 @@ impl PreparedLocalOwnerEffectV1 {
         &self.owner_result
     }
 }
+
+/// The tombstones and the ELO1 effect digest and object of one owner
+/// effect, with an ELNEG1 checked against `binding`.
+fn effect_parts(effect: LocalOwnerEffectV1, binding: &LocalOwnerResultBindingV1) -> EffectPartsV1 {
+    match effect {
+        LocalOwnerEffectV1::KeyTombstone {
+            request,
+            deletion_receipt,
+        } => (
+            Some((*request, deletion_receipt)),
+            None,
+            Ok((receipt_digest(deletion_receipt), None)),
+        ),
+        LocalOwnerEffectV1::ExistingTombstone(tombstone) => (
+            None,
+            Some(*tombstone),
+            Ok((receipt_digest(tombstone.deletion_receipt), None)),
+        ),
+        LocalOwnerEffectV1::ArtifactDisposition(record) => {
+            (None, None, record_effect(record, "ELAD1"))
+        }
+        LocalOwnerEffectV1::CacheGeneration(record) => (None, None, record_effect(record, "ELCG1")),
+        LocalOwnerEffectV1::Negative(record) => (
+            None,
+            None,
+            negative_bound_by(&record, binding).and_then(|()| record_effect(record, "ELNEG1")),
+        ),
+        LocalOwnerEffectV1::ReplicaPurge(record) => (None, None, record_effect(record, "ELRP1")),
+    }
+}
+
+/// The parts [`effect_parts`] splits one owner effect into.
+type EffectPartsV1 = (
+    Option<(KeyDestructionRequestV1, Hash)>,
+    Option<KeyTombstoneV1>,
+    Result<(ErasureReferenceV1, Option<ErasureRetainedObjectV1>), ErasureErrorV1>,
+);
 
 /// The canonical ELO1 of `binding` over `effect_digest`.
 fn owner_result_object(
