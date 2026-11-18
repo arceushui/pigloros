@@ -142,6 +142,17 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
             .any(|path| path.ends_with("image_activator/socket.rs")),
         "the scan must include the mountfsd transport"
     );
+    // The R11 provider installation modules (#1358) are provider code too.
+    for module in [
+        "provider_installation.rs",
+        "provider_installation/codec.rs",
+        "provider_installation/files.rs",
+    ] {
+        assert!(
+            sources.iter().any(|path| path.ends_with(module)),
+            "the scan must include {module}"
+        );
+    }
     assert!(
         sources
             .iter()
