@@ -1725,15 +1725,16 @@ fn refused_without_retention(
         host.command_sender()?.submit_local_erasure(submission),
         Err(LocalErasureSubmitErrorV1::Host(error))
     );
+    // The host's own authority view reads no object, so read the store.
     let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
-    let view = host.authority_view()?;
+    let sqlite = store.sqlite()?;
     for object in [
         authorization(1, store.head)?.reference()?,
         authorization_at(1, store.head + 1, 1)?.reference()?,
         LocalErasureSelectorV1 { subject }.reference()?,
         idempotency(1)?.reference()?,
     ] {
-        assert_eq!(view.retained_object(object), None);
+        assert!(ErasurePersistencePortV1::read_object(&sqlite, object).is_err());
     }
     Ok(())
 }
@@ -1833,10 +1834,10 @@ fn a_refused_submission_retains_nothing() -> TestResult {
     host.command_sender()?
         .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
         .map_err(fail)?;
-    assert!(host
-        .authority_view()?
-        .retained_object(idempotency(1)?.reference()?)
-        .is_some());
+    assert_eq!(
+        ErasurePersistencePortV1::read_object(&store.sqlite()?, idempotency(1)?.reference()?)?,
+        idempotency(1)?.to_canonical_cbor()?
+    );
     Ok(())
 }
 
