@@ -105,6 +105,29 @@ impl ErasureRecoveryAuthorizationVerifierV1 for BenchmarkErasureHost {
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
+
+    fn validate_attempt_admission(
+        &self,
+        _request: &pos_core::ErasureRequestV1,
+        _admission: &pos_core::ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_acknowledgement(
+        &self,
+        _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_receipt(
+        &self,
+        _attempt: &pos_core::ErasureRetryAdmissionV1,
+        _receipt: &pos_core::ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
 }
 
 impl ErasureCoordinatorPortV1 for BenchmarkErasureHost {
