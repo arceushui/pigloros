@@ -7433,7 +7433,7 @@ fn the_driver_commits_a_freeze_rejection_without_a_signature() -> TestResult {
 /// lifecycle command, between the pending key-destruction phase and the
 /// tombstone, and between an owner effect with its ELO1 and the
 /// acknowledgement each resume to exactly the bytes of an uninterrupted
-/// run.
+/// run, and so does a duplicated acknowledgement (acceptance test 4).
 #[test]
 fn every_crash_window_resumes_to_identical_bytes() -> TestResult {
     let (receipt, states) = straight_run(&driver_store()?)?;
@@ -7489,6 +7489,34 @@ fn every_crash_window_resumes_to_identical_bytes() -> TestResult {
             host,
             LocalErasureSigningRequestV1::OwnerResult {
                 owner_result: executed.owner_result(),
+            },
+        )?;
+        Ok(())
+    })?;
+    // A duplicated acknowledgement commits nothing new.
+    interrupted(&|host: &mut ErasureExecutionHostV1| {
+        let mut acknowledged = None;
+        for _ in 0..4 {
+            if let LocalErasureStepV1::Acknowledged(result) = driver().step(host, request)? {
+                acknowledged = Some(*result);
+            }
+        }
+        let key = acknowledged.ok_or("no acknowledgement")?;
+        let evidence = signer.sign(
+            host,
+            LocalErasureSigningRequestV1::OwnerResult {
+                owner_result: key.owner_result(),
+            },
+        )?;
+        let destruction = key.command().destruction;
+        host.command_sender()?.acknowledge_erasure(
+            request,
+            ErasureAcknowledgementV1 {
+                obligation: destruction.obligation,
+                target: destruction.target,
+                owner: destruction.owner,
+                evidence,
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
             },
         )?;
         Ok(())
