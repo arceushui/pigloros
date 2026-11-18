@@ -944,8 +944,9 @@ fn targets_resolve_through_the_scoped_catalog_then_the_withdrawal_row() -> TestR
             expected
         );
     }
-    // Once withdrawn or retracted, the withdrawal row resolves the target
-    // with no scope at all.
+    // Once withdrawn or retracted, the withdrawal row resolves the target,
+    // still only inside the scope: the other publication's Timeline alone
+    // resolves neither.
     let database = fixture.database();
     let (record, elo1) = withdraw(&mut fixture.store, &database, &grantee, first, 5)?;
     assert_eq!(
@@ -954,11 +955,19 @@ fn targets_resolve_through_the_scoped_catalog_then_the_withdrawal_row() -> TestR
             .begin_recipient_export_withdrawal(second.1, &grantee)?,
         CAPTURED
     );
-    for (target, expected) in [(first_target, first.1), (second_target, second.1)] {
+    for (target, expected, other) in [
+        (first_target, first.1, second.0),
+        (second_target, second.1, first.0),
+    ] {
         assert_eq!(
-            fixture.store.recipient_export_by_target(target, &[])?,
+            fixture.store.recipient_export_by_target(target, &scope)?,
             Some((expected, grantee))
         );
+        assert_eq!(
+            fixture.store.recipient_export_by_target(target, &[other])?,
+            None
+        );
+        assert_eq!(fixture.store.recipient_export_by_target(target, &[])?, None);
     }
     let mut expected = [
         RecipientExportWithdrawalRowV1 {
@@ -1109,6 +1118,10 @@ fn a_read_only_handle_refuses_every_withdrawal_step() -> TestResult {
         read_only.commit_local_owner_effect(prepared(unknown_elxw1(export_id)?, 5)?),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
+    assert_eq!(
+        read_only.attach_recipient_custody(vec![fixture.custody()?]),
+        Err(RecipientCustodyAttachErrorV1::Unwritable)
+    );
     // Nothing was retracted.
     fixture.attach()?;
     assert_eq!(
@@ -1125,6 +1138,10 @@ fn a_malformed_or_unreadable_catalog_row_fails_closed() -> TestResult {
     for (sql, expected) in [
         (
             "UPDATE recipient_export_catalog_v1 SET ciphertext_digest = X'00'",
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+        (
+            "UPDATE recipient_export_catalog_v1 SET ciphertext_length = -1",
             ErasureErrorV1::ProvenanceMissing,
         ),
         (
@@ -1174,5 +1191,53 @@ fn a_malformed_or_unreadable_withdrawal_row_fails_closed() -> TestResult {
             .read_recipient_export(&fixture.owner, export_id),
         Err(RecipientExportPublicationErrorV1::Store(_))
     ));
+    Ok(())
+}
+
+/// Copy the catalog row of `export_id` under one fresh export identity per
+/// index, as further publications of its Timeline would record them.
+fn copy_catalog_rows(
+    database: &Path,
+    export_id: [u8; 16],
+    indices: impl IntoIterator<Item = u32>,
+) -> TestResult {
+    let mut connection = rusqlite::Connection::open(database)?;
+    let transaction = connection.transaction()?;
+    for index in indices {
+        let mut copy = [0xee; 16];
+        copy[..4].copy_from_slice(&index.to_be_bytes());
+        transaction.execute(
+            "INSERT INTO recipient_export_catalog_v1
+             SELECT ?1, owner_id, recipient_epoch, recipient_descriptor, timeline_id,
+                    local_head, logical_head, ciphertext_length, ciphertext_digest
+             FROM recipient_export_catalog_v1 WHERE export_id = ?2",
+            rusqlite::params![copy.as_slice(), export_id.as_slice()],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+#[test]
+fn a_target_scan_reads_at_most_one_category_of_publications() -> TestResult {
+    let (mut fixture, (timeline, export_id)) = published()?;
+    let database = fixture.database();
+    let unknown = ErasureReferenceV1::from_digest([0x77; 32]);
+    // The published row and 4,095 copies: exactly one category.
+    let bound = u32::try_from(ERASURE_MAX_OBLIGATIONS_PER_CATEGORY)?;
+    copy_catalog_rows(&database, export_id, 1..bound)?;
+    assert_eq!(
+        fixture
+            .store
+            .recipient_export_by_target(unknown, &[timeline])?,
+        None
+    );
+    copy_catalog_rows(&database, export_id, [bound])?;
+    assert_eq!(
+        fixture
+            .store
+            .recipient_export_by_target(unknown, &[timeline]),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     Ok(())
 }

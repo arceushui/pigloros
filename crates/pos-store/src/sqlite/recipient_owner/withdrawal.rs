@@ -14,6 +14,11 @@
 //!
 //! Every step commits on `self.conn` under `synchronous=FULL`, and is refused
 //! on a read-only handle or inside an outer transaction (ADR-138 §3).
+//!
+//! The withdrawal table is created with the recipient-export catalog. A store
+//! whose catalog predates it has no supported upgrade (no-legacy rule): its
+//! reservation and serving reads fail closed with a storage error, and T1
+//! cannot record a withdrawal there.
 
 use std::{collections::BTreeSet, fs::File, io::Read, os::unix::fs::MetadataExt};
 
@@ -35,10 +40,10 @@ use super::{
     validate_recipient_export_file, RecipientKeyOwnerV1, RecipientPrivateFileIdentityV1,
 };
 use crate::sqlite::{
-    begin_immediate_sql, finish_erasure_transaction, finish_immediate_transaction,
-    load_sqlite_erasure_evidence,
+    begin_immediate_sql, finish_erasure_transaction, load_sqlite_erasure_evidence,
     local_erasure::{insert_retained, table_present, RECIPIENT_EXPORT_WITHDRAWALS},
-    map_erasure_receipt_failure, parse_timeline_id, reference_from_sql, SqliteStore,
+    map_erasure_receipt_failure, parse_timeline_id, reference_from_sql, SqliteRollbackOnDrop,
+    SqliteStore,
 };
 
 /// Capture status: the final object, and any staging object, are captured.
@@ -65,6 +70,11 @@ pub enum RecipientCustodyAttachErrorV1 {
     /// Custody is attached once, at composition.
     #[error("recipient custody is already attached")]
     AlreadyAttached,
+    /// The store refused the attach transaction: a read-only handle, an
+    /// unreadable read-only state, an open outer transaction, or a failed
+    /// begin or commit.
+    #[error("the store cannot record recipient custody")]
+    Unwritable,
 }
 
 /// The columns of one withdrawal row that T1, the owner step and T3 read.
@@ -191,7 +201,9 @@ impl SqliteStore {
     /// call, [`RecipientCustodyAttachErrorV1::DuplicateGrantee`] when two
     /// handles name one grantee, and
     /// [`RecipientCustodyAttachErrorV1::InvalidDirectory`] when a handle fails
-    /// its directory validation or claim. Nothing is attached on error.
+    /// its directory validation or claim, and
+    /// [`RecipientCustodyAttachErrorV1::Unwritable`] when the store refuses
+    /// the claim transaction. Nothing is attached on error.
     pub fn attach_recipient_custody(
         &mut self,
         owners: Vec<RecipientKeyOwnerV1>,
@@ -208,22 +220,40 @@ impl SqliteStore {
             return Err(RecipientCustodyAttachErrorV1::DuplicateGrantee);
         }
         self.claim_recipient_custody(&owners)
-            .map_err(|_| RecipientCustodyAttachErrorV1::InvalidDirectory)
             .map(|()| self.recipient_custody = Some(owners))
     }
 
-    fn claim_recipient_custody(&self, owners: &[RecipientKeyOwnerV1]) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(storage_error)
+    /// Validate and claim every handle in one transaction on a writable,
+    /// autocommit `self.conn`; a failed claim rolls the transaction back.
+    fn claim_recipient_custody(
+        &self,
+        owners: &[RecipientKeyOwnerV1],
+    ) -> Result<(), RecipientCustodyAttachErrorV1> {
+        writable(&self.conn)
+            .then_some(())
+            .ok_or(RecipientCustodyAttachErrorV1::Unwritable)
             .and_then(|()| {
-                let result = ensure_recipient_custody_tables(&self.conn).and_then(|()| {
-                    owners.iter().try_for_each(|owner| {
-                        validate_owner_directory(owner)
-                            .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
+                self.conn
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(|_| RecipientCustodyAttachErrorV1::Unwritable)
+            })
+            .and_then(|()| {
+                let rollback = SqliteRollbackOnDrop(&self.conn);
+                let claimed = ensure_recipient_custody_tables(&self.conn)
+                    .and_then(|()| {
+                        owners.iter().try_for_each(|owner| {
+                            validate_owner_directory(owner)
+                                .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
+                        })
                     })
-                });
-                finish_immediate_transaction(&self.conn, result)
+                    .map_err(|_| RecipientCustodyAttachErrorV1::InvalidDirectory)
+                    .and_then(|()| {
+                        self.conn
+                            .execute_batch("COMMIT")
+                            .map_err(|_| RecipientCustodyAttachErrorV1::Unwritable)
+                    });
+                drop(rollback);
+                claimed
             })
     }
 
@@ -326,9 +356,7 @@ impl SqliteStore {
         refusal: ErasureErrorV1,
         step: impl FnOnce() -> Result<T, ErasureErrorV1>,
     ) -> Result<T, ErasureErrorV1> {
-        let writable =
-            self.conn.is_autocommit() && withdrawal_is_readonly(&self.conn).ok() == Some(false);
-        writable
+        writable(&self.conn)
             .then_some(())
             .ok_or(refusal)
             .and_then(|()| ensure_recipient_export_durability(&self.conn).map_err(|_| refusal))
@@ -407,15 +435,16 @@ impl SqliteStore {
         })
     }
 
-    /// A captured final name that no longer holds the captured object, in
-    /// a directory whose handle is still usable, is unsafe.
+    /// Re-check a capture inside its transaction: custody that is no longer
+    /// usable is no custody, and a captured final name that no longer holds
+    /// the captured object is unsafe.
     fn confirm_capture(
         &self,
         export_id: [u8; 16],
         grantee_owner: &OwnerIdV1,
         capture: CaptureV1,
     ) -> CaptureV1 {
-        let confirmed = capture.final_identity.is_none_or(|captured| {
+        capture.final_identity.map_or(capture, |captured| {
             self.usable_custody(
                 grantee_owner.as_str(),
                 capture
@@ -423,16 +452,19 @@ impl SqliteStore {
                     .as_ref()
                     .map(<[u8; 16]>::as_slice),
             )
-            .is_some_and(|owner| {
-                stat_entry(owner, &recipient_export_final_name(export_id))
-                    == EntryV1::Safe(captured)
-            })
-        });
-        if confirmed {
-            capture
-        } else {
-            CaptureV1::failed(UNSAFE)
-        }
+            .map_or_else(
+                || CaptureV1::failed(NO_CUSTODY),
+                |owner| {
+                    if stat_entry(owner, &recipient_export_final_name(export_id))
+                        == EntryV1::Safe(captured)
+                    {
+                        capture
+                    } else {
+                        CaptureV1::failed(UNSAFE)
+                    }
+                },
+            )
+        })
     }
 
     /// The captured objects of a retracted, captured row and the attached,
@@ -475,6 +507,12 @@ fn in_immediate_transaction<T>(
             observe_withdrawal_synchronous(connection);
             finish_erasure_transaction(connection, work())
         })
+}
+
+/// Whether `connection` may begin a durable write: autocommit, and known
+/// not to be read-only (an `is_readonly` error is a refusal).
+fn writable(connection: &Connection) -> bool {
+    connection.is_autocommit() && withdrawal_is_readonly(connection).ok() == Some(false)
 }
 
 /// Whether a handle is still private, owner-bound and claimed for its
@@ -726,6 +764,11 @@ fn unlink_captured_objects(
 /// Open `name` beneath the directory, require the captured `(dev, inode,
 /// uid)`, one link and, for the final name, the exact length, require the
 /// name to still hold that file, then unlink it.
+///
+/// An absent captured name reads as already deleted (ADR-138 §5): the crash
+/// case after an earlier unlink. A captured name renamed away out of band
+/// therefore also reads as deleted, the same trade-off as key destruction's
+/// absent-name rule; the custody directory is owner-private.
 fn unlink_captured(
     owner: &RecipientKeyOwnerV1,
     name: &[u8],
@@ -890,9 +933,11 @@ mod tests {
     };
     use super::super::{
         current_sqlite_synchronous_level, RecipientExportPublicationErrorV1,
-        RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE, RECIPIENT_RANDOM_OVERRIDE,
+        RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE, RECIPIENT_FSYNC_CALLS, RECIPIENT_FSYNC_FAILURE,
+        RECIPIENT_RANDOM_OVERRIDE, RECIPIENT_UNLINK_FAILURE,
     };
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// One publication of the fixture's grantee, with a second handle on its
     /// directory attached as custody.
@@ -1122,6 +1167,8 @@ mod tests {
         Ok(())
     }
 
+    /// The replacement is a private single-link file, so only its new
+    /// identity differs from the capture.
     #[test]
     fn a_final_object_replaced_before_the_record_is_unsafe() -> RecipientTestResult {
         let (mut fixture, export_id) = published()?;
@@ -1134,6 +1181,9 @@ mod tests {
                 let fresh = final_path.with_extension("replacement");
                 let replaced = std::fs::read(&final_path)
                     .and_then(|bytes| std::fs::write(&fresh, bytes))
+                    .and_then(|()| {
+                        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o600))
+                    })
                     .and_then(|()| std::fs::rename(fresh, final_path));
                 assert!(replaced.is_ok());
             }));
@@ -1169,6 +1219,107 @@ mod tests {
             fixture.store.reserve_recipient_export_id(&fixture.owner),
             Err(RecipientExportPublicationErrorV1::IdentifierCollision)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn custody_lost_before_the_record_is_no_custody() -> RecipientTestResult {
+        let (mut fixture, export_id) = published()?;
+        let directory = fixture.owner.directory.clone();
+        WITHDRAWAL_BEFORE_RECORD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let changed =
+                    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755));
+                assert!(changed.is_ok());
+            }));
+        });
+        let grantee = fixture.descriptor.identity().owner_id;
+        let state = fixture
+            .store
+            .begin_recipient_export_withdrawal(export_id, &grantee);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert_eq!(
+            state?,
+            RecipientExportWithdrawalStateV1::Retracted {
+                capture_status: NO_CUSTODY,
+                objects_deleted: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_unlink_or_directory_sync_leaves_the_owner_step_negative() -> RecipientTestResult {
+        let (mut fixture, export_id) = published()?;
+        let grantee = fixture.descriptor.identity().owner_id;
+        fixture
+            .store
+            .begin_recipient_export_withdrawal(export_id, &grantee)?;
+        let final_path = fixture
+            .owner
+            .directory
+            .join(String::from_utf8(recipient_export_final_name(export_id))?);
+        RECIPIENT_UNLINK_FAILURE.with(|failure| failure.set(true));
+        let unlink = fixture.store.delete_recipient_export_ciphertext(export_id);
+        RECIPIENT_UNLINK_FAILURE.with(|failure| failure.set(false));
+        assert_eq!(unlink, Err(ErasureErrorV1::ArtifactDeletionFailed));
+        assert!(final_path.exists());
+        // The directory sync after the unlink fails; a re-run accepts the
+        // absent captured name.
+        RECIPIENT_FSYNC_CALLS.with(|calls| calls.set(0));
+        RECIPIENT_FSYNC_FAILURE.with(|failure| failure.set(Some(0)));
+        let sync = fixture.store.delete_recipient_export_ciphertext(export_id);
+        RECIPIENT_FSYNC_FAILURE.with(|failure| failure.set(None));
+        assert_eq!(sync, Err(ErasureErrorV1::ArtifactDeletionFailed));
+        assert!(!final_path.exists());
+        assert_eq!(
+            fixture
+                .store
+                .begin_recipient_export_withdrawal(export_id, &grantee)?,
+            RecipientExportWithdrawalStateV1::Retracted {
+                capture_status: CAPTURED,
+                objects_deleted: false,
+            }
+        );
+        fixture
+            .store
+            .delete_recipient_export_ciphertext(export_id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn attach_refuses_an_unwritable_store_and_attaches_nothing() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let custody =
+            || RecipientKeyOwnerV1::open(fixture.owner.directory.clone(), fixture.owner.grantee_id);
+        let handles = [custody()?, custody()?, custody()?, custody()?];
+        let [outer, readonly_error, begin, commit] = handles;
+        // An open outer transaction.
+        fixture.store.conn.execute_batch("BEGIN")?;
+        let refused = fixture.store.attach_recipient_custody(vec![outer]);
+        fixture.store.conn.execute_batch("ROLLBACK")?;
+        assert_eq!(refused, Err(RecipientCustodyAttachErrorV1::Unwritable));
+        // An `is_readonly` error.
+        WITHDRAWAL_READONLY_FAILURE.with(|failure| failure.set(true));
+        let refused = fixture.store.attach_recipient_custody(vec![readonly_error]);
+        WITHDRAWAL_READONLY_FAILURE.with(|failure| failure.set(false));
+        assert_eq!(refused, Err(RecipientCustodyAttachErrorV1::Unwritable));
+        // A failed begin.
+        crate::sqlite::FAIL_BEGIN_IMMEDIATE.with(|failure| failure.set(true));
+        let refused = fixture.store.attach_recipient_custody(vec![begin]);
+        crate::sqlite::FAIL_BEGIN_IMMEDIATE.with(|failure| failure.set(false));
+        assert_eq!(refused, Err(RecipientCustodyAttachErrorV1::Unwritable));
+        // A failed commit.
+        fixture.store.conn.commit_hook(Some(|| true))?;
+        let refused = fixture.store.attach_recipient_custody(vec![commit]);
+        fixture.store.conn.commit_hook::<fn() -> bool>(None)?;
+        assert_eq!(refused, Err(RecipientCustodyAttachErrorV1::Unwritable));
+        assert!(fixture.store.conn.is_autocommit());
+        // Nothing was attached.
+        fixture.store.attach_recipient_custody(vec![custody()?])?;
         Ok(())
     }
 }

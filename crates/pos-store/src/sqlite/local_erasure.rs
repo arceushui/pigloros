@@ -226,8 +226,9 @@ impl SqliteStore {
 
     /// Resolve one `ELXR1` target (ADR-138 §5): the withdrawal row with that
     /// target first, else the first catalog row of `timelines` whose
-    /// recomputed `ELXR1` equals it. A store without the withdrawal table
-    /// never published, so it resolves nothing.
+    /// recomputed `ELXR1` equals it. Either is resolved only when its source
+    /// Timeline is in `timelines`. A store without the withdrawal table never
+    /// published, so it resolves nothing.
     pub(super) fn local_erasure_recipient_export_by_target(
         &self,
         target: ErasureReferenceV1,
@@ -240,7 +241,11 @@ impl SqliteStore {
             withdrawal_by_target(&self.conn, target).and_then(|withdrawal| {
                 withdrawal.map_or_else(
                     || catalog_by_target(&self.conn, target, timelines),
-                    |row| Ok(Some((row.export_id, row.grantee_owner))),
+                    |row| {
+                        Ok(timelines
+                            .contains(&row.timeline)
+                            .then_some((row.export_id, row.grantee_owner)))
+                    },
                 )
             })
         })
@@ -337,12 +342,13 @@ fn withdrawal_rows(
 struct TargetedWithdrawalV1 {
     target: ErasureReferenceV1,
     export_id: [u8; 16],
+    timeline: TimelineId,
     grantee_owner: OwnerIdV1,
     disposition: Option<ErasureReferenceV1>,
     committed_elo1: Option<ErasureReferenceV1>,
 }
 
-type TargetedWithdrawalSqlV1 = (Vec<u8>, String, Option<Vec<u8>>, Option<Vec<u8>>);
+type TargetedWithdrawalSqlV1 = (Vec<u8>, String, String, Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// The withdrawal row whose `target` column is `target`; a malformed row is
 /// [`ErasureErrorV1::ProvenanceMissing`].
@@ -352,7 +358,7 @@ fn withdrawal_by_target(
 ) -> Result<Option<TargetedWithdrawalV1>, ErasureErrorV1> {
     connection
         .query_row(
-            "SELECT export_id, owner_id, disposition, committed_elo1
+            "SELECT export_id, timeline_id, owner_id, disposition, committed_elo1
              FROM recipient_export_withdrawals_v1 WHERE target = ?1",
             params![target.digest().as_slice()],
             |row| TargetedWithdrawalSqlV1::try_from(row),
@@ -360,44 +366,59 @@ fn withdrawal_by_target(
         .optional()
         .map_err(map_erasure_receipt_failure)
         .and_then(|row| {
-            row.map(|(export_id, owner, disposition, committed_elo1)| {
-                <[u8; 16]>::try_from(export_id)
-                    .ok()
-                    .zip(OwnerIdV1::new(owner).ok())
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-                    .and_then(|(export_id, grantee_owner)| {
-                        disposition
-                            .map(reference_from_sql)
-                            .transpose()
-                            .and_then(|disposition| {
-                                committed_elo1.map(reference_from_sql).transpose().map(
-                                    |committed_elo1| TargetedWithdrawalV1 {
-                                        target,
-                                        export_id,
-                                        grantee_owner,
-                                        disposition,
-                                        committed_elo1,
-                                    },
-                                )
-                            })
-                    })
-            })
+            row.map(
+                |(export_id, timeline, owner, disposition, committed_elo1)| {
+                    <[u8; 16]>::try_from(export_id)
+                        .ok()
+                        .zip(parse_timeline_id(&timeline).ok())
+                        .zip(OwnerIdV1::new(owner).ok())
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        .and_then(|((export_id, timeline), grantee_owner)| {
+                            disposition.map(reference_from_sql).transpose().and_then(
+                                |disposition| {
+                                    committed_elo1.map(reference_from_sql).transpose().map(
+                                        |committed_elo1| TargetedWithdrawalV1 {
+                                            target,
+                                            export_id,
+                                            timeline,
+                                            grantee_owner,
+                                            disposition,
+                                            committed_elo1,
+                                        },
+                                    )
+                                },
+                            )
+                        })
+                },
+            )
             .transpose()
         })
 }
 
 /// The first catalog row of `timelines`, in Timeline then `export_id` order,
-/// whose recomputed `CA("ELXR1", [export_id, owner_id])` is `target`.
+/// whose recomputed `CA("ELXR1", [export_id, owner_id])` is `target`. The
+/// scan reads at most one category of publications (ADR-138 §5): more is
+/// [`ErasureErrorV1::ScopeInvalid`].
 fn catalog_by_target(
     connection: &Connection,
     target: ErasureReferenceV1,
     timelines: &[TimelineId],
 ) -> Result<Option<([u8; 16], OwnerIdV1)>, ErasureErrorV1> {
     let selected: BTreeSet<TimelineId> = timelines.iter().copied().collect();
+    let limit = ERASURE_MAX_OBLIGATIONS_PER_CATEGORY.saturating_add(1);
     selected
         .into_iter()
-        .map(|timeline| timeline_publications(connection, timeline, usize::MAX))
+        .map(|timeline| timeline_publications(connection, timeline, limit))
         .collect::<Result<Vec<_>, _>>()
+        .and_then(|publications| {
+            if publications.iter().map(Vec::len).sum::<usize>()
+                > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY
+            {
+                Err(ErasureErrorV1::ScopeInvalid)
+            } else {
+                Ok(publications)
+            }
+        })
         .and_then(|publications| {
             publications
                 .into_iter()
