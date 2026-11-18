@@ -69,6 +69,137 @@ record_process() { # PID
   fi
 }
 
+# --- Part (b): MountImage cases -------------------------------------------
+
+# Every loop device with a backing file, and every device-mapper device:
+#   loop NAME BACKING_FILE RESOLVED_PATH MAJOR:MINOR PARTITIONS
+#   dm NAME DM_NAME DM_UUID MAJOR:MINOR SLAVES
+# RESOLVED_PATH is the backing file resolved in this namespace, or "-".
+devices() {
+  local block name backing resolved
+  for block in /sys/block/loop* /sys/block/dm-*; do
+    [[ -e ${block} ]] || continue
+    name="${block##*/}"
+    if [[ ${name} == loop* ]]; then
+      [[ -e ${block}/loop/backing_file ]] || continue
+      backing="$(cat "${block}/loop/backing_file")"
+      resolved="$(readlink -e -- "${backing}" || printf -- '-')"
+      printf 'loop\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${backing}" "${resolved}" "$(cat "${block}/dev")" \
+        "$(find -H "${block}" -mindepth 1 -maxdepth 1 -name "${name}p*" -printf '%f\n' | sort | paste -sd, -)"
+    else
+      printf 'dm\t%s\t%s\t%s\t%s\t%s\n' "${name}" "$(cat "${block}/dm/name")" "$(cat "${block}/dm/uuid")" \
+        "$(cat "${block}/dev")" "$(find "${block}/slaves" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | paste -sd, -)"
+    fi
+  done
+}
+
+# Read the held root's readback file through the mount: the whole file, then
+# its first block alone. Each line is "<what>\t<exit status>\t<sha256 or error>".
+readback() { # ROOT
+  local file="$1/usr/share/pigloros/readback" digest status what
+  for what in file block-0; do
+    status=0
+    if [[ ${what} == file ]]; then
+      digest="$(sha256sum <"${file}" 2>&1)" || status=$?
+    else
+      digest="$(dd if="${file}" bs=4096 count=1 status=none 2>&1 | sha256sum 2>&1)" || status=$?
+    fi
+    if [[ ${status} -eq 0 ]]; then
+      digest="${digest%% *}"
+    else
+      digest="${digest//[$'\t\n']/ }"
+    fi
+    printf '%s\t%s\t%s\n' "${what}" "${status}" "${digest}"
+  done
+}
+
+# Snapshot the devices into FILE until no loop device and no device-mapper
+# device remain, for at most 60 s: their removal can lag the unmount.
+settled_devices() { # FILE
+  for _ in $(seq 60); do
+    devices >"$1"
+    if [[ ! -s $1 ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+# The provider's empty private runtime directories, as its startup leaves them.
+provision_runtime() {
+  local directory
+  for directory in /run/pigloros /run/pigloros/sandbox /run/pigloros/sandbox/registry \
+    /run/pigloros/sandbox/attempts; do
+    mkdir -m 0700 "${directory}"
+  done
+}
+
+# Run the driver on one image. It reports the activation on its first line,
+# holds a mounted root while this records the live kernel state, and releases
+# it when its standard input closes. Afterwards the runtime tree is recorded
+# and removed: restart reconciliation is part (c).
+driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
+  local dir="cases/$1" fifo=/run/piglor-evidence-control control line root pid status=0 start
+  mkdir -p "${dir}"
+  printf '%s\n' "$2" "$3" "$4" >"${dir}/arguments"
+  provision_runtime
+  devices >"${dir}/devices-before"
+  # The control FIFO lives on the guest's tmpfs, not on the 9p evidence share.
+  mkfifo -m 0600 "${fifo}"
+  start="$(cut -d ' ' -f 1 /proc/uptime)"
+  pos-sandboxd-conformance "$2" "$3" "$4" <"${fifo}" >"${dir}/report" 2>"${dir}/driver-stderr" &
+  pid=$!
+  exec {control}>"${fifo}"
+  for _ in $(seq 600); do
+    if [[ -s ${dir}/report ]] || ! kill -0 "${pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  # Seconds from the driver's start to its activation report, for reading
+  # the TCG run against the provider's 60 s MountImage bounds.
+  awk -v start="${start}" '{ printf "activation-seconds\t%.2f\n", $1 - start }' /proc/uptime >"${dir}/timing"
+  line="$(head -n 1 "${dir}/report")"
+  if [[ ${line} == activation$'\t'mounted$'\t'* ]]; then
+    root="${line##*$'\t'}"
+    devices >"${dir}/devices-held"
+    cat /proc/self/mountinfo >"${dir}/mountinfo-held"
+    dmsetup table >"${dir}/dm-table-held"
+    readback "${root}" >"${dir}/readback"
+  fi
+  exec {control}>&-
+  wait "${pid}" || status=$?
+  rm -- "${fifo}"
+  printf '%s\n' "${status}" >"${dir}/driver-status"
+  settled_devices "${dir}/devices-after"
+  find /run/pigloros -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-after"
+  rm -rf /run/pigloros
+}
+
+# One raw MountImage call with the provider's exact parameters, so that the
+# reply mountfsd sends is recorded verbatim. varlinkctl exits with the reply,
+# closing the returned mount descriptor; the devices must then go away.
+mountfsd_reply_case() { # IMAGE
+  local dir=cases/mountfsd-reply image=/run/piglor-evidence-image.raw status=0 fd start
+  mkdir -p "${dir}"
+  cp -- "$1" "${image}"
+  devices >"${dir}/devices-before"
+  # Pass a read-only descriptor, as the provider does, not a path.
+  exec {fd}<"${image}"
+  start="$(cut -d ' ' -f 1 /proc/uptime)"
+  # varlinkctl's own default timeout is shorter than this cold first call
+  # under aarch64 TCG (run 43903782177); its duration is recorded instead.
+  varlinkctl call --timeout=600 --push-fd="${fd}" /run/systemd/io.systemd.MountFileSystem \
+    io.systemd.MountFileSystem.MountImage \
+    '{"imageFileDescriptor":0,"readOnly":true,"growFileSystems":false,"imagePolicy":"root=signed+erofs:=absent","relaxExtensionReleaseChecks":false,"veritySharing":false,"allowInteractiveAuthentication":false}' \
+    >"${dir}/reply" 2>"${dir}/stderr" || status=$?
+  awk -v start="${start}" '{ printf "mountimage-seconds\t%.2f\n", $1 - start }' /proc/uptime >"${dir}/timing"
+  exec {fd}<&-
+  printf '%s\n' "${status}" >"${dir}/status"
+  settled_devices "${dir}/devices-after"
+  rm -- "${image}"
+}
+
 # scripts/test_qemu_closure_evidence_producer.py sources the functions above.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
   return 0
@@ -166,5 +297,28 @@ while read -r pid; do
   record_process "${pid}"
 done <"/sys/fs/cgroup${control_group}/cgroup.procs"
 namespaces 1 >pid1-namespaces
+
+# Part (b). The positive image is signed by the key the kernel trusts; the
+# tampered one has one data byte flipped after signing; the wrong-key image is
+# signed by a key no kernel trusts, first alone and then with that key's
+# certificate in /run/verity.d, which only userspace verification would read.
+images="${PIGLOR_EVIDENCE_IMAGES:?}"
+mkdir cases
+# The raw call runs first. Its first MountImage also loads what mountfsd's
+# probing needs, which under aarch64 TCG took longer than the provider's 60 s
+# bound (run 43854451008). So the driver cases measure warm activations only;
+# the cold call's duration is recorded in its timing file.
+mountfsd_reply_case "${images}/positive.raw"
+for case in positive tampered wrong-key; do
+  driver_case "${case}" "${images}/${case}.raw" "${images}/${case}.der" "$(cat "${images}/${case}.description")"
+done
+mkdir /run/verity.d
+cp -- "${images}/wrong-key.crt" /run/verity.d/piglor-untrusted.crt
+find /run/verity.d -mindepth 1 -printf '%p\t%y\n' >cases/verity-d-planted
+driver_case verity-d "${images}/wrong-key.raw" "${images}/wrong-key.der" "$(cat "${images}/wrong-key.description")"
+rm -r -- /run/verity.d
+journalctl --dmesg --boot --no-pager --output=cat >cases/kernel-log
+# mountfsd's own log, with monotonic times, for reading each case's refusal.
+journalctl --boot --no-pager --output=short-monotonic --unit=systemd-mountfsd.service >cases/mountfsd-log
 
 printf 'complete\n' >status
