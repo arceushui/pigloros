@@ -193,7 +193,7 @@ fn usage(command: Option<&str>) -> Result<(), RunError> {
                 .into(),
         );
     }
-    output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority] [--require-local-erasure]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]|version>");
+    output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority] [--require-local-erasure]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>] [--rotation routine|compromise]|version>");
     output_stderr!("  profiles: gateway-mode-local-v1, gateway-mode-air-gapped-v1");
     output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
     output_stderr!("  owntracks status <sqlite-path>");
@@ -214,7 +214,8 @@ fn usage(command: Option<&str>) -> Result<(), RunError> {
 }
 
 /// `provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner
-/// <owner-id> --out <path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]`
+/// <owner-id> --out <path> [--expiry <unix-seconds>] [--signer-epoch <epoch>]
+/// [--rotation routine|compromise]`
 /// (ADR-136 §4, #1429): one-shot, only under its systemd unit, against the
 /// deployment trust state store at its fixed path.
 fn provision_local_erasure_command(
