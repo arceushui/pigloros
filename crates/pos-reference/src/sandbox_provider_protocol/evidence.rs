@@ -15,8 +15,11 @@
 //! validates by decoding what it encoded, so both directions apply the same
 //! rules. A decoded record satisfies every R9 §6 rule that the record alone
 //! can decide. [`AttemptEvidence::verify`] applies the rules that need the
-//! three records together with their grant, ELM1 limits and `ReadyV1`, and
-//! [`AttemptEvidence::verify_receipt`] binds them to SPR1.
+//! three records together with their grant, ELM1 limits and `ReadyV1`,
+//! [`AttemptEvidence::verify_receipt`] binds them to SPR1, and
+//! [`AttemptEvidence::verify_response`] authenticates the complete signed
+//! response that binds them: AGR1, the SAU1 chain, SPR1, SPY1 and the
+//! `ReleaseV1` sent.
 //!
 //! The negative-probe digest is not a record: SPR1 ordinal 21 is the admitted
 //! HCP1's ordinal 7, which [`super::AdmittedSandboxProvider`] enforces when
@@ -41,8 +44,8 @@ use super::termination::{
     ServiceResultCode, StartJobResult, TerminalCode,
 };
 use super::{
-    LauncherReady, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
-    SandboxProviderProtocolError, SandboxProviderReceipt,
+    AdmissionGrant, ExecutionRelease, LauncherReady, SandboxArchitecture, SandboxExecutionMode,
+    SandboxLimit, SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
 };
 
 pub use observed::{
@@ -352,6 +355,115 @@ impl AttemptEvidence {
         )
     }
 
+    /// Authenticate the complete signed response of this attempt under
+    /// `key`, the admitted runtime-attestation key (R9 §6 rules 5, 6, 8 and
+    /// 10, with ADR-069 §4).
+    ///
+    /// Every signed record must verify under `key`. AGR1 must be the grant
+    /// SPR1 and SPY1 name, with its request, attempt, ELM1, authority and
+    /// epochs. SPR1 must bind these records and copy
+    /// `negative_probe_evidence`, the admitted HCP1 ordinal 7. The SAU1 chain
+    /// must be complete and bind KOE1 (events 11 to 13) and TME1 (events 0
+    /// to 10). SPY1's outcome and its terminal event must be TME1's terminal
+    /// code, and a `ReleaseV1` exists exactly when SPR1 names one: it binds
+    /// the KOE1 digest, which must then have status 0. A `Completed` SPY1's
+    /// output descriptor must be exactly as long as TME1
+    /// `output-capture.accepted-bytes` (R10 I6).
+    ///
+    /// # Errors
+    /// The decoders' closed errors, `SignatureInvalid` for a signature that
+    /// does not verify under `key`, and `InconsistentFields` when a binding
+    /// fails.
+    pub fn verify_response(
+        &self,
+        response: &AttemptResponse<'_>,
+        negative_probe_evidence: [u8; 32],
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<()> {
+        let grant = AdmissionGrant::from_canonical_cbor(response.grant)?;
+        grant.verify_signature(key)?;
+        let receipt = SandboxProviderReceipt::from_canonical_cbor(response.receipt)?;
+        receipt.verify_signature(key)?;
+        let result = SandboxProviderResult::from_canonical_cbor(response.result)?;
+        result.verify_signature(key)?;
+        self.verify_receipt(&receipt)?;
+        result.validate_receipt_lifecycle(&receipt)?;
+        super::audit::authenticate_audit_chain(response.audit, &receipt, &result, key)?;
+        consistent(
+            granted(&grant, &receipt, &result)
+                && receipt.negative_probe_evidence == negative_probe_evidence
+                && self.reported(&result),
+        )?;
+        self.released(response.release, &receipt, key)
+    }
+
+    /// Rule 8: SPY1's outcome is the one TME1's code selects, and its last
+    /// event is that code; `Completed` has no terminal event, and code 0
+    /// never occurs. A `Completed` output descriptor is exactly as long as
+    /// the captured output TME1 records (R10 I6).
+    fn reported(&self, result: &SandboxProviderResult) -> bool {
+        let termination = self.termination.fields();
+        let code = termination.terminal_code;
+        let outcome = self
+            .termination
+            .facts(&self.requested, &self.observed)
+            .classify()
+            .outcome();
+        result.outcome == outcome
+            && code.is_none_or(|code| result.operational_events.last() == Some(&code.code()))
+            && result.output.as_ref().is_none_or(|output| {
+                termination
+                    .output_capture
+                    .is_some_and(|capture| capture.accepted_bytes == output.byte_length)
+            })
+    }
+
+    /// Rule 6's RLS1 binding: a `ReleaseV1` exactly when SPR1 names one,
+    /// signed under `key`, for this attempt and `ReadyV1`, under SPR1's
+    /// authority, with the KOE1 digest of a status 0 observation.
+    fn released(
+        &self,
+        release: Option<&[u8]>,
+        receipt: &SandboxProviderReceipt,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<()> {
+        match (release, receipt.release1_digest) {
+            (None, None) => Ok(()),
+            (Some(bytes), Some(digest)) => {
+                let release = ExecutionRelease::from_canonical_cbor(bytes)?;
+                release.verify_signature(key)?;
+                let fields = &release.fields;
+                consistent(
+                    release.digest == digest
+                        && fields.attempt_id == receipt.attempt_id
+                        && Some(fields.ready1_digest) == receipt.ready1_digest
+                        && [fields.trs1_digest, fields.rvs1_digest, fields.apt1_digest]
+                            == [
+                                receipt.authority.trs1_digest,
+                                receipt.authority.rvs1_digest,
+                                receipt.authority.apt1_digest,
+                            ]
+                        && [
+                            fields.trust_epoch,
+                            fields.revocation_epoch,
+                            fields.policy_epoch,
+                        ] == [
+                            receipt.trust_epoch,
+                            receipt.revocation_epoch,
+                            receipt.policy_epoch,
+                        ]
+                        && fields.runtime_attestation_key_id == receipt.runtime_attestation_key_id
+                        && fields.observed_readback_digest == self.observed.digest()
+                        && matches!(
+                            self.observed.fields().status,
+                            KernelObservationStatus::Observed { .. }
+                        ),
+                )
+            }
+            _ => consistent(false),
+        }
+    }
+
     /// Rule 5, and rule 6's RQE1 binding: one attempt and grant throughout,
     /// TME1 binds KOE1 and ELM1, KOE1 binds RQE1, and RQE1 is
     /// `NotRequested` exactly when TME1 progress is 0.
@@ -468,6 +580,73 @@ impl AttemptEvidence {
             _ => false,
         }
     }
+}
+
+/// One complete post-admission `execute` response, without its output
+/// SBC1 records, and the `ReleaseV1` the provider sent (ADR-069 §4).
+#[derive(Clone, Copy, Debug)]
+pub struct AttemptResponse<'a> {
+    /// The AGR1 bytes.
+    pub grant: &'a [u8],
+    /// The SAU1 chain, from sequence zero.
+    pub audit: &'a [Vec<u8>],
+    /// The SPR1 bytes.
+    pub receipt: &'a [u8],
+    /// The SPY1 bytes.
+    pub result: &'a [u8],
+    /// The `ReleaseV1` bytes; `None` when none was sent.
+    pub release: Option<&'a [u8]>,
+}
+
+/// AGR1 is the grant that SPR1 and SPY1 name: its request, attempt, ELM1,
+/// key, the authority digests both records carry, and the epochs.
+fn granted(
+    grant: &AdmissionGrant,
+    receipt: &SandboxProviderReceipt,
+    result: &SandboxProviderResult,
+) -> bool {
+    let (admitted, received) = (&grant.authority, &receipt.authority);
+    let by_grant = (
+        [grant.request_id, grant.attempt_id],
+        [
+            grant.grant_digest,
+            grant.elm1_digest,
+            admitted.hcp1_digest,
+            admitted.spm1_digest,
+            admitted.lps1_digest,
+            admitted.sim1_digest,
+            admitted.apt1_digest,
+            admitted.trs1_digest,
+            admitted.rvs1_digest,
+        ],
+        [
+            grant.trust_epoch,
+            grant.revocation_epoch,
+            grant.policy_epoch,
+        ],
+        grant.runtime_attestation_key_id.as_str(),
+    );
+    let by_records = (
+        [result.request_id, receipt.attempt_id],
+        [
+            received.agr1_digest,
+            receipt.elm1_digest,
+            receipt.hcp1_digest,
+            received.spm1_digest,
+            received.lps1_digest,
+            received.sim1_digest,
+            received.apt1_digest,
+            received.trs1_digest,
+            received.rvs1_digest,
+        ],
+        [
+            receipt.trust_epoch,
+            receipt.revocation_epoch,
+            receipt.policy_epoch,
+        ],
+        receipt.runtime_attestation_key_id.as_str(),
+    );
+    by_grant == by_records
 }
 
 /// The ELM1 limits the verifier reads.
