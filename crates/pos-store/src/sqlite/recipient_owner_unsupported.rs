@@ -161,7 +161,7 @@ impl SqliteStore {
     pub(in crate::sqlite) const fn delete_captured_recipient_export(
         &self,
         _export_id: [u8; 16],
-    ) -> Result<(), ErasureErrorV1> {
+    ) -> Result<RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
         Err(ErasureErrorV1::ArtifactDeletionFailed)
     }
 

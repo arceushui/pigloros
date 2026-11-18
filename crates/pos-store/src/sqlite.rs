@@ -10239,7 +10239,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn delete_recipient_export_ciphertext(
         &mut self,
         export_id: [u8; 16],
-    ) -> Result<(), ErasureErrorV1> {
+    ) -> Result<pos_core::RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
         self.delete_captured_recipient_export(export_id)
     }
 

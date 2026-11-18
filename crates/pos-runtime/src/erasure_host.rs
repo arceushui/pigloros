@@ -2883,6 +2883,8 @@ impl ErasureExecutionHostV1 {
         Ok(ErasureCommandSenderV1 {
             host: self,
             generation,
+            #[cfg(target_os = "linux")]
+            export_publications: None,
         })
     }
 
@@ -3957,6 +3959,11 @@ impl ErasureExecutionHostV1 {
 pub struct ErasureCommandSenderV1<'host> {
     host: &'host mut ErasureExecutionHostV1,
     generation: ErasureReferenceV1,
+    /// The recipient-export publications this sender's first
+    /// `export-recipient` command scanned, by `ELXR1` target: one scan per
+    /// replay pass (ADR-138 §5).
+    #[cfg(target_os = "linux")]
+    export_publications: Option<local_owner::ExportPublicationsV1>,
 }
 
 impl ErasureCommandSenderV1<'_> {
@@ -6819,6 +6826,7 @@ mod tests {
         lineage_read_calls: Arc<std::sync::atomic::AtomicUsize>,
         inventory_snapshot_calls: usize,
         authority_snapshot_calls: usize,
+        export_scan_calls: usize,
         fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
 
@@ -7448,6 +7456,7 @@ mod tests {
             timelines: &[TimelineId],
             max: usize,
         ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
+            self.export_scan_calls += 1;
             self.inner.recipient_export_publications(timelines, max)
         }
 
@@ -7463,7 +7472,7 @@ mod tests {
         fn delete_recipient_export_ciphertext(
             &mut self,
             export_id: [u8; 16],
-        ) -> Result<(), ErasureErrorV1> {
+        ) -> Result<pos_core::RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
             self.inner.delete_recipient_export_ciphertext(export_id)
         }
 
@@ -9302,6 +9311,30 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-138 §5: one replay pass scans the recipient-export publications
+    /// of its scope once, and every later target of the pass resolves from
+    /// that scan.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn one_export_pass_scans_the_publications_once() {
+        let mut store = fault_store(FaultModeV1::Passthrough);
+        let timelines = [TimelineId::new()];
+        let mut publications = None;
+        for byte in [7, 8] {
+            assert_eq!(
+                super::local_owner::resolved_export(
+                    &mut store,
+                    reference(byte),
+                    &timelines,
+                    &mut publications,
+                ),
+                None
+            );
+        }
+        assert_eq!(store.export_scan_calls, 1);
+        assert_eq!(publications, Some(std::collections::BTreeMap::new()));
+    }
+
     #[test]
     fn hosted_port_drops_its_authority_view_after_a_recovery_error() {
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
@@ -10021,6 +10054,7 @@ mod tests {
                 lineage_read_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 inventory_snapshot_calls: 0,
                 authority_snapshot_calls: 0,
+                export_scan_calls: 0,
                 fork_recovery_override: None,
             },
             resolve_control,
