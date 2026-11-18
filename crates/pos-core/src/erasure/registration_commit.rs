@@ -9,7 +9,7 @@ use super::{
     MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
 };
 use crate::{
-    AdapterAdmissionV1, AdapterTranscriptV1, Hash, OwnerIdV1, ReproManifestRootV1,
+    AdapterAdmissionV1, AdapterTranscriptV1, Hash, OwnerIdV1, ReproManifestRootV1, TimelineId,
     WorldRecordingReceiptV1,
 };
 
@@ -110,6 +110,14 @@ pub enum ArtifactRegistrationPreparationErrorV1 {
     /// The trusted local owner rejected its native commit facts.
     #[error("local artifact owner rejected the commit")]
     OwnerRejected,
+    /// A `PrivateSubjectData` or `ConsentedSharedData` record has no source
+    /// Timeline, so erasure could never find it (ADR-136 §2.6).
+    #[error("destruction-eligible artifact registration has no source Timeline")]
+    SourceTimelineRequired,
+    /// The source Timeline differs from the Timeline of the root's World run
+    /// (its MRM1 World replay handle).
+    #[error("artifact registration source Timeline differs from its World run")]
+    SourceTimelineMismatch,
 }
 
 /// A validated immutable artifact/registration pair read from the owner catalog.
@@ -166,6 +174,14 @@ impl ArtifactRegistrationCatalogRowV1 {
     #[must_use]
     pub const fn owner_id(&self) -> &OwnerIdV1 {
         &self.owner_id
+    }
+
+    /// Return whether this row is an MRM1 repro-manifest root, whose closure
+    /// validation also checks its operation index and adapter recording.
+    #[must_use]
+    pub fn is_repro_manifest_root(&self) -> bool {
+        self.artifact_class == ErasureArtifactClassV1::ReproManifest
+            && self.artifact_bytes.get(2..6) == Some(b"MRM1")
     }
 
     /// Return the closed artifact class.
@@ -376,6 +392,7 @@ pub struct PreparedArtifactRegistrationBatchV1 {
     owner_id: OwnerIdV1,
     root_registration_address: Hash,
     root_operation_id: Hash,
+    source_timeline: Option<TimelineId>,
     records: Vec<PreparedArtifactRegistrationRecordV1>,
 }
 
@@ -398,6 +415,22 @@ impl PreparedArtifactRegistrationBatchV1 {
         self.root_operation_id
     }
 
+    /// Return the Timeline whose data this closure was derived from.
+    ///
+    /// When present it equals the Timeline of the root's World run. The store
+    /// binds every record of the closure to it in the same transaction as the
+    /// registration. It is always present when any record is
+    /// `PrivateSubjectData` or `ConsentedSharedData`.
+    ///
+    /// Bindings are additive: a record shared by closures of several
+    /// Timelines (such as one MAA1 admission) is bound to each of them, and a
+    /// closure first committed without a source Timeline and later with one
+    /// gains its bindings, which commits as `Applied`.
+    #[must_use]
+    pub const fn source_timeline(&self) -> Option<TimelineId> {
+        self.source_timeline
+    }
+
     /// Borrow every exact artifact/ARD1 pair in the root's complete closure.
     #[must_use]
     pub fn records(&self) -> &[PreparedArtifactRegistrationRecordV1] {
@@ -413,6 +446,7 @@ impl PreparedArtifactRegistrationBatchV1 {
             owner_id: OwnerIdV1::from_static("unsupported-event-store-test"),
             root_registration_address: Hash::zero(),
             root_operation_id: Hash::zero(),
+            source_timeline: None,
             records: Vec::new(),
         }
     }
@@ -479,6 +513,9 @@ pub enum ArtifactRegistrationPersistenceErrorV1 {
     /// The adapter could not complete or determine the persistence operation.
     #[error("artifact registration storage operation failed")]
     StorageFailure,
+    /// A bounded read found more rows than the caller's maximum.
+    #[error("artifact registration read exceeds its bound")]
+    FieldOutOfBounds,
 }
 
 /// Outcome of one atomic immutable artifact and ARD1 catalog commit.
@@ -517,6 +554,32 @@ pub trait ArtifactRegistrationPersistencePortV1 {
         owner_id: &OwnerIdV1,
         registration_address: Hash,
     ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>;
+
+    /// Read every row bound to `timeline`, whatever its owner, in increasing
+    /// registration-address order (ADR-136 §2.6).
+    ///
+    /// A row is bound when a committed batch named `timeline` as its source
+    /// Timeline. Bindings are additive: a row shared by closures of several
+    /// Timelines is bound to each of them, and never unbound. Each returned
+    /// row's closure is revalidated, so the read costs at most `max` bounded
+    /// closure walks.
+    ///
+    /// The read need not be one snapshot: an adapter may load bindings, rows
+    /// and closures in separate statements. The catalog is append-only, so a
+    /// concurrent commit can only add bindings and rows; every row and
+    /// closure object already read stays exactly as read, and a binding added
+    /// after the binding read is simply not returned.
+    ///
+    /// # Errors
+    /// Returns [`ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds`]
+    /// when more than `max` rows are bound, never a truncated list, and a
+    /// closed corruption or storage failure if a bound row is missing or not
+    /// internally consistent.
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>;
 }
 
 /// Derive, owner-verify, and prepare one complete MRM1 registration closure.
@@ -527,17 +590,28 @@ pub trait ArtifactRegistrationPersistencePortV1 {
 /// extractors; structural `TimelineReplay` bytes alone cannot be committed as
 /// an authoritative root.
 ///
+/// `source_timeline` names the Timeline whose data the closure was derived
+/// from. It is required when any record is `PrivateSubjectData` or
+/// `ConsentedSharedData`, so destruction-eligible data can never be stored
+/// unbound, and optional otherwise. When present it must equal the Timeline
+/// of the root's World run (the MRM1 World replay handle). Both rules are
+/// checked after every format, graph and owner check, so a closure that fails
+/// one of those reports that error.
+///
 /// # Errors
 /// Rejects unsupported formats/classes, incomplete or invalid child graphs,
-/// mismatched ARD1 bytes, excessive input, and local-owner verification failure.
+/// mismatched ARD1 bytes, excessive input, local-owner verification failure,
+/// destruction-eligible records without a source Timeline, and a source
+/// Timeline other than the World run's.
 pub fn prepare_artifact_registration_batch_v1(
     owner_id: OwnerIdV1,
     root_registration_address: Hash,
+    source_timeline: Option<TimelineId>,
     inputs: Vec<ArtifactRegistrationInputV1>,
     owner_verifier: &dyn ArtifactRegistrationOwnerVerifierV1,
 ) -> Result<PreparedArtifactRegistrationBatchV1, ArtifactRegistrationPreparationErrorV1> {
     let parsed = parse_artifact_inputs(inputs)?;
-    let (records, root_operation_id) =
+    let (records, (root_operation_id, run_timeline)) =
         derive_records(root_registration_address, &owner_id, parsed, owner_verifier)?;
     let graph_nodes: Vec<_> = records
         .iter()
@@ -560,12 +634,36 @@ pub fn prepare_artifact_registration_batch_v1(
             )
             .map_err(|_| ArtifactRegistrationPreparationErrorV1::OwnerRejected)?;
     }
-    Ok(PreparedArtifactRegistrationBatchV1 {
-        owner_id,
-        root_registration_address,
-        root_operation_id,
-        records,
+    check_source_timeline(&records, source_timeline, run_timeline).map(|()| {
+        PreparedArtifactRegistrationBatchV1 {
+            owner_id,
+            root_registration_address,
+            root_operation_id,
+            source_timeline,
+            records,
+        }
     })
+}
+
+/// Checked after every format, graph and owner check, so only an otherwise
+/// valid, owner-verified closure is refused for its source Timeline.
+fn check_source_timeline(
+    records: &[PreparedArtifactRegistrationRecordV1],
+    source_timeline: Option<TimelineId>,
+    run_timeline: TimelineId,
+) -> Result<(), ArtifactRegistrationPreparationErrorV1> {
+    match source_timeline {
+        Some(source) if source != run_timeline => {
+            Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineMismatch)
+        }
+        None if records
+            .iter()
+            .any(|record| !record.registration.fields().data_class.is_always_retained()) =>
+        {
+            Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired)
+        }
+        Some(_) | None => Ok(()),
+    }
 }
 
 fn parse_artifact_inputs(
@@ -609,8 +707,12 @@ fn parse_artifact_inputs(
     Ok(parsed)
 }
 
-/// Prepared records with the root MRM1 run operation identity.
-type DerivedArtifactRecordsV1 = (Vec<PreparedArtifactRegistrationRecordV1>, Hash);
+/// Prepared records with the root MRM1 run operation identity and the
+/// Timeline of its World run.
+type DerivedArtifactRecordsV1 = (
+    Vec<PreparedArtifactRegistrationRecordV1>,
+    (Hash, TimelineId),
+);
 
 fn derive_records(
     root_registration_address: Hash,
@@ -627,7 +729,7 @@ fn derive_records(
         expected_registrations.push(expected);
     }
 
-    let root_operation_id = parsed
+    let root_run = parsed
         .iter()
         .zip(&expected_registrations)
         .find_map(|(candidate, registration)| match &candidate.native {
@@ -635,7 +737,10 @@ fn derive_records(
                 if registration.address() == root_registration_address
                     && candidate.owner_id == *owner_id =>
             {
-                Some(root.as_input().run_operation_id)
+                Some((
+                    root.as_input().run_operation_id,
+                    root.as_input().world_handle.as_input().timeline_id,
+                ))
             }
             _ => None,
         })
@@ -654,7 +759,7 @@ fn derive_records(
             },
         )
         .collect();
-    Ok((records, root_operation_id))
+    Ok((records, root_run))
 }
 
 enum NativeArtifactV1 {
@@ -1110,7 +1215,7 @@ mod tests {
         root: Hash,
         inputs: Vec<ArtifactRegistrationInputV1>,
     ) -> Result<PreparedArtifactRegistrationBatchV1, ArtifactRegistrationPreparationErrorV1> {
-        prepare_artifact_registration_batch_v1(owner_id, root, inputs, &StructuralOwner)
+        prepare_artifact_registration_batch_v1(owner_id, root, None, inputs, &StructuralOwner)
     }
 
     fn catalog_row(

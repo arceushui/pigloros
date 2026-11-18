@@ -25,26 +25,74 @@ impl ArtifactRegistrationOwnerVerifierV1 for TestOnlyStructuralOwnerVerifier {
         artifact_class: ErasureArtifactClassV1,
         artifact_bytes: &[u8],
     ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
-        if artifact_class != ErasureArtifactClassV1::TimelineReplay
-            || WorldRecordingReceiptV1::from_canonical_cbor(artifact_bytes).is_err()
-        {
-            return Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected);
-        }
-        ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+        structural_recording_registration(
+            owner_id,
             artifact_class,
-            artifact_digest: ArtifactRegistrationV1::artifact_digest(
-                artifact_class,
-                artifact_bytes,
-            ),
-            owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
-            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-            optionality: pos_core::ArtifactOptionalityV1::Required,
-            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
-            required_key_roles: Vec::new(),
-            key_dependencies: Vec::new(),
-            child_artifacts: Vec::new(),
-        })
-        .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+            artifact_bytes,
+            ArtifactDataClassV1::StructuralAuditMetadata,
+        )
+    }
+
+    fn classify_repro_manifest_label(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(ArtifactDataClassV1::PublicRecord)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _artifact_bytes: &[u8],
+        _registration: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(())
+    }
+}
+
+fn structural_recording_registration(
+    owner_id: &OwnerIdV1,
+    artifact_class: ErasureArtifactClassV1,
+    artifact_bytes: &[u8],
+    data_class: ArtifactDataClassV1,
+) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+    if artifact_class != ErasureArtifactClassV1::TimelineReplay
+        || WorldRecordingReceiptV1::from_canonical_cbor(artifact_bytes).is_err()
+    {
+        return Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected);
+    }
+    ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+        artifact_class,
+        artifact_digest: ArtifactRegistrationV1::artifact_digest(artifact_class, artifact_bytes),
+        owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
+        data_class,
+        optionality: pos_core::ArtifactOptionalityV1::Required,
+        transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+        required_key_roles: Vec::new(),
+        key_dependencies: Vec::new(),
+        child_artifacts: Vec::new(),
+    })
+    .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+}
+
+/// Derives the World recording as `PrivateSubjectData`, so its closure is
+/// destruction-eligible and must name its source Timeline.
+struct PrivateRecordingVerifier;
+
+impl ArtifactRegistrationOwnerVerifierV1 for PrivateRecordingVerifier {
+    fn derive_native_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        structural_recording_registration(
+            owner_id,
+            artifact_class,
+            artifact_bytes,
+            ArtifactDataClassV1::PrivateSubjectData,
+        )
     }
 
     fn classify_repro_manifest_label(
@@ -152,8 +200,20 @@ fn repro_manifest_closure(
     repro_manifest_closure_with_label(Some("public reproducibility record"))
 }
 
+/// The Timeline of the fixture closure's World run.
+const fn run_timeline() -> pos_core::TimelineId {
+    pos_core::TimelineId::from_ulid(Ulid(1))
+}
+
 fn repro_manifest_closure_with_label(
     label: Option<&str>,
+) -> Result<(OwnerIdV1, Hash, Vec<ArtifactRegistrationInputV1>), Box<dyn std::error::Error>> {
+    repro_manifest_closure_derived_by(label, &TestOnlyStructuralOwnerVerifier)
+}
+
+fn repro_manifest_closure_derived_by(
+    label: Option<&str>,
+    recording_verifier: &dyn ArtifactRegistrationOwnerVerifierV1,
 ) -> Result<(OwnerIdV1, Hash, Vec<ArtifactRegistrationInputV1>), Box<dyn std::error::Error>> {
     let owner_id = OwnerIdV1::from_static("wave8-local-owner");
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner_id);
@@ -167,7 +227,7 @@ fn repro_manifest_closure_with_label(
     })?;
     let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
         owner_reference,
-        timeline_id: pos_core::TimelineId::from_ulid(Ulid::from(1_u128)),
+        timeline_id: run_timeline(),
         cut_id: 1,
         commit_receipt_digest,
         recording_receipt_digest: recording_receipt.digest(),
@@ -207,7 +267,7 @@ fn repro_manifest_closure_with_label(
         &admission_bytes,
         &admission_registration,
     )?;
-    let recording_registration = TestOnlyStructuralOwnerVerifier.derive_native_registration(
+    let recording_registration = recording_verifier.derive_native_registration(
         &owner_id,
         ErasureArtifactClassV1::TimelineReplay,
         &recording_bytes,
@@ -250,6 +310,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
     let prepared = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs.clone(),
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -275,6 +336,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
     let no_label_batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs_without_label,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -294,6 +356,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             incorrectly_classified_label,
             &WrongLabelClassificationVerifier,
         ),
@@ -311,6 +374,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             missing_admission,
             &TestOnlyStructuralOwnerVerifier,
         ),
@@ -328,6 +392,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             duplicate_transcript,
             &TestOnlyStructuralOwnerVerifier,
         ),
@@ -340,7 +405,13 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
 fn rejecting_test_owner_does_not_produce_a_batch() -> Result<(), Box<dyn std::error::Error>> {
     let (owner_id, root, inputs) = repro_manifest_closure()?;
     assert_eq!(
-        prepare_artifact_registration_batch_v1(owner_id, root, inputs, &RejectingTestOwnerVerifier,),
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            None,
+            inputs,
+            &RejectingTestOwnerVerifier,
+        ),
         Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)
     );
     Ok(())
@@ -355,6 +426,7 @@ fn exact_artifact_byte_bound_is_256_mib_and_checked_before_parsing() {
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             vec![ArtifactRegistrationInputV1 {
                 owner_id,
                 artifact_bytes: vec![0; MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1 + 1],
@@ -386,6 +458,7 @@ fn unsupported_timeline_replay_class_stays_unavailable() -> Result<(), Box<dyn s
         prepare_artifact_registration_batch_v1(
             owner_id,
             registration.address(),
+            None,
             vec![ArtifactRegistrationInputV1 {
                 owner_id,
                 artifact_bytes: bytes,
@@ -405,6 +478,7 @@ fn persisted_registration_rows_reject_each_mismatched_identity_column(
     let batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -500,6 +574,7 @@ fn complete_native_catalog_closure_revalidates_through_the_public_port(
     let batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -526,6 +601,93 @@ fn complete_native_catalog_closure_revalidates_through_the_public_port(
     Ok(())
 }
 
+#[test]
+fn source_timeline_must_be_the_world_run_timeline_and_is_required_for_private_data(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let other_timeline = pos_core::TimelineId::from_ulid(Ulid(2));
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    let bound = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root,
+        Some(run_timeline()),
+        inputs.clone(),
+        &TestOnlyStructuralOwnerVerifier,
+    )?;
+    assert_eq!(bound.source_timeline(), Some(run_timeline()));
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            Some(other_timeline),
+            inputs,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineMismatch)
+    );
+
+    let (owner_id, root, private_inputs) =
+        repro_manifest_closure_derived_by(Some("private run"), &PrivateRecordingVerifier)?;
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            None,
+            private_inputs.clone(),
+            &PrivateRecordingVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired)
+    );
+    let private = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root,
+        Some(run_timeline()),
+        private_inputs,
+        &PrivateRecordingVerifier,
+    )?;
+    assert_eq!(private.source_timeline(), Some(run_timeline()));
+    Ok(())
+}
+
+#[test]
+fn only_the_mrm1_root_row_is_a_repro_manifest_root() -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    let batch = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root,
+        None,
+        inputs,
+        &TestOnlyStructuralOwnerVerifier,
+    )?;
+    let rows: Vec<_> = batch
+        .records()
+        .iter()
+        .map(|record| {
+            ArtifactRegistrationCatalogRowV1::from_persisted(
+                *record.owner_id(),
+                record.artifact_class(),
+                record.artifact_digest(),
+                record.registration_address(),
+                record.artifact_bytes().to_vec(),
+                record.registration().canonical_cbor(),
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    // MAA1 and MAT1 share the ReproManifest class without MRM1 bytes, and the
+    // World recording has neither, so exactly the root qualifies.
+    let repro_manifest_classed = rows
+        .iter()
+        .filter(|row| row.artifact_class() == ErasureArtifactClassV1::ReproManifest)
+        .count();
+    assert_eq!(repro_manifest_classed, 3);
+    let roots: Vec<Hash> = rows
+        .iter()
+        .filter(|row| row.is_repro_manifest_root())
+        .map(ArtifactRegistrationCatalogRowV1::registration_address)
+        .collect();
+    assert_eq!(roots, vec![root]);
+    Ok(())
+}
+
 fn assert_preparation_error(
     owner_id: OwnerIdV1,
     root: Hash,
@@ -534,7 +696,7 @@ fn assert_preparation_error(
     expected: ArtifactRegistrationPreparationErrorV1,
 ) {
     assert_eq!(
-        prepare_artifact_registration_batch_v1(owner_id, root, inputs, owner_verifier),
+        prepare_artifact_registration_batch_v1(owner_id, root, None, inputs, owner_verifier),
         Err(expected)
     );
 }
@@ -967,6 +1129,7 @@ fn catalog_fixture() -> Result<CatalogFixture, Box<dyn std::error::Error>> {
     let batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -1276,6 +1439,7 @@ fn registration_preparation_covers_registration_byte_and_native_owner_failures(
         prepare_artifact_registration_batch_v1(
             owner_id,
             Hash::from_bytes([0x91; 32]),
+            None,
             vec![ArtifactRegistrationInputV1 {
                 owner_id,
                 artifact_bytes: Vec::new(),

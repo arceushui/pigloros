@@ -186,6 +186,33 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             })
     }
 
+    /// The verified record of `request`, read without caching it or
+    /// retaining a recovery error: the cached record, else a fresh core
+    /// recovery whose failure is only returned.
+    fn read_record(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<RecoveredErasureV1, ErasureErrorV1> {
+        self.records
+            .iter()
+            .find(|record| record.request.reference() == request)
+            .cloned()
+            .map_or_else(
+                || {
+                    self.port
+                        .read_manifest(request)
+                        .and_then(|stored| stored.ok_or(ErasureErrorV1::ProvenanceMissing))
+                        .and_then(|stored| {
+                            RecoveredErasureV1::recover(
+                                &self.port, &self.port, &self.port, request, &stored,
+                            )
+                            .map_err(super::RecoveryFailureV1::error)
+                        })
+                },
+                Ok,
+            )
+    }
+
     fn commit(
         &mut self,
         next: RecoveredErasureV1,
@@ -1062,23 +1089,40 @@ fn terminal_attempt(
     )
 }
 
+/// The normalized ERC1 input of one terminal attempt and the attempt
+/// evidence its receipt commits.
+struct TerminalReceiptV1 {
+    outcome: ErasureAttemptOutcomeV1,
+    receipt_provenance: ErasureReceiptProvenanceV1,
+    input: ErasureReceiptInputV1,
+}
+
+/// The receipt of a normalized ERC1 input, checked against the frozen
+/// obligations.
+fn frozen_receipt(
+    input: ErasureReceiptInputV1,
+    obligations: &[super::ErasureObligationV1],
+) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+    ErasureReceiptV1::new(input).and_then(|receipt| {
+        receipt
+            .validate_frozen_obligations(obligations)
+            .map(|()| receipt)
+    })
+}
+
 impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
-    /// Finalize the active attempt and persist its terminal receipt.
+    /// Normalize `input` into the ERC1 input that closes the active attempt
+    /// of `record`, moving `record` to the attempt's terminal state.
     ///
-    /// # Errors
-    ///
-    /// Returns a closed lifecycle, receipt-admission, or CAS error.
-    pub fn finalize(
-        &mut self,
+    /// [`Self::finalize`] and [`Self::preview_receipt`] share it, so a
+    /// previewed receipt is exactly the one finalize admits.
+    fn terminal_receipt(
+        &self,
         request: ErasureReferenceV1,
+        record: &mut RecoveredErasureV1,
         mut input: ErasureReceiptInputV1,
-    ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
-        if record.active.is_none() {
-            return self.finalize_exact_retry(&record, input);
-        }
+    ) -> Result<TerminalReceiptV1, ErasureErrorV1> {
         input.replay_claim = inventory_replay_claim(&input.inventories);
-        let terminal = terminal_attempt(request, &record, &input)?;
         let TerminalAttemptV1 {
             admission,
             acknowledgements,
@@ -1086,7 +1130,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             outcome,
             state,
             receipt_provenance,
-        } = terminal;
+        } = terminal_attempt(request, record, &input)?;
         record.replace_state(state);
         input.request = request;
         input.coordinator = self.coordinator;
@@ -1105,51 +1149,104 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 input.trust = admission.trust();
                 input.provenance = receipt_provenance.reference();
                 input.receipt_digest = reference_zero();
-                self.port
-                    .admit_receipt(&input)
-                    .and_then(|()| {
-                        ErasureReceiptV1::new(input).and_then(|receipt| {
-                            receipt
-                                .validate_frozen_obligations(&record.obligations)
-                                .map(|()| receipt)
-                        })
-                    })
-                    .and_then(|receipt| {
-                        record
-                            .finish_attempt(&outcome, &receipt_provenance, &receipt)
-                            .map(|(objects, index)| (receipt, objects, index))
-                    })
-                    .and_then(|(receipt, objects, index)| {
-                        record
-                            .state_object()
-                            .map(|state| (receipt, objects, index, state))
-                    })
-                    .and_then(|(receipt, objects, index, state)| {
-                        record
-                            .prepare(
-                                Some(record.manifest_digest),
-                                objects,
-                                vec![state],
-                                vec![index],
-                                ErasureCasEffectV1::ReceiptAdmission {
-                                    receipt: receipt.receipt_digest(),
-                                },
-                            )
-                            .map(|prepared| (receipt, prepared))
-                    })
-                    .and_then(|(receipt, prepared)| {
-                        let next_digest = prepared.next_manifest().digest();
-                        self.port
-                            .compare_and_swap(prepared)
-                            .map(|_| (receipt, next_digest))
-                    })
-                    .map(|(receipt, next_digest)| {
-                        record.manifest_digest = next_digest;
-                        self.cache(record);
-                        receipt
-                    })
+                Ok(TerminalReceiptV1 {
+                    outcome,
+                    receipt_provenance,
+                    input,
+                })
             },
         )
+    }
+
+    /// Finalize the active attempt and persist its terminal receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed lifecycle, receipt-admission, or CAS error.
+    pub fn finalize(
+        &mut self,
+        request: ErasureReferenceV1,
+        input: ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+        let mut record = self.record(request)?;
+        if record.active.is_none() {
+            return self.finalize_exact_retry(&record, input);
+        }
+        let TerminalReceiptV1 {
+            outcome,
+            receipt_provenance,
+            input,
+        } = self.terminal_receipt(request, &mut record, input)?;
+        self.port
+            .admit_receipt(&input)
+            .and_then(|()| frozen_receipt(input, &record.obligations))
+            .and_then(|receipt| {
+                record
+                    .finish_attempt(&outcome, &receipt_provenance, &receipt)
+                    .map(|(objects, index)| (receipt, objects, index))
+            })
+            .and_then(|(receipt, objects, index)| {
+                record
+                    .state_object()
+                    .map(|state| (receipt, objects, index, state))
+            })
+            .and_then(|(receipt, objects, index, state)| {
+                record
+                    .prepare(
+                        Some(record.manifest_digest),
+                        objects,
+                        vec![state],
+                        vec![index],
+                        ErasureCasEffectV1::ReceiptAdmission {
+                            receipt: receipt.receipt_digest(),
+                        },
+                    )
+                    .map(|prepared| (receipt, prepared))
+            })
+            .and_then(|(receipt, prepared)| {
+                let next_digest = prepared.next_manifest().digest();
+                self.port
+                    .compare_and_swap(prepared)
+                    .map(|_| (receipt, next_digest))
+            })
+            .map(|(receipt, next_digest)| {
+                record.manifest_digest = next_digest;
+                self.cache(record);
+                receipt
+            })
+    }
+
+    /// The ERC1 [`Self::finalize`] would return for `input`, without
+    /// admitting or committing it.
+    ///
+    /// It shares finalize's normalization, so a signer can sign the exact
+    /// receipt body finalize later admits (ADR-136 §5 purpose 2, owner
+    /// decision Q2 on #1412). The receipt's `signature` is the input's.
+    /// Without an active attempt it is finalize's exact retry: the latest
+    /// receipt, when `input` normalizes to it.
+    ///
+    /// Byte equality with finalize holds only for an input finalize accepts:
+    /// the preview does not run the receipt admission, so a signer still
+    /// learns from finalize whether the signed receipt was admitted.
+    ///
+    /// The preview is write-free: it neither caches the record nor retains a
+    /// recovery error when the record does not recover.
+    ///
+    /// # Errors
+    ///
+    /// Returns the closed lifecycle, receipt or recovery error finalize
+    /// would return before admitting the receipt.
+    pub fn preview_receipt(
+        &self,
+        request: ErasureReferenceV1,
+        input: ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+        let mut record = self.read_record(request)?;
+        if record.active.is_none() {
+            return self.finalize_exact_retry(&record, input);
+        }
+        self.terminal_receipt(request, &mut record, input)
+            .and_then(|terminal| frozen_receipt(terminal.input, &record.obligations))
     }
     /// Append one authorized future-Fork scope extension.
     ///
