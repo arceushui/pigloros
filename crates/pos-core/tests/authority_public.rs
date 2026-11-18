@@ -44,6 +44,7 @@ fn principal(value: u8) -> PrincipalRefV1 {
 
 fn authenticated(principal: PrincipalRefV1) -> AuthenticatedPrincipalResultV1 {
     ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         AuthenticatedPrincipalDraftV1 {
             principal,
             adapter_id: "test-passkey".to_owned(),
@@ -278,6 +279,7 @@ fn decision_for(
         _ => Vec::new(),
     };
     let trusted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![request.authenticated().registry_binding_digest()],
         capability_bindings,
@@ -318,6 +320,7 @@ fn expiry_for(
         _ => Vec::new(),
     };
     let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![request.authenticated().registry_binding_digest()],
         capability_bindings,
@@ -457,17 +460,26 @@ fn principal_and_adapter_results_are_canonical_public_contracts() {
         binding_digest: Hash::zero(),
     };
     assert_eq!(
-        AuthenticatedPrincipalResultV1::try_from_draft(bad_adapter.clone()),
+        AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            bad_adapter.clone()
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     bad_adapter.adapter_id = "adapter".to_owned();
     assert_eq!(
-        AuthenticatedPrincipalResultV1::try_from_draft(bad_adapter.clone()),
+        AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            bad_adapter.clone()
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     bad_adapter.expires_at = WallTime::from_micros(11);
     assert_eq!(
-        AuthenticatedPrincipalResultV1::try_from_draft(bad_adapter),
+        AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            bad_adapter
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 }
@@ -567,6 +579,7 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
         draft
     }));
     let registry_without_capability = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![missing_request.authenticated().registry_binding_digest()],
         Vec::new(),
@@ -802,12 +815,18 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let current_request = request(principal_ref.clone(), actor);
     let grant = root_grant(principal_ref, vec![actor]);
     let untrusted = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![hash(6)],
         vec![hash(1)],
         vec![hash(8)],
     ));
     let chain = ok(DelegationChainV1::try_from_grants(vec![grant]));
+    let chain_bindings: Vec<_> = chain
+        .grants()
+        .iter()
+        .map(|grant| ok(grant.binding_digest()))
+        .collect();
     assert_eq!(untrusted.registry_digest(), hash(7));
     let decision = AuthorityEvaluatorV1::authorize(&current_request, &chain, &untrusted);
     assert_eq!(
@@ -836,13 +855,10 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let substituted_request = request(principal(2), actor);
     let original_binding = current_request.authenticated().registry_binding_digest();
     let substituted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![original_binding],
-        chain
-            .grants()
-            .iter()
-            .map(|grant| ok(grant.binding_digest()))
-            .collect(),
+        chain_bindings.clone(),
         vec![consent_grant().binding_digest()],
     ));
     let decision =
@@ -863,15 +879,12 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
         draft
     }));
     let registry_without_consent = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![untrusted_consent_request
             .authenticated()
             .registry_binding_digest()],
-        chain
-            .grants()
-            .iter()
-            .map(|grant| ok(grant.binding_digest()))
-            .collect(),
+        chain_bindings,
         Vec::new(),
     ));
     let decision = AuthorityEvaluatorV1::authorize(
@@ -886,6 +899,7 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let current_grant = root_grant(principal(1), vec![actor]);
     let current_chain = ok(DelegationChainV1::try_from_grants(vec![current_grant]));
     let missing_capability = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![current_request.authenticated().registry_binding_digest()],
         vec![hash(99)],
@@ -1605,6 +1619,7 @@ fn capability_and_registry_hash_sets_enforce_their_distinct_bounds() {
 
     let registry_bindings: Vec<_> = (1_u8..=128).map(hash).collect();
     assert!(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(200),
         vec![hash(200)],
         registry_bindings.clone(),
@@ -1615,6 +1630,7 @@ fn capability_and_registry_hash_sets_enforce_their_distinct_bounds() {
     oversized_registry.push(hash(129));
     assert_eq!(
         AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             hash(200),
             vec![hash(200)],
             oversized_registry,
@@ -2114,15 +2130,33 @@ fn malformed_requests_are_rejected_before_evaluation() {
 #[test]
 fn registry_snapshot_rejects_missing_or_zero_bindings() {
     assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(Hash::zero(), vec![hash(1)], vec![hash(2)], vec![]),
+        AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            Hash::zero(),
+            vec![hash(1)],
+            vec![hash(2)],
+            vec![]
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![], vec![], vec![]),
+        AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            hash(1),
+            vec![],
+            vec![],
+            vec![]
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![hash(2)], vec![], vec![Hash::zero()]),
+        AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            hash(1),
+            vec![hash(2)],
+            vec![],
+            vec![Hash::zero()]
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 }
@@ -2533,6 +2567,7 @@ fn a_denial_record_binds_only_a_denied_decision_without_payload() {
     }
 
     let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![hash(8)],
         Vec::new(),

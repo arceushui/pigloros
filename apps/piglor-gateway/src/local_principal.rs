@@ -66,12 +66,12 @@ use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityCommitOutcomeV1, AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
     AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CanonicalBytes,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
-    ConsentGrantedV1, ConsentRevokedV1, EntityId, Event, EventDraft, EventReadBounds, Hash, Kind,
-    PersistedAuthorityV1, PrincipalRefV1, Seq, SeqRange, TimelineId, WallTime,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1, AuthorityViewV1,
+    CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, ConsentAuthority, ConsentGrantRefDraftV1, ConsentGrantRefV1,
+    ConsentGrantStatusV1, ConsentGrantedV1, ConsentRevokedV1, EntityId, Event, EventDraft,
+    EventReadBounds, Hash, Kind, PersistedAuthorityV1, PrincipalRefV1, Seq, SeqRange, TimelineId,
+    WallTime, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
     MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CONSENT_HISTORY_EVENTS,
 };
 use pos_runtime::ErasureExecutionHostV1;
@@ -94,6 +94,12 @@ pub const MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES: usize = 16 * 1_024;
 const LOCAL_ADAPTER_ID: &str = "local-loopback";
 /// The one audience every Gateway operation is evaluated for.
 const GATEWAY_AUDIENCE: &str = "gateway";
+/// The composition-root seal the Local Principal authentication adapter builds
+/// its pinned evidence and attesting registry with (ADR-129 A5.9, #1374).
+///
+/// It stays private to this adapter and is never re-exported.
+static AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 =
+    AuthorityTrustRootSealV1::for_composition_root();
 /// The name of the Principal's consent Timeline.
 const CONSENT_TIMELINE_NAME: &str = "pigloros.local-principal.consents";
 /// The ADR-059 withdrawal policy of every Local consent: it is withdrawn at
@@ -1369,14 +1375,17 @@ fn authority_for(
     let (issued, current) = grant;
     AssuranceLevelV1::try_new(1)
         .and_then(|assurance| {
-            AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-                principal: issued.grantee().principal().clone(),
-                adapter_id: LOCAL_ADAPTER_ID.to_owned(),
-                assurance,
-                issued_at: WallTime::from_micros(0),
-                expires_at: WallTime::from_micros(u64::MAX),
-                binding_digest: issued.authority_registry_digest(),
-            })
+            AuthenticatedPrincipalResultV1::try_from_draft(
+                &AUTHORITY_TRUST_ROOT,
+                AuthenticatedPrincipalDraftV1 {
+                    principal: issued.grantee().principal().clone(),
+                    adapter_id: LOCAL_ADAPTER_ID.to_owned(),
+                    assurance,
+                    issued_at: WallTime::from_micros(0),
+                    expires_at: WallTime::from_micros(u64::MAX),
+                    binding_digest: issued.authority_registry_digest(),
+                },
+            )
         })
         .and_then(|evidence| {
             [issued, current]
@@ -1393,6 +1402,7 @@ fn authority_for(
                     bindings.dedup();
                     consent_bindings.sort_unstable();
                     AuthorityRegistrySnapshotV1::try_new(
+                        &AUTHORITY_TRUST_ROOT,
                         issued.authority_registry_digest(),
                         vec![evidence.registry_binding_digest()],
                         bindings,
@@ -2313,7 +2323,7 @@ mod tests {
     const LOCAL_MODE_DIGEST: &str =
         "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f";
     const AIR_GAPPED_MODE_DIGEST: &str =
-        "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
+        "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb";
 
     /// `actor`'s answer to `GET /v1/session` from the production composition
     /// over a store bound to `mode` with its operator network grants and
@@ -2942,6 +2952,7 @@ mod tests {
         let mut bindings = vec![foreign.binding_digest()?, local.binding_digest()?];
         bindings.sort_unstable();
         let registry = AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             provision.grant.authority_registry_digest(),
             vec![Hash::from_bytes([1; 32])],
             bindings,
@@ -3480,14 +3491,15 @@ mod tests {
         drop(app);
 
         // Under a later binding epoch, the answer still names the binding
-        // the revocation was produced under.
+        // the revocation was produced under. This test host has a network
+        // path, so the Air-Gapped no-route predicate is vouched for here.
         crate::mode_profile::migrate_gateway_mode_v1(
             path,
             crate::mode_profile::GatewayModeProfileIdV1::Local,
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
         )?;
         let mut host = sqlite_host(path)?;
-        let mode = crate::mode_profile::bind_gateway_mode_v1(
+        let mode = crate::mode_profile::test_bind_vouched(
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
             crate::mode_profile::GatewayServeCompositionV1 {
                 tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),

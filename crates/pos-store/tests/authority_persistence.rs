@@ -49,6 +49,7 @@ fn authority_host(
         .collect::<Vec<_>>();
     capability_bindings.sort_unstable();
     let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![hash(200)],
         capability_bindings,
