@@ -320,6 +320,35 @@ struct ServeFlags {
     require_local_erasure: bool,
 }
 
+/// The boolean `serve` flag `arg` names in `flags`, with the error of its
+/// repetition.
+fn boolean_serve_flag<'a>(
+    flags: &'a mut ServeFlags,
+    arg: &str,
+) -> Option<(&'a mut bool, &'static str)> {
+    match arg {
+        "--require-local-fork-authority" => Some((
+            &mut flags.require_local_fork_authority,
+            "Local Fork authority option may be specified once",
+        )),
+        "--require-local-erasure" => Some((
+            &mut flags.require_local_erasure,
+            "Local erasure option may be specified once",
+        )),
+        _ => None,
+    }
+}
+
+/// Set a boolean `serve` flag that may be given once.
+fn set_serve_flag_once(flag: &mut bool, repeated: &'static str) -> Result<(), RunError> {
+    if *flag {
+        Err(repeated.into())
+    } else {
+        *flag = true;
+        Ok(())
+    }
+}
+
 fn parse_serve_flags(args: &[String]) -> Result<ServeFlags, RunError> {
     let mut flags = ServeFlags {
         positional: Vec::new(),
@@ -338,17 +367,8 @@ fn parse_serve_flags(args: &[String]) -> Result<ServeFlags, RunError> {
             };
             flags.owner_key = Some(PathBuf::from(path));
             index += 2;
-        } else if args[index] == "--require-local-fork-authority" {
-            if flags.require_local_fork_authority {
-                return Err("Local Fork authority option may be specified once".into());
-            }
-            flags.require_local_fork_authority = true;
-            index += 1;
-        } else if args[index] == "--require-local-erasure" {
-            if flags.require_local_erasure {
-                return Err("Local erasure option may be specified once".into());
-            }
-            flags.require_local_erasure = true;
+        } else if let Some((flag, repeated)) = boolean_serve_flag(&mut flags, &args[index]) {
+            set_serve_flag_once(flag, repeated)?;
             index += 1;
         } else {
             flags.positional.push(args[index].clone());
@@ -356,6 +376,27 @@ fn parse_serve_flags(args: &[String]) -> Result<ServeFlags, RunError> {
         }
     }
     Ok(flags)
+}
+
+/// The error of the first `serve` option in `flags` that requires an
+/// `SQLite` path.
+fn sqlite_requirement(flags: &ServeFlags) -> Option<&'static str> {
+    [
+        (
+            flags.owner_key.is_some(),
+            "OwnTracks ingress requires an SQLite path",
+        ),
+        (
+            flags.require_local_fork_authority,
+            "Fork admission requires an SQLite path",
+        ),
+        (
+            flags.require_local_erasure,
+            "Local erasure requires an SQLite path",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(required, requirement)| required.then_some(requirement))
 }
 
 fn parse_serve_args(args: &[String]) -> Result<ServeArgs, RunError> {
@@ -368,14 +409,8 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, RunError> {
         .first()
         .map_or(Ok("127.0.0.1:8080".parse()?), |value| value.parse())?;
     let sqlite_path = flags.positional.get(1).cloned();
-    if flags.owner_key.is_some() && sqlite_path.is_none() {
-        return Err("OwnTracks ingress requires an SQLite path".into());
-    }
-    if flags.require_local_fork_authority && sqlite_path.is_none() {
-        return Err("Fork admission requires an SQLite path".into());
-    }
-    if flags.require_local_erasure && sqlite_path.is_none() {
-        return Err("Local erasure requires an SQLite path".into());
+    if let Some(requirement) = sqlite_requirement(&flags).filter(|_| sqlite_path.is_none()) {
+        return Err(requirement.into());
     }
     Ok(ServeArgs {
         addr,
@@ -641,8 +676,9 @@ async fn serve_http(
     shutdown: impl Future<Output = ()> + Send + 'static,
     environment: LedgerEnvironment,
 ) -> Result<(), RunError> {
-    let erasure = LocalErasureServeV1::for_serve(erasure)?;
-    let (host, mode, erasure) = open_bound_host(request, composition, owner_key, erasure)?;
+    let (host, mode, erasure) = LocalErasureServeV1::for_serve(erasure)
+        .map_err(RunError::from)
+        .and_then(|erasure| open_bound_host(request, composition, owner_key, erasure))?;
     let (ledger_view, ledger_write) = load_ledger_with_environment(environment)?;
     // D1 on #302: every protected route requires the Local Principal the
     // store records; an unprovisioned store answers them `401`.

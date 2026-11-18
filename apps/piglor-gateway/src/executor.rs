@@ -2678,6 +2678,7 @@ mod local_erasure_advance_tests {
             Ok(Err(ErasureHostErrorV1::RecoveryUnavailable))
         ));
         assert!(executor.shutdown().await.is_ok());
+        drop(executor);
     }
 
     #[test]

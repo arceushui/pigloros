@@ -105,21 +105,12 @@ pub struct ManagedLocalForkAdmissionV1<'a> {
     pub local_erasure_trust_state: Option<&'a Path>,
 }
 
-/// Serve a managed local Fork-admission deployment.
-///
-/// ADR-134 §4 order after the lock: decode the managed credentials before
-/// the database opens (ADR-107 r6), compose the erasure authority (the
-/// Local one with `--require-local-erasure`, else the closed one), recover
-/// the host with it and bind it to its execution mode, run the Local
-/// startup sweep, load the ledger, then serve.
-///
-/// # Errors
-/// Returns the first credential, erasure composition, store, binding,
-/// ledger or serve error.
-pub async fn serve_managed_local_fork_admission(
-    deployment: ManagedLocalForkAdmissionV1<'_>,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-) -> Result<(), ServeError> {
+/// The decoded managed credentials of `deployment`, read with the Local
+/// erasure credentials alongside under `--require-local-erasure`, and its
+/// erasure composition: the Local one then, else the closed one.
+fn managed_credentials_and_erasure(
+    deployment: &ManagedLocalForkAdmissionV1<'_>,
+) -> Result<(LocalForkAdmissionCredentialsV1, LocalErasureServeV1), ServeError> {
     let alongside: &[&str] = if deployment.local_erasure_trust_state.is_some() {
         &LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES
     } else {
@@ -136,6 +127,25 @@ pub async fn serve_managed_local_fork_admission(
                 with_fork_authority: true,
             }
         }))?;
+    Ok((credentials, erasure))
+}
+
+/// Serve a managed local Fork-admission deployment.
+///
+/// ADR-134 §4 order after the lock: decode the managed credentials before
+/// the database opens (ADR-107 r6), compose the erasure authority (the
+/// Local one with `--require-local-erasure`, else the closed one), recover
+/// the host with it and bind it to its execution mode, run the Local
+/// startup sweep, load the ledger, then serve.
+///
+/// # Errors
+/// Returns the first credential, erasure composition, store, binding,
+/// ledger or serve error.
+pub async fn serve_managed_local_fork_admission(
+    deployment: ManagedLocalForkAdmissionV1<'_>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
+    let (credentials, erasure) = managed_credentials_and_erasure(&deployment)?;
     let store = if deployment.owntracks_owner_key.is_some() {
         GatewayHostStoreV1::OwnTracks
     } else {
