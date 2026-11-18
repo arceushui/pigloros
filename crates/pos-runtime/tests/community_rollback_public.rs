@@ -250,7 +250,11 @@ fn the_evaluation_world_rollback_reactivates_the_target_for_the_gate() -> TestRe
         previous: Some(first.release_digest()),
         ..Shape::first()
     })?;
-    let mut eval = CommunityEvaluationWorldV1::open(&trust).map_err(|e| format!("{e:?}"))?;
+    let mut eval = CommunityEvaluationWorldV1::open(
+        &trust,
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .map_err(|e| format!("{e:?}"))?;
     for address in [first.address(), second.address()] {
         let mut wall = seconds(&material, 2)?;
         let installed = eval.install(&world.store, address, &trust, &mut wall, TICK);

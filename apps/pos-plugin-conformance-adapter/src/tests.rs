@@ -446,7 +446,7 @@ fn a_write_failure_is_an_output_error() -> TestResult {
 
 #[test]
 fn run_reads_the_stream_and_reports_a_wire_fault() {
-    let result = run(std::io::empty(), std::io::sink());
+    let result = run(&TEST_TRUST_ROOT, std::io::empty(), std::io::sink());
     assert_eq!(result, Err(AdapterRunErrorV1::Wire));
 }
 
@@ -472,3 +472,7 @@ fn the_exit_code_names_the_error() {
         format!("{:?}", ExitCode::SUCCESS)
     );
 }
+
+/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
+const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
