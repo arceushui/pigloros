@@ -16,16 +16,16 @@ use super::{
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceV1,
     ErasureIndexInsertV1, ErasureLifecycleV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
-    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateResolverV1, ErasureStateV1, ErasureVerifiedStateV1, PreparedErasureCasV1,
-    RecoveryFailureV1, StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
-    ERASURE_ATTEMPT_HISTORY_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
-    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
-    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, VERSION,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecordedProgressV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateV1,
+    ErasureVerifiedStateV1, PreparedErasureCasV1, RecoveryFailureV1, StoredErasureManifestV1,
+    ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
+    ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
+    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -523,6 +523,25 @@ pub(super) fn recorded_obligation_trust<P: ErasurePersistencePortV1 + ?Sized>(
         })
 }
 
+/// Read a request's attempt progress through its current manifest by the
+/// complete core recovery of the request, under the host's verifiers.
+pub(super) fn recorded_progress(
+    port: &dyn ErasurePersistencePortV1,
+    verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+    recovery_verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
+    port.read_manifest(request).and_then(|stored| {
+        stored
+            .map(|stored| {
+                RecoveredErasureV1::recover(port, verifier, recovery_verifier, request, &stored)
+                    .map_err(RecoveryFailureV1::error)
+                    .and_then(|recovered| recovered.progress(port))
+            })
+            .transpose()
+    })
+}
+
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(domain_digest(tag, bytes))
 }
@@ -618,6 +637,7 @@ struct CompletedAttemptContextV1<'a> {
     admission: &'a ErasureRetryAdmissionV1,
     effective: &'a InventoryV1,
     predecessor_receipt: Option<ErasureReferenceV1>,
+    verifier: &'a dyn ErasureRecoveryAuthorizationVerifierV1,
 }
 
 fn retain_positive_acknowledgements(
@@ -993,6 +1013,22 @@ impl RecoveredErasureV1 {
         validate_correction(port, &foundation.request, evidence.correction.as_ref())?;
         validate_state_provenance(port, &foundation.state, &manifest, stored.digest())?;
 
+        let mut recovered =
+            Self::from_recovered_parts(manifest, stored.digest(), foundation, evidence);
+        recovered.recover_attempts(port, recovery_verifier)?;
+        recovered.recover_scope(port, recovery_verifier)?;
+        recovered.recover_administrative_resolutions(port, recovery_verifier)?;
+        Ok(recovered)
+    }
+
+    /// The recovered record of one verified manifest, foundation and fixed
+    /// evidence, before its attempt, scope and resolution histories.
+    fn from_recovered_parts(
+        manifest: ManifestV1,
+        manifest_digest: ErasureReferenceV1,
+        foundation: RecoveredFoundationV1,
+        evidence: RecoveredFixedEvidenceV1,
+    ) -> Self {
         let RecoveredFoundationV1 {
             request,
             state,
@@ -1010,9 +1046,8 @@ impl RecoveredErasureV1 {
             obligations,
         } = evidence;
 
-        let mut recovered = Self {
-            manifest: manifest.clone(),
-            manifest_digest: stored.digest(),
+        Self {
+            manifest_digest,
             request,
             state,
             targets,
@@ -1036,11 +1071,29 @@ impl RecoveredErasureV1 {
             authorize_provenance: manifest.authorize_provenance,
             dispatch_provenance: manifest.dispatch_provenance,
             scope_extensions: Vec::new(),
-        };
-        recovered.recover_attempts(port)?;
-        recovered.recover_scope(port, recovery_verifier)?;
-        recovered.recover_administrative_resolutions(port, recovery_verifier)?;
-        Ok(recovered)
+            manifest,
+        }
+    }
+
+    /// The attempt progress of this record; its latest receipt was read and
+    /// bound by recovery.
+    fn progress(
+        self,
+        port: &dyn ErasurePersistencePortV1,
+    ) -> Result<ErasureRecordedProgressV1, ErasureErrorV1> {
+        self.latest_receipt
+            .map(|reference| {
+                port.read_object(reference)
+                    .and_then(|bytes| ErasureReceiptV1::from_canonical_cbor(&bytes))
+            })
+            .transpose()
+            .map(|latest_receipt| ErasureRecordedProgressV1 {
+                obligations: self.obligations,
+                effective: self.effective.into_values().collect(),
+                active: self.active.map(|active| active.admission),
+                completed_attempt_count: self.completed_attempt_count,
+                latest_receipt,
+            })
     }
 
     pub(super) const fn state(&self) -> &ErasureStateV1 {
@@ -1429,6 +1482,7 @@ impl RecoveredErasureV1 {
     fn recover_active_attempt(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
+        verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
         active: &ActiveAttemptRefV1,
         latest_terminal_state: Option<ErasureReferenceV1>,
     ) -> Result<(), RecoveryFailureV1> {
@@ -1469,10 +1523,11 @@ impl RecoveredErasureV1 {
                 self.manifest.state,
             ));
         }
-        self.validate_attempt_effect(port, &admission)?;
+        self.verified_attempt_effect(port, verifier, &admission)?;
         retain_positive_acknowledgements(&mut self.effective);
         let admitted = self.load_acknowledgements(
             port,
+            verifier,
             &admission,
             &active.acknowledgements,
             active.admission,
@@ -1489,6 +1544,7 @@ impl RecoveredErasureV1 {
     fn recover_attempts(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
+        verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
     ) -> Result<(), RecoveryFailureV1> {
         let index_count = port
             .attempt_index_count(self.request.reference())
@@ -1520,7 +1576,8 @@ impl RecoveredErasureV1 {
                     reference,
                 ));
             }
-            let (receipt, terminal_state) = self.replay_page(port, &page, predecessor_receipt)?;
+            let (receipt, terminal_state) =
+                self.replay_page(port, verifier, &page, predecessor_receipt)?;
             predecessor_receipt = Some(receipt);
             latest_terminal_state = Some(terminal_state);
             predecessor = Some(reference);
@@ -1544,7 +1601,7 @@ impl RecoveredErasureV1 {
             ));
         }
         if let Some(active) = self.manifest.active.clone() {
-            self.recover_active_attempt(port, &active, latest_terminal_state)?;
+            self.recover_active_attempt(port, verifier, &active, latest_terminal_state)?;
         }
         Ok(())
     }
@@ -1552,6 +1609,7 @@ impl RecoveredErasureV1 {
     fn replay_page(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
+        verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
         page: &AttemptPageV1,
         predecessor_receipt: Option<ErasureReferenceV1>,
     ) -> Result<(ErasureReferenceV1, ErasureReferenceV1), RecoveryFailureV1> {
@@ -1580,10 +1638,11 @@ impl RecoveredErasureV1 {
             &effective,
             predecessor_receipt,
         )?;
-        self.validate_attempt_effect(port, &admission)?;
+        self.verified_attempt_effect(port, verifier, &admission)?;
         retain_positive_acknowledgements(&mut self.effective);
         let admitted_values = self.load_acknowledgements(
             port,
+            verifier,
             &admission,
             &admitted.references,
             page.admitted_inventory,
@@ -1604,6 +1663,7 @@ impl RecoveredErasureV1 {
             admission: &admission,
             effective: &effective,
             predecessor_receipt,
+            verifier,
         };
         self.validate_completed_attempt(port, &context)
     }
@@ -1693,19 +1753,34 @@ impl RecoveredErasureV1 {
                         context.admission,
                     )
                 })
-                .and_then(|()| {
-                    Self::validate_effect_subject(
-                        port,
-                        receipt.receipt_digest(),
-                        &ErasureCasEffectV1::ReceiptAdmission {
-                            receipt: receipt.receipt_digest(),
-                        },
-                    )
-                })
-                .and_then(|()| validate_receipt_obligations(&receipt, &self.obligations))
+                .and_then(|()| self.validate_receipt_admission(port, &receipt, context))
                 .map(|()| (receipt.receipt_digest(), context.page.terminal_state))
             },
         )
+    }
+
+    /// Validate how one recovered receipt was admitted: its committed
+    /// effect, the frozen obligations it closes, and then the host
+    /// verifier's re-verification of its evidence against its attempt.
+    fn validate_receipt_admission(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        receipt: &ErasureReceiptV1,
+        context: &CompletedAttemptContextV1<'_>,
+    ) -> Result<(), RecoveryFailureV1> {
+        let reference = receipt.receipt_digest();
+        Self::validate_effect_subject(
+            port,
+            reference,
+            &ErasureCasEffectV1::ReceiptAdmission { receipt: reference },
+        )
+        .and_then(|()| validate_receipt_obligations(receipt, &self.obligations))
+        .and_then(|()| {
+            context
+                .verifier
+                .validate_receipt(context.admission, receipt)
+                .map_err(|error| RecoveryFailureV1::new(error, reference))
+        })
     }
 
     fn validate_completed_outcome(
@@ -1830,9 +1905,39 @@ impl RecoveredErasureV1 {
         ])
     }
 
+    /// Load one acknowledgement of `admission`, which must bind it and
+    /// which the host verifier must authenticate.
+    fn load_acknowledgement(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+        admission: &ErasureRetryAdmissionV1,
+        reference: ErasureReferenceV1,
+    ) -> Result<ErasureAcknowledgementProvenanceV1, RecoveryFailureV1> {
+        load_recovery_object(
+            port,
+            reference,
+            ErasureAcknowledgementProvenanceV1::from_canonical_cbor,
+            ErasureAcknowledgementProvenanceV1::reference,
+        )
+        .and_then(|acknowledgement| {
+            validate_recovery_bindings([(
+                self.acknowledgement_matches_admission(&acknowledgement, admission),
+                reference,
+            )])
+            .and_then(|()| {
+                verifier
+                    .validate_acknowledgement(&acknowledgement)
+                    .map_err(|error| RecoveryFailureV1::new(error, reference))
+            })
+            .map(|()| acknowledgement)
+        })
+    }
+
     fn load_acknowledgements(
         &self,
         port: &dyn ErasurePersistencePortV1,
+        verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
         admission: &ErasureRetryAdmissionV1,
         references: &[ErasureReferenceV1],
         failure_subject: ErasureReferenceV1,
@@ -1842,16 +1947,10 @@ impl RecoveredErasureV1 {
     > {
         let mut values = BTreeMap::new();
         for reference in references {
-            let acknowledgement = load_recovery_object(
-                port,
-                *reference,
-                ErasureAcknowledgementProvenanceV1::from_canonical_cbor,
-                ErasureAcknowledgementProvenanceV1::reference,
-            )?;
+            let acknowledgement =
+                self.load_acknowledgement(port, verifier, admission, *reference)?;
             let key = (acknowledgement.obligation(), acknowledgement.owner());
-            if !self.acknowledgement_matches_admission(&acknowledgement, admission)
-                || values.insert(key, acknowledgement).is_some()
-            {
+            if values.insert(key, acknowledgement).is_some() {
                 return Err(RecoveryFailureV1::new(
                     ErasureErrorV1::ProvenanceMissing,
                     *reference,
@@ -1921,6 +2020,22 @@ impl RecoveredErasureV1 {
                 ErasureDestructionCommandV1::from_obligation(obligation, admission.reference())
             })
             .collect())
+    }
+
+    /// Validate one recovered attempt's committed effect, then have the host
+    /// verifier authenticate its admission against the request.
+    fn verified_attempt_effect(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), RecoveryFailureV1> {
+        self.validate_attempt_effect(port, admission)
+            .and_then(|()| {
+                verifier
+                    .validate_attempt_admission(&self.request, admission)
+                    .map_err(|error| RecoveryFailureV1::new(error, admission.reference()))
+            })
     }
 
     fn validate_attempt_effect(
@@ -3500,6 +3615,109 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn recovery_records_need_their_bindings_before_the_host_verifier() -> Result<(), ErasureErrorV1>
+    {
+        let request = request()?;
+        let obligation = obligation(request.reference())?;
+        let mut record = record_fixture(&request)?;
+        record.obligation_set = Some(ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request.reference(),
+            obligations: vec![obligation.reference()],
+            policy: reference(6),
+            trust: reference(7),
+        })?);
+        record.obligations = vec![obligation];
+        record.scope = Some(scope(request.reference())?);
+        let scope_reference = record
+            .scope
+            .as_ref()
+            .map(ErasureScopeCommitmentV1::reference)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let admission = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            vec![obligation.reference()],
+            vec![obligation.command_identity()],
+            reference(6),
+            reference(7),
+        )?;
+        let bound = acknowledgement_fixture(
+            request.reference(),
+            admission.reference(),
+            obligation.reference(),
+            obligation.command_identity(),
+            scope_reference,
+        )?;
+        let unbound = acknowledgement_fixture(
+            request.reference(),
+            admission.reference(),
+            obligation.reference(),
+            obligation.command_identity(),
+            reference(40),
+        )?;
+        let commands = record
+            .validate_attempt_admission(&admission)
+            .map_err(RecoveryFailureV1::error)?;
+        let mut port = TestPersistencePort::new(
+            Some(reference(81)),
+            ErasureCasEffectV1::AttemptAdmission {
+                reservation: ErasureAttemptQuotaReservationV1::new(
+                    admission.reference(),
+                    reference(80),
+                ),
+                commands,
+            },
+        );
+        for acknowledgement in [&bound, &unbound] {
+            port.objects.insert(
+                acknowledgement.reference(),
+                acknowledgement.to_canonical_cbor()?,
+            );
+        }
+        let outcome = |acknowledgement: &ErasureAcknowledgementProvenanceV1,
+                       verifier: &RecoveryVerifier| {
+            record
+                .load_acknowledgement(&port, verifier, &admission, acknowledgement.reference())
+                .map_err(|failure| (failure.error(), failure.subject()))
+        };
+        // The host verifier sees a bound acknowledgement, and its refusal
+        // names the acknowledgement.
+        assert_eq!(outcome(&bound, &RecoveryVerifier::ACCEPT), Ok(bound));
+        assert_eq!(
+            outcome(&bound, &RecoveryVerifier::REJECT),
+            Err((ErasureErrorV1::Unauthorized, bound.reference()))
+        );
+        // A binding failure is reported before the host verifier runs.
+        assert_eq!(
+            outcome(&unbound, &RecoveryVerifier::REJECT),
+            Err((ErasureErrorV1::ProvenanceMissing, unbound.reference()))
+        );
+        // The attempt's host verification runs after its committed effect,
+        // and its refusal names the admission.
+        assert_eq!(
+            record
+                .verified_attempt_effect(&port, &RecoveryVerifier::ACCEPT, &admission)
+                .map_err(RecoveryFailureV1::error),
+            Ok(())
+        );
+        assert_eq!(
+            record
+                .verified_attempt_effect(&port, &RecoveryVerifier::REJECT, &admission)
+                .map_err(|failure| (failure.error(), failure.subject())),
+            Err((ErasureErrorV1::Unauthorized, admission.reference()))
+        );
+        port.effect = ErasureCasEffectV1::None;
+        assert_eq!(
+            record
+                .verified_attempt_effect(&port, &RecoveryVerifier::REJECT, &admission)
+                .map_err(RecoveryFailureV1::error),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
     struct RepeatingStateResolver(ErasureStateV1);
 
     impl ErasureStateResolverV1 for RepeatingStateResolver {
@@ -3533,6 +3751,29 @@ mod tests {
         fn validate_administrative_resolution(
             &self,
             _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            self.error.map_or(Ok(()), Err)
+        }
+
+        fn validate_attempt_admission(
+            &self,
+            _request: &ErasureRequestV1,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            self.error.map_or(Ok(()), Err)
+        }
+
+        fn validate_acknowledgement(
+            &self,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            self.error.map_or(Ok(()), Err)
+        }
+
+        fn validate_receipt(
+            &self,
+            _attempt: &ErasureRetryAdmissionV1,
+            _receipt: &ErasureReceiptV1,
         ) -> Result<(), ErasureErrorV1> {
             self.error.map_or(Ok(()), Err)
         }
@@ -3822,6 +4063,48 @@ mod tests {
                 request
             ),
             Ok(Some(reference(0x70)))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_recorded_progress_needs_a_recoverable_manifest() -> Result<(), ErasureErrorV1> {
+        fn read(
+            port: &dyn ErasurePersistencePortV1,
+            request: ErasureReferenceV1,
+        ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
+            recorded_progress(
+                port,
+                &AcceptFreezeVerifier,
+                &RecoveryVerifier::ACCEPT,
+                request,
+            )
+        }
+        let request = reference(1);
+        // No manifest: no progress.
+        let empty = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        assert_eq!(read(&empty, request), Ok(None));
+        // A manifest whose request object is not retained fails closed, as
+        // core recovery does, and the sealed trait forwards to the read.
+        let unretained = manifest_port(&manifest_value(Value::Null), Vec::new())?;
+        assert_eq!(
+            read(&unretained, request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let port: &dyn ErasurePersistencePortV1 = &unretained;
+        assert_eq!(
+            crate::ErasureRecordedProgressReadV1::recorded_progress(
+                port,
+                &AcceptFreezeVerifier,
+                &RecoveryVerifier::ACCEPT,
+                request
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        // A manifest naming another request is refused before any read.
+        assert_eq!(
+            read(&unretained, reference(2)),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())
     }

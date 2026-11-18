@@ -50,14 +50,27 @@ impl PendingRecovery {
         listener: &OwnedAdministratorListener,
     ) -> Result<(), SelectorBoundaryError> {
         loop {
-            match listener.verify().and_then(|()| listener.try_accept()) {
-                Ok(Some(stream)) => {
-                    let _retry_result = self.answer(stream);
-                }
-                Ok(None) => thread::sleep(Duration::from_millis(10)),
-                Err(error) => return Err(error),
-            }
+            self.serve_once(listener)?;
         }
+    }
+
+    /// One poll of the administrative listener: answers a waiting connection,
+    /// or sleeps briefly when none is waiting.
+    ///
+    /// # Errors
+    /// Returns the listener's error when its pathname identity is lost or
+    /// accepting fails. A connection's own outcome never ends serving.
+    fn serve_once(
+        &self,
+        listener: &OwnedAdministratorListener,
+    ) -> Result<(), SelectorBoundaryError> {
+        match listener.verify().and_then(|()| listener.try_accept())? {
+            Some(stream) => {
+                let _retry_result = self.answer(stream);
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+        Ok(())
     }
 
     /// One administrative connection: the mode-1 challenge, then at most one
@@ -126,12 +139,13 @@ impl PendingRecovery {
 mod tests {
     use std::fs::{self, File};
     use std::io::{Read as _, Write as _};
-    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::control_framing;
     use crate::evaluator_protocol::{array, decode_canonical, uint};
+    use crate::root_selector::OwnedSelectorListener;
     use crate::selector::installation::tests::updates::{SuccessorRevocation, UpdateFixture};
 
     const RECOVERY_NAME: &str = "installation-update.cbor";
@@ -244,6 +258,46 @@ mod tests {
         let (client, server) = UnixStream::pair()?;
         drop(client);
         assert!(recovery.answer(server).is_err());
+        Ok(())
+    }
+
+    /// Each poll waits when no client is queued, answers a queued client, and
+    /// stops once the listener's pathname is gone. Driving `serve_once`
+    /// directly covers every branch without racing the loop in `serve`.
+    #[test]
+    fn each_poll_waits_answers_or_stops_serving() -> TestResult {
+        let fixture = UpdateFixture::new()?;
+        let (_committed, request) =
+            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
+        let recovery = pending(&fixture, own_uid(fixture.path())?)?;
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let socket = directory.path().join("administrator.sock");
+        let listener = OwnedAdministratorListener {
+            inner: OwnedSelectorListener::bind_path(&socket, own_uid(directory.path())?)?,
+        };
+        listener.set_nonblocking()?;
+
+        recovery.serve_once(&listener)?;
+
+        // The client queues its whole request first, so one thread suffices.
+        let mut client = UnixStream::connect(&socket)?;
+        control_framing::write_frame(&mut client, &request, FRAME_LIMIT)
+            .map_err(|_| "the client could not send its update")?;
+        client.shutdown(std::net::Shutdown::Write)?;
+        recovery.serve_once(&listener)?;
+        let challenge = control_framing::read_frame(&mut client, FRAME_LIMIT)
+            .ok()
+            .flatten()
+            .ok_or("the selector sent no challenge")?;
+        assert_eq!(uint(&array(&decode_canonical(&challenge)?, 5)?[4])?, 1);
+        let mut reply = Vec::new();
+        client.read_to_end(&mut reply)?;
+        assert!(reply.is_empty());
+
+        fs::remove_file(&socket)?;
+        assert!(recovery.serve_once(&listener).is_err());
+        assert!(recovery.serve(&listener).is_err());
         Ok(())
     }
 

@@ -53,6 +53,9 @@
           kernelConfig = "${config.boot.kernelPackages.kernel.configfile}";
           collector = "${config.system.build.piglorQemuEvidenceCollector}";
           collectorUnit = "${config.systemd.units."piglor-qemu-evidence.service".unit}";
+          # Part (b): the driver and the signed images the collector runs.
+          conformance = "${config.system.build.piglorQemuEvidenceConformance}";
+          images = "${config.system.build.piglorQemuEvidenceImages}";
         }
       ) guests;
     };

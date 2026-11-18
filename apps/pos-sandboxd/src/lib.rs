@@ -41,6 +41,8 @@ mod local_network;
 mod namespace_network;
 #[cfg(target_os = "linux")]
 mod provider_barrier;
+#[cfg(target_os = "linux")]
+mod provider_installation;
 // Public module reachability lets the provider-unit types that `system_bus`
 // shares with the lifecycle adapter stay `pub(crate)` without Clippy's
 // `redundant_pub_crate` lint.
@@ -51,6 +53,14 @@ pub mod provider_lifecycle;
 mod release_barrier;
 #[cfg(target_os = "linux")]
 mod restart;
+// The #444 QEMU evidence guest's driver, compiled only with `test-support`
+// and only for the two architectures the evidence guest runs on.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    feature = "test-support"
+))]
+pub mod packaged_conformance;
 #[cfg(target_os = "linux")]
 mod root_attachment;
 #[cfg(target_os = "linux")]
@@ -354,6 +364,8 @@ pub use provider_barrier::{
     fresh_nonce, AuthorityCheck, BarrierError, BarrierEvidence, ObservedReadback,
     ObservedReadbackUnavailable, ProviderReleaseBarrier, RecheckRefusal, UnitIdentitySource,
 };
+#[cfg(target_os = "linux")]
+pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};
 #[cfg(target_os = "linux")]
 pub use provider_lifecycle::SystemdProviderLifecycle;
 #[cfg(target_os = "linux")]

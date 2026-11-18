@@ -6239,6 +6239,7 @@ dependencies = [
 name = "pos-reference"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake3",
  "ciborium",
  "ciborium-ll",
@@ -6300,6 +6301,7 @@ name = "pos-sandboxd"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ciborium",
  "ed25519-dalek",
  "futures-util",
  "netlink-packet-core",
@@ -6317,6 +6319,7 @@ dependencies = [
  "tokio",
  "zbus",
  "zbus_systemd",
+ "zeroize",
  "zlink",
 ]
 

@@ -11,6 +11,8 @@
 //! is the C4 driver's scheduling (ADR-136 §6): the authority admits any
 //! retry that recomputes, within the per-request attempt quota.
 
+use std::borrow::Cow;
+
 use pos_core::{
     local_erasure_receipt_body_reference_v1, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceV1, ErasureAttemptQuotaReservationV1, ErasureErrorV1,
@@ -63,6 +65,21 @@ fn issue_position(attempt: &ErasureRetryAdmissionV1, lifecycle: ErasureLifecycle
     }
 }
 
+/// Whether a receipt of `lifecycle` issuing at `position` issues at the
+/// §6 position of `attempt`.
+///
+/// # Errors
+/// `PolicyConflict` for any other position.
+fn issues_at(
+    attempt: &ErasureRetryAdmissionV1,
+    lifecycle: ErasureLifecycleV1,
+    position: u64,
+) -> Result<(), ErasureErrorV1> {
+    (issue_position(attempt, lifecycle) == Some(position))
+        .then_some(())
+        .ok_or(ErasureErrorV1::PolicyConflict)
+}
+
 /// The acknowledgement outcome an ELO1 stands for: a positive result
 /// acknowledges, a negative one is negative. No ELO1 stands for `Stale`:
 /// Local owners are synchronous, so a stale acknowledgement is refused.
@@ -106,7 +123,7 @@ impl LocalErasureAuthorityV1 {
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         trust: ErasureReferenceV1,
-    ) -> Option<LocalErasureBundleV1> {
+    ) -> Option<Cow<'_, LocalErasureBundleV1>> {
         self.pinned_bundle(view, trust)
             .filter(|bundle| !self.revoked(bundle))
     }
@@ -192,16 +209,52 @@ impl LocalErasureAuthorityV1 {
         erq1: &ErasureRequestV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> bool {
-        within_quota(admission.attempt_ordinal())
-            && admission.authorization_provenance() == erq1.authorization()
-            && admission.policy() == erq1.policy()
+        Self::derives_attempt(view, erq1, admission)
             && view
                 .retained_object(admission.trust())
                 .and_then(|bytes| LocalErasureBundleV1::from_canonical_cbor(&bytes).ok())
                 .is_some_and(|bundle| bundle == self.bundle)
             && view.frozen_trust(erq1.reference()) == Ok(Some(admission.trust()))
+    }
+
+    /// Whether ERRA1 recomputes for `erq1` (ADR-136 §5 and §6).
+    ///
+    /// It must be within the lifetime attempt quota, under the request's
+    /// own ERAZ1 and the ELP1 ERQ1 pins, at the §6 positions. Admission and
+    /// recovery both require it.
+    fn derives_attempt(
+        view: &dyn ErasureAuthorityReadViewV1,
+        erq1: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> bool {
+        within_quota(admission.attempt_ordinal())
+            && admission.authorization_provenance() == erq1.authorization()
+            && admission.policy() == erq1.policy()
             && Self::attempt_positions(view, erq1, admission)
                 == Some((admission.admitted_position(), admission.deadline_position()))
+    }
+
+    /// Re-verify one recovered attempt of `erq1`.
+    ///
+    /// Under the companion §2.4 amendment of #1425 it must still recompute,
+    /// and the bundle it pins must resolve, the retained one after a
+    /// rotation. The admission-time fences are not re-run: expiry, the
+    /// current bundle and the subject fence decided only whether the
+    /// attempt could start.
+    ///
+    /// # Errors
+    /// `PolicyConflict` when the attempt does not recompute or its bundle
+    /// does not resolve.
+    pub(super) fn attempt_verified(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        erq1: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (Self::derives_attempt(view, erq1, admission)
+            && self.pinned_bundle(view, admission.trust()).is_some())
+        .then_some(())
+        .ok_or(ErasureErrorV1::PolicyConflict)
     }
 
     /// Admit one attempt of a request the installed inventory holds, whose
@@ -275,19 +328,49 @@ impl LocalErasureAuthorityV1 {
     ) -> Result<(), ErasureErrorV1> {
         self.live_bundle(view, acknowledgement.trust())
             .ok_or(ErasureErrorV1::TrustSnapshotInvalid)
-            .and_then(|bundle| {
-                view.retained_object(acknowledgement.evidence())
-                    .filter(|_| {
-                        bundle
-                            .owners
-                            .iter()
-                            .any(|row| row.owner_ref == acknowledgement.owner())
-                    })
-                    .and_then(|evidence| Self::owner_result(view, &bundle, &evidence))
-                    .filter(|result| binds_acknowledgement(result, acknowledgement))
-                    .map(drop)
-                    .ok_or(ErasureErrorV1::Unauthorized)
+            .and_then(|bundle| Self::acknowledgement_signed(view, &bundle, acknowledgement))
+    }
+
+    /// Re-verify one recovered owner acknowledgement.
+    ///
+    /// The check is admission's, against the bundle it pins whether or not
+    /// the installed TPS1 now revokes it: committed evidence stays
+    /// verifiable through the retained ELB1 (ADR-136 §5, *Old evidence*).
+    ///
+    /// # Errors
+    /// `TrustSnapshotInvalid` when the pinned bundle does not resolve;
+    /// otherwise `Unauthorized`.
+    pub(super) fn acknowledgement_verified(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.pinned_bundle(view, acknowledgement.trust())
+            .ok_or(ErasureErrorV1::TrustSnapshotInvalid)
+            .and_then(|bundle| Self::acknowledgement_signed(view, &bundle, acknowledgement))
+    }
+
+    /// Whether `acknowledgement` names an owner of `bundle` and a purpose-1
+    /// ELS1 by its signer over an ELO1 that binds it.
+    ///
+    /// # Errors
+    /// `Unauthorized` otherwise.
+    fn acknowledgement_signed(
+        view: &dyn ErasureAuthorityReadViewV1,
+        bundle: &LocalErasureBundleV1,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        view.retained_object(acknowledgement.evidence())
+            .filter(|_| {
+                bundle
+                    .owners
+                    .iter()
+                    .any(|row| row.owner_ref == acknowledgement.owner())
             })
+            .and_then(|evidence| Self::owner_result(view, bundle, &evidence))
+            .filter(|result| binds_acknowledgement(result, acknowledgement))
+            .map(drop)
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     /// Admit one receipt of the active attempt (ADR-136 §5): it must issue
@@ -312,28 +395,62 @@ impl LocalErasureAuthorityV1 {
                 self.live_bundle(view, attempt.trust())
                     .ok_or(ErasureErrorV1::TrustSnapshotInvalid)
                     .and_then(|bundle| {
-                        (issue_position(&attempt, input.lifecycle) == Some(input.issue_position))
-                            .then_some(bundle)
-                            .ok_or(ErasureErrorV1::PolicyConflict)
+                        issues_at(&attempt, input.lifecycle, input.issue_position).map(|()| bundle)
                     })
             })
             .and_then(|bundle| {
                 ErasureReceiptV1::new(input.clone())
-                    .and_then(|receipt| local_erasure_receipt_body_reference_v1(&receipt))
-                    .and_then(|body| {
-                        view.retained_object(input.signature)
-                            .filter(|evidence| {
-                                verified_signature(
-                                    &bundle,
-                                    LocalErasureSignaturePurposeV1::ReceiptBody,
-                                    body,
-                                    evidence,
-                                )
-                            })
-                            .map(drop)
-                            .ok_or(ErasureErrorV1::Unauthorized)
-                    })
+                    .and_then(|receipt| Self::receipt_signed(view, &bundle, &receipt))
             })
+    }
+
+    /// Re-verify one recovered receipt of `attempt`.
+    ///
+    /// The check is admission's, against the bundle the attempt pins
+    /// whether or not the installed TPS1 now revokes it (ADR-136 §5, *Old
+    /// evidence*).
+    ///
+    /// # Errors
+    /// `TrustSnapshotInvalid` when the pinned bundle does not resolve,
+    /// `PolicyConflict` for another issue position, otherwise
+    /// `Unauthorized`.
+    pub(super) fn receipt_verified(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        attempt: &ErasureRetryAdmissionV1,
+        receipt: &ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.pinned_bundle(view, attempt.trust())
+            .ok_or(ErasureErrorV1::TrustSnapshotInvalid)
+            .and_then(|bundle| {
+                issues_at(attempt, receipt.lifecycle(), receipt.issue_position())
+                    .and_then(|()| Self::receipt_signed(view, &bundle, receipt))
+            })
+    }
+
+    /// Whether `receipt` names a purpose-2 ELS1 by `bundle`'s signer over
+    /// its ERCB1.
+    ///
+    /// # Errors
+    /// The ERCB1 encoding error, otherwise `Unauthorized`.
+    fn receipt_signed(
+        view: &dyn ErasureAuthorityReadViewV1,
+        bundle: &LocalErasureBundleV1,
+        receipt: &ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        local_erasure_receipt_body_reference_v1(receipt).and_then(|body| {
+            view.retained_object(receipt.signature())
+                .filter(|evidence| {
+                    verified_signature(
+                        bundle,
+                        LocalErasureSignaturePurposeV1::ReceiptBody,
+                        body,
+                        evidence,
+                    )
+                })
+                .map(drop)
+                .ok_or(ErasureErrorV1::Unauthorized)
+        })
     }
 }
 

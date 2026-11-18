@@ -2025,6 +2025,47 @@ impl ErasureDestructionCommandV1 {
     }
 }
 
+/// One exact, coordinator-dispatched destruction command and its request.
+///
+/// It is the ADR-136 §4a `ErasureOwnerCommandV1` (owner decision Q4 on
+/// #1412): the [`ErasureDestructionCommandV1`] core handed to
+/// `dispatch_destruction` for the request's active attempt, whose
+/// `provenance` is that attempt. An ELO1 owner result binds both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureOwnerCommandV1 {
+    /// The ERQ1 request the command serves.
+    pub request: ErasureReferenceV1,
+    /// The dispatched destruction command.
+    pub destruction: ErasureDestructionCommandV1,
+}
+
+/// The ADR-075 §3 erasure execution port (ADR-136 §4a).
+///
+/// An executor receives only an exact, coordinator-dispatched command and
+/// returns the owner result it made durable, bound to that command. It has
+/// no access to the authority or the signer. The Local executor and the
+/// future non-local executors (#357) implement the same trait.
+pub trait ErasureAuthorityExecutionV1 {
+    /// What the executor runs the owner work through: the Local owner host
+    /// commands, or a non-local executor's remote client.
+    type Context: ?Sized;
+
+    /// Run the owner work of `command` and commit its owner result.
+    ///
+    /// The returned [`ErasureOwnerResultV1`] binds `CA(ELO1)` to `command`;
+    /// the driver acknowledges the command with that reference, and the
+    /// acknowledgement admission verifies the retained ELO1 against it.
+    ///
+    /// # Errors
+    /// Returns a closed error when no owner result could be made durable.
+    /// A negative owner outcome is an owner result, not an error.
+    fn execute(
+        &mut self,
+        command: &ErasureOwnerCommandV1,
+        context: &mut Self::Context,
+    ) -> Result<ErasureOwnerResultV1, ErasureErrorV1>;
+}
+
 /// Derive the content-addressed identity of one destruction command.
 #[must_use]
 pub fn destruction_command_reference(
@@ -3928,14 +3969,16 @@ pub use local_records::{
     local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_request_v1,
     local_erasure_requester_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
     local_erasure_store_target_v1, local_erasure_subject_v1, local_erasure_timeline_payload_v1,
-    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    ErasureOwnerResultV1, LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1,
+    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureCacheGenerationV1,
     LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
-    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
-    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
-    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
-    LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1,
-    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
-    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
+    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureNegativeResultV1,
+    LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
+    LocalErasureRedactionV1, LocalErasureRejectionV1, LocalErasureReplicaPurgeV1,
+    LocalErasureSelectorV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1,
+    LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1,
+    ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
 pub use local_records::{local_erasure_executor_version_v1, local_erasure_host_timeline_v1};
 /// The committed ERSC1 and ERSE1 chain of one request, read through its
@@ -3991,6 +4034,73 @@ pub trait ErasureRecordedAttemptReadV1: recorded_scope_sealed::Sealed {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
+}
+
+/// One request's attempt progress, from its verified recovery.
+///
+/// [`ErasureRecordedProgressReadV1`] builds it by the same complete core
+/// recovery a coordinator runs before any lifecycle command, so a driver can
+/// build an ERRA1 from it and a signer can re-derive from it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureRecordedProgressV1 {
+    /// The frozen EROS1 obligations, in the obligation set's order.
+    pub obligations: Vec<ErasureObligationV1>,
+    /// The effective acknowledgement inventory, ordered by obligation and
+    /// owner: the positive acknowledgements of earlier attempts and every
+    /// acknowledgement of the latest attempt, active or completed.
+    pub effective: Vec<ErasureAcknowledgementProvenanceV1>,
+    /// The admission of the active attempt, if any.
+    pub active: Option<ErasureRetryAdmissionV1>,
+    /// The number of completed attempts.
+    pub completed_attempt_count: u64,
+    /// The ERC1 receipt of the latest completed attempt, if any.
+    pub latest_receipt: Option<ErasureReceiptV1>,
+}
+
+/// The attempt progress of one request, from its verified recovery.
+///
+/// ADR-136 §5 and §6 need it for a crash-safe driver and a re-deriving
+/// signer (owner decision Q2 on #1412). The read is the complete core
+/// recovery of the request's current manifest: every structural check of
+/// its graph and the host's freeze and recovery verifiers over its freeze
+/// authorization, attempts, acknowledgements, receipts, scope extensions and
+/// administrative resolutions. A failure is returned, never retained.
+///
+/// The trait is sealed and implemented only for `dyn ErasurePersistencePortV1`,
+/// so no adapter can implement or override it; a host reads it through that
+/// trait object with its own verifiers.
+pub trait ErasureRecordedProgressReadV1: recorded_progress_sealed::Sealed {
+    /// The request's verified progress, `Ok(None)` when it has no manifest.
+    ///
+    /// # Errors
+    /// Once a manifest exists, the closed error of the first recovery check
+    /// that fails, read or decoding failure included.
+    fn recorded_progress(
+        &self,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+        recovery_verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1>;
+}
+
+impl ErasureRecordedProgressReadV1 for dyn ErasurePersistencePortV1 + '_ {
+    fn recorded_progress(
+        &self,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+        recovery_verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
+        persistence::recorded_progress(self, verifier, recovery_verifier, request)
+    }
+}
+
+mod recorded_progress_sealed {
+    /// Keeps [`super::ErasureRecordedProgressReadV1`] core-implemented: only
+    /// the persistence port trait object is sealed, so no adapter type can
+    /// implement it.
+    pub trait Sealed {}
+
+    impl Sealed for dyn super::ErasurePersistencePortV1 + '_ {}
 }
 
 mod recorded_scope_sealed {
@@ -4214,14 +4324,15 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
-/// Host-owned verifier for authorization attached to recovered erasure
-/// extensions and administrative resolutions.
+/// Host-owned verifier for the evidence of recovered erasure records.
 ///
-/// The persistence layer validates immutable structural bindings. The host
-/// remains responsible for interpreting retained #186/#187 evidence and
-/// checking capabilities, principals, policy, and trust semantics.
-/// This verifier revalidates already admitted evidence during recovery; it
-/// does not itself make the admission decision.
+/// It covers future-Fork extensions, administrative resolutions, attempt
+/// admissions, owner acknowledgements and receipts. The persistence layer
+/// validates immutable structural bindings. The host remains responsible
+/// for interpreting retained #186/#187 evidence and checking capabilities,
+/// principals, policy, trust, and signature semantics. This verifier
+/// revalidates already admitted evidence during recovery, once for each
+/// recovered record; it does not itself make the admission decision.
 pub trait ErasureRecoveryAuthorizationVerifierV1 {
     /// Verify the host admission which authorized one future-Fork extension.
     ///
@@ -4244,6 +4355,51 @@ pub trait ErasureRecoveryAuthorizationVerifierV1 {
     fn validate_administrative_resolution(
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the host evidence of one recovered attempt admission.
+    ///
+    /// Recovery calls it once for each attempt of `request`, completed or
+    /// active, after the attempt's structural bindings hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization, policy, trust, or provenance error
+    /// when the admission is not the attempt the host derives for `request`.
+    fn validate_attempt_admission(
+        &self,
+        request: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the evidence of one recovered owner acknowledgement.
+    ///
+    /// Recovery calls it once for each acknowledgement it recovers, after
+    /// the acknowledgement binds its attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed owner, evidence, trust, or provenance error when the
+    /// retained evidence does not authenticate the acknowledgement.
+    fn validate_acknowledgement(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the signature commitment of one recovered receipt.
+    ///
+    /// Recovery calls it once for each completed attempt, with the attempt
+    /// admission the receipt closes, after the receipt's structural
+    /// bindings hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed policy, trust, signature, or provenance error when
+    /// the retained evidence does not authenticate the receipt.
+    fn validate_receipt(
+        &self,
+        attempt: &ErasureRetryAdmissionV1,
+        receipt: &ErasureReceiptV1,
     ) -> Result<(), ErasureErrorV1>;
 }
 
