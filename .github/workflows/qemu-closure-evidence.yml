@@ -1,15 +1,23 @@
 name: qemu-closure-evidence
 
-# #444 part (a), ADR-087 gate 5: boot the pinned NixOS 26.05 closure once per
-# architecture under QEMU TCG on GitHub-hosted runners and record its packaged
-# kernel, keyring and mountfsd state. CI uses the public dev/test trust domain;
-# the release signing key stays offline (ADR-087 Part C.4).
+# #444 parts (a) and (b), ADR-087 gate 5: boot the pinned NixOS 26.05 closure
+# once per architecture under QEMU TCG on GitHub-hosted runners, record its
+# packaged kernel, keyring and mountfsd state, and run the real MountImage,
+# readback, failure-closure and cleanup cases through the production
+# activation path. CI uses the public dev/test trust domain; the release
+# signing key stays offline (ADR-087 Part C.4).
 
 on:
   pull_request:
     paths:
       - .github/workflows/qemu-closure-evidence.yml
       - deploy/nixos/**
+      # The guest's part (b) driver and the crates it compiles.
+      - Cargo.lock
+      - Cargo.toml
+      - apps/pos-sandboxd/**
+      - crates/pos-reference/**
+      - fixtures/conformance/**
       - scripts/check_qemu_closure_evidence.py
       - scripts/test_check_qemu_closure_evidence.py
       - scripts/check_qemu_closure_workflow_policy.py
@@ -106,6 +114,7 @@ jobs:
           python scripts/check_qemu_closure_evidence.py
           --architecture "${EVIDENCE_ARCHITECTURE}"
           --certificate deploy/nixos/dev-trust/root-hash-dev-test.crt
+          --untrusted-certificate deploy/nixos/dev-trust/root-hash-untrusted-dev-test.crt
           --flake-lock deploy/nixos/flake.lock
           --verdict "${RUNNER_TEMP}/qemu-closure-evidence/checker-verdict.json"
           "${RUNNER_TEMP}/qemu-closure-evidence"

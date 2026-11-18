@@ -366,17 +366,18 @@ fn committed_scope(
         .and_then(|scope| scope.ok_or(ErasureHostErrorV1::RecoveryUnavailable))
 }
 
-/// Whether `active` dispatches `command`: it is the request's attempt the
-/// command names, and it pairs the command's obligation, whose address
-/// `obligation` re-derives, with the command identity.
+/// Whether `active` dispatches `command`: it is the attempt the command
+/// names, and it pairs the command's obligation, whose address `obligation`
+/// re-derives, with the command identity. `active` is always the active
+/// attempt recorded for `command.request` ([`dispatched_admission`]), so
+/// the request itself needs no comparison here.
 fn dispatches(
     active: &ErasureRetryAdmissionV1,
     command: &ErasureOwnerCommandV1,
     obligation: ErasureReferenceV1,
 ) -> bool {
     let destruction = command.destruction;
-    active.request() == command.request
-        && active.reference() == destruction.provenance
+    active.reference() == destruction.provenance
         && obligation == destruction.obligation
         && destruction.command
             == pos_core::destruction_command_reference(command.request, destruction.target)
