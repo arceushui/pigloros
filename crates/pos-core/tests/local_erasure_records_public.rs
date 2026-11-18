@@ -21,7 +21,7 @@ use pos_core::{
 };
 use ulid::Ulid;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const fn reference(seed: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([seed; 32])

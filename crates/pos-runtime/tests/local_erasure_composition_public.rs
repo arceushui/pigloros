@@ -6108,7 +6108,7 @@ fn the_outbox_replays_only_unacknowledged_commands() -> TestResult {
     Ok(())
 }
 
-/// A Memory store with the content the SQLite executor fixture holds before
+/// A Memory store with the content the `SQLite` executor fixture holds before
 /// its freeze, at fixed identities, plus `retained`; and its root-grant
 /// chain head.
 fn memory_store(retained: &[Vec<u8>]) -> TestResult<(MemoryStore, u64)> {
