@@ -798,9 +798,9 @@ use pos_core::{
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureReceiptInputV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureScopeV1,
-    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineMeta,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureReceiptInputV1, ErasureReceiptV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineMeta,
 };
 use pos_runtime::{
     ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1,
@@ -834,6 +834,32 @@ impl ErasureCoordinatorAuthorityV1 for SubmissionAuthority {
         &self,
         _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn validate_attempt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+        _admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn validate_acknowledgement_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(REFUSED)
+    }
+
+    fn validate_receipt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _attempt: &ErasureRetryAdmissionV1,
+        _receipt: &ErasureReceiptV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(REFUSED)
     }
