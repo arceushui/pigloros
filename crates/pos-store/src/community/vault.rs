@@ -6,8 +6,9 @@
 //! identity: a caller that finds an intent resolves it instead.
 
 use pos_core::community_lifecycle::{
-    CommunityKeyIntentInputV1, CommunityKeyIntentV1, CommunityKeyUseV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1, CommunityMetadataScopeV1,
+    CommunityArtifactHeaderV1, CommunityEncryptedEnvelopeV1, CommunityKeyIntentInputV1,
+    CommunityKeyIntentV1, CommunityKeyUseV1, CommunityLifecycleErrorV1 as Error,
+    CommunityMetadataSchemaV1, CommunityMetadataScopeV1,
 };
 use pos_crypto::community_cipher::{CommunityArtifactCipherV1, MAX_COMMUNITY_KEY_ENCRYPTIONS_V1};
 use rand::{rngs::SysRng, TryRng};
@@ -56,6 +57,47 @@ impl VaultKeyV1 {
         self.credits.next_credit().and_then(|credits| {
             self.credits = credits;
             seal_metadata(&mut self.cipher, scope, schema, plaintext)
+        })
+    }
+
+    /// Commit the next credit, then encrypt `plaintext` under `header` into
+    /// one canonical COE1. The caller derives the header from this key's
+    /// own intent.
+    pub(super) fn seal_envelope(
+        &mut self,
+        header: CommunityArtifactHeaderV1,
+        plaintext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        self.credits.next_credit().and_then(|credits| {
+            self.credits = credits;
+            self.cipher
+                .seal(plaintext, header.associated_data_digest().as_bytes())
+                .ok()
+                .ok_or(Error::CapacityExhausted)
+                .and_then(|sealed| {
+                    CommunityEncryptedEnvelopeV1::new(
+                        header,
+                        *sealed.nonce(),
+                        sealed.ciphertext_and_tag(),
+                    )
+                    .map(|envelope| envelope.to_canonical_cbor())
+                })
+        })
+    }
+
+    /// Authenticate one canonical COE1 under this key, for tests that check
+    /// a sealed record decrypts to its exact plaintext.
+    #[cfg(test)]
+    pub(super) fn open_envelope(&self, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+        CommunityEncryptedEnvelopeV1::from_canonical_cbor(envelope).and_then(|envelope| {
+            self.cipher
+                .open(
+                    envelope.nonce(),
+                    envelope.ciphertext_and_tag(),
+                    envelope.header().associated_data_digest().as_bytes(),
+                )
+                .ok()
+                .ok_or(Error::EvidenceUnavailable)
         })
     }
 
