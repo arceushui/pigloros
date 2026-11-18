@@ -22,6 +22,44 @@ pub enum ArtifactDataClassV1 {
     StructuralAuditMetadata,
 }
 
+impl From<ArtifactDataClassV1> for u64 {
+    /// The stable ADR-060 V1 data-class code.
+    fn from(value: ArtifactDataClassV1) -> Self {
+        match value {
+            ArtifactDataClassV1::PrivateSubjectData => 0,
+            ArtifactDataClassV1::ConsentedSharedData => 1,
+            ArtifactDataClassV1::PublicRecord => 2,
+            ArtifactDataClassV1::AggregateData => 3,
+            ArtifactDataClassV1::StructuralAuditMetadata => 4,
+        }
+    }
+}
+
+impl ArtifactDataClassV1 {
+    /// Decode one stable ADR-060 V1 data-class code.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::InvalidEncoding`] for an unknown code.
+    pub const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
+        match code {
+            0 => Ok(Self::PrivateSubjectData),
+            1 => Ok(Self::ConsentedSharedData),
+            2 => Ok(Self::PublicRecord),
+            3 => Ok(Self::AggregateData),
+            4 => Ok(Self::StructuralAuditMetadata),
+            _ => Err(ErasureErrorV1::InvalidEncoding),
+        }
+    }
+
+    /// Whether data of this class is always retained by the single-host
+    /// erasure authority (ADR-136 §3): every class except the two
+    /// destruction-eligible ones.
+    #[must_use]
+    pub const fn is_always_retained(self) -> bool {
+        !matches!(self, Self::PrivateSubjectData | Self::ConsentedSharedData)
+    }
+}
+
 /// Whether an artifact is required to support its enclosing claim.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ArtifactOptionalityV1 {

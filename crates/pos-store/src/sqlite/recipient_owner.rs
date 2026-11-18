@@ -1968,7 +1968,9 @@ fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreEr
                 owner_id TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS recipient_export_pending_owner_v1
-                ON recipient_export_pending_v1 (owner_id, export_id);",
+                ON recipient_export_pending_v1 (owner_id, export_id);
+            CREATE INDEX IF NOT EXISTS recipient_export_catalog_timeline_v1
+                ON recipient_export_catalog_v1 (timeline_id, export_id);",
         )
         .map_err(storage_error)
 }

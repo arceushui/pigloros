@@ -578,16 +578,18 @@ mod tests {
         ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceInputV1,
         ErasureFreezeAdmissionEvidenceV1, ErasureFreezeApplicabilityRowV1,
         ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
-        ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1,
-        ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-        ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
-        ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestInputV1,
-        ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
-        ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-        ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
-        EventStore as _, TimelineId, TimelineMeta,
+        ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+        ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+        ErasureReceiptInputV1, ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1,
+        ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+        ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+        ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, EventStore as _,
+        TimelineId, TimelineMeta,
     };
-    use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
+    use pos_runtime::{
+        ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1,
+        ErasureHostStatusV1,
+    };
     use rusqlite::{params, OptionalExtension as _};
     use std::{
         collections::BTreeMap,
@@ -1208,35 +1210,61 @@ mod tests {
         }
     }
 
-    impl ErasureFreezeAuthorizationVerifierV1 for ForkTestAuthority {
-        fn validate_freeze_authorization(
+    impl ErasureCoordinatorAuthorityV1 for ForkTestAuthority {
+        fn validate_freeze_authorization_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             admission: &ErasureFreezeAdmissionEvidenceV1,
             authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
             authorization.verify_admission_body_binding(admission)
         }
-    }
 
-    impl ErasureRecoveryAuthorizationVerifierV1 for ForkTestAuthority {
-        fn validate_scope_extension(
+        fn validate_scope_extension_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
-        fn validate_administrative_resolution(
+        fn validate_administrative_resolution_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
-    }
 
-    impl ErasureCoordinatorAuthorityV1 for ForkTestAuthority {
+        fn validate_attempt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &pos_core::ErasureRequestV1,
+            _admission: &pos_core::ErasureRetryAdmissionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn validate_acknowledgement_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn validate_receipt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _attempt: &pos_core::ErasureRetryAdmissionV1,
+            _receipt: &pos_core::ErasureReceiptV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
         fn verified_topology_observation(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -1245,6 +1273,7 @@ mod tests {
 
         fn verified_topology_observation_for_candidate(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
             candidate: &TimelineMeta,
@@ -1253,12 +1282,17 @@ mod tests {
             self.observation(manifest_digest).map(Some)
         }
 
-        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        fn authenticate(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+        ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
         fn admit_authorization(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _provenance: ErasureReferenceV1,
             decision: ErasureAuthorizationDecisionV1,
@@ -1270,6 +1304,7 @@ mod tests {
 
         fn admit_corrected_submission(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: &ErasureRequestV1,
             _correction: &ErasureCorrectionProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -1278,6 +1313,7 @@ mod tests {
 
         fn admit_atomic_freeze(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             request: ErasureReferenceV1,
             requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -1333,6 +1369,7 @@ mod tests {
 
         fn admit_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
@@ -1340,6 +1377,7 @@ mod tests {
 
         fn admit_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -1348,6 +1386,7 @@ mod tests {
 
         fn resolve_fork_child_scope(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -1356,6 +1395,7 @@ mod tests {
 
         fn resolve_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             requirement: ErasureForkScopeRequirementV1,
             input: &ErasureForkAdmissionInputV1,
         ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -1372,6 +1412,7 @@ mod tests {
 
         fn admit_administrative_resolution(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
@@ -1379,6 +1420,7 @@ mod tests {
 
         fn dispatch_destruction(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _commands: &[ErasureDestructionCommandV1],
         ) -> Result<(), ErasureErrorV1> {
@@ -1387,6 +1429,7 @@ mod tests {
 
         fn admit_attempt(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             admission: &pos_core::ErasureRetryAdmissionV1,
         ) -> Result<pos_core::ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
             Ok(pos_core::ErasureAttemptQuotaReservationV1::new(
@@ -1397,12 +1440,17 @@ mod tests {
 
         fn admit_acknowledgement(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _acknowledgement: &ErasureAcknowledgementProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
-        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        fn admit_receipt(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _input: &ErasureReceiptInputV1,
+        ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
     }
