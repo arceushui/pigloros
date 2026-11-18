@@ -36,31 +36,54 @@ Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, 
 - **Notion** — design docs and Wave specs (MCP configured)
 - See `.agents/domain.md` for consumer rules
 
-### Coverage rule
+### Coverage and quality gates
 
-After every code change, run `cargo llvm-cov --fail-under-lines 99 --fail-under-regions 99`. If new code cannot be covered by a test, **remove it** — don't leave dead branches. The 1% tolerance is only for LLVM regions with no source mapping after a fresh non-root run; it does not exempt tests or production code.
+Hosted CI is the evidence for build, test, lint, coverage and mutation results.
+Do not run Cargo locally: push the branch and read the jobs
+(`gh run view <run-id> --log-failed`). Only `cargo generate-lockfile` may run
+locally; the versioned `.githooks/pre-commit` hook runs `cargo fmt --check` and
+Clippy on commit, so keep `core.hooksPath=.githooks` and never skip it.
 
-### Quality gates (local)
-
-```bash
-cargo fmt --all -- --check
-cargo test --workspace --locked -- --include-ignored
-cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
-RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 99 --fail-under-regions 99 -- --include-ignored
-```
-
-CI runs the same tests through cargo-nextest (`cargo nextest run --workspace
---all-features --locked --run-ignored all`, doctests via `cargo test --doc --
---include-ignored`, coverage via `cargo llvm-cov nextest`). The libtest commands
-above run the same tests locally without installing nextest.
+CI enforces the workspace gates: `cargo fmt`, Clippy (pedantic, warnings
+denied), `cargo nextest run --workspace --all-features --locked --run-ignored
+all`, doctests via `cargo test --doc -- --include-ignored`, and coverage via
+`cargo llvm-cov nextest` at 99% lines and regions. If new code cannot be
+covered by a test, **remove it** — don't leave dead branches. The 1% tolerance
+is only for LLVM regions with no source mapping; it does not exempt tests or
+production code.
 
 ### Merging
 
-Merge only through the Trunk merge queue, which enqueues pull requests labelled `ready-to-merge`. Add that label only when the maintainer explicitly asks; `/trunk merge` comments are disabled. Never press Merge or call the GitHub merge API, and never rebase or update a branch only because `main` moved — only to resolve conflicts. See [`docs/merge-queue.md`](docs/merge-queue.md).
+Merge only through the Trunk merge queue, which enqueues pull requests labelled
+`ready-to-merge`. Add that label once the PR has passed its independent code
+review (re-reviewed after every later change, all High/Medium/Low findings
+fixed) and its CI is green. `/trunk merge` comments are disabled. Never press
+Merge or call the GitHub merge API. Before pushing a fix, `git fetch origin`
+and `git merge origin/main` (and the updated parent branch of a stacked PR) so
+the PR runs against the baseline the queue uses; never rebase, amend or
+force-push a pushed branch. A real fix may be pushed while the PR is queued —
+it ejects the PR, so relabel after CI is green again. See
+[`docs/merge-queue.md`](docs/merge-queue.md).
 
 ### Features and sizing
 
 - **0 → 1** (new crate, plugin, or binary): architecture-first, ADR required
 - **0 → many** (test expansion): keep tests focused on public interfaces (seams), not internals
 - **MVP ≠ simplest** — cut the thinnest slice *of the final architecture*, built on the seams the full vision requires (ports, schema versions, documented extension points). Never ship a shortcut that must be thrown away when the future arrives
+
+### Agent rules
+
+Each rule the owner has had to repeat, with what enforces it. When the owner
+corrects an agent, fix the mistake and add the rule here; enforce it with code
+when it can be, and drop a rule once its mistake can no longer happen.
+
+| Rule | Enforced by |
+| --- | --- |
+| No local Cargo except `cargo generate-lockfile` | `scripts/agent_command_guard.py` (Claude Code `PreToolUse` hook in `.claude/settings.json`) denies it; tested by `scripts/test_agent_command_guard.py` in CI |
+| Never skip git hooks (`--no-verify`, `commit -n`, overriding `core.hooksPath`) without the owner's approval for that commit | Same guard asks the owner |
+| Never rebase, amend or force-push a pushed branch; merge `origin/main` instead | Same guard asks the owner |
+| Merge only through the Trunk queue | Branch protection and the queue (`docs/merge-queue.md`) |
+| Stale `Cargo.lock` after a merge: restore main's lock before `cargo generate-lockfile` | `.githooks/pre-commit` rejects a stale lock; the restore order is a judgment call |
+| Label `ready-to-merge` only after a clean independent review and green CI | Judgment call — nothing enforces it |
+| Root-cause the first failing job before a rerun | Judgment call — nothing enforces it |
+| No legacy or compatibility shims; replace directly | Judgment call — review finding |
