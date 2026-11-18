@@ -2,26 +2,30 @@
 //! task (#1448).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use pos_core::{
     local_erasure_bundle_signing_message_v1, EntityId, ErasureHostErrorV1, ErasureLifecycleV1,
     ErasureReferenceV1, ErasureScopeV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    PrincipalRefV1,
+    OwnerIdV1, PrincipalRefV1,
 };
+use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, LocalErasureCompositionErrorV1,
-    LocalErasureSubmissionV1, LocalErasureSubmitErrorV1, LocalErasureSweepV1,
+    LocalErasureDriverV1, LocalErasureSignerV1, LocalErasureSubmissionV1,
+    LocalErasureSubmitErrorV1, LocalErasureSweepV1,
 };
 use pos_store::trust_policy_registry::TrustPolicyRegistryErrorV1;
 use pos_store::StoreConfig;
 use ulid::Ulid;
 
 use super::{
-    LocalErasureDriverTaskV1, LocalErasureServeErrorV1, LocalErasureServeInputsV1,
-    LocalErasureServeV1, LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME,
-    LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME,
+    deferred_report, wake_once, LocalErasureDriverTaskV1, LocalErasureServeErrorV1,
+    LocalErasureServeInputsV1, LocalErasureServeV1, LocalErasureStartV1,
+    LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME,
+    MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES,
 };
 use crate::authorization::GatewayOperationV1;
 use crate::deployment_trust::{DeploymentTrustErrorV1, RELEASE_TRUST_CREDENTIAL_NAME};
@@ -105,6 +109,25 @@ impl World {
         ];
         credentials.extend_from_slice(extra);
         self.fixture.credentials(name, &credentials)
+    }
+
+    /// A protected credential directory `name` with the signer seed, the
+    /// bundle and signature `bundles` and the release anchor `release`.
+    fn with_bundle(
+        &self,
+        name: &str,
+        (bundle, signature): (&[u8], &[u8]),
+        release: &[u8],
+    ) -> TestResult<PathBuf> {
+        self.fixture.credentials(
+            name,
+            &[
+                (LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, bundle),
+                (LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME, signature),
+                (LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME, SIGNER_SEED.as_slice()),
+                (RELEASE_TRUST_CREDENTIAL_NAME, release),
+            ],
+        )
     }
 
     /// The serve inputs over this world's store and trust state.
@@ -217,10 +240,10 @@ async fn without_the_flag_the_composition_stays_closed() -> TestResult {
     Ok(())
 }
 
-/// D9: every credential, trust, store and bundle failure refuses startup
-/// with its typed, payload-free error.
+/// D9: every credential failure refuses startup with its typed,
+/// payload-free error.
 #[test]
-fn each_credential_trust_store_or_bundle_failure_refuses_startup() -> TestResult {
+fn each_credential_failure_refuses_startup() -> TestResult {
     let world = World::new()?;
     let missing = world.fixture.directory.path().join("missing");
     assert_eq!(
@@ -254,25 +277,23 @@ fn each_credential_trust_store_or_bundle_failure_refuses_startup() -> TestResult
         refused(world.inputs(&unsigned)),
         Some(LocalErasureServeErrorV1::Credentials)
     );
-    let short_seed = world.credentials("short-seed", &SIGNER_SEED[..31], &[])?;
-    assert_eq!(
-        refused(world.inputs(&short_seed)),
-        Some(LocalErasureServeErrorV1::SignerCredentialInvalid)
-    );
-    let release = world.fixture.credentials(
+    // A short seed, and a long one refused without being read.
+    let long_seed = [SIGNER_SEED.as_slice(), &[0]].concat();
+    for (name, seed) in [
+        ("short-seed", &SIGNER_SEED[..31]),
+        ("long-seed", long_seed.as_slice()),
+    ] {
+        let credentials = world.credentials(name, seed, &[])?;
+        assert_eq!(
+            refused(world.inputs(&credentials)),
+            Some(LocalErasureServeErrorV1::SignerCredentialInvalid),
+            "{name}"
+        );
+    }
+    let release = world.with_bundle(
         "release",
-        &[
-            (
-                LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME,
-                world.bundle.as_slice(),
-            ),
-            (
-                LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME,
-                world.signature.as_slice(),
-            ),
-            (LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME, SIGNER_SEED.as_slice()),
-            (RELEASE_TRUST_CREDENTIAL_NAME, b"policy_id = 1".as_slice()),
-        ],
+        (&world.bundle, &world.signature),
+        b"policy_id = 1",
     )?;
     assert_eq!(
         refused(world.inputs(&release)),
@@ -280,6 +301,49 @@ fn each_credential_trust_store_or_bundle_failure_refuses_startup() -> TestResult
             DeploymentTrustErrorV1::ReleaseTrustInvalid
         ))
     );
+    assert_eq!(
+        LocalErasureServeErrorV1::Credentials.to_string(),
+        "the local erasure credentials are unavailable or invalid"
+    );
+    Ok(())
+}
+
+/// The bundle and bundle-signature credentials are read up to the 64 KiB
+/// ELB1 bound: a bundle at the bound reaches the bundle check, one byte
+/// more of either is refused as a credential.
+#[test]
+fn bundle_credentials_are_bounded_by_the_elb1_record_bound() -> TestResult {
+    assert_eq!(MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES, 65_536);
+    let world = World::new()?;
+    let release = world.deployment.release.as_bytes();
+    let at_bound = vec![0x5a; MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES];
+    let over_bound = vec![0x5a; MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES + 1];
+    let bundle_at_bound = world.with_bundle("at-bound", (&at_bound, &world.signature), release)?;
+    assert_eq!(
+        refused(world.inputs(&bundle_at_bound)),
+        Some(LocalErasureServeErrorV1::Composition(
+            LocalErasureCompositionErrorV1::BundleInvalid
+        ))
+    );
+    let bundle_over = world.with_bundle("bundle-over", (&over_bound, &world.signature), release)?;
+    assert_eq!(
+        refused(world.inputs(&bundle_over)),
+        Some(LocalErasureServeErrorV1::Credentials)
+    );
+    let signature_over =
+        world.with_bundle("signature-over", (&world.bundle, &over_bound), release)?;
+    assert_eq!(
+        refused(world.inputs(&signature_over)),
+        Some(LocalErasureServeErrorV1::Credentials)
+    );
+    Ok(())
+}
+
+/// D9: trust and store failures refuse startup with their typed errors,
+/// and composition never creates a store.
+#[test]
+fn each_trust_or_store_failure_refuses_startup() -> TestResult {
+    let world = World::new()?;
     let valid = world.credentials("valid", &SIGNER_SEED, &[])?;
     let absent_trust = world.fixture.directory.path().join("absent-trust.db");
     assert_eq!(
@@ -291,20 +355,31 @@ fn each_credential_trust_store_or_bundle_failure_refuses_startup() -> TestResult
             DeploymentTrustErrorV1::TrustState(TrustPolicyRegistryErrorV1::MissingState)
         ))
     );
-    let directory_path = world
-        .fixture
-        .directory
-        .path()
-        .to_str()
-        .ok_or("temporary path is not UTF-8")?
-        .to_owned();
-    assert_eq!(
-        refused(LocalErasureServeInputsV1 {
-            sqlite_path: &directory_path,
-            ..world.inputs(&valid)
-        }),
-        Some(LocalErasureServeErrorV1::StoreUnavailable)
-    );
+    let path = |name: &str| -> TestResult<String> {
+        Ok(world
+            .fixture
+            .directory
+            .path()
+            .join(name)
+            .to_str()
+            .ok_or("temporary path is not UTF-8")?
+            .to_owned())
+    };
+    // A directory, an absent path (left absent) and an unbound store.
+    let absent = path("absent.db")?;
+    let unbound = path("unbound.db")?;
+    drop(pos_store::sqlite::SqliteStore::open(&unbound)?);
+    for store in [path("")?, absent.clone(), unbound] {
+        assert_eq!(
+            refused(LocalErasureServeInputsV1 {
+                sqlite_path: &store,
+                ..world.inputs(&valid)
+            }),
+            Some(LocalErasureServeErrorV1::StoreUnavailable),
+            "{store}"
+        );
+    }
+    assert!(!Path::new(&absent).exists());
     let unprovisioned = Fixture::new(false)?;
     assert_eq!(
         refused(LocalErasureServeInputsV1 {
@@ -313,24 +388,19 @@ fn each_credential_trust_store_or_bundle_failure_refuses_startup() -> TestResult
         }),
         Some(LocalErasureServeErrorV1::PrincipalMissing)
     );
+    Ok(())
+}
+
+/// D9: a bundle the TPS1 root did not sign, or a signer seed the bundle
+/// does not pin, refuses startup.
+#[test]
+fn each_bundle_failure_refuses_startup() -> TestResult {
+    let world = World::new()?;
     let foreign_root = signed(&world.bundle, &SigningKey::from_bytes(&[0x63; 32]))?;
-    let forged = world.fixture.credentials(
+    let forged = world.with_bundle(
         "forged",
-        &[
-            (
-                LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME,
-                world.bundle.as_slice(),
-            ),
-            (
-                LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME,
-                foreign_root.as_slice(),
-            ),
-            (LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME, SIGNER_SEED.as_slice()),
-            (
-                RELEASE_TRUST_CREDENTIAL_NAME,
-                world.deployment.release.as_bytes(),
-            ),
-        ],
+        (&world.bundle, &foreign_root),
+        world.deployment.release.as_bytes(),
     )?;
     assert_eq!(
         refused(world.inputs(&forged)),
@@ -342,10 +412,6 @@ fn each_credential_trust_store_or_bundle_failure_refuses_startup() -> TestResult
     assert_eq!(
         refused(world.inputs(&other_signer)),
         Some(LocalErasureServeErrorV1::SignerMismatch)
-    );
-    assert_eq!(
-        LocalErasureServeErrorV1::Credentials.to_string(),
-        "the local erasure credentials are unavailable or invalid"
     );
     Ok(())
 }
@@ -417,11 +483,17 @@ fn erasure_world() -> TestResult<World> {
     World::over(fixture)
 }
 
-/// D7: a request submitted through the host seam is driven to its first
-/// receipt by the driver task's startup run, one step per store command;
-/// once the executor stops, the next admission wake ends the task.
-#[tokio::test]
-async fn the_driver_task_drives_a_submitted_request_end_to_end() -> TestResult {
+/// A Gateway over the erasure world's host, composed Local, with the
+/// actor's owned root and one request submitted through the host seam
+/// before the host moved into the executor; the world must outlive it.
+struct Submitted {
+    _world: World,
+    gateway: Gateway,
+    started: LocalErasureStartV1,
+    request: ErasureReferenceV1,
+}
+
+fn submitted() -> TestResult<Submitted> {
     let world = erasure_world()?;
     let credentials = world.credentials("credentials", &SIGNER_SEED, &[])?;
     let erasure = LocalErasureServeV1::for_serve(Some(world.inputs(&credentials)))?;
@@ -435,28 +507,99 @@ async fn the_driver_task_drives_a_submitted_request_end_to_end() -> TestResult {
         .request();
     let started = erasure.start(&mut host);
     let gateway = Gateway::new_with_erasure_host(host, None)?;
+    Ok(Submitted {
+        _world: world,
+        gateway,
+        started,
+        request,
+    })
+}
+
+/// The lifecycle of `request` as the Gateway's host holds it.
+async fn lifecycle(
+    gateway: &Gateway,
+    request: ErasureReferenceV1,
+) -> TestResult<Option<ErasureLifecycleV1>> {
+    Ok(gateway
+        .store
+        .probe_host_for_test(move |host| {
+            host.read_sender()
+                .and_then(|mut reads| reads.erasure_state(request))
+                .ok()
+                .flatten()
+                .map(|state| state.lifecycle())
+        })
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .flatten())
+}
+
+/// Whether `lifecycle` follows a first receipt.
+const fn receipted(lifecycle: Option<ErasureLifecycleV1>) -> bool {
+    matches!(
+        lifecycle,
+        Some(ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure)
+    )
+}
+
+/// The payload-free report of a wake names only the count it deferred.
+#[test]
+fn a_wake_reports_only_the_count_it_deferred() {
+    assert_eq!(deferred_report(0), None);
+    assert_eq!(
+        deferred_report(2).as_deref(),
+        Some("piglor-gateway local erasure driver deferred 2 request steps")
+    );
+}
+
+/// L3 of the #1448 review: a wake takes one step per store command until
+/// none is due, and counts the request steps it deferred. A driver whose
+/// key the store does not register authorizes the request, then defers its
+/// freeze; the deployment's driver then completes it with none deferred.
+#[tokio::test]
+async fn a_wake_counts_the_request_steps_it_deferred() -> TestResult {
+    let Submitted {
+        _world,
+        gateway,
+        started,
+        request,
+    } = submitted()?;
+    let foreign = Arc::new(LocalErasureDriverV1::new(LocalErasureSignerV1::new(
+        SigningKeyMaterial::new(SigningKey::from_bytes(&ROTATED_SEED)),
+        OwnerIdV1::from_static("foreign-signer"),
+        1,
+    )));
+    assert_eq!(wake_once(&gateway.store, &foreign).await, 1);
+    assert_eq!(
+        lifecycle(&gateway, request).await?,
+        Some(ErasureLifecycleV1::Authorized)
+    );
+    let (driver, _) = started.started.ok_or("a Local start has a driver")?;
+    assert_eq!(wake_once(&gateway.store, &Arc::new(driver)).await, 0);
+    assert!(receipted(lifecycle(&gateway, request).await?));
+    assert!(gateway.shutdown().await.is_ok());
+    Ok(())
+}
+
+/// D7: a request submitted through the host seam is driven to its first
+/// receipt by the driver task's startup run, one step per store command;
+/// once the executor stops, the next admission wake ends the task.
+#[tokio::test]
+async fn the_driver_task_drives_a_submitted_request_end_to_end() -> TestResult {
+    let Submitted {
+        _world,
+        gateway,
+        started,
+        request,
+    } = submitted()?;
     // A tick far beyond the deadline: only the startup run and the
     // admission hook wake this driver.
     let driver =
         LocalErasureDriverTaskV1::spawn_every(&gateway, started, Duration::from_secs(3_600));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
-        let lifecycle = gateway
-            .store
-            .probe_host_for_test(move |host| {
-                host.read_sender()
-                    .and_then(|mut reads| reads.erasure_state(request))
-                    .ok()
-                    .flatten()
-                    .map(|state| state.lifecycle())
-            })
-            .await
-            .map_err(|error| format!("{error:?}"))?
-            .flatten();
-        if matches!(
-            lifecycle,
-            Some(ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure)
-        ) {
+        let lifecycle = lifecycle(&gateway, request).await?;
+        if receipted(lifecycle) {
             break;
         }
         if tokio::time::Instant::now() > deadline {

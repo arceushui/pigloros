@@ -32,9 +32,12 @@
 //! runs the startup sweep ([`LocalErasureDriverV1::sweep`]) once; a skipped
 //! sweep never fails startup. [`LocalErasureDriverTaskV1`] then drives the
 //! lifecycle: once at startup, on every [`LOCAL_ERASURE_DRIVER_TICK`], and
-//! whenever [`LocalErasureTriggerV1::admitted`] reports a new admission. Each
-//! wake submits one driver step per store command until no request has a
-//! step due, so every other Gateway command interleaves between two steps.
+//! whenever [`LocalErasureTriggerV1::admitted`] reports a new admission (the
+//! erasure admission route of the next slice calls it; until then only the
+//! startup run and the tick wake the driver). Each wake submits one driver step per store
+//! command until no request has a step due, so every other Gateway command
+//! interleaves between two steps, and reports how many request steps failed
+//! and were deferred.
 //! A step that purges the local replica runs `VACUUM` inside its one
 //! command and holds every other Gateway command for its duration.
 
@@ -55,7 +58,11 @@ use pos_runtime::{
 };
 use pos_store::{sqlite::SqliteStore, trust_policy_registry::OperatorReleaseTrustV1};
 use thiserror::Error;
-use tokio::{sync::Notify, task::JoinHandle, time::MissedTickBehavior};
+use tokio::{
+    sync::Notify,
+    task::{JoinError, JoinHandle},
+    time::MissedTickBehavior,
+};
 use zeroize::Zeroizing;
 
 pub use crate::deployment_trust::DEPLOYMENT_TRUST_STATE_PATH;
@@ -91,6 +98,9 @@ pub const LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES: [&str; 4] = [
 /// record bound, 64 KiB.
 pub const MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES: usize = 64 * 1024;
 
+/// The length of the signer credential, a 32-byte Ed25519 seed.
+const LOCAL_ERASURE_SIGNER_SEED_BYTES: usize = 32;
+
 /// How often the driver wakes without an admission, to resume deferred
 /// steps and the automatic retries of transient negatives.
 pub const LOCAL_ERASURE_DRIVER_TICK: Duration = Duration::from_secs(10);
@@ -104,7 +114,8 @@ pub enum LocalErasureServeErrorV1 {
     /// or over its bound.
     #[error("the local erasure credentials are unavailable or invalid")]
     Credentials,
-    /// The signer credential is not a 32-byte Ed25519 seed.
+    /// The signer credential is not a readable, protected 32-byte Ed25519
+    /// seed; a longer credential is refused without reading it.
     #[error("the local erasure signer credential is not a 32-byte Ed25519 seed")]
     SignerCredentialInvalid,
     /// The signer credential is not the signer key the bundle pins.
@@ -116,7 +127,9 @@ pub enum LocalErasureServeErrorV1 {
     /// The store records no Local Principal.
     #[error("the store records no Local Principal; run provision-local-principal first")]
     PrincipalMissing,
-    /// The store cannot be opened or its Local Principal record read.
+    /// The store does not exist (composition never creates it), cannot be
+    /// opened, is not bound to a compiled execution mode, or its Local
+    /// Principal record cannot be read.
     #[error("the local erasure store cannot be read")]
     StoreUnavailable,
     /// The installed bundle keeps the Local erasure authority closed.
@@ -165,44 +178,46 @@ fn credentials(
         &names,
         rustix::process::geteuid().as_raw(),
     )
+    .map_err(|_| LocalErasureServeErrorV1::Credentials)
     .and_then(|credentials| {
+        let read = |name: &str, maximum: usize| {
+            credentials
+                .read(name, maximum)
+                .map_err(|_| LocalErasureServeErrorV1::Credentials)
+        };
         let bundle_bytes = MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES;
-        credentials
-            .read(LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, bundle_bytes)
+        read(LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, bundle_bytes)
             .and_then(|bundle| {
-                credentials
-                    .read(LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME, bundle_bytes)
+                read(LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME, bundle_bytes)
                     .map(|signature| (bundle, signature))
             })
             .and_then(|bundles| {
+                read(
+                    RELEASE_TRUST_CREDENTIAL_NAME,
+                    MAX_RELEASE_TRUST_CREDENTIAL_BYTES,
+                )
+                .map(|release| (bundles, release))
+            })
+            .and_then(|(bundles, release)| {
                 credentials
                     .read(
                         LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
-                        MAX_RELEASE_TRUST_CREDENTIAL_BYTES,
+                        LOCAL_ERASURE_SIGNER_SEED_BYTES,
                     )
-                    .and_then(|signer| {
-                        credentials
-                            .read(
-                                RELEASE_TRUST_CREDENTIAL_NAME,
-                                MAX_RELEASE_TRUST_CREDENTIAL_BYTES,
-                            )
-                            .map(|release| (bundles, signer, release))
-                    })
+                    .ok()
+                    .and_then(|seed| signer_material(&seed).ok())
+                    .ok_or(LocalErasureServeErrorV1::SignerCredentialInvalid)
+                    .map(|signer| (bundles, signer, release))
             })
     })
-    .map_err(|_| LocalErasureServeErrorV1::Credentials)
     .and_then(|((bundle, bundle_signature), signer, release)| {
-        signer_material(&signer)
-            .map_err(|_| LocalErasureServeErrorV1::SignerCredentialInvalid)
-            .and_then(|signer| {
-                release_trust_from_credential(&release)
-                    .map_err(LocalErasureServeErrorV1::Trust)
-                    .map(|release| LocalErasureCredentialsV1 {
-                        bundle,
-                        bundle_signature,
-                        signer,
-                        release,
-                    })
+        release_trust_from_credential(&release)
+            .map_err(LocalErasureServeErrorV1::Trust)
+            .map(|release| LocalErasureCredentialsV1 {
+                bundle,
+                bundle_signature,
+                signer,
+                release,
             })
     })
 }
@@ -225,6 +240,22 @@ fn bundle_signer(
         })
         .map(|(owner, epoch)| LocalErasureSignerV1::new(signer, owner, epoch))
         .ok_or(LocalErasureServeErrorV1::SignerMismatch)
+}
+
+/// Open the existing store at `sqlite_path` as provisioning does: attached
+/// to its binding, which must be a compiled execution mode (ADR-134 §8).
+/// A path that names no file is refused before the store opens, so
+/// composition never creates a database.
+fn open_bound_store(sqlite_path: &str) -> Result<SqliteStore, LocalErasureServeErrorV1> {
+    Some(sqlite_path)
+        .filter(|path| Path::new(path).is_file())
+        .and_then(|path| SqliteStore::open(path).ok())
+        .and_then(|mut store| {
+            crate::mode_profile::attach_offline_writer_v1(&mut store)
+                .ok()
+                .map(|_| store)
+        })
+        .ok_or(LocalErasureServeErrorV1::StoreUnavailable)
 }
 
 /// The erasure authority one serve composes: the closed authority, or the
@@ -274,39 +305,36 @@ impl LocalErasureServeV1 {
                 load_deployment_trust_v1(inputs.trust_state, release)
                     .map_err(LocalErasureServeErrorV1::Trust)
                     .and_then(|trust| {
-                        SqliteStore::open(inputs.sqlite_path)
-                            .ok()
-                            .ok_or(LocalErasureServeErrorV1::StoreUnavailable)
-                            .and_then(|mut store| {
-                                recorded_registry_digest(&store)
-                                    .ok()
-                                    .ok_or(LocalErasureServeErrorV1::StoreUnavailable)
-                                    .and_then(|registry| {
-                                        registry.ok_or(LocalErasureServeErrorV1::PrincipalMissing)
-                                    })
-                                    .and_then(|registry| {
-                                        let binding = local_erasure_execution_binding_v1();
-                                        ErasureCoordinatorCompositionV1::local(
-                                            &LocalErasureCompositionInputsV1 {
-                                                bundle: &bundle,
-                                                bundle_signature: &bundle_signature,
-                                                trust: &trust,
-                                                operator_public_key,
-                                                authority_registry_digest:
-                                                    ErasureReferenceV1::from_digest(
-                                                        *registry.as_bytes(),
-                                                    ),
-                                                execution_binding: Some(&binding),
-                                                principal_grant: local_principal_grant_id(),
-                                                authority_timeline:
-                                                    local_principal_authority_timeline(),
-                                                clock: unix_now,
-                                            },
-                                            &mut store,
-                                        )
-                                        .map_err(LocalErasureServeErrorV1::Composition)
-                                    })
-                            })
+                        open_bound_store(inputs.sqlite_path).and_then(|mut store| {
+                            recorded_registry_digest(&store)
+                                .ok()
+                                .ok_or(LocalErasureServeErrorV1::StoreUnavailable)
+                                .and_then(|registry| {
+                                    registry.ok_or(LocalErasureServeErrorV1::PrincipalMissing)
+                                })
+                                .and_then(|registry| {
+                                    let binding = local_erasure_execution_binding_v1();
+                                    ErasureCoordinatorCompositionV1::local(
+                                        &LocalErasureCompositionInputsV1 {
+                                            bundle: &bundle,
+                                            bundle_signature: &bundle_signature,
+                                            trust: &trust,
+                                            operator_public_key,
+                                            authority_registry_digest:
+                                                ErasureReferenceV1::from_digest(
+                                                    *registry.as_bytes(),
+                                                ),
+                                            execution_binding: Some(&binding),
+                                            principal_grant: local_principal_grant_id(),
+                                            authority_timeline: local_principal_authority_timeline(
+                                            ),
+                                            clock: unix_now,
+                                        },
+                                        &mut store,
+                                    )
+                                    .map_err(LocalErasureServeErrorV1::Composition)
+                                })
+                        })
                     })
                     .and_then(|composition| {
                         bundle_signer(&bundle, signer).map(|signer| Self {
@@ -406,11 +434,17 @@ impl LocalErasureDriverTaskV1 {
         self.running.as_ref().map(|(trigger, _)| trigger.clone())
     }
 
-    /// Stop the driver before the executor drains.
+    /// Stop the driver before the executor drains, and report on standard
+    /// error whether it had panicked.
     pub async fn stop(self) {
         if let Some((_, task)) = self.running {
             task.abort();
-            drop(task.await);
+            let panicked = task.await.err().as_ref().is_some_and(JoinError::is_panic);
+            let mut output = io::stderr().lock();
+            drop(writeln!(
+                output,
+                "piglor-gateway local erasure driver stopped (panicked: {panicked})"
+            ));
         }
     }
 }
@@ -427,22 +461,43 @@ async fn drive(
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
+        // Each arm binds its future's output: the tick's instant, the
+        // notification's unit.
         tokio::select! {
-            _ = tick.tick() => {}
+            _instant = tick.tick() => {}
             () = wake.notified() => {}
         }
         let Some(store) = executor.upgrade().filter(StoreExecutor::is_ready) else {
             break;
         };
-        loop {
-            let advanced = store.advance_local_erasure(&driver).await;
-            if !advanced
-                .is_ok_and(|advanced| advanced.is_ok_and(|step| step != LocalErasureStepV1::Idle))
-            {
-                break;
-            }
+        wake_once(&store, &driver).await;
+    }
+}
+
+/// One wake of the driver: one step per store command until no request has
+/// one due or a command fails. It reports on standard error how many
+/// request steps failed and were deferred to a later wake, when any were,
+/// and returns that count.
+async fn wake_once(store: &StoreExecutor, driver: &Arc<LocalErasureDriverV1>) -> usize {
+    let mut deferred = 0;
+    while let Ok(Ok(advanced)) = store.advance_local_erasure(driver).await {
+        deferred += advanced.deferred;
+        if advanced.step == LocalErasureStepV1::Idle {
+            break;
         }
     }
+    if let Some(report) = deferred_report(deferred) {
+        let mut output = io::stderr().lock();
+        drop(writeln!(output, "{report}"));
+    }
+    deferred
+}
+
+/// The payload-free report of a wake that deferred `deferred` request
+/// steps, `None` when it deferred none.
+fn deferred_report(deferred: usize) -> Option<String> {
+    (deferred > 0)
+        .then(|| format!("piglor-gateway local erasure driver deferred {deferred} request steps"))
 }
 
 #[cfg(test)]

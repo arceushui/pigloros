@@ -48,6 +48,17 @@ pub enum LocalErasureStepV1 {
     Idle,
 }
 
+/// What one [`LocalErasureDriverV1::advance`] did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalErasureAdvanceV1 {
+    /// The one transition committed, [`LocalErasureStepV1::Idle`] when none
+    /// was.
+    pub step: LocalErasureStepV1,
+    /// How many requests were passed over because their step failed,
+    /// committing nothing.
+    pub deferred: usize,
+}
+
 /// The outcome of the startup sweep (ADR-136 §5; owner decision Q13 on
 /// #1431).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,11 +166,13 @@ impl LocalErasureDriverV1 {
     }
 
     /// Commit the one durable transition the first request with one due
-    /// needs, in the host's request order, and return it;
+    /// needs, in the host's request order, and return it with the number of
+    /// requests passed over before it; the step is
     /// [`LocalErasureStepV1::Idle`] when no request has one due.
     ///
-    /// A request whose step fails is passed over: its step committed
-    /// nothing and it resumes on a later call. A serving host calls this
+    /// A request whose step fails is passed over and counted in
+    /// [`LocalErasureAdvanceV1::deferred`]: its step committed nothing and
+    /// it resumes on a later call. A serving host calls this
     /// once per store command, so every other command of the host
     /// interleaves between two transitions (ADR-136 §5; owner decision D7
     /// of 2026-11-18 on #1413).
@@ -169,18 +182,23 @@ impl LocalErasureDriverV1 {
     pub fn advance(
         &self,
         host: &mut ErasureExecutionHostV1,
-    ) -> Result<LocalErasureStepV1, ErasureHostErrorV1> {
+    ) -> Result<LocalErasureAdvanceV1, ErasureHostErrorV1> {
         host.command_sender()
             .and_then(|mut sender| sender.local_erasure_requests())
             .map(|requests| {
-                requests
+                let mut deferred = 0;
+                let step = requests
                     .into_iter()
-                    .find_map(|request| {
-                        self.step(host, request)
-                            .ok()
-                            .filter(|step| *step != LocalErasureStepV1::Idle)
+                    .find_map(|request| match self.step(host, request) {
+                        Ok(LocalErasureStepV1::Idle) => None,
+                        Ok(step) => Some(step),
+                        Err(_) => {
+                            deferred += 1;
+                            None
+                        }
                     })
-                    .unwrap_or(LocalErasureStepV1::Idle)
+                    .unwrap_or(LocalErasureStepV1::Idle);
+                LocalErasureAdvanceV1 { step, deferred }
             })
     }
 

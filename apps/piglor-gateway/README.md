@@ -289,9 +289,12 @@ authority, which admits no Local erasure and refuses a store that holds erasure 
 
 Once the host is recovered, a startup sweep deletes unreferenced erasure evidence objects once and
 logs only its count (`Swept(n)` or `Skipped`); a skipped sweep never fails startup. The erasure
-driver then runs once, every 10 seconds, and after each erasure admission. Each run submits one
-driver step per store command until no request has a step due, so other Gateway requests
-interleave between steps. **The step that purges the local replica runs `VACUUM` inside its one
+driver then runs once at startup and every 10 seconds (the compiled `LOCAL_ERASURE_DRIVER_TICK`).
+Its admission trigger, which runs it at once after an erasure admission, is wired by the erasure
+routes of the next ADR-136 slice (C5c) and is not active yet. Each run submits one driver step per
+store command until no request has a step due, so other Gateway requests interleave between steps,
+and logs how many request steps failed and were deferred to a later run, when any were. Composition
+opens only an existing store bound to a compiled execution mode; it never creates a database. **The step that purges the local replica runs `VACUUM` inside its one
 store command and holds every other Gateway request for its duration**, which grows with the store.
 
 **Rollout.** On a store bound by a first `serve`:

@@ -6811,8 +6811,8 @@ fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> Tes
 // ---------------------------------------------------------------------------
 
 use pos_runtime::{
-    LocalErasureDriverV1, LocalErasureSignerV1, LocalErasureSigningRequestV1, LocalErasureStepV1,
-    LocalErasureSweepV1,
+    LocalErasureAdvanceV1, LocalErasureDriverV1, LocalErasureSignerV1,
+    LocalErasureSigningRequestV1, LocalErasureStepV1, LocalErasureSweepV1,
 };
 
 /// A signer of `key`, registered as the fixture signer at `epoch`.
@@ -7521,11 +7521,19 @@ fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
     let (receipt, states) = straight_run(&driver_store()?)?;
     let store = driver_store()?;
     let mut host = store.host(&driver_case()?, 4_096)?;
-    assert_eq!(driver().advance(&mut host)?, LocalErasureStepV1::Idle);
+    assert_eq!(
+        driver().advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Idle,
+            deferred: 0
+        }
+    );
     submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
     let mut steps = Vec::new();
     loop {
-        match driver().advance(&mut host)? {
+        let advanced = driver().advance(&mut host)?;
+        assert_eq!(advanced.deferred, 0);
+        match advanced.step {
             LocalErasureStepV1::Idle => break,
             step => steps.push(step),
         }
@@ -7545,12 +7553,24 @@ fn advance_passes_over_a_request_it_cannot_step() -> TestResult {
     let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
     let mut host = store.host(&driver_case()?, 4_096)?;
     let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
-    assert_eq!(foreign.advance(&mut host)?, LocalErasureStepV1::Idle);
+    assert_eq!(
+        foreign.advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Idle,
+            deferred: 1
+        }
+    );
     assert_eq!(
         lifecycle(&mut host, request_of(1)?)?,
         ErasureLifecycleV1::Authorized
     );
-    assert_eq!(driver().advance(&mut host)?, LocalErasureStepV1::Frozen);
+    assert_eq!(
+        driver().advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Frozen,
+            deferred: 0
+        }
+    );
     Ok(())
 }
 

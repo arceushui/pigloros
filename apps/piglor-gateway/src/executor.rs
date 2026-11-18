@@ -2553,7 +2553,7 @@ impl<T: Send + 'static> WorkerCommandV1 for RevisionCommand<T> {
 
 /// The result of one Local erasure driver step on the host store.
 #[cfg(target_os = "linux")]
-type LocalErasureAdvanceV1 = Result<pos_runtime::LocalErasureStepV1, ErasureHostErrorV1>;
+type LocalErasureAdvanceResultV1 = Result<pos_runtime::LocalErasureAdvanceV1, ErasureHostErrorV1>;
 
 /// One Local erasure driver step (ADR-136 §5; owner decision D7 of
 /// 2026-11-18 on #1413): the one durable transition the first due request
@@ -2563,7 +2563,7 @@ type LocalErasureAdvanceV1 = Result<pos_runtime::LocalErasureStepV1, ErasureHost
 #[cfg(target_os = "linux")]
 struct LocalErasureAdvanceCommand {
     driver: Arc<pos_runtime::LocalErasureDriverV1>,
-    reply: oneshot::Sender<Result<LocalErasureAdvanceV1, StoreExecutorError>>,
+    reply: oneshot::Sender<Result<LocalErasureAdvanceResultV1, StoreExecutorError>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -2595,7 +2595,7 @@ impl StoreExecutor {
     pub(crate) async fn advance_local_erasure(
         &self,
         driver: &Arc<pos_runtime::LocalErasureDriverV1>,
-    ) -> Result<LocalErasureAdvanceV1, StoreExecutorError> {
+    ) -> Result<LocalErasureAdvanceResultV1, StoreExecutorError> {
         submit!(self, |reply| Command::Action(Box::new(
             LocalErasureAdvanceCommand {
                 driver: Arc::clone(driver),
@@ -2606,17 +2606,17 @@ impl StoreExecutor {
 }
 
 /// Test-only: a closure over the host store's erasure host.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 type HostProbeV1<T> = Box<dyn FnOnce(&mut ErasureExecutionHostV1) -> T + Send>;
 
 /// Test-only: run a closure on the host store's erasure host.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 struct HostProbeForTestV1<T> {
     probe: HostProbeV1<T>,
     reply: oneshot::Sender<Result<Option<T>, StoreExecutorError>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl<T: Send + 'static> WorkerCommandV1 for HostProbeForTestV1<T> {
     fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
@@ -2633,7 +2633,7 @@ impl<T: Send + 'static> WorkerCommandV1 for HostProbeForTestV1<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl StoreExecutor {
     /// Run `probe` on the host store's erasure host as one command; `None`

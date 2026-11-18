@@ -83,7 +83,7 @@ pub use erasure_host::{
 };
 #[cfg(target_os = "linux")]
 pub use erasure_local_authority::{
-    compiled_local_erasure_policy_v1, local_erasure_execution_binding_v1,
+    compiled_local_erasure_policy_v1, local_erasure_execution_binding_v1, LocalErasureAdvanceV1,
     LocalErasureClassificationRowV1, LocalErasureCompositionErrorV1,
     LocalErasureCompositionInputsV1, LocalErasureDriverV1, LocalErasureExecutorV1,
     LocalErasureSignerV1, LocalErasureSigningRequestV1, LocalErasureStepV1, LocalErasureSweepV1,

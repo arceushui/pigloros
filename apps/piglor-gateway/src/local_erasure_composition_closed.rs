@@ -70,14 +70,36 @@ impl LocalErasureServeV1 {
 
     /// A closed composition starts nothing.
     #[must_use]
-    pub fn start(self, _host: &mut ErasureExecutionHostV1) -> LocalErasureStartV1 {
+    pub fn start(&self, _host: &mut ErasureExecutionHostV1) -> LocalErasureStartV1 {
         LocalErasureStartV1
     }
 }
 
+/// No startup sweep runs off Linux: the uninhabited stand-in of the Linux
+/// sweep outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalErasureSweepV1 {}
+
 /// A started closed composition.
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct LocalErasureStartV1;
+
+impl LocalErasureStartV1 {
+    /// No sweep ran.
+    #[must_use]
+    pub const fn sweep(self) -> Option<LocalErasureSweepV1> {
+        None
+    }
+}
+
+/// The admission hook of a driver; none exists off Linux.
+#[derive(Clone, Copy, Debug)]
+pub struct LocalErasureTriggerV1;
+
+impl LocalErasureTriggerV1 {
+    /// Nothing to wake.
+    pub const fn admitted(self) {}
+}
 
 /// The inert driver of a closed composition.
 pub struct LocalErasureDriverTaskV1;
@@ -89,6 +111,14 @@ impl LocalErasureDriverTaskV1 {
         Self
     }
 
-    /// Nothing to stop.
-    pub async fn stop(self) {}
+    /// No admission hook.
+    #[must_use]
+    pub const fn trigger(&self) -> Option<LocalErasureTriggerV1> {
+        None
+    }
+
+    /// Nothing to stop; ready at once.
+    pub fn stop(self) -> std::future::Ready<()> {
+        std::future::ready(())
+    }
 }
