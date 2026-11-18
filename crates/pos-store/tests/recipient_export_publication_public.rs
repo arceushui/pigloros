@@ -484,6 +484,8 @@ fn reader_keeps_an_unrecoverable_containment_boundary_a_store_failure() -> TestR
         .store
         .read_recipient_export(&fixture.owner, unaffected.export_id)
         .is_ok());
+    Ok(())
+}
 
 /// Copy the published catalog row under another export identity, Timeline
 /// and grantee owner, as a second publication would record it.
