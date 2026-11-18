@@ -228,7 +228,7 @@ impl ErasureCommandSenderV1<'_> {
     /// of its erasure store identity, which the host derives itself. Inside
     /// that one fence it resolves the command's `ELXR1` target to its
     /// publication through the request's effective scope Timelines, with the
-    /// publications this sender scanned once for its replay pass, then runs
+    /// publications this sender scanned once for that scope, then runs
     /// T1, the owner step with T2, and T3 through
     /// `commit_local_owner_effect` (§7):
     ///

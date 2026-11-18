@@ -3959,9 +3959,9 @@ impl ErasureExecutionHostV1 {
 pub struct ErasureCommandSenderV1<'host> {
     host: &'host mut ErasureExecutionHostV1,
     generation: ErasureReferenceV1,
-    /// The recipient-export publications this sender's first
-    /// `export-recipient` command scanned, by `ELXR1` target: one scan per
-    /// replay pass (ADR-138 §5).
+    /// The recipient-export publications this sender last scanned, by
+    /// `ELXR1` target and keyed by the scope they were scanned for: one scan
+    /// per scope and sender, so one per replay pass (ADR-138 §5).
     #[cfg(target_os = "linux")]
     export_publications: Option<local_owner::ExportPublicationsV1>,
 }
@@ -6812,6 +6812,8 @@ mod tests {
         ForkReplayEventCount,
         ForkReplayEventSequence,
         BeginForkReplayPanic,
+        ExportScanFailure,
+        ExportScanRow,
         Passthrough,
     }
 
@@ -6827,6 +6829,7 @@ mod tests {
         inventory_snapshot_calls: usize,
         authority_snapshot_calls: usize,
         export_scan_calls: usize,
+        export_lookup_calls: usize,
         fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
 
@@ -7457,7 +7460,18 @@ mod tests {
             max: usize,
         ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
             self.export_scan_calls += 1;
-            self.inner.recipient_export_publications(timelines, max)
+            match self.fault {
+                FaultModeV1::ExportScanFailure => Err(ErasureErrorV1::ProvenanceMissing),
+                FaultModeV1::ExportScanRow => Ok(timelines
+                    .iter()
+                    .map(|timeline| pos_core::RecipientExportPublicationRowV1 {
+                        export_id: [0x42; 16],
+                        timeline: *timeline,
+                        grantee_owner: pos_core::OwnerIdV1::from_static("recipient-export"),
+                    })
+                    .collect()),
+                _ => self.inner.recipient_export_publications(timelines, max),
+            }
         }
 
         fn begin_recipient_export_withdrawal(
@@ -7481,6 +7495,7 @@ mod tests {
             target: ErasureReferenceV1,
             timelines: &[TimelineId],
         ) -> Result<Option<([u8; 16], pos_core::OwnerIdV1)>, ErasureErrorV1> {
+            self.export_lookup_calls += 1;
             self.inner.recipient_export_by_target(target, timelines)
         }
 
@@ -9311,28 +9326,95 @@ mod tests {
         Ok(())
     }
 
-    /// ADR-138 §5: one replay pass scans the recipient-export publications
-    /// of its scope once, and every later target of the pass resolves from
-    /// that scan.
+    /// ADR-138 §5: a sender scans the recipient-export publications of one
+    /// scope once and resolves every later target of that scope from that
+    /// scan; another scope scans again; a target the scan does not map
+    /// falls back to the target lookup.
     #[cfg(target_os = "linux")]
     #[test]
-    fn one_export_pass_scans_the_publications_once() {
+    fn a_sender_scans_each_export_scope_once() {
         let mut store = fault_store(FaultModeV1::Passthrough);
-        let timelines = [TimelineId::new()];
+        let scope = [TimelineId::new()];
         let mut publications = None;
         for byte in [7, 8] {
             assert_eq!(
                 super::local_owner::resolved_export(
                     &mut store,
                     reference(byte),
-                    &timelines,
+                    &scope,
                     &mut publications,
                 ),
                 None
             );
         }
         assert_eq!(store.export_scan_calls, 1);
-        assert_eq!(publications, Some(std::collections::BTreeMap::new()));
+        assert_eq!(store.export_lookup_calls, 2);
+        assert_eq!(
+            publications,
+            Some((scope.to_vec(), std::collections::BTreeMap::new()))
+        );
+        let other = [TimelineId::new()];
+        assert_eq!(
+            super::local_owner::resolved_export(
+                &mut store,
+                reference(9),
+                &other,
+                &mut publications,
+            ),
+            None
+        );
+        assert_eq!(store.export_scan_calls, 2);
+        assert_eq!(
+            publications,
+            Some((other.to_vec(), std::collections::BTreeMap::new()))
+        );
+    }
+
+    /// A scanned publication resolves from the scan alone, without the
+    /// target lookup.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_scanned_export_target_resolves_without_a_lookup() -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::ExportScanRow);
+        let owner = pos_core::OwnerIdV1::from_static("recipient-export");
+        let target = pos_core::local_erasure_export_recipient_v1([0x42; 16], &owner)?;
+        let mut publications = None;
+        assert_eq!(
+            super::local_owner::resolved_export(
+                &mut store,
+                target,
+                &[TimelineId::new()],
+                &mut publications,
+            ),
+            Some(([0x42; 16], owner))
+        );
+        assert_eq!(store.export_scan_calls, 1);
+        assert_eq!(store.export_lookup_calls, 0);
+        Ok(())
+    }
+
+    /// A failed scan is not kept: the next target scans again, and each
+    /// target still falls back to the target lookup.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_export_scan_is_retried() {
+        let mut store = fault_store(FaultModeV1::ExportScanFailure);
+        let scope = [TimelineId::new()];
+        let mut publications = None;
+        for byte in [7, 8] {
+            assert_eq!(
+                super::local_owner::resolved_export(
+                    &mut store,
+                    reference(byte),
+                    &scope,
+                    &mut publications,
+                ),
+                None
+            );
+        }
+        assert_eq!(store.export_scan_calls, 2);
+        assert_eq!(store.export_lookup_calls, 2);
+        assert_eq!(publications, None);
     }
 
     #[test]
@@ -10055,6 +10137,7 @@ mod tests {
                 inventory_snapshot_calls: 0,
                 authority_snapshot_calls: 0,
                 export_scan_calls: 0,
+                export_lookup_calls: 0,
                 fork_recovery_override: None,
             },
             resolve_control,
