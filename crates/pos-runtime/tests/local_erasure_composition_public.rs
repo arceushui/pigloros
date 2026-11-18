@@ -3042,8 +3042,11 @@ fn a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not() 
             .id();
         (host_timeline, host_fork)
     };
+    // Listed beside the bundle's Erasure Host Timeline, which every Local
+    // bundle must list; ELB1 keeps its host Timelines sorted.
     let mut hosting = bundle();
-    hosting.host_timelines = vec![host_timeline];
+    hosting.host_timelines.push(host_timeline);
+    hosting.host_timelines.sort_unstable();
     let case = Case::signed(&hosting, &bundle_root(), &[])?;
     let digest = {
         let mut host = owned.store.host(&case, 4_096)?;
