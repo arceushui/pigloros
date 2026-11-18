@@ -397,34 +397,35 @@ fn receipt_chain(
     latest: Option<ErasureReceiptV1>,
 ) -> Option<Vec<ErasureReceiptV1>> {
     let mut chain = Vec::new();
-    let mut next = Some(latest);
-    while let Some(Some(receipt)) = next {
+    let mut next = Ok(latest);
+    while let Ok(Some(receipt)) = next {
         next = predecessor(store, &receipt);
         chain.push(receipt);
     }
-    next.map(|_| chain)
+    next.ok().map(|_| chain)
 }
 
-/// The predecessor receipt of `receipt`, `Some(None)` for the first
-/// attempt's, or `None` when it cannot be read.
+/// The predecessor receipt of `receipt`, `Ok(None)` for the first
+/// attempt's.
+///
+/// # Errors
+/// The closed read or decoding error of its provenance or predecessor.
 fn predecessor(
     store: &dyn ErasureHostStore,
     receipt: &ErasureReceiptV1,
-) -> Option<Option<ErasureReceiptV1>> {
+) -> Result<Option<ErasureReceiptV1>, ErasureErrorV1> {
     store
         .read_object(receipt.provenance())
-        .ok()
-        .and_then(|bytes| ErasureReceiptProvenanceV1::from_canonical_cbor(&bytes).ok())
+        .and_then(|bytes| ErasureReceiptProvenanceV1::from_canonical_cbor(&bytes))
         .and_then(|provenance| {
             provenance
                 .predecessor_receipt()
-                .map_or(Some(None), |digest| {
+                .map(|digest| {
                     store
                         .read_object(digest)
-                        .ok()
-                        .and_then(|bytes| ErasureReceiptV1::from_canonical_cbor(&bytes).ok())
-                        .map(Some)
+                        .and_then(|bytes| ErasureReceiptV1::from_canonical_cbor(&bytes))
                 })
+                .transpose()
         })
 }
 
