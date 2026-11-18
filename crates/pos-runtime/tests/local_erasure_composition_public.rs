@@ -6706,6 +6706,66 @@ fn an_artifact_is_redacted_only_once_every_key_it_depends_on_is_tombstoned() -> 
             }
         }
         assert_eq!(artifacts, 2);
+        assert_signer_rechecks_q7(&attempted, &results, keyed, registered)?;
+    }
+    Ok(())
+}
+
+/// The signer signs every artifact owner result the executor committed, and
+/// a positive ELAD1 only while Q7 holds: the keyed recording's fabricated
+/// positive ELAD1 is refused while its key is not tombstoned.
+fn assert_signer_rechecks_q7(
+    attempted: &Attempted,
+    results: &[ErasureOwnerResultV1],
+    keyed: ErasureReferenceV1,
+    registered: bool,
+) -> TestResult {
+    let signer = signer_of(erasure_signer(), 1);
+    let mut host = attempted.host()?;
+    for result in results {
+        let destruction = result.command().destruction;
+        if class_of(destruction.owner)? != "artifact-store" {
+            continue;
+        }
+        let sign = |host: &mut ErasureExecutionHostV1, owner_result| {
+            signer.sign(
+                host,
+                LocalErasureSigningRequestV1::OwnerResult { owner_result },
+            )
+        };
+        assert!(sign(&mut host, result.owner_result()).is_ok());
+        if registered || destruction.target.artifact_digest != keyed {
+            continue;
+        }
+        let prepared = PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::ArtifactDisposition(
+                LocalErasureArtifactDispositionV1 {
+                    request: attempted.request,
+                    artifact_class: destruction.target.artifact_class,
+                    artifact_digest: destruction.target.artifact_digest,
+                    redaction: LocalErasureRedactionV1::Redacted,
+                    replay_claim_to: ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                }
+                .to_canonical_cbor()?,
+            ),
+            LocalOwnerResultBindingV1 {
+                request: attempted.request,
+                attempt: destruction.provenance,
+                obligation: destruction.obligation,
+                command: destruction.command,
+                owner_ref: destruction.owner,
+                error: None,
+            },
+        )?;
+        let effect = prepared.effect_object().ok_or("no effect record")?;
+        attempted.store.retain(&[
+            effect.canonical_cbor().to_vec(),
+            prepared.owner_result().canonical_cbor().to_vec(),
+        ])?;
+        assert_eq!(
+            sign(&mut host, prepared.owner_result().reference()),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
     }
     Ok(())
 }

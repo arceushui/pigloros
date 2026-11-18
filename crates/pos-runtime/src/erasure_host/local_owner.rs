@@ -195,7 +195,9 @@ impl ErasureCommandSenderV1<'_> {
         command: &ErasureOwnerCommandV1,
         identity: KeyIdentityV1,
     ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
-        self.local_erasure_host_timeline()
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| self.local_erasure_host_timeline())
             .and_then(|host_timeline| {
                 self.host.with_store_fence(
                     self.generation,
@@ -734,8 +736,32 @@ fn disposition(
     store: &mut dyn ErasureHostStore,
     command: &ErasureOwnerCommandV1,
 ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
-    registered_dependencies(store, command.request, command.destruction.target)
-        .and_then(|dependencies| {
+    redactable(store, command).and_then(|redacted| {
+        if redacted {
+            disposition_record(command)
+                .map_err(map_erasure_error)
+                .and_then(|effect| committed(store, command, None, effect))
+        } else {
+            negative(store, command, ErasureErrorV1::ArtifactDeletionFailed)
+        }
+    })
+}
+
+/// Q7: whether the ARD1 row of `command`'s target is registered in the
+/// request's committed scope, depends on at least one key, and the key
+/// registry has tombstoned every key it depends on, so the artifact is
+/// unreadable and its positive ELAD1 is due. The executor's disposition and
+/// the signer's re-derivation of a positive ELAD1 share this rule.
+///
+/// # Errors
+/// The payload-free error of an unreadable scope, registration list or
+/// registry.
+fn redactable(
+    store: &dyn ErasureHostStore,
+    command: &ErasureOwnerCommandV1,
+) -> Result<bool, ErasureHostErrorV1> {
+    registered_dependencies(store, command.request, command.destruction.target).and_then(
+        |dependencies| {
             loaded_registry(store).map(|registry| {
                 dependencies
                     .zip(registry)
@@ -746,16 +772,8 @@ fn disposition(
                                 .all(|identity| registry.tombstone(*identity).is_some())
                     })
             })
-        })
-        .and_then(|redacted| {
-            if redacted {
-                disposition_record(command)
-                    .map_err(map_erasure_error)
-                    .and_then(|effect| committed(store, command, None, effect))
-            } else {
-                negative(store, command, ErasureErrorV1::ArtifactDeletionFailed)
-            }
-        })
+        },
+    )
 }
 
 /// The `client-cache-signal` effect of `command`: the ELCG1 of the
@@ -1003,7 +1021,9 @@ fn emits(work: OwnerWorkV1, error: Option<ErasureErrorV1>, effect: &LocalOwnerEf
 }
 
 /// Whether `owner_result` is the ELO1 of a committed outcome the Local
-/// executor's path for the dispatched `command`'s class can produce.
+/// executor's path for the dispatched `command`'s class can produce. A
+/// positive ELAD1 must also still meet Q7 (`redactable`): every key the
+/// ARD1 row depends on is tombstoned, as when the executor emitted it.
 ///
 /// # Errors
 /// [`ErasureHostErrorV1::Conflict`] unless the active attempt dispatches
@@ -1041,16 +1061,28 @@ fn committed_owner_result(
                             PreparedLocalOwnerEffectV1::new(effect, owner_binding(command, error))
                         })
                         .ok()
+                        .map(|prepared| (error, prepared))
                 })
-                .find(|prepared| prepared.owner_result().reference() == owner_result)
-                .filter(|prepared| {
+                .find(|(_, prepared)| prepared.owner_result().reference() == owner_result)
+                .filter(|(_, prepared)| {
                     prepared.effect_object().is_none_or(|effect| {
                         store
                             .read_object(effect.reference())
                             .is_ok_and(|bytes| bytes == effect.canonical_cbor())
                     })
                 })
-                .map(drop)
+                .map(|(error, _)| work == OwnerWorkV1::Disposition && error.is_none())
                 .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+        })
+        .and_then(|positive_disposition| {
+            if positive_disposition {
+                redactable(store, command).and_then(|redacted| {
+                    redacted
+                        .then_some(())
+                        .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+                })
+            } else {
+                Ok(())
+            }
         })
 }
