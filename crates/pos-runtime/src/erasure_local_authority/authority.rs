@@ -26,7 +26,7 @@ use super::freeze::{extension_admitted, observation, ShortfallV1, LOCAL_FREEZE_P
 use super::{LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1};
 use crate::erasure_host::{
     local_principal_reference, local_subject_admission, LocalErasurePreparationV1,
-    LOCAL_ERASURE_REQUEST_OPERATION,
+    PreparedFreezeV1, LOCAL_ERASURE_REQUEST_OPERATION,
 };
 use crate::{ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1};
 
@@ -271,7 +271,7 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
-    ) -> Result<Option<(ErasureReferenceV1, Vec<Vec<u8>>)>, ErasureErrorV1> {
+    ) -> Result<PreparedFreezeV1, ErasureErrorV1> {
         self.admits_new_work()
             .and_then(|()| {
                 self.freeze_draft(view, request)

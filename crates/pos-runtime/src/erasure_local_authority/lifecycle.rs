@@ -137,8 +137,8 @@ impl LocalErasureAuthorityV1 {
         progress
             .latest_receipt
             .as_ref()
-            .map_or(
-                Some((LOCAL_FREEZE_POSITION + 1, erq1.horizon_position())),
+            .map_or_else(
+                || Some((LOCAL_FREEZE_POSITION + 1, erq1.horizon_position())),
                 |receipt| {
                     receipt
                         .issue_position()
