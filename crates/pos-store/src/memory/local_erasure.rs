@@ -11,9 +11,9 @@
 
 use pos_core::{
     store::EventStore, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureErrorV1,
-    ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureRetainedObjectV1, Hash, KeyTombstoneV1, PreparedLocalOwnerEffectV1,
-    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
+    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1, Hash, KeyTombstoneV1,
+    PreparedLocalOwnerEffectV1,
 };
 
 use super::MemoryStore;
@@ -24,31 +24,38 @@ impl MemoryStore {
         limits: ErasureRecoveryLimitsV1,
         export_targets: &[ErasureReferenceV1],
     ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
-        if export_targets.len() > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        // The authority read never rebinds the installed inventory generation.
+        crate::export_targets_admitted(export_targets)
+            .and_then(|()| self.local_erasure_inventory_snapshot(limits))
+            .and_then(|inventory| {
+                let mut timelines = self
+                    .timelines
+                    .values()
+                    .map(|state| ErasureAuthorityTimelineRowV1 {
+                        id: state.timeline.meta.id,
+                        owner: state.timeline.meta.owner,
+                        fork_point: state.timeline.meta.fork_point,
+                    })
+                    .collect::<Vec<_>>();
+                timelines.sort_unstable_by_key(|row| row.id);
+                ErasureAuthoritySnapshotV1::new(
+                    inventory,
+                    timelines,
+                    self.erasure_store_identity,
+                    Vec::new(),
+                )
+            })
+    }
+
+    /// The complete erasure inventory within `limits`; the authority read
+    /// never rebinds the installed inventory generation.
+    fn local_erasure_inventory_snapshot(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
         let installed = self.erasure_inventory_generation;
         let inventory = self.complete_erasure_inventory_snapshot_with_limits(limits);
         self.erasure_inventory_generation = installed;
-        inventory.and_then(|inventory| {
-            let mut timelines = self
-                .timelines
-                .values()
-                .map(|state| ErasureAuthorityTimelineRowV1 {
-                    id: state.timeline.meta.id,
-                    owner: state.timeline.meta.owner,
-                    fork_point: state.timeline.meta.fork_point,
-                })
-                .collect::<Vec<_>>();
-            timelines.sort_unstable_by_key(|row| row.id);
-            ErasureAuthoritySnapshotV1::new(
-                inventory,
-                timelines,
-                self.erasure_store_identity,
-                Vec::new(),
-            )
-        })
+        inventory
     }
 
     pub(super) fn local_erasure_retain(

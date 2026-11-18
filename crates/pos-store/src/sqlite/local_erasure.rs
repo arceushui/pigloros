@@ -39,7 +39,7 @@ impl SqliteStore {
         limits: ErasureRecoveryLimitsV1,
         export_targets: &[ErasureReferenceV1],
     ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
-        export_targets_admitted(export_targets).and_then(|()| {
+        crate::export_targets_admitted(export_targets).and_then(|()| {
             self.conn
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(map_erasure_receipt_failure)
@@ -301,17 +301,6 @@ fn authority_snapshot_in(
             })
         })
     })
-}
-
-/// At most one category's obligations may name `ELXR1` targets (ADR-138 §5).
-const fn export_targets_admitted(
-    export_targets: &[ErasureReferenceV1],
-) -> Result<(), ErasureErrorV1> {
-    if export_targets.len() > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
-        Err(ErasureErrorV1::ScopeInvalid)
-    } else {
-        Ok(())
-    }
 }
 
 /// The withdrawal rows of the distinct `export_targets` that have one, in

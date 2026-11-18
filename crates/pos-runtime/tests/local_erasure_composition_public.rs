@@ -8557,7 +8557,7 @@ fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
     }
     assert_eq!(
         LocalErasureRotationRefusalV1::SignerUnknown.to_string(),
-        "the key registry's current signer cannot be read"
+        "the key registry or its current signer's public key cannot be read"
     );
     Ok(())
 }
