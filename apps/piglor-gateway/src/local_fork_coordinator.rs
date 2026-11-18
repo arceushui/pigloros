@@ -1980,13 +1980,11 @@ mod tests {
                 ));
             }
         }
-        assert!(lock(&fixture.store)
-            .list_timelines()?
-            .iter()
-            .all(|timeline| timeline
-                .meta
-                .fork_point
-                .is_none_or(|(fork_parent, _)| !host_timelines.contains(&fork_parent))));
+        let timelines = lock(&fixture.store).list_timelines()?;
+        assert!(timelines.iter().all(|timeline| timeline
+            .meta
+            .fork_point
+            .is_none_or(|(fork_parent, _)| !host_timelines.contains(&fork_parent))));
         Ok(())
     }
 
