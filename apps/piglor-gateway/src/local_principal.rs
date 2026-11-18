@@ -3755,11 +3755,12 @@ mod tests {
         bind_local(&path)?;
         let actor = actor()?;
         let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
-        let unprotected = Gateway::unprotected_for_harness(memory_host()?)?;
-        for (gateway, app, owner) in [
+        let cases = [
             (gateway, app, Some(actor)),
-            (unprotected.clone(), app_of(unprotected), None),
-        ] {
+            Gateway::unprotected_for_harness(memory_host()?)
+                .map(|unprotected| (unprotected.clone(), app_of(unprotected), None))?,
+        ];
+        for (gateway, app, owner) in cases {
             let (status, created) = create(&app, Some(actor)).await?;
             assert_eq!(status, StatusCode::CREATED);
             let id = created["id"].as_str().ok_or("a created root has an id")?;

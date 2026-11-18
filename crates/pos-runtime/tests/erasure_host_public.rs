@@ -126,17 +126,16 @@ fn an_owned_root_records_its_owner_at_creation() -> Result<(), Box<dyn Error + S
         )?;
         let owner = EntityId::new();
         let mut commands = host.command_sender()?;
-        let owned = commands.create_owned_timeline("owned-root", owner)?;
-        let unowned = commands.create_timeline("unowned-root")?;
-        assert_eq!(owned.meta.owner, Some(owner));
-        assert_eq!(owned.meta.name.as_deref(), Some("owned-root"));
-        assert!(owned.meta.fork_point.is_none());
-        assert_eq!(unowned.meta.owner, None);
-        assert!(commands.records_timeline(owned.id())?);
-        drop(commands);
+        let owned_root = commands.create_owned_timeline("owned-root", owner)?;
+        let unowned_root = commands.create_timeline("unowned-root")?;
+        assert_eq!(owned_root.meta.owner, Some(owner));
+        assert_eq!(owned_root.meta.name.as_deref(), Some("owned-root"));
+        assert!(owned_root.meta.fork_point.is_none());
+        assert_eq!(unowned_root.meta.owner, None);
+        assert!(commands.records_timeline(owned_root.id())?);
         let mut reads = host.read_sender()?;
-        assert_eq!(reads.timeline(owned.id())?, Some(owned));
-        assert_eq!(reads.timeline(unowned.id())?, Some(unowned));
+        assert_eq!(reads.timeline(owned_root.id())?, Some(owned_root));
+        assert_eq!(reads.timeline(unowned_root.id())?, Some(unowned_root));
     }
     Ok(())
 }
