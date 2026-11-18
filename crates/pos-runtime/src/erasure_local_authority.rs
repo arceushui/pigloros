@@ -161,6 +161,7 @@ impl ErasureCoordinatorCompositionV1 {
                     .ok()
                     .and_then(|coordinator| {
                         let authority = Arc::new(LocalErasureAuthorityV1 {
+                            bundle_reference: bundle.reference().ok(),
                             bundle,
                             trust_expiry: inputs.trust.expiry(),
                             revoked_key_ids: inputs.trust.snapshot().revoked_key_ids.clone(),
