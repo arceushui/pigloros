@@ -970,7 +970,7 @@ fn result_receipt_pair_validation_rejects_invalid_records_before_comparing_them(
         independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
     let decoded_receipt =
         independent::SandboxProviderReceipt::from_canonical_cbor(&receipt.to_canonical_cbor()?)?;
-    decoded_result.result_digest[0] ^= 1;
+    decoded_result.request_id[0] ^= 1;
     assert_eq!(
         decoded_result.validate_receipt_lifecycle(&decoded_receipt),
         Err(independent::SandboxProviderProtocolError::DigestMismatch)
@@ -979,7 +979,7 @@ fn result_receipt_pair_validation_rejects_invalid_records_before_comparing_them(
     let decoded_result =
         independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
     let mut decoded_receipt = decoded_receipt;
-    decoded_receipt.receipt_digest[0] ^= 1;
+    decoded_receipt.trust_epoch += 1;
     assert_eq!(
         decoded_result.validate_receipt_lifecycle(&decoded_receipt),
         Err(independent::SandboxProviderProtocolError::DigestMismatch)
