@@ -437,16 +437,18 @@ fn gateway_authorization_for(
     actor: EntityId,
 ) -> Result<GatewayAuthorization, Box<dyn std::error::Error + Send + Sync>> {
     let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok()?;
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+    let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        AuthenticatedPrincipalDraftV1 {
             principal: principal.clone(),
             adapter_id: "fixture".to_owned(),
             assurance: AssuranceLevelV1::try_new(1).test_ok()?,
             issued_at: WallTime::from_micros(1),
             expires_at: WallTime::from_micros(u64::MAX),
             binding_digest: Hash::from_bytes([2; 32]),
-        })
-        .test_ok()?;
+        },
+    )
+    .test_ok()?;
     let authority_timeline = TimelineId::new();
     let registry_digest = Hash::from_bytes([3; 32]);
     let policy_revision = Hash::from_bytes([4; 32]);
@@ -487,6 +489,7 @@ fn gateway_authorization_for(
     })
     .test_ok()?;
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![authenticated.registry_binding_digest()],
         vec![grant.binding_digest().test_ok()?],

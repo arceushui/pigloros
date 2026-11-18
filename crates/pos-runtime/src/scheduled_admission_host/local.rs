@@ -32,9 +32,9 @@ use pos_core::{
     pipeline_draft_vector_digest_v1, pipeline_erasure_revision_v1, AppendDedupKey,
     AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
     AuthorityPersistenceHostV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
-    EventDraft, Hash, PersistedAuthorityV1, PipelineAdmissionFenceV1, PipelineAttemptIdV1,
-    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
+    AuthorityTrustRootSealV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, EntityId, EventDraft, Hash, PersistedAuthorityV1, PipelineAdmissionFenceV1,
+    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
     PipelineObservationAnchorV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
     PrincipalRefV1, ProposedAction, Seq, TimelineId,
 };
@@ -76,12 +76,16 @@ pub struct LocalScheduledAdmissionHostV1 {
 impl LocalScheduledAdmissionHostV1 {
     /// Return the process-wide local admission host.
     ///
+    /// The local experiment composition root passes its
+    /// [`AuthorityTrustRootSealV1`] (ADR-129 A5.9, #1374): the host builds its
+    /// session registry snapshot with it on first use.
+    ///
     /// # Errors
     /// Returns [`RuntimeError::Authority`] when the local session authority
     /// root cannot be composed.
-    pub fn shared() -> Result<&'static Self, RuntimeError> {
+    pub fn shared(seal: &AuthorityTrustRootSealV1) -> Result<&'static Self, RuntimeError> {
         SHARED
-            .get_or_init(|| Self::compose().ok())
+            .get_or_init(|| Self::compose(seal).ok())
             .as_ref()
             .ok_or(RuntimeError::Authority(
                 AuthorityErrorV1::PrincipalUnresolved,
@@ -283,7 +287,7 @@ impl LocalScheduledAdmissionHostV1 {
             .map_err(RuntimeError::AuthorityPersistence)
     }
 
-    fn compose() -> Result<Self, AuthorityErrorV1> {
+    fn compose(seal: &AuthorityTrustRootSealV1) -> Result<Self, AuthorityErrorV1> {
         let registry_digest = keyed(b"registry", &[]);
         PrincipalRefV1::try_new(LOCAL_ROOT.to_be_bytes(), TRUST_DOMAIN)
             .and_then(|principal| {
@@ -315,6 +319,7 @@ impl LocalScheduledAdmissionHostV1 {
                     .binding_digest()
                     .and_then(|binding| {
                         AuthorityRegistrySnapshotV1::try_new(
+                            seal,
                             registry_digest,
                             vec![keyed(b"authentication", &[])],
                             vec![binding],
