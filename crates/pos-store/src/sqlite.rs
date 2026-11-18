@@ -17349,6 +17349,7 @@ mod tests {
     fn sqlite_denial_record_inside_an_outer_transaction_fails_closed() {
         let mut store = tests::new_store();
         let registry = pos_core::AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             Hash::from_bytes([7; 32]),
             vec![Hash::from_bytes([8; 32])],
             Vec::new(),

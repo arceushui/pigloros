@@ -22,9 +22,9 @@
 
 use pos_core::{
     store::EventReadBounds, trusted_clock::PluginTrustWallSourceV1, AppendDedupKey,
-    AppendDedupScope, AppendIdentity, EntityId, ErasureHostErrorV1, ErasureRecoveryLimitsV1, Event,
-    Hash, PipelineAttemptIdV1, PipelineEvidenceRefV1, PipelineSecurityRevisionsV1, Seq, SeqRange,
-    TimelineId, TimelineMeta,
+    AppendDedupScope, AppendIdentity, AuthorityTrustRootSealV1, EntityId, ErasureHostErrorV1,
+    ErasureRecoveryLimitsV1, Event, Hash, PipelineAttemptIdV1, PipelineEvidenceRefV1,
+    PipelineSecurityRevisionsV1, Seq, SeqRange, TimelineId, TimelineMeta,
 };
 use pos_crypto::plugin_trust::{verify_plugin_trust_v1, VerifiedPluginTrustEvidenceV1};
 use pos_plugin_publisher::{InstalledPluginReleaseV1, RolledBackPluginReleaseV1};
@@ -98,6 +98,8 @@ fn registry_unit<T, E>(
 ///
 /// Two worlds share nothing: each opens its own hosts, stores and registry.
 pub struct CommunityEvaluationWorldV1 {
+    /// The process-wide local admission host every pass of this world is admitted by.
+    local: &'static LocalScheduledAdmissionHostV1,
     pass_host: ErasureExecutionHostV1,
     registry_host: ErasureExecutionHostV1,
     plugins: PluginRegistry,
@@ -123,26 +125,36 @@ impl CommunityEvaluationWorldV1 {
     /// (the registry's `admit`) or by [`Self::refresh()`] (`advance_policy`); until then a
     /// gate is `PolicyMismatch`, the registry's `PolicyNotAdvanced`).
     ///
+    /// The caller is the composition root of the world: it passes its
+    /// [`AuthorityTrustRootSealV1`] (ADR-129 A5.9, #1374), and the world obtains the local
+    /// admission host with it once, here.
+    ///
     /// # Errors
-    /// Returns `WorkerCrashed` (operational) when a host cannot be opened, and the registry
-    /// mapping of the refusal of `provision`.
-    pub fn open(genesis: &CommunityPluginTrustMaterialV1) -> WorldResult<Self> {
-        operational(open_parts()).and_then(|parts| {
-            let plugins =
-                PluginRegistry::new().with_erasure_gate(parts.pass_host.containment_gate());
-            let mut world = Self {
-                pass_host: parts.pass_host,
-                registry_host: parts.registry_host,
-                plugins,
-                pass_timeline: parts.pass_timeline,
-                target: ActivationTargetV1 {
-                    timeline: parts.activation,
-                    entity: EntityId::new(),
-                },
-                attempts: 0,
-            };
-            world.provision(genesis).map(|()| world)
-        })
+    /// Returns `WorkerCrashed` (operational) when the local admission host cannot be composed
+    /// or a host cannot be opened, and the registry mapping of the refusal of `provision`.
+    pub fn open(
+        genesis: &CommunityPluginTrustMaterialV1,
+        seal: &AuthorityTrustRootSealV1,
+    ) -> WorldResult<Self> {
+        operational(LocalScheduledAdmissionHostV1::shared(seal))
+            .and_then(|local| operational(open_parts()).map(|parts| (local, parts)))
+            .and_then(|(local, parts)| {
+                let plugins =
+                    PluginRegistry::new().with_erasure_gate(parts.pass_host.containment_gate());
+                let mut world = Self {
+                    local,
+                    pass_host: parts.pass_host,
+                    registry_host: parts.registry_host,
+                    plugins,
+                    pass_timeline: parts.pass_timeline,
+                    target: ActivationTargetV1 {
+                        timeline: parts.activation,
+                        entity: EntityId::new(),
+                    },
+                    attempts: 0,
+                };
+                world.provision(genesis).map(|()| world)
+            })
     }
 
     /// The registry the caller registers its Drivers in.
@@ -310,7 +322,7 @@ impl CommunityEvaluationWorldV1 {
     ) -> WorldResult<CommunityPassOutcomeV1> {
         self.attempts += 1;
         let (attempt, timeline) = (self.attempts, self.pass_timeline);
-        observe(&mut self.pass_host, &self.plugins, timeline)
+        observe(self.local, &mut self.pass_host, &self.plugins, timeline)
             .and_then(|observed| {
                 admission_for(attempt, &observed).map(|admission| (observed, admission))
             })
@@ -439,17 +451,16 @@ fn read_all(host: &mut ErasureExecutionHostV1, timeline: TimelineId) -> WorldRes
 /// first observation binds the store to the local admission host), the Logical Head, the
 /// committed prefix and the Fork ancestry.
 fn observe(
+    local: &LocalScheduledAdmissionHostV1,
     host: &mut ErasureExecutionHostV1,
     plugins: &PluginRegistry,
     timeline: TimelineId,
 ) -> WorldResult<Observed> {
     let observed = host.command_sender().and_then(|mut sender| {
         sender.with_scheduled_admission(|ports| {
-            LocalScheduledAdmissionHostV1::shared().and_then(|local| {
-                local
-                    .observe(plugins, ports, timeline)
-                    .map(|revisions| (revisions, local.authority_grant()))
-            })
+            local
+                .observe(plugins, ports, timeline)
+                .map(|revisions| (revisions, local.authority_grant()))
         })
     });
     flat_fault(observed).and_then(|(revisions, authority_grant)| {

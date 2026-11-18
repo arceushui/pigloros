@@ -71,9 +71,7 @@ fn human_admission(
     observed: u64,
     revisions: PipelineSecurityRevisionsV1,
 ) -> HumanActionAdmissionV1 {
-    let grant = LocalScheduledAdmissionHostV1::shared()
-        .test_ok()
-        .authority_grant();
+    let grant = local_admission_host().test_ok().authority_grant();
     HumanActionAdmissionV1 {
         attempt_id: PipelineAttemptIdV1::try_new([key; 16]).test_ok(),
         idempotency: AppendIdentity::new(
@@ -124,7 +122,7 @@ fn host_fixture(
     let approvals = Arc::new(AtomicUsize::new(0));
     let mut registry = gated_registry(None);
     register_action_plugin(&mut registry, &approvals, driver);
-    let revisions = LocalScheduledAdmissionHostV1::shared()
+    let revisions = local_admission_host()
         .test_ok()
         .observe(&registry, store.as_mut(), timeline)
         .test_ok();
@@ -258,7 +256,7 @@ pub fn human_admission_receipt() -> Capture {
         let mut fixture = host_fixture(backend, None);
         let actor = EntityId::new();
         let head = fixture.store.logical_head(fixture.timeline).test_ok();
-        let admitted = LocalScheduledAdmissionHostV1::shared()
+        let admitted = local_admission_host()
             .test_ok()
             .admit_action(
                 &fixture.registry,
@@ -294,9 +292,7 @@ pub fn store_failure_precedence() -> Capture {
         let mut fixture = host_fixture(backend, None);
         let timeline = fixture.timeline;
         let revisions = fixture.revisions;
-        let grant = LocalScheduledAdmissionHostV1::shared()
-            .test_ok()
-            .authority_grant();
+        let grant = local_admission_host().test_ok().authority_grant();
         let mut forged = revisions.as_draft();
         forged.authority = Hash::from_bytes([99; 32]);
         let forged = PipelineSecurityRevisionsV1::try_from_draft(forged).test_ok();
@@ -505,14 +501,12 @@ pub fn lost_acknowledgement_recovery() -> Capture {
                 Some(Box::new(driver)),
             )
             .test_ok();
-        let revisions = LocalScheduledAdmissionHostV1::shared()
+        let revisions = local_admission_host()
             .test_ok()
             .observe(&registry, backend.as_mut(), timeline)
             .test_ok();
         let (head, _) = stage(&mut registry, backend.as_ref(), timeline, None).test_ok();
-        let grant = LocalScheduledAdmissionHostV1::shared()
-            .test_ok()
-            .authority_grant();
+        let grant = local_admission_host().test_ok().authority_grant();
         let admission = ScheduledPassAdmissionV1 {
             attempt_id: PipelineAttemptIdV1::try_new([9; 16]).test_ok(),
             idempotency: AppendIdentity::new(
@@ -625,7 +619,7 @@ pub fn replay_never_resubmits() -> Capture {
         let mut fixture = host_fixture(backend, Some(driver));
         let timeline = fixture.timeline;
         let head = fixture.store.logical_head(timeline).test_ok();
-        LocalScheduledAdmissionHostV1::shared()
+        local_admission_host()
             .test_ok()
             .admit_action(
                 &fixture.registry,
@@ -750,4 +744,11 @@ pub fn evaluation_non_authority() -> Capture {
         );
     }
     capture
+}
+
+/// The process-wide local admission host, opened with a test composition-root seal.
+fn local_admission_host() -> Result<&'static LocalScheduledAdmissionHostV1, RuntimeError> {
+    LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
 }
