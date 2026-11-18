@@ -10,6 +10,7 @@ check runs from the sourced scripts/install-pinned-nix.sh against a stub
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -321,6 +322,22 @@ class ProducerShellTests(unittest.TestCase):
         self.shell.stub("cat", "exit 1")
         result = self.record(process.pid)
         self.assertEqual(result.returncode, 1)
+
+    def test_readback_records_digests_or_the_whole_read_error(self):
+        import check_qemu_closure_evidence as checker
+        root = self.base / "root"
+        (root / "usr/share/pigloros").mkdir(parents=True)
+        expected = checker.readback_bytes()
+        (root / "usr/share/pigloros/readback").write_bytes(expected)
+        self.assertEqual(self.shell.out(f'readback "{root}"', COLLECTOR), (
+            f"file\t0\t{hashlib.sha256(expected).hexdigest()}\n"
+            f"block-0\t0\t{hashlib.sha256(expected[:4096]).hexdigest()}\n"))
+        # A failed read keeps its whole message, with tabs and newlines flattened.
+        self.shell.stub("sha256sum", "/bin/cat >/dev/null\n"
+                                     "printf 'sha256sum: -: Input/output error\\n\\textra\\n' >&2; exit 1")
+        lines = self.shell.out(f'readback "{root}"', COLLECTOR).splitlines()
+        self.assertEqual(lines[0], "file\t1\tsha256sum: -: Input/output error  extra")
+        self.assertTrue(lines[1].startswith("block-0\t1\t"), lines)
 
     def test_producer_and_checker_hash_the_same_inputs(self):
         import check_qemu_closure_evidence as checker

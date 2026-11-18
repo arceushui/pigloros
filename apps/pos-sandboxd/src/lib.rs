@@ -59,6 +59,14 @@ pub mod provider_lifecycle;
 mod release_barrier;
 #[cfg(target_os = "linux")]
 mod restart;
+// The #444 QEMU evidence guest's driver, compiled only with `test-support`
+// and only for the two architectures the evidence guest runs on.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    feature = "test-support"
+))]
+pub mod packaged_conformance;
 #[cfg(target_os = "linux")]
 mod root_attachment;
 #[cfg(target_os = "linux")]
