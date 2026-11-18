@@ -45,6 +45,16 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
   network. Air-Gapped accepts no grant, so it refuses OwnTracks, a non-loopback bind and any
   network `LEDGER_SOURCE`; `LEDGER_SOURCE` must always be a local path. Each refusal happens before
   the store, the ledger or a listener opens.
+- **Air-Gapped serves only without a network path (ADR-135 §4).** Before the store, ledger or
+  listeners open, `air-gapped-no-route` reads this process's `/proc/self` facts and refuses unless
+  its network namespace holds only `lo` (plus the kernel's fallback tunnel devices, without
+  addresses, routes or multicast memberships), it holds none of `CAP_NET_ADMIN`, `CAP_NET_RAW` and
+  `CAP_SYS_ADMIN` (nor keeps them in its bounding set without `NoNewPrivs`), and a seccomp filter
+  is installed. A missing or unparsable fact refuses (a kernel without `/proc/net/igmp` included);
+  with IPv6 disabled the IPv6 files count as empty. Run it in a dedicated namespace, for example a
+  unit with `PrivateNetwork=yes`, `NoNewPrivileges=yes`, an empty `CapabilityBoundingSet=` and
+  `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`; HTTP clients join that namespace
+  (`JoinsNamespaceOf=`). The tests run in the equivalent `scripts/air-gapped-namespace.sh` shape.
 - **The store records its mode.** The first `serve` of an empty SQLite store binds it to the
   profile. A later `serve` must name the same profile; a populated store that no `serve` bound is
   refused (recreate development stores). Only `migrate-mode` changes the mode, while no other
