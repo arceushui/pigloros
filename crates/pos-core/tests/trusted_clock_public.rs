@@ -103,7 +103,10 @@ fn authenticated(byte: u8, expires_at: u64) -> AuthenticatedPrincipalResultV1 {
         expires_at: WallTime::from_micros(expires_at),
         binding_digest: Hash::from_bytes([7; 32]),
     };
-    ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
+    ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        draft,
+    ))
 }
 
 fn consent_reference(valid_until: u64) -> ConsentGrantRefV1 {
