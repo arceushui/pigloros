@@ -30,6 +30,9 @@ required-features = ["test-support"]
 
 [dependencies]
 blake3 = { workspace = true }
+# Strict decoding of the SPI1 provider installation (ADR-069 R11 §4.2); only
+# byte-identical deterministic re-encodings are accepted.
+ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { version = "0.3", default-features = false }
 # Safe `execveat` for the launcher's final release step (Q9.12). Only the
@@ -76,6 +79,7 @@ zlink = { version = "=0.7.1", default-features = false, features = [
   "tokio",
   "tracing",
 ] }
+zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # In-process netlink encoding and decoding for the Local attempt namespace
