@@ -56,6 +56,8 @@ mod provider_installation;
 #[doc(hidden)]
 pub mod provider_lifecycle;
 #[cfg(target_os = "linux")]
+mod provider_runtime;
+#[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]
 mod restart;
@@ -376,6 +378,8 @@ pub use provider_barrier::{
 pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};
 #[cfg(target_os = "linux")]
 pub use provider_lifecycle::SystemdProviderLifecycle;
+#[cfg(target_os = "linux")]
+pub use provider_runtime::{start_runtime_authority, ProviderStartupError};
 #[cfg(target_os = "linux")]
 pub use release_barrier::{
     release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
