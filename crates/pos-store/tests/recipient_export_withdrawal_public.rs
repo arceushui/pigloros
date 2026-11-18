@@ -222,7 +222,7 @@ fn elxw1(
 ) -> TestResult<Vec<u8>> {
     let (owner, length, digest, directory, final_identity): (
         String,
-        u64,
+        i64,
         Vec<u8>,
         Vec<u8>,
         Vec<u8>,
@@ -248,7 +248,7 @@ fn elxw1(
         timeline_id: timeline,
         grantee_owner: OwnerIdV1::new(owner)?,
         ciphertext_digest: Hash::from_bytes(digest.as_slice().try_into()?),
-        ciphertext_length: length,
+        ciphertext_length: u64::try_from(length)?,
         directory_identity: directory.as_slice().try_into()?,
         final_identity: final_identity.as_slice().try_into()?,
     }

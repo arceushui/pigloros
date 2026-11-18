@@ -1987,7 +1987,7 @@ fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreEr
                 target BLOB NOT NULL UNIQUE CHECK (length(target) = 32),
                 owner_id TEXT NOT NULL,
                 timeline_id TEXT NOT NULL,
-                ciphertext_length INTEGER NOT NULL,
+                ciphertext_length INTEGER NOT NULL CHECK (ciphertext_length >= 0),
                 ciphertext_digest BLOB NOT NULL CHECK (length(ciphertext_digest) = 32),
                 directory_identity BLOB NULL
                     CHECK (directory_identity IS NULL OR length(directory_identity) = 16),

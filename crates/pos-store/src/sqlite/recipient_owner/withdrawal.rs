@@ -81,7 +81,7 @@ pub enum RecipientCustodyAttachErrorV1 {
 struct WithdrawalRowV1 {
     owner_id: String,
     timeline_id: String,
-    ciphertext_length: u64,
+    ciphertext_length: i64,
     ciphertext_digest: Vec<u8>,
     directory_identity: Option<Vec<u8>>,
     final_identity: Option<Vec<u8>>,
@@ -480,16 +480,19 @@ impl SqliteStore {
                 row.directory_identity
                     .zip(row.final_identity.as_deref().and_then(file_identity))
                     .zip(staging_identity)
+                    .zip(u64::try_from(row.ciphertext_length).ok())
             })
-            .and_then(|((directory, final_identity), staging_identity)| {
-                self.usable_custody(&row.owner_id, Some(directory.as_slice()))
-                    .map(|owner| CapturedObjectsV1 {
-                        owner,
-                        final_identity,
-                        ciphertext_length: row.ciphertext_length,
-                        staging_identity,
-                    })
-            })
+            .and_then(
+                |(((directory, final_identity), staging_identity), ciphertext_length)| {
+                    self.usable_custody(&row.owner_id, Some(directory.as_slice()))
+                        .map(|owner| CapturedObjectsV1 {
+                            owner,
+                            final_identity,
+                            ciphertext_length,
+                            staging_identity,
+                        })
+                },
+            )
     }
 }
 
@@ -623,7 +626,7 @@ fn classify_withdrawal_row(
         )),
         (None, _) => capture_subject(
             row.timeline_id,
-            Some(row.ciphertext_length),
+            u64::try_from(row.ciphertext_length).ok(),
             &row.ciphertext_digest,
         )
         .map(RetractionV1::Capture),
@@ -831,7 +834,8 @@ fn upsert_capture(
                 target.digest().as_slice(),
                 grantee_owner.as_str(),
                 subject.timeline_id,
-                subject.ciphertext_length,
+                // Always `Some`: the length was read from an INTEGER column.
+                i64::try_from(subject.ciphertext_length).ok(),
                 subject.ciphertext_digest.as_bytes().as_slice(),
                 capture.directory_identity.map(Vec::from),
                 capture.final_identity.map(file_identity_bytes),
@@ -854,7 +858,7 @@ fn first_withdrawal(
     let agrees = row.objects_deleted
         && row.capture_status == CAPTURED
         && row.owner_id == binding.grantee_owner.as_str()
-        && row.ciphertext_length == binding.ciphertext_length
+        && u64::try_from(row.ciphertext_length).ok() == Some(binding.ciphertext_length)
         && row.ciphertext_digest.as_slice() == binding.ciphertext_digest.as_bytes()
         && row.directory_identity.as_deref() == Some(binding.directory_identity.as_slice())
         && row.final_identity.as_deref() == Some(binding.final_identity.as_slice())
@@ -967,7 +971,7 @@ mod tests {
     ) -> RecipientTestResult<Vec<u8>> {
         let (owner, length, digest, directory, final_identity): (
             String,
-            u64,
+            i64,
             Vec<u8>,
             Vec<u8>,
             Vec<u8>,
@@ -993,7 +997,7 @@ mod tests {
             timeline_id: timeline,
             grantee_owner: OwnerIdV1::new(owner)?,
             ciphertext_digest: Hash::from_bytes(digest.as_slice().try_into()?),
-            ciphertext_length: length,
+            ciphertext_length: u64::try_from(length)?,
             directory_identity: directory.as_slice().try_into()?,
             final_identity: final_identity.as_slice().try_into()?,
         }
