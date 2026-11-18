@@ -732,6 +732,12 @@ pub struct LocalErasureSubmissionBindingV1 {
     pub(crate) preparation: Arc<dyn LocalErasurePreparationV1>,
 }
 
+/// What the Local authority prepares for one freeze: the `CA(ERFA1-AUTH)`
+/// body digest a purpose-0 ELS1 must sign and the objects to retain before
+/// the freeze commits, or `None` when the freeze commits
+/// `Rejected(ScopeInvalid)` without a signature.
+pub(crate) type PreparedFreezeV1 = Option<(ErasureReferenceV1, Vec<Vec<u8>>)>;
+
 /// The pure Local erasure evaluations the host asks of the Local authority
 /// besides the authority trait (ADR-136 §5 and §6). They read only the
 /// host-built view.
@@ -779,7 +785,7 @@ pub(crate) trait LocalErasurePreparationV1: Send + Sync {
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
-    ) -> Result<Option<(ErasureReferenceV1, Vec<Vec<u8>>)>, ErasureErrorV1>;
+    ) -> Result<PreparedFreezeV1, ErasureErrorV1>;
 
     /// The attempt of the frozen request `erq1` that is due now, with the
     /// ELB1 bytes it pins, which must be retained before its admission;

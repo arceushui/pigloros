@@ -6902,17 +6902,20 @@ fn straight_run(store: &LocalStore) -> TestResult<(ErasureReceiptV1, Vec<Erasure
     Ok((receipt, history(&mut host, request)?))
 }
 
+/// The steps, the receipt and the ERS1 history of one reopened run.
+type ReopenedRun = (
+    Vec<LocalErasureStepV1>,
+    ErasureReceiptV1,
+    Vec<ErasureReferenceV1>,
+);
+
 /// Step request 1 of `store` on a host reopened before every step, after
 /// `interrupt` ran once on a fresh host before the first step, and return
 /// the steps, the receipt and the ERS1 history.
 fn reopened_run(
     store: &LocalStore,
     interrupt: impl FnOnce(&mut ErasureExecutionHostV1) -> TestResult,
-) -> TestResult<(
-    Vec<LocalErasureStepV1>,
-    ErasureReceiptV1,
-    Vec<ErasureReferenceV1>,
-)> {
+) -> TestResult<ReopenedRun> {
     let request = request_of(1)?;
     let case = driver_case()?;
     interrupt(&mut store.host(&case, 4_096)?)?;
