@@ -47,6 +47,8 @@ mod local_network;
 mod namespace_network;
 #[cfg(target_os = "linux")]
 mod provider_barrier;
+#[cfg(target_os = "linux")]
+mod provider_installation;
 // Public module reachability lets the provider-unit types that `system_bus`
 // shares with the lifecycle adapter stay `pub(crate)` without Clippy's
 // `redundant_pub_crate` lint.
@@ -362,6 +364,8 @@ pub use provider_barrier::{
     fresh_nonce, AuthorityCheck, BarrierError, BarrierEvidence, ObservedReadback,
     ObservedReadbackUnavailable, ProviderReleaseBarrier, RecheckRefusal, UnitIdentitySource,
 };
+#[cfg(target_os = "linux")]
+pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};
 #[cfg(target_os = "linux")]
 pub use provider_lifecycle::SystemdProviderLifecycle;
 #[cfg(target_os = "linux")]

@@ -18,7 +18,12 @@ path = "src/main.rs"
 [dependencies]
 blake3 = { workspace = true }
 ciborium = { workspace = true }
-pos-core = { path = "../../crates/pos-core", features = ["fixture-instant"] }
+# The adapter is the composition root of its evaluation worlds: `main` mints the
+# trust-root seal once (ADR-129 A5.9, #1374; scripts/check_authority_trust_root_seal.py).
+pos-core = { path = "../../crates/pos-core", features = [
+  "authority-trust-root",
+  "fixture-instant",
+] }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-plugin-release = { path = "../../crates/pos-plugin-release" }
 pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor" }
