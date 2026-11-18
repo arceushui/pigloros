@@ -1478,14 +1478,13 @@ fn refused_before_the_subject_checks(
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
         Err(LocalErasureSubmitErrorV1::Host(error))
     );
-    let view = host.authority_view()?;
+    // The host's own authority view reads no object, so read the store.
+    let sqlite = store.sqlite()?;
     for (head, epoch) in [(store.head, 0), (store.head + 1, 1)] {
-        assert_eq!(
-            view.retained_object(authorization_at(2, head, epoch)?.reference()?),
-            None
-        );
+        let authorization = authorization_at(2, head, epoch)?.reference()?;
+        assert!(ErasurePersistencePortV1::read_object(&sqlite, authorization).is_err());
     }
-    assert_eq!(view.retained_object(idempotency(2)?.reference()?), None);
+    assert!(ErasurePersistencePortV1::read_object(&sqlite, idempotency(2)?.reference()?).is_err());
     Ok(())
 }
 
