@@ -1241,3 +1241,29 @@ fn a_target_scan_reads_at_most_one_category_of_publications() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn a_withdrawal_row_with_a_malformed_timeline_fails_closed() -> TestResult {
+    let (mut fixture, (timeline, export_id)) = published()?;
+    let grantee = fixture.grantee_owner();
+    fixture
+        .store
+        .begin_recipient_export_withdrawal(export_id, &grantee)?;
+    let target = local_erasure_export_recipient_v1(export_id, &grantee)?;
+    rusqlite::Connection::open(fixture.database())?
+        .execute_batch("UPDATE recipient_export_withdrawals_v1 SET timeline_id = 'x'")?;
+    assert_eq!(
+        fixture
+            .store
+            .recipient_export_by_target(target, &[timeline]),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .erasure_authority_snapshot_with_limits(limits()?, &[target])
+            .err(),
+        Some(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
