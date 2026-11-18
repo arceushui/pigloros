@@ -319,7 +319,12 @@ impl ErasureCommandSenderV1<'_> {
                     .iter()
                     .map(|request| self.committed_signatures(*request))
                     .collect::<Option<Vec<_>>>()
-                    .map(|lists| (requests, lists.into_iter().flatten().collect()))
+                    .map(|lists| {
+                        (
+                            requests,
+                            lists.into_iter().flatten().collect::<BTreeSet<_>>(),
+                        )
+                    })
             })
             .and_then(|(requests, committed)| {
                 let store = self.host.store.host_store();
