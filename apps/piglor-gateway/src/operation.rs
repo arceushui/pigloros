@@ -273,11 +273,13 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
         T: Send + 'static,
     {
         let permit = self.authorize(gateway, target_timeline).await?;
-        let actor = permit
-            .decision()
-            .map(|decision| AdmittedActorV1(decision.actor_entity_id()));
         let gateway = gateway.clone();
         tokio::spawn(async move {
+            // The permit moves into the task whole: it holds the authority
+            // fence until the operation completes.
+            let actor = permit
+                .decision()
+                .map(|decision| AdmittedActorV1(decision.actor_entity_id()));
             let output = operation(gateway, actor).await;
             drop(permit);
             output
