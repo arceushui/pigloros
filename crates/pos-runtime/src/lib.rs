@@ -83,10 +83,12 @@ pub use erasure_host::{
 };
 #[cfg(target_os = "linux")]
 pub use erasure_local_authority::{
-    compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
-    LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1, LocalErasureExecutorV1,
-    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
-    LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
+    compiled_local_erasure_policy_v1, local_erasure_execution_binding_v1,
+    LocalErasureClassificationRowV1, LocalErasureCompositionErrorV1,
+    LocalErasureCompositionInputsV1, LocalErasureExecutorV1, LOCAL_ERASURE_AUTO_RETRY_MAX_V1,
+    LOCAL_ERASURE_CLASSIFICATION_COUNT_V1, LOCAL_ERASURE_CLASSIFICATION_V1,
+    LOCAL_ERASURE_EXECUTOR_ID_V1, LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1,
+    LOCAL_ERASURE_EXECUTOR_VERSION_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
     LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_QUOTA_ATTEMPTS_V1,
     LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
 };

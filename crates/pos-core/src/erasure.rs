@@ -3982,6 +3982,7 @@ pub use local_records::{
     ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
     LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
+pub use local_records::{local_erasure_executor_version_v1, local_erasure_host_timeline_v1};
 /// The committed ERSC1 and ERSE1 chain of one request, read through its
 /// current manifest and scope index without validating the record.
 ///
