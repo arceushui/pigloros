@@ -153,7 +153,7 @@ struct WorkerSubject {
 impl WorkerSubject {
     fn new(corpus: &Corpus) -> TestResult<Self> {
         Ok(Self {
-            runner: SupervisorRunnerV1::with_program(PathBuf::from(WORKER))
+            runner: SupervisorRunnerV1::with_program(PathBuf::from(WORKER), &TEST_TRUST_ROOT)
                 .ok_or("the worker path must be absolute")?,
             subject_digest: corpus.subject_digest,
             executed: 0,
@@ -335,3 +335,7 @@ fn n6_a_missing_or_mismatched_plugin_executor_launches_no_worker() -> TestResult
     }
     Ok(())
 }
+
+/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
+const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
