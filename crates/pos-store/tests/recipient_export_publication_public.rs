@@ -647,6 +647,10 @@ fn erasure_publication_reads_fail_closed_for_malformed_catalog_rows() -> TestRes
 
 /// Rewrite exactly one catalog column of one publication, keeping its
 /// ciphertext, length and digest intact.
+///
+/// No store may hold the database open while this runs: a foreign commit
+/// moves `PRAGMA data_version`, and a store with a bound erasure gate then
+/// refuses every fenced read.
 fn tamper_catalog_column(
     database: &std::path::Path,
     export_id: [u8; 16],
