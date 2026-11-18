@@ -48,7 +48,9 @@ Do **not**:
 
 ## Who can merge
 
-Merging is a maintainer decision, not a CI check. Nothing in the repository's
+Merging is a maintainer decision, not a CI check. Agents that add the label
+act on the maintainer's standing instruction through the maintainer's own
+account, so they add no collaborator or bot. Nothing in the repository's
 workflows approves or blocks a pull request for its author; the queue entry
 point is restricted instead:
 

@@ -9,14 +9,20 @@ AGENTS.md):
   ``cargo --version`` may run. The versioned pre-commit hook still runs its
   own Cargo checks, because the hook is not a Bash tool call.
 * Skipping hooks (``--no-verify``, ``git commit -n``, overriding
-  ``core.hooksPath``), rewriting pushed history (force-push, ``+refspec``,
-  ``git rebase``, ``git pull --rebase``, ``git commit --amend``) need the
-  owner's approval, so the hook asks instead of allowing. Bring a branch up to
-  date with ``git fetch origin && git merge origin/main``.
+  ``core.hooksPath``) and rewriting pushed history (force-push, ``+refspec``,
+  ``--mirror``, ``git rebase``, ``git pull --rebase``, rebase-on-pull config,
+  ``git commit --amend``) need the owner's approval, so the hook asks. Bring a
+  branch up to date with ``git fetch origin && git merge origin/main``.
 
-The hook reads the PreToolUse JSON on stdin and prints a decision as JSON, or
-nothing when the command is allowed. It never inspects quoted arguments or
-here-document bodies as commands, so commit messages that mention Cargo pass.
+Commands are tokenized like a shell: words inside quotes, comments and quoted
+here-document bodies are arguments, not commands, so a commit message that
+mentions Cargo passes. Command and process substitutions are checked wherever
+they expand (bare, inside double quotes, and in unquoted here-documents).
+Common wrappers (``env``, ``sudo``, ``nice``, ``timeout``, ``xargs``, ``time``,
+``stdbuf``, ``watch``, ``eval``, ``bash -c``, ``rustup run``, ``find -exec``)
+are unwrapped. Not covered: scripts a command runs from a file (``bash x.sh``,
+``source``, ``make``), and remote commands (``ssh``), which do not run Cargo on
+this machine's shell directly. A command the guard cannot parse asks.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import sys
 
 DENY = "deny"
 ASK = "ask"
+Verdict = "tuple[str, str] | None"  # annotation alias (postponed evaluation)
 
 CARGO_ALLOWED = {"generate-lockfile", "--version", "-V"}
 CARGO_REASON = (
@@ -48,28 +55,128 @@ REWRITE_REASON = (
 )
 PARSE_REASON = "The guard could not parse this command; confirm it by hand."
 
-# Wrappers that run their remaining arguments as a command.
-PASSTHROUGH = {"env", "sudo", "time", "nice", "nohup", "command", "exec", "builtin"}
-SHELLS = {"bash", "sh", "zsh", "dash"}
-OPERATORS = {"&&", "||", ";", "|", "&", "|&", ";;", "(", ")", "\n"}
-ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+OPERATORS = {"&&", "||", ";", "|", "&", "|&", ";;", ";&", "(", ")", "\n"}
+KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "{", "!"}
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 
+# Wrappers that run their remaining arguments as a command, with the options
+# that take a separate value word. A ``--long=value`` or attached short value
+# never consumes the next word.
+WRAPPERS: dict[str, set[str]] = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir",
+             "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type",
+             "-U", "--other-user", "-T", "--command-timeout"},
+    "nice": {"-n", "--adjustment"},
+    "nohup": set(),
+    "command": set(),
+    "builtin": set(),
+    "exec": {"-a"},
+    "time": {"-f", "--format", "-o", "--output"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "ionice": {"-c", "--class", "-n", "--classdata", "-p", "--pid"},
+    "xargs": {"-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-L",
+              "--max-lines", "-n", "--max-args", "-P", "--max-procs", "-s",
+              "--max-chars", "--process-slot-var"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "watch": {"-n", "--interval", "-d", "--differences", "-q", "--equexit"},
+}
+# Wrappers whose first positional argument is not the command.
+POSITIONAL_PREFIX = {"timeout": 1}
+# Wrappers that join their arguments into one shell string.
+STRING_WRAPPERS = {"eval", "watch"}
 
-def strip_heredocs(command: str) -> str:
-    """Drop here-document bodies so their text is never read as commands."""
-    lines = command.split("\n")
+GIT_GLOBAL_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                            "--config-env", "--super-prefix", "--exec-path"}
+# Per-subcommand options that take a separate value word.
+GIT_VALUE_OPTIONS: dict[str, set[str]] = {
+    "commit": {"-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c",
+               "--reedit-message", "-t", "--template", "--author", "--date",
+               "--cleanup", "--fixup", "--squash", "--trailer", "-S", "--gpg-sign",
+               "--pathspec-from-file"},
+    "merge": {"-m", "--message", "-F", "--file", "-s", "--strategy", "-X",
+              "--strategy-option", "--into-name", "--cleanup", "-S", "--gpg-sign"},
+    "push": {"--repo", "-o", "--push-option", "--receive-pack", "--exec"},
+    "pull": {"-s", "--strategy", "-X", "--strategy-option", "--depth", "--upload-pack",
+             "-j", "--jobs", "-o", "--server-option"},
+    "rebase": {"-s", "--strategy", "-X", "--strategy-option", "--onto", "-x",
+               "--exec", "--whitespace", "-C"},
+}
+# Long options whose abbreviations git also accepts.
+NO_VERIFY_OPTIONS = {"--no-verify"}
+FORCE_OPTIONS = {"--force", "--force-with-lease", "--mirror"}
+REBASE_CONFIG = re.compile(r"^(pull\.rebase|branch\..+\.rebase)$", re.IGNORECASE)
+REBASE_CONTROL = {"--abort", "--quit", "--continue", "--skip", "--edit-todo",
+                  "--show-current-patch"}
+
+
+def merge_verdicts(*verdicts: Verdict) -> Verdict:
+    result = None
+    for verdict in verdicts:
+        if verdict and (result is None or verdict[0] == DENY):
+            result = verdict
+    return result
+
+
+def split_heredocs(command: str) -> tuple[str, list[str]]:
+    """Drop here-document bodies; return expanding bodies separately."""
     out: list[str] = []
-    pending: list[tuple[bool, str]] = []
-    for line in lines:
+    expanding: list[str] = []
+    pending: list[tuple[bool, bool, str]] = []
+    for line in command.split("\n"):
         if pending:
-            dash, tag = pending[0]
+            dash, quoted, tag = pending[0]
             if (line.lstrip("\t") if dash else line) == tag:
                 pending.pop(0)
+            elif not quoted:
+                expanding.append(line)
             continue
         out.append(line)
-        pending.extend((m.group(1) == "-", m.group(3)) for m in HEREDOC.finditer(line))
-    return "\n".join(out)
+        pending.extend(
+            (m.group(1) == "-", bool(m.group(2)), m.group(3)) for m in HEREDOC.finditer(line)
+        )
+    return "\n".join(out), expanding
+
+
+def substitutions(text: str) -> list[str]:
+    """Bodies of $(...), <(...), >(...) and `...` that the shell expands.
+
+    Single-quoted text is literal; double-quoted text still expands.
+    """
+    bodies: list[str] = []
+    index, quote, length = 0, "", len(text)
+    while index < length:
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            quote = "" if quote == '"' else '"'
+        elif char == "'" and not quote:
+            quote = "'"
+        elif char in "$<>" and text.startswith("(", index + 1):
+            depth, end = 1, index + 2
+            while end < length and depth:
+                depth += {"(": 1, ")": -1}.get(text[end], 0)
+                end += 1
+            bodies.append(text[index + 2:end - 1])
+            index = end
+            continue
+        elif char == "`":
+            end = text.find("`", index + 1)
+            end = length if end == -1 else end
+            bodies.append(text[index + 1:end])
+            index = end + 1
+            continue
+        index += 1
+    return bodies
 
 
 def tokenize(command: str) -> list[str]:
@@ -90,73 +197,49 @@ def segments(tokens: list[str]) -> list[list[str]]:
     return [segment for segment in result if segment]
 
 
-def strip_wrappers(words: list[str]) -> list[str]:
-    while words:
-        head = os.path.basename(words[0])
-        if ASSIGNMENT.match(words[0]):
+def skip_options(words: list[str], value_options: set[str]) -> list[str]:
+    while words and words[0].startswith("-") and words[0] != "-":
+        option = words[0]
+        words = words[1:]
+        if option == "--":
+            break
+        if option in value_options and words:
             words = words[1:]
-        elif head in PASSTHROUGH:
-            words = words[1:]
-            while words and (words[0].startswith("-") or ASSIGNMENT.match(words[0])):
-                words = words[1:]
-        elif head == "timeout":
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                words = words[1:]
-            words = words[1:]  # the duration
-        elif head == "rustup" and len(words) > 2 and words[1] == "run":
-            words = words[3:]
-        else:
-            return words
     return words
 
 
-def check_cargo(args: list[str]) -> tuple[str, str] | None:
-    rest = [word for word in args if not word.startswith("+")]
-    if rest and rest[0] in CARGO_ALLOWED:
+def check_find(words: list[str], depth: int) -> Verdict:
+    verdicts = []
+    for index, word in enumerate(words):
+        if word in {"-exec", "-execdir", "-ok", "-okdir"}:
+            command = []
+            for item in words[index + 1:]:
+                if item in {";", "+", "\\;"}:
+                    break
+                command.append(item)
+            verdicts.append(check_words(command, depth + 1))
+    return merge_verdicts(*verdicts)
+
+
+def check_words(words: list[str], depth: int = 0) -> Verdict:
+    if depth > 4:
         return None
-    return DENY, CARGO_REASON
-
-
-GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
-
-
-def check_git(args: list[str]) -> tuple[str, str] | None:
-    while args and args[0].startswith("-"):
-        option = args[0]
-        if option == "-c" and len(args) > 1 and args[1].lower().startswith("core.hookspath"):
-            return ASK, NO_VERIFY_REASON
-        args = args[2:] if option in GIT_VALUE_OPTIONS else args[1:]
-    if not args:
-        return None
-    sub, rest = args[0], args[1:]
-    flags = [word for word in rest if word.startswith("-")]
-    short = "".join(word[1:] for word in flags if not word.startswith("--"))
-    if "--no-verify" in flags or (sub == "commit" and "n" in short):
-        return ASK, NO_VERIFY_REASON
-    if sub == "config" and any(word.lower() == "core.hookspath" for word in rest):
-        return ASK, NO_VERIFY_REASON
-    if sub == "rebase" and not {"--abort", "--quit"} & set(flags):
-        return ASK, REWRITE_REASON
-    rebase_pull = "--rebase" in flags or "r" in short or any(
-        word.startswith("--rebase=") and word != "--rebase=false" for word in flags
-    )
-    if sub == "pull" and rebase_pull:
-        return ASK, REWRITE_REASON
-    if sub == "commit" and "--amend" in flags:
-        return ASK, REWRITE_REASON
-    if sub == "push":
-        forced = any(
-            word in {"--force", "--force-if-includes"} or word.startswith("--force-with-lease")
-            for word in flags
-        )
-        if forced or "f" in short or any(word.startswith("+") for word in rest):
-            return ASK, REWRITE_REASON
-    return None
-
-
-def check_words(words: list[str], depth: int = 0) -> tuple[str, str] | None:
-    words = strip_wrappers(words)
+    while words:
+        head = os.path.basename(words[0])
+        if words[0] in KEYWORDS or ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        elif head in STRING_WRAPPERS:
+            rest = skip_options(words[1:], WRAPPERS.get(head, set()))
+            return check_command(" ".join(rest), depth + 1)
+        elif head == "env" and any(w in {"-S", "--split-string"} for w in words[1:2]):
+            return check_command(words[2] if len(words) > 2 else "", depth + 1)
+        elif head in WRAPPERS:
+            words = skip_options(words[1:], WRAPPERS[head])
+            words = words[POSITIONAL_PREFIX.get(head, 0):]
+        elif head == "rustup" and len(words) > 2 and words[1] == "run":
+            words = words[3:]
+        else:
+            break
     if not words:
         return None
     head = os.path.basename(words[0])
@@ -164,35 +247,125 @@ def check_words(words: list[str], depth: int = 0) -> tuple[str, str] | None:
         return check_cargo(words[1:] if head == "cargo" else ["<plugin>"])
     if head == "git":
         return check_git(words[1:])
-    if head in SHELLS and depth < 3:
+    if head == "find":
+        return check_find(words[1:], depth)
+    if head in SHELLS or head == "script":
         for index, word in enumerate(words[1:-1], start=1):
-            short_c = word.startswith("-") and not word.startswith("--") and word.endswith("c")
-            if word == "-c" or short_c:
+            short_c = word.startswith("-") and not word.startswith("--") and "c" in word
+            if short_c:
                 return check_command(words[index + 1], depth + 1)
     return None
 
 
-def check_command(command: str, depth: int = 0) -> tuple[str, str] | None:
+def check_cargo(args: list[str]) -> Verdict:
+    rest = [word for word in args if not word.startswith("+")]
+    if rest and rest[0] in CARGO_ALLOWED:
+        return None
+    return DENY, CARGO_REASON
+
+
+def abbreviates(word: str, options: set[str]) -> bool:
+    name = word.split("=", 1)[0]
+    return len(name) > 4 and any(option.startswith(name) for option in options)
+
+
+def config_verdict(assignment: str) -> Verdict:
+    key, _, value = assignment.partition("=")
+    if key.lower() == "core.hookspath":
+        return ASK, NO_VERIFY_REASON
+    if REBASE_CONFIG.match(key) and value.lower() not in {"false", "0", "no", "off"}:
+        return ASK, REWRITE_REASON
+    return None
+
+
+def parse_git_args(sub: str, rest: list[str]) -> tuple[list[str], set[str], list[str]]:
+    """Split a subcommand's arguments into long flags, short letters, positionals."""
+    value_options = GIT_VALUE_OPTIONS.get(sub, set())
+    long_flags: list[str] = []
+    short: set[str] = set()
+    positionals: list[str] = []
+    index = 0
+    while index < len(rest):
+        word = rest[index]
+        index += 1
+        if word == "--":
+            positionals.extend(rest[index:])
+            break
+        if word.startswith("--"):
+            long_flags.append(word)
+            if word in value_options:
+                index += 1
+        elif word.startswith("-") and word != "-":
+            for position, letter in enumerate(word[1:], start=1):
+                if f"-{letter}" in value_options:
+                    if position == len(word) - 1:
+                        index += 1
+                    break
+                short.add(letter)
+        else:
+            positionals.append(word)
+    return long_flags, short, positionals
+
+
+def check_git(args: list[str]) -> Verdict:
+    while args and args[0].startswith("-"):
+        option = args[0]
+        if option.startswith("-c") and len(option) > 2:
+            if found := config_verdict(option[2:]):
+                return found
+        elif option.startswith("--config-env="):
+            if found := config_verdict(option.split("=", 1)[1]):
+                return found
+        elif option in {"-c", "--config-env"} and len(args) > 1:
+            if found := config_verdict(args[1]):
+                return found
+        args = args[2:] if option in GIT_GLOBAL_VALUE_OPTIONS else args[1:]
+    if not args:
+        return None
+    sub, rest = args[0], args[1:]
+    long_flags, short, positionals = parse_git_args(sub, rest)
+    if any(abbreviates(flag, NO_VERIFY_OPTIONS) for flag in long_flags) or (
+        sub == "commit" and "n" in short
+    ):
+        return ASK, NO_VERIFY_REASON
+    if sub == "config":
+        if len(positionals) >= 2:
+            return config_verdict(f"{positionals[0]}={positionals[1]}")
+        return None
+    if sub == "rebase" and not REBASE_CONTROL & {flag.split("=")[0] for flag in long_flags}:
+        return ASK, REWRITE_REASON
+    if sub == "pull":
+        rebase = [flag for flag in long_flags if abbreviates(flag, {"--rebase"})]
+        if "r" in short or any(flag.partition("=")[2] != "false" for flag in rebase):
+            return ASK, REWRITE_REASON
+    if sub == "commit" and any(abbreviates(flag, {"--amend"}) for flag in long_flags):
+        return ASK, REWRITE_REASON
+    if sub == "push":
+        forced = any(abbreviates(flag, FORCE_OPTIONS) for flag in long_flags)
+        plus_refspec = any(word.startswith("+") or ":+" in word for word in positionals)
+        if forced or "f" in short or plus_refspec:
+            return ASK, REWRITE_REASON
+    return None
+
+
+def check_command(command: str, depth: int = 0) -> Verdict:
+    if depth > 4:
+        return None
+    command = command.replace("\\\r\n", "").replace("\\\n", "")
+    body, expanding = split_heredocs(command)
     try:
-        tokens = tokenize(strip_heredocs(command))
+        tokens = tokenize(body)
     except ValueError:
         return ASK, PARSE_REASON
-    verdict: tuple[str, str] | None = None
-    for segment in segments(tokens):
-        found = check_words(segment, depth)
-        if found and (verdict is None or found[0] == DENY):
-            verdict = found
-    return verdict
+    nested = [
+        check_command(inner, depth + 1)
+        for text in [body, *expanding]
+        for inner in substitutions(text)
+    ]
+    return merge_verdicts(*nested, *(check_words(seg, depth) for seg in segments(tokens)))
 
 
-def main() -> int:
-    payload = json.load(sys.stdin)
-    if payload.get("tool_name") != "Bash":
-        return 0
-    verdict = check_command(payload.get("tool_input", {}).get("command", ""))
-    if verdict is None:
-        return 0
-    decision, reason = verdict
+def emit(decision: str, reason: str) -> None:
     json.dump(
         {
             "hookSpecificOutput": {
@@ -203,6 +376,24 @@ def main() -> int:
         },
         sys.stdout,
     )
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        emit(ASK, PARSE_REASON)
+        return 0
+    if not isinstance(payload, dict) or payload.get("tool_name") != "Bash":
+        return 0
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        emit(ASK, PARSE_REASON)
+        return 0
+    verdict = check_command(command)
+    if verdict is not None:
+        emit(*verdict)
     return 0
 
 

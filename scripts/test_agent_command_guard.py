@@ -39,6 +39,30 @@ class PastMistakes(unittest.TestCase):
             "/home/u/.cargo/bin/cargo metadata --format-version 1",
             "cargo-mutants --in-diff x.diff",
             "git status; cargo build",
+            "if true; then cargo build; fi",
+            "while :; do cargo test; done",
+            "{ cargo build; }",
+            "! cargo build",
+            "nice -n 10 cargo build",
+            "timeout -s KILL 10 cargo build",
+            "env -u X cargo build",
+            "env -C crates/pos-core cargo build",
+            "env -S 'cargo build'",
+            "sudo -u me cargo build",
+            "ls | xargs cargo test",
+            "xargs -n 1 cargo test",
+            "eval cargo build",
+            "watch -n 5 cargo check",
+            "sh -lc 'cargo test'",
+            "find . -name Cargo.toml -exec cargo fmt --manifest-path {} \\;",
+            'echo "$(cargo build)"',
+            "x=`cargo build`",
+            "echo `cargo build`",
+            "x=$(cargo build)",
+            "diff <(cargo tree) deps.txt",
+            'git commit -m "$(cargo build)"',
+            "cat <<EOF\n$(cargo build)\nEOF",
+            "cargo \\\n  build",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.DENY)
@@ -51,6 +75,11 @@ class PastMistakes(unittest.TestCase):
             "git -c core.hooksPath=/dev/null commit -m x",
             "git config core.hooksPath ''",
             "git merge --no-verify origin/main",
+            "git commit \\\n  --no-verify -m x",
+            "git -ccore.hooksPath=/dev/null commit -m x",
+            "git --config-env=core.hooksPath=HOOKS commit -m x",
+            "git push --no-v",
+            "nice -n 10 git commit --no-verify",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.ASK)
@@ -64,6 +93,17 @@ class PastMistakes(unittest.TestCase):
             "git pull --rebase origin main",
             "git commit --amend --no-edit",
             "git -C ../pigloros-x push --force",
+            "nice -n 10 git push -f",
+            "git push origin HEAD:+main",
+            "git push --mirror",
+            "git push --forc",
+            "git push --force-with-lease=main:abc123 origin main",
+            "git commit --amen",
+            "git config pull.rebase true",
+            "git config branch.main.rebase interactive",
+            "git -c pull.rebase=true pull",
+            "git pull -r",
+            "git pull --rebase=merges",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decision(command), guard.ASK)
@@ -85,6 +125,23 @@ class AllowedCommands(unittest.TestCase):
             "git commit -F - <<'EOF'\ncargo test is run by CI\ngit push --force\nEOF",
             "git log --oneline -5 # cargo build",
             "python3 scripts/test_ci_workflow_policy.py",
+            'git commit -m "-n"',
+            "git commit -m a -m '- Add new parser'",
+            "git commit -m x -- -n",
+            "git commit -am 'fix'",
+            "git log -n 5",
+            "git push -u origin HEAD",
+            "git push -o ci.skip origin HEAD",
+            "git fetch --force origin",
+            "git branch -f tmp origin/main",
+            "git pull --rebase=false origin main",
+            "git pull --no-rebase origin main",
+            "git config pull.rebase false",
+            "git rebase --continue",
+            "echo '$(cargo build)'",
+            "git commit -F - <<'EOF'\n$(cargo build)\nEOF",
+            "nice -n 10 git status",
+            "timeout 60 gh run watch 1",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(decision(command))
@@ -110,6 +167,19 @@ class HookWiring(unittest.TestCase):
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PreToolUse")
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("gh run view", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_malformed_payload_asks(self) -> None:
+        for raw in ("not json", json.dumps({"tool_name": "Bash", "tool_input": None})):
+            with self.subTest(raw=raw):
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / "agent_command_guard.py")],
+                    input=raw,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                out = json.loads(result.stdout)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_hook_is_silent_when_allowed(self) -> None:
         for payload in (
