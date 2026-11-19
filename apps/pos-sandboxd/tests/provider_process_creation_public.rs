@@ -151,6 +151,7 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
         "provider_runtime/endpoint.rs",
         "provider_runtime/notify.rs",
         "provider_runtime/reconcile.rs",
+        "provider_runtime/revocation.rs",
         "provider_runtime/serving.rs",
     ] {
         assert!(
