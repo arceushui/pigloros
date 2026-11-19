@@ -1,5 +1,7 @@
 //! Single-owner execution boundary for erasure-protected store operations.
 
+#[cfg(target_os = "linux")]
+mod local_owner;
 mod world_replay_read;
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -194,6 +196,7 @@ trait ErasureHostStore:
     + ForkEventPermitIssuerPortV1
     + ForkEventProvenanceAuthorityPortV1
     + ForkReplayAuthorityReadPortV1
+    + pos_core::LocalReplicaResidualPortV1
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -216,7 +219,8 @@ where
         + ForkAdmissionDeliveryJournalPortV1
         + ForkEventPermitIssuerPortV1
         + ForkEventProvenanceAuthorityPortV1
-        + ForkReplayAuthorityReadPortV1,
+        + ForkReplayAuthorityReadPortV1
+        + pos_core::LocalReplicaResidualPortV1,
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -4432,8 +4436,9 @@ impl ErasureCommandSenderV1<'_> {
     ///
     /// # Errors
     /// Returns [`LocalErasureSubmitErrorV1::Concurrent`] while another
-    /// request of the subject is pre-terminal or has an active attempt not
-    /// pinned to a revoked bundle,
+    /// request of the subject is pre-terminal or has an active attempt,
+    /// unless that attempt, or the freeze of a request without one, pins a
+    /// revoked bundle,
     /// [`LocalErasureSubmitErrorV1::QuotaExhausted`] once the subject's
     /// quota is used, [`LocalErasureSubmitErrorV1::ScopeTooLarge`] for a
     /// closure over its bound, and otherwise a payload-free host error: a
@@ -7289,6 +7294,12 @@ mod tests {
         }
     }
 
+    impl pos_core::LocalReplicaResidualPortV1 for FaultStoreV1 {
+        fn purge_local_replica_residue(&mut self) -> Result<(), ErasureErrorV1> {
+            pos_core::LocalReplicaResidualPortV1::purge_local_replica_residue(&mut self.inner)
+        }
+    }
+
     impl pos_core::ErasureInventoryPersistencePortV1 for FaultStoreV1 {
         fn erasure_authority_snapshot_with_limits(
             &mut self,
@@ -7308,10 +7319,9 @@ mod tests {
 
         fn commit_local_owner_effect(
             &mut self,
-            effect: pos_core::LocalOwnerEffectV1,
-            elo1: &[u8],
+            prepared: pos_core::PreparedLocalOwnerEffectV1,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-            self.inner.commit_local_owner_effect(effect, elo1)
+            self.inner.commit_local_owner_effect(prepared)
         }
 
         fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
