@@ -1353,10 +1353,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_codeql_waits_for_core_gate_except_on_documentation_only_prs(self) -> None:
         condition = self.workflow["jobs"]["codeql"]["if"]
         for before, after in (
-            (" || needs.ci_change_scope.outputs.rust == 'false'", ""),
-            ("needs.ci_change_scope.outputs.rust == 'false'", "needs.ci_change_scope.outputs.rust != 'true'"),
-            ("needs.core-gate.result == 'success' ||", "needs.core-gate.result != 'failure' ||"),
-            ("needs.ci_change_scope.result == 'success' && ", ""),
+            (" || needs.ci_change_scope.outputs.rust == 'false')", ")"),
+            ("|| needs.ci_change_scope.outputs.rust == 'false'", "|| needs.ci_change_scope.outputs.rust != 'true'"),
+            ("needs.coverage.result == 'success') ||", "needs.coverage.result != 'failure') ||"),
+            ("${{ !cancelled() && needs.ci_change_scope.result == 'success' && ", "${{ !cancelled() && "),
         ):
             with self.subTest(before=before):
                 self.assertIn(before, condition)
@@ -1395,15 +1395,37 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 self.assert_rejected(remove_status_check)
 
     def test_staged_main_jobs_require_successful_direct_dependencies(self) -> None:
-        for job_name, needs in CHECKER.STAGED_MAIN_JOBS.items():
-            with self.subTest(job=job_name):
-                def remove_dependency_result(workflow, *, job_name=job_name, needs=needs):
-                    dependency = needs[-1]
-                    workflow["jobs"][job_name]["if"] = workflow["jobs"][job_name][
-                        "if"
-                    ].replace(f"needs.{dependency}.result == 'success' && ", "")
+        for job_name, (needs, condition) in CHECKER.STAGED_MAIN_JOBS.items():
+            for dependency in needs:
+                check = f"needs.{dependency}.result == 'success'"
+                if check not in condition:
+                    continue
+                with self.subTest(job=job_name, dependency=dependency):
+                    def accept_failure(workflow, *, job_name=job_name, check=check):
+                        workflow["jobs"][job_name]["if"] = workflow["jobs"][job_name][
+                            "if"
+                        ].replace(check, check.replace("== 'success'", "!= 'cancelled'"), 1)
 
-                self.assert_rejected(remove_dependency_result)
+                    self.assert_rejected(accept_failure)
+
+    def test_staged_main_jobs_wait_for_the_complete_core_set(self) -> None:
+        for job_name, (needs, _) in CHECKER.STAGED_MAIN_JOBS.items():
+            for dependency in ("trunk-pr", "test-shards", "coverage", "world-client-wasm"):
+                if dependency not in needs:
+                    continue
+                with self.subTest(job=job_name, dependency=dependency):
+                    self.assert_rejected(
+                        lambda workflow, job_name=job_name, dependency=dependency: workflow[
+                            "jobs"
+                        ][job_name].update(
+                            needs=[need for need in needs if need != dependency]
+                        )
+                    )
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["rustdoc"].update(
+                needs=["ci_change_scope", "core-gate"]
+            )
+        )
 
     def test_requires_successful_coverage_for_cargo_crap(self) -> None:
         self.assert_rejected(
@@ -1622,6 +1644,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_standard_gate_and_reports_keep_their_cargo_crap_contract(self) -> None:
         self.assert_rejected(lambda workflow: workflow["jobs"]["standard-gate"]["needs"].append("cargo-crap"))
+        for name in CHECKER.STANDARD_STAGE_JOBS:
+            with self.subTest(job=name):
+                self.assert_rejected(lambda workflow, name=name: workflow["jobs"][name].update(
+                    needs=[*workflow["jobs"][name]["needs"], "cargo-crap"]))
         for name in CHECKER.MAIN_REPORT_JOBS:
             with self.subTest(job=name):
                 self.assert_rejected(lambda workflow, name=name: workflow["jobs"][name].update(needs="standard-gate"))

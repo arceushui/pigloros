@@ -81,6 +81,21 @@ class MemoryStoreBenchmarkCiPolicyTests(unittest.TestCase):
     def test_repository_workflows_pass(self) -> None:
         CHECKER.check_workflows(CI_WORKFLOW, BENCHMARK_WORKFLOW)
 
+    def test_rejects_comparator_jobs_started_before_the_preflight_set(self) -> None:
+        for job in ("test", "coverage"):
+            for change in (
+                {"needs": ["ci_change_scope", "preflight-gate"]},
+                {"needs": [n for n in CHECKER.PREFLIGHT_STAGE_NEEDS if n != "trunk-pr"]},
+                {"if": CHECKER.PREFLIGHT_STAGE_IF.replace(
+                    "needs.trunk-pr.result == 'success'", "needs.trunk-pr.result != 'failure'")},
+            ):
+                with self.subTest(job=job, change=change):
+                    self.assert_rejected(
+                        mutate_ci=lambda workflow, job=job, change=change: workflow["jobs"][
+                            job
+                        ].update(change)
+                    )
+
     def test_rejects_disabled_comparator_step(self) -> None:
         self.assert_rejected(
             mutate_ci=lambda workflow: self.comparator_step(workflow, "test").update(
