@@ -26,6 +26,9 @@ use crate::selector::runtime_lifecycle::{CgroupPath, ObservationChallenge, Provi
 /// §9's 10 s restart bound. The adapter extends it only by the #1200 D2
 /// recent-activation wait (R12 §7.4).
 const PREVIOUS_RUNTIME_BOUND: Duration = Duration::from_secs(10);
+/// The longest #1200 D2 recent-activation wait the adapter may add to the
+/// previous-runtime bound (R12 §7.1, §7.4).
+const RECENT_ACTIVATION_WAIT: Duration = Duration::from_secs(70);
 /// The slot reconciliation bound at operation start (R12 §6 step 4, m4).
 const SLOT_RECONCILE_BOUND: Duration = Duration::from_secs(5);
 
@@ -220,7 +223,12 @@ impl<P: ProviderLifecyclePort + ?Sized> ProviderTerminationAuthority<P> {
                         deadline,
                     )
                     .map_err(RecoveryError::Lifecycle)
-                    .and_then(|observed| verify_previous(&observed, challenge, target))
+                    .and_then(|observed| {
+                        // The adapter may outlast the 10 s bound only by the
+                        // recent-activation wait; anything later is refused.
+                        self.require_within(deadline, RECENT_ACTIVATION_WAIT)
+                            .and_then(|()| verify_previous(&observed, challenge, target))
+                    })
             })
             .and_then(|control_group| {
                 RecoveryHost::require_process_absent(pid, ticks)
@@ -244,6 +252,10 @@ impl<P: ProviderLifecyclePort + ?Sized> ProviderTerminationAuthority<P> {
                     .reconcile_recovery_slot(&RecoverySlotTarget::new(challenge, scope), deadline)
                     .map_err(RecoveryError::Lifecycle)
                     .and_then(|observed| {
+                        self.require_within(deadline, Duration::ZERO)
+                            .map(|()| observed)
+                    })
+                    .and_then(|observed| {
                         require(
                             observed.challenge() == challenge
                                 && observed.recovery_lifecycle_scope_id() == scope
@@ -255,6 +267,19 @@ impl<P: ProviderLifecyclePort + ?Sized> ProviderTerminationAuthority<P> {
                     })
             })
             .and_then(|observed| self.host.require_cgroup_absent(observed.control_group()))
+    }
+
+    /// The selector's clock has not passed `deadline` plus `grace`: a port
+    /// that returned after its deadline yields no proof.
+    pub(super) fn require_within(
+        &self,
+        deadline: Instant,
+        grace: Duration,
+    ) -> Result<(), RecoveryError> {
+        deadline
+            .checked_add(grace)
+            .ok_or(RecoveryError::DeadlineExceeded)
+            .and_then(|latest| require(self.host.now() <= latest, RecoveryError::DeadlineExceeded))
     }
 
     /// The sole authorization of one peer start (R12 §6 step 6).

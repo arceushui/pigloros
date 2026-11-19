@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::num::NonZeroU64;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -17,15 +18,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustix::fs::{
-    fstatfs, openat2, statat, unlinkat, AtFlags, FileType, Mode, OFlags, ResolveFlags,
+    fstatfs, openat2, statat, unlinkat, AtFlags, FileType, Mode, OFlags, ResolveFlags, Stat,
 };
 use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 use super::RecoveryError;
 use crate::selector::runtime_lifecycle::CgroupPath;
 
-/// The fixed recovery endpoint directory (ADR-069 §4.1, R12 §7.2).
-pub(super) const RECOVERY_DIRECTORY: &str = "/run/pigloros/sandbox-selector-recovery";
 /// The cgroup2 mount the selector checks control groups against.
 const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 /// `CGROUP2_SUPER_MAGIC` from `linux/magic.h`.
@@ -47,7 +46,6 @@ pub(crate) type RecoveryClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// The kernel and filesystem view one recovery operation checks against.
 pub(crate) struct RecoveryHost {
     directory: Arc<File>,
-    directory_path: PathBuf,
     owner: u32,
     cgroup_mount: PathBuf,
     cgroup2: fn(&File) -> bool,
@@ -69,7 +67,6 @@ impl RecoveryHost {
     pub(crate) fn fixed(directory: Arc<File>, executable_digest: ExecutableDigest) -> Self {
         Self {
             directory,
-            directory_path: PathBuf::from(RECOVERY_DIRECTORY),
             owner: 0,
             cgroup_mount: PathBuf::from(CGROUP_MOUNT),
             cgroup2: is_cgroup2,
@@ -81,7 +78,7 @@ impl RecoveryHost {
     /// A view over a test directory, owner, cgroup mount and clock.
     #[cfg(test)]
     pub(crate) fn for_test(
-        (directory, directory_path): (Arc<File>, PathBuf),
+        directory: Arc<File>,
         owner: u32,
         (cgroup_mount, cgroup2): (PathBuf, fn(&File) -> bool),
         executable_digest: ExecutableDigest,
@@ -89,7 +86,6 @@ impl RecoveryHost {
     ) -> Self {
         Self {
             directory,
-            directory_path,
             owner,
             cgroup_mount,
             cgroup2,
@@ -168,16 +164,14 @@ impl RecoveryHost {
     fn verify_directory(&self) -> Result<(), RecoveryError> {
         self.directory
             .metadata()
-            .map_err(|_| RecoveryError::Leaf)
+            .map_err(leaf_error)
             .and_then(|metadata| {
-                if metadata.is_dir()
-                    && metadata.uid() == self.owner
-                    && metadata.mode() & 0o7777 == DIRECTORY_MODE
-                {
-                    Ok(())
-                } else {
-                    Err(RecoveryError::Leaf)
-                }
+                require(
+                    metadata.is_dir()
+                        && metadata.uid() == self.owner
+                        && metadata.mode() & 0o7777 == DIRECTORY_MODE,
+                    RecoveryError::Leaf,
+                )
             })
     }
 
@@ -187,22 +181,32 @@ impl RecoveryHost {
         self.verify_directory().and_then(|()| {
             match statat(&*self.directory, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW) {
                 Err(rustix::io::Errno::NOENT) => Ok(None),
-                Err(_) => Err(RecoveryError::Leaf),
-                Ok(metadata) => {
-                    if FileType::from_raw_mode(metadata.st_mode) == FileType::Socket
-                        && metadata.st_uid == self.owner
-                        && metadata.st_mode & 0o7777 == LEAF_MODE
-                    {
-                        Ok(Some(LeafIdentity {
-                            device: metadata.st_dev,
-                            inode: metadata.st_ino,
-                        }))
-                    } else {
-                        Err(RecoveryError::Leaf)
-                    }
-                }
+                stat => stat
+                    .map_err(leaf_error)
+                    .and_then(|metadata| self.exact_socket(&metadata))
+                    .map(Some),
             }
         })
+    }
+
+    /// The identity of a node that is a socket of the owner with mode `0600`.
+    fn exact_socket(&self, metadata: &Stat) -> Result<LeafIdentity, RecoveryError> {
+        require(
+            FileType::from_raw_mode(metadata.st_mode) == FileType::Socket
+                && metadata.st_uid == self.owner
+                && metadata.st_mode & 0o7777 == LEAF_MODE,
+            RecoveryError::Leaf,
+        )
+        .map(|()| LeafIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        })
+    }
+
+    /// The leaf reached through the retained directory descriptor, never
+    /// through a pathname that could resolve elsewhere.
+    fn leaf_path(&self, leaf: &OsString) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd())).join(leaf)
     }
 
     /// R12 §6 step 8: the peer's leaf exists as the exact socket.
@@ -211,49 +215,46 @@ impl RecoveryHost {
             .and_then(|identity| identity.ok_or(RecoveryError::Leaf))
     }
 
-    /// R12 §6 steps 9: the leaf still names the socket observed ready.
+    /// R12 §6 step 9 and I8: the leaf still names the socket observed ready.
     pub(super) fn require_same_leaf(
         &self,
         endpoint_id: [u8; 16],
         ready: LeafIdentity,
     ) -> Result<(), RecoveryError> {
-        self.ready_leaf(endpoint_id).and_then(|current| {
-            if current == ready {
-                Ok(())
-            } else {
-                Err(RecoveryError::Leaf)
-            }
-        })
+        self.ready_leaf(endpoint_id)
+            .and_then(|current| require(current == ready, RecoveryError::Leaf))
     }
 
     /// R12 §6 step 5 (owner decision O3): the exact SIR1 leaf is absent, or
-    /// is a socket of the owner with mode `0600` whose `connect()` fails with
-    /// `ECONNREFUSED`; it is then unlinked on the retained directory, after
-    /// its `(dev, ino)` is rechecked, and proven absent. Any other node or
-    /// outcome fails closed and is kept.
+    /// it is removed by [`Self::remove_refusing_leaf`]. Any other node fails
+    /// closed and is kept.
     pub(super) fn remove_stale_leaf(&self, endpoint_id: [u8; 16]) -> Result<(), RecoveryError> {
         let leaf = leaf_name(endpoint_id);
         self.leaf_identity(&leaf).and_then(|identity| {
             identity.map_or(Ok(()), |identity| {
-                crate::selector::runtime_lifecycle::require_refused(
-                    &self.directory_path.join(&leaf),
-                )
-                .map_err(|_| RecoveryError::Leaf)
-                .and_then(|()| self.leaf_identity(&leaf))
-                .and_then(|current| {
-                    if current == Some(identity) {
-                        unlinkat(&*self.directory, Path::new(&leaf), AtFlags::empty())
-                            .map_err(|_| RecoveryError::Leaf)
-                    } else {
-                        Err(RecoveryError::Leaf)
-                    }
-                })
-                .and_then(|()| match self.leaf_identity(&leaf) {
-                    Ok(None) => Ok(()),
-                    _ => Err(RecoveryError::Leaf),
-                })
+                self.remove_refusing_leaf(&leaf, identity)
             })
         })
+    }
+
+    /// Remove the leaf probed as `identity`: its `connect()` must fail with
+    /// `ECONNREFUSED` and its `(dev, ino)` be unchanged; it is then unlinked
+    /// on the retained directory and proven absent. A leaf that is still
+    /// there, for whatever reason, fails closed.
+    pub(super) fn remove_refusing_leaf(
+        &self,
+        leaf: &OsString,
+        identity: LeafIdentity,
+    ) -> Result<(), RecoveryError> {
+        crate::selector::runtime_lifecycle::require_refused(&self.leaf_path(leaf))
+            .map_err(leaf_error)
+            .and_then(|()| self.leaf_identity(leaf))
+            .and_then(|current| require(current == Some(identity), RecoveryError::Leaf))
+            .and_then(|()| {
+                let _unlinked = unlinkat(&*self.directory, Path::new(leaf), AtFlags::empty());
+                self.leaf_identity(leaf)
+            })
+            .and_then(|current| require(current.is_none(), RecoveryError::Leaf))
     }
 
     /// R12 §6 step 8: the observed main process is the one the kernel
@@ -267,69 +268,40 @@ impl RecoveryHost {
     ) -> Result<(), RecoveryError> {
         let same_process = || {
             crate::selector::runtime_lifecycle::process_start_time_ticks(pid)
-                .map_err(|_| RecoveryError::PeerBinding)
+                .map_err(peer_binding)
                 .and_then(|ticks| require(ticks == start_time_ticks, RecoveryError::PeerBinding))
         };
         same_process()
             .and_then(|()| {
-                crate::selector::runtime_lifecycle::process_control_group(pid)
-                    .map_err(|_| RecoveryError::PeerBinding)
+                crate::selector::runtime_lifecycle::process_control_group(pid).map_err(peer_binding)
             })
             .and_then(|cgroup| {
                 require(cgroup == control_group.as_str(), RecoveryError::PeerBinding)
             })
-            .and_then(|()| {
-                (self.executable_digest)(pid, binary_length).map_err(|_| RecoveryError::PeerBinding)
-            })
+            .and_then(|()| (self.executable_digest)(pid, binary_length).map_err(peer_binding))
             .and_then(|digest| require(digest == binary_digest, RecoveryError::PeerBinding))
             // The same process, not a recycled PID, owned the executable just hashed.
             .and_then(|()| same_process())
     }
 
-    /// R12 §6 step 9: one connection to the peer's leaf, whose
-    /// `SO_PEERCRED` is the owner and the observed main process. A
-    /// connection that does not complete at once is refused: there is no
-    /// retry.
+    /// R12 §6 step 9: one connection to the peer's leaf, through the
+    /// retained directory, whose `SO_PEERCRED` is the owner and the
+    /// observed main process.
     pub(super) fn connect_peer(
         &self,
         endpoint_id: [u8; 16],
         pid: NonZeroU64,
     ) -> Result<UnixStream, RecoveryError> {
-        SocketAddrUnix::new(self.directory_path.join(leaf_name(endpoint_id)))
-            .map_err(|_| RecoveryError::Exchange)
-            .and_then(|address| {
-                socket_with(
-                    AddressFamily::UNIX,
-                    SocketType::STREAM,
-                    SocketFlags::CLOEXEC.union(SocketFlags::NONBLOCK),
-                    None,
-                )
-                .map_err(|_| RecoveryError::Exchange)
-                .and_then(|socket| {
-                    connect(&socket, &address)
-                        .map_err(|_| RecoveryError::Exchange)
-                        .map(|()| UnixStream::from(socket))
+        connect_now(&self.leaf_path(&leaf_name(endpoint_id))).and_then(|stream| {
+            peer_credentials(&stream)
+                .and_then(|peer| {
+                    require(
+                        peer_matches(peer, self.owner, pid),
+                        RecoveryError::PeerBinding,
+                    )
                 })
-            })
-            .and_then(|stream| {
-                stream
-                    .set_nonblocking(false)
-                    .map_err(|_| RecoveryError::Exchange)
-                    .map(|()| stream)
-            })
-            .and_then(|stream| {
-                rustix::net::sockopt::socket_peercred(&stream)
-                    .map_err(|_| RecoveryError::PeerBinding)
-                    .and_then(|peer| {
-                        require(
-                            peer.uid.as_raw() == self.owner
-                                && u64::try_from(peer.pid.as_raw_nonzero().get())
-                                    .is_ok_and(|peer_pid| peer_pid == pid.get()),
-                            RecoveryError::PeerBinding,
-                        )
-                    })
-                    .map(|()| stream)
-            })
+                .map(|()| stream)
+        })
     }
 
     /// A stream whose every read and write ends by `deadline` on this host's
@@ -395,8 +367,65 @@ impl Write for ClockedStream<'_> {
     }
 }
 
+/// One connection that completes at once: one that does not is refused,
+/// since there is no retry. The stream is then blocking.
+fn connect_now(path: &Path) -> Result<UnixStream, RecoveryError> {
+    SocketAddrUnix::new(path)
+        .map_err(exchange_error)
+        .and_then(|address| {
+            socket_with(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                SocketFlags::CLOEXEC.union(SocketFlags::NONBLOCK),
+                None,
+            )
+            .map_err(exchange_error)
+            .and_then(|socket| {
+                connect(&socket, &address)
+                    .map(|()| socket)
+                    .map_err(exchange_error)
+            })
+        })
+        .map(UnixStream::from)
+        .and_then(|stream| {
+            stream
+                .set_nonblocking(false)
+                .map(|()| stream)
+                .map_err(exchange_error)
+        })
+}
+
+/// The `SO_PEERCRED` UID and PID of `stream`'s peer.
+fn peer_credentials(stream: &UnixStream) -> Result<(u32, u64), RecoveryError> {
+    rustix::net::sockopt::socket_peercred(stream)
+        .map(|peer| {
+            (
+                peer.uid.as_raw(),
+                u64::try_from(peer.pid.as_raw_nonzero().get()).unwrap_or_default(),
+            )
+        })
+        .map_err(peer_binding)
+}
+
+/// Whether the peer credentials `(uid, pid)` are the owner's process `pid`.
+pub(super) const fn peer_matches((uid, peer_pid): (u32, u64), owner: u32, pid: NonZeroU64) -> bool {
+    uid == owner && peer_pid == pid.get()
+}
+
+pub(super) fn leaf_error<T>(_: T) -> RecoveryError {
+    RecoveryError::Leaf
+}
+
+pub(super) fn peer_binding<T>(_: T) -> RecoveryError {
+    RecoveryError::PeerBinding
+}
+
+pub(super) fn exchange_error<T>(_: T) -> RecoveryError {
+    RecoveryError::Exchange
+}
+
 /// `<32 lowercase hex endpoint ID>.sock`.
-fn leaf_name(endpoint_id: [u8; 16]) -> OsString {
+pub(super) fn leaf_name(endpoint_id: [u8; 16]) -> OsString {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut leaf = String::with_capacity(37);
     for byte in endpoint_id {
@@ -422,10 +451,4 @@ pub(super) fn is_cgroup2(mount: &File) -> bool {
     })
 }
 
-const fn require(condition: bool, error: RecoveryError) -> Result<(), RecoveryError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(error)
-    }
-}
+use super::authority::require;
