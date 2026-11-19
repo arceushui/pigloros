@@ -48,7 +48,8 @@ pub enum OwnerStoreInstallationV1 {
 /// The main file must be a singly linked regular/euid/0600 `SQLite` 3 database
 /// in WAL mode, as the existing ordinary creation route leaves it; no
 /// `-journal` entry may exist and existing WAL/SHM entries must pass the same
-/// file policy. The run then:
+/// file policy. The run never opens `SQLite`, so it does not check that the
+/// schema exists; a later participant open does. The run then:
 ///
 /// 1. creates the child with mode 0700, or reuses an existing one, and checks
 ///    it is a private/euid/0700 directory, physically distinct from its
@@ -118,19 +119,25 @@ fn wal_header(header: &[u8; 20]) -> bool {
 /// after the child and the child after its entries. Returns whether anything
 /// was created.
 fn install_child(namespace: &CheckedNamespace) -> io::Result<bool> {
-    let created_child = match fs::mkdirat(&namespace.directory, NAMESPACE, Mode::RWXU) {
-        Ok(()) => Ok(true),
-        Err(Errno::EXIST) => Ok(false),
-        Err(error) => Err(error),
-    }?;
-    let child = open_coordination_directory(&namespace.directory)?;
-    fs::fsync(readable_directory(&namespace.directory)?)?;
-    let mut created_entry = false;
-    for name in reserved_names(&namespace.main.stat) {
-        created_entry |= ensure_entry(&child, &name)?;
-    }
-    fs::fsync(readable_directory(&child)?)?;
-    Ok(created_child || created_entry)
+    // An existing child is reused. Any other mkdirat failure leaves no child,
+    // which the open below then refuses.
+    let created_child = fs::mkdirat(&namespace.directory, NAMESPACE, Mode::RWXU).is_ok();
+    open_coordination_directory(&namespace.directory).and_then(|child| {
+        readable_directory(&namespace.directory)
+            .and_then(fs::fsync)
+            .and_then(|()| {
+                reserved_names(&namespace.main.stat)
+                    .iter()
+                    .try_fold(false, |created, name| {
+                        ensure_entry(&child, name).map(|entry| created || entry)
+                    })
+            })
+            .and_then(|created_entry| {
+                readable_directory(&child)
+                    .and_then(fs::fsync)
+                    .map(|()| created_child || created_entry)
+            })
+    })
 }
 
 /// A readable descriptor of the directory behind the `O_PATH` `directory`,
