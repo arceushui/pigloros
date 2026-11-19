@@ -648,11 +648,12 @@ mod cases {
         assert_eq!(count(&runtime.path().join("registry"))?, 1);
         assert!(runtime.path().join("registry/activation").is_file());
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
-        // The orphan sweep, then the egress probe, each ran once while every
-        // record was kept, so admission was still closed.
+        // The orphan sweep ran once while every record was kept, so
+        // admission was still closed; the egress probe ran once after the
+        // intents were removed (ADR-069 R12 §7.1 step 5).
         assert_eq!(
             *steps.lock().map_err(|_| "steps")?,
-            vec![("network", records), ("egress", records)]
+            vec![("network", records), ("egress", 1)]
         );
         assert_eq!(sweeps.load(Ordering::SeqCst), 1);
         // No unit was listed; the recorded tree's and the PAI3 attempt's
@@ -737,13 +738,13 @@ mod cases {
         .await;
         // The host reset the unit and observed it unloaded, and found the
         // recorded roots unmounted on the real kernel; the network was then
-        // cleaned and the egress property observed. The real host's loop
-        // sweep then fails closed on a test host without a provider
-        // installation.
+        // cleaned. The real host's loop sweep then fails closed on a test
+        // host without a provider installation, so the egress probe, which
+        // follows intent removal, never ran.
         assert_eq!(*host.resets.lock().map_err(|_| "resets")?, vec![unit(2)?]);
         assert!(host.loaded.lock().map_err(|_| "loaded")?.is_empty());
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(egress.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(egress.calls.load(Ordering::SeqCst), 0);
         assert_no_installation();
         assert!(
             matches!(
@@ -936,12 +937,9 @@ mod cases {
                     )
             );
             assert!(refused, "case {case}: {result:?}");
-            // The egress property is probed only on a network swept clean.
-            assert_eq!(
-                egress.calls.load(Ordering::SeqCst),
-                usize::from(case >= 2),
-                "case {case}"
-            );
+            // The egress property is probed only after the intents were
+            // removed, so never after a failed network or device proof.
+            assert_eq!(egress.calls.load(Ordering::SeqCst), 0, "case {case}");
             assert_untouched(runtime.path(), 5)?;
         }
         Ok(())
@@ -998,14 +996,17 @@ mod cases {
                     "the Local egress property was not observed"
                 );
             }
-            // The probe ran on the swept network; no later step ran and
-            // every record is kept.
+            // The probe ran last, on the swept network, once every device
+            // proof held and the intents were removed: the registry is
+            // reconciled, and admission stays closed only through the error
+            // (ADR-069 R12 §7.1 step 5).
             assert_eq!(
                 *steps.lock().map_err(|_| "steps")?,
-                vec![("network", records), ("egress", records)]
+                vec![("network", records), ("egress", 1)]
             );
-            assert_eq!(devices.load(Ordering::SeqCst), 0);
-            assert_untouched(runtime.path(), 5)?;
+            assert_eq!(devices.load(Ordering::SeqCst), 1);
+            assert_eq!(count(&runtime.path().join("registry"))?, 1);
+            assert_eq!(count(&runtime.path().join("attempts"))?, 0);
         }
         Ok(())
     }
