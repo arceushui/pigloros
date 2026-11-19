@@ -18,6 +18,7 @@ pub mod key_roles;
 pub mod plugin_execution;
 pub mod plugin_manifest;
 pub mod plugin_trust;
+pub mod preference_weights;
 pub mod recipient_export;
 pub mod recipient_key;
 pub mod signing;

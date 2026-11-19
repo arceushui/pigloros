@@ -24,6 +24,10 @@ use pos_store::community::{
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
 
+/// The composition-root seal the community owner is installed with.
+static OWNER_SEAL: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
+
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
 
@@ -154,7 +158,7 @@ impl Installation {
 
     fn catalogue(&self, catalogue: Hash, native: Hash) -> Fallible<CommunityInstalledCatalogueV1> {
         let authority = CommunityMetadataAuthorityV1::new(
-            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            &OWNER_SEAL,
             CommunityMetadataAuthorityInputV1 {
                 registry: self.registry.clone(),
                 principal: owner()?,

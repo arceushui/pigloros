@@ -69,7 +69,7 @@ pub struct CommunityMaterializationReferenceV1 {
 }
 
 impl CommunityMaterializationReferenceV1 {
-    fn validate(self) -> Result<()> {
+    pub(super) fn validate(self) -> Result<()> {
         if [
             self.owner_reference,
             self.object_address,
@@ -85,7 +85,7 @@ impl CommunityMaterializationReferenceV1 {
         }
     }
 
-    fn encode(self, out: &mut Vec<u8>) {
+    pub(super) fn encode(self, out: &mut Vec<u8>) {
         out.push(0x86);
         encode_hash(out, self.owner_reference);
         encode_head(out, 0, self.artifact_class.code());
@@ -95,7 +95,7 @@ impl CommunityMaterializationReferenceV1 {
         encode_hash(out, self.attestation_address);
     }
 
-    fn read(cursor: &mut CborCursor<'_>) -> Result<Self> {
+    pub(super) fn read(cursor: &mut CborCursor<'_>) -> Result<Self> {
         cursor.fixed(&[0x86]).map_err(Error::from).and_then(|()| {
             read_hash(cursor).and_then(|owner_reference| {
                 read_head(cursor, 0)
