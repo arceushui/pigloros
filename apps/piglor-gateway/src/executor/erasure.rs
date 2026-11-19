@@ -66,33 +66,34 @@ impl<T: Send + 'static> WorkerCommandV1 for LocalErasureCommandV1<T> {
 /// Submit `request` on `host` under the store's current execution-mode
 /// binding.
 ///
-/// A store a Local composition serves is always bound to a compiled
-/// execution mode, since composition attaches to that binding; an unbound
-/// store records epoch 0, which the host refuses after it has answered
-/// [`LocalErasureSubmitErrorV1::Unserved`] for a host without one.
+/// A host without that binding (an unbound or uncompiled one) serves no
+/// erasure: a Local composition only ever attaches to a bound store, so
+/// such a host is answered [`LocalErasureSubmitErrorV1::Unserved`] like a
+/// host without a Local composition, and no submission without a binding
+/// is ever built.
 fn submit_on_host(
     host: Option<&mut ErasureExecutionHostV1>,
     request: &LocalErasureRequestV1,
 ) -> Result<LocalErasureAdmittedV1, LocalErasureSubmitErrorV1> {
-    host.ok_or(LocalErasureSubmitErrorV1::Unserved)
-        .and_then(|host| {
-            let (mode_profile, binding_epoch) =
-                crate::mode_profile::current_binding_v1(host.gateway_mode_binding())
-                    .map_or(([0; 32], 0), |(digest, epoch)| (digest, epoch.get()));
-            host.command_sender()
-                .map_err(LocalErasureSubmitErrorV1::Host)
-                .map(|sender| (sender, mode_profile, binding_epoch))
-        })
-        .and_then(|(mut sender, mode_profile, binding_epoch)| {
-            sender.submit_local_erasure(&LocalErasureSubmissionV1 {
-                principal: request.principal.clone(),
-                actor: request.actor,
-                scope: request.scope,
-                idempotency_key_digest: request.idempotency_key_digest,
-                mode_profile: ErasureReferenceV1::from_digest(mode_profile),
-                binding_epoch,
+    host.and_then(|host| {
+        crate::mode_profile::current_binding_v1(host.gateway_mode_binding())
+            .map(|binding| (host, binding))
+    })
+    .ok_or(LocalErasureSubmitErrorV1::Unserved)
+    .and_then(|(host, (mode_profile, binding_epoch))| {
+        host.command_sender()
+            .map_err(LocalErasureSubmitErrorV1::Host)
+            .and_then(|mut sender| {
+                sender.submit_local_erasure(&LocalErasureSubmissionV1 {
+                    principal: request.principal.clone(),
+                    actor: request.actor,
+                    scope: request.scope,
+                    idempotency_key_digest: request.idempotency_key_digest,
+                    mode_profile: ErasureReferenceV1::from_digest(mode_profile),
+                    binding_epoch: binding_epoch.get(),
+                })
             })
-        })
+    })
 }
 
 /// The projection of `erasure_id` for the subject of `principal` acting
@@ -183,6 +184,30 @@ mod tests {
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(projected, Ok(None));
         assert!(executor.shutdown().await.is_ok());
+        Ok(())
+    }
+
+    /// An erasure host whose store records no execution-mode binding
+    /// serves no erasure: the submission is unserved before it is built.
+    #[tokio::test]
+    async fn an_unbound_erasure_host_serves_no_erasure() -> TestResult {
+        let host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let gateway = crate::Gateway::unprotected_for_harness(host)?;
+        let submitted = gateway
+            .store
+            .submit_local_erasure(LocalErasureRequestV1 {
+                principal: principal()?,
+                actor: EntityId::new(),
+                scope: ErasureScopeV1::PrivateSubjectData,
+                idempotency_key_digest: ErasureReferenceV1::from_digest([0x23; 32]),
+            })
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(submitted.err(), Some(LocalErasureSubmitErrorV1::Unserved));
+        gateway.shutdown().await?;
         Ok(())
     }
 
