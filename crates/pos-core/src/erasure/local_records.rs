@@ -1069,6 +1069,57 @@ impl LocalRecordV1 for LocalErasureIdempotencyV1 {
 
 local_record_api!(LocalErasureIdempotencyV1);
 
+/// ELADM1, the submission binding of one admitted Local erasure request
+/// (owner decision D5 of 2026-11-18 on #1413, an ADR-136 amendment):
+/// `["ELADM1", 1, request(32), trust(32), mode_profile(32),
+/// binding_epoch(uint ≥ 1)]`, at most 1 KiB.
+///
+/// The host retains it with the request's ERAZ1, ELSEL1 and ELIDEM1 before
+/// the ERQ1 commits, and never rewrites it, so a replayed `202` names the
+/// bundle and the Gateway execution-mode binding of the submission, and
+/// `getErasure` reports that binding as its `mode_profile`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalErasureAdmissionV1 {
+    /// The ERQ1 request.
+    pub request: ErasureReferenceV1,
+    /// `CA(ELB1)` of the bundle active at submission.
+    pub trust: ErasureReferenceV1,
+    /// The GMP1 mode-profile digest of the Gateway binding at submission.
+    pub mode_profile: ErasureReferenceV1,
+    /// The store binding epoch of that Gateway binding, at least 1.
+    pub binding_epoch: u64,
+}
+
+impl LocalRecordV1 for LocalErasureAdmissionV1 {
+    const TAG: &'static str = "ELADM1";
+    const MAX_BYTES: usize = KIB;
+
+    fn fields(&self) -> Vec<Value> {
+        vec![
+            digest(self.request),
+            digest(self.trust),
+            digest(self.mode_profile),
+            uint(self.binding_epoch),
+        ]
+    }
+
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, request, trust, mode_profile, binding_epoch] = open::<6>(record, Self::TAG)?;
+        Ok(Self {
+            request: bytes32(request)?,
+            trust: bytes32(trust)?,
+            mode_profile: bytes32(mode_profile)?,
+            binding_epoch: unsigned(binding_epoch)?,
+        })
+    }
+
+    fn validate(&self) -> Result<(), ErasureErrorV1> {
+        require(self.binding_epoch >= 1)
+    }
+}
+
+local_record_api!(LocalErasureAdmissionV1);
+
 /// ELO1, one owner result bound to its durable effect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalErasureOwnerResultV1 {
