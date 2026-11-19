@@ -20,7 +20,7 @@ use crate::{
 };
 use zeroize::Zeroizing;
 
-const MAX_NODE: usize = 1_048_576;
+pub(super) const MAX_NODE: usize = 1_048_576;
 /// Maximum direct typed references in one input index or CIB1 group.
 pub const MAX_COMMUNITY_DIRECT_INPUTS_V1: usize = 256;
 /// Maximum expanded inputs of one grouped input index.

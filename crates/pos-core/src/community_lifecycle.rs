@@ -7,6 +7,7 @@
 
 mod authority_catalogue;
 mod authority_evidence;
+mod budget_quote;
 mod classification;
 mod copy_inventory;
 mod current_view;
@@ -59,6 +60,11 @@ pub use authority_evidence::{
     CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityClockBoundV1,
     CommunityDecisionRowV1, CommunityObjectBindingV1, MAX_COMMUNITY_DECISION_ROWS_V1,
     MAX_COMMUNITY_OBJECT_BINDINGS_V1,
+};
+pub use budget_quote::{
+    CommunityBudgetQuoteInputV1, CommunityBudgetQuoteV1, CommunityDueMemberBudgetV1,
+    CommunitySharedCountsV1, COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1,
+    MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
 };
 pub use classification::{
     CommunityArtifactChildrenV1, CommunityClassificationProofInputV1,
