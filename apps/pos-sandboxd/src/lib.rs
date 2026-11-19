@@ -631,44 +631,97 @@ impl SystemCallFilter {
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
     let arguments: Vec<_> = arguments.into_iter().collect();
-    match run_mode(&arguments) {
-        None => {
-            report(
-                "usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime \
-                 | recovery-peer <endpoint-id-hex>",
-            );
-            std::process::ExitCode::from(2)
-        }
-        Some(Ok(())) => std::process::ExitCode::SUCCESS,
-        Some(Err(diagnostic)) => {
-            report(&diagnostic);
-            std::process::ExitCode::FAILURE
+    MODES
+        .iter()
+        .find_map(|mode| mode(&arguments))
+        .unwrap_or(ModeOutcome::Usage)
+        .exit()
+}
+
+/// How one run of the binary ended.
+#[cfg(target_os = "linux")]
+enum ModeOutcome {
+    /// The arguments name no mode: exit status 2.
+    Usage,
+    /// The recovery peer acknowledged its one exchange: exit status 0.
+    Succeeded,
+    /// A mode failed with this diagnostic: exit status 1.
+    Failed(String),
+}
+
+#[cfg(target_os = "linux")]
+impl ModeOutcome {
+    /// A failure of a mode, with its one fixed diagnostic.
+    fn failed(error: impl std::fmt::Display) -> Self {
+        Self::Failed(format!("pos-sandboxd: {error}"))
+    }
+
+    /// Report the outcome on standard error and give the exit status.
+    fn exit(self) -> std::process::ExitCode {
+        match self {
+            Self::Usage => {
+                report(
+                    "usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime \
+                     | recovery-peer <endpoint-id-hex>",
+                );
+                std::process::ExitCode::from(2)
+            }
+            Self::Succeeded => std::process::ExitCode::SUCCESS,
+            Self::Failed(diagnostic) => {
+                report(&diagnostic);
+                std::process::ExitCode::FAILURE
+            }
         }
     }
 }
 
-/// Run the mode `arguments` name and return its outcome, with the diagnostic
-/// for a failure, or `None` when they name no mode.
+/// One mode: its outcome when `arguments` name it, or `None`.
 #[cfg(target_os = "linux")]
-fn run_mode(arguments: &[std::ffi::OsString]) -> Option<Result<(), String>> {
+type Mode = fn(&[std::ffi::OsString]) -> Option<ModeOutcome>;
+
+/// Every mode the binary has, tried in order.
+#[cfg(target_os = "linux")]
+const MODES: [Mode; 3] = [
+    provider_runtime_mode,
+    recovery_peer_mode,
+    launch_barrier_mode,
+];
+
+/// `provider-runtime`: serve until a listener invariant fails.
+#[cfg(target_os = "linux")]
+fn provider_runtime_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
     match arguments {
-        [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => {
-            let error = provider_runtime::serve_provider_runtime();
-            Some(Err(format!("pos-sandboxd: {error}")))
-        }
+        [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => Some(
+            ModeOutcome::failed(provider_runtime::serve_provider_runtime()),
+        ),
+        _ => None,
+    }
+}
+
+/// `recovery-peer <endpoint-id-hex>`: answer one exchange (ADR-069 R12 §5).
+#[cfg(target_os = "linux")]
+fn recovery_peer_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
+    match arguments {
         [mode, endpoint_id] if mode == provider_runtime::recovery_peer::RECOVERY_PEER_ARGUMENT => {
             Some(
                 provider_runtime::recovery_peer::serve_recovery_peer(endpoint_id)
-                    .map_err(|error| format!("pos-sandboxd: {error}")),
+                    .map_or_else(ModeOutcome::failed, |()| ModeOutcome::Succeeded),
             )
         }
+        _ => None,
+    }
+}
+
+/// `launch-barrier <lpv1-hex>`: a released adapter replaces this process
+/// image, so only a failure returns.
+#[cfg(target_os = "linux")]
+fn launch_barrier_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
+    match arguments {
         [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
-            let error = lpv1
-                .to_str()
-                .map_or(launcher::LauncherError::Parameters, |hex| {
-                    launcher::run_launch_barrier(hex)
-                });
-            Some(Err(format!("pos-sandboxd: {error}")))
+            Some(ModeOutcome::failed(lpv1.to_str().map_or(
+                launcher::LauncherError::Parameters,
+                launcher::run_launch_barrier,
+            )))
         }
         _ => None,
     }
