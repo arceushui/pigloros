@@ -1083,6 +1083,11 @@ fn a_failure_after_the_release_is_a_provider_fault() -> TestResult {
         (cleanup(true)?, Some(CLEANED_AT)),
     );
     assert!(matches!(ended.records(), Err(EvidenceFault::Record(_))));
+    // No response is emitted either.
+    assert!(matches!(
+        ended.signed_response(&signer, crate::AdmittedRuntimeKey::new("runtime", &public)),
+        Err(super::ResponseFault::Evidence(EvidenceFault::Record(_)))
+    ));
     Ok(())
 }
 
