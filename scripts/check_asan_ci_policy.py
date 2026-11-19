@@ -293,12 +293,29 @@ symbolizer_version="$("${symbolizer}" --version)"
 grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
 """,
     },
+    # One retry of the ~10 GB download: the first attempt may fail at the
+    # artifact store, the retry runs only then on a cleared directory, and
+    # the retry itself fails the shard.
     {
         "name": "Download ASan test archive",
+        "id": "download-asan-archive",
+        "continue-on-error": True,
+        "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
+        "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
+    },
+    {
+        "name": "Clear the failed ASan archive download",
+        "if": "steps.download-asan-archive.outcome == 'failure'",
+        "run": 'rm -rf -- "${RUNNER_TEMP}/asan-archive"',
+    },
+    {
+        "name": "Retry ASan test archive download",
+        "if": "steps.download-asan-archive.outcome == 'failure'",
         "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
         "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
     },
 ]
+SETUP_STEP_COUNT = len(EXPECTED_SETUP_STEPS)
 EXPECTED_NEGATIVE_CONTROL_STEP = {
     "name": "Prove unrelated leaks still fail LSan",
     "env": {
@@ -408,13 +425,16 @@ def check_workflow(
 
     steps = job.get("steps")
     require(isinstance(steps, list), "ASan job steps must be a list")
-    require(len(steps) == 9, "ASan job must contain the exact trusted step sequence")
     require(
-        steps[:7] == EXPECTED_SETUP_STEPS,
+        len(steps) == SETUP_STEP_COUNT + 2,
+        "ASan job must contain the exact trusted step sequence",
+    )
+    require(
+        steps[:SETUP_STEP_COUNT] == EXPECTED_SETUP_STEPS,
         "ASan setup steps must match the exact pinned trusted sequence",
     )
     require(
-        steps[7] == EXPECTED_NEGATIVE_CONTROL_STEP,
+        steps[SETUP_STEP_COUNT] == EXPECTED_NEGATIVE_CONTROL_STEP,
         "ASan negative control must match the exact trusted step",
     )
     test_steps = [
@@ -424,7 +444,7 @@ def check_workflow(
     ]
     require(len(test_steps) == 1, "ASan job must contain exactly one named test step")
     step = test_steps[0]
-    require(step is steps[8], "ASan test must be the final trusted step")
+    require(step is steps[-1], "ASan test must be the final trusted step")
     require(
         set(step) == {"name", "env", "run"},
         "ASan test step must contain exactly name, env, and run",
