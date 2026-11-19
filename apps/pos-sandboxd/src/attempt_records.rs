@@ -486,14 +486,16 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
         let (attempt_id, agr1_digest) = (self.attempt_id(), grant.digest());
         let reached = Reached::of(self.progress());
         let requested = reached.start.evidence(attempt_id, agr1_digest)?;
-        let observed = observation_evidence(
+        observation_evidence(
             reached.evidence,
             attempt_id,
             agr1_digest,
             requested.digest(),
-        )?;
-        let fields = self.termination_fields(&reached, observed.digest())?;
-        classified(requested, observed, fields)
+        )
+        .and_then(|observed| {
+            let fields = self.termination_fields(&reached, observed.digest())?;
+            classified(requested, observed, fields)
+        })
     }
 
     /// The TME1 fields before classification.
