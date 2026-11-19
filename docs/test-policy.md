@@ -70,7 +70,7 @@ scripts the lane or its consumers run), read from the trusted base revision.
 Failed detection, a base revision without that filter, a pull request at the
 3000-file listing limit, any renamed file, or a failure to list renames runs
 it. Only `cargo-crap` waits for the lane, and `ci-gate` requires both results
-directly; `standard-gate`, mutation and ASan never wait for it, so a failed lane
+directly; the standard stage, mutation and ASan never wait for it, so a failed lane
 does not hide or delay their findings. When a pull
 request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
 `crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
@@ -148,8 +148,8 @@ first-parent `main` ancestor among the 30 commits before it; a function `main`
 improved after that ancestor may then regrow up to its ancestor score, which
 the owner accepted. With no trusted baseline in that window, the job fails
 closed (pull requests that change no Rust, Cargo or toolchain input bootstrap
-instead). A failed `core-gate` no longer stops cargo-crap from running; `ci-gate`
-still fails on it.
+instead). A failed core stage (as `core-gate` reports it) does not stop
+cargo-crap from running; `ci-gate` still fails on it.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,

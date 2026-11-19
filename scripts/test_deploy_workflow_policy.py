@@ -18,6 +18,8 @@ import unittest
 
 import yaml
 
+from ci_stage_policy import CORE_STAGE_NEEDS, DOCKER_BUILD_IF, IN_RUST_SCOPE
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / ".github" / "workflows" / "deploy.yml"
@@ -125,8 +127,10 @@ def check_ci(workflow: dict) -> None:
         raise AssertionError("docker-build must need the notice job")
     if "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request')" not in job["if"]:
         raise AssertionError("docker-build must keep the Rust-scope clause")
-    if "needs.third-party-notices.result == 'success'" not in job["if"]:
+    if "needs.third-party-notices.result == 'success' && " + IN_RUST_SCOPE not in job["if"]:
         raise AssertionError("docker-build must require the notice job to succeed")
+    if job["needs"] != CORE_STAGE_NEEDS or job["if"] != DOCKER_BUILD_IF:
+        raise AssertionError("docker-build must use the canonical core stage prerequisites")
     steps = job["steps"]
     download = check_download(steps, "docker-build")
     builds = check_builds(steps, "docker-build", push=False)
@@ -293,6 +297,19 @@ class DeployNoticePolicy(unittest.TestCase):
             (
                 lambda j: j["third-party-notices"].update({"uses": "./x.yml"}),
                 "same reusable",
+            ),
+            (
+                lambda j: j["docker-build"].update(
+                    {"needs": ["ci_change_scope", "core-gate", "third-party-notices"]}
+                ),
+                "canonical core stage prerequisites",
+            ),
+            (
+                lambda j: j["docker-build"].update(
+                    {"if": j["docker-build"]["if"].replace(
+                        "needs.coverage.result == 'success'", "needs.coverage.result != 'failure'")}
+                ),
+                "canonical core stage prerequisites",
             ),
         ):
             broken = copy.deepcopy(workflow)
