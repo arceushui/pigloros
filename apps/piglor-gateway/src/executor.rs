@@ -2606,17 +2606,20 @@ impl StoreExecutor {
 }
 
 /// Test-only: a closure over the host store's erasure host.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 type HostProbeV1<T> = Box<dyn FnOnce(&mut ErasureExecutionHostV1) -> T + Send>;
 
 /// Test-only: run a closure on the host store's erasure host.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 struct HostProbeForTestV1<T> {
     probe: HostProbeV1<T>,
     reply: oneshot::Sender<Result<Option<T>, StoreExecutorError>>,
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl<T: Send + 'static> WorkerCommandV1 for HostProbeForTestV1<T> {
     fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
@@ -2633,7 +2636,8 @@ impl<T: Send + 'static> WorkerCommandV1 for HostProbeForTestV1<T> {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl StoreExecutor {
     /// Run `probe` on the host store's erasure host as one command; `None`
@@ -2651,7 +2655,8 @@ impl StoreExecutor {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod local_erasure_advance_tests {
     use super::{LocalErasureAdvanceCommand, StoreExecutor, StoreExecutorError, WorkerCommandV1};

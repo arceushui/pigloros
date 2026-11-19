@@ -75,6 +75,15 @@ use crate::local_principal::{
 };
 use crate::Gateway;
 
+/// Write one payload-free line to standard error; the stream's lock is
+/// released at the end of the write. A macro, like `main`'s
+/// `output_stderr!`, because its only effect is the write.
+macro_rules! announce {
+    ($($line:tt)*) => {
+        drop(writeln!(io::stderr().lock(), $($line)*))
+    };
+}
+
 /// The systemd credential holding the installed ELB1 bytes.
 pub const LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME: &str = "pigloros.local-erasure-bundle";
 
@@ -356,9 +365,7 @@ impl LocalErasureServeV1 {
         LocalErasureStartV1 {
             started: self.driver.map(|driver| {
                 let sweep = LocalErasureDriverV1::sweep(host);
-                announce(&format!(
-                    "piglor-gateway local erasure startup sweep: {sweep:?}"
-                ));
+                announce!("piglor-gateway local erasure startup sweep: {sweep:?}");
                 (driver, sweep)
             }),
         }
@@ -434,9 +441,7 @@ impl LocalErasureDriverTaskV1 {
         if let Some((_, task)) = self.running {
             task.abort();
             let panicked = task.await.is_err_and(|error| error.is_panic());
-            announce(&format!(
-                "piglor-gateway local erasure driver stopped (panicked: {panicked})"
-            ));
+            announce!("piglor-gateway local erasure driver stopped (panicked: {panicked})");
         }
     }
 }
@@ -484,15 +489,9 @@ async fn wake_once(
         }
     }
     if let Some(report) = deferred_report(deferred.len(), previous) {
-        announce(&report);
+        announce!("{report}");
     }
     deferred.len()
-}
-
-/// Write one payload-free line to standard error; the stream's lock is
-/// released at the end of the write.
-fn announce(line: &str) {
-    drop(writeln!(io::stderr().lock(), "{line}"));
 }
 
 /// The payload-free report of a wake that deferred `deferred` requests,
