@@ -2,13 +2,16 @@
 """Keep the ADR-129 A5.9 authority trust-root seal inside the trusted composition roots (#1374).
 
 `pos_core::AuthorityTrustRootSealV1` builds the `AuthenticatedPrincipalResultV1` and
-`AuthorityRegistrySnapshotV1` values the authority evaluator trusts, and the metadata authority
-installed by `pos_store::community::CommunityMetadataAuthorityV1::new`. Its constructor exists
+`AuthorityRegistrySnapshotV1` values the authority evaluator trusts, and the community owner
+types `pos_store::community` installs (`CommunityMetadataAuthorityV1`,
+`CommunityLifecycleAuthorityV1`, `CommunityInitializerOwnerV1`), which receive a
+`&'static` seal from their composition root and never mint one. Its constructor exists
 only with `pos-core`'s `authority-trust-root` feature, so:
 
 - only `apps/piglor-gateway`, `apps/pos-experiment` and `apps/pos-plugin-conformance-adapter`
   (the trusted composition roots) may enable `authority-trust-root` in a deployable dependency
-  table or forward it from a feature; every manifest may enable it from `[dev-dependencies]`;
+  table or forward it from a feature; every manifest, `crates/pos-store` included, may enable it
+  from `[dev-dependencies]`;
 - no feature named `local-admission-host`, nor any feature it reaches, forwards it, in any
   manifest: the local scheduled-admission host takes the seal from its caller and never mints it;
 - outside `crates/pos-core/`, non-test code calls `for_composition_root` only at the pinned mint

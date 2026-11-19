@@ -1229,7 +1229,7 @@ fn authenticate_initial_grant(
     let grant = admitted
         .authenticate_selector_grant(bytes, request, commitment)
         .map_err(receive_invalid)?;
-    retain_authenticated_grant(retained, bytes.to_vec(), grant.grant_digest);
+    retain_authenticated_grant(retained, bytes.to_vec(), grant.grant_digest());
     Ok(grant)
 }
 
@@ -1301,7 +1301,7 @@ fn read_admitted_response(
                             result_bytes,
                             audit_bytes,
                         ),
-                        agr1_digest: grant.grant_digest,
+                        agr1_digest: grant.grant_digest(),
                         output,
                     })
                 })
@@ -1440,7 +1440,7 @@ fn stage_output(
     match result.output.as_ref() {
         Some(descriptor) => {
             let validator = PayloadStreamValidator::new(
-                result.result_digest,
+                result.result_digest(),
                 request.request.request_id,
                 request.attempt_id,
                 PayloadDirection::Output,
@@ -2455,7 +2455,7 @@ mod tests {
             ProviderTransportError::AfterAdmission {
                 agr1_digest,
                 failure: PostAdmissionProviderFailure::TerminalUnavailable,
-            } if agr1_digest == grant.grant_digest
+            } if agr1_digest == grant.grant_digest()
         ));
         Ok(())
     }
@@ -2511,7 +2511,7 @@ mod tests {
             ProviderTransportError::AfterAdmission {
                 agr1_digest,
                 failure: PostAdmissionProviderFailure::EvidenceInvalid,
-            } if agr1_digest == grant.grant_digest
+            } if agr1_digest == grant.grant_digest()
         ));
         Ok(())
     }
@@ -2602,7 +2602,7 @@ mod tests {
         assert_eq!(execution.sau1_frames(), fixture.sau1);
         let grant =
             crate::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(&fixture.agr1)?;
-        assert_eq!(execution.agr1_digest(), grant.grant_digest);
+        assert_eq!(execution.agr1_digest(), grant.grant_digest());
         let output = execution
             .with_verified_output(|descriptor, reader| {
                 let mut bytes = Vec::new();
@@ -3008,7 +3008,7 @@ mod tests {
             Err(ProviderTransportError::AfterAdmission {
                 agr1_digest,
                 failure: PostAdmissionProviderFailure::TerminalUnavailable,
-            }) if agr1_digest == grant.grant_digest
+            }) if agr1_digest == grant.grant_digest()
         ));
         provider.join().map_err(|_| "provider thread panicked")??;
         Ok(())

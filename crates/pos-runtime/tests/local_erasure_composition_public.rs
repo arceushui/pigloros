@@ -122,7 +122,7 @@ fn bundle() -> LocalErasureBundleV1 {
         tps1: ErasureReferenceV1::from_digest([0x54; 32]),
         store_identity: ErasureReferenceV1::from_digest(STORE_IDENTITY),
         authority_registry_digest: ErasureReferenceV1::from_digest(REGISTRY),
-        host_timelines: Vec::new(),
+        host_timelines: erasure_host_timelines(),
         policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
         owners: Vec::new(),
         execution_binding: execution_binding(),
@@ -135,6 +135,13 @@ fn bundle() -> LocalErasureBundleV1 {
         issued_by: BUNDLE_ROOT.to_owned(),
         expiry: 0,
     }
+}
+
+/// The Erasure Host Timeline of the fixture store identity.
+fn erasure_host_timelines() -> Vec<TimelineId> {
+    pos_core::local_erasure_host_timeline_v1(ErasureReferenceV1::from_digest(STORE_IDENTITY))
+        .into_iter()
+        .collect()
 }
 
 /// ELB1S over `bundle` by `key`.
@@ -374,6 +381,70 @@ fn a_bundle_for_another_policy_or_executor_is_a_mismatch() -> TestResult {
     assert_eq!(
         case.refusal(&mut store),
         Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+    Ok(())
+}
+
+/// Owner decision Q14 (2026-11-17, #1412): the bundle must list its store's
+/// Erasure Host Timeline among `host_timelines`, with or without a composed
+/// executor; other host Timelines beside it do not matter.
+#[test]
+fn a_bundle_without_its_erasure_host_timeline_is_a_mismatch() -> TestResult {
+    let mut store = provisioned_store()?;
+    assert_eq!(erasure_host_timelines().len(), 1);
+    let mut listed = bundle();
+    listed
+        .host_timelines
+        .insert(0, TimelineId::from_ulid(Ulid::nil()));
+    listed
+        .host_timelines
+        .push(TimelineId::from_ulid(Ulid::from_bytes([0xff; 16])));
+    let case = Case::signed(&listed, &bundle_root(), &[])?;
+    assert!(case.compose(&mut store).is_ok());
+    let mut omitted = bundle();
+    omitted.host_timelines = vec![TimelineId::from_ulid(Ulid::nil())];
+    let mut case = Case::signed(&omitted, &bundle_root(), &[])?;
+    assert_eq!(
+        case.refusal(&mut store),
+        Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+    case.execution_binding = None;
+    assert_eq!(
+        case.refusal(&mut store),
+        Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+    // Another store's Erasure Host Timeline is not this store's.
+    omitted.host_timelines = vec![pos_core::local_erasure_host_timeline_v1(reference(0x5f))?];
+    let case = Case::signed(&omitted, &bundle_root(), &[])?;
+    assert_eq!(
+        case.refusal(&mut store),
+        Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+    Ok(())
+}
+
+/// Owner decision Q6 (2026-11-17, #1412): the pinned executor binding is
+/// `CA("ELEXV1", [executor_id, version])` of exactly these values.
+#[test]
+fn the_executor_binding_is_the_pinned_executor_version_digest() -> TestResult {
+    assert_eq!(
+        pos_runtime::LOCAL_ERASURE_EXECUTOR_ID_V1,
+        "pigloros.local-erasure-executor"
+    );
+    assert_eq!(pos_runtime::LOCAL_ERASURE_EXECUTOR_VERSION_V1, 1);
+    assert_eq!(
+        pos_core::local_erasure_executor_version_v1(
+            pos_runtime::LOCAL_ERASURE_EXECUTOR_ID_V1,
+            pos_runtime::LOCAL_ERASURE_EXECUTOR_VERSION_V1,
+        )?,
+        pos_runtime::LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1
+    );
+    assert_eq!(
+        pos_runtime::local_erasure_execution_binding_v1(),
+        LocalErasureExecutionBindingV1 {
+            executor_id: pos_runtime::LOCAL_ERASURE_EXECUTOR_ID_V1.to_owned(),
+            executor_version_digest: pos_runtime::LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1,
+        }
     );
     Ok(())
 }
@@ -2998,8 +3069,11 @@ fn a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not() 
             .id();
         (host_timeline, host_fork)
     };
+    // Listed beside the bundle's Erasure Host Timeline, which every Local
+    // bundle must list; ELB1 keeps its host Timelines sorted.
     let mut hosting = bundle();
-    hosting.host_timelines = vec![host_timeline];
+    hosting.host_timelines.push(host_timeline);
+    hosting.host_timelines.sort_unstable();
     let case = Case::signed(&hosting, &bundle_root(), &[])?;
     let digest = {
         let mut host = owned.store.host(&case, 4_096)?;

@@ -18,8 +18,9 @@
 //! enable that feature outside dev-dependencies, each mints the seal at one
 //! pinned site, and no crate but this one may re-export or return the seal; CI
 //! enforces all three with `scripts/check_authority_trust_root_seal.py`.
-//! Hosts below them, such as the local scheduled-admission host, take the seal
-//! from their caller.
+//! Hosts and owners below them, such as the local scheduled-admission host
+//! and the `pos-store` community owner, never mint it: they take a seal from
+//! their caller.
 //!
 //! The seal cannot be forged, copied or defaulted:
 //!
@@ -320,8 +321,12 @@ impl AssuranceLevelV1 {
     }
 }
 
-/// Capability held only by the trusted composition root and the
-/// authentication adapters it installs (ADR-129 A5.9, #1374).
+/// Capability held only by the trusted composition roots and what they
+/// install (ADR-129 A5.9, #1374).
+///
+/// The roots are `piglor-gateway`, `pos-experiment` and
+/// `pos-plugin-conformance-adapter`; the authentication adapters and owners
+/// they install take the seal from them.
 ///
 /// [`AuthenticatedPrincipalResultV1::try_from_draft`] and
 /// [`AuthorityRegistrySnapshotV1::try_new`] require it, so same-process code
@@ -534,6 +539,15 @@ impl AuthorityRegistrySnapshotV1 {
     #[must_use]
     pub const fn registry_digest(&self) -> Hash {
         self.registry_digest
+    }
+
+    /// The strictly ordered capability-grant bindings this snapshot attests.
+    ///
+    /// Read-only: it cannot construct a grant, a snapshot or an
+    /// authentication result (ADR-129 R6.2(5)).
+    #[must_use]
+    pub fn capability_bindings(&self) -> &[Hash] {
+        &self.capability_bindings
     }
 
     fn trusts_authentication(&self, request: &AuthorizationRequestV1) -> bool {

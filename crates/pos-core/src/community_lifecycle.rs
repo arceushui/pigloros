@@ -5,8 +5,11 @@
 //! source, selected generation, current head and actual protected use. These
 //! codecs cannot issue a guest permit or restore a live state cell.
 
+mod authority_catalogue;
+mod authority_evidence;
 mod classification;
 mod copy_inventory;
+mod current_view;
 mod envelope;
 mod error;
 mod failure;
@@ -46,6 +49,17 @@ mod state;
 mod step;
 mod terminal;
 
+pub use authority_catalogue::{
+    community_authentication_nonce_v1, community_capability_attestation_digest_v1,
+    CommunityActorRowV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
+    COMMUNITY_AUD_SCHEMA_V1, COMMUNITY_PRINCIPAL_SCHEMA_V1, MAX_COMMUNITY_ACTOR_ROWS_V1,
+    MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1,
+};
+pub use authority_evidence::{
+    CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityClockBoundV1,
+    CommunityDecisionRowV1, CommunityObjectBindingV1, MAX_COMMUNITY_DECISION_ROWS_V1,
+    MAX_COMMUNITY_OBJECT_BINDINGS_V1,
+};
 pub use classification::{
     CommunityArtifactChildrenV1, CommunityClassificationProofInputV1,
     CommunityClassificationProofV1,
@@ -53,6 +67,13 @@ pub use classification::{
 pub use copy_inventory::{
     CommunityCopyHolderV1, CommunityCopyInventoryInputV1, CommunityCopyInventoryV1,
     CommunityCopyStateV1,
+};
+pub use current_view::{
+    CommunityAuthorityViewRowV1, CommunityClockLatchV1, CommunityCurrentViewInputV1,
+    CommunityCurrentViewV1, CommunityKeyStateV1, CommunityKeyViewRowV1, CommunityScopeStateV1,
+    CommunityScopeViewRowV1, CommunityTrustViewRowV1, MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1,
+    MAX_COMMUNITY_VIEW_KEY_ROWS_V1, MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1,
+    MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
 };
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
@@ -124,16 +145,18 @@ pub use native_node::{
 };
 pub use original_provenance::{CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1};
 pub use owner_binding::{
-    CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
-    CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
+    community_catalogue_owner_reference_v1, CommunityMetadataAnchorInputV1,
+    CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1,
+    CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
 };
 pub use prepared::{
     CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
     TimelinePositionV1, MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
 };
 pub use profile::{
-    CommunityDurableBackendV1, CommunityDurableProfileInputV1, CommunityDurableProfileV1,
-    CommunityProfileMemberV1, CommunityProfileRetentionV1,
+    community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
+    CommunityDurableProfileV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
+    COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
 };
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
@@ -387,6 +410,21 @@ fn bounded_text<'a>(cursor: &mut CborCursor<'a>, maximum: usize) -> Result<&'a s
             .and_then(|bytes| {
                 std::str::from_utf8(bytes).map_err(|_| CommunityLifecycleErrorV1::InvalidEncoding)
             })
+    })
+}
+
+/// Read a definite array of at most `maximum` items with `read`.
+fn read_vec<'a, T>(
+    cursor: &mut CborCursor<'a>,
+    maximum: usize,
+    mut read: impl FnMut(&mut CborCursor<'a>) -> Result<T>,
+) -> Result<Vec<T>> {
+    read_head(cursor, 4).and_then(|count| {
+        if count > maximum as u64 {
+            Err(CommunityLifecycleErrorV1::BoundsExceeded)
+        } else {
+            (0..count).map(|_| read(cursor)).collect()
+        }
     })
 }
 

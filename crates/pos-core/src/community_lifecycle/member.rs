@@ -5,7 +5,7 @@ use super::{
     read_implementation_key, record_cursor, record_prefix, CommunityLifecycleErrorV1 as Error,
     Result,
 };
-use crate::{encode_bytes, encode_hash, Hash, ImplementationKeyV1};
+use crate::{encode_bytes, encode_hash, encode_head, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
 
 const _: () = assert!(7 + 66 + 3 + crate::MAX_IMPLEMENTATION_KEY_BYTES_V1 + 5 * 34 <= 1024);
@@ -90,6 +90,19 @@ impl<'a> CommunityMemberBindingV1<'a> {
     #[must_use]
     pub fn digest(&self) -> Hash {
         digest(b"PiglorOS.Community.CMB1.v1\0", &self.to_canonical_cbor())
+    }
+
+    /// The stable member M, `H("StableMember", preferred [stable_entry,
+    /// IMK1_bytes])` (ADR-129 A5.8). It names the execution resource; it is
+    /// not the private CMB1 or State digest, and it changes with IMK1.
+    #[must_use]
+    pub fn stable_member_digest(&self) -> Hash {
+        let input = self.as_input();
+        let mut preimage = Zeroizing::new(Vec::with_capacity(1024));
+        encode_head(&mut preimage, 4, 2);
+        encode_bytes(&mut preimage, input.stable_entry.as_bytes(), 3);
+        encode_implementation_key(&mut preimage, input.implementation);
+        digest(b"PiglorOS.Community.StableMember.v1\0", &preimage)
     }
 
     /// Decode against the actual independently retained implementation key.

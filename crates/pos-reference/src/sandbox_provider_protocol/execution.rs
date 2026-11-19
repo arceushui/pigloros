@@ -10,7 +10,7 @@ use super::codec::{
     verify_signature, MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES, MAX_SAFE_DETAIL_BYTES,
 };
 use super::operations::{decode_request_authority, validate_request_authority, RequestAuthority};
-use super::{SandboxProviderProtocolError, SelfDigested, Spe1, Verified};
+use super::{Agr1, SandboxProviderProtocolError, SelfDigested, Spe1, Spr1, Spy1, Verified};
 
 const PAYLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_PAYLOAD_CHUNKS: u64 = 128;
@@ -423,6 +423,35 @@ pub struct AdmissionAuthority {
     pub hcp1_digest: [u8; 32],
 }
 
+/// The signed body of an AGR1 before its digest and signature exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmissionGrantFields {
+    /// The SPX1 request ID.
+    pub request_id: [u8; 16],
+    /// The attempt identity.
+    pub attempt_id: [u8; 16],
+    /// The thirteen authority digests.
+    pub authority: AdmissionAuthority,
+    /// The TRS1 epoch.
+    pub trust_epoch: u64,
+    /// The RVS1 epoch.
+    pub revocation_epoch: u64,
+    /// The APT1 epoch.
+    pub policy_epoch: u64,
+    /// The ELM1 self-digest.
+    pub elm1_digest: [u8; 32],
+    /// The input payload digest.
+    pub input_digest: [u8; 32],
+    /// The ordered network exchange-plan digests.
+    pub exchange_plan_digests: Vec<[u8; 32]>,
+    /// The LPS1 digest the launch must use.
+    pub expected_launch_policy_digest: [u8; 32],
+    /// The RBS1 readback-set commitment.
+    pub expected_readback_set_digest: [u8; 32],
+    /// Provider runtime-attestation key ID.
+    pub runtime_attestation_key_id: String,
+}
+
 /// Independently decoded signed AGR1 admission grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmissionGrant {
@@ -438,27 +467,76 @@ pub struct AdmissionGrant {
     pub expected_launch_policy_digest: [u8; 32],
     pub expected_readback_set_digest: [u8; 32],
     pub runtime_attestation_key_id: String,
-    pub grant_digest: [u8; 32],
-    pub signature: [u8; 64],
+    grant_digest: [u8; 32],
+    signature: [u8; 64],
 }
 
 impl AdmissionGrant {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn sign_and_encode(
-        mut self,
-        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], std::io::Error>,
-    ) -> Result<(Vec<u8>, [u8; 32]), SandboxProviderProtocolError> {
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an AGR1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects zero identities and digests, an invalid exchange-plan list
+    /// and an invalid key ID, as the decoder does.
+    pub fn self_digested(
+        fields: AdmissionGrantFields,
+    ) -> Result<SelfDigested<Agr1>, SandboxProviderProtocolError> {
+        validate_grant_fields(&fields)
+            .and_then(|()| {
+                record_digest(
+                    "AGR1",
+                    &Value::Array(grant_unsigned_value(&fields).to_vec()),
+                )
+            })
+            .map(|digest| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Agr1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, grant_digest, signature) = verified.into_parts();
+            Ok(Self {
+                request_id: fields.request_id,
+                attempt_id: fields.attempt_id,
+                authority: fields.authority,
+                trust_epoch: fields.trust_epoch,
+                revocation_epoch: fields.revocation_epoch,
+                policy_epoch: fields.policy_epoch,
+                elm1_digest: fields.elm1_digest,
+                input_digest: fields.input_digest,
+                exchange_plan_digests: fields.exchange_plan_digests,
+                expected_launch_policy_digest: fields.expected_launch_policy_digest,
+                expected_readback_set_digest: fields.expected_readback_set_digest,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                grant_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        }
+    }
+
+    /// Exact canonical AGR1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed error when the fields no longer match the
+    /// self-digest, and an encoding error if they cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.grant_digest = record_digest("AGR1", &Value::Array(unsigned.to_vec()))?;
-        self.signature = sign(&super::codec::signature_message("AGR1", &self.grant_digest))
-            .map_err(|_| SandboxProviderProtocolError::SignatureInvalid)?;
-        self.validate(&unsigned)?;
-        encode(&Value::Array(vec![
-            Value::Array(unsigned.to_vec()),
-            bytes_value(&self.grant_digest),
-            bytes_value(&self.signature),
-        ]))
-        .map(|bytes| (bytes, self.grant_digest))
+        self.validate(&unsigned).and_then(|()| {
+            encode(&Value::Array(vec![
+                Value::Array(unsigned.to_vec()),
+                bytes_value(&self.grant_digest),
+                bytes_value(&self.signature),
+            ]))
+        })
     }
 
     /// Decode and fully validate exact canonical AGR1 bytes.
@@ -487,6 +565,35 @@ impl AdmissionGrant {
         grant.validate(fields).map(|()| grant)
     }
 
+    /// The AGR1 self-digest, which SPR1, SPY1 and every later cancel and
+    /// reconcile request name.
+    #[must_use]
+    pub const fn grant_digest(&self) -> [u8; 32] {
+        self.grant_digest
+    }
+
+    /// An unsigned grant of `fields` with the filler self-digest `digest`,
+    /// for tests that authenticate nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn unsigned_fixture(fields: AdmissionGrantFields, digest: [u8; 32]) -> Self {
+        Self {
+            request_id: fields.request_id,
+            attempt_id: fields.attempt_id,
+            authority: fields.authority,
+            trust_epoch: fields.trust_epoch,
+            revocation_epoch: fields.revocation_epoch,
+            policy_epoch: fields.policy_epoch,
+            elm1_digest: fields.elm1_digest,
+            input_digest: fields.input_digest,
+            exchange_plan_digests: fields.exchange_plan_digests,
+            expected_launch_policy_digest: fields.expected_launch_policy_digest,
+            expected_readback_set_digest: fields.expected_readback_set_digest,
+            runtime_attestation_key_id: fields.runtime_attestation_key_id,
+            grant_digest: digest,
+            signature: [0; 64],
+        }
+    }
+
     /// Verify AGR1 using a caller-authorized runtime-attestation key.
     ///
     /// # Errors
@@ -500,56 +607,88 @@ impl AdmissionGrant {
         verify_signature("AGR1", &self.grant_digest, &self.signature, key)
     }
 
-    fn validate(&self, unsigned: &[Value; 26]) -> Result<(), SandboxProviderProtocolError> {
-        if self.request_id == [0; 16]
-            || self.attempt_id == [0; 16]
-            || self.authority.has_zero_digest()
-            || [
-                self.elm1_digest,
-                self.input_digest,
-                self.expected_launch_policy_digest,
-                self.expected_readback_set_digest,
-            ]
-            .contains(&[0; 32])
-            || invalid_digest_list(&self.exchange_plan_digests)
-            || !valid_key_id(&self.runtime_attestation_key_id)
-        {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    fn fields(&self) -> AdmissionGrantFields {
+        AdmissionGrantFields {
+            request_id: self.request_id,
+            attempt_id: self.attempt_id,
+            authority: self.authority.clone(),
+            trust_epoch: self.trust_epoch,
+            revocation_epoch: self.revocation_epoch,
+            policy_epoch: self.policy_epoch,
+            elm1_digest: self.elm1_digest,
+            input_digest: self.input_digest,
+            exchange_plan_digests: self.exchange_plan_digests.clone(),
+            expected_launch_policy_digest: self.expected_launch_policy_digest,
+            expected_readback_set_digest: self.expected_readback_set_digest,
+            runtime_attestation_key_id: self.runtime_attestation_key_id.clone(),
         }
+    }
+
+    fn validate(&self, unsigned: &[Value; 26]) -> Result<(), SandboxProviderProtocolError> {
+        validate_grant_fields(&self.fields())?;
         require_signature(&self.signature)?;
         verify_digest("AGR1", unsigned, self.grant_digest)
     }
 
     fn unsigned_value(&self) -> [Value; 26] {
-        [
-            text_value("AGR1"),
-            uint_value(1),
-            bytes_value(&self.request_id),
-            bytes_value(&self.attempt_id),
-            bytes_value(&self.authority.evr1_digest),
-            bytes_value(&self.authority.fixture_contract_digest),
-            bytes_value(&self.authority.fixture_digest),
-            bytes_value(&self.authority.execution_profile_digest),
-            bytes_value(&self.authority.lps1_digest),
-            bytes_value(&self.authority.sim1_digest),
-            bytes_value(&self.authority.apt1_digest),
-            bytes_value(&self.authority.trs1_digest),
-            bytes_value(&self.authority.rvs1_digest),
-            bytes_value(&self.authority.spm1_digest),
-            bytes_value(&self.authority.pcf1_digest),
-            bytes_value(&self.authority.pcr1_digest),
-            bytes_value(&self.authority.hcp1_digest),
-            uint_value(self.trust_epoch),
-            uint_value(self.revocation_epoch),
-            uint_value(self.policy_epoch),
-            bytes_value(&self.elm1_digest),
-            bytes_value(&self.input_digest),
-            digest_list_value(&self.exchange_plan_digests),
-            bytes_value(&self.expected_launch_policy_digest),
-            bytes_value(&self.expected_readback_set_digest),
-            text_value(&self.runtime_attestation_key_id),
-        ]
+        grant_unsigned_value(&self.fields())
     }
+}
+
+/// The AGR1 field bounds: nonzero identities and digests, a valid
+/// exchange-plan list and key ID.
+fn validate_grant_fields(
+    fields: &AdmissionGrantFields,
+) -> Result<(), SandboxProviderProtocolError> {
+    if fields.request_id == [0; 16]
+        || fields.attempt_id == [0; 16]
+        || fields.authority.has_zero_digest()
+        || [
+            fields.elm1_digest,
+            fields.input_digest,
+            fields.expected_launch_policy_digest,
+            fields.expected_readback_set_digest,
+        ]
+        .contains(&[0; 32])
+        || invalid_digest_list(&fields.exchange_plan_digests)
+        || !valid_key_id(&fields.runtime_attestation_key_id)
+    {
+        Err(SandboxProviderProtocolError::FieldOutOfBounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn grant_unsigned_value(fields: &AdmissionGrantFields) -> [Value; 26] {
+    let authority = &fields.authority;
+    [
+        text_value("AGR1"),
+        uint_value(1),
+        bytes_value(&fields.request_id),
+        bytes_value(&fields.attempt_id),
+        bytes_value(&authority.evr1_digest),
+        bytes_value(&authority.fixture_contract_digest),
+        bytes_value(&authority.fixture_digest),
+        bytes_value(&authority.execution_profile_digest),
+        bytes_value(&authority.lps1_digest),
+        bytes_value(&authority.sim1_digest),
+        bytes_value(&authority.apt1_digest),
+        bytes_value(&authority.trs1_digest),
+        bytes_value(&authority.rvs1_digest),
+        bytes_value(&authority.spm1_digest),
+        bytes_value(&authority.pcf1_digest),
+        bytes_value(&authority.pcr1_digest),
+        bytes_value(&authority.hcp1_digest),
+        uint_value(fields.trust_epoch),
+        uint_value(fields.revocation_epoch),
+        uint_value(fields.policy_epoch),
+        bytes_value(&fields.elm1_digest),
+        bytes_value(&fields.input_digest),
+        digest_list_value(&fields.exchange_plan_digests),
+        bytes_value(&fields.expected_launch_policy_digest),
+        bytes_value(&fields.expected_readback_set_digest),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
 }
 
 /// Closed SPY1 terminal outcome.
@@ -656,6 +795,27 @@ fn validate_lifecycle_events(
         .ok_or(SandboxProviderProtocolError::InconsistentFields)
 }
 
+/// The signed body of an SPY1 before its digest and signature exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxProviderResultFields {
+    /// The SPX1 request ID.
+    pub request_id: [u8; 16],
+    /// The attempt identity.
+    pub attempt_id: [u8; 16],
+    /// The closed terminal outcome.
+    pub outcome: SandboxTerminalOutcome,
+    /// The output descriptor, present exactly when Completed.
+    pub output: Option<PayloadDescriptor>,
+    /// The AGR1 self-digest, after admission.
+    pub agr1_digest: Option<[u8; 32]>,
+    /// The SPR1 self-digest, after admission.
+    pub spr1_digest: Option<[u8; 32]>,
+    /// The SAU1 event codes of the chain, in order.
+    pub operational_events: Vec<u8>,
+    /// Provider runtime-attestation key ID.
+    pub runtime_attestation_key_id: String,
+}
+
 /// Independently decoded signed SPY1 terminal result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxProviderResult {
@@ -667,11 +827,76 @@ pub struct SandboxProviderResult {
     pub spr1_digest: Option<[u8; 32]>,
     pub operational_events: Vec<u8>,
     pub runtime_attestation_key_id: String,
-    pub result_digest: [u8; 32],
-    pub signature: [u8; 64],
+    result_digest: [u8; 32],
+    signature: [u8; 64],
 }
 
 impl SandboxProviderResult {
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an SPY1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects out-of-bounds fields, an event sequence the outcome does not
+    /// allow, and digests or output inconsistent with the outcome, as the
+    /// decoder does.
+    pub fn self_digested(
+        fields: SandboxProviderResultFields,
+    ) -> Result<SelfDigested<Spy1>, SandboxProviderProtocolError> {
+        validate_result_bounds(&fields)
+            .and_then(|()| validate_result_union(&fields))
+            .and_then(|()| {
+                record_digest(
+                    "SPY1",
+                    &Value::Array(result_unsigned_value(&fields).to_vec()),
+                )
+            })
+            .map(|digest| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Spy1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, result_digest, signature) = verified.into_parts();
+            Ok(Self {
+                request_id: fields.request_id,
+                attempt_id: fields.attempt_id,
+                outcome: fields.outcome,
+                output: fields.output,
+                agr1_digest: fields.agr1_digest,
+                spr1_digest: fields.spr1_digest,
+                operational_events: fields.operational_events,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                result_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        }
+    }
+
+    /// Exact canonical SPY1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed error when the fields no longer match the
+    /// self-digest, and an encoding error if they cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = self.unsigned_value();
+        self.validate(&unsigned).and_then(|()| {
+            encode(&Value::Array(vec![
+                Value::Array(unsigned.to_vec()),
+                bytes_value(&self.result_digest),
+                bytes_value(&self.signature),
+            ]))
+        })
+    }
+
     /// Decode and fully validate exact canonical SPY1 bytes.
     ///
     /// # Errors
@@ -692,6 +917,12 @@ impl SandboxProviderResult {
             signature,
         };
         result.validate(fields).map(|()| result)
+    }
+
+    /// The SPY1 self-digest, which every output chunk names as its parent.
+    #[must_use]
+    pub const fn result_digest(&self) -> [u8; 32] {
+        self.result_digest
     }
 
     /// Verify SPY1 using a caller-authorized runtime-attestation key.
@@ -727,61 +958,96 @@ impl SandboxProviderResult {
         validate_lifecycle_events(self.outcome, &self.operational_events, receipt)
     }
 
+    fn fields(&self) -> SandboxProviderResultFields {
+        SandboxProviderResultFields {
+            request_id: self.request_id,
+            attempt_id: self.attempt_id,
+            outcome: self.outcome,
+            output: self.output.clone(),
+            agr1_digest: self.agr1_digest,
+            spr1_digest: self.spr1_digest,
+            operational_events: self.operational_events.clone(),
+            runtime_attestation_key_id: self.runtime_attestation_key_id.clone(),
+        }
+    }
+
     fn validate(&self, unsigned: &[Value; 10]) -> Result<(), SandboxProviderProtocolError> {
-        if self.request_id == [0; 16]
-            || self.attempt_id == [0; 16]
-            || self.operational_events.len() > MAX_LIST_ENTRIES
-            || self.operational_events.iter().any(|code| *code > 13)
-            || !valid_key_id(&self.runtime_attestation_key_id)
-        {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
-        }
-        validate_terminal_event_shape(self.outcome, &self.operational_events)?;
+        let fields = self.fields();
+        validate_result_bounds(&fields)?;
         require_signature(&self.signature)?;
-        self.output.as_ref().map_or(Ok(()), |output| {
-            validate_payload_descriptor(output, PayloadDirection::Output)
-        })?;
-        let post_admission = nonzero_optional(self.agr1_digest)
-            && nonzero_optional(self.spr1_digest)
-            && self.output.is_none();
-        let valid = match self.outcome {
-            SandboxTerminalOutcome::Completed => {
-                self.output.is_some()
-                    && nonzero_optional(self.agr1_digest)
-                    && nonzero_optional(self.spr1_digest)
-            }
-            SandboxTerminalOutcome::Cancelled
-            | SandboxTerminalOutcome::UnavailableAfterAdmission => post_admission,
-            SandboxTerminalOutcome::UnavailableBeforeAdmission
-            | SandboxTerminalOutcome::Rejected => {
-                self.output.is_none() && self.agr1_digest.is_none() && self.spr1_digest.is_none()
-            }
-        };
-        if !valid {
-            return Err(SandboxProviderProtocolError::InconsistentFields);
-        }
+        validate_result_union(&fields)?;
         verify_digest("SPY1", unsigned, self.result_digest)
     }
 
     fn unsigned_value(&self) -> [Value; 10] {
-        [
-            text_value("SPY1"),
-            uint_value(1),
-            bytes_value(&self.request_id),
-            bytes_value(&self.attempt_id),
-            uint_value(self.outcome.code()),
-            self.output.as_ref().map_or(Value::Null, output_value),
-            optional_digest_value(self.agr1_digest.as_ref()),
-            optional_digest_value(self.spr1_digest.as_ref()),
-            Value::Array(
-                self.operational_events
-                    .iter()
-                    .map(|code| uint_value(u64::from(*code)))
-                    .collect(),
-            ),
-            text_value(&self.runtime_attestation_key_id),
-        ]
+        result_unsigned_value(&self.fields())
     }
+}
+
+/// The SPY1 field bounds and the event sequence its outcome allows.
+fn validate_result_bounds(
+    fields: &SandboxProviderResultFields,
+) -> Result<(), SandboxProviderProtocolError> {
+    if fields.request_id == [0; 16]
+        || fields.attempt_id == [0; 16]
+        || fields.operational_events.len() > MAX_LIST_ENTRIES
+        || fields.operational_events.iter().any(|code| *code > 13)
+        || !valid_key_id(&fields.runtime_attestation_key_id)
+    {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    validate_terminal_event_shape(fields.outcome, &fields.operational_events)
+}
+
+/// The output descriptor and the closed terminal union (ADR-069 §4).
+fn validate_result_union(
+    fields: &SandboxProviderResultFields,
+) -> Result<(), SandboxProviderProtocolError> {
+    fields.output.as_ref().map_or(Ok(()), |output| {
+        validate_payload_descriptor(output, PayloadDirection::Output)
+    })?;
+    let post_admission = nonzero_optional(fields.agr1_digest)
+        && nonzero_optional(fields.spr1_digest)
+        && fields.output.is_none();
+    let valid = match fields.outcome {
+        SandboxTerminalOutcome::Completed => {
+            fields.output.is_some()
+                && nonzero_optional(fields.agr1_digest)
+                && nonzero_optional(fields.spr1_digest)
+        }
+        SandboxTerminalOutcome::Cancelled | SandboxTerminalOutcome::UnavailableAfterAdmission => {
+            post_admission
+        }
+        SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
+            fields.output.is_none() && fields.agr1_digest.is_none() && fields.spr1_digest.is_none()
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SandboxProviderProtocolError::InconsistentFields)
+    }
+}
+
+fn result_unsigned_value(fields: &SandboxProviderResultFields) -> [Value; 10] {
+    [
+        text_value("SPY1"),
+        uint_value(1),
+        bytes_value(&fields.request_id),
+        bytes_value(&fields.attempt_id),
+        uint_value(fields.outcome.code()),
+        fields.output.as_ref().map_or(Value::Null, output_value),
+        optional_digest_value(fields.agr1_digest.as_ref()),
+        optional_digest_value(fields.spr1_digest.as_ref()),
+        Value::Array(
+            fields
+                .operational_events
+                .iter()
+                .map(|code| uint_value(u64::from(*code)))
+                .collect(),
+        ),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
 }
 
 /// Closed SPE1 failure code.
@@ -1115,6 +1381,43 @@ pub struct ReceiptAuthority {
     pub rvs1_digest: [u8; 32],
 }
 
+/// The signed body of an SPR1 before its digest and signature exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxProviderReceiptFields {
+    /// The attempt identity.
+    pub attempt_id: [u8; 16],
+    /// The eight authority digests.
+    pub authority: ReceiptAuthority,
+    /// The TRS1 epoch.
+    pub trust_epoch: u64,
+    /// The RVS1 epoch.
+    pub revocation_epoch: u64,
+    /// The APT1 epoch.
+    pub policy_epoch: u64,
+    /// The admitted HCP1 self-digest.
+    pub hcp1_digest: [u8; 32],
+    /// The ELM1 self-digest.
+    pub elm1_digest: [u8; 32],
+    /// The ordered NXT1 digests.
+    pub network_transcript_digests: Vec<[u8; 32]>,
+    /// The accepted `ReadyV1` digest.
+    pub ready1_digest: Option<[u8; 32]>,
+    /// The `ReleaseV1` digest, once sent.
+    pub release1_digest: Option<[u8; 32]>,
+    /// Ordinal 19: the RQE1 self-digest.
+    pub requested_configuration_evidence: [u8; 32],
+    /// Ordinal 20: the KOE1 self-digest.
+    pub kernel_observation_evidence: [u8; 32],
+    /// Ordinal 21: the admitted HCP1 ordinal 7.
+    pub negative_probe_evidence: [u8; 32],
+    /// Ordinal 22: the TME1 self-digest.
+    pub termination_evidence: [u8; 32],
+    /// The final SAU1 self-digest.
+    pub sau1_digest: [u8; 32],
+    /// Provider runtime-attestation key ID.
+    pub runtime_attestation_key_id: String,
+}
+
 /// Independently decoded signed SPR1 attempt receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxProviderReceipt {
@@ -1134,11 +1437,82 @@ pub struct SandboxProviderReceipt {
     pub termination_evidence: [u8; 32],
     pub sau1_digest: [u8; 32],
     pub runtime_attestation_key_id: String,
-    pub receipt_digest: [u8; 32],
-    pub signature: [u8; 64],
+    receipt_digest: [u8; 32],
+    signature: [u8; 64],
 }
 
 impl SandboxProviderReceipt {
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an SPR1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects zero identities and digests, an invalid key ID, and a
+    /// `ReleaseV1` digest without a `ReadyV1` digest, as the decoder does.
+    pub fn self_digested(
+        fields: SandboxProviderReceiptFields,
+    ) -> Result<SelfDigested<Spr1>, SandboxProviderProtocolError> {
+        validate_receipt_fields(&fields)
+            .and_then(|()| {
+                record_digest(
+                    "SPR1",
+                    &Value::Array(receipt_unsigned_value(&fields).to_vec()),
+                )
+            })
+            .map(|digest| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Spr1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, receipt_digest, signature) = verified.into_parts();
+            Ok(Self {
+                attempt_id: fields.attempt_id,
+                authority: fields.authority,
+                trust_epoch: fields.trust_epoch,
+                revocation_epoch: fields.revocation_epoch,
+                policy_epoch: fields.policy_epoch,
+                hcp1_digest: fields.hcp1_digest,
+                elm1_digest: fields.elm1_digest,
+                network_transcript_digests: fields.network_transcript_digests,
+                ready1_digest: fields.ready1_digest,
+                release1_digest: fields.release1_digest,
+                requested_configuration_evidence: fields.requested_configuration_evidence,
+                kernel_observation_evidence: fields.kernel_observation_evidence,
+                negative_probe_evidence: fields.negative_probe_evidence,
+                termination_evidence: fields.termination_evidence,
+                sau1_digest: fields.sau1_digest,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                receipt_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        }
+    }
+
+    /// Exact canonical SPR1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed error when the fields no longer match the
+    /// self-digest, and an encoding error if they cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = self.unsigned_value();
+        self.validate(&unsigned).and_then(|()| {
+            encode(&Value::Array(vec![
+                Value::Array(unsigned.to_vec()),
+                bytes_value(&self.receipt_digest),
+                bytes_value(&self.signature),
+            ]))
+        })
+    }
+
     /// Decode and fully validate exact canonical SPR1 bytes.
     ///
     /// # Errors
@@ -1169,6 +1543,12 @@ impl SandboxProviderReceipt {
         receipt.validate(fields).map(|()| receipt)
     }
 
+    /// The SPR1 self-digest.
+    #[must_use]
+    pub const fn receipt_digest(&self) -> [u8; 32] {
+        self.receipt_digest
+    }
+
     /// Verify SPR1 using a caller-authorized runtime-attestation key.
     ///
     /// # Errors
@@ -1182,62 +1562,95 @@ impl SandboxProviderReceipt {
         verify_signature("SPR1", &self.receipt_digest, &self.signature, key)
     }
 
+    fn fields(&self) -> SandboxProviderReceiptFields {
+        SandboxProviderReceiptFields {
+            attempt_id: self.attempt_id,
+            authority: self.authority.clone(),
+            trust_epoch: self.trust_epoch,
+            revocation_epoch: self.revocation_epoch,
+            policy_epoch: self.policy_epoch,
+            hcp1_digest: self.hcp1_digest,
+            elm1_digest: self.elm1_digest,
+            network_transcript_digests: self.network_transcript_digests.clone(),
+            ready1_digest: self.ready1_digest,
+            release1_digest: self.release1_digest,
+            requested_configuration_evidence: self.requested_configuration_evidence,
+            kernel_observation_evidence: self.kernel_observation_evidence,
+            negative_probe_evidence: self.negative_probe_evidence,
+            termination_evidence: self.termination_evidence,
+            sau1_digest: self.sau1_digest,
+            runtime_attestation_key_id: self.runtime_attestation_key_id.clone(),
+        }
+    }
+
     fn validate(&self, unsigned: &[Value; 25]) -> Result<(), SandboxProviderProtocolError> {
-        if self.attempt_id == [0; 16]
-            || self.authority.has_zero_digest()
-            || [
-                self.hcp1_digest,
-                self.elm1_digest,
-                self.requested_configuration_evidence,
-                self.kernel_observation_evidence,
-                self.negative_probe_evidence,
-                self.termination_evidence,
-                self.sau1_digest,
-            ]
-            .contains(&[0; 32])
-            || invalid_digest_list(&self.network_transcript_digests)
-            || self.ready1_digest == Some([0; 32])
-            || self.release1_digest == Some([0; 32])
-            || !valid_key_id(&self.runtime_attestation_key_id)
-        {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
-        }
-        if self.release1_digest.is_some() && self.ready1_digest.is_none() {
-            return Err(SandboxProviderProtocolError::InconsistentFields);
-        }
+        validate_receipt_fields(&self.fields())?;
         require_signature(&self.signature)?;
         verify_digest("SPR1", unsigned, self.receipt_digest)
     }
 
     fn unsigned_value(&self) -> [Value; 25] {
-        [
-            text_value("SPR1"),
-            uint_value(1),
-            bytes_value(&self.attempt_id),
-            bytes_value(&self.authority.agr1_digest),
-            bytes_value(&self.authority.spm1_digest),
-            bytes_value(&self.authority.provider_binary_digest),
-            bytes_value(&self.authority.lps1_digest),
-            bytes_value(&self.authority.sim1_digest),
-            bytes_value(&self.authority.apt1_digest),
-            bytes_value(&self.authority.trs1_digest),
-            bytes_value(&self.authority.rvs1_digest),
-            uint_value(self.trust_epoch),
-            uint_value(self.revocation_epoch),
-            uint_value(self.policy_epoch),
-            bytes_value(&self.hcp1_digest),
-            bytes_value(&self.elm1_digest),
-            digest_list_value(&self.network_transcript_digests),
-            optional_digest_value(self.ready1_digest.as_ref()),
-            optional_digest_value(self.release1_digest.as_ref()),
-            bytes_value(&self.requested_configuration_evidence),
-            bytes_value(&self.kernel_observation_evidence),
-            bytes_value(&self.negative_probe_evidence),
-            bytes_value(&self.termination_evidence),
-            bytes_value(&self.sau1_digest),
-            text_value(&self.runtime_attestation_key_id),
-        ]
+        receipt_unsigned_value(&self.fields())
     }
+}
+
+/// The SPR1 field bounds, and a `ReleaseV1` only after a `ReadyV1`.
+fn validate_receipt_fields(
+    fields: &SandboxProviderReceiptFields,
+) -> Result<(), SandboxProviderProtocolError> {
+    if fields.attempt_id == [0; 16]
+        || fields.authority.has_zero_digest()
+        || [
+            fields.hcp1_digest,
+            fields.elm1_digest,
+            fields.requested_configuration_evidence,
+            fields.kernel_observation_evidence,
+            fields.negative_probe_evidence,
+            fields.termination_evidence,
+            fields.sau1_digest,
+        ]
+        .contains(&[0; 32])
+        || invalid_digest_list(&fields.network_transcript_digests)
+        || fields.ready1_digest == Some([0; 32])
+        || fields.release1_digest == Some([0; 32])
+        || !valid_key_id(&fields.runtime_attestation_key_id)
+    {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    if fields.release1_digest.is_some() && fields.ready1_digest.is_none() {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    Ok(())
+}
+
+fn receipt_unsigned_value(fields: &SandboxProviderReceiptFields) -> [Value; 25] {
+    [
+        text_value("SPR1"),
+        uint_value(1),
+        bytes_value(&fields.attempt_id),
+        bytes_value(&fields.authority.agr1_digest),
+        bytes_value(&fields.authority.spm1_digest),
+        bytes_value(&fields.authority.provider_binary_digest),
+        bytes_value(&fields.authority.lps1_digest),
+        bytes_value(&fields.authority.sim1_digest),
+        bytes_value(&fields.authority.apt1_digest),
+        bytes_value(&fields.authority.trs1_digest),
+        bytes_value(&fields.authority.rvs1_digest),
+        uint_value(fields.trust_epoch),
+        uint_value(fields.revocation_epoch),
+        uint_value(fields.policy_epoch),
+        bytes_value(&fields.hcp1_digest),
+        bytes_value(&fields.elm1_digest),
+        digest_list_value(&fields.network_transcript_digests),
+        optional_digest_value(fields.ready1_digest.as_ref()),
+        optional_digest_value(fields.release1_digest.as_ref()),
+        bytes_value(&fields.requested_configuration_evidence),
+        bytes_value(&fields.kernel_observation_evidence),
+        bytes_value(&fields.negative_probe_evidence),
+        bytes_value(&fields.termination_evidence),
+        bytes_value(&fields.sau1_digest),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
 }
 
 impl ExecuteAuthority {

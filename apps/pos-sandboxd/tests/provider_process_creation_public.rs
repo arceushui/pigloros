@@ -147,6 +147,11 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
         "provider_installation.rs",
         "provider_installation/codec.rs",
         "provider_installation/files.rs",
+        "provider_runtime.rs",
+        "provider_runtime/endpoint.rs",
+        "provider_runtime/notify.rs",
+        "provider_runtime/reconcile.rs",
+        "provider_runtime/serving.rs",
     ] {
         assert!(
             sources.iter().any(|path| path.ends_with(module)),

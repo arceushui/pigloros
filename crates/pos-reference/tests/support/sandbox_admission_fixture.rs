@@ -788,9 +788,9 @@ fn audit_record(
     previous: Option<[u8; 32]>,
 ) -> TestResult<Vec<u8>> {
     let authority = match event {
-        0..=10 => vec![grant.grant_digest, grant.elm1_digest, [46; 32]],
-        11 | 13 => vec![grant.grant_digest, [41; 32], [44; 32]],
-        12 => vec![grant.grant_digest, [41; 32], [42; 32], [44; 32]],
+        0..=10 => vec![grant.grant_digest(), grant.elm1_digest, [46; 32]],
+        11 | 13 => vec![grant.grant_digest(), [41; 32], [44; 32]],
+        12 => vec![grant.grant_digest(), [41; 32], [42; 32], [44; 32]],
         _ => return Err("unsupported audit fixture event".into()),
     };
     sign_record(
@@ -855,7 +855,7 @@ fn provider_receipt_for_lifecycle(
             Value::Text("SPR1".to_owned()),
             integer(1),
             Value::Bytes(grant.attempt_id.to_vec()),
-            bytes(grant.grant_digest),
+            bytes(grant.grant_digest()),
             bytes(grant.authority.spm1_digest),
             bytes(*blake3::hash(&fixture.provider_binary).as_bytes()),
             bytes(grant.authority.lps1_digest),
@@ -917,8 +917,8 @@ fn terminal_result_for_outcome(
             } else {
                 Value::Null
             },
-            bytes(grant.grant_digest),
-            bytes(receipt.receipt_digest),
+            bytes(grant.grant_digest()),
+            bytes(receipt.receipt_digest()),
             Value::Array(
                 events
                     .iter()
@@ -1924,7 +1924,7 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         &grant,
         &receipt,
     )?;
-    assert_eq!(result.spr1_digest, Some(receipt.receipt_digest));
+    assert_eq!(result.spr1_digest, Some(receipt.receipt_digest()));
     assert_eq!(result.attempt_id, request.attempt_id);
     assert_eq!(
         admitted

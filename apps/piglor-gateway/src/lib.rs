@@ -12,12 +12,16 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod action_admission_tests;
 pub mod authorization;
+#[cfg(target_os = "linux")]
+pub mod deployment_trust;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
 pub mod executor;
 mod http;
 pub mod ledger_config;
+#[cfg(target_os = "linux")]
+pub mod local_erasure_provision;
 #[cfg(target_os = "linux")]
 pub mod local_fork_authentication;
 #[cfg(target_os = "linux")]

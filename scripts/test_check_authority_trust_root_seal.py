@@ -111,11 +111,25 @@ REJECTED_MANIFESTS = {
         '[features]\ndefault = ["authority-trust-root"]\nauthority-trust-root = []\n',
         DEFAULT,
     ),
-    "store dependency": ("crates/pos-store/Cargo.toml", "[dependencies]\n" + ENABLING, DEPENDENCY),
+    "store dependency": (
+        "crates/pos-store/Cargo.toml",
+        "[dependencies]\n" + ENABLING,
+        DEPENDENCY,
+    ),
+    "store target dependency": (
+        "crates/pos-store/Cargo.toml",
+        "[target.'cfg(target_os = \"linux\")'.dependencies]\n" + ENABLING,
+        DEPENDENCY,
+    ),
     "store forwarding feature": (
         "crates/pos-store/Cargo.toml",
         '[features]\nowner = ["pos-core/authority-trust-root"]\n',
         "feature owner forwards authority-trust-root",
+    ),
+    "store default feature": (
+        "crates/pos-store/Cargo.toml",
+        '[features]\ndefault = ["owner"]\nowner = ["pos-core/authority-trust-root"]\n',
+        DEFAULT,
     ),
     "indirect local admission host forwarding": (
         "apps/pos-experiment/Cargo.toml",
@@ -166,6 +180,8 @@ ALLOWED_SOURCES = {
     + '    println!("cargo:rerun-if-changed=x");\n}\n',
     "apps/pos-plugin-conformance-adapter/src/runner.rs": "#[cfg(test)]\nmod tests;\n"
     + "pub fn open(seal: &'static AuthorityTrustRootSealV1) {}\n",
+    "crates/pos-store/src/community/attestation.rs": "pub(super) fn snapshot("
+    + "seal: &AuthorityTrustRootSealV1) {}\n",
     "crates/pos-store/src/community/owner.rs": "pub(crate) fn seal() "
     + "-> AuthorityTrustRootSealV1 {\n"
     + "pub fn install(seal: &AuthorityTrustRootSealV1) -> u8 {\n"
@@ -392,6 +408,16 @@ REJECTED_SOURCES = {
         PINNED,
     ),
     "non-enabling crate mint": ("plugins/agent/src/provider_driver.rs", SEAL_USE, PINNED),
+    "store mint at the former owner site": (
+        "crates/pos-store/src/community/attestation.rs",
+        "static OWNER_SEAL: AuthorityTrustRootSealV1 = " + MINT,
+        PINNED,
+    ),
+    "store mint outside its pinned site": (
+        "crates/pos-store/src/community/lifecycle_authority.rs",
+        SEAL_USE,
+        PINNED,
+    ),
     "unpinned enabling crate mint": ("apps/piglor-gateway/src/http.rs", SEAL_USE, PINNED),
     "mint in a test-named module without cfg(test)": (
         "crates/pos-state/src/lib.rs",

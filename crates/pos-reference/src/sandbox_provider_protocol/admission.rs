@@ -505,7 +505,10 @@ impl AdmittedSandboxImage {
 }
 
 impl AdmittedSandboxProvider {
-    pub(crate) const fn runtime_attestation_key(&self) -> &ed25519_dalek::VerifyingKey {
+    /// The TRS1 runtime-attestation key that admission resolved for the
+    /// SPM1 key ID, active under the current RVS1.
+    #[must_use]
+    pub const fn runtime_attestation_key(&self) -> &ed25519_dalek::VerifyingKey {
         &self.runtime_key
     }
 
@@ -1045,7 +1048,7 @@ impl AdmittedSandboxProvider {
         let expected = ReceiptBinding {
             attempt_id: grant.attempt_id,
             authority: ReceiptAuthority {
-                agr1_digest: grant.grant_digest,
+                agr1_digest: grant.grant_digest(),
                 spm1_digest: self.manifest.manifest_digest,
                 provider_binary_digest: self.manifest.binary_digest,
                 lps1_digest: grant.authority.lps1_digest,
@@ -1237,8 +1240,10 @@ impl AdmittedSandboxProvider {
         &self.syscall_set
     }
 
+    /// The selected BHC1 hard caps, one per limit ID in ID order.
     #[cfg(target_os = "linux")]
-    pub(crate) fn broker_hard_caps(&self) -> &[SandboxLimit] {
+    #[must_use]
+    pub fn broker_hard_caps(&self) -> &[SandboxLimit] {
         &self.broker_hard_caps
     }
 
