@@ -67,7 +67,7 @@ const ROOT_UID: u32 = 0;
 /// no timer for this interval: `TimeoutStartUSec` (§7.3, O2) ends at
 /// readiness, and only `RuntimeMaxUSec` (5 s + 100 ms + 5 s, §7.3 item 2)
 /// caps the whole peer. The selector connects as soon as its step-8 checks
-/// pass (§6 steps 8 and 9), so this in-process bound sits well inside that
+/// pass (§6 steps 8 and 9), so this in-process bound stays within that
 /// lifetime and lets the peer exit on every path even without its unit.
 const ACCEPT_BOUND: Timespec = Timespec {
     tv_sec: 5,
