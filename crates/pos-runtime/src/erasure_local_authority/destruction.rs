@@ -128,30 +128,46 @@ impl LocalErasureAuthorityV1 {
             .filter(|bundle| !self.revoked(bundle))
     }
 
+    /// Whether `trust` names a bundle the installed TPS1 revokes (ADR-136
+    /// §5, *Compromise*).
+    fn pins_revoked(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        trust: Option<ErasureReferenceV1>,
+    ) -> bool {
+        trust
+            .and_then(|trust| self.pinned_bundle(view, trust))
+            .is_some_and(|bundle| self.revoked(&bundle))
+    }
+
     /// Whether `state` holds its subject's one active erasure (ADR-136 §6).
     /// A complete or rejected request never does, and its attempt is not
     /// read. Otherwise, with an active attempt it does unless that attempt
-    /// is pinned to a revoked bundle (§5); without one it does while
-    /// pre-terminal. An attempt that cannot be read holds it.
+    /// is pinned to a revoked bundle (§5). Without one it does while
+    /// pre-terminal, unless its committed freeze pins a revoked bundle
+    /// (owner decision Q18 on #1412): such a request can never be signed
+    /// again, so it stays contained but no longer holds its subject. An
+    /// attempt or frozen trust that cannot be read holds it.
     pub(super) fn subject_held_by(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         state: &ErasureVerifiedStateV1,
     ) -> bool {
         let lifecycle = state.lifecycle();
+        let request = state.request().reference();
         let pre_terminal = is_pre_terminal(lifecycle);
         !matches!(
             lifecycle,
             ErasureLifecycleV1::Complete | ErasureLifecycleV1::Rejected
-        ) && view
-            .active_attempt(state.request().reference())
-            .map_or(true, |active| {
-                active.map_or(pre_terminal, |attempt| {
-                    !self
-                        .pinned_bundle(view, attempt.trust())
-                        .is_some_and(|bundle| self.revoked(&bundle))
-                })
-            })
+        ) && view.active_attempt(request).map_or(true, |active| {
+            active.map_or_else(
+                || {
+                    pre_terminal
+                        && !self.pins_revoked(view, view.frozen_trust(request).ok().flatten())
+                },
+                |attempt| !self.pins_revoked(view, Some(attempt.trust())),
+            )
+        })
     }
 
     /// Whether another request of `erq1`'s subject holds it.
