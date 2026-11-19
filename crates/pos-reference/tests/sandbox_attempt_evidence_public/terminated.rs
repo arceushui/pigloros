@@ -42,7 +42,7 @@ const CPU_TERMINAL: &[u8] = b"usage_usec 9800\nuser_usec 7100\nsystem_usec 2700\
 const BASELINE_AT: u64 = 1_000_000_000_000;
 const TERMINAL_AT: u64 = 1_000_250_000_000;
 /// The R10 §8.3 stdin feed: it starts 10 s after the baseline, has an
-/// ELM1[16] window of 2000 ms, and accepts the 5 input bytes.
+/// ELM1\[16\] window of 2000 ms, and accepts the 5 input bytes.
 const FEED_START: u64 = 1_000_010_000_000;
 const FEED_DEADLINE: u64 = 1_000_012_000_000;
 const FEED_FINISH: u64 = 1_000_010_500_000;
@@ -177,7 +177,7 @@ fn vector_c_fields() -> TestResult<TerminationEvidenceFields> {
     Ok(fields)
 }
 
-/// TME1-D: ELM1[8] is 69, so `S` stops at the ceiling; the adapter exited 1.
+/// TME1-D: ELM1\[8\] is 69, so `S` stops at the ceiling; the adapter exited 1.
 fn vector_d_fields() -> TestResult<TerminationEvidenceFields> {
     Ok(TerminationEvidenceFields {
         output_capture: Some(OutputCaptureRecord {

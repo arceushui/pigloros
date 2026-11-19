@@ -29,8 +29,9 @@ use crate::{
 use super::super::{HeldImageAdmission, ProviderImageSnapshot};
 use super::{
     AdmittedProviderExecution, Clock, ConnectionIdentity, ExecutionSource, FailedInput, GrantState,
-    InputRefusal, IssuedGrant, PreparedProviderExecution, ProviderExecutionPolicy, RetainedCase,
-    StagingCharge, StagingError, StagingLedger, TransferWindow,
+    InputRefusal, IssuedGrant, OutputReservationRefused, PreparedProviderExecution,
+    ProviderExecutionPolicy, RetainedCase, StagingCharge, StagingError, StagingLedger,
+    TransferWindow,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -707,12 +708,14 @@ impl AdmittedProviderExecution {
         self.verified_input.read_exact_at(bytes, offset)
     }
 
-    /// Keep this attempt counted while staging one bounded terminal output.
+    /// Reserve this attempt's one output of exactly ELM1\[8\] bytes, keeping
+    /// the attempt counted while the charge lives (ADR-069 R10 §4.7).
     ///
-    /// # Errors
-    /// Refuses a second output, ID-8 violation or aggregate byte overflow.
-    pub fn reserve_output(&self, bytes: u64) -> Result<StagingCharge, StagingError> {
-        self.slot.output(self.policy(), bytes)
+    /// `None` once the reservation was made: an attempt has one output.
+    /// Otherwise the reservation, or why the ledger refused it.
+    #[must_use = "a dropped reservation releases its bytes at once"]
+    pub fn reserve_output(&self) -> Option<Result<StagingCharge, OutputReservationRefused>> {
+        self.slot.output(self.policy())
     }
 }
 
@@ -1602,6 +1605,20 @@ mod tests {
         verified.read_exact_at(&mut readback, 0)?;
         assert_eq!(readback, staged.input());
         let execution = verified.entry().retain();
+        // The attempt's one output: exactly ELM1[8] bytes, reserved once
+        // through either handle and released with its charge.
+        let before = ledger.usage().reserved_bytes;
+        let output = verified
+            .reserve_output()
+            .ok_or("the first output reservation was refused")??;
+        assert_eq!(
+            ledger.usage().reserved_bytes - before,
+            verified.entry().policy().effective_limits()[8].value
+        );
+        assert!(execution.reserve_output().is_none());
+        assert!(verified.reserve_output().is_none());
+        drop(output);
+        assert_eq!(ledger.usage().reserved_bytes, before);
         let length = verified.len();
         execution.read_exact_at(&mut [], length)?;
         let mut last = [0xff];

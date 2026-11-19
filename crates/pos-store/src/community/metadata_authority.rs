@@ -86,20 +86,23 @@ pub struct CommunityMetadataAuthorityInputV1 {
 /// It has no public evaluation method: only the domain evaluates it, over
 /// the grant chain it loads itself, so no decision crosses the API.
 pub struct CommunityMetadataAuthorityV1 {
+    seal: &'static AuthorityTrustRootSealV1,
     input: CommunityMetadataAuthorityInputV1,
     wall: Box<dyn TrustedWallSourceV1>,
 }
 
 impl CommunityMetadataAuthorityV1 {
     /// Install the authority at the trusted composition root, which alone
-    /// holds the [`AuthorityTrustRootSealV1`].
+    /// holds the [`AuthorityTrustRootSealV1`]. The authority keeps that seal
+    /// to build each per-request snapshot; this crate never mints one.
     #[must_use]
     pub fn new(
-        _seal: &AuthorityTrustRootSealV1,
+        seal: &'static AuthorityTrustRootSealV1,
         input: CommunityMetadataAuthorityInputV1,
         wall: impl TrustedWallSourceV1 + 'static,
     ) -> Self {
         Self {
+            seal,
             input,
             wall: Box::new(wall),
         }
@@ -141,6 +144,7 @@ impl CommunityMetadataAuthorityV1 {
             .and_then(|at_time| self.request(persisted, store_incarnation, action, at_time))
             .and_then(|request| {
                 evaluation_snapshot(
+                    self.seal,
                     &self.input.registry,
                     self.input.registry.registry_digest(),
                     self.input.principal.registry_binding_digest(),
