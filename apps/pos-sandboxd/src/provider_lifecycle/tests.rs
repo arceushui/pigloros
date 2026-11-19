@@ -1149,30 +1149,47 @@ fn the_previous_runtime_unit_is_stopped_and_its_attempts_reconciled() -> TestRes
 }
 
 #[test]
-fn a_foreign_provider_unit_stops_nothing_and_cleans_nothing() -> TestResult {
-    for units in [
+fn a_foreign_provider_unit_is_refused_after_the_named_unit_is_stopped() -> TestResult {
+    // Review M1: the SIR1 runtime unit is stopped first, so a foreign unit
+    // never keeps it running; a foreign unit is itself never stopped.
+    let runtime = runtime_name(1);
+    let harness = Harness::new(
         vec![
-            loaded(runtime_name(1), "active", ""),
+            loaded(runtime.clone(), "failed", ""),
             loaded(runtime_name(3), "failed", ""),
         ],
-        vec![loaded(recovery_name(4), "failed", "")],
-    ] {
-        let harness = Harness::new(units, Fault::None)?;
-        assert_eq!(
-            terminate_previous(&harness, &[], Duration::from_secs(10)),
-            Err(ProviderLifecycleError::ForeignResource)
-        );
-        assert!(!harness
-            .calls()?
-            .iter()
-            .any(|call| matches!(call, Call::Stop(..))));
-        assert!(harness
-            .state
-            .lock()
-            .map_err(|_| "poisoned fake")?
-            .cleaned
-            .is_empty());
-    }
+        Fault::None,
+    )?;
+    assert_eq!(
+        terminate_previous(&harness, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::ForeignResource)
+    );
+    assert_eq!(
+        harness.calls()?,
+        vec![
+            listing(RUNTIME_PREFIX),
+            Call::Reset(runtime),
+            listing(RUNTIME_PREFIX),
+        ]
+    );
+    assert!(harness
+        .state
+        .lock()
+        .map_err(|_| "poisoned fake")?
+        .cleaned
+        .is_empty());
+    // A recovery unit other than the SIR1 slot's.
+    let harness = Harness::new(vec![loaded(recovery_name(4), "failed", "")], Fault::None)?;
+    assert_eq!(
+        terminate_previous(&harness, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::ForeignResource)
+    );
+    assert!(harness
+        .state
+        .lock()
+        .map_err(|_| "poisoned fake")?
+        .cleaned
+        .is_empty());
     Ok(())
 }
 
@@ -1186,8 +1203,22 @@ fn previous_runtime_failures_close_the_termination() -> TestResult {
         terminate_previous(&refused, &[], Duration::from_secs(10)),
         Err(ProviderLifecycleError::ResidualResource)
     );
-    // A runtime unit that comes back is residual.
-    let returning = Harness::new(
+    // A runtime unit that keeps its cgroup is residual; another one that
+    // appears while it stops is foreign.
+    let name = runtime_name(1);
+    let kept = Harness::new(
+        vec![loaded(
+            name.clone(),
+            "active",
+            &format!("/system.slice/{name}"),
+        )],
+        Fault::KeepCgroup,
+    )?;
+    assert_eq!(
+        terminate_previous(&kept, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::ResidualResource)
+    );
+    let appearing = Harness::new(
         vec![
             loaded(runtime_name(1), "failed", ""),
             FakeUnit {
@@ -1198,8 +1229,8 @@ fn previous_runtime_failures_close_the_termination() -> TestResult {
         Fault::LoadOnReset(1),
     )?;
     assert_eq!(
-        terminate_previous(&returning, &[], Duration::from_secs(10)),
-        Err(ProviderLifecycleError::ResidualResource)
+        terminate_previous(&appearing, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::ForeignResource)
     );
     // The unit stop is bounded by the caller's deadline.
     let stuck = Harness::new(
@@ -1277,11 +1308,33 @@ fn the_recovery_slot_is_reconciled_idempotently() -> TestResult {
             listing(RECOVERY_PREFIX),
         ]
     );
-    // Another recovery unit is foreign; a zero scope names none.
-    let foreign = Harness::new(vec![loaded(recovery_name(4), "failed", "")], Fault::None)?;
+    // Another recovery unit is foreign, but only after the peer unit was
+    // stopped (review M1); a zero scope names none.
+    let peer = recovery_name(2);
+    let foreign = Harness::new(
+        vec![
+            loaded(peer.clone(), "failed", ""),
+            loaded(recovery_name(4), "failed", ""),
+        ],
+        Fault::None,
+    )?;
     assert_eq!(
         reconcile_slot(&foreign, 2),
         Err(ProviderLifecycleError::ForeignResource)
+    );
+    assert_eq!(
+        foreign.calls()?,
+        vec![
+            listing(RECOVERY_PREFIX),
+            Call::Reset(peer),
+            listing(RECOVERY_PREFIX),
+        ]
+    );
+    // A peer unit listing that cannot be repeated proves nothing.
+    let unlistable = Harness::new(Vec::new(), Fault::ListFailsFrom(2))?;
+    assert_eq!(
+        reconcile_slot(&unlistable, 2),
+        Err(ProviderLifecycleError::ResidualResource)
     );
     assert_eq!(
         reconcile_slot(&foreign, 0),

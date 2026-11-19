@@ -336,27 +336,25 @@ impl SystemdProviderLifecycle {
         .unwrap_or(Err(ProviderLifecycleError::DeadlineExceeded))
     }
 
-    /// Stop the one loaded unit of `family` named `name`, if any. Any other
-    /// unit of the family is foreign, and nothing is then stopped.
+    /// Stop the loaded unit of `family` named `name`, if any, and prove it
+    /// unloaded (R12 §7.3: "stop the peer unit, if loaded"). Any other unit
+    /// of the family is then foreign: the named unit is stopped first, so a
+    /// foreign unit never keeps it running.
     async fn stop_only(
         &self,
         family: ProviderUnitFamily,
         name: &TransientServiceUnitName,
         deadline: Instant,
     ) -> Result<(), ProviderLifecycleError> {
-        let units = self.observe(family).await?;
-        if units.iter().any(|unit| unit.name() != name) {
-            return Err(ProviderLifecycleError::ForeignResource);
-        }
-        for unit in units {
-            self.stop(&unit, deadline).await?;
+        for unit in self.observe(family).await? {
+            if unit.name() == name {
+                self.stop(&unit, deadline).await?;
+            }
         }
         let remaining = self.observe(family).await;
-        if remaining.is_ok_and(|units| units.is_empty()) {
-            Ok(())
-        } else {
-            Err(ProviderLifecycleError::ResidualResource)
-        }
+        remaining
+            .map_err(|_| ProviderLifecycleError::ResidualResource)
+            .and_then(|units| only_foreign(&units, name))
     }
 
     /// R12 §7.1 steps 1 and 2: stop the runtime unit and prove it unloaded;
@@ -563,12 +561,27 @@ impl SystemdProviderLifecycle {
     }
 }
 
+/// After `name` was stopped: it must be gone, and no other unit of its
+/// family may be loaded.
+fn only_foreign(
+    remaining: &[ProviderUnit],
+    name: &TransientServiceUnitName,
+) -> Result<(), ProviderLifecycleError> {
+    if remaining.iter().any(|unit| unit.name() == name) {
+        Err(ProviderLifecycleError::ResidualResource)
+    } else if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(ProviderLifecycleError::ForeignResource)
+    }
+}
+
 /// R12 §7.1 steps 3 to 7 on this host: read the SPI1 cleanup budget, open
 /// the registry exclusively, require every committed intent to be one of
 /// the previous-live attempts, and run the cleanup part of restart
 /// reconciliation with the orphan sweep `network` builds. The registry lock
 /// is released when this returns. The egress probe never runs.
-async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
+pub(crate) async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
     transport: &SystemdTransientUnitTransport,
     previous_live: &[[u8; 16]],
     deadline: Instant,
@@ -579,6 +592,10 @@ async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
         .cleanup_budget();
     let recovery =
         SystemdAttemptRecovery::open().map_err(|_| ProviderLifecycleError::Unavailable)?;
+    // R12 §7.1 lists the foreign-intent check (step 6) after the cleanup
+    // (step 5). It runs first here, so that cleanup never acts on, or
+    // deletes the evidence of, an attempt SIR1 does not name; the reviewed
+    // R12 text order is queued for amendment with the owner.
     require_owned_intents(
         recovery
             .entries()
