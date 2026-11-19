@@ -265,10 +265,10 @@ Windows lane never delays or hides the normal checks. `ci-gate` requires
 `cargo-crap` directly. Audit, deny, and shear share one runner; browser parity
 replaces the completed WASM packaging job rather than adding another concurrent
 runner. CodeQL is called from this stage instead of starting independently on
-every PR. Rust pull requests start CodeQL once the core set passes; documentation-only
-pull requests start it after the scope job even if preflight fails. It is never
-skipped, because the `main` ruleset's code-scanning rule needs an analysis for
-every PR head.
+every PR. Rust pull requests start CodeQL once the core set passes;
+documentation-only pull requests start it after the scope job even if preflight
+fails. It is never skipped, because the `main` ruleset's code-scanning rule
+needs an analysis for every PR head.
 
 ```mermaid
 flowchart TD
