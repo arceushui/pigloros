@@ -61,6 +61,13 @@ pub enum SystemdHardeningProperty {
     KillMode,
     /// `SendSIGKILL: b = true`.
     SendSigKill,
+    /// `StandardInput: s = null` (ADR-069 R10 §4.2): fd 0 is the provider's
+    /// stdin pipe, and no enum routes the stream elsewhere.
+    StandardInput,
+    /// `StandardOutput: s = null`: fd 1 is the provider's stdout pipe.
+    StandardOutput,
+    /// `StandardError: s = null`: fd 2 is the provider's checked `/dev/null`.
+    StandardError,
 }
 
 /// A systemd D-Bus value with one of the exact signatures this bundle permits.
@@ -198,8 +205,23 @@ impl SystemdHardeningProperty {
             Self::LockPersonality => "LockPersonality",
             Self::SystemCallArchitectures => "SystemCallArchitectures",
             Self::UMask => "UMask",
+            Self::KillMode
+            | Self::SendSigKill
+            | Self::StandardInput
+            | Self::StandardOutput
+            | Self::StandardError => self.kill_and_stdio_name(),
+        }
+    }
+
+    /// The name of a kill or standard-stream property; `StandardError` is
+    /// the last of them.
+    const fn kill_and_stdio_name(self) -> &'static str {
+        match self {
             Self::KillMode => "KillMode",
             Self::SendSigKill => "SendSIGKILL",
+            Self::StandardInput => "StandardInput",
+            Self::StandardOutput => "StandardOutput",
+            _ => "StandardError",
         }
     }
 
@@ -221,8 +243,7 @@ impl SystemdHardeningProperty {
             | Self::ProtectHostname
             | Self::RestrictSuidSgid
             | Self::RestrictRealtime
-            | Self::LockPersonality
-            | Self::SendSigKill => SystemdHardeningValue::Bool(true),
+            | Self::LockPersonality => SystemdHardeningValue::Bool(true),
             Self::PrivatePids | Self::ProtectHome => SystemdHardeningValue::String("yes"),
             Self::PrivateUsersEx => SystemdHardeningValue::String("self"),
             Self::CapabilityBoundingSet | Self::AmbientCapabilities => {
@@ -236,7 +257,21 @@ impl SystemdHardeningProperty {
             Self::RestrictNamespaces => SystemdHardeningValue::U64(0x7e02_0080),
             Self::SystemCallArchitectures => SystemdHardeningValue::StringArray(&["native"]),
             Self::UMask => SystemdHardeningValue::U32(0o077),
+            Self::KillMode
+            | Self::SendSigKill
+            | Self::StandardInput
+            | Self::StandardOutput
+            | Self::StandardError => self.kill_and_stdio_value(),
+        }
+    }
+
+    /// The value of a kill or standard-stream property; the standard
+    /// streams, the last of them, are all `null`.
+    const fn kill_and_stdio_value(self) -> SystemdHardeningValue {
+        match self {
             Self::KillMode => SystemdHardeningValue::String("control-group"),
+            Self::SendSigKill => SystemdHardeningValue::Bool(true),
+            _ => SystemdHardeningValue::String("null"),
         }
     }
 }
@@ -253,7 +288,7 @@ pub enum TransientUnitHardeningError {
 pub struct TransientUnitHardening;
 
 impl TransientUnitHardening {
-    const REQUESTED_PROPERTIES: [SystemdHardeningProperty; 29] = [
+    const REQUESTED_PROPERTIES: [SystemdHardeningProperty; 32] = [
         SystemdHardeningProperty::TypeExec,
         SystemdHardeningProperty::DynamicUser,
         SystemdHardeningProperty::NoNewPrivileges,
@@ -283,6 +318,9 @@ impl TransientUnitHardening {
         SystemdHardeningProperty::UMask,
         SystemdHardeningProperty::KillMode,
         SystemdHardeningProperty::SendSigKill,
+        SystemdHardeningProperty::StandardInput,
+        SystemdHardeningProperty::StandardOutput,
+        SystemdHardeningProperty::StandardError,
     ];
 
     /// Return the complete ordered static requested-state bundle.

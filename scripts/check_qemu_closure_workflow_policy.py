@@ -29,10 +29,11 @@ EVIDENCE = '"${RUNNER_TEMP}/qemu-closure-evidence"'
 # github.sha is the merge commit that the pull_request run actually tests.
 ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
 # Universal newlines keep the same program across LF and CRLF checkouts. The
-# two imported policy modules are pinned too: they supply EXPECTED's headroom
-# step and the graph comparison.
+# imported policy modules are pinned too: they supply EXPECTED's headroom step
+# (with the CI stage conditions that module imports) and the graph comparison.
 PRODUCER_SHA256 = {
-    "scripts/check_asan_ci_policy.py": "ccf1c401c0d65022506efdea50f1d87674deeacc6f3631f31c5812f2f9b4ced2",
+    "scripts/check_asan_ci_policy.py": "47c2fa2b7cc9de7a7ea4199f3134bfe5a7aa3f95152e35ea8a47024727e16a99",
+    "scripts/ci_stage_policy.py": "1ff0e611958501bfef1bfb54ea4016c129ed717d01de23a51cf8f7bf2cfd373e",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "d87e1b027174070441483c29bc0526cfbbf8d0fcbd73d034a44479361c822711",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
@@ -66,6 +67,7 @@ EXPECTED = {
             "scripts/check_qemu_closure_workflow_policy.py",
             "scripts/test_check_qemu_closure_workflow_policy.py",
             "scripts/check_asan_ci_policy.py",
+            "scripts/ci_stage_policy.py",
             "scripts/check_owner_runtime_custody_policy.py",
             "scripts/install-pinned-nix.sh",
             "scripts/qemu-closure-evidence.sh",

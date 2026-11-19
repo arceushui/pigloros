@@ -2,11 +2,12 @@
 
 use super::super::HeldImageAdmission;
 use super::{
-    AdmittedProviderExecution, PreparedProviderExecution, ProviderExecutionPolicy, StagingCharge,
-    StagingError,
+    AdmittedProviderExecution, InputRefusal, IssuedGrant, OutputReservationRefused,
+    PreparedProviderExecution, ProviderExecutionPolicy, StagingCharge, StagingError,
 };
 #[cfg(test)]
 use super::{StagingLedger, StagingLimits, StagingUsage};
+use crate::sandbox_provider_protocol::TransferRecord;
 use rustix::fs::{openat2, statat, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
 use std::{
     fs::File,
@@ -21,7 +22,7 @@ pub struct AdmittedEntry<'a> {
     execution: &'a Arc<AdmittedProviderExecution>,
 }
 
-impl AdmittedEntry<'_> {
+impl<'a> AdmittedEntry<'a> {
     /// Descriptor-bearing image evidence from the same verified exchange.
     #[must_use]
     pub fn admission(&self) -> HeldImageAdmission<'_> {
@@ -37,7 +38,21 @@ impl AdmittedEntry<'_> {
     /// The self-digest of the AGR1 this entry was admitted under.
     #[must_use]
     pub fn grant_digest(&self) -> [u8; 32] {
-        self.execution.grant_digest()
+        self.execution.grant().digest()
+    }
+
+    /// The AGR1 this entry was admitted under: its exact bytes and the
+    /// admission ledger when it was issued.
+    #[must_use]
+    pub fn grant(&self) -> &'a IssuedGrant {
+        self.execution.grant()
+    }
+
+    /// TME1 `input`: the complete input transfer; `None` if the clock could
+    /// not report when it finished.
+    #[must_use]
+    pub fn transfer(&self) -> Option<TransferRecord> {
+        self.execution.transfer()
     }
 
     /// Retain the exact admitted context through execution and release.
@@ -195,8 +210,10 @@ impl StagedInput {
     /// Verify descriptor, framing and every selected case field before admission.
     ///
     /// # Errors
-    /// Refuses incomplete, foreign, expired or substituted input and authority.
-    pub fn receive(self, stream: &mut UnixStream) -> Result<VerifiedStagedInput, StagingError> {
+    /// [`InputRefusal::NotGranted`] before a complete AGR1; otherwise
+    /// [`InputRefusal::Failed`] refuses incomplete, foreign, expired or
+    /// substituted input and authority, and discards the staged bytes.
+    pub fn receive(self, stream: &mut UnixStream) -> Result<VerifiedStagedInput, InputRefusal> {
         let Self { staged, prepared } = self;
         let execution = prepared.receive_input(stream, &staged.file)?;
         Ok(VerifiedStagedInput {
@@ -242,12 +259,13 @@ impl VerifiedStagedInput {
         self.execution.read_exact_at(buffer, offset)
     }
 
-    /// Reserve this attempt's bounded output, retaining its attempt slot.
+    /// Reserve this attempt's one output of exactly ELM1\[8\] bytes, retaining
+    /// its attempt slot (ADR-069 R10 §4.7).
     ///
-    /// # Errors
-    /// Refuses duplicate output, ID-8 excess or aggregate overflow.
-    pub fn reserve_output(&self, bytes: u64) -> Result<StagingCharge, StagingError> {
-        self.execution.reserve_output(bytes)
+    /// `None` once the reservation was made: an attempt has one output.
+    #[must_use = "a dropped reservation releases its bytes at once"]
+    pub fn reserve_output(&self) -> Option<Result<StagingCharge, OutputReservationRefused>> {
+        self.execution.reserve_output()
     }
 }
 

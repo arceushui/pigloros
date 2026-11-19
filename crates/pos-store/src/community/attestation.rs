@@ -17,17 +17,14 @@ use pos_core::{
 };
 use pos_crypto::fork_authentication::VerifiedAuthenticatedPrincipalEvidenceV1;
 
-/// The community owner's own trust-root seal, its one pinned mint site
-/// (`scripts/check_authority_trust_root_seal.py`). The owner is inside the
-/// trusted boundary (ADR-129 A5.9): it builds the per-request snapshot and
-/// the verified authentication result itself. The seal stays private to
-/// this module and is passed only by reference.
-static OWNER_SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
-
 /// The authentication result derived from one policy-verified FAE1
 /// (R6.2(3)(iv)): the APR1 principal, adapter, assurance and validity, with
 /// the FAE1 digest as binding digest. Only a verified witness yields one.
+///
+/// `seal` is the one the composition root installed the owner with; this
+/// crate never mints one (#1374).
 pub(super) fn authenticated_result(
+    seal: &AuthorityTrustRootSealV1,
     verified: &VerifiedAuthenticatedPrincipalEvidenceV1,
 ) -> Option<AuthenticatedPrincipalResultV1> {
     let evidence = verified.evidence();
@@ -38,7 +35,7 @@ pub(super) fn authenticated_result(
         .zip(AssuranceLevelV1::try_new(record.assurance).ok())
         .and_then(|(binding_digest, assurance)| {
             AuthenticatedPrincipalResultV1::try_from_draft(
-                &OWNER_SEAL,
+                seal,
                 AuthenticatedPrincipalDraftV1 {
                     principal: record.principal.clone(),
                     adapter_id: record.adapter_id.clone(),
@@ -59,6 +56,7 @@ pub(super) fn authenticated_result(
 /// still requires every grant to carry it. A revoked grant stays attested
 /// and is refused by the evaluator itself.
 pub(super) fn evaluation_snapshot(
+    seal: &AuthorityTrustRootSealV1,
     attestation: &AuthorityRegistrySnapshotV1,
     registry_digest: Hash,
     authentication_binding: Hash,
@@ -85,7 +83,7 @@ pub(super) fn evaluation_snapshot(
         .and_then(|mut current| {
             current.sort_unstable();
             AuthorityRegistrySnapshotV1::try_new(
-                &OWNER_SEAL,
+                seal,
                 registry_digest,
                 vec![authentication_binding],
                 current,
