@@ -248,8 +248,8 @@ where
     N: OrphanNetworkCleanup + Sync,
     P: EgressPropertyProbe + Sync,
 {
-    let cleaned = reconcile_cleanup(transport, recovery, network, cleanup, deadline).await;
-    then_prove_egress(cleaned, egress, deadline).await
+    let cleaned = host_cleanup(transport, recovery, network, (cleanup, deadline)).await;
+    then_prove_egress(cleaned, egress).await
 }
 
 /// The cleanup part of restart reconciliation (ADR-069 R12 §7.1 step 5):
@@ -272,6 +272,20 @@ pub async fn reconcile_cleanup<N>(
 where
     N: OrphanNetworkCleanup + Sync,
 {
+    host_cleanup(transport, recovery, network, (cleanup, deadline))
+        .await
+        .map(|(reconciled, _deadline)| reconciled)
+}
+
+/// The cleanup on this host's manager and kernel. Returns the reconciled
+/// attempts and the deadline the egress probe keeps: `deadline`, extended
+/// by any #1200 D2 recent-activation wait.
+async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
+    transport: &SystemdTransientUnitTransport,
+    recovery: SystemdAttemptRecovery,
+    network: &N,
+    deadlines: (AttemptCleanupDeadlines, Instant),
+) -> Reconciled<(ReconciledRestart, Instant)> {
     cleanup_with(
         transport,
         recovery,
@@ -280,7 +294,7 @@ where
             transport,
             detach: crate::RootResourceIdentity::detach_recovered,
         },
-        (cleanup, deadline),
+        deadlines,
         (
             crate::RootResourceIdentity::recorded_generations_absent,
             crate::RootResourceIdentity::provider_loops_absent,
@@ -290,14 +304,15 @@ where
     .await
 }
 
-/// Prove the egress property after a successful cleanup.
+/// Prove the egress property after a successful cleanup, by the deadline
+/// the cleanup left: the overall deadline plus any recent-activation wait,
+/// so a wait never uses up the probe's time.
 async fn then_prove_egress<E: EgressPropertyProbe + Sync>(
-    cleaned: Reconciled<ReconciledRestart>,
+    cleaned: Reconciled<(ReconciledRestart, Instant)>,
     egress: &E,
-    deadline: Instant,
 ) -> Reconciled<ReconciledRestart> {
     match cleaned {
-        Ok(reconciled) => prove_egress(egress, deadline).await.map(|()| reconciled),
+        Ok((reconciled, deadline)) => prove_egress(egress, deadline).await.map(|()| reconciled),
         Err(error) => Err(error),
     }
 }
@@ -356,7 +371,8 @@ type Generations = [((u32, u32), u64); 2];
 
 /// `network` is the orphan sweep; `deadlines` are the surviving-resource
 /// cleanup and the overall deadline; `probes` are the recorded-generation
-/// probe, the provider loop sweep and the boot clock.
+/// probe, the provider loop sweep and the boot clock. Also returns the
+/// overall deadline extended by the recent-activation wait.
 async fn cleanup_with<N, S, P, F, L, G, C>(
     transport: &SystemdTransientUnitTransport,
     recovery: SystemdAttemptRecovery,
@@ -364,7 +380,7 @@ async fn cleanup_with<N, S, P, F, L, G, C>(
     survivors: &S,
     (cleanup, deadline): (AttemptCleanupDeadlines, Instant),
     probes: (P, L, C),
-) -> Reconciled<ReconciledRestart>
+) -> Reconciled<(ReconciledRestart, Instant)>
 where
     N: OrphanNetworkCleanup + Sync,
     S: Survivors,
@@ -391,10 +407,10 @@ where
             .map(|roots| (absent, roots)),
         Err(error) => Err(error),
     };
-    released.and_then(|(absent, roots)| {
+    released.and_then(|(absent, (roots, extended))| {
         recovery
             .remove_reconciled(&absent, &roots)
-            .map(|attempts| ReconciledRestart { attempts })
+            .map(|attempts| (ReconciledRestart { attempts }, extended))
             .map_err(RestartReconciliationError::from)
     })
 }
@@ -421,7 +437,7 @@ where
     C: FnOnce() -> io::Result<BootInstant>,
 {
     let cleaned = cleanup_with(transport, recovery, network, survivors, deadlines, probes).await;
-    then_prove_egress(cleaned, egress, deadlines.1).await
+    then_prove_egress(cleaned, egress).await
 }
 
 /// Stop every listed unit, each only when a committed intent records it.
@@ -551,12 +567,12 @@ async fn prove_egress<E: EgressPropertyProbe + Sync>(
 
 /// Mint the released-root evidence only once no loop device is backed by a
 /// provider image, and none can still be attached by a previous-runtime
-/// `MountImage` request.
+/// `MountImage` request. Also returns `deadline` extended by that wait.
 async fn roots_released<P, F, L, G, C>(
     recovery: &SystemdAttemptRecovery,
     (probe, sweep, now): (P, L, C),
     deadline: Instant,
-) -> Reconciled<RootsReleased>
+) -> Reconciled<(RootsReleased, Instant)>
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
@@ -578,7 +594,7 @@ where
     timeout_at(swept_by, sweep_loops(sweep))
         .await
         .unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
-        .map(|()| RootsReleased(released))
+        .map(|()| (RootsReleased(released), swept_by))
 }
 
 /// Prove that no loop device is backed by a provider image.

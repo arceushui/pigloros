@@ -1558,6 +1558,63 @@ mod cases {
         Ok(())
     }
 
+    /// The egress probe follows intent removal, so it keeps the time the
+    /// recent-activation wait added to the overall deadline (ADR-069 R12
+    /// §7.1 step 5): a restart that waits out a recent request still proves
+    /// the egress property and reconciles.
+    #[tokio::test(start_paused = true)]
+    async fn a_recent_request_wait_leaves_the_egress_probe_its_time() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_recent_request_wait_leaves_the_egress_probe_its_time",
+        )? {
+            return Ok(());
+        }
+        // PAI2 intents, and a request sent on this boot 10 s ago: a 60 s wait.
+        let runtime = seed(false)?;
+        mark(runtime.path(), THIS_BOOT, 90)?;
+        let host = host(Listing::Empty, Vec::new()).await?;
+        let egress = present();
+        let start = Instant::now();
+        let reconciled = reconcile_with(
+            &host.transport,
+            recovery(runtime.path())?,
+            (&Network::new(Cleanup::Removes), &egress),
+            &FakeSurvivors::succeeding(&host),
+            (cleanup()?, start + Duration::from_millis(500)),
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
+        )
+        .await?;
+        assert_eq!(egress.calls.load(Ordering::SeqCst), 1);
+        assert!(!reconciled.attempts().is_empty());
+        assert_eq!(count(&runtime.path().join("registry"))?, 1);
+        // The extended deadline bounds the probe too: one that never answers
+        // fails closed exactly when the wait plus the overall bound passed.
+        let runtime = seed(false)?;
+        mark(runtime.path(), THIS_BOOT, 90)?;
+        let start = Instant::now();
+        let refused = reconcile_with(
+            &host.transport,
+            recovery(runtime.path())?,
+            (
+                &Network::new(Cleanup::Removes),
+                &Egress::new(Property::Hangs),
+            ),
+            &FakeSurvivors::succeeding(&host),
+            (cleanup()?, start + Duration::from_millis(500)),
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(RestartReconciliationError::DeadlineElapsed)),
+            "{refused:?}"
+        );
+        assert_eq!(
+            Instant::now(),
+            start + Duration::from_mins(1) + Duration::from_millis(500)
+        );
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_request_of_another_boot_or_past_its_deadline_needs_no_wait() -> TestResult {
         if !in_lock_test_process(
@@ -1629,7 +1686,7 @@ mod cases {
         )? {
             return Ok(());
         }
-        let registry = |result: &Reconciled<RootsReleased>| match result {
+        let registry = |result: &Reconciled<(RootsReleased, Instant)>| match result {
             Err(RestartReconciliationError::Registry(error)) => Some(error.to_string()),
             _ => None,
         };
