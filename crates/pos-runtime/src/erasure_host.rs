@@ -4698,7 +4698,7 @@ impl ErasureCommandSenderV1<'_> {
         records: LocalSubmissionRecordsV1,
         retained: Option<LocalErasureAdmissionV1>,
     ) -> Result<LocalErasureAdmittedV1, LocalErasureSubmitErrorV1> {
-        let admission = retained.unwrap_or(LocalErasureAdmissionV1 {
+        let admission = retained.unwrap_or_else(|| LocalErasureAdmissionV1 {
             request: records.request.reference(),
             trust,
             mode_profile: submission.mode_profile,
