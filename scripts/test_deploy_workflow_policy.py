@@ -141,6 +141,10 @@ def check_ci(workflow: dict) -> None:
 
 
 def check_dockerfile(text: str) -> None:
+    builder = text.split("AS runtime", 1)[0]
+    config = "COPY .cargo/config.toml .cargo/config.toml"
+    if config not in builder.splitlines() or builder.index(config) > builder.index("cargo build"):
+        raise AssertionError("the builder must copy the Cargo build config before building")
     copy_pattern = re.compile(
         r"^COPY third-party-notices/THIRD-PARTY-NOTICES\.txt \\\n"
         r"\s+third-party-notices/third-party-notices\.json \\\n"
@@ -159,6 +163,8 @@ def check_dockerfile(text: str) -> None:
 def check_dockerignore(text: str) -> None:
     if f"!{NOTICES_DIR}/" not in text.splitlines():
         raise AssertionError(".dockerignore must allow the notice bundle directory")
+    if "!.cargo/config.toml" not in text.splitlines():
+        raise AssertionError(".dockerignore must allow the Cargo build config")
 
 
 class DeployNoticePolicy(unittest.TestCase):
@@ -238,6 +244,20 @@ class DeployNoticePolicy(unittest.TestCase):
         check_dockerignore((ROOT / ".dockerignore").read_text(encoding="utf-8"))
         with self.assertRaisesRegex(AssertionError, "allow the notice bundle"):
             check_dockerignore("**\n!crates/\n")
+        with self.assertRaisesRegex(AssertionError, "allow the Cargo build config"):
+            check_dockerignore(f"**\n!{NOTICES_DIR}/\n")
+
+    def test_dockerfile_must_build_with_the_cargo_config(self) -> None:
+        text = DOCKERFILE.read_text(encoding="utf-8")
+        config = "COPY .cargo/config.toml .cargo/config.toml\n"
+        with self.assertRaisesRegex(AssertionError, "Cargo build config before building"):
+            check_dockerfile(text.replace(config, ""))
+        moved = text.replace(config, "").replace("AS runtime", "AS runtime\n" + config.rstrip(), 1)
+        with self.assertRaisesRegex(AssertionError, "Cargo build config before building"):
+            check_dockerfile(moved)
+        late = text.replace(config, "").replace("\nFROM debian", "\n" + config + "\nFROM debian", 1)
+        with self.assertRaisesRegex(AssertionError, "Cargo build config before building"):
+            check_dockerfile(late)
 
     def test_deploy_rejects_push_before_checks(self) -> None:
         def drop_check(jobs: dict) -> None:

@@ -4,6 +4,7 @@
 //! `SQLITE_ENABLE_WALSTAT` through `.cargo/config.toml`. `PRAGMA compile_options`
 //! never lists those two flags, so this test asserts what they produce instead:
 //! the registered diagnostic functions, on the qualified source.
+#![cfg(feature = "sqlite")]
 
 use rusqlite::Connection;
 

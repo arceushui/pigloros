@@ -3,6 +3,7 @@
 !Cargo.lock
 !rust-toolchain.toml
 !rustfmt.toml
+!.cargo/config.toml
 !crates/
 !plugins/
 !apps/
