@@ -4634,8 +4634,9 @@ impl ErasureCommandSenderV1<'_> {
         );
         let preparation = &binding.preparation;
         let request = &records.request;
-        // `Some` is the answer to an exact replay; `None` admits a fresh
-        // request whose records may now be retained.
+        // `Some` is the answer to an exact replay, with the policy its
+        // installed ERQ1 pins; `None` admits a fresh request whose records
+        // may now be retained.
         let replayed = self
             .with_local_view(Arc::clone(&installed), |view| {
                 preparation.authenticate_submission(
@@ -4648,7 +4649,7 @@ impl ErasureCommandSenderV1<'_> {
                     .find(|state| state.request().reference() == request.reference())
                 {
                     return Ok((state.request().provenance() == request.provenance())
-                        .then(|| Some(state.state().clone()))
+                        .then(|| Some((state.state().clone(), state.request().policy())))
                         .ok_or(LocalErasureSubmitErrorV1::Host(
                             ErasureHostErrorV1::Conflict,
                         )));
@@ -4674,7 +4675,7 @@ impl ErasureCommandSenderV1<'_> {
             .map_err(LocalErasureSubmitErrorV1::from)
             .and_then(std::convert::identity)?;
         let retained = self.local_admission(request.reference())?;
-        if let Some(state) = replayed {
+        if let Some((state, policy)) = replayed {
             return retained
                 .ok_or(LocalErasureSubmitErrorV1::Host(
                     ErasureHostErrorV1::RecoveryUnavailable,
@@ -4682,7 +4683,7 @@ impl ErasureCommandSenderV1<'_> {
                 .map(|admission| LocalErasureAdmittedV1 {
                     erasure_id: records.erasure_id,
                     state,
-                    policy: request.policy(),
+                    policy,
                     admission,
                 });
         }
@@ -4733,10 +4734,14 @@ impl ErasureCommandSenderV1<'_> {
 
     /// The ELADM1 retained for `request`, if any. Only the host retains
     /// ELADM1 records, at most one per `erasure_id`, so the scan is bounded
-    /// by the request-head limit.
+    /// by the request-head limit. Every retained ELADM1 must decode: a
+    /// record that does not may be this request's, so the read fails closed
+    /// rather than treat it as absent and retain a second one.
     ///
     /// # Errors
-    /// The payload-free error of a failed or over-limit read.
+    /// The payload-free error of a failed or over-limit read, and
+    /// [`ErasureHostErrorV1::RecoveryUnavailable`] for a retained ELADM1
+    /// that does not decode.
     pub(crate) fn local_admission(
         &mut self,
         request: ErasureReferenceV1,
@@ -4746,13 +4751,19 @@ impl ErasureCommandSenderV1<'_> {
             .store
             .host_store()
             .retained_erasure_objects(LOCAL_ERASURE_ADMISSION_TAG, maximum)
-            .map(|objects| {
+            .map_err(map_erasure_error)
+            .and_then(|objects| {
                 objects
                     .iter()
-                    .filter_map(|bytes| LocalErasureAdmissionV1::from_canonical_cbor(bytes).ok())
+                    .map(|bytes| LocalErasureAdmissionV1::from_canonical_cbor(bytes))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)
+            })
+            .map(|admissions| {
+                admissions
+                    .into_iter()
                     .find(|admission| admission.request == request)
             })
-            .map_err(map_erasure_error)
     }
 
     /// Prepare the access freeze of one Local erasure request (ADR-136 §5;
