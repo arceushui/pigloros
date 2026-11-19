@@ -323,3 +323,106 @@ pub(crate) fn cgroup_listing(main_pid: u32) -> TestResult<(tempfile::TempDir, Fi
     let held = File::open(directory.path())?;
     Ok((directory, held))
 }
+
+/// An admitted payload for tests: fixed input bytes, and an output
+/// reservation of `output` bytes on its own ledger, made at most once.
+#[derive(Debug)]
+pub(crate) struct TestPayload {
+    pub(crate) input: Vec<u8>,
+    pub(crate) ledger: crate::StagingLedger,
+    pub(crate) output: u64,
+    pub(crate) reserved: std::sync::atomic::AtomicBool,
+    pub(crate) fail_read: bool,
+    /// Whether a second reservation is refused, as an admitted execution's is.
+    pub(crate) single_use: bool,
+}
+
+impl Default for TestPayload {
+    fn default() -> Self {
+        Self {
+            input: b"I".to_vec(),
+            ledger: crate::StagingLedger::new(crate::StagingLimits {
+                aggregate_bytes: 1 << 20,
+            }),
+            output: 1_000,
+            reserved: std::sync::atomic::AtomicBool::new(false),
+            fail_read: false,
+            single_use: true,
+        }
+    }
+}
+
+impl TestPayload {
+    /// A payload whose input is `input`.
+    pub(crate) fn with_input(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            ..Self::default()
+        }
+    }
+}
+
+impl crate::adapter_stdio::AttemptPayload for TestPayload {
+    fn input_len(&self) -> u64 {
+        self.input.len() as u64
+    }
+
+    fn read_input_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        let start = usize::try_from(offset).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let source = self
+            .input
+            .get(start..start + buffer.len())
+            .filter(|_| !self.fail_read)
+            .ok_or(io::ErrorKind::UnexpectedEof)?;
+        buffer.copy_from_slice(source);
+        Ok(())
+    }
+
+    fn reserve_output(
+        &self,
+    ) -> Option<Result<crate::StagingCharge, crate::OutputReservationRefused>> {
+        if self
+            .reserved
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+            && self.single_use
+        {
+            return None;
+        }
+        Some(
+            self.ledger
+                .reserve_storage(self.output)
+                .map_err(|error| match error {
+                    crate::StagingError::CleanupFailed => {
+                        crate::OutputReservationRefused::AdmissionClosed
+                    }
+                    _ => crate::OutputReservationRefused::AggregateExceeded,
+                }),
+        )
+    }
+}
+
+/// An adapter feed of one byte and an empty capture, held under a charge of
+/// no bytes; `None` only if a fresh ledger refused that charge.
+pub(crate) fn adapter_io() -> Option<crate::AdapterIo> {
+    crate::StagingLedger::new(crate::StagingLimits { aggregate_bytes: 0 })
+        .reserve_storage(0)
+        .ok()
+        .map(crate::AdapterIo::for_test)
+}
+
+/// The one payload every [`AdmittedAttempt::for_test`] shares, so separately
+/// built test attempts stay equal as before. It reserves as often as it is
+/// asked; tests of the single reservation use their own payload.
+pub(crate) fn shared_test_payload() -> Arc<dyn crate::adapter_stdio::AttemptPayload> {
+    static SHARED: std::sync::OnceLock<Arc<TestPayload>> = std::sync::OnceLock::new();
+    let shared = SHARED.get_or_init(|| {
+        Arc::new(TestPayload {
+            ledger: crate::StagingLedger::new(crate::StagingLimits {
+                aggregate_bytes: u64::MAX / 2,
+            }),
+            single_use: false,
+            ..TestPayload::default()
+        })
+    });
+    Arc::clone(shared) as Arc<dyn crate::adapter_stdio::AttemptPayload>
+}
