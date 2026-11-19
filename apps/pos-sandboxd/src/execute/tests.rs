@@ -31,6 +31,7 @@ use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
+mod adapter;
 mod cancellation;
 mod ownership;
 
@@ -90,6 +91,8 @@ enum Fault {
     HangBind,
     HangKill,
     HangStop,
+    /// A kill or stop is acknowledged, but the unit's tasks linger.
+    Lingering,
 }
 
 type ExecCommands = Vec<(String, Vec<String>, bool)>;
@@ -111,6 +114,19 @@ struct FakeHost {
     /// The `ActiveEnterTimestampMonotonic` reported, in nanoseconds; `None`
     /// reports the time of the read.
     activated: Option<u64>,
+    /// The adapter's use of its standard streams; `None` closes them at once.
+    stdio: Option<adapter::StdioScript>,
+    /// Set once the stdio adapter finished; until then the cgroup is busy.
+    adapter_done: Arc<AtomicBool>,
+    /// Set once an acknowledged kill or a stop ended the unit's tasks: the
+    /// cgroup is then empty, however many polls it had to see otherwise.
+    host_ended: Arc<AtomicBool>,
+    /// What the stdio adapter observed.
+    stdio_report: Arc<Mutex<adapter::StdioReport>>,
+    /// The releases the barrier made, seen by the stdio adapter.
+    released: Arc<Mutex<Vec<(String, Instant)>>>,
+    /// Descriptors held as systemd holds its duplicates of the unit ends.
+    systemd_held: Arc<Mutex<Vec<StdOwnedFd>>>,
 }
 
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
@@ -137,6 +153,12 @@ impl FakeHost {
             cgroup_kills: Arc::default(),
             killed: Arc::default(),
             activated: None,
+            stdio: None,
+            adapter_done: Arc::default(),
+            host_ended: Arc::default(),
+            stdio_report: Arc::default(),
+            released: Arc::default(),
+            systemd_held: Arc::default(),
         }
     }
 
@@ -209,6 +231,14 @@ impl FakeHost {
         self.faults.contains(&fault)
     }
 
+    /// An acknowledged kill or a stop ends the unit's tasks, unless they
+    /// linger.
+    fn end_tasks(&self) {
+        if !self.faulty(Fault::Lingering) {
+            self.host_ended.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn observed(&self) -> Observed {
         self.observed
             .lock()
@@ -261,6 +291,19 @@ struct FakeCgroup {
     empty_after: usize,
     fail_read: bool,
     fail_kill: bool,
+    /// No unit task remains once the stdio adapter finished.
+    adapter_done: Arc<AtomicBool>,
+    /// No unit task remains once a kill or stop ended them.
+    host_ended: Arc<AtomicBool>,
+}
+
+impl FakeCgroup {
+    /// Whether no unit task remains at poll `polls`: the adapter finished and
+    /// enough polls passed, or a kill or stop ended the tasks.
+    fn tasks_gone(&self, polls: usize) -> bool {
+        (polls > self.empty_after && self.adapter_done.load(Ordering::SeqCst))
+            || self.host_ended.load(Ordering::SeqCst)
+    }
 }
 
 impl UnitCgroup for FakeCgroup {
@@ -271,7 +314,7 @@ impl UnitCgroup for FakeCgroup {
         if self.fail_read {
             Err(Injected)
         } else {
-            Ok(polls > self.empty_after)
+            Ok(self.tasks_gone(polls))
         }
     }
 
@@ -365,6 +408,7 @@ impl UnitHost for FakeHost {
         request: TransientUnitRequest,
     ) -> impl Future<Output = Result<String, Injected>> + Send {
         record(&self.log, "start");
+        self.run_stdio(&request);
         let adapter_end = self.observe(&request);
         let outcome = if self.faulty(Fault::Start) {
             Err(Injected)
@@ -399,6 +443,8 @@ impl UnitHost for FakeHost {
                     empty_after: self.empty_after,
                     fail_read: self.faulty(Fault::ReadCgroup),
                     fail_kill: self.faulty(Fault::KillCgroup),
+                    adapter_done: Arc::clone(&self.adapter_done),
+                    host_ended: Arc::clone(&self.host_ended),
                 })
         };
         let hang = self.faulty(Fault::HangBind);
@@ -432,6 +478,7 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "stop");
+        self.end_tasks();
         let hang = self.faulty(Fault::HangStop);
         async move {
             hang_if(hang).await;
@@ -448,6 +495,7 @@ impl UnitHost for FakeHost {
         let outcome = if self.faulty(Fault::Kill) {
             Err(Injected)
         } else {
+            self.end_tasks();
             Ok(())
         };
         let hang = self.faulty(Fault::HangKill);
