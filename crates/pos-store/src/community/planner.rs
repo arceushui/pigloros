@@ -18,16 +18,18 @@
 
 use pos_core::community_lifecycle::{
     community_initializer_set_ref_v1, CommunityArtifactOperationV1, CommunityBudgetQuoteV1,
-    CommunityDigestListV1, CommunityDueMemberBudgetV1, CommunityDurableProfileV1,
-    CommunityInitializationRequestInputV1, CommunityInitializationRequestV1,
-    CommunityInitializationSourceV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMemberBindingInputV1, CommunityMemberBindingV1, CommunityMetadataAnchorV1,
-    CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1,
+    CommunityContentReferenceV1, CommunityDigestListV1, CommunityDueMemberBudgetV1,
+    CommunityDurableProfileV1, CommunityInitializationRequestInputV1,
+    CommunityInitializationRequestV1, CommunityInitializationSourceV1, CommunityInputIndexV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMemberBindingInputV1, CommunityMemberBindingV1,
+    CommunityMetadataAnchorV1, CommunityNativeNodeInputV1, CommunityNativeNodeKindV1,
+    CommunityNativeNodeV1, CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1,
     CommunityOwnerBindingInputV1, CommunityOwnerBindingV1, CommunityScopeBindingInputV1,
     CommunityScopeBindingV1, CommunityScopeCoverageRowV1, CommunityScopeCoverageRowsV1,
     CommunityScopeMembersV1, CommunitySelectionV1, CommunityTypedInputRefV1,
     CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
+use pos_core::RecordedDependencyClassV1;
 use pos_core::{AuthorityTrustRootSealV1, Hash, TimelineId};
 use zeroize::Zeroizing;
 
@@ -37,6 +39,12 @@ use super::lifecycle_authority::{
 };
 use super::native_graph::member_binding_ref;
 use super::private_hash::scope_set_digest;
+
+/// The fixed CIS1 encoding maximum, a CBQ1 byte term.
+const CIS1_BYTES: u64 = 1024;
+
+/// The fixed CSR1 encoding maximum, a CBQ1 byte term.
+const CSR1_BYTES: u64 = 512;
 
 /// Preferred CBOR encoding of the empty scope-member array: the
 /// initializer's proven empty scope (R6.1(6)).
@@ -56,6 +64,12 @@ pub struct CommunityInitializationInstallationV1<'a> {
     pub installed_owner_catalogue_digest: Hash,
     /// The host installation identity, which COB1 binds.
     pub installation_id: [u8; 16],
+    /// Each roster row's CNT1 effective State limit in bytes, in roster
+    /// order: the CSC1 term of the CBQ1 byte maximum. The composition root
+    /// takes it from the row's actual CNT1, and the initialize entry
+    /// (2c-3, pos-runtime) checks it against the row's CNT1 digest; this
+    /// planner cannot see a CNT1.
+    pub state_limit_bytes: &'a [u64],
 }
 
 /// The caller form of a code-0 `initialize` (A5.3(0)): the CGI1 fields
@@ -193,9 +207,9 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a zero Timeline or operation identity, a
-    /// source other than an initializer set, and an initializer-set reference
+    /// source other than an initializer set, an initializer-set reference
     /// that differs from the R6.1(7) derivation over the installed roster
-    /// (P6, I31).
+    /// (P6, I31), and a State-limit count other than the roster's.
     pub fn new(
         _seal: &'static AuthorityTrustRootSealV1,
         installation: CommunityInitializationInstallationV1<'a>,
@@ -213,6 +227,8 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                 == CommunityInitializationSourceV1::Initializer(community_initializer_set_ref_v1(
                     installation.profile,
                 ))
+                && installation.state_limit_bytes.len()
+                    == installation.profile.as_input().roster.len()
             {
                 Ok(Self {
                     installation,
@@ -368,36 +384,39 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
         }
         self.bindings(generation).and_then(|bindings| {
             let digests: Vec<Hash> = bindings.member_binding_digests().collect();
-            self.quote(generation, &digests).and_then(|quote| {
+            let refs: Vec<CommunityTypedInputRefV1<'_>> = digests
+                .iter()
+                .zip(envelope_addresses)
+                .zip(0_u16..)
+                .map(|((digest, address), slot)| {
+                    member_binding_ref(
+                        self.form.timeline,
+                        generation,
+                        self.form.operation_id,
+                        slot,
+                        *address,
+                        *digest,
+                    )
+                })
+                .collect();
+            self.quote(generation, &digests, &refs).and_then(|quote| {
                 self.request_record(generation, admission, &digests)
-                    .and_then(|request| {
-                        let refs: Vec<CommunityTypedInputRefV1<'_>> = digests
-                            .iter()
-                            .zip(envelope_addresses)
-                            .zip(0_u16..)
-                            .map(|((digest, address), slot)| {
-                                member_binding_ref(
-                                    self.form.timeline,
-                                    generation,
-                                    self.form.operation_id,
-                                    slot,
-                                    *address,
-                                    *digest,
-                                )
-                            })
-                            .collect();
-                        self.evidence(generation, request, &refs, &quote)
-                    })
+                    .and_then(|request| self.evidence(generation, request, &refs, &quote))
             })
         })
     }
 
     /// The CBQ1 initialization quote, in roster order, within the CDP1
     /// shared per-record limits (G3).
+    ///
+    /// Its byte maximum sums, per member, the installed CNT1 State limit for
+    /// the CSC1, the fixed CIS1 and CSR1 maxima, and the actual sizes of the
+    /// member's two one-input CPN1s (owner decision on #560, 2026-11-19).
     fn quote(
         &self,
         generation: [u8; 16],
         digests: &[Hash],
+        refs: &[CommunityTypedInputRefV1<'_>],
     ) -> Result<CommunityBudgetQuoteV1, Error> {
         let profile = self.installation.profile;
         let due = digests
@@ -408,16 +427,92 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                 negotiated_tuple_digest: row.digests()[2],
             })
             .collect();
-        CommunityBudgetQuoteV1::initialization(
-            self.form.timeline,
-            generation,
-            profile.digest(),
-            due,
+        refs.iter()
+            .zip(self.installation.state_limit_bytes)
+            .zip(0_u32..)
+            .try_fold(0_u64, |total, ((reference, limit), slot)| {
+                self.node_bytes(generation, slot, *reference).map(|nodes| {
+                    total
+                        .saturating_add(*limit)
+                        .saturating_add(CIS1_BYTES + CSR1_BYTES)
+                        .saturating_add(nodes)
+                })
+            })
+            .and_then(|bytes| {
+                CommunityBudgetQuoteV1::initialization(
+                    self.form.timeline,
+                    generation,
+                    profile.digest(),
+                    due,
+                    bytes,
+                )
+            })
+            .and_then(|quote| {
+                quote
+                    .require_within(COMMUNITY_SHARED_RECORD_LIMITS_V1)
+                    .map(|()| quote)
+            })
+    }
+
+    /// The encoded size of slot `slot`'s `InitialState` CPN1 (input: its CMB1
+    /// ref) plus its `StateRevision` CPN1 (input: that node).
+    ///
+    /// The commit allocates the producer ordinal later, so both are encoded
+    /// with the largest one; every digest is fixed-width, so the stand-in
+    /// digests do not change the size.
+    fn node_bytes(
+        &self,
+        generation: [u8; 16],
+        slot: u32,
+        member: CommunityTypedInputRefV1<'_>,
+    ) -> Result<u64, Error> {
+        let stand_in = Hash::from_bytes([1; 32]);
+        let node = |node_ordinal: u32,
+                    kind: CommunityNativeNodeKindV1,
+                    magic: [u8; 4],
+                    input: CommunityTypedInputRefV1<'_>| {
+            let inputs = [input];
+            CommunityNativeNodeV1::new(CommunityNativeNodeInputV1 {
+                store_incarnation: self.installation.store_incarnation,
+                timeline: self.form.timeline,
+                generation,
+                producer_ordinal: u64::MAX,
+                node_ordinal,
+                kind,
+                content: CommunityContentReferenceV1 {
+                    record_magic: magic,
+                    logical_digest: stand_in,
+                },
+                dependency_class: RecordedDependencyClassV1::EndogenousRecomputed,
+                input_index: CommunityInputIndexV1::Direct(
+                    CommunityTypedInputRefsV1::from_references(&inputs),
+                ),
+                scope_binding_digest: stand_in,
+                authorization_digest: stand_in,
+                provenance_digest: stand_in,
+                evidence_not_after_micros: self
+                    .installation
+                    .profile
+                    .as_input()
+                    .retention
+                    .generation_not_after_micros,
+            })
+            .map(|node| (node.to_canonical_cbor().len() as u64, node.reference()))
+        };
+        node(
+            2 * slot,
+            CommunityNativeNodeKindV1::InitialState,
+            *b"CIS1",
+            member,
         )
-        .and_then(|quote| {
-            quote
-                .require_within(COMMUNITY_SHARED_RECORD_LIMITS_V1)
-                .map(|()| quote)
+        .and_then(|(initial, reference)| {
+            node(
+                2 * slot + 1,
+                CommunityNativeNodeKindV1::StateRevision,
+                *b"CSR1",
+                CommunityTypedInputRefV1::Native(reference),
+            )
+            .map(|(revision, _)| initial + revision)
         })
     }
 

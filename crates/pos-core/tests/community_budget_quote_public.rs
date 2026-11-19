@@ -9,8 +9,8 @@ use ciborium::value::Value;
 use pos_core::community_lifecycle::{
     CommunityBudgetQuoteInputV1 as QuoteInput, CommunityBudgetQuoteV1 as Quote,
     CommunityDueMemberBudgetV1 as Due, CommunityLifecycleErrorV1 as Error,
-    CommunitySharedCountsV1 as Counts, COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1,
-    COMMUNITY_SHARED_RECORD_LIMITS_V1, MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
+    CommunitySharedCountsV1 as Counts, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
 };
 use pos_core::{Hash, TimelineId};
 
@@ -145,12 +145,12 @@ fn cbq1_round_trips_the_exact_ten_fields() -> TestResult {
     })
 }
 
-/// G3 and note 22729: zero prior counts, `2n` nodes and edges, and `n`
-/// per-member encoding bounds.
+/// G3 and note 22729: zero prior counts, `2n` nodes and edges, and the
+/// planner's byte maximum.
 #[test]
 fn initialization_quote_has_the_owner_decided_maxima() -> TestResult {
     let rows = vec![due(10, 11), due(12, 13), due(14, 11)];
-    let quote = Quote::initialization(timeline(4), GENERATION, hash(9), rows.clone())?;
+    let quote = Quote::initialization(timeline(4), GENERATION, hash(9), rows.clone(), 77)?;
     assert!(
         *quote.as_input()
             == QuoteInput {
@@ -166,16 +166,11 @@ fn initialization_quote_has_the_owner_decided_maxima() -> TestResult {
                 due_members: rows,
                 maximum_required_nodes: 6,
                 maximum_required_edges: 6,
-                maximum_required_bytes: 3 * 3_147_312,
+                maximum_required_bytes: 77,
             }
     );
-    // CSC1 + CIS1 + CSR1 + two CPN1s.
     assert_eq!(
-        COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1,
-        1_048_624 + 1_024 + 512 + 2 * 1_048_576
-    );
-    assert_eq!(
-        Quote::initialization(timeline(4), GENERATION, hash(9), vec![]).err(),
+        Quote::initialization(timeline(4), GENERATION, hash(9), vec![], 0).err(),
         Some(Error::BoundsExceeded)
     );
     Ok(())

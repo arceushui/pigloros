@@ -10,9 +10,6 @@ use super::{
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash, Seq, TimelineId};
 use zeroize::Zeroizing;
 
-/// Maximum canonical CIS1 encoding.
-pub(super) const MAX_PRODUCER_BYTES: usize = 1024;
-
 // The complete scalar/source framing is below 1 KiB; 64 fixed-width member
 // digests fit without reallocating the secret encoder's original allocation.
 const _: () = assert!(1024 + MAX_COMMUNITY_MEMBERS_V1 * 34 <= 4096);
@@ -208,7 +205,7 @@ impl CommunityInitializationProducerV1 {
     /// # Errors
     /// Rejects framing, version, trailing bytes, limits and invalid field links.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, MAX_PRODUCER_BYTES, 8, *b"CIS1").and_then(|mut cursor| {
+        record_cursor(bytes, 1024, 8, *b"CIS1").and_then(|mut cursor| {
             read_hashes(&mut cursor).and_then(
                 |[generation_request_digest, member_binding_digest]| {
                     read_artifact_ref(&mut cursor).and_then(|initializer_ref| {

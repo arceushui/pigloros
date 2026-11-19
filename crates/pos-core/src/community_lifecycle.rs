@@ -63,8 +63,7 @@ pub use authority_evidence::{
 };
 pub use budget_quote::{
     CommunityBudgetQuoteInputV1, CommunityBudgetQuoteV1, CommunityDueMemberBudgetV1,
-    CommunitySharedCountsV1, COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1,
-    MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
+    CommunitySharedCountsV1, MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
 };
 pub use classification::{
     CommunityArtifactChildrenV1, CommunityClassificationProofInputV1,

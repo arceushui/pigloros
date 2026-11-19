@@ -21,21 +21,6 @@ use zeroize::Zeroizing;
 /// Maximum canonical CBQ1 encoding.
 pub const MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1: usize = 65_536;
 
-/// Worst-case encoded bytes of one initialized member's five records.
-///
-/// It sums the per-record encoding bounds of the member's CSC1 (1,048,624),
-/// CIS1 (1,024), CSR1 (512) and two CPN1s (1,048,576 each) (owner decision
-/// on #560, note 22729).
-pub const COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1: u64 = 3_147_312;
-
-const _: () = assert!(
-    COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1
-        == (super::state::MAX_RECORD_BYTES
-            + super::initialization::MAX_PRODUCER_BYTES
-            + super::revision::MAX_RECORD_BYTES
-            + 2 * super::native_node::MAX_NODE) as u64
-);
-
 // Fixed fields and heads stay under 256 bytes; each due row is an array
 // head and two hashes (69 bytes).
 const _: () = assert!(256 + MAX_COMMUNITY_MEMBERS_V1 * 69 <= MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1);
@@ -70,7 +55,7 @@ impl CommunitySharedCountsV1 {
 /// One due member's `[CMB1_digest, CNT1_digest]` budget row.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct CommunityDueMemberBudgetV1 {
-    /// Admitted CMB1 identity; rows are strictly ascending by it.
+    /// Admitted CMB1 identity, distinct across rows.
     pub member_binding_digest: Hash,
     /// Retained CNT1 identity whose limits bound the member.
     pub negotiated_tuple_digest: Hash,
@@ -132,8 +117,10 @@ impl CommunityBudgetQuoteV1 {
     /// `due_members` has one row per roster member (owner decisions on
     /// #560, notes 22722 G3 and 22729). The quote has zero prior counts,
     /// `2n` nodes and edges (one `InitialState` and one `StateRevision` CPN1
-    /// per member, each with one direct input), and `n` times
-    /// [`COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1`].
+    /// per member, each with one direct input), and the caller's
+    /// `maximum_required_bytes`: the planner sums each member's CNT1 State
+    /// limit, CIS1 and CSR1 maxima and actual CPN1 sizes (owner decision on
+    /// #560, 2026-11-19).
     ///
     /// # Errors
     /// As [`Self::new`].
@@ -142,6 +129,7 @@ impl CommunityBudgetQuoteV1 {
         generation: [u8; 16],
         profile_digest: Hash,
         due_members: Vec<CommunityDueMemberBudgetV1>,
+        maximum_required_bytes: u64,
     ) -> Result<Self> {
         let members = due_members.len() as u64;
         Self::new(CommunityBudgetQuoteInputV1 {
@@ -152,7 +140,7 @@ impl CommunityBudgetQuoteV1 {
             due_members,
             maximum_required_nodes: 2 * members,
             maximum_required_edges: 2 * members,
-            maximum_required_bytes: members * COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1,
+            maximum_required_bytes,
         })
     }
 

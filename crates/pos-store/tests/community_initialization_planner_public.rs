@@ -16,21 +16,25 @@ use pos_core::community_lifecycle::{
     community_capability_attestation_digest_v1, community_initializer_set_ref_v1, ArtifactRefV1,
     CommunityActorRowV1, CommunityArtifactOperationV1 as ArtifactOperation,
     CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1, CommunityBudgetQuoteV1,
-    CommunityDueMemberBudgetV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
-    CommunityDurableProfileV1, CommunityGenerationIdsV1, CommunityInitializationRequestV1,
-    CommunityInitializationSourceV1 as Source, CommunityLifecycleErrorV1 as Error,
+    CommunityContentReferenceV1, CommunityDueMemberBudgetV1, CommunityDurableBackendV1,
+    CommunityDurableProfileInputV1, CommunityDurableProfileV1, CommunityGenerationIdsV1,
+    CommunityInitializationRequestV1, CommunityInitializationSourceV1 as Source,
+    CommunityInputIndexV1, CommunityLifecycleErrorV1 as Error, CommunityLocatorProducerV1,
     CommunityMemberBindingInputV1, CommunityMemberBindingV1, CommunityMetadataAnchorV1,
-    CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1, CommunityOriginalProvenanceV1,
-    CommunityOwnerBindingInputV1, CommunityOwnerBindingV1, CommunityProfileMemberV1,
-    CommunityProfileRetentionV1, CommunityScopeBindingV1, CommunitySelectionInputV1,
-    CommunitySelectionV1, CommunityStateContentV1, CommunityTimelineFloorV1,
-    CommunityTimelineFloorsV1, CommunityTypedInputRefV1,
+    CommunityMetadataLocatorV1, CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1,
+    CommunityMetadataSchemaV1, CommunityNativeNodeInputV1, CommunityNativeNodeKindV1,
+    CommunityNativeNodeV1, CommunityOriginalProvenanceV1, CommunityOwnerBindingInputV1,
+    CommunityOwnerBindingV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
+    CommunityScopeBindingV1, CommunitySelectionInputV1, CommunitySelectionV1,
+    CommunityStateContentV1, CommunityTimelineFloorV1, CommunityTimelineFloorsV1,
+    CommunityTypedInputRefV1, CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
     ForkAuthenticationPolicyV1,
 };
 use pos_core::trusted_clock::{ScriptedTrustedWallSourceV1, SystemGuardMonotonicSourceV1};
+use pos_core::RecordedDependencyClassV1;
 use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1, CapabilityGrantDraftV1,
@@ -79,6 +83,7 @@ const SOURCE_CATALOGUE: Hash = Hash::from_bytes([2; 32]);
 const AUTHORITY_CATALOGUE: Hash = Hash::from_bytes([9; 32]);
 const ENTRIES: [&str; 2] = ["Entry-A_1", "Entry-B_1"];
 const TUPLES: [Hash; 2] = [Hash::from_bytes([6; 32]), Hash::from_bytes([7; 32])];
+const STATE_LIMITS: [u64; 2] = [4096, 100];
 const ADDRESSES: [Hash; 2] = [Hash::from_bytes([0x71; 32]), Hash::from_bytes([0x72; 32])];
 
 const fn hash(value: u8) -> Hash {
@@ -229,6 +234,7 @@ const fn installation<'a>(
         native_profile_digest: NATIVE_PROFILE,
         installed_owner_catalogue_digest: OWNER_CATALOGUE,
         installation_id: INSTALLATION,
+        state_limit_bytes: &STATE_LIMITS,
     }
 }
 
@@ -427,6 +433,74 @@ fn member_ref(slot: u8, address: Hash, digest: Hash) -> Fallible<Vec<u8>> {
         Value::Bytes(address.as_bytes().to_vec()),
         Value::Bytes(digest.as_bytes().to_vec()),
     ]))
+}
+
+/// The encoded size of slot `slot`'s two one-input CPN1s, with the largest
+/// producer ordinal (the commit allocates the real one later).
+fn node_pair_bytes(slot: u16, address: Hash, digest: Hash) -> Fallible<u64> {
+    let stand_in = hash(1);
+    let node = |ordinal: u32, kind, magic: [u8; 4], input: CommunityTypedInputRefV1<'_>| {
+        let inputs = [input];
+        CommunityNativeNodeV1::new(CommunityNativeNodeInputV1 {
+            store_incarnation: INCARNATION,
+            timeline: target(),
+            generation: GENERATION,
+            producer_ordinal: u64::MAX,
+            node_ordinal: ordinal,
+            kind,
+            content: CommunityContentReferenceV1 {
+                record_magic: magic,
+                logical_digest: stand_in,
+            },
+            dependency_class: RecordedDependencyClassV1::EndogenousRecomputed,
+            input_index: CommunityInputIndexV1::Direct(CommunityTypedInputRefsV1::from_references(
+                &inputs,
+            )),
+            scope_binding_digest: stand_in,
+            authorization_digest: stand_in,
+            provenance_digest: stand_in,
+            evidence_not_after_micros: HORIZON,
+        })
+        .map(|node| (node.to_canonical_cbor().len() as u64, node.reference()))
+    };
+    let member = CommunityTypedInputRefV1::Metadata {
+        schema: CommunityMetadataSchemaV1::Cmb1,
+        locator: CommunityMetadataLocatorV1 {
+            timeline: target(),
+            generation: GENERATION,
+            producer: CommunityLocatorProducerV1::Control(OPERATION),
+            record_role: 11,
+            slot,
+        },
+        envelope_address: address,
+        private_record_digest: digest,
+    };
+    let ordinal = u32::from(slot) * 2;
+    let (initial, reference) = node(
+        ordinal,
+        CommunityNativeNodeKindV1::InitialState,
+        *b"CIS1",
+        member,
+    )?;
+    let (revision, _) = node(
+        ordinal + 1,
+        CommunityNativeNodeKindV1::StateRevision,
+        *b"CSR1",
+        CommunityTypedInputRefV1::Native(reference),
+    )?;
+    Ok(initial + revision)
+}
+
+/// Decision 5: per member, the CNT1 State limit, CIS1 1,024, CSR1 512 and
+/// the two CPN1s.
+fn quote_bytes(limits: &[u64], digests: &[Hash]) -> Fallible<u64> {
+    let mut total = 0;
+    for (slot, (limit, digest)) in limits.iter().zip(digests).enumerate() {
+        let slot = u16::try_from(slot)?;
+        total +=
+            limit + 1_024 + 512 + node_pair_bytes(slot, ADDRESSES[usize::from(slot)], *digest)?;
+    }
+    Ok(total)
 }
 
 fn expected_owner_binding() -> Fallible<CommunityOwnerBindingV1> {
@@ -699,8 +773,13 @@ fn records_mint_cgi1_csb1_cbq1_and_cpv1() -> TestResult {
             negotiated_tuple_digest: TUPLES[1],
         },
     ];
-    let quote =
-        CommunityBudgetQuoteV1::initialization(target(), GENERATION, profile.digest(), due)?;
+    let quote = CommunityBudgetQuoteV1::initialization(
+        target(),
+        GENERATION,
+        profile.digest(),
+        due,
+        quote_bytes(&STATE_LIMITS, &digests)?,
+    )?;
     assert_eq!(records.budget_quote(), quote.to_canonical_cbor().as_slice());
     assert_eq!(records.budget_quote_digest(), quote.digest());
 
@@ -771,44 +850,112 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
         planner.records([0; 16], &admission, &ADDRESSES).err(),
         Some(Error::InvalidBinding)
     );
-    Ok(())
-}
-
-/// Owner decision 6 (2026-11-19): a roster whose CBQ1 byte maximum exceeds
-/// the CDP1 shared per-record limit is refused before anything is minted.
-#[test]
-fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
-    let fixture = Fixture::new()?;
-    let entries: Vec<String> = (0..43).map(|index| format!("Entry-{index:02}")).collect();
-    let rows = entries
-        .iter()
-        .map(|entry| {
+    // A repeated address that is not adjacent, on a three-member roster.
+    let three = ["Entry-A_1", "Entry-B_1", "Entry-C_1"]
+        .into_iter()
+        .zip([0, 1, 0])
+        .map(|(entry, state)| {
             Ok(CommunityProfileMemberV1::new(
                 entry,
                 &fixture.implementation,
                 hash(4),
                 SCHEMA,
                 TUPLES[0],
-                fixture.initializer(0),
+                fixture.initializer(state),
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
-    let oversized = profile(&rows)?;
-    let planner =
-        CommunityInitializationPlannerV1::new(&SEAL, installation(&oversized), form(&oversized))?;
-    let mut world = World::new()?;
+    let wide = crate::profile(&three)?;
+    let planner = CommunityInitializationPlannerV1::new(
+        &SEAL,
+        CommunityInitializationInstallationV1 {
+            state_limit_bytes: &[1, 1, 1],
+            ..installation(&wide)
+        },
+        form(&wide),
+    )?;
     let admission = world.admit(planner.request())?;
-    let addresses: Vec<Hash> = (0..43_u8).map(|index| hash(0x80 + index)).collect();
+    let [first, second] = ADDRESSES;
     assert_eq!(
-        planner.records(GENERATION, &admission, &addresses).err(),
+        planner
+            .records(GENERATION, &admission, &[first, second, first])
+            .err(),
+        Some(Error::InvalidBinding)
+    );
+    assert!(planner
+        .records(GENERATION, &admission, &[first, second, hash(0x73)])
+        .is_ok());
+    Ok(())
+}
+
+/// Owner decisions 5 and 6 (2026-11-19): the CBQ1 byte maximum follows the
+/// installed CNT1 State limits, and a quote over the CDP1 shared per-record
+/// limit is refused before anything is minted, exactly at the limit and not
+/// one over.
+#[test]
+fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
+    let fixture = Fixture::new()?;
+    let rows = fixture.rows()?;
+    let profile = profile(&rows)?;
+    let mut world = World::new()?;
+    let digests: Vec<Hash> =
+        CommunityInitializationPlannerV1::new(&SEAL, installation(&profile), form(&profile))?
+            .bindings(GENERATION)?
+            .member_binding_digests()
+            .collect();
+    let fixed = quote_bytes(&[0, 0], &digests)?;
+    let exact = COMMUNITY_SHARED_RECORD_LIMITS_V1[2] - fixed;
+    for (limits, fits) in [
+        ([exact, 0], true),
+        ([exact, 1], false),
+        ([0, exact + 1], false),
+    ] {
+        let planner = CommunityInitializationPlannerV1::new(
+            &SEAL,
+            CommunityInitializationInstallationV1 {
+                state_limit_bytes: &limits,
+                ..installation(&profile)
+            },
+            form(&profile),
+        )?;
+        let admission = world.admit(planner.request())?;
+        let result = planner.records(GENERATION, &admission, &ADDRESSES);
+        if fits {
+            let quote = CommunityBudgetQuoteV1::from_canonical_cbor(result?.budget_quote())?;
+            assert_eq!(
+                quote.as_input().maximum_required_bytes,
+                COMMUNITY_SHARED_RECORD_LIMITS_V1[2]
+            );
+        } else {
+            assert_eq!(result.err(), Some(Error::BoundsExceeded));
+        }
+    }
+    // A saturating sum still refuses.
+    let planner = CommunityInitializationPlannerV1::new(
+        &SEAL,
+        CommunityInitializationInstallationV1 {
+            state_limit_bytes: &[u64::MAX, u64::MAX],
+            ..installation(&profile)
+        },
+        form(&profile),
+    )?;
+    let admission = world.admit(planner.request())?;
+    assert_eq!(
+        planner.records(GENERATION, &admission, &ADDRESSES).err(),
         Some(Error::BoundsExceeded)
     );
-    // 42 members fit: 42 x 3,147,312 bytes is under 128 MiB.
-    let fitting = profile(&rows[..42])?;
-    let planner =
-        CommunityInitializationPlannerV1::new(&SEAL, installation(&fitting), form(&fitting))?;
-    assert!(planner
-        .records(GENERATION, &admission, &addresses[..42])
-        .is_ok());
+    // One State limit per roster row.
+    assert_eq!(
+        CommunityInitializationPlannerV1::new(
+            &SEAL,
+            CommunityInitializationInstallationV1 {
+                state_limit_bytes: &[1],
+                ..installation(&profile)
+            },
+            form(&profile),
+        )
+        .err(),
+        Some(Error::InvalidBinding)
+    );
     Ok(())
 }

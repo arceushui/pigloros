@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 /// Maximum opaque Plugin State bytes in the accepted CSC1 schema.
 pub const MAX_COMMUNITY_STATE_BYTES_V1: usize = 1_048_576;
-pub(super) const MAX_RECORD_BYTES: usize = 1_048_624;
+const MAX_RECORD_BYTES: usize = 1_048_624;
 
 /// A structurally valid CSC1 view borrowing caller-owned plaintext.
 ///

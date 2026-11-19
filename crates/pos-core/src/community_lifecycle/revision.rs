@@ -8,7 +8,7 @@ use super::{
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash};
 use zeroize::Zeroizing;
 
-pub(super) const MAX_RECORD_BYTES: usize = 512;
+const MAX_RECORD_BYTES: usize = 512;
 
 /// The exact activity that produced a State revision.
 ///
