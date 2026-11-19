@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use pos_core::{
     error::CoreError, store::EventStore, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1,
     ErasureErrorV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1, Hash,
-    KeyDestructionRequestV1, LocalOwnerEffectV1, OwnerIdV1, PreparedLocalOwnerEffectV1,
+    KeyDestructionRequestV1, KeyTombstoneV1, OwnerIdV1, PreparedLocalOwnerEffectV1,
     RecipientExportPublicationRowV1, Seq, TimelineId,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -56,23 +56,25 @@ impl SqliteStore {
 
     pub(super) fn local_erasure_commit_owner_effect(
         &self,
-        effect: LocalOwnerEffectV1,
-        elo1: &[u8],
+        prepared: &PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        PreparedLocalOwnerEffectV1::new(effect, elo1).and_then(|prepared| {
-            within_immediate(&self.conn, || {
-                prepared
-                    .key_tombstone()
-                    .map_or(Ok(()), |(request, deletion_receipt)| {
-                        self.complete_tombstone(request, deletion_receipt)
+        within_immediate(&self.conn, || {
+            prepared
+                .key_tombstone()
+                .map_or(Ok(()), |(request, deletion_receipt)| {
+                    self.complete_tombstone(request, deletion_receipt)
+                })
+                .and_then(|()| {
+                    prepared
+                        .existing_tombstone()
+                        .map_or(Ok(()), |tombstone| self.holds_tombstone(&tombstone))
+                })
+                .and_then(|()| {
+                    prepared.effect_object().map_or(Ok(()), |object| {
+                        insert_retained(&self.conn, object).map(|_| ())
                     })
-                    .and_then(|()| {
-                        prepared.effect_object().map_or(Ok(()), |object| {
-                            insert_retained(&self.conn, object).map(|_| ())
-                        })
-                    })
-                    .and_then(|()| insert_retained(&self.conn, prepared.owner_result()))
-            })
+                })
+                .and_then(|()| insert_retained(&self.conn, prepared.owner_result()))
         })
     }
 
@@ -195,6 +197,18 @@ impl SqliteStore {
                     )
                 })
         })
+    }
+
+    /// Whether the key registry holds exactly `tombstone`, read inside the
+    /// caller's transaction.
+    fn holds_tombstone(&self, tombstone: &KeyTombstoneV1) -> Result<(), ErasureErrorV1> {
+        self.validate_erasure_inventory_data_version()
+            .ok()
+            .and_then(|()| self.load_key_registry().ok().flatten())
+            .and_then(|registry| registry.tombstone(tombstone.identity))
+            .filter(|held| held == tombstone)
+            .map(drop)
+            .ok_or(ErasureErrorV1::KeyDestructionFailed)
     }
 
     /// Complete one pending key destruction inside the caller's transaction,

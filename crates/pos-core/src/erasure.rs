@@ -2848,20 +2848,21 @@ pub trait ErasureInventoryPersistencePortV1 {
     /// Commit one single-host owner effect and its ELO1 owner result in one
     /// adapter transaction, and return the ELO1 address (ADR-136 §4a).
     ///
+    /// The ELO1 is the one [`PreparedLocalOwnerEffectV1::new`] assembled, so
+    /// its `effect_digest` is always derived from the committed effect.
     /// Repeating a committed key tombstone is idempotent and returns the ELO1
     /// address again, bound to the existing tombstone.
     ///
     /// # Errors
-    /// Returns a closed validation error for a malformed record, or a
-    /// persistence error. Every key-tombstone failure is the one closed
+    /// Returns a closed validation error for a retained address that holds
+    /// other bytes, or a persistence error. Every key-tombstone failure is the one closed
     /// [`ErasureErrorV1::KeyDestructionFailed`]: a missing key registry, a
     /// registry refusal, and, on an adapter whose durable state another
     /// connection can change, an inventory changed since the adapter
     /// installed it. Nothing is committed on error.
     fn commit_local_owner_effect(
         &mut self,
-        effect: LocalOwnerEffectV1,
-        elo1: &[u8],
+        prepared: PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
 
     /// Read the write-once erasure store identity.
@@ -3956,9 +3957,10 @@ mod authority_snapshot;
 mod local_records;
 pub use authority_snapshot::{
     ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureRetainedObjectV1,
-    LocalOwnerEffectV1, PreparedLocalOwnerEffectV1, ERASURE_RECORD_TAG_MAX_BYTES_V1,
-    ERASURE_RECORD_TAG_MIN_BYTES_V1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
-    LOCAL_OWNER_EFFECT_MAX_BYTES_V1, LOCAL_OWNER_RESULT_MAX_BYTES_V1,
+    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1,
+    ERASURE_RECORD_TAG_MAX_BYTES_V1, ERASURE_RECORD_TAG_MIN_BYTES_V1,
+    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    LOCAL_OWNER_RESULT_MAX_BYTES_V1,
 };
 pub use local_records::{
     local_erasure_body_digest_v1, local_erasure_bundle_signing_message_v1,
@@ -7936,8 +7938,7 @@ mod coverage_paths {
 
         fn commit_local_owner_effect(
             &mut self,
-            _effect: LocalOwnerEffectV1,
-            _elo1: &[u8],
+            _prepared: PreparedLocalOwnerEffectV1,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
             Err(ErasureErrorV1::ProvenanceMissing)
         }
