@@ -49,6 +49,12 @@ impl<'a> AdmittedRuntimeKey<'a> {
     pub(crate) const fn key_id(&self) -> &'a str {
         self.key_id
     }
+
+    /// The admitted public key every emitted signature verifies under.
+    #[must_use]
+    pub(crate) const fn key(&self) -> &'a VerifyingKey {
+        self.key
+    }
 }
 
 /// Closed failures of the runtime-attestation signing boundary.

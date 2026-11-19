@@ -280,6 +280,14 @@ impl IssuedGrant {
             }),
         }
     }
+
+    /// The same grant whose AGR1 is the canonical `bytes`, for tests that
+    /// authenticate the stored response it heads.
+    #[must_use]
+    pub fn with_bytes(mut self, bytes: &[u8]) -> Self {
+        self.bytes = Arc::from(bytes);
+        self
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

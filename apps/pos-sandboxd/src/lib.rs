@@ -314,7 +314,9 @@ pub use attempt_evidence::{
     TerminalServiceError,
 };
 #[cfg(target_os = "linux")]
-pub use attempt_records::{AttemptAdmission, AttemptRecords, EvidenceFault};
+pub use attempt_records::{
+    AttemptAdmission, AttemptRecords, EvidenceFault, ResponseFault, RetainedResponse,
+};
 #[cfg(target_os = "linux")]
 pub use execute::{
     execute, AttemptCancel, AttemptEnding, AttemptExecution, CancelSignal, ExecuteError,

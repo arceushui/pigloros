@@ -287,6 +287,25 @@ pub struct AttemptEvidence {
     termination: TerminationEvidence,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl AttemptEvidence {
+    /// Records a test already holds as verified, so that it can
+    /// authenticate the response that binds them with
+    /// [`AttemptEvidence::verify_response`].
+    #[must_use]
+    pub const fn fixture(
+        requested: RequestedConfigurationEvidence,
+        observed: KernelObservationEvidence,
+        termination: TerminationEvidence,
+    ) -> Self {
+        Self {
+            requested,
+            observed,
+            termination,
+        }
+    }
+}
+
 impl AttemptEvidence {
     /// Verify the three records of one attempt against what the verifier
     /// holds. `previous` is the verified evidence whose TME1 `termination`
