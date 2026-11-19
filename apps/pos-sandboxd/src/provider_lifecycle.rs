@@ -96,7 +96,7 @@ impl StartedProviderUnit {
 /// The directory of the SIC1 kind-11 provider binaries (ADR-069 R11 §5.2).
 const PROVIDER_BINARY_DIRECTORY: &str = "/var/lib/pigloros/sandbox/providers/";
 /// The provider daemon mode's only argument (ADR-069 R11 §5.1 step 1).
-const PROVIDER_RUNTIME_ARGUMENT: &str = "provider-runtime";
+pub(crate) const PROVIDER_RUNTIME_ARGUMENT: &str = "provider-runtime";
 /// The runtime's start-to-`READY=1` bound, 30 s (R11 §5.2, owner decision O7).
 const PROVIDER_RUNTIME_START_TIMEOUT_USEC: u64 = 30_000_000;
 /// Owner-only files and directories (R11 §5.2, owner decision O9).
