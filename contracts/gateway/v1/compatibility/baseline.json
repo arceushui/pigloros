@@ -2135,6 +2135,16 @@
           },
           "default": {
             "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable, without `Retry-After`): the store executor is saturated. A refused read past the denial-record bound answers the `404` instead.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       }

@@ -4736,7 +4736,10 @@ impl ErasureCommandSenderV1<'_> {
     /// ELADM1 records, at most one per `erasure_id`, so the scan is bounded
     /// by the request-head limit. Every retained ELADM1 must decode: a
     /// record that does not may be this request's, so the read fails closed
-    /// rather than treat it as absent and retain a second one.
+    /// rather than treat it as absent and retain a second one. A corrupt
+    /// ELADM1 is store corruption only the host can cause, and it closes
+    /// every submission and every `getErasure` projection of the host until
+    /// the store is repaired; recovery and the driver never read ELADM1.
     ///
     /// # Errors
     /// The payload-free error of a failed or over-limit read, and
