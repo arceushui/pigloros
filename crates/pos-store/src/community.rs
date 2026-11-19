@@ -9,13 +9,23 @@
 //! records, State or the backing store.
 
 mod attestation;
+mod extractor;
+mod initializer;
 mod lifecycle_authority;
 mod memory_domain;
 mod metadata_authority;
+mod native_graph;
 mod private_hash;
+mod protection;
 mod sealer;
+mod store_domain;
 mod vault;
 
+pub use extractor::{
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
+    CommunityArtifactRecordInputV1,
+};
+pub use initializer::CommunityInitializerOwnerV1;
 pub use lifecycle_authority::{
     CommunityAdministrativeActionV1, CommunityAdministrativeOperationV1,
     CommunityAdministrativeRequestV1, CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1,
@@ -27,4 +37,12 @@ pub use memory_domain::{
 };
 pub use metadata_authority::{
     metadata_resource, CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
+};
+pub use native_graph::{
+    CommunityAssembledRecordV1, CommunityInitializationGraphInputV1,
+    CommunityInitializationGraphV1, CommunityInitializationMemberV1,
+};
+pub use protection::{
+    CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,
+    CommunityRecordEvidenceV1,
 };

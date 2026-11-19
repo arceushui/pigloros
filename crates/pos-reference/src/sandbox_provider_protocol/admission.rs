@@ -1048,7 +1048,7 @@ impl AdmittedSandboxProvider {
         let expected = ReceiptBinding {
             attempt_id: grant.attempt_id,
             authority: ReceiptAuthority {
-                agr1_digest: grant.grant_digest,
+                agr1_digest: grant.grant_digest(),
                 spm1_digest: self.manifest.manifest_digest,
                 provider_binary_digest: self.manifest.binary_digest,
                 lps1_digest: grant.authority.lps1_digest,

@@ -19,9 +19,11 @@
 //!   containment gate on the Timeline read, and no ADR-097 B6 fence row exists;
 //! - durable nonce reservation under the ADR-110 E16 lock; reservations go
 //!   through [`SubjectNonceReservationPortV1`], and the only implementation
-//!   here is volatile;
-//! - the ADR-097 B4 plaintext grammar; only the inherited 8,192-byte raw cap
-//!   is enforced, on both append and read.
+//!   here is volatile.
+//!
+//! Both append and read enforce the ADR-097 B4 plaintext grammar of
+//! [`pos_crypto::preference_weights`], which includes the inherited 8,192-byte
+//! raw cap.
 //!
 //! Private bytes stay in `pos-crypto` values held by [`SubjectKeyringV1`];
 //! nothing here hands a root, subkey or plaintext to `pos-core` or to a store.
@@ -38,6 +40,7 @@ use pos_core::{
 use pos_crypto::key_roles::{
     sign_timeline_event_for_registered_role, verify_committed_timeline_event_v1, SigningKeyMaterial,
 };
+use pos_crypto::preference_weights::validate_preference_weights;
 use pos_crypto::subject_ciphertext::SubjectCiphertextV1;
 use pos_crypto::subject_data::{
     subject_data_public_header, SubjectDataV1, SUBJECT_DATA_EVENT_TYPE,
@@ -55,9 +58,6 @@ use zeroize::Zeroizing;
 
 /// The accepted field tag of [`SubjectFieldSelectorV1::PersonaPreferenceWeights`].
 pub const PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG: &str = "persona.preference_weights";
-
-/// The inherited raw logical plaintext cap of one subject field value.
-pub const MAX_SUBJECT_FIELD_PLAINTEXT_BYTES: usize = 8_192;
 
 /// A closed, payload-free refusal of this consumer's key and write operations.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -85,9 +85,10 @@ pub enum SubjectDataConsumerErrorV1 {
     /// active epoch.
     #[error("subject key is not the active encryption epoch")]
     KeyNotActive,
-    /// The plaintext exceeds [`MAX_SUBJECT_FIELD_PLAINTEXT_BYTES`].
-    #[error("subject field plaintext exceeds its raw cap")]
-    PlaintextBoundExceeded,
+    /// The plaintext is not an accepted ADR-097 B4 `persona.preference_weights`
+    /// value, including one over its 8,192-byte raw cap.
+    #[error("subject field plaintext is not an accepted preference weight set")]
+    InvalidPlaintext,
     /// No exact nonce row exists, its data counter is exhausted, or the port
     /// returned a counter that is not above the last one this keyring used
     /// for the epoch.
@@ -271,15 +272,15 @@ pub struct SubjectDataAppendV1<'a> {
     pub epoch: u64,
     /// The owner-process `TimelineIntegritySigning` material of the keyring's anchor.
     pub signing: &'a SigningKeyMaterial,
-    /// The complete plaintext weight set, at most
-    /// [`MAX_SUBJECT_FIELD_PLAINTEXT_BYTES`]; its grammar is not validated.
+    /// The complete plaintext weight set in the ADR-097 B4 grammar of
+    /// [`pos_crypto::preference_weights`].
     pub weights: &'a [u8],
 }
 
 /// Encrypt and append one `subject.data.v1` Event through the combined
 /// two-identity prepared append.
 ///
-/// The order is: raw cap, unlocked epoch, loaded registry, active registry
+/// The order is: plaintext grammar, unlocked epoch, loaded registry, active registry
 /// identity and root fingerprint, nonce reservation, the keyring's counter
 /// high-water, then the store's combined boundary, inside which AES-256-GCM
 /// and the Timeline signature run.
@@ -294,8 +295,8 @@ pub fn append_subject_preference_weights<S: EventStore + ?Sized>(
     nonces: &mut dyn SubjectNonceReservationPortV1,
     request: &SubjectDataAppendV1<'_>,
 ) -> Result<Event, SubjectDataConsumerErrorV1> {
-    if request.weights.len() > MAX_SUBJECT_FIELD_PLAINTEXT_BYTES {
-        return Err(SubjectDataConsumerErrorV1::PlaintextBoundExceeded);
+    if validate_preference_weights(request.weights).is_err() {
+        return Err(SubjectDataConsumerErrorV1::InvalidPlaintext);
     }
     let subject = keys.subject;
     let identity = keys.key_identity(request.epoch);
@@ -513,7 +514,7 @@ fn verified_subject_data(
 }
 
 /// Every failure is the one payload-free `Integrity` outcome ADR-121 allows:
-/// a typed derivation, context, authentication or bound cause never reaches
+/// a typed derivation, context, authentication or grammar cause never reaches
 /// the callback.
 fn open_subject_field(
     unlocked: &UnlockedEpoch,
@@ -530,7 +531,7 @@ fn open_subject_field(
                 .decrypt(&subkey, envelope.input(), &data.public_header(), field_tag)
                 .ok()
         })
-        .filter(|plaintext| plaintext.len() <= MAX_SUBJECT_FIELD_PLAINTEXT_BYTES)
+        .filter(|plaintext| validate_preference_weights(plaintext).is_ok())
         .ok_or(SubjectFieldReadError::Integrity)
 }
 

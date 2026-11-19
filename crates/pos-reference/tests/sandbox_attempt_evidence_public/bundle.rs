@@ -21,7 +21,7 @@ use super::vectors::{
 };
 
 const WORK_LIMIT: u64 = 1_048_576;
-/// ELM1[8]: exactly the 70 bytes of `S` that TME1-A captures (R10 §8.3).
+/// ELM1\[8\]: exactly the 70 bytes of `S` that TME1-A captures (R10 §8.3).
 const OUTPUT_LIMIT: u64 = 70;
 
 const fn ready_fields() -> LauncherReadyFields {

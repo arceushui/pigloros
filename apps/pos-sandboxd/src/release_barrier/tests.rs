@@ -212,7 +212,7 @@ fn a_matching_ready_is_released_once_with_the_rechecked_authority() -> TestResul
     let ready = LauncherReady::new(expected.fields())?;
     // The recheck is bound to the very ReadyV1 that was accepted.
     assert_eq!(recheck.ready.get(), Some(ready.digest));
-    let fields = &sent.fields;
+    let fields = sent.fields();
     assert_eq!(fields.attempt_id, expected.attempt_id);
     assert_eq!(fields.nonce, expected.nonce);
     assert_eq!(fields.ready1_digest, ready.digest);
