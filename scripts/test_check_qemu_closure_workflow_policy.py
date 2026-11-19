@@ -28,6 +28,10 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
 
     def test_privilege_trigger_runner_and_job_changes_fail_closed(self):
         evidence = lambda w: w["jobs"]["evidence"]
+        kernel = lambda w: w["jobs"]["kernel-cache"]
+
+        def step(job, name):
+            return next(s for s in job["steps"] if name in (s.get("name"), s.get("id")))
         matrix = lambda w: evidence(w)["strategy"]["matrix"]["include"]
         mutations = [
             lambda w: w.update(permissions={"contents": "write"}),
@@ -56,6 +60,30 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
             lambda w: evidence(w)["steps"][-2]["with"].update(**{"retention-days": 1}),
             lambda w: evidence(w)["steps"][-2]["with"].update(**{"if-no-files-found": "ignore"}),
             lambda w: evidence(w)["steps"][-1].update(**{"if": "${{ always() }}"}),
+            # The kernel cache: main-only signing, exact-key restore, signed import.
+            lambda w: evidence(w).pop("if"),
+            lambda w: evidence(w).update(**{"if": "${{ always() }}"}),
+            lambda w: step(evidence(w), "kernel-cache")["with"].update(**{"restore-keys": "qemu-kernel-"}),
+            lambda w: step(evidence(w), "kernel-cache")["with"].update(key="qemu-kernel"),
+            lambda w: step(evidence(w), "Import the signed kernel").update(
+                run='nix copy --no-check-sigs --from "file://${RUNNER_TEMP}/qemu-kernel-cache"'),
+            lambda w: step(evidence(w), "Import the signed kernel").pop("if"),
+            lambda w: evidence(w)["steps"].append(copy.deepcopy(step(kernel(w), "Save the signed kernel"))),
+            lambda w: kernel(w).pop("environment"),
+            lambda w: kernel(w).update(environment="production"),
+            lambda w: kernel(w).pop("if"),
+            lambda w: kernel(w).update(**{"if": "${{ always() }}"}),
+            lambda w: kernel(w).update(**{"continue-on-error": True}),
+            lambda w: kernel(w).update(permissions={"contents": "write"}),
+            lambda w: kernel(w)["env"].update(QEMU_KERNEL_CACHE_SIGNING_KEY="${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"),
+            lambda w: step(kernel(w), "Build and sign the kernel")["env"].update(
+                QEMU_KERNEL_CACHE_SIGNING_KEY="${{ secrets.OTHER }}"),
+            lambda w: step(kernel(w), "Look up the kernel cache entry")["with"].pop("lookup-only"),
+            lambda w: step(kernel(w), "Save the signed kernel").update(**{"if": "${{ always() }}"}),
+            lambda w: w["concurrency"].update(**{"cancel-in-progress": True}),
+            lambda w: w[True]["push"].update(branches=["**"]),
+            lambda w: w[True]["push"]["paths"].pop(),
+            lambda w: w[True].pop("schedule"),
         ]
         policy.check(self.workflow, self.producers)
         for mutate in mutations:

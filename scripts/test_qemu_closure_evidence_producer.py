@@ -30,10 +30,13 @@ import qemu_qmp_query_kvm as qmp
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "qemu-closure-evidence.sh"
 INSTALL_NIX = ROOT / "scripts" / "install-pinned-nix.sh"
+KERNEL_CACHE = ROOT / "scripts" / "qemu-kernel-cache.sh"
+KERNEL_SIGNING_PUBLIC_KEY = "piglor-qemu-kernel-1:62KZ76u3AzKRSSsmRDqEanDdgOu7j81BXH5VINsQj9c="
 COLLECTOR = ROOT / "deploy" / "nixos" / "qemu-evidence" / "collect-evidence.sh"
 NIX_SETTINGS = {
     "substituters": "https://cache.nixos.org",
-    "trusted-public-keys": "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=",
+    "trusted-public-keys": "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= "
+                           + KERNEL_SIGNING_PUBLIC_KEY,
     "require-sigs": "true",
     "sandbox": "true",
 }
@@ -226,6 +229,8 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual(result.stdout, "".join(f"{name} = {value}\n" for name, value in NIX_SETTINGS.items()))
         for name, value in (("substituters", "https://cache.nixos.org https://evil.example"),
                             ("trusted-public-keys", "evil-1:AAAA"),
+                            ("trusted-public-keys", NIX_SETTINGS["trusted-public-keys"] + " evil-1:AAAA"),
+                            ("trusted-public-keys", "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="),
                             ("require-sigs", "false"), ("sandbox", "relaxed"), ("sandbox", "")):
             with self.subTest(name=name, value=value):
                 result = self.shell.run(
@@ -452,6 +457,110 @@ class QmpTests(unittest.TestCase):
                      [str(self.socket), "1", "start"]):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
                 self.assertEqual(qmp.main(argv), 2)
+
+
+class KernelCacheTests(unittest.TestCase):
+    """scripts/qemu-kernel-cache.sh against a `nix` stub that logs each call."""
+
+    DRV = "/nix/store/0123456789abcdfghijklmnpqrsvwxya-linux-6.12.117.drv"
+    SECRET = "piglor-qemu-kernel-1:c2VjcmV0LWtleS1ieXRlcw=="
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.base = pathlib.Path(directory.name)
+        self.log = self.base / "nix.log"
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        self.stub_nix()
+
+    def stub_nix(self, drv: str = DRV, copy_status: int = 0) -> None:
+        # Each call logs its arguments; `copy --to` also logs the signing key
+        # file's mode and content, read while the copy runs.
+        (self.bin / "nix").write_text(f"""#!/bin/bash
+printf '%s\\n' "$*" >>"{self.log}"
+case "$1" in
+eval) printf '%s' '{drv}' ;;
+copy)
+  for arg in "$@"; do
+    if [[ $arg == --to=* || $arg == file://*secret-key=* ]]; then
+      key="${{arg##*secret-key=}}"
+      printf 'key-mode %s\\nkey-content %s\\n' "$(stat -c %a "$key")" "$(cat "$key")" >>"{self.log}"
+      printf '%s\\n' "$key" >"{self.base}/key-path"
+    fi
+  done
+  exit {copy_status} ;;
+esac
+""")
+        (self.bin / "nix").chmod(0o755)
+
+    def run_cache(self, *args: str, secret: str | None = None) -> subprocess.CompletedProcess:
+        environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}")
+        environment.pop("QEMU_KERNEL_CACHE_SIGNING_KEY", None)
+        if secret is not None:
+            environment["QEMU_KERNEL_CACHE_SIGNING_KEY"] = secret
+        return subprocess.run(["bash", str(KERNEL_CACHE), *args], env=environment,
+                              capture_output=True, text=True, check=False)
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def kernel(self, architecture: str) -> str:
+        return (f"{ROOT}/deploy/nixos#nixosConfigurations.qemu-evidence-{architecture}"
+                ".config.boot.kernelPackages.kernel")
+
+    def test_key_names_the_kernel_derivation(self):
+        result = self.run_cache("key", "aarch64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "key=qemu-kernel-aarch64-0123456789abcdfghijklmnpqrsvwxya\n")
+        self.assertEqual(self.calls(), [f"eval --raw --no-update-lock-file {self.kernel('aarch64')}.drvPath"])
+
+    def test_key_refuses_an_unexpected_derivation_or_architecture(self):
+        self.stub_nix(drv="/nix/store/short-linux.drv")
+        result = self.run_cache("key", "x86_64")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected kernel derivation path", result.stderr)
+        self.assertEqual(self.run_cache("key", "riscv64").returncode, 2)
+        self.assertEqual(self.run_cache("key").returncode, 2)
+
+    def test_export_signs_with_a_private_temporary_key_file_and_removes_it(self):
+        out = self.base / "cache"
+        result = self.run_cache("export", "x86_64", str(out), secret=self.SECRET)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kernel = self.kernel("x86_64")
+        key_path = (self.base / "key-path").read_text().strip()
+        self.assertEqual(self.calls(), [
+            f"build --no-update-lock-file --no-link --print-build-logs {kernel} {kernel}.dev",
+            f"copy --no-update-lock-file --to file://{out}?compression=zstd&secret-key={key_path}"
+            f" {kernel} {kernel}.dev",
+            "key-mode 600",
+            f"key-content {self.SECRET}",
+        ])
+        self.assertFalse(pathlib.Path(key_path).exists())
+        self.assertNotIn(self.SECRET, result.stdout + result.stderr)
+
+    def test_export_removes_the_key_file_when_the_copy_fails(self):
+        self.stub_nix(copy_status=3)
+        result = self.run_cache("export", "x86_64", str(self.base / "cache"), secret=self.SECRET)
+        self.assertEqual(result.returncode, 3)
+        self.assertFalse(pathlib.Path((self.base / "key-path").read_text().strip()).exists())
+
+    def test_export_without_the_signing_key_builds_nothing(self):
+        for secret in (None, ""):
+            with self.subTest(secret=secret):
+                result = self.run_cache("export", "x86_64", str(self.base / "cache"), secret=secret)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("QEMU_KERNEL_CACHE_SIGNING_KEY is not set", result.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_import_keeps_signature_checks(self):
+        out = self.base / "cache"
+        result = self.run_cache("import", "aarch64", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kernel = self.kernel("aarch64")
+        self.assertEqual(self.calls(), [f"copy --no-update-lock-file --from file://{out} {kernel} {kernel}.dev"])
+        self.assertNotIn("--no-check-sigs", KERNEL_CACHE.read_text().replace(
+            "import never passes --no-check-sigs", ""))
 
 
 if __name__ == "__main__":
