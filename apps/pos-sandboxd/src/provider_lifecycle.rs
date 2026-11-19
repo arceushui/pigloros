@@ -48,7 +48,7 @@ pub(crate) type CgroupRootSource =
 
 /// The previous runtime's reconciled attempts, or why they are not.
 type Reconciled<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<[u8; 16]>, ProviderLifecycleError>> + 'a>>;
+    Pin<Box<dyn Future<Output = Result<(Vec<[u8; 16]>, Duration), ProviderLifecycleError>> + 'a>>;
 
 /// R12 §7.1 steps 3 to 7 on this host, after the runtime unit is gone: the
 /// cleanup part of restart reconciliation over the previous-live set, by
@@ -455,7 +455,7 @@ impl ProviderLifecyclePort for SystemdProviderLifecycle {
         let deadline = Instant::from_std(deadline);
         // The unit stop is bounded by the deadline. The cleanup bounds itself:
         // only its #1200 D2 recent-activation wait may outlast the deadline.
-        let reconciled = self.runtime.block_on(async {
+        let (reconciled, activation_wait) = self.runtime.block_on(async {
             timeout_at(
                 deadline,
                 self.terminate_previous_unit(&runtime, &slot, deadline),
@@ -474,6 +474,7 @@ impl ProviderLifecyclePort for SystemdProviderLifecycle {
             target.lifecycle_scope_id(),
             control_group,
             reconciled,
+            activation_wait,
         ))
     }
 
@@ -580,13 +581,14 @@ fn only_foreign(
 /// the registry exclusively, require every committed intent to be one of
 /// the previous-live attempts, and run the cleanup part of restart
 /// reconciliation with the orphan sweep `network` builds. The registry lock
-/// is released when this returns. The egress probe never runs.
+/// is released when this returns. The egress probe never runs. Returns the
+/// reconciled attempts and the recent-activation wait the cleanup applied.
 pub(crate) async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
     transport: &SystemdTransientUnitTransport,
     previous_live: &[[u8; 16]],
     deadline: Instant,
     network: impl FnOnce() -> N,
-) -> Result<Vec<[u8; 16]>, ProviderLifecycleError> {
+) -> Result<(Vec<[u8; 16]>, Duration), ProviderLifecycleError> {
     let budget = ProviderInstallation::open()
         .map_err(|_| ProviderLifecycleError::Unavailable)?
         .cleanup_budget();
@@ -613,12 +615,15 @@ pub(crate) async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
     )
     .await;
     reconciled
-        .map(|reconciled| {
-            reconciled
-                .attempts()
-                .iter()
-                .map(crate::PlannedAttemptIntent::attempt_id)
-                .collect()
+        .map(|(reconciled, wait)| {
+            (
+                reconciled
+                    .attempts()
+                    .iter()
+                    .map(crate::PlannedAttemptIntent::attempt_id)
+                    .collect(),
+                wait,
+            )
         })
         .map_err(|error| reconciliation_failure(&error))
 }

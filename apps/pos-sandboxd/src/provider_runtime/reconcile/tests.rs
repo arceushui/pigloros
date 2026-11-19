@@ -410,7 +410,8 @@ fn the_selector_cleanup_refuses_foreign_intents_and_releases_the_lock() -> TestR
     );
     assert!(lock_is_free()?);
     // A clean host reconciles nothing, and the lock is free at once.
-    assert_eq!(cleanup(&[[9; 16]], false), Ok(Vec::new()));
+    // No activation was recorded, so no wait was applied.
+    assert_eq!(cleanup(&[[9; 16]], false), Ok((Vec::new(), Duration::ZERO)));
     assert!(lock_is_free()?);
     assert!(SystemdAttemptRegistry::open().is_ok());
     drop(servers);
