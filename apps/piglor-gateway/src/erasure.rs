@@ -236,6 +236,11 @@ fn submit_refusal(error: LocalErasureSubmitErrorV1) -> ProblemV1 {
             StatusCode::CONFLICT,
             "the Idempotency-Key named another erasure request",
         ),
+        // Every other host failure, an authority denial included: the
+        // Gateway's own decision already admitted the operation on the same
+        // root grant, so a host that still denies it disagrees with the
+        // authority state the decision pinned and cannot vouch for it. That
+        // is a retryable 503, never a 403, which needs a recorded denial.
         LocalErasureSubmitErrorV1::Host(_) => ProblemV1::new(
             ProblemCodeV1::TemporarilyUnavailable,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -350,7 +355,8 @@ async fn submit_holding(
 /// `GET /v1/me/erasures/{erasure_id}`: the acting subject's own erasure
 /// under the permit of its `erasure.read` decision. A refused decision is
 /// recorded like any denial but answered as the same `404` as an unknown
-/// id, so a caller without the grant learns nothing.
+/// id, so a caller without the grant learns nothing (ADR-136 acceptance
+/// test 9).
 pub(crate) async fn read(
     gateway: &Gateway,
     authority: OperationAuthority<ReadErasureOperation>,
@@ -366,7 +372,7 @@ pub(crate) async fn read(
     };
     let permit = match authority.authorize(gateway, None).await {
         Ok(permit) => permit,
-        Err(error) => return hide_refusal(error.into_response()),
+        Err(error) => return hide_refusal(error),
     };
     let Some((principal, actor)) = subject_of(&permit) else {
         return GatewayError::AuthorizationUnavailable.into_response();
@@ -412,10 +418,15 @@ impl Gateway {
     }
 }
 
-/// A refused decision's `403` answered as the `404` of an unknown id; every
-/// other failure keeps its answer.
-fn hide_refusal(response: Response) -> Response {
-    if response.status() == StatusCode::FORBIDDEN {
+/// A refused decision answered as the `404` of an unknown id: its `403`,
+/// and the `429` of a denial over the denial-record bound, which only a
+/// refused caller can reach (its suppressed denial is still counted in the
+/// window's durable marker). Every other failure, which a granted caller
+/// meets alike, keeps its answer.
+fn hide_refusal(error: GatewayError) -> Response {
+    let suppressed = matches!(error, GatewayError::DenialRecordLimitReached { .. });
+    let response = error.into_response();
+    if suppressed || response.status() == StatusCode::FORBIDDEN {
         not_found()
     } else {
         response

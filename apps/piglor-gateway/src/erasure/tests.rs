@@ -343,6 +343,15 @@ async fn each_erasure_operation_needs_its_own_grant() -> TestResult {
         .request(actor, "erasure-1", "private-subject-data")
         .await?;
     assert_eq!(admitted.status, StatusCode::ACCEPTED);
+    // Past the per-Principal denial-record bound of 60 per window, the
+    // refused read still answers the same 404, never the bound's 429.
+    for _ in 0..61 {
+        let refused = requester.read(actor, &Ulid::nil().to_string()).await?;
+        assert_eq!(
+            (refused.status, &refused.bytes),
+            (unknown.status, &unknown.bytes)
+        );
+    }
     let ungranted = requester
         .read(actor, &erasure_id(actor, "erasure-1")?.to_string())
         .await?;
@@ -360,6 +369,8 @@ async fn each_erasure_operation_needs_its_own_grant() -> TestResult {
 #[tokio::test]
 async fn get_erasure_answers_one_not_found() -> TestResult {
     let (served, driver) = Served::local(&SERVED, compiled())?;
+    // The 202 wakes the driver (D7); stopped, it leaves the erasure submitted.
+    driver.stop().await;
     let (actor, other) = (actor()?, other_actor()?);
     let created = served
         .send(
@@ -417,8 +428,7 @@ async fn get_erasure_answers_one_not_found() -> TestResult {
         malformed.problem()?,
         (StatusCode::BAD_REQUEST, "invalid-request".to_owned(), false)
     );
-    let world = served.stop(driver).await?;
-    drop(world);
+    served.gateway.shutdown().await?;
     // A missing grant answers the same bytes.
     let (ungranted, driver) = Served::local(&[GatewayOperationV1::REQUEST_ERASURE], compiled())?;
     let refused = ungranted.read(actor, &Ulid::nil().to_string()).await?;
