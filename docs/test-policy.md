@@ -71,17 +71,22 @@ scripts the lane or its consumers run), read from the trusted base revision.
 Failed detection, a base revision without that filter, a pull request at the
 3000-file listing limit, any renamed file, or a failure to list renames runs
 it. Only `cargo-crap` waits for the lane, and `ci-gate` requires both results
-directly; `standard-gate`, mutation and ASan never wait for it, so a failed lane
+directly; the standard stage, mutation and ASan never wait for it, so a failed lane
 does not hide or delay their findings. When a pull
 request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
 `crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
 `ci-gate` requires the lane's success whenever it is in scope.
 
-The Windows job runs the complete native test suite, including all 1,000 real
-readiness cases, once under coverage instrumentation. Portable bridge and owner
-executable tests run separately, along with native doctests. The retained runtime
-is prepared before these tests. No test-exclusion filters are used; the complete
-native suite executes once while producing its coverage evidence.
+The Windows lane has two blocking jobs that run side by side. The coverage job
+runs the complete native test suite once under coverage instrumentation, with no
+test-exclusion filters; its readiness fixture drives 4 workers x 5 real
+ceremonies, which reaches the same code. The `readiness-soak` job runs that
+fixture uninstrumented with the full 4 workers x 250 = 1,000 real ceremonies.
+It fails if the fixture is renamed away. Under instrumentation the soak alone
+took about 40 minutes and pushed slow runners past the 65-minute step limit.
+The fixture refuses to run without `OWNER_BRIDGE_READINESS_RUNS_PER_WORKER`.
+Portable bridge and owner executable tests run separately, along with native
+doctests. The retained runtime is prepared before these tests.
 
 `covgate` reads the detailed LLVM JSON report produced by the completed
 `cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test
@@ -144,8 +149,8 @@ first-parent `main` ancestor among the 30 commits before it; a function `main`
 improved after that ancestor may then regrow up to its ancestor score, which
 the owner accepted. With no trusted baseline in that window, the job fails
 closed (pull requests that change no Rust, Cargo or toolchain input bootstrap
-instead). A failed `core-gate` no longer stops cargo-crap from running; `ci-gate`
-still fails on it.
+instead). A failed core stage (as `core-gate` reports it) does not stop
+cargo-crap from running; `ci-gate` still fails on it.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,

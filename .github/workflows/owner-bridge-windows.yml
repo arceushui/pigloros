@@ -70,14 +70,18 @@ jobs:
           }
       - name: Measure only shim source coverage
         id: coverage
-        # Successful runs take 41-54 minutes. A hung fixture fails this step,
-        # so the failure-only diagnostics below still run inside the job budget:
-        # steps before this one take about 4 minutes, so 4 + 65 + diagnostics
-        # stays under the 90-minute job timeout.
+        # With the full 1,000-ceremony readiness soak, successful runs took
+        # 41-54 minutes and slow runners passed 65; the soak now runs in the
+        # readiness-soak job, and this run drives the same fixture through
+        # 4 x 5 ceremonies, which reaches the same code. A hung fixture fails
+        # this step, so the failure-only diagnostics below still run inside
+        # the job budget: steps before this one take about 4 minutes, so
+        # 4 + 65 + diagnostics stays under the 90-minute job timeout.
         timeout-minutes: 65
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
+          OWNER_BRIDGE_READINESS_RUNS_PER_WORKER: '5'
         run: |
           $ErrorActionPreference = 'Stop'
           $metadata = cargo metadata --locked --no-deps --format-version 1
@@ -237,3 +241,51 @@ jobs:
           name: owner-windows-failed-diagnostic-${{ github.sha }}
           path: ${{ runner.temp }}/owner-windows-failed-diagnostic/
           if-no-files-found: error
+
+  # The full readiness soak: 4 workers x 250 real WebView2 ceremonies. It runs
+  # uninstrumented beside the coverage job, and the lane fails unless both
+  # jobs succeed.
+  readiness-soak:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      RUSTC_BOOTSTRAP: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Prepare retained runtime for real native fixtures
+        id: runtime
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
+      - name: Stop the storage service before timed native fixtures
+        shell: pwsh
+        run: |
+          $service = Get-Service -Name StorSvc -ErrorAction SilentlyContinue
+          if ($service) {
+            Set-Service -Name StorSvc -StartupType Disabled
+            Stop-Service -Name StorSvc -Force
+            Write-Output "HOST_QUIESCE service=StorSvc before=$($service.Status) after=$((Get-Service -Name StorSvc).Status)"
+          } else {
+            Write-Output 'HOST_QUIESCE service=StorSvc absent'
+          }
+      - name: Run the full native readiness soak
+        timeout-minutes: 65
+        shell: pwsh
+        env:
+          OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
+          OWNER_BRIDGE_READINESS_RUNS_PER_WORKER: '250'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $test = 'tests::native_window_environment_and_buffers_lifecycle'
+          # A renamed test would otherwise filter to zero tests and pass.
+          $listed = cargo test -p pos-owner-bridge-windows --all-features --locked --lib -- --include-ignored --list --exact $test
+          if ($LASTEXITCODE -ne 0) { throw 'Readiness soak build failed' }
+          if (@($listed | Where-Object { $_ -eq "${test}: test" }).Count -ne 1) { throw 'Readiness soak test not found' }
+          cargo test -p pos-owner-bridge-windows --all-features --locked --lib -- --include-ignored --exact $test --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Native readiness soak failed' }
