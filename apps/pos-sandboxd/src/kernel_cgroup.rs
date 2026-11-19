@@ -258,6 +258,7 @@ struct BoundCgroupIdentity {
 #[cfg(test)]
 impl BoundCgroupIdentity {
     /// The cgroup `(device, inode)` of a fixed test unit.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn for_test(
         (device, inode): (u64, u64),
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
