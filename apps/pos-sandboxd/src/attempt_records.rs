@@ -217,19 +217,18 @@ impl<'a, S> Reached<'a, S> {
 
     /// A failed execution: released once its `ReleaseV1` was sent, started
     /// once its unit start was requested.
+    ///
+    /// A failure after `ReleaseV1` records no ending, and possibly no
+    /// terminal snapshot. A progress-2 TME1 requires both, so its encoder
+    /// refuses the record and no response is emitted: a deliberate provider
+    /// fault that fails closed (owner decision 2026-11-19, Q2).
     fn failed(
         error: &'a ExecuteError,
         unit: UnitState,
         started: Option<&'a S>,
         evidence: Option<&'a ResourceEvidence>,
     ) -> Self {
-        let progress = if evidence.is_some_and(|evidence| evidence.release().release().is_some()) {
-            AttemptProgressCode::Released
-        } else if started.is_some() || unit != UnitState::NotStarted {
-            AttemptProgressCode::StartedNotReleased
-        } else {
-            AttemptProgressCode::NotStarted
-        };
+        let progress = failed_progress(unit, started.is_some(), evidence);
         let start = match (progress, started) {
             (AttemptProgressCode::NotStarted, _) => Start::NotRequested,
             (_, Some(started)) => Start::Verified(started),
@@ -545,6 +544,22 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
     }
 }
 
+/// TME1 `progress` of a failed execution: released once its `ReleaseV1`
+/// was sent, started once its unit start was requested.
+fn failed_progress(
+    unit: UnitState,
+    started: bool,
+    evidence: Option<&ResourceEvidence>,
+) -> AttemptProgressCode {
+    if evidence.is_some_and(|evidence| evidence.release().release().is_some()) {
+        AttemptProgressCode::Released
+    } else if started || unit != UnitState::NotStarted {
+        AttemptProgressCode::StartedNotReleased
+    } else {
+        AttemptProgressCode::NotStarted
+    }
+}
+
 /// TME1 `local-network` (R9 §4.6.3): a Local attempt's proxy session once
 /// released; before the release, a bound proxy that never served, which is a
 /// clean close.
@@ -558,18 +573,27 @@ fn local_network<S>(
             watchdog_closed: served.watchdog_expired,
         }),
         Some(NetworkEvidence::None | NetworkEvidence::Replay(_)) => None,
-        // The proxy is bound once the pre-release evidence was read.
-        None => (mode == SandboxExecutionMode::Local
-            && reached.progress == AttemptProgressCode::StartedNotReleased
-            && reached
-                .evidence
-                .and_then(ResourceEvidence::resources)
-                .is_some())
+        None => unserved_proxy(reached, mode),
+    }
+}
+
+/// A Local attempt stopped before its release whose proxy was bound, once
+/// the pre-release evidence was read: a clean close.
+fn unserved_proxy<S>(
+    reached: &Reached<'_, S>,
+    mode: SandboxExecutionMode,
+) -> Option<LocalNetworkRecord> {
+    let bound = reached
+        .evidence
+        .and_then(ResourceEvidence::resources)
+        .is_some();
+    (mode == SandboxExecutionMode::Local
+        && reached.progress == AttemptProgressCode::StartedNotReleased
+        && bound)
         .then_some(LocalNetworkRecord {
             termination: None,
             watchdog_closed: false,
-        }),
-    }
+        })
 }
 
 #[cfg(test)]
