@@ -16,9 +16,9 @@ use ciborium::Value;
 use community_initialization_fixture::*;
 use plugin_trust_registry_fixtures::release_one;
 use pos_core::community_lifecycle::{
-    community_initializer_set_ref_v1, CommunityArtifactOperationV1, CommunityArtifactPurposeV1,
-    CommunityAuthorityEvidenceV1, CommunityCurrentViewV1, CommunityDurableProfileV1,
-    CommunityInitializationSourceV1 as Source, CommunityKeyStateV1,
+    community_initializer_set_ref_v1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
+    CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1, CommunityCurrentViewV1,
+    CommunityDurableProfileV1, CommunityInitializationSourceV1 as Source, CommunityKeyStateV1,
     CommunityLifecycleErrorV1 as Error, CommunityMaterializationV1, CommunityPassFrontierV1,
 };
 use pos_core::trusted_clock::{TrustedClockOverrunLatchRowV1, TrustedClockStorePortV1};
@@ -57,8 +57,16 @@ fn the_view_reads_every_row_from_the_domain() -> TestResult {
     )?;
     let admission = world.admit(planner.request())?;
     let again = world.admit(planner.request())?;
-    let metadata = key(0x0b, CommunityArtifactPurposeV1::LifecycleControl)?;
-    let cohort = key(0x0a, CommunityArtifactPurposeV1::ExecutionState)?;
+    let metadata = key(
+        0x0b,
+        CommunityArtifactPurposeV1::LifecycleControl,
+        CommunityArtifactKindV1::LifecycleControl,
+    )?;
+    let cohort = key(
+        0x0a,
+        CommunityArtifactPurposeV1::ExecutionState,
+        CommunityArtifactKindV1::StateContent,
+    )?;
     let view = planner.current_view(
         &world.domain,
         &world.authority,
@@ -605,7 +613,11 @@ fn the_view_refuses_rows_that_collide() -> TestResult {
     )?;
     let first = world.admit(planner.request())?;
     let (_, second) = world.call_and_admit(planner.request(), LEAVES[1])?;
-    let key = key(0x0b, CommunityArtifactPurposeV1::LifecycleControl)?;
+    let key = key(
+        0x0b,
+        CommunityArtifactPurposeV1::LifecycleControl,
+        CommunityArtifactKindV1::LifecycleControl,
+    )?;
     for (decisions, keys) in [
         (vec![&first, &second], vec![]),
         (vec![&first], vec![&key, &key]),

@@ -334,13 +334,16 @@ pub fn planner<'a>(
     planner_at(seal, profile, target())
 }
 
-/// One CKP1 key intent: `byte` names its protection operation. It allows
-/// only bounded record bundles, a kind every purpose admits, so any
-/// `purpose` gives a valid intent.
+/// One CKP1 key intent: `byte` names its protection operation, and the
+/// intent allows the one record `kind`, which `purpose` must admit.
 ///
 /// # Errors
 /// Returns the intent refusal.
-pub fn key(byte: u8, purpose: CommunityArtifactPurposeV1) -> Fallible<CommunityKeyIntentV1> {
+pub fn key(
+    byte: u8,
+    purpose: CommunityArtifactPurposeV1,
+    kind: CommunityArtifactKindV1,
+) -> Fallible<CommunityKeyIntentV1> {
     Ok(CommunityKeyIntentV1::new(CommunityKeyIntentInputV1 {
         protection_operation_id: [byte; 16],
         parent_operation: CommunityArtifactOperationV1::Initialization(OPERATION),
@@ -349,8 +352,7 @@ pub fn key(byte: u8, purpose: CommunityArtifactPurposeV1) -> Fallible<CommunityK
         purpose,
         scope_set_digest: adr_h("ScopeSet", &[0x80]),
         evidence_not_after_micros: HORIZON,
-        allowed_record_kinds: CommunityRecordKindsV1::empty()
-            .with(CommunityArtifactKindV1::BoundedRecordBundle),
+        allowed_record_kinds: CommunityRecordKindsV1::empty().with(kind),
         member_slots: CommunityMemberSlotsV1::empty(),
         material_fingerprint: hash(byte),
         authority_request_digest: hash(0x44),
