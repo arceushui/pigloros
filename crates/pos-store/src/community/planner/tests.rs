@@ -24,6 +24,7 @@ use crate::community_initialization_fixture::{
     graph, planner, profile, trusted_store, Fallible, Roster, World, ADDRESSES, GENERATION, LEAVES,
     TRUST_SCOPE,
 };
+#[cfg(target_os = "linux")]
 use crate::plugin_trust_registry::{
     ActivationEventIdentityV1, ActiveReleaseV1, RetainedPolicyStateV1,
 };
