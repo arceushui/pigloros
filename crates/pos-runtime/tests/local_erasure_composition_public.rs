@@ -8246,3 +8246,106 @@ fn the_projection_follows_a_driven_request() -> TestResult {
     assert_eq!(acknowledged, 5);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
+// a subject-scoped export through core `export_timeline`, then erasure,
+// then the export again through the public offline evaluator.
+// ---------------------------------------------------------------------------
+
+use pos_core::{
+    store::export_timeline, ArtifactClaimInputV1, ArtifactOptionalityV1, ArtifactStateV1,
+    CoreError, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+};
+
+/// The export artifact of the subject's owned Timeline.
+const SUBJECT_EXPORT: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0xe7; 32]);
+
+/// The offline evaluation of the subject's export under the erasure state
+/// `claim`, from the store's own facts: the export depends on the subject's
+/// role-0 key, so it is missing once the key registry tombstones that key.
+fn export_evaluation(
+    store: &LocalStore,
+    claim: ErasureReplayClaimV1,
+) -> TestResult<ReplayClaimEvaluationV1> {
+    let registry = store.sqlite()?.load_key_registry()?.ok_or("no registry")?;
+    let state = if registry.tombstone(subject_key(1)?).is_some() {
+        ArtifactStateV1::MissingKey
+    } else {
+        ArtifactStateV1::Retained
+    };
+    Ok(ReplayClaimEvaluatorV1::evaluate(
+        claim,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                SUBJECT_EXPORT,
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                reference(0xe8),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: claim,
+            state,
+        }],
+    )?)
+}
+
+/// Acceptance test 10: before the erasure the export is exact and core
+/// exports the Timeline; after it the evaluator reports the export
+/// unavailable under the receipt's weakened claim, and core refuses it.
+#[test]
+fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult {
+    let store = driver_store()?;
+    store.sqlite()?.append(
+        memory_owned_timeline(),
+        &[pos_core::EventDraft::new(
+            actor(),
+            pos_core::Kind::new("subject.note.v1"),
+            CanonicalBytes::from_static(b"subject-note"),
+        )],
+    )?;
+    let before = export_evaluation(&store, ErasureReplayClaimV1::Exact)?;
+    assert_eq!(before.replay_claim(), ErasureReplayClaimV1::Exact);
+    let exported = export_timeline(
+        &store.sqlite()?,
+        memory_owned_timeline(),
+        SUBJECT_EXPORT,
+        &before,
+    )?;
+    assert_eq!(exported.events.len(), 1);
+    let receipt = {
+        let mut host = store.host(&driver_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+        finalized(driver().drive(&mut host, request_of(1)?)?)?
+    };
+    let after = export_evaluation(&store, receipt.replay_claim())?;
+    assert_eq!(
+        after.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let [export] = after.artifacts() else {
+        return Err("one evaluated artifact".into());
+    };
+    assert_eq!(export.artifact_digest(), SUBJECT_EXPORT);
+    assert_eq!(
+        export.from(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        export.to(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert!(!export.authoritative_use_permitted());
+    assert!(matches!(
+        export_timeline(
+            &store.sqlite()?,
+            memory_owned_timeline(),
+            SUBJECT_EXPORT,
+            &after
+        ),
+        Err(CoreError::ArtifactUnavailable)
+    ));
+    Ok(())
+}
