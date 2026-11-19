@@ -279,11 +279,7 @@ impl SystemdProviderLifecycle {
                             runtime,
                             transport,
                             Box::new(CgroupRoot::system),
-                            Box::new(|transport, previous_live, deadline| {
-                                Box::pin(host_cleanup(transport, previous_live, deadline, || {
-                                    NetlinkNamespaceControl::new(NetworkNamespaces::system())
-                                }))
-                            }),
+                            Box::new(system_cleanup),
                         )
                     })
             })
@@ -577,17 +573,32 @@ fn only_foreign(
     }
 }
 
+/// The production [`PreviousRuntimeCleanup`]: [`host_cleanup`] with the
+/// orphan sweep over the namespaces pinned under `/run/netns`.
+fn system_cleanup<'a>(
+    transport: &'a SystemdTransientUnitTransport,
+    previous_live: &'a [[u8; 16]],
+    deadline: Instant,
+) -> Reconciled<'a> {
+    Box::pin(host_cleanup(
+        transport,
+        previous_live,
+        deadline,
+        NetlinkNamespaceControl::new(NetworkNamespaces::system()),
+    ))
+}
+
 /// R12 §7.1 steps 3 to 7 on this host: read the SPI1 cleanup budget, open
 /// the registry exclusively, require every committed intent to be one of
 /// the previous-live attempts, and run the cleanup part of restart
-/// reconciliation with the orphan sweep `network` builds. The registry lock
-/// is released when this returns. The egress probe never runs. Returns the
+/// reconciliation with the orphan sweep `network`. The registry lock is
+/// released when this returns. The egress probe never runs. Returns the
 /// reconciled attempts and the recent-activation wait the cleanup applied.
 pub(crate) async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
     transport: &SystemdTransientUnitTransport,
     previous_live: &[[u8; 16]],
     deadline: Instant,
-    network: impl FnOnce() -> N,
+    network: N,
 ) -> Result<(Vec<[u8; 16]>, Duration), ProviderLifecycleError> {
     let budget = ProviderInstallation::open()
         .map_err(|_| ProviderLifecycleError::Unavailable)?
@@ -605,7 +616,6 @@ pub(crate) async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
             .map(|entry| (entry.attempt_id(), entry.is_temporary())),
         previous_live,
     )?;
-    let network = network();
     let reconciled = reconcile_cleanup(
         transport,
         recovery,

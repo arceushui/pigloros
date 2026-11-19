@@ -71,8 +71,8 @@ impl PendingRecovery {
         listener: &OwnedAdministratorListener,
     ) -> Result<AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
         loop {
-            if let Some(bootstrap) = self.serve_once(listener)? {
-                return Ok(bootstrap);
+            if let Some(outcome) = self.serve_once(listener).transpose() {
+                return outcome;
             }
         }
     }

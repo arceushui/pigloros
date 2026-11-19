@@ -102,20 +102,27 @@ pub enum RecoveryError {
 
 impl From<RecoveryError> for SelectorBoundaryError {
     fn from(error: RecoveryError) -> Self {
-        match error {
-            RecoveryError::Boundary(error) => error,
-            RecoveryError::Lifecycle(_)
-            | RecoveryError::Exchange
-            | RecoveryError::DeadlineExceeded => Self::SelectorUnavailable,
-            RecoveryError::EvaluatorEndpointPresent
-            | RecoveryError::Observation
-            | RecoveryError::ProcessAlive
-            | RecoveryError::CgroupPresent
-            | RecoveryError::Leaf
-            | RecoveryError::PeerBinding
-            | RecoveryError::Binary
-            | RecoveryError::Acknowledgement
-            | RecoveryError::Mismatch => Self::ArtifactInvalid,
+        error.into_boundary_error()
+    }
+}
+
+impl RecoveryError {
+    /// Classifies this refusal as the selector boundary error it reports.
+    const fn into_boundary_error(self) -> SelectorBoundaryError {
+        match self {
+            Self::Boundary(error) => error,
+            Self::Lifecycle(_) | Self::Exchange | Self::DeadlineExceeded => {
+                SelectorBoundaryError::SelectorUnavailable
+            }
+            Self::EvaluatorEndpointPresent
+            | Self::Observation
+            | Self::ProcessAlive
+            | Self::CgroupPresent
+            | Self::Leaf
+            | Self::PeerBinding
+            | Self::Binary
+            | Self::Acknowledgement
+            | Self::Mismatch => SelectorBoundaryError::ArtifactInvalid,
         }
     }
 }
