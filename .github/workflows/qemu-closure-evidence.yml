@@ -23,6 +23,7 @@ on:
       - scripts/check_qemu_closure_workflow_policy.py
       - scripts/test_check_qemu_closure_workflow_policy.py
       - scripts/check_asan_ci_policy.py
+      - scripts/ci_stage_policy.py
       - scripts/check_owner_runtime_custody_policy.py
       - scripts/install-pinned-nix.sh
       - scripts/qemu-closure-evidence.sh

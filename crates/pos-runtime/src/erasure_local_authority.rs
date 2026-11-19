@@ -3,15 +3,16 @@
 //! This module holds the ELP1 policy and the executor binding (ELEXV1)
 //! compiled into this binary, the composition-time verification of the
 //! installed ELB1/ELB1S bundle against the profile's TPS1 anchor and the
-//! store (ADR-136 §4, *Bundle*), and the verify-only
-//! `LocalErasureAuthorityV1` that composition installs over the verified
-//! bundle, from submission through freeze to attempt, acknowledgement and
-//! receipt admission. The executor, signer and driver of ADR-136 §1 are
-//! later slices of the same module.
+//! store (ADR-136 §4, *Bundle*), the verify-only `LocalErasureAuthorityV1`
+//! that composition installs over the verified bundle, from submission
+//! through freeze to attempt, acknowledgement and receipt admission, and the
+//! `LocalErasureExecutorV1` that runs the owner work of dispatched commands.
+//! The signer and driver of ADR-136 §1 are later slices of the same module.
 
 mod authority;
 mod binding;
 mod destruction;
+mod executor;
 mod freeze;
 mod policy;
 
@@ -35,6 +36,7 @@ pub use binding::{
     local_erasure_execution_binding_v1, LOCAL_ERASURE_EXECUTOR_ID_V1,
     LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1, LOCAL_ERASURE_EXECUTOR_VERSION_V1,
 };
+pub use executor::LocalErasureExecutorV1;
 pub use policy::{
     compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
     LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,

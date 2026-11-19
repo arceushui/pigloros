@@ -492,6 +492,13 @@ mod cases {
                     AttemptEnding::CgroupEmpty
                 };
                 self.world.reach(Boundary::ExecutionEnded);
+                let adapter = crate::test_fixtures::adapter_io().ok_or_else(|| ExecuteFailure {
+                    error: ExecuteError::HostTimeout,
+                    unit: UnitState::Unknown,
+                    cgroup: None,
+                    evidence: None,
+                    started: None,
+                })?;
                 Ok(AttemptExecution {
                     attempt_id,
                     started: (),
@@ -502,6 +509,7 @@ mod cases {
                         None,
                         crate::ReleaseOutcome::new(None, None, None),
                     ),
+                    adapter,
                 })
             }
         }

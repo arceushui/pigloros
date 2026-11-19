@@ -22,7 +22,7 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Stage only task files and re-check mutation boundaries.** Before cleanup, rebasing, or an external write, confirm live ownership, current state, and exact targets immediately before the mutation; never delete an active worktree or overwrite a shared record from a stale inventory.
 
-- **Reconcile a shared PR immediately before pushing.** Concurrent workers can land equivalent or overlapping fixes while a rebase or hook is running. Fetch the PR branch, compare the merge base and commits, rebase onto its current tip, and drop patches already present. Never force-push a shared branch to replace a concurrent update.
+- **Reconcile a shared PR immediately before pushing.** Concurrent workers can land equivalent or overlapping fixes while a rebase or hook is running. Fetch the PR branch, compare the merge base and commits, merge its current tip, and drop patches already present. Never rebase or force-push a shared branch to replace a concurrent update.
 
 - **Publish only dependency-complete shared-branch commits.** Parallel agents may prepare disjoint edits, but a slice that depends on uncommitted coordinator work must not be pushed alone. Integrate and commit one coherent state, or isolate independently mergeable commits in separate worktrees.
 

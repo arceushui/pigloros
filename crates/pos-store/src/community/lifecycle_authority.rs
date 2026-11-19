@@ -18,6 +18,11 @@
 //! they are never call results. No method accepts an authentication result,
 //! registry snapshot, principal, actor or decision from its caller.
 //!
+//! The evaluators reach a domain only through the crate-private store-domain
+//! seam (owner decision on #560, note 22571): they are generic over it, so
+//! every backend's domain is evaluated by the same code. The Memory domain is
+//! its only implementation until the `SQLite` domain lands.
+//!
 //! Execution authority exists only inside an administrative call: a member
 //! request is built from the call's own Timeline and operation constraint.
 //! Community `run_pass` and `verify_recording` authority is therefore
@@ -34,11 +39,10 @@ use pos_core::fork_authentication::{
 };
 use pos_core::trusted_clock::TrustedWallSourceV1;
 use pos_core::{
-    AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1,
-    AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
-    ConsentEvidenceV1, EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime,
-    MAX_AUTHORITY_TEXT_BYTES,
+    AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorityTrustRootSealV1, AuthorizationDecisionV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1,
+    EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime, MAX_AUTHORITY_TEXT_BYTES,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, VerifiedAuthenticatedPrincipalEvidenceV1,
@@ -46,7 +50,7 @@ use pos_crypto::fork_authentication::{
 
 use super::attestation::{authenticated_result, evaluation_snapshot};
 use super::initializer::CommunityInitializerOwnerV1;
-use super::memory_domain::MemoryCommunityDomainV1;
+use super::store_domain::CommunityStoreDomainV1;
 
 const LIFECYCLE_CATEGORY: &str = "community.lifecycle-control";
 const EXECUTION_CATEGORY: &str = "community.execution-state";
@@ -294,6 +298,7 @@ pub struct CommunityLifecycleAuthorityInputV1 {
 
 /// Installed community lifecycle authority with its trusted wall source.
 pub struct CommunityLifecycleAuthorityV1 {
+    seal: &'static AuthorityTrustRootSealV1,
     catalogue: CommunityAuthorityCatalogueV1,
     catalogue_digest: Hash,
     policy: ForkAuthenticationPolicyV1,
@@ -305,8 +310,9 @@ pub struct CommunityLifecycleAuthorityV1 {
 
 impl CommunityLifecycleAuthorityV1 {
     /// Install the authority at the trusted composition root, which alone
-    /// holds the [`AuthorityTrustRootSealV1`] (#1374). Without the seal it
-    /// cannot be installed:
+    /// holds the [`AuthorityTrustRootSealV1`] (#1374). The authority keeps
+    /// that seal to build each request's evaluation snapshot and
+    /// authentication result. Without the seal it cannot be installed:
     ///
     /// ```compile_fail,E0061
     /// use pos_core::trusted_clock::TrustedWallSourceV1;
@@ -329,7 +335,7 @@ impl CommunityLifecycleAuthorityV1 {
     /// an empty or over-128-byte member recipient, and for a zero store
     /// incarnation.
     pub fn new(
-        _seal: &AuthorityTrustRootSealV1,
+        seal: &'static AuthorityTrustRootSealV1,
         input: CommunityLifecycleAuthorityInputV1,
         wall: impl TrustedWallSourceV1 + 'static,
     ) -> Result<Self, Error> {
@@ -356,6 +362,7 @@ impl CommunityLifecycleAuthorityV1 {
             return Err(Error::InvalidBinding);
         }
         Ok(Self {
+            seal,
             catalogue_digest: input.catalogue.digest(),
             catalogue: input.catalogue,
             policy: input.authentication_policy,
@@ -421,12 +428,14 @@ impl CommunityLifecycleAuthorityV1 {
             .ok()
             .and_then(|principal| self.catalogue.actor_for(principal))
             .and_then(|actor_entity_id| {
-                authenticated_result(verified).map(|authenticated| CommunityAuthorityCallV1 {
-                    catalogue_digest: self.catalogue_digest,
-                    request,
-                    authenticated,
-                    actor_entity_id,
-                    at_time,
+                authenticated_result(self.seal, verified).map(|authenticated| {
+                    CommunityAuthorityCallV1 {
+                        catalogue_digest: self.catalogue_digest,
+                        request,
+                        authenticated,
+                        actor_entity_id,
+                        at_time,
+                    }
                 })
             })
     }
@@ -443,10 +452,10 @@ impl CommunityLifecycleAuthorityV1 {
     /// domain other than the installed one, a missing or foreign leaf, a
     /// leaf that binds consent references, a chain grant not attested as
     /// issued, or a decision that is not `Active`.
-    pub fn authorize_administrative(
+    pub fn authorize_administrative<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         self.evaluate(
@@ -470,12 +479,12 @@ impl CommunityLifecycleAuthorityV1 {
     /// # Errors
     /// Returns `EvidenceUnavailable` for a retire or reset call, which uses
     /// no State, and for every failure `authorize_administrative` refuses.
-    pub fn authorize_member(
+    pub fn authorize_member<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
         member: &CommunityMemberBindingV1<'_>,
         action: CommunityMemberActionV1,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         if !call.request.action.uses_state() {
@@ -515,12 +524,12 @@ impl CommunityLifecycleAuthorityV1 {
     /// starts from no initializer; for an owner installed for another
     /// authority catalogue or a digest it does not hold; and for every
     /// failure `authorize_administrative` refuses.
-    pub fn authorize_initializer(
+    pub fn authorize_initializer<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
         owner: &CommunityInitializerOwnerV1,
         initializer: Hash,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         if !matches!(
@@ -549,12 +558,12 @@ impl CommunityLifecycleAuthorityV1 {
     }
 
     /// Check the call is this authority's and the domain is the one it was
-    /// installed for, load the chain from the domain's own store, and
-    /// evaluate it.
-    fn evaluate(
+    /// installed for, load the chain from the domain's own store through the
+    /// store-domain seam (#560, note 22571), and evaluate it.
+    fn evaluate<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
         shape: RequestShapeV1<'_>,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
@@ -564,7 +573,6 @@ impl CommunityLifecycleAuthorityV1 {
             return Err(Error::EvidenceUnavailable);
         }
         domain
-            .store
             .load_authority(leaf_grant_id)
             .ok()
             .and_then(|persisted| self.admit(call, &persisted, shape))
@@ -620,6 +628,7 @@ impl CommunityLifecycleAuthorityV1 {
             })
             .and_then(|request| {
                 evaluation_snapshot(
+                    self.seal,
                     &self.attestation,
                     pins.authority_registry_digest,
                     call.authenticated.registry_binding_digest(),

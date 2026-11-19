@@ -443,15 +443,52 @@ class AsanCiPolicyTests(unittest.TestCase):
                 {"needs": ["ci_change_scope", "preflight-gate"]}
             )
         )
-
-    def test_archive_build_must_require_core_gate_success(self) -> None:
-        def drop_core_gate_condition(workflow: dict) -> None:
-            job = workflow["jobs"]["asan-build"]
-            job["if"] = job["if"].replace(
-                "needs.core-gate.result == 'success' && ", ""
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-build"].update(
+                {"needs": ["ci_change_scope", "core-gate"]}
             )
+        )
+        for dropped in ("coverage", "test-shards", "trunk-pr"):
+            with self.subTest(dropped=dropped):
+                self.assert_rejected(
+                    lambda workflow, dropped=dropped: workflow["jobs"]["asan-build"].update(
+                        {"needs": [need for need in workflow["jobs"]["asan-build"]["needs"]
+                                   if need != dropped]}
+                    )
+                )
 
-        self.assert_rejected(drop_core_gate_condition)
+    def test_archive_build_must_require_the_core_pass_rule(self) -> None:
+        for check in (
+            "needs.clippy.result == 'success' && ",
+            "needs.ci_change_scope.result == 'success' && ",
+        ):
+            def drop_core_condition(workflow: dict, check: str = check) -> None:
+                job = workflow["jobs"]["asan-build"]
+                job["if"] = job["if"].replace(check, "", 1)
+
+            with self.subTest(check=check):
+                self.assert_rejected(drop_core_condition)
+
+    def test_shards_must_wait_for_the_complete_standard_set(self) -> None:
+        for dropped in ("codeql", "static-launcher", "coverage"):
+            with self.subTest(dropped=dropped):
+                self.assert_rejected(
+                    lambda workflow, dropped=dropped: workflow["jobs"]["asan"].update(
+                        {"needs": [need for need in workflow["jobs"]["asan"]["needs"]
+                                   if need != dropped]}
+                    )
+                )
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"].update(
+                {"needs": ["ci_change_scope", "standard-gate", "asan-build"]}
+            )
+        )
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"].update(
+                {"if": workflow["jobs"]["asan"]["if"].replace(
+                    "needs.codeql.result == 'success' && ", "")}
+            )
+        )
 
     def test_archive_build_requires_instrumented_complete_scope(self) -> None:
         for fragment in (
@@ -459,7 +496,7 @@ class AsanCiPolicyTests(unittest.TestCase):
             " -Z build-std",
             " --all-features",
             " --tests",
-            " --workspace",
+            ' "${packages[@]}"',
         ):
             with self.subTest(fragment=fragment):
                 def weaken_build(workflow: dict, removed: str = fragment) -> None:
@@ -504,6 +541,35 @@ class AsanCiPolicyTests(unittest.TestCase):
             download["with"]["name"] = "asan-nextest-archive-other"
 
         self.assert_rejected(rename_download)
+
+    def archive_download_steps(self, workflow: dict) -> list[dict]:
+        names = ("Download ASan test archive", "Retry ASan test archive download")
+        steps = workflow["jobs"]["asan"]["steps"]
+        return [next(step for step in steps if step.get("name") == name) for name in names]
+
+    def test_rejects_archive_download_retry_that_cannot_fail(self) -> None:
+        def ignore_retry(workflow: dict) -> None:
+            self.archive_download_steps(workflow)[1]["continue-on-error"] = True
+
+        self.assert_rejected(ignore_retry)
+
+    def test_rejects_dropped_archive_download_retry(self) -> None:
+        def drop_retry(workflow: dict) -> None:
+            steps = workflow["jobs"]["asan"]["steps"]
+            steps.remove(self.archive_download_steps(workflow)[1])
+
+        self.assert_rejected(drop_retry)
+
+    def test_rejects_unconditional_archive_clear(self) -> None:
+        def always_clear(workflow: dict) -> None:
+            clear = next(
+                step
+                for step in workflow["jobs"]["asan"]["steps"]
+                if step.get("name") == "Clear the failed ASan archive download"
+            )
+            del clear["if"]
+
+        self.assert_rejected(always_clear)
 
     def test_rejects_ignored_missing_archive_upload(self) -> None:
         def ignore_missing_archive(workflow: dict) -> None:
@@ -940,6 +1006,112 @@ class AsanCiPolicyTests(unittest.TestCase):
         self.assert_rejected(
             lambda workflow: self.append_to_command(workflow, " -- --skip anything")
         )
+
+    def test_package_scope_defaults_to_the_workspace_off_pull_requests(self) -> None:
+        for step_of in (self.build_step, self.asan_step):
+            for value in (
+                "${{ needs.ci_change_scope.outputs.rust_packages }}",
+                "${{ needs.ci_change_scope.outputs.rust_packages || '--workspace' }}",
+                "${{ github.event_name == 'pull_request' && "
+                "needs.ci_change_scope.outputs.rust_packages || '-p pos-core' }}",
+                "${{ github.event_name == 'push' && "
+                "needs.ci_change_scope.outputs.rust_packages || '--workspace' }}",
+                "--workspace",
+            ):
+                with self.subTest(step=step_of.__name__, value=value):
+                    self.assert_rejected(
+                        lambda workflow, s=step_of, v=value: s(workflow)["env"].update(
+                            {"CARGO_PACKAGES": v}
+                        )
+                    )
+                    self.assert_rejected(
+                        lambda workflow, s=step_of: s(workflow)["env"].pop("CARGO_PACKAGES")
+                    )
+
+    def test_shards_must_not_skip_or_pass_empty_partitions_for_the_workspace(self) -> None:
+        for old, new in (
+            ('if [[ "${CARGO_PACKAGES}" != --workspace ]]; then\n  nextest_args+=',
+             "if true; then\n  nextest_args+="),
+            ('if [[ "${conformance}" == true ]]; then', "if false; then"),
+            ("conformance=true\n", "conformance=false\n"),
+            ("    run_asan_partition -E 'not package(pos-conformance)' \\\n      --partition slice:2/2",
+             "    run_conformance_partition -E 'not package(pos-conformance)' \\\n      --partition slice:2/2"),
+        ):
+            with self.subTest(old=old):
+                def change(workflow: dict, before: str = old, after: str = new) -> None:
+                    step = self.asan_step(workflow)
+                    self.assertIn(before, step["run"])
+                    step["run"] = step["run"].replace(before, after, 1)
+
+                self.assert_rejected(change)
+
+    def run_shard(self, shard: str, packages: str) -> tuple[list[list[str]], str]:
+        """Run the exact shard command with recording cargo and python stubs."""
+        command = CHECKER.EXPECTED_COMMAND.replace(
+            'test -x "/usr/bin/llvm-symbolizer-18"\n', "", 1
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            calls = root / "calls"
+            for tool in ("cargo", "python"):
+                (tools / tool).write_text(
+                    "#!/usr/bin/env bash\n"
+                    f'printf \'%s\\n\' {tool} "$@" --end-- >> "${{CALLS}}"\n',
+                    encoding="utf-8",
+                )
+                (tools / tool).chmod(0o755)
+            completed = subprocess.run(
+                ["bash", "-e", "-c", command],
+                env=dict(
+                    os.environ,
+                    PATH=f"{tools}:{os.environ['PATH']}",
+                    CALLS=str(calls),
+                    RUNNER_TEMP=str(root),
+                    GITHUB_WORKSPACE=str(root),
+                    ASAN_SHARD=shard,
+                    CARGO_PACKAGES=packages,
+                ),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            text = calls.read_text(encoding="utf-8") if calls.exists() else ""
+            recorded = [
+                call.strip("\n").split("\n")
+                for call in text.split("--end--\n")
+                if call.strip("\n")
+            ]
+            return recorded, completed.stdout
+
+    def test_shard_partitions_follow_the_package_scope(self) -> None:
+        conformance_only = ("bundle-coverage", "bundle-public-1", "bundle-public-2", "moat-proof")
+        for shard in (*conformance_only, "remainder-1", "remainder-2"):
+            with self.subTest(shard=shard, scope="workspace"):
+                calls, _ = self.run_shard(shard, "--workspace")
+                cargo = [call for call in calls if call[0] == "cargo"]
+                self.assertEqual(len(cargo), 2 if shard == "remainder-1" else 1)
+                for call in cargo:
+                    self.assertNotIn("--no-tests=pass", call)
+                self.assertEqual(calls[-1][0], "python")
+            with self.subTest(shard=shard, scope="with conformance"):
+                calls, _ = self.run_shard(shard, "-p pos-core -p pos-conformance")
+                cargo = [call for call in calls if call[0] == "cargo"]
+                self.assertEqual(len(cargo), 2 if shard == "remainder-1" else 1)
+                for call in cargo:
+                    self.assertIn("--no-tests=pass", call)
+            with self.subTest(shard=shard, scope="without conformance"):
+                calls, output = self.run_shard(shard, "-p pos-core -p pos-conformance-extra")
+                cargo = [call for call in calls if call[0] == "cargo"]
+                if shard in conformance_only:
+                    self.assertEqual(cargo, [])
+                    self.assertIn("pos-conformance is not in the affected packages", output)
+                else:
+                    self.assertEqual(len(cargo), 1)
+                    self.assertIn("not package(pos-conformance)", cargo[0])
+                    self.assertIn("--no-tests=pass", cargo[0])
+                self.assertEqual(calls[-1][0], "python")
 
     @staticmethod
     def headroom_step(workflow: dict, job_name: str = "asan") -> dict:
