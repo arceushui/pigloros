@@ -259,3 +259,25 @@ fn a_quarantining_classification_closes_admission() -> TestResult {
     }
     Ok(())
 }
+
+/// The lifecycle quarantines on the post-release provider fault (owner
+/// decision 2026-11-19, Q2), and the response stays unavailable.
+#[test]
+fn the_post_release_fault_quarantines_the_lifecycle() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, AGR1))?;
+    let ended = super::super::failed_after_release()?;
+    let public = signing_key().verifying_key();
+    assert!(matches!(
+        lifecycle.retain_response(&ended, &signer(), AdmittedRuntimeKey::new(KEY_ID, &public)),
+        Err(AttemptLifecycleError::Response(ResponseFault::Evidence(
+            EvidenceFault::Record(_)
+        )))
+    ));
+    assert!(ledger.reserve_storage(0).is_err());
+    assert!(matches!(
+        lifecycle.terminal_response(ATTEMPT, AGR1),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    Ok(())
+}

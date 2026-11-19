@@ -1036,17 +1036,28 @@ fn unreadable_times_and_unordered_records_are_faults() -> TestResult {
 /// requires: no records, by the owner's decision (2026-11-19, Q2).
 #[test]
 fn a_failure_after_the_release_is_a_provider_fault() -> TestResult {
+    let ended = failed_after_release()?;
+    assert!(matches!(ended.records(), Err(EvidenceFault::Record(_))));
+    // No response is emitted either.
+    let public = signing_key().verifying_key();
+    assert!(matches!(
+        ended.signed_response(&signer(), crate::AdmittedRuntimeKey::new(KEY_ID, &public)),
+        Err(super::ResponseFault::Evidence(EvidenceFault::Record(_)))
+    ));
+    Ok(())
+}
+
+/// An attempt that failed after its `ReleaseV1` was sent.
+fn failed_after_release() -> TestResult<EndedAttempt<String>> {
     let requested =
         crate::RequestedConfiguration::requested_configuration_evidence(&start(), ATTEMPT, AGR1)?;
     let observation = observation(None);
     let koe1 =
         crate::observation_evidence(ATTEMPT, AGR1, READY1, requested.digest(), &observation)?;
-    let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-    let public = key.verifying_key();
-    let signer = crate::KeyFileRuntimeSigner::from_signing_key(key, "runtime".to_owned());
+    let public = signing_key().verifying_key();
     let sent = crate::issue_release(
-        &signer,
-        crate::AdmittedRuntimeKey::new("runtime", &public),
+        &signer(),
+        crate::AdmittedRuntimeKey::new(KEY_ID, &public),
         pos_reference::sandbox_provider_protocol::ExecutionReleaseFields {
             attempt_id: ATTEMPT,
             nonce: [0x61; 32],
@@ -1075,20 +1086,13 @@ fn a_failure_after_the_release_is_a_provider_fault() -> TestResult {
         started: Some(start()),
         evidence: Some(evidence(release, quiet(), terminal(&run)?)?),
     };
-    let ended = EndedAttempt::for_test(
+    Ok(EndedAttempt::for_test(
         ATTEMPT,
         admission(SandboxExecutionMode::AirGapped, Some(input(true))),
         None,
         progress,
         (cleanup(true)?, Some(CLEANED_AT)),
-    );
-    assert!(matches!(ended.records(), Err(EvidenceFault::Record(_))));
-    // No response is emitted either.
-    assert!(matches!(
-        ended.signed_response(&signer, crate::AdmittedRuntimeKey::new("runtime", &public)),
-        Err(super::ResponseFault::Evidence(EvidenceFault::Record(_)))
-    ));
-    Ok(())
+    ))
 }
 
 mod response;

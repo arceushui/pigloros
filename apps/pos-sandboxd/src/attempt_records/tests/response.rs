@@ -330,6 +330,12 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
             Err(ResponseFault::Evidence(EvidenceFault::UnboundTransfer))
         ));
     }
+    // A transfer that starts exactly when the cleanup finished is bound.
+    let at_cleanup = TransferRecord {
+        start: CLEANED_AT,
+        ..timed_out_transfer()
+    };
+    verified(&first.successor(at_cleanup, &signer(), admitted)?)?;
     Ok(())
 }
 

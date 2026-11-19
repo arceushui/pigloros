@@ -129,8 +129,8 @@ impl AttemptRecords {
     /// digest and the recomputed terminal code.
     fn successor(&self, transfer: TransferRecord) -> Result<Self, EvidenceFault> {
         let stored = self.termination.fields();
-        // A successor has a predecessor, so a first TME1 has no output
-        // transfer either (R9 §4.7).
+        // The stored TME1 must be a first one (no predecessor): R9 §4.7
+        // then gives it no output transfer.
         let reissuable = stored.previous_tme1_digest.is_none()
             && self.classification.code().is_none()
             && !transfer.complete;
@@ -194,9 +194,9 @@ pub enum EvidenceFault {
     /// The record encoders refused the facts.
     #[error(transparent)]
     Record(#[from] SandboxProviderProtocolError),
-    /// Only a first, Completed TME1 has an output transfer to re-issue, and
-    /// only once that transfer is incomplete (R9 §4.7).
-    #[error("the termination evidence has no output transfer to re-issue")]
+    /// The re-issue was refused: the stored TME1 is already a successor or
+    /// not Completed, or the output transfer completed (R9 §4.7).
+    #[error("the termination evidence cannot be re-issued")]
     NotReissuable,
     /// The output transfer does not carry the retained output, or started
     /// before the cleanup finished.
