@@ -505,6 +505,44 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(rename_download)
 
+    def archive_download_steps(self, workflow: dict) -> list[dict]:
+        return [
+            step
+            for step in workflow["jobs"]["asan"]["steps"]
+            if "download-artifact" in step.get("uses", "")
+        ]
+
+    def test_archive_download_retries_once_and_then_fails(self) -> None:
+        first, retry = self.archive_download_steps(self.workflow)
+        self.assertIs(first["continue-on-error"], True)
+        self.assertEqual(retry["if"], "steps.download-asan-archive.outcome == 'failure'")
+        self.assertNotIn("continue-on-error", retry)
+        self.assertEqual(first["with"], retry["with"])
+
+    def test_rejects_archive_download_retry_that_cannot_fail(self) -> None:
+        def ignore_retry(workflow: dict) -> None:
+            self.archive_download_steps(workflow)[1]["continue-on-error"] = True
+
+        self.assert_rejected(ignore_retry)
+
+    def test_rejects_dropped_archive_download_retry(self) -> None:
+        def drop_retry(workflow: dict) -> None:
+            steps = workflow["jobs"]["asan"]["steps"]
+            steps.remove(self.archive_download_steps(workflow)[1])
+
+        self.assert_rejected(drop_retry)
+
+    def test_rejects_unconditional_archive_clear(self) -> None:
+        def always_clear(workflow: dict) -> None:
+            clear = next(
+                step
+                for step in workflow["jobs"]["asan"]["steps"]
+                if step.get("name") == "Clear the failed ASan archive download"
+            )
+            del clear["if"]
+
+        self.assert_rejected(always_clear)
+
     def test_rejects_ignored_missing_archive_upload(self) -> None:
         def ignore_missing_archive(workflow: dict) -> None:
             upload = workflow["jobs"]["asan-build"]["steps"][-1]
