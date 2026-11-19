@@ -64,6 +64,10 @@ struct MemoryTransactionV1 {
 /// # Note
 /// A standalone test/dev authority, not linked to a `MemoryStore` catalog
 /// (#509): it must not back a release host.
+///
+/// The retained-Memory community domain installs one as the clock its
+/// lifecycle operations reserve on (#560, note 22722, G1); that profile has
+/// no process-restart durability either.
 #[derive(Debug, Default)]
 pub struct MemoryTrustedClockAuthorityV1 {
     shared: Arc<MemoryAuthorityV1>,
