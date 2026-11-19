@@ -30,7 +30,8 @@ const WORKERS: usize = 4;
 const RUNS_PER_WORKER_ENV: &str = "OWNER_BRIDGE_READINESS_RUNS_PER_WORKER";
 
 fn runs_per_worker() -> usize {
-    pass(pass(std::env::var(RUNS_PER_WORKER_ENV)).parse())
+    // NonZeroUsize: a zero count would make the completion check vacuous.
+    pass(pass(std::env::var(RUNS_PER_WORKER_ENV)).parse::<std::num::NonZeroUsize>()).get()
 }
 
 pub(super) fn run(runtime_path: &Path, root: &Path) {
