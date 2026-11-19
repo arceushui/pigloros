@@ -12,10 +12,12 @@ use super::envelope::{
 use super::{
     canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates, read_hash, read_head,
     record_cursor, record_prefix, validate_coordinates, validate_horizon, CommunityArtifactKindV1,
-    CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityLifecycleErrorV1 as Error,
-    Result, MAX_COMMUNITY_MEMBERS_V1,
+    CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityKeyStateV1,
+    CommunityKeyViewRowV1, CommunityLifecycleErrorV1 as Error, Result, MAX_COMMUNITY_MEMBERS_V1,
 };
-use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash, OwnerIdV1, TimelineId};
+use crate::{
+    encode_bytes, encode_hash, encode_head, CborCursor, Hash, KeyRoleV1, OwnerIdV1, TimelineId,
+};
 use zeroize::Zeroizing;
 
 /// Maximum primitive encryptions one operation/purpose key may ever record.
@@ -217,6 +219,25 @@ impl CommunityKeyIntentV1 {
         encode_hash(&mut out, input.material_fingerprint);
         encode_hash(&mut out, input.authority_request_digest);
         out
+    }
+
+    /// This key's CAV1 key row in `state` (ADR-129 §3): its role7 owner
+    /// text, epoch 1, material fingerprint and intent digest.
+    ///
+    /// The state is the one the qualified owner read from its own vault.
+    /// Until key destruction lands, the initialize planner is passed only
+    /// keys its caller read as `Available` and marks them so (owner
+    /// decision on #560, 2026-11-19).
+    #[must_use]
+    pub fn key_view_row(&self, state: CommunityKeyStateV1) -> CommunityKeyViewRowV1 {
+        CommunityKeyViewRowV1 {
+            owner: self.key_owner_text().to_owned(),
+            role: KeyRoleV1::CommunityArtifactEncryption,
+            epoch: 1,
+            material_fingerprint: self.input.material_fingerprint,
+            state,
+            key_intent_digest: self.digest(),
+        }
     }
 
     /// Clear intent identity `BLAKE3("PiglorOS.Community.CKP1.v1\0" || CKP1)`.

@@ -33,6 +33,16 @@ const _: () = assert!(MAX_COMMUNITY_OBJECT_BINDINGS_V1 == 2048);
 const _: () = assert!(MAX_COMMUNITY_DECISION_ROWS_V1 == 2048);
 const _: () = assert!(MAX_ENCODED_BYTES < MAX_EVIDENCE);
 
+/// `H("RecipientIdentity", recipient)` over the canonical CBOR text item
+/// of the installed recipient text: CAU1's `recipient_identity_digest`
+/// (owner decisions on #560, note 22722 G6 and 2026-11-19).
+#[must_use]
+pub fn community_recipient_identity_digest_v1(recipient: &str) -> Hash {
+    let mut text = Zeroizing::new(Vec::with_capacity(9 + recipient.len()));
+    encode_bytes(&mut text, recipient.as_bytes(), 3);
+    digest(b"PiglorOS.Community.RecipientIdentity.v1\0", &text)
+}
+
 /// One admitted object: `[COW1_physical_address, ARD1_artifact_digest,
 /// ARD1_registration_address]`.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]

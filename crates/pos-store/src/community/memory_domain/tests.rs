@@ -38,6 +38,7 @@ use super::{
     MemoryCommunityDomainV1,
 };
 use crate::memory::MemoryStore;
+use crate::trusted_clock::MemoryTrustedClockAuthorityV1;
 
 /// The composition-root seal the community owner is installed with.
 static OWNER_SEAL: pos_core::AuthorityTrustRootSealV1 =
@@ -196,7 +197,11 @@ fn domain_with(
                     .map(drop)
             })
         })?;
-    Ok(MemoryCommunityDomainV1::new(store, INCARNATION)?)
+    Ok(MemoryCommunityDomainV1::new(
+        store,
+        INCARNATION,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?)
 }
 
 /// Install the metadata authority from explicit composition inputs.
@@ -447,7 +452,12 @@ fn assert_unavailable(world: &mut World) -> TestResult {
 #[test]
 fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
     assert_eq!(
-        MemoryCommunityDomainV1::new(MemoryStore::new(), [0; 16]).err(),
+        MemoryCommunityDomainV1::new(
+            MemoryStore::new(),
+            [0; 16],
+            MemoryTrustedClockAuthorityV1::new()
+        )
+        .err(),
         Some(Error::InvalidBinding)
     );
     let zero_timeline = TimelineId::from_ulid(Ulid::from_bytes([0; 16]));
@@ -461,9 +471,24 @@ fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
             Some(Error::InvalidBinding)
         );
     }
-    let domain = MemoryCommunityDomainV1::new(MemoryStore::new(), INCARNATION)?;
+    let mut domain = MemoryCommunityDomainV1::new(
+        MemoryStore::new(),
+        INCARNATION,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     assert_eq!(domain.store_incarnation(), INCARNATION);
     assert!(!domain.is_bootstrapped());
+    // G5: the inventory generation starts at 0.
+    assert_eq!(
+        super::super::store_domain::CommunityStoreDomainV1::inventory_generation(&domain),
+        0
+    );
+    // The seam reads the domain's own counter.
+    domain.inventory_generation = 7;
+    assert_eq!(
+        super::super::store_domain::CommunityStoreDomainV1::inventory_generation(&domain),
+        7
+    );
     Ok(())
 }
 
@@ -471,6 +496,8 @@ fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
 fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> TestResult {
     let world = bootstrapped()?;
     assert!(world.domain.is_bootstrapped());
+    // Bootstrap is not an inventory effect (G5).
+    assert_eq!(world.domain.inventory_generation, 0);
     assert_eq!(world.domain.keys.len(), 1);
     let record = world.record()?;
     let key = world.key()?;
@@ -1252,5 +1279,173 @@ fn a_metadata_grant_outside_the_installed_registry_is_refused() -> TestResult {
         world.open(request()?)?,
         CommunityDomainOpenedV1::Bootstrapped
     );
+    Ok(())
+}
+
+/// The CAV1 authority row (ADR-129 §3, R6.7) read through the seam: the
+/// chain's current, re-stamped CPG1 bindings and the persisted CRF1s
+/// (owner decision on #560, 2026-11-19).
+#[test]
+fn authority_row_binds_the_current_chain_and_its_revocations() -> TestResult {
+    use super::super::store_domain::CommunityStoreDomainV1;
+    let mut world = World::new(&[LEAF, OTHER_LEAF])?;
+    world.revoke(1, 3, 1)?;
+    let pins = world.expected_request("inspect")?;
+    let row = world.domain.authority_row(LEAF, &pins)?;
+
+    let persisted = world.domain.store.load_authority(LEAF)?;
+    let current = persisted.chain().grants()[0].binding_digest()?;
+    // The sibling revocation re-stamped the untouched leaf.
+    assert_ne!(current, world.grants[0].binding_digest()?);
+    let revocations: Vec<Value> = persisted
+        .revocations()
+        .iter()
+        .map(|revocation| {
+            Ok(Value::Bytes(
+                blake3::hash(revocation.encode()?.as_slice())
+                    .as_bytes()
+                    .to_vec(),
+            ))
+        })
+        .collect::<Fallible<_>>()?;
+    assert_eq!(revocations.len(), 1);
+    let mut preimage = Vec::new();
+    ciborium::into_writer(
+        &Value::Array(vec![
+            Value::Array(vec![Value::Bytes(current.as_bytes().to_vec())]),
+            Value::Array(revocations),
+        ]),
+        &mut preimage,
+    )?;
+    assert_eq!(row.binding_digest, adr_h("AuthorityBindings", &preimage));
+    assert_eq!(row.authority_timeline, authority_timeline());
+    assert_eq!(row.head_seq, persisted.head_position().as_u64());
+    assert_eq!(row.revocation_epoch, 1);
+    assert_eq!(row.registry_digest, REGISTRY);
+    assert_eq!(row.capability_policy_revision, POLICY_REVISION);
+    assert_eq!(row.consent_policy_revision, CONSENT_REVISION);
+    assert_eq!(
+        world
+            .domain
+            .authority_row(Hash::from_bytes([0x77; 32]), &pins)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+const DELEGATING_ROOT: Hash = Hash::from_bytes([0x61; 32]);
+
+/// A grant on the full metadata scope that may delegate once (no parent)
+/// or is that delegation (`parent`).
+fn delegated(id: Hash, seq: u64, parent: Option<Hash>) -> Fallible<CapabilityGrantV1> {
+    let base = grant(id, seq, FULL)?;
+    let mut actions: Vec<String> = base.scope().actions().to_vec();
+    if parent.is_none() {
+        actions.push(pos_core::DELEGATE_ACTION_V1.to_owned());
+        actions.sort_unstable();
+    }
+    let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: base.scope().resources().to_vec(),
+        actions,
+        purposes: vec![FULL.purpose.to_owned()],
+        audiences: vec![AUDIENCE.to_owned()],
+        actor_entity_ids: vec![actor()],
+        subject_ids: vec![],
+        participant_ids: vec![],
+        plugin_id: None,
+        principal_roles: vec![AuthorityRoleV1::Actor],
+        max_uses: 1,
+        budget: 1,
+        environment_constraints: vec![],
+    })?;
+    Ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id: id,
+        grantor: principal(if parent.is_some() { 3 } else { 1 })?,
+        grantee: AuthorityGranteeV1::Principal(principal(if parent.is_some() { 2 } else { 3 })?),
+        trust_domain: "local.test".to_owned(),
+        scope,
+        valid_from_position: Seq::from_u64(seq),
+        valid_until_position: Seq::from_u64(100),
+        parent_grant_id: parent,
+        delegation_depth: u8::from(parent.is_some()),
+        max_delegation_depth: 1,
+        permitted_delegate_classes: if parent.is_some() {
+            vec![]
+        } else {
+            vec![pos_core::DelegateClassV1::Principal]
+        },
+        consent_references: vec![],
+        policy_revision: POLICY_REVISION,
+        issuance_timeline: authority_timeline(),
+        issuance_seq: Seq::from_u64(seq),
+        revocation_epoch: 0,
+        revocation_fence: None,
+        authority_registry_digest: REGISTRY,
+    })?)
+}
+
+/// A two-grant chain contributes its current bindings root to leaf, and two
+/// sibling revocations contribute their CRF1 digests in Timeline order.
+#[test]
+fn authority_row_binds_a_delegated_chain_and_ordered_revocations() -> TestResult {
+    use super::super::store_domain::CommunityStoreDomainV1;
+    const SIBLINGS: [Hash; 2] = [Hash::from_bytes([0x62; 32]), Hash::from_bytes([0x63; 32])];
+    let grants = vec![
+        delegated(DELEGATING_ROOT, 1, None)?,
+        delegated(LEAF, 2, Some(DELEGATING_ROOT))?,
+        grant(SIBLINGS[0], 3, FULL)?,
+        grant(SIBLINGS[1], 4, FULL)?,
+    ];
+    let registry = registry_for(&grants)?;
+    let host = AuthorityPersistenceHostV1::new(&registry);
+    let domain = domain_with(&host, &grants)?;
+    let mut world = World::assemble(domain, registry, host, grants)?;
+    world.revoke(2, 5, 1)?;
+    world.revoke(3, 6, 2)?;
+    let pins = world.expected_request("inspect")?;
+    let row = world.domain.authority_row(LEAF, &pins)?;
+
+    let persisted = world.domain.store.load_authority(LEAF)?;
+    let chain = persisted.chain().grants();
+    assert_eq!(
+        chain
+            .iter()
+            .map(CapabilityGrantV1::grant_id)
+            .collect::<Vec<_>>(),
+        vec![DELEGATING_ROOT, LEAF]
+    );
+    assert_eq!(
+        persisted
+            .revocations()
+            .iter()
+            .map(CapabilityRevocationV1::grant_id)
+            .collect::<Vec<_>>(),
+        SIBLINGS.to_vec()
+    );
+    let bytes = |digest: Hash| Value::Bytes(digest.as_bytes().to_vec());
+    let grant_values = chain
+        .iter()
+        .map(|grant| Ok(bytes(grant.binding_digest()?)))
+        .collect::<Fallible<Vec<_>>>()?;
+    let revocation_values = persisted
+        .revocations()
+        .iter()
+        .map(|revocation| {
+            Ok(bytes(Hash::from_bytes(
+                *blake3::hash(revocation.encode()?.as_slice()).as_bytes(),
+            )))
+        })
+        .collect::<Fallible<Vec<_>>>()?;
+    let mut preimage = Vec::new();
+    ciborium::into_writer(
+        &Value::Array(vec![
+            Value::Array(grant_values),
+            Value::Array(revocation_values),
+        ]),
+        &mut preimage,
+    )?;
+    assert_eq!(row.binding_digest, adr_h("AuthorityBindings", &preimage));
+    assert_eq!(row.revocation_epoch, 2);
     Ok(())
 }

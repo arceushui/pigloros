@@ -277,7 +277,7 @@ pub fn first_party_has_no_privileged_route() -> Capture {
 
             let gateway = Gateway::unprotected_for_harness(host(unauthorized_store)).test_ok();
             let timeline = gateway
-                .create_timeline("first-party")
+                .create_timeline("first-party", None)
                 .await
                 .test_ok()
                 .id()

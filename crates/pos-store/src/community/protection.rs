@@ -399,6 +399,16 @@ impl CommunityProtectedRecordV1 {
         }
     }
 
+    /// The CSB1 `ScopeCover` commitment the record's COH1 carries.
+    pub(super) const fn scope_cover_digest(&self) -> Hash {
+        self.scope_cover_digest
+    }
+
+    /// The record's original horizon.
+    pub(super) const fn evidence_not_after_micros(&self) -> u64 {
+        self.evidence_not_after_micros
+    }
+
     /// The exact canonical COW1 bytes.
     #[must_use]
     pub fn object(&self) -> &[u8] {

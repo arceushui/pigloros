@@ -65,6 +65,15 @@ pub mod classified_fork_fixture;
 #[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
 pub mod plugin_trust_registry_fixtures;
 
+// Test-only. The shared community initialize planner fixtures under
+// `tests/support` serve the public planner tests and the planner's unit
+// tests; the items are `pub` for the same reason as the fixtures above.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/community_initialization_fixture.rs"]
+pub mod community_initialization_fixture;
+
 pub mod community;
 pub mod composition_fallback_registry;
 
