@@ -775,9 +775,10 @@ fn unlink_captured_objects(
     .and_then(|()| recipient_fsync(&captured.owner.directory_file).map_err(storage_error))
 }
 
-/// Open `name` beneath the directory, require the captured `(dev, inode,
-/// uid)`, one link and, for the final name, the exact length, require the
-/// name to still hold that file, then unlink it.
+/// Open `name` beneath the directory, require the descriptor to be the
+/// captured `(dev, inode, uid)` and the name to still be a safe single-link
+/// entry holding that file and, for the final name, the exact length, then
+/// unlink it.
 ///
 /// An absent captured name reads as already deleted (ADR-138 §5): the crash
 /// case after an earlier unlink. A captured name renamed away out of band
@@ -805,8 +806,8 @@ fn unlink_captured(
             .and_then(|metadata| {
                 // A safe name entry has one link, so the descriptor and the
                 // name holding the captured object fix its link count.
-                let opened = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
-                if (opened, stat_entry(owner, name)) == (expected, EntryV1::Safe(expected))
+                let descriptor = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
+                if (descriptor, stat_entry(owner, name)) == (expected, EntryV1::Safe(expected))
                     && length.is_none_or(|length| metadata.len() == length)
                 {
                     recipient_unlinkat(&owner.directory_file, name, AtFlags::empty())
