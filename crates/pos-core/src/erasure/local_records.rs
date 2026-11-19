@@ -1069,8 +1069,9 @@ impl LocalRecordV1 for LocalErasureIdempotencyV1 {
 
 local_record_api!(LocalErasureIdempotencyV1);
 
-/// ELADM1, the submission binding of one admitted Local erasure request
-/// (owner decision D5 of 2026-11-18 on #1413, an ADR-136 amendment):
+/// ELADM1, the submission binding of one admitted Local erasure request.
+///
+/// Owner decision D5 of 2026-11-18 on #1413, an ADR-136 amendment:
 /// `["ELADM1", 1, request(32), trust(32), mode_profile(32),
 /// binding_epoch(uint ≥ 1)]`, at most 1 KiB.
 ///

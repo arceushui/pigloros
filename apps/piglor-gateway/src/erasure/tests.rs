@@ -1,6 +1,7 @@
 //! `requestErasure` and `getErasure` through the served router (#1449):
 //! ADR-136 acceptance tests 8 and 9 and the Gateway parts of test 2.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::{
@@ -74,8 +75,9 @@ impl Served {
     ) -> TestResult<(Self, LocalErasureDriverTaskV1)> {
         // Each serve reads its own credential directory, as a restart may
         // serve the same world again.
-        let credentials =
-            world.credentials(&format!("credentials-{}", Ulid::new()), &SIGNER_SEED, &[])?;
+        static SERVES: AtomicU64 = AtomicU64::new(0);
+        let serve = SERVES.fetch_add(1, Ordering::Relaxed);
+        let credentials = world.credentials(&format!("credentials-{serve}"), &SIGNER_SEED, &[])?;
         let erasure = LocalErasureServeV1::for_serve(Some(world.inputs(&credentials)))?;
         let mode = test_binding(GatewayModeProfileIdV1::Local, []);
         let mut host = test_attach_host(
