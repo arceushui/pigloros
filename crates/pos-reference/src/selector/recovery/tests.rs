@@ -237,6 +237,9 @@ pub(crate) struct PeerPort {
     base: Instant,
     calls: Mutex<Vec<Call>>,
     peer: Mutex<Option<(PathBuf, JoinHandle<()>)>>,
+    /// The control group the last start reported: an honest cleanup names
+    /// it, since the slot's unit is the started peer's.
+    started: Mutex<Option<CgroupPath>>,
     reconciles: AtomicUsize,
     terminations: AtomicUsize,
 }
@@ -250,6 +253,7 @@ impl PeerPort {
             base: Instant::now(),
             calls: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
+            started: Mutex::new(None),
             reconciles: AtomicUsize::new(0),
             terminations: AtomicUsize::new(0),
         }
@@ -341,8 +345,12 @@ impl ProviderLifecyclePort for PeerPort {
         if self.terminations.fetch_add(1, Ordering::SeqCst) < self.script.refused_terminations {
             return Err(ProviderLifecycleError::Unavailable);
         }
-        // A new operation: its first slot reconciliation comes next.
+        // A new operation: its first slot reconciliation comes next, and no
+        // peer of it has started.
         self.reconciles.store(0, Ordering::SeqCst);
+        if let Ok(mut started) = self.started.lock() {
+            *started = None;
+        }
         self.clock
             .fetch_add(self.script.terminate_advance_ms, Ordering::SeqCst);
         let reply = self.script.terminate;
@@ -381,10 +389,11 @@ impl ProviderLifecyclePort for PeerPort {
         if let Reply::Refuse(error) = reply {
             return Err(error);
         }
+        let started = self.started.lock().ok().and_then(|started| started.clone());
         let control_group = if reply == Reply::OtherCgroup {
             CgroupPath::new("/system.slice/other.service")?
         } else {
-            own_cgroup()?
+            started.map_or_else(own_cgroup, Ok)?
         };
         Ok(RecoverySlotObservation::new(
             challenge_of(reply, target.challenge()),
@@ -433,6 +442,9 @@ impl ProviderLifecyclePort for PeerPort {
         } else {
             own_cgroup()?
         };
+        if let Ok(mut started) = self.started.lock() {
+            *started = Some(control_group.clone());
+        }
         Ok(RecoveryPeerObservation::new(
             challenge_of(reply, launch.challenge()),
             scope_of(reply, launch.slot().recovery_lifecycle_scope_id()),
