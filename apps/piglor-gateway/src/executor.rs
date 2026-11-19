@@ -4674,7 +4674,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -4730,7 +4732,9 @@ mod tests {
             tokio::spawn(async move { executor.create("first".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -4785,7 +4789,9 @@ mod tests {
             tokio::spawn(async move { executor.create("started".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -5332,7 +5338,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -5379,7 +5387,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -5426,7 +5436,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -5507,7 +5519,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6116,7 +6130,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6368,7 +6384,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6534,7 +6552,9 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6599,7 +6619,9 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6680,7 +6702,9 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6798,7 +6822,9 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6894,7 +6920,9 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -6999,7 +7027,9 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
@@ -7150,7 +7180,9 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok());
         })
         .await
         .test_ok()?;
