@@ -213,7 +213,7 @@ fn validate_members(members: &CommunityMemberHeadsV1<'_>) -> Result<()> {
     })
 }
 
-fn encode_frontier(out: &mut Vec<u8>, frontier: CommunityPassFrontierV1) {
+pub(super) fn encode_frontier(out: &mut Vec<u8>, frontier: CommunityPassFrontierV1) {
     match frontier {
         CommunityPassFrontierV1::Initial => out.extend_from_slice(&[0x81, 0]),
         CommunityPassFrontierV1::Committed(key) => {
@@ -224,7 +224,7 @@ fn encode_frontier(out: &mut Vec<u8>, frontier: CommunityPassFrontierV1) {
     }
 }
 
-fn read_frontier(cursor: &mut CborCursor<'_>) -> Result<CommunityPassFrontierV1> {
+pub(super) fn read_frontier(cursor: &mut CborCursor<'_>) -> Result<CommunityPassFrontierV1> {
     read_head(cursor, 4).and_then(|fields| {
         read_head(cursor, 0).and_then(|tag| match (fields, tag) {
             (1, 0) => Ok(CommunityPassFrontierV1::Initial),
