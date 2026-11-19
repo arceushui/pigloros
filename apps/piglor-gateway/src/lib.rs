@@ -17,6 +17,9 @@ pub mod deployment_trust;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
+// Public so its crate-only items satisfy `unreachable_pub` and
+// `clippy::redundant_pub_crate`, as `host_timelines` below.
+pub mod erasure;
 pub mod executor;
 // Public so its crate-only items satisfy both `unreachable_pub` and
 // `clippy::redundant_pub_crate`: in a private module `pub(crate)` trips the
@@ -1220,6 +1223,9 @@ pub struct Gateway {
     /// Whether protected operations need [`Self::authorization`] (always set
     /// with it), so a composition without its authorizer fails closed.
     authorization_required: bool,
+    /// The admission hook of the Local erasure driver, set once its task
+    /// runs (ADR-136 §6; owner decision D7 of 2026-11-18 on #1413).
+    local_erasure_wake: Arc<std::sync::OnceLock<local_erasure_composition::LocalErasureTriggerV1>>,
 }
 
 /// Whether a composition protects its operations, and with which authorizer.
@@ -2295,6 +2301,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization,
             authorization_required,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2328,6 +2335,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2585,6 +2593,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2636,6 +2645,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: Some(Arc::new(test_local_authorization(authorization))),
             authorization_required: true,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2672,6 +2682,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2709,6 +2720,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2747,6 +2759,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2779,6 +2792,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
         .schedule_startup_consent_cleanup()
     }
@@ -3897,6 +3911,7 @@ impl Gateway {
             ),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
     }
 
@@ -3913,6 +3928,7 @@ impl Gateway {
             action_registry: gateway_action_registry(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
     }
 
@@ -3938,6 +3954,7 @@ impl Gateway {
             ),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         }
     }
 }
@@ -8003,6 +8020,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         };
         assert!(matches!(
             fail_create.create_timeline("x", None).await,
@@ -8022,6 +8040,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         };
         assert!(matches!(
             fail_list.create_timeline("x", None).await,
@@ -8067,6 +8086,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         };
         assert!(matches!(
             missing
@@ -8112,6 +8132,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         };
         let tl = empty_append.create_timeline("e", None).await.test_ok();
         let err = empty_append
@@ -8138,6 +8159,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         };
         let err = fail_get_timeline
             .append_action(
@@ -8163,6 +8185,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         };
         let tl = fail_append.create_timeline("a", None).await.test_ok();
         let err = fail_append
@@ -8189,6 +8212,7 @@ mod tests {
             action_registry: gateway_action_registry(),
             authorization: None,
             authorization_required: false,
+            local_erasure_wake: Arc::default(),
         };
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -8249,6 +8273,7 @@ mod tests {
                 action_registry: gateway_action_registry(),
                 authorization: None,
                 authorization_required: false,
+                local_erasure_wake: Arc::default(),
             };
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)

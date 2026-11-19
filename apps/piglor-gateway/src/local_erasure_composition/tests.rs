@@ -60,22 +60,22 @@ fn signed(bundle: &[u8], root: &SigningKey) -> TestResult<Vec<u8>> {
 
 /// A Gateway store with its Local Principal, provisioned for Local erasure
 /// under a signed bundle, and its deployment trust state.
-struct World {
+pub(crate) struct World {
     deployment: Deployment,
-    fixture: Fixture,
-    bundle: Vec<u8>,
+    pub(crate) fixture: Fixture,
+    pub(crate) bundle: Vec<u8>,
     signature: Vec<u8>,
 }
 
 impl World {
     /// The Local Principal of the provisioning fixture.
-    fn new() -> TestResult<Self> {
+    pub(crate) fn new() -> TestResult<Self> {
         Self::over(Fixture::new(true)?)
     }
 
     /// Provision Local erasure on `fixture`, which records its Local
     /// Principal, and sign the bundle with the TPS1 bundle root.
-    fn over(fixture: Fixture) -> TestResult<Self> {
+    pub(crate) fn over(fixture: Fixture) -> TestResult<Self> {
         let deployment = Deployment::new(&[])?;
         let bundle = provision_local_erasure(
             &fixture.request("bundle.elb1"),
@@ -94,7 +94,12 @@ impl World {
 
     /// A protected credential directory `name` holding the four erasure
     /// credentials, with the signer seed `seed`, and `extra`.
-    fn credentials(&self, name: &str, seed: &[u8], extra: &[(&str, &[u8])]) -> TestResult<PathBuf> {
+    pub(crate) fn credentials(
+        &self,
+        name: &str,
+        seed: &[u8],
+        extra: &[(&str, &[u8])],
+    ) -> TestResult<PathBuf> {
         let mut credentials: Vec<(&str, &[u8])> = vec![
             (LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, self.bundle.as_slice()),
             (
@@ -131,7 +136,7 @@ impl World {
     }
 
     /// The serve inputs over this world's store and trust state.
-    fn inputs<'a>(&'a self, credentials: &'a Path) -> LocalErasureServeInputsV1<'a> {
+    pub(crate) fn inputs<'a>(&'a self, credentials: &'a Path) -> LocalErasureServeInputsV1<'a> {
         LocalErasureServeInputsV1 {
             sqlite_path: &self.fixture.path,
             credential_directory: credentials,
@@ -142,7 +147,7 @@ impl World {
 
     /// Open this world's erasure host with `composition`, attached to the
     /// Local mode the fixture bound.
-    fn host(
+    pub(crate) fn host(
         &self,
         composition: &ErasureCoordinatorCompositionV1,
     ) -> TestResult<ErasureExecutionHostV1> {
@@ -160,18 +165,18 @@ impl World {
     }
 }
 
-fn principal() -> TestResult<PrincipalRefV1> {
+pub(crate) fn principal() -> TestResult<PrincipalRefV1> {
     Ok(PrincipalRefV1::try_new(
         Ulid::from_string(PRINCIPAL_ID)?.to_bytes(),
         "local",
     )?)
 }
 
-fn actor() -> TestResult<EntityId> {
+pub(crate) fn actor() -> TestResult<EntityId> {
     Ok(EntityId::from_ulid(Ulid::from_string(ACTOR)?))
 }
 
-fn other_actor() -> TestResult<EntityId> {
+pub(crate) fn other_actor() -> TestResult<EntityId> {
     Ok(EntityId::from_ulid(Ulid::from_string(OTHER_ACTOR)?))
 }
 
@@ -471,14 +476,20 @@ async fn a_skipped_startup_sweep_does_not_fail_startup() -> TestResult {
 /// A Local Principal store whose root grant lets the fixture actor request
 /// erasure, provisioned for Local erasure.
 fn erasure_world() -> TestResult<World> {
+    erasure_world_granting(&[
+        GatewayOperationV1::CREATE_TIMELINE,
+        GatewayOperationV1::REQUEST_ERASURE,
+    ])
+}
+
+/// A Local Principal store whose root grant covers both fixture actors for
+/// `operations`, provisioned for Local erasure.
+pub(crate) fn erasure_world_granting(operations: &[GatewayOperationV1]) -> TestResult<World> {
     let fixture = Fixture::new(false)?;
     let provision = LocalPrincipalProvisionV1::try_new(
         &principal()?,
         [actor()?, other_actor()?],
-        [
-            GatewayOperationV1::CREATE_TIMELINE,
-            GatewayOperationV1::new("erasure.request", "erasure", "request", "operation"),
-        ],
+        operations.iter().copied(),
     )?;
     let mut host = open_recovered_erasure_host(
         StoreConfig::Sqlite {

@@ -274,6 +274,14 @@ impl GatewayOperationV1 {
     /// `POST /v1/me/consent-revocations`: revoke one of the Principal's own
     /// consents (#309).
     pub const REVOKE_CONSENT: Self = Self::new("consent.revoke", "consent", "revoke", "operation");
+    /// `POST /v1/me/erasures`: request the erasure of the acting
+    /// subject's own data (ADR-136 §3, #1449).
+    pub const REQUEST_ERASURE: Self =
+        Self::new("erasure.request", "erasure", "request", "operation");
+    /// `GET /v1/me/erasures/{erasure_id}`: observe one of the acting
+    /// subject's erasures (ADR-136 §3 and §7, #1449). Its own resource, so
+    /// a grant of either erasure operation never authorizes the other.
+    pub const READ_ERASURE: Self = Self::new("erasure.read", "erasure.status", "read", "read");
     /// `POST /v1/timelines`: create a root Timeline.
     pub const CREATE_TIMELINE: Self =
         Self::new("timeline.create", "timeline", "create", "operation");
@@ -343,6 +351,8 @@ impl GatewayOperationV1 {
     /// name order.
     pub const ALL: &[Self] = &[
         Self::REVOKE_CONSENT,
+        Self::READ_ERASURE,
+        Self::REQUEST_ERASURE,
         Self::NETWORK,
         Self::CREATE_PREDICTION,
         Self::CREATE_OPTION_SPEC,
@@ -1939,6 +1949,13 @@ pub(crate) fn test_sourced_authorization_for(actor: EntityId) -> GatewayAuthoriz
     test_authorization_for(actor).with_source(Arc::new(TestUnreproducibleSourceV1))
 }
 
+/// An authorizer with no store source whose grant covers both erasure
+/// operations for `actor`.
+#[cfg(test)]
+pub(crate) fn test_erasure_authorization_for(actor: EntityId) -> GatewayAuthorization {
+    tests::fixture_erasure_authorization_with_actor(actor)
+}
+
 #[cfg(test)]
 pub(crate) fn test_action_only_authorization_for(actor: EntityId) -> GatewayAuthorization {
     tests::fixture_action_only_authorization_with_actor(actor)
@@ -2232,6 +2249,18 @@ mod tests {
 
     pub(super) fn fixture_authorization_with_actor(actor: EntityId) -> GatewayAuthorization {
         fixture_with_actor(actor).authorization
+    }
+
+    pub(super) fn fixture_erasure_authorization_with_actor(
+        actor: EntityId,
+    ) -> GatewayAuthorization {
+        fixture_with_scope(
+            actor,
+            vec!["erasure".to_owned(), "erasure.status".to_owned()],
+            vec!["read".to_owned(), "request".to_owned()],
+            vec!["operation".to_owned(), "read".to_owned()],
+        )
+        .authorization
     }
 
     pub(super) fn fixture_action_only_authorization_with_actor(
