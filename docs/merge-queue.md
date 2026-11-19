@@ -10,8 +10,8 @@ wiki ([#476](https://redmine.piglor.com/issues/476)).
 ```mermaid
 flowchart LR
     A["Open PR"] --> B["PR CI green"]
-    B --> C["Maintainer reviews<br/>the current commits"]
-    C --> D["Maintainer adds<br/>ready-to-merge"]
+    B --> C["Independent review<br/>of the current commits"]
+    C --> D["ready-to-merge<br/>label added"]
     D --> F["Trunk tests main + PRs ahead<br/>on a draft test PR"]
     F -- pass --> G["Trunk merges into main"]
     F -- fail --> H["PR removed with a comment;<br/>others re-tested without it"]
@@ -20,8 +20,11 @@ flowchart LR
 ## Merging a pull request
 
 1. Open the pull request against `main` and let its CI run.
-2. A maintainer reviews the changes, including their own.
-3. The maintainer adds the **`ready-to-merge`** label. That label is the only
+2. The changes get an independent review, re-run after every later change.
+   Agents working for the maintainer run that review themselves.
+3. Once the review is clean and CI is green, the maintainer — or an agent
+   acting on the maintainer's standing instruction — adds the
+   **`ready-to-merge`** label. That label is the only
    way into the queue; `/trunk merge` comments are switched off (see
    [Who can merge](#who-can-merge)). You may add it before CI finishes; Trunk
    waits until GitHub reports the pull request as mergeable.
@@ -36,15 +39,18 @@ Do **not**:
 - press GitHub's Merge button or call the merge API — the `main -> queue only`
   ruleset rejects it, and any merge outside the queue resets every queued
   test;
-- rebase or "Update branch" only because `main` moved — the queue already tests
-  on top of the latest `main`. Update a branch only to resolve a **merge
-  conflict**, which the queue cannot do for you;
+- rebase, amend or force-push a pushed branch. When you push a fix, first
+  `git fetch origin` and `git merge origin/main` so the pull request's CI sees
+  the same `main` the queue tests against; otherwise update a branch only to
+  resolve a **merge conflict**, which the queue cannot do for you;
 - cancel and re-submit a pull request whose test was reset — Trunk restarts it
   automatically and re-submitting moves it to the back of the queue.
 
 ## Who can merge
 
-Merging is a maintainer decision, not a CI check. Nothing in the repository's
+Merging is a maintainer decision, not a CI check. Agents that add the label
+act on the maintainer's standing instruction through the maintainer's own
+account, so they add no collaborator or bot. Nothing in the repository's
 workflows approves or blocks a pull request for its author; the queue entry
 point is restricted instead:
 

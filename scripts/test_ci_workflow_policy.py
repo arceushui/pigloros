@@ -162,6 +162,10 @@ PREFLIGHT_POLICY_STEPS = {
             "run": "python scripts/test_assert_no_ignored_in_test_summary.py",
         },
         {
+            "name": "Test agent command guard",
+            "run": "python scripts/test_agent_command_guard.py",
+        },
+        {
             "name": "Check ASan CI policy",
             "run": "bash scripts/check-asan-ci-policy.sh",
         },
