@@ -609,14 +609,6 @@ impl SystemdTransientUnitTransport {
         root: Result<CgroupRoot, AttemptCgroupError>,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
         let root = root?;
-        self.bind_cgroup_with_root(verified, root).await
-    }
-
-    async fn bind_cgroup_with_root(
-        &self,
-        verified: &SystemdVerifiedStart,
-        root: CgroupRoot,
-    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
         self.bind_invoked_cgroup(verified, root).await
     }
 
