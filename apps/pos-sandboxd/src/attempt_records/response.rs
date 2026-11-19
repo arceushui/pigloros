@@ -99,8 +99,9 @@ struct Sent<'a> {
 
 impl<'a> Sent<'a> {
     /// The `ReleaseV1` sent, the network transcripts and the output
-    /// descriptor of an executed attempt; only the `ReleaseV1` of a failed
-    /// one.
+    /// descriptor of an executed attempt. No other attempt sent anything a
+    /// signed response names: one that failed after its `ReleaseV1` has no
+    /// records, so it is never signed (owner decision 2026-11-19, Q2).
     fn of<S>(progress: &'a AttemptProgress<S>) -> Self {
         match progress {
             AttemptProgress::Executed {
@@ -112,13 +113,6 @@ impl<'a> Sent<'a> {
                 release: evidence.release().release(),
                 transcripts: network.transcript_digests(),
                 output: Some(adapter.output().descriptor()),
-            },
-            AttemptProgress::Failed {
-                evidence: Some(evidence),
-                ..
-            } => Self {
-                release: evidence.release().release(),
-                ..Self::default()
             },
             _ => Self::default(),
         }
