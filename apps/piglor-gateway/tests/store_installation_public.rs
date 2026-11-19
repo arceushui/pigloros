@@ -124,6 +124,11 @@ mod tests {
         store_refused(install_gateway_store_v1(&alias.to_string_lossy()));
         assert!(!store.child().exists());
 
+        // A trailing slash after the main file takes its lock but names no
+        // main basename.
+        store_refused(install_gateway_store_v1(&format!("{}/", store.path())));
+        assert!(!store.child().exists());
+
         // A directory path names no store, so it has no sibling lock.
         lock_refused(&install_gateway_store_v1(&format!(
             "{}/",
@@ -140,6 +145,8 @@ mod tests {
             install_gateway_store_v1(&store.path())?,
             OwnerStoreInstallationV1::Installed
         );
+        // The shared sibling lock models a Gateway composed without the
+        // profile; its ordinary open still meets the protected subtree.
         let serving = GatewayModeStoreLockV1::shared(&store.path())?;
         let Err(error) = SqliteStore::open(&store.path()) else {
             std::panic::resume_unwind(Box::new("expected the ordinary open refusal"));

@@ -31,9 +31,10 @@ pub enum GatewayStoreInstallationErrorV1 {
 ///
 /// The operator asserts that no participant or ordinary process has the store
 /// open. `sqlite_path` names the main file directly, in an absolute private
-/// database directory; the installation does not follow a symlinked main
-/// file or resolve a relative path. The sibling mode lock is released when
-/// the call returns.
+/// database directory; the installation refuses a symlinked main file and a
+/// path without an absolute directory. The sibling mode lock is released when
+/// the call returns; its lock file, which `GatewayModeStoreLockV1` creates,
+/// stays beside the store whether or not the installation succeeds.
 ///
 /// # Errors
 /// Returns [`GatewayStoreInstallationErrorV1::ModeLock`] while any other
