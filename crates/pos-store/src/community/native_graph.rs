@@ -34,6 +34,10 @@ use pos_core::community_lifecycle::{
     CommunityStateRevisionInputV1, CommunityStateRevisionV1, CommunityTypedInputRefV1,
     CommunityTypedInputRefsV1,
 };
+use pos_core::community_lifecycle::{
+    CommunityMaterializationInputV1, CommunityMaterializationReferenceV1,
+    CommunityMaterializationV1, CommunityProducerBindingV1,
+};
 use pos_core::{
     ArtifactChildEdgeV1, AuthorityTrustRootSealV1, Hash, RecordedDependencyClassV1, Seq, TimelineId,
 };
@@ -102,6 +106,9 @@ struct Context {
 /// One protected logical record of the graph.
 pub struct CommunityAssembledRecordV1 {
     record_magic: [u8; 4],
+    logical_digest: Hash,
+    plaintext_length: u64,
+    producer: CommunityProducerBindingV1,
     height: u64,
     protected: CommunityProtectedRecordV1,
 }
@@ -117,6 +124,43 @@ impl CommunityAssembledRecordV1 {
     #[must_use]
     pub const fn protected(&self) -> &CommunityProtectedRecordV1 {
         &self.protected
+    }
+
+    /// This record's CMI1 (ADR-129 §4; owner decision on #560, note 22661,
+    /// item 7), with the COA1 address its caller derived.
+    ///
+    /// It covers the COW1 families only. Its logical identity is the owning
+    /// record's `H(M, record)`, and its producer binding is the native node
+    /// that produced it (CIS1: the `InitialState` node; CSC1 and CSR1: the
+    /// `StateRevision` node) or, for each CPN1, the initialization's control
+    /// request `H(CGI1)`. Scope and horizon are the protected record's.
+    pub(super) fn materialization(
+        &self,
+        store_incarnation: [u8; 16],
+        timeline: TimelineId,
+        generation: [u8; 16],
+        attestation_address: Hash,
+    ) -> Result<CommunityMaterializationV1, Error> {
+        let registration = self.protected.registration();
+        CommunityMaterializationV1::new(CommunityMaterializationInputV1 {
+            store_incarnation,
+            timeline,
+            generation,
+            record_magic: self.record_magic,
+            logical_record_digest: self.logical_digest,
+            plaintext_length: self.plaintext_length,
+            materialization: CommunityMaterializationReferenceV1 {
+                owner_reference: registration.fields().owner_reference,
+                artifact_class: registration.fields().artifact_class,
+                object_address: self.protected.object_address(),
+                artifact_digest: registration.fields().artifact_digest,
+                registration_address: registration.address(),
+                attestation_address,
+            },
+            producer: self.producer,
+            scope_binding_digest: self.protected.scope_cover_digest(),
+            evidence_not_after_micros: self.protected.evidence_not_after_micros(),
+        })
     }
 
     /// The exact required ARD1 child edge naming this record.
@@ -142,17 +186,27 @@ pub struct CommunityInitializationGraphV1 {
     generation_admission: Zeroizing<Vec<u8>>,
 }
 
-/// One record to protect: its kind, plaintext, magic and the indices of its
-/// earlier ARD1 children.
-type Step<'p> = (CommunityArtifactKindV1, &'p [u8], [u8; 4], &'static [usize]);
+/// One record to protect: its kind, plaintext, magic, the indices of its
+/// earlier ARD1 children, its logical identity and its producer binding.
+struct Step<'p> {
+    kind: CommunityArtifactKindV1,
+    plaintext: &'p [u8],
+    record_magic: [u8; 4],
+    children: &'static [usize],
+    logical_digest: Hash,
+    producer: CommunityProducerBindingV1,
+}
 
 /// One member's plaintext records, minted before any encryption.
 struct MemberPlan<'a> {
     state: &'a [u8],
+    state_digest: Hash,
     producer: Zeroizing<Vec<u8>>,
+    producer_digest: Hash,
     revision: Zeroizing<Vec<u8>>,
     revision_digest: Hash,
     initial_node: Zeroizing<Vec<u8>>,
+    initial_reference: CommunityNativeNodeReferenceV1,
     revision_node: Zeroizing<Vec<u8>>,
     revision_reference: CommunityNativeNodeReferenceV1,
     member_binding_digest: Hash,
@@ -208,7 +262,7 @@ impl CommunityInitializationGraphV1 {
                 .and_then(|plans| {
                     plans
                         .iter()
-                        .map(|plan| protect_member(plan, &input, protector))
+                        .map(|plan| protect_member(plan, &input, context.request_digest, protector))
                         .collect::<Result<Vec<_>, Error>>()
                         .and_then(|members| finish(&input, context, &plans, members))
                 })
@@ -403,10 +457,13 @@ fn plan_member<'a>(
                 )
                 .map(|(revision_node, revision_reference)| MemberPlan {
                     state,
+                    state_digest,
                     producer: producer.to_canonical_cbor(),
+                    producer_digest,
                     revision,
                     revision_digest,
                     initial_node,
+                    initial_reference,
                     revision_node,
                     revision_reference,
                     member_binding_digest,
@@ -492,48 +549,62 @@ fn node(
 fn protect_member(
     plan: &MemberPlan<'_>,
     input: &CommunityInitializationGraphInputV1<'_>,
+    request_digest: Hash,
     protector: &mut CommunityArtifactProtectorV1,
 ) -> Result<Vec<CommunityAssembledRecordV1>, Error> {
+    let initial = CommunityProducerBindingV1::Native(plan.initial_reference);
+    let revision = CommunityProducerBindingV1::Native(plan.revision_reference);
+    let control = CommunityProducerBindingV1::Control(request_digest);
     let steps: [Step<'_>; 5] = [
         // CSC1 and CIS1 have no children.
-        (
-            CommunityArtifactKindV1::StateContent,
-            plan.state,
-            *b"CSC1",
-            &[],
-        ),
-        (
-            CommunityArtifactKindV1::ExecutionProvenance,
-            plan.producer.as_slice(),
-            *b"CIS1",
-            &[],
-        ),
+        Step {
+            kind: CommunityArtifactKindV1::StateContent,
+            plaintext: plan.state,
+            record_magic: *b"CSC1",
+            children: &[],
+            logical_digest: plan.state_digest,
+            producer: revision,
+        },
+        Step {
+            kind: CommunityArtifactKindV1::ExecutionProvenance,
+            plaintext: plan.producer.as_slice(),
+            record_magic: *b"CIS1",
+            children: &[],
+            logical_digest: plan.producer_digest,
+            producer: initial,
+        },
         // CSR1 -> CSC1, CIS1.
-        (
-            CommunityArtifactKindV1::StateRevisionOrHead,
-            plan.revision.as_slice(),
-            *b"CSR1",
-            &[0, 1],
-        ),
+        Step {
+            kind: CommunityArtifactKindV1::StateRevisionOrHead,
+            plaintext: plan.revision.as_slice(),
+            record_magic: *b"CSR1",
+            children: &[0, 1],
+            logical_digest: plan.revision_digest,
+            producer: revision,
+        },
         // `InitialState` CPN1 -> CIS1.
-        (
-            CommunityArtifactKindV1::ExecutionProvenance,
-            plan.initial_node.as_slice(),
-            *b"CPN1",
-            &[1],
-        ),
+        Step {
+            kind: CommunityArtifactKindV1::ExecutionProvenance,
+            plaintext: plan.initial_node.as_slice(),
+            record_magic: *b"CPN1",
+            children: &[1],
+            logical_digest: plan.initial_reference.node_digest,
+            producer: control,
+        },
         // `StateRevision` CPN1 -> CSR1, CSC1, `InitialState` CPN1.
-        (
-            CommunityArtifactKindV1::ExecutionProvenance,
-            plan.revision_node.as_slice(),
-            *b"CPN1",
-            &[2, 0, 3],
-        ),
+        Step {
+            kind: CommunityArtifactKindV1::ExecutionProvenance,
+            plaintext: plan.revision_node.as_slice(),
+            record_magic: *b"CPN1",
+            children: &[2, 0, 3],
+            logical_digest: plan.revision_reference.node_digest,
+            producer: control,
+        },
     ];
     steps.into_iter().try_fold(
         Vec::with_capacity(5),
-        |mut records: Vec<CommunityAssembledRecordV1>,
-         (kind, plaintext, record_magic, children)| {
+        |mut records: Vec<CommunityAssembledRecordV1>, step: Step<'_>| {
+            let children = step.children;
             let mut edges: Vec<ArtifactChildEdgeV1> = children
                 .iter()
                 .map(|child| records[*child].child_edge())
@@ -552,8 +623,8 @@ fn protect_member(
                 .unwrap_or(0);
             protector
                 .protect(
-                    kind,
-                    plaintext,
+                    step.kind,
+                    step.plaintext,
                     CommunityRecordEvidenceV1 {
                         owner_binding_digest: input.owner_binding_digest,
                         host_provenance_digest: input.host_provenance_digest,
@@ -562,7 +633,10 @@ fn protect_member(
                 )
                 .map(|protected| {
                     records.push(CommunityAssembledRecordV1 {
-                        record_magic,
+                        record_magic: step.record_magic,
+                        logical_digest: step.logical_digest,
+                        plaintext_length: step.plaintext.len() as u64,
+                        producer: step.producer,
                         height,
                         protected,
                     });

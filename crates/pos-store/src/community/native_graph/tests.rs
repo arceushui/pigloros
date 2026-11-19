@@ -16,10 +16,10 @@ use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1, CommunityLocatorProducerV1, CommunityMemberBindingInputV1,
     CommunityMemberBindingV1, CommunityMemberProgressV1, CommunityMemberSlotsV1,
     CommunityMetadataLocatorV1, CommunityMetadataSchemaV1, CommunityNativeNodeKindV1,
-    CommunityNativeNodeReferenceV1, CommunityNativeNodeV1, CommunityProfileMemberV1,
-    CommunityProfileRetentionV1, CommunityProtectedObjectV1, CommunityRecordKindsV1,
-    CommunityStateContentV1, CommunityStateProducerV1, CommunityStateRevisionV1,
-    CommunityTypedInputRefV1,
+    CommunityNativeNodeReferenceV1, CommunityNativeNodeV1, CommunityProducerBindingV1,
+    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityProtectedObjectV1,
+    CommunityRecordKindsV1, CommunityStateContentV1, CommunityStateProducerV1,
+    CommunityStateRevisionV1, CommunityTypedInputRefV1,
 };
 use pos_core::{
     AuthorityTrustRootSealV1, Hash, ImplementationKeyV1, RecordedDependencyClassV1, Seq, TimelineId,
@@ -468,5 +468,69 @@ fn a_refused_graph_burns_no_credit() -> TestResult {
         Some(CommunityLifecycleErrorV1::InvalidBinding)
     );
     assert_eq!(assembled.burned, 0);
+    Ok(())
+}
+
+/// Owner decision on #560, note 22661, item 7, rebuilt for the 2c planner:
+/// the crate-private CMI1 builder takes the COA1 address from its caller,
+/// covers the COW1 families only, and binds CIS1 to its `InitialState`
+/// node, CSC1 and CSR1 to the `StateRevision` node and each CPN1 to the
+/// control request `H(CGI1)`.
+#[test]
+fn each_record_materializes_with_its_decided_producer() -> TestResult {
+    let assembled = assemble(PRODUCER)?;
+    let graph = assembled.graph?;
+    let records = graph.records();
+    assert_eq!(records.len(), assembled.plaintexts.len());
+    for (index, (record, plaintext)) in records.iter().zip(&assembled.plaintexts).enumerate() {
+        let slot = u16::try_from(index / 5)?;
+        let member = &assembled.plaintexts[index - index % 5..][..5];
+        let ordinal = u32::from(slot) * 2;
+        let initial = CommunityProducerBindingV1::Native(reference(ordinal, &member[3]));
+        let revision = CommunityProducerBindingV1::Native(reference(ordinal + 1, &member[4]));
+        let (magic, producer) = match index % 5 {
+            0 => (*b"CSC1", revision),
+            1 => (*b"CIS1", initial),
+            2 => (*b"CSR1", revision),
+            _ => (
+                *b"CPN1",
+                CommunityProducerBindingV1::Control(assembled.request_digest),
+            ),
+        };
+        let attestation = hash(0x90 + u8::try_from(index)?);
+        let materialization =
+            record.materialization(INCARNATION, timeline(), GENERATION, attestation)?;
+        let fields = materialization.as_input();
+        assert_eq!(fields.store_incarnation, INCARNATION);
+        assert_eq!(fields.timeline, timeline());
+        assert_eq!(fields.generation, GENERATION);
+        assert_eq!(fields.record_magic, magic);
+        let domain = std::str::from_utf8(&magic)?;
+        assert_eq!(fields.logical_record_digest, adr_h(domain, plaintext));
+        assert_eq!(fields.plaintext_length, plaintext.len() as u64);
+        let registration = record.protected().registration();
+        let reference = fields.materialization;
+        assert_eq!(
+            reference.owner_reference,
+            registration.fields().owner_reference
+        );
+        assert_eq!(
+            reference.artifact_class,
+            pos_core::ErasureArtifactClassV1::TimelineReplay
+        );
+        assert_eq!(
+            reference.object_address,
+            record.protected().object_address()
+        );
+        assert_eq!(
+            reference.artifact_digest,
+            registration.fields().artifact_digest
+        );
+        assert_eq!(reference.registration_address, registration.address());
+        assert_eq!(reference.attestation_address, attestation);
+        assert!(fields.producer == producer);
+        assert_eq!(fields.scope_binding_digest, SCOPE_COVER);
+        assert_eq!(fields.evidence_not_after_micros, HORIZON);
+    }
     Ok(())
 }

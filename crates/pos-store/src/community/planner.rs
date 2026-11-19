@@ -983,4 +983,37 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             })
             .collect()
     }
+
+    /// One canonical CMI1 per protected record of `graph`, binding the
+    /// address of that record's COA1 in `admissions`, in record order
+    /// (ADR-129 §4; owner decision on #560, note 22661, item 7).
+    ///
+    /// # Errors
+    /// Returns `InvalidBinding` for an admission count other than the
+    /// graph's record count. CMI1 codec refusals pass through.
+    pub fn materializations(
+        &self,
+        generation: [u8; 16],
+        graph: &CommunityInitializationGraphV1,
+        admissions: &[CommunityArtifactAdmissionV1],
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>, Error> {
+        let records = graph.records();
+        if admissions.len() != records.len() {
+            return Err(Error::InvalidBinding);
+        }
+        records
+            .iter()
+            .zip(admissions)
+            .map(|(record, admission)| {
+                record
+                    .materialization(
+                        self.installation.store_incarnation,
+                        self.form.timeline,
+                        generation,
+                        admission.digest(),
+                    )
+                    .map(|materialization| materialization.to_canonical_cbor())
+            })
+            .collect()
+    }
 }

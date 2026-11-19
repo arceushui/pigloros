@@ -13,6 +13,7 @@ use std::error::Error as StdError;
 
 use ciborium::Value;
 use fixtures::{release_one, Harness, ManifestSpec};
+use pos_core::community_lifecycle::CommunityMaterializationV1;
 use pos_core::community_lifecycle::{
     community_capability_attestation_digest_v1, community_initializer_set_ref_v1, ArtifactRefV1,
     CommunityActorRowV1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
@@ -866,6 +867,51 @@ fn every_protected_record_gets_its_coa1() -> TestResult {
             assert_eq!(fields.admission_inventory_generation, 0);
             assert_eq!(fields.authority_evidence_digest, evidence.evidence_digest());
         }
+        Ok(())
+    })
+}
+
+/// Note 22661, item 7: one CMI1 per protected record, each naming its own
+/// record's COA1; a COA1 list of another length is refused.
+#[test]
+fn every_protected_record_gets_its_cmi1() -> TestResult {
+    with_operation(|operation| {
+        let Operation {
+            world,
+            planner,
+            graph,
+            input,
+            ..
+        } = operation;
+        let evidence = planner.authority_evidence(&world.authority, GENERATION, input)?;
+        let admissions = planner.admissions(graph, &evidence)?;
+        let materializations = planner.materializations(GENERATION, graph, &admissions)?;
+        assert_eq!(materializations.len(), graph.records().len());
+        for ((bytes, admission), record) in materializations
+            .iter()
+            .zip(&admissions)
+            .zip(graph.records())
+        {
+            let materialization = CommunityMaterializationV1::from_canonical_cbor(bytes)?;
+            let fields = materialization.as_input();
+            assert_eq!(
+                fields.materialization.attestation_address,
+                admission.digest()
+            );
+            assert_eq!(
+                fields.materialization.object_address,
+                record.protected().object_address()
+            );
+            assert_eq!(fields.record_magic, record.record_magic());
+            assert_eq!(fields.timeline, target());
+            assert_eq!(fields.generation, GENERATION);
+        }
+        assert_eq!(
+            planner
+                .materializations(GENERATION, graph, &admissions[1..])
+                .err(),
+            Some(Error::InvalidBinding)
+        );
         Ok(())
     })
 }
