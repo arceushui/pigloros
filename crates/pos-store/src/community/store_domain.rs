@@ -28,7 +28,7 @@ pub trait CommunityStoreDomainV1 {
     fn store_incarnation(&self) -> [u8; 16];
 
     /// Load the persisted grant chain whose leaf is `leaf_grant_id` from
-    /// this domain's own authority store, under the domain's guard.
+    /// this domain's own authority store.
     ///
     /// `leaf_grant_id` is an untrusted locator: the chain is evidence for
     /// the owner's own evaluation, never a decision.
@@ -41,7 +41,7 @@ pub trait CommunityStoreDomainV1 {
 
 impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
     fn store_incarnation(&self) -> [u8; 16] {
-        self.store_incarnation
+        Self::store_incarnation(self)
     }
 
     fn load_authority(&self, leaf_grant_id: Hash) -> Result<PersistedAuthorityV1, Error> {
