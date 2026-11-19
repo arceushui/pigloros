@@ -541,10 +541,11 @@ impl AttemptEvidence {
 
     /// `work-after` may be present only when ELM1 limit 9 is nonzero and
     /// KOE1 has status 0: `/work` is read only through the handle that
-    /// observation opened. It is required then, but a null one is missing
-    /// evidence (code 2), not a shape error; after a failed KOE1 (status 1
-    /// or 2) it is null and no evidence is missing (owner decision
-    /// 2026-11-19, R9 amendment review).
+    /// observation opened. Any null `work-after` passes this shape check;
+    /// whether one was required is left to the classifier, which selects a
+    /// null after a status-0 KOE1 with `/work` as missing evidence (code 2).
+    /// After a failed KOE1 (status 1 or 2) a null one is valid (owner
+    /// decision 2026-11-19, R9 amendment review).
     const fn work_after_shaped(&self, work_limit: u64) -> bool {
         let observed = matches!(
             self.observed.fields().status,
