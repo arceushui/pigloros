@@ -306,8 +306,9 @@ pub struct CommunityLifecycleAuthorityV1 {
 
 impl CommunityLifecycleAuthorityV1 {
     /// Install the authority at the trusted composition root, which alone
-    /// holds the [`AuthorityTrustRootSealV1`] (#1374). Without the seal it
-    /// cannot be installed:
+    /// holds the [`AuthorityTrustRootSealV1`] (#1374). The authority keeps
+    /// that seal to build each request's evaluation snapshot and
+    /// authentication result. Without the seal it cannot be installed:
     ///
     /// ```compile_fail,E0061
     /// use pos_core::trusted_clock::TrustedWallSourceV1;
