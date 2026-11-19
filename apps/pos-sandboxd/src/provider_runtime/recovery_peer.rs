@@ -20,8 +20,8 @@
 //!    its retained directory, and verifies mode `0600`, owner UID 0 and the
 //!    socket type;
 //! 5. sends `READY=1`;
-//! 6. accepts exactly one connection within the 5 s peer start bound
-//!    (R12 §7.3), which must have UID 0 `SO_PEERCRED`;
+//! 6. accepts exactly one connection, waiting at most 5 s for it, which
+//!    must have UID 0 `SO_PEERCRED`;
 //! 7. answers it within 100 ms of the accept and sends server EOF after
 //!    RCA1.
 //!
@@ -63,10 +63,12 @@ pub(crate) const RECOVERY_PEER_ARGUMENT: &str = "recovery-peer";
 const RECOVERY_DIRECTORY: &str = "/run/pigloros/sandbox-selector-recovery";
 /// The `SO_PEERCRED` UID the one connection must have.
 const ROOT_UID: u32 = 0;
-/// How long the peer waits for its one connection after `READY=1`: the
-/// 5 s peer start bound of ADR-069 R12 §7.3 (`TimeoutStartUSec`, owner
-/// decision O2). The selector connects as soon as it saw readiness (R12 §6
-/// steps 8 and 9), so a peer still unconnected after that bound is orphaned.
+/// How long the peer waits for its one connection after `READY=1`. R12 sets
+/// no timer for this interval: `TimeoutStartUSec` (§7.3, O2) ends at
+/// readiness, and only `RuntimeMaxUSec` (5 s + 100 ms + 5 s, §7.3 item 2)
+/// caps the whole peer. The selector connects as soon as its step-8 checks
+/// pass (§6 steps 8 and 9), so this in-process bound sits well inside that
+/// lifetime and lets the peer exit on every path even without its unit.
 const ACCEPT_BOUND: Timespec = Timespec {
     tv_sec: 5,
     tv_nsec: 0,

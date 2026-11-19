@@ -255,10 +255,9 @@ fn refuses_without_an_acknowledgement(pair: &[&[u8]; 2]) -> TestResult {
     // A malformed exchange: RCC1 alone.
     assert_eq!(run_peer(ROOT_UID, &pair[..1], Client::Ends, None)?, refused);
     // A client that sends nothing and keeps its stream open is refused at
-    // the 100 ms exchange deadline.
-    let started = Instant::now();
+    // the 100 ms exchange deadline: without it the peer never closes, and
+    // the client's 5 s read timeout fails `run_peer` with an error.
     assert_eq!(run_peer(ROOT_UID, &[], Client::StaysOpen, None)?, refused);
-    assert!(started.elapsed() < Duration::from_secs(5));
     // A connection that is not from root, and a leaf that changed after
     // readiness.
     assert_eq!(
@@ -297,7 +296,7 @@ fn the_recovery_peer_answers_one_exchange_of_the_pending_sir1() -> TestResult {
     let context_bytes = context.to_canonical_cbor()?;
     let pair = [context_bytes.as_slice(), update.as_slice()];
     refuses_without_an_acknowledgement(&pair)?;
-    // No connection within the R12 §7.3 start bound: the peer exits.
+    // No connection within the 5 s accept bound: the peer exits.
     let started = Instant::now();
     assert_eq!(
         serve_with(OsStr::new(ENDPOINT_ID), None, ROOT_UID),
