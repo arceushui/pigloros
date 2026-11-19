@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import hashlib
 import os
 import pathlib
@@ -17,6 +18,7 @@ import unittest
 
 import yaml
 
+import ci_stage_policy as stages
 import test_check_owner_runtime_custody_policy as custody_policy_tests
 import test_merge_owner_bridge_lcov as native_lcov_tests
 import owner_bridge_windows_workflow_policy as native_policy
@@ -86,12 +88,7 @@ WORKSPACE_RUSTDOC_STEP = {
     "env": {"CARGO_INCREMENTAL": "0", "RUSTDOCFLAGS": "-D warnings"},
     "run": "cargo doc --workspace --all-features --no-deps --locked",
 }
-RUSTDOC_JOB_IF = (
-    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "needs.core-gate.result == 'success' && "
-    "(needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request') }}"
-)
+RUSTDOC_JOB_IF = stages.CORE_STAGE_IF
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
 REQUIRED_PREFLIGHT_NEEDS = (
@@ -395,12 +392,8 @@ OWNER_WINDOWS_SCOPE_STEP = {
         'printf \'owner_windows=%s\\n\' "${scope}" >> "$GITHUB_OUTPUT"\n'
     ),
 }
-CORE_JOB_NEEDS = ["ci_change_scope", "preflight-gate"]
-CORE_JOB_IF = (
-    "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
-    "(needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request') }}"
-)
+CORE_JOB_NEEDS = stages.PREFLIGHT_STAGE_NEEDS
+CORE_JOB_IF = stages.PREFLIGHT_STAGE_IF
 
 
 def assert_core_sdk_headroom(workflow: dict) -> None:
@@ -712,7 +705,7 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
 STANDARD_STAGE_RUNNER_CAP = 8
 LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate"})
 CARGO_CRAP_CONSUMERS = ["ci-gate", "depgraph", "modules-structure"]
-# Heavy jobs released by core-gate. Browser parity follows WASM packaging on
+# Heavy jobs released by the complete core set. Browser parity follows WASM packaging on
 # the same budget. cargo-crap starts earlier, from coverage, and compiles
 # nothing (pinned binary, cargo metadata and LCOV parsing in a 10-minute budget,
 # plus a bounded idle wait for main's trusted baseline), and standard-gate and
@@ -736,19 +729,27 @@ def job_needs(job: dict) -> list[str]:
     return [needs] if isinstance(needs, str) else list(needs)
 
 
+def released_by(job: dict, gate: str) -> bool:
+    """A job waits for a stage when it needs the gate or every job the gate reads."""
+    needs = job_needs(job)
+    return gate in needs or set(stages.STAGE_GATES[gate]).issubset(needs)
+
+
 def assert_standard_stage_runner_cap(workflow: dict) -> None:
     """Keep the normal stage within its documented concurrent-runner cap."""
     jobs = workflow["jobs"]
     started = {
         name
         for name, job in jobs.items()
-        if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
+        if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS
+        and released_by(job, "core-gate")
+        and not released_by(job, "standard-gate")
     }
     crap = jobs.get("cargo-crap", {})
     if (
         "strategy" in crap
         or crap.get("timeout-minutes") != 70
-        or "core-gate" in job_needs(crap)
+        or released_by(crap, "core-gate")
         or "coverage" not in job_needs(crap)
     ):
         raise AssertionError("cargo-crap must stay one lightweight runner released by coverage")
@@ -765,6 +766,360 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     missing = sorted(started - set(gate_needs))
     if missing:
         raise AssertionError(f"standard-gate must wait for every standard-stage job: {missing}")
+
+
+# ── Stage prerequisites without gate hops ───────────────────────────────────
+# preflight-gate, core-gate and standard-gate only report to ci-gate. Every
+# later stage needs the gate's underlying jobs directly and repeats the gate's
+# pass rule as its condition. The reference below is the gate-hop wiring each
+# consumer replaces: the consumer must start in exactly the circumstances in
+# which it would start after waiting for the gate reporter, whose verdict is
+# taken by executing the gate's own result script.
+IN_SCOPE = (
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request')"
+)
+_PREFLIGHT_HOP = (
+    ["ci_change_scope", "preflight-gate"],
+    "${{ !cancelled() && needs.preflight-gate.result == 'success' && " + IN_SCOPE + " }}",
+)
+_CORE_HOP = (
+    ["ci_change_scope", "core-gate"],
+    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+    "needs.core-gate.result == 'success' && " + IN_SCOPE + " }}",
+)
+GATE_HOP_REFERENCE = {
+    **dict.fromkeys(
+        ("fmt", "feature-matrix", "test", "test-shard", "clippy", "static-launcher", "coverage"),
+        _PREFLIGHT_HOP,
+    ),
+    **dict.fromkeys(
+        ("rustdoc", "reference-evaluator-release", "audit", "asan-build", "world-client-wasm"),
+        _CORE_HOP,
+    ),
+    "materialize-conformance-bundles": (
+        ["ci_change_scope", "conformance-fixtures", "core-gate"],
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "needs.conformance-fixtures.result == 'success' && "
+        "needs.core-gate.result == 'success' && " + IN_SCOPE + " }}",
+    ),
+    "docker-build": (
+        ["ci_change_scope", "core-gate", "third-party-notices"],
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "needs.core-gate.result == 'success' && "
+        "needs.third-party-notices.result == 'success' && " + IN_SCOPE + " }}",
+    ),
+    "codeql": (
+        ["ci_change_scope", "core-gate"],
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "(needs.core-gate.result == 'success' || "
+        "needs.ci_change_scope.outputs.rust == 'false') }}",
+    ),
+    # No status function: GitHub adds an implicit success() of every need.
+    "mutation-checks": (
+        ["ci_change_scope", "standard-gate"],
+        "${{ github.event_name == 'pull_request' && "
+        "needs.ci_change_scope.outputs.rust == 'true' }}",
+    ),
+    "asan": (
+        ["ci_change_scope", "standard-gate", "asan-build"],
+        "${{ !cancelled() && needs.standard-gate.result == 'success' && "
+        "needs.asan-build.result == 'success' && " + IN_SCOPE + " }}",
+    ),
+    **dict.fromkeys(
+        ("modules-structure", "depgraph"),
+        (
+            ["standard-gate", "cargo-crap"],
+            "${{ github.event_name != 'pull_request' && "
+            "needs.standard-gate.result == 'success' && "
+            "needs.cargo-crap.result == 'success' }}",
+        ),
+    ),
+}
+JOB_RESULTS = ("success", "failure", "cancelled", "skipped")
+STATUS_FUNCTIONS = frozenset({"always", "cancelled", "success", "failure"})
+EXPRESSION_TOKEN = re.compile(
+    r"\s*(?:(?P<op>&&|\|\||==|!=|!|\(|\))|(?P<string>'(?:[^']|'')*')"
+    r"|(?P<call>[A-Za-z_]+)\(\)|(?P<ref>[A-Za-z_][A-Za-z0-9_.-]*))"
+)
+
+
+@functools.lru_cache(maxsize=None)
+def parse_condition(text: str) -> tuple:
+    """Parse the job-condition subset ci.yml uses into a small syntax tree."""
+    text = text.strip()
+    if not (text.startswith("${{") and text.endswith("}}")):
+        raise AssertionError(f"job condition must be one expression: {text!r}")
+    body = text[3:-2].strip()
+    tokens: list[tuple[str, str]] = []
+    position = 0
+    while position < len(body):
+        match = EXPRESSION_TOKEN.match(body, position)
+        if match is None or match.end() == position:
+            raise AssertionError(f"unsupported job condition syntax: {body[position:]!r}")
+        position = match.end()
+        kind = match.lastgroup
+        tokens.append((kind, match.group(kind)))
+    index = 0
+
+    def peek() -> str | None:
+        return tokens[index][1] if index < len(tokens) and tokens[index][0] == "op" else None
+
+    def take() -> tuple[str, str]:
+        nonlocal index
+        if index >= len(tokens):
+            raise AssertionError("job condition ends early")
+        index += 1
+        return tokens[index - 1]
+
+    def disjunction() -> tuple:
+        node = conjunction()
+        while peek() == "||":
+            take()
+            node = ("or", node, conjunction())
+        return node
+
+    def conjunction() -> tuple:
+        node = unary()
+        while peek() == "&&":
+            take()
+            node = ("and", node, unary())
+        return node
+
+    def unary() -> tuple:
+        if peek() == "!":
+            take()
+            return ("not", unary())
+        node = primary()
+        if peek() in ("==", "!="):
+            operator = take()[1]
+            node = ("eq" if operator == "==" else "ne", node, primary())
+        return node
+
+    def primary() -> tuple:
+        kind, value = take()
+        if kind == "op" and value == "(":
+            node = disjunction()
+            if take() != ("op", ")"):
+                raise AssertionError("unbalanced job condition")
+            return node
+        if kind == "string":
+            return ("string", value[1:-1].replace("''", "'"))
+        if kind == "call" and value in STATUS_FUNCTIONS:
+            return ("call", value)
+        if kind == "ref" and value in ("true", "false"):
+            return ("literal", value == "true")
+        if kind == "ref":
+            return ("ref", value)
+        raise AssertionError(f"unsupported job condition term: {value!r}")
+
+    tree = disjunction()
+    if index != len(tokens):
+        raise AssertionError("trailing job condition text")
+
+    def calls(node: tuple) -> bool:
+        return node[0] == "call" or any(
+            isinstance(part, tuple) and calls(part) for part in node[1:]
+        )
+
+    # GitHub adds success() to a job condition without a status function.
+    return tree if calls(tree) else ("and", ("call", "success"), tree)
+
+
+class Scenario:
+    """One combination of dependency results, Rust scope and event."""
+
+    def __init__(self, results: dict[str, str], *, rust: str, event: str,
+                 cancelled: bool = False, change: str = "every job passes") -> None:
+        self.results = results
+        self.rust = rust
+        self.event = event
+        self.cancelled = cancelled
+        self.change = change
+
+    def __str__(self) -> str:
+        state = ", workflow cancelled" if self.cancelled else ""
+        return f"{self.change} ({self.event}, rust={self.rust!r}{state})"
+
+
+def evaluate_condition(text: str, needs: list[str], scenario: Scenario,
+                       results: dict[str, str]) -> bool:
+    """Evaluate a job condition the way the Actions runner does for this subset."""
+
+    def value(node: tuple) -> object:
+        kind = node[0]
+        if kind == "and":
+            return truthy(value(node[1])) and truthy(value(node[2]))
+        if kind == "or":
+            return truthy(value(node[1])) or truthy(value(node[2]))
+        if kind == "not":
+            return not truthy(value(node[1]))
+        if kind in ("eq", "ne"):
+            left, right = value(node[1]), value(node[2])
+            if not isinstance(left, str) or not isinstance(right, str):
+                raise AssertionError("job conditions may compare only strings")
+            # Actions compares strings case-insensitively.
+            return (left.casefold() == right.casefold()) == (kind == "eq")
+        if kind in ("string", "literal"):
+            return node[1]
+        if kind == "call":
+            return {
+                "always": True,
+                "cancelled": scenario.cancelled,
+                "success": not scenario.cancelled
+                and all(results[need] == "success" for need in needs),
+                "failure": any(results[need] == "failure" for need in needs),
+            }[node[1]]
+        reference = node[1]
+        if reference == "github.event_name":
+            return scenario.event
+        parts = reference.split(".")
+        if len(parts) < 3 or parts[0] != "needs":
+            raise AssertionError(f"unsupported job condition reference: {reference}")
+        if parts[1] not in needs:
+            raise AssertionError(f"job condition reads undeclared {reference}")
+        if parts[2:] == ["result"]:
+            return results[parts[1]]
+        if parts[1:] == ["ci_change_scope", "outputs", "rust"]:
+            return scenario.rust
+        raise AssertionError(f"unsupported job condition reference: {reference}")
+
+    def truthy(item: object) -> bool:
+        return item is True or (isinstance(item, str) and item != "")
+
+    return truthy(value(parse_condition(text)))
+
+
+@functools.lru_cache(maxsize=None)
+def run_result_script(script: str, environment: tuple[tuple[str, str], ...]) -> bool:
+    completed = subprocess.run(["bash", "-c", script], env=dict(environment),
+                               capture_output=True, check=False)
+    return completed.returncode == 0
+
+
+GATE_ENV_REFERENCE = re.compile(r"\$\{\{ (needs\.([\w-]+)\.result|[\w.-]+) \}\}")
+
+
+def gate_results(jobs: dict, scenario: Scenario) -> dict[str, str]:
+    """Scenario results plus each gate reporter's verdict from its own script."""
+    results = dict(scenario.results)
+
+    def verdict(gate: str) -> str:
+        if gate in results:
+            return results[gate]
+        job = jobs[gate]
+        if job.get("if") != "${{ always() }}" or len(job.get("steps", [])) != 1:
+            raise AssertionError(f"{gate} must be one unconditional result check")
+        step = job["steps"][0]
+        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        for name, reference in step.get("env", {}).items():
+            match = GATE_ENV_REFERENCE.fullmatch(str(reference))
+            if match is None:
+                raise AssertionError(f"{gate} reads an unsupported value: {reference}")
+            if match.group(2) is not None:
+                if match.group(2) not in job_needs(job):
+                    raise AssertionError(f"{gate} reads undeclared {match.group(1)}")
+                needed = match.group(2)
+                if needed not in results and needed not in stages.STAGE_GATES:
+                    raise AssertionError(f"{gate} reads {needed}, which its stage omits")
+                environment[name] = verdict(needed)
+            elif match.group(1) == "needs.ci_change_scope.outputs.rust":
+                environment[name] = scenario.rust
+            elif match.group(1) == "github.event_name":
+                environment[name] = scenario.event
+            else:
+                raise AssertionError(f"{gate} reads an unsupported value: {reference}")
+        passed = run_result_script(step["run"], tuple(sorted(environment.items())))
+        results[gate] = "success" if passed else "failure"
+        return results[gate]
+
+    for gate in stages.STAGE_GATES:
+        if set(stages.STAGE_GATES[gate]).issubset(results):
+            verdict(gate)
+    return results
+
+
+def baseline_result(job: str, *, rust: str, event: str) -> str:
+    """The result each job reports in an all-green run of this scope."""
+    if job == "trunk-pr":
+        return "success" if event == "pull_request" else "skipped"
+    if job in stages.PREFLIGHT_SCOPED_JOBS:
+        return "success" if rust == "true" else "skipped"
+    if job in (*stages.CORE_JOBS, *stages.STANDARD_JOBS):
+        return "skipped" if rust == "false" else "success"
+    return "success"
+
+
+def stage_scenarios(needs: list[str]):
+    """Every all-green run plus each single dependency changed to another result."""
+    for event in ("pull_request", "push"):
+        for rust in ("true", "false"):
+            baseline = {job: baseline_result(job, rust=rust, event=event) for job in needs}
+            yield Scenario(dict(baseline), rust=rust, event=event)
+            yield Scenario(dict(baseline), rust=rust, event=event, cancelled=True)
+            for job in needs:
+                for result in JOB_RESULTS:
+                    if result == baseline[job]:
+                        continue
+                    changed = dict(baseline, **{job: result})
+                    change = f"{job} is {result}"
+                    yield Scenario(changed, rust=rust, event=event, change=change)
+                    if job == "ci_change_scope":
+                        # A scope job that did not succeed publishes no outputs.
+                        yield Scenario(changed, rust="", event=event, change=change)
+
+
+def assert_stage_consumer(jobs: dict, name: str) -> None:
+    """One stage consumer waits for exactly its gate's jobs and pass rule."""
+    gate, expected_needs, canonical = stages.STAGE_CONSUMERS[name]
+    job = jobs.get(name)
+    if not isinstance(job, dict):
+        raise AssertionError(f"ci.yml must define stage job {name}")
+    needs = job_needs(job)
+    for reporter in stages.GATE_REPORTERS:
+        if reporter in needs:
+            raise AssertionError(f"{name} must not wait for the {reporter} reporter")
+    missing = sorted(set(expected_needs) - set(needs))
+    if missing:
+        raise AssertionError(f"{name} must wait for every {gate} job: missing {missing}")
+    if needs != expected_needs:
+        raise AssertionError(f"{name} direct dependencies changed")
+    condition = job.get("if")
+    if not isinstance(condition, str) or not condition.startswith("${{ !cancelled() && "):
+        raise AssertionError(f"{name} must judge skipped dependencies explicitly")
+    reference_needs, reference = GATE_HOP_REFERENCE[name]
+    for scenario in stage_scenarios(needs):
+        results = gate_results(jobs, scenario)
+        starts = evaluate_condition(condition, needs, scenario, results)
+        expected = evaluate_condition(reference, reference_needs, scenario, results)
+        if starts and not expected:
+            raise AssertionError(f"{name} starts although {scenario}")
+        if expected and not starts:
+            raise AssertionError(f"{name} does not start although {scenario}")
+    if condition != canonical:
+        raise AssertionError(f"{name} must use the canonical {gate} stage condition")
+
+
+def assert_stage_graph(workflow: dict) -> None:
+    """Gate reporters sit beside the stages; consumers wait for the real jobs."""
+    jobs = workflow["jobs"]
+    for gate, reporters in stages.GATE_REPORTERS.items():
+        job = jobs.get(gate)
+        if not isinstance(job, dict):
+            raise AssertionError(f"ci.yml must define the {gate} reporter")
+        covered: set[str] = set()
+        for need in job_needs(job):
+            covered.update(stages.STAGE_GATES.get(need, [need]))
+        if covered != set(stages.STAGE_GATES[gate]):
+            raise AssertionError(f"{gate} must cover exactly its stage consumers' jobs")
+        waiting = sorted(name for name, other in jobs.items() if gate in job_needs(other))
+        if waiting != sorted(reporters):
+            raise AssertionError(
+                f"only {sorted(reporters)} may wait for {gate}; "
+                f"stage jobs must need its jobs directly: {waiting}"
+            )
+    for name in stages.STAGE_CONSUMERS:
+        assert_stage_consumer(jobs, name)
 
 
 # cargo-crap consumes the native LCOV and ci-gate requires both results. The
@@ -861,7 +1216,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
             if occurrences != [(owner, expected)]:
                 raise AssertionError(f"{owner} must run the exact required step once")
     rustdoc = jobs["rustdoc"]
-    if (rustdoc.get("needs") != ["ci_change_scope", "core-gate"]
+    if (rustdoc.get("needs") != stages.CORE_STAGE_NEEDS
             or rustdoc.get("if") != RUSTDOC_JOB_IF):
         raise AssertionError("rustdoc must retain its successful standard-stage prerequisites")
     if any(
@@ -1660,11 +2015,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         # every PR head, so a Rust-scope skip would leave docs-only PRs unmergeable.
         workflow = load_workflow(CI_WORKFLOW_PATH)
         jobs = workflow["jobs"]
-        condition = " ".join(jobs["codeql"]["if"].split())
-        self.assertEqual(jobs["codeql"]["needs"], ["ci_change_scope", "core-gate"])
-        self.assertEqual(condition, "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-                         "(needs.core-gate.result == 'success' || "
-                         "needs.ci_change_scope.outputs.rust == 'false') }}")
+        condition = jobs["codeql"]["if"]
+        self.assertEqual(jobs["codeql"]["needs"], stages.CORE_STAGE_NEEDS)
+        self.assertEqual(condition, stages.CODEQL_IF)
+        self.assertTrue(condition.endswith(
+            "|| needs.ci_change_scope.outputs.rust == 'false') }}"))
         self.assertNotIn("cargo-crap", condition)
         required = jobs["codeql-required"]
         self.assertEqual(required["name"], "CodeQL (Rust)")
@@ -1910,11 +2265,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_asan_runs_beside_mutation_and_ci_gate_still_requires_both(self) -> None:
         jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
         asan = jobs["asan"]
-        self.assertEqual(asan["needs"], ["ci_change_scope", "standard-gate", "asan-build"])
+        self.assertEqual(asan["needs"], stages.STANDARD_STAGE_NEEDS)
         self.assertNotIn("mutation", asan["if"])
-        self.assertIn("needs.standard-gate.result == 'success'", asan["if"])
+        self.assertEqual(asan["if"], stages.ASAN_IF)
         self.assertIn("needs.asan-build.result == 'success'", asan["if"])
-        self.assertEqual(jobs["mutation-checks"]["needs"], ["ci_change_scope", "standard-gate"])
+        self.assertEqual(jobs["mutation-checks"]["needs"], stages.STANDARD_STAGE_NEEDS)
         for name in ("mutation-checks", "asan-gate"):
             self.assertIn(name, jobs["ci-gate"]["needs"])
         for mutation in ("failure", "cancelled", "skipped", ""):
@@ -2542,6 +2897,170 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, message):
                     assert_test_shards_gate(mutated)
 
+    def test_stage_jobs_wait_for_gate_jobs_directly(self) -> None:
+        assert_stage_graph(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_stage_graph_rejects_a_dropped_dependency(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for name, (gate, needs, _) in stages.STAGE_CONSUMERS.items():
+            for dropped in needs:
+                with self.subTest(job=name, dropped=dropped):
+                    mutated = copy.deepcopy(workflow)
+                    # Stage jobs share one aliased list; change only this job.
+                    mutated["jobs"][name]["needs"] = [n for n in needs if n != dropped]
+                    with self.assertRaisesRegex(
+                        AssertionError, f"{name} must wait for every {gate} job"
+                    ):
+                        assert_stage_consumer(mutated["jobs"], name)
+
+    def test_stage_graph_rejects_a_condition_accepting_a_bad_result(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        representatives: dict[str, str] = {}
+        for name, (_, _, condition) in stages.STAGE_CONSUMERS.items():
+            representatives.setdefault(condition, name)
+        self.assertEqual(len(representatives), 7)
+        for condition, name in representatives.items():
+            checked = re.findall(r"needs\.[\w-]+\.result == '(?:success|skipped)'", condition)
+            self.assertTrue(checked)
+            for check in sorted(set(checked)):
+                for accepted in ("failure", "cancelled"):
+                    with self.subTest(job=name, check=check, accepted=accepted):
+                        mutated = copy.deepcopy(workflow)
+                        mutated["jobs"][name]["if"] = condition.replace(
+                            check, check.split(" == ")[0] + f" != '{accepted}'"
+                        )
+                        # Some branches cannot run for some jobs (docker-build needs
+                        # successful notices, the main reports never run on pull
+                        # requests); there only the canonical text rejects a change.
+                        unreachable = "'skipped'" in check or (
+                            name == "modules-structure" and "trunk-pr" in check)
+                        message = (f"{name} (starts although|must use the canonical)"
+                                   if unreachable else f"{name} starts although")
+                        with self.assertRaisesRegex(AssertionError, message):
+                            assert_stage_consumer(mutated["jobs"], name)
+
+    def test_stage_graph_rejects_a_stage_started_early(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        hop_needs, hop_condition = GATE_HOP_REFERENCE["rustdoc"]
+        mutations = {
+            "mutation-checks must wait for every standard-gate job": lambda jobs: jobs[
+                "mutation-checks"
+            ].update(needs=list(stages.CORE_STAGE_NEEDS)),
+            "asan must wait for every standard-gate job": lambda jobs: jobs["asan"].update(
+                needs=[*stages.CORE_STAGE_NEEDS, "asan-build"]
+            ),
+            "rustdoc must wait for every core-gate job": lambda jobs: jobs["rustdoc"].update(
+                needs=list(stages.PREFLIGHT_STAGE_NEEDS), **{"if": stages.PREFLIGHT_STAGE_IF}
+            ),
+            "asan starts although codeql is failure": lambda jobs: jobs["asan"].update(
+                {"if": stages.CORE_STAGE_IF}
+            ),
+            "mutation-checks starts although": lambda jobs: jobs["mutation-checks"].update(
+                {"if": stages.MUTATION_IF.replace(stages.STANDARD_PASSED, stages.CORE_PASSED)}
+            ),
+            "depgraph starts although cargo-crap is": lambda jobs: jobs["depgraph"].update(
+                {"if": stages.MAIN_REPORT_IF.replace(
+                    " && needs.cargo-crap.result == 'success'", "")}
+            ),
+            "fmt starts although": lambda jobs: jobs["fmt"].update(
+                {"if": "${{ !cancelled() && " + IN_SCOPE + " }}"}
+            ),
+            "codeql does not start although": lambda jobs: jobs["codeql"].update(
+                {"if": stages.CORE_STAGE_IF}
+            ),
+            "only \\['ci-gate', 'standard-gate'\\] may wait for core-gate": lambda jobs: jobs[
+                "rustdoc"
+            ].update(needs=list(hop_needs), **{"if": hop_condition}),
+            "audit direct dependencies changed": lambda jobs: jobs["audit"].update(
+                needs=[*stages.CORE_STAGE_NEEDS, "cargo-crap"]
+            ),
+            "test must judge skipped dependencies explicitly": lambda jobs: jobs["test"].update(
+                {"if": stages.PREFLIGHT_STAGE_IF.replace("!cancelled() && ", "")}
+            ),
+            "fmt must use the canonical preflight-gate stage condition": lambda jobs: jobs[
+                "fmt"
+            ].update({"if": stages.PREFLIGHT_STAGE_IF.replace(
+                "!cancelled() && ", "!cancelled() && !cancelled() && ")}),
+            "standard-gate must cover exactly": lambda jobs: jobs["standard-gate"][
+                "needs"
+            ].remove("static-launcher"),
+            "core-gate must cover exactly": lambda jobs: jobs["core-gate"]["needs"].append(
+                "static-launcher"
+            ),
+        }
+        for message, mutate in mutations.items():
+            with self.subTest(message=message):
+                mutated = copy.deepcopy(workflow)
+                mutate(mutated["jobs"])
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_stage_graph(mutated)
+        mutated = copy.deepcopy(workflow)
+        mutated["jobs"]["rustdoc"]["needs"] = [*stages.CORE_STAGE_NEEDS, "core-gate"]
+        with self.assertRaisesRegex(
+            AssertionError, "rustdoc must not wait for the core-gate reporter"
+        ):
+            assert_stage_consumer(mutated["jobs"], "rustdoc")
+
+    def test_stage_condition_evaluator_follows_actions_semantics(self) -> None:
+        scenario = Scenario({"a": "skipped", "b": "success", "ci_change_scope": "success"},
+                            rust="True", event="push")
+        results = scenario.results
+        cases = {
+            "${{ needs.b.result == 'success' }}": False,  # implicit success()
+            "${{ always() && needs.b.result == 'SUCCESS' }}": True,
+            "${{ !cancelled() && (needs.a.result == 'skipped' || false) }}": True,
+            "${{ !cancelled() && needs.a.result != 'skipped' || true }}": True,
+            "${{ !cancelled() && !(needs.a.result == 'skipped') }}": False,
+            "${{ failure() || needs.ci_change_scope.outputs.rust == 'true' }}": True,
+            "${{ cancelled() || github.event_name == 'pull_request' }}": False,
+        }
+        needs = ["a", "b", "ci_change_scope"]
+        for condition, expected in cases.items():
+            with self.subTest(condition=condition):
+                self.assertEqual(
+                    evaluate_condition(condition, needs, scenario, results), expected
+                )
+        for condition in (
+            "needs.a.result == 'skipped'",
+            "${{ !cancelled() && needs.c.result == 'success' }}",
+            "${{ !cancelled() && needs.a.outputs.x == 'y' }}",
+            "${{ !cancelled() && env.X == 'y' }}",
+            "${{ !cancelled() && contains(needs.*.result, 'failure') }}",
+            "${{ !cancelled() && (needs.a.result == 'skipped' }}",
+            "${{ !cancelled() && needs.a.result == 'skipped' ) }}",
+            "${{ !cancelled() && needs.a.result == 'skipped' && }}",
+            "${{ !cancelled() == 'true' }}",
+            "${{ !cancelled() && true == 'true' }}",
+        ):
+            with self.subTest(condition=condition), self.assertRaises(AssertionError):
+                evaluate_condition(condition, needs, scenario, results)
+
+    def test_gate_reporters_read_only_supported_stage_results(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        scenario = next(stage_scenarios(stages.STANDARD_STAGE_NEEDS))
+        results = gate_results(workflow["jobs"], scenario)
+        for gate in stages.STAGE_GATES:
+            self.assertEqual(results[gate], "success")
+        for mutate, message in (
+            (lambda jobs: jobs["core-gate"].update({"if": "${{ success() }}"}),
+             "core-gate must be one unconditional result check"),
+            (lambda jobs: jobs["core-gate"]["steps"][0]["env"].update(X="${{ env.X }}"),
+             "core-gate reads an unsupported value"),
+            (lambda jobs: jobs["core-gate"]["steps"][0]["env"].update(X="literal"),
+             "core-gate reads an unsupported value"),
+            (lambda jobs: jobs["core-gate"]["steps"][0]["env"].update(
+                X="${{ needs.audit.result }}"), "core-gate reads undeclared needs.audit"),
+            (lambda jobs: (jobs["core-gate"]["needs"].append("cargo-crap"),
+                           jobs["core-gate"]["steps"][0]["env"].update(
+                               X="${{ needs.cargo-crap.result }}")),
+             "core-gate reads cargo-crap, which its stage omits"),
+        ):
+            with self.subTest(message=message):
+                mutated = copy.deepcopy(workflow)
+                mutate(mutated["jobs"])
+                with self.assertRaisesRegex(AssertionError, message):
+                    gate_results(mutated["jobs"], scenario)
+
     def test_standard_stage_stays_within_runner_cap(self) -> None:
         assert_standard_stage_runner_cap(load_workflow(CI_WORKFLOW_PATH))
 
@@ -2550,6 +3069,15 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "start exactly the counted jobs": lambda w: w["jobs"].update(
                 {
                     "ninth-heavy-job": {
+                        "needs": list(stages.CORE_STAGE_NEEDS),
+                        "runs-on": "ubuntu-24.04",
+                        "steps": [{"run": "true"}],
+                    }
+                }
+            ),
+            "standard stage must start exactly the counted jobs": lambda w: w["jobs"].update(
+                {
+                    "hop-heavy-job": {
                         "needs": ["ci_change_scope", "core-gate"],
                         "runs-on": "ubuntu-24.04",
                         "steps": [{"run": "true"}],
@@ -2571,6 +3099,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "lightweight runner released by coverage": lambda w: w["jobs"]["cargo-crap"][
                 "needs"
             ].append("core-gate"),
+            "runner released by coverage": lambda w: w["jobs"]["cargo-crap"].update(
+                needs=[*stages.CORE_STAGE_NEEDS, "owner-bridge-windows"]
+            ),
         }
         for message, mutate in mutations.items():
             with self.subTest(message=message):
@@ -2609,15 +3140,12 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_conformance_materialization_honors_rust_scope(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         materialization = workflow["jobs"]["materialize-conformance-bundles"]
-        self.assertIn("ci_change_scope", materialization["needs"])
-        self.assertEqual(
-            materialization["if"],
-            "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-            "needs.conformance-fixtures.result == 'success' && "
-            "needs.core-gate.result == 'success' && "
+        self.assertEqual(materialization["needs"], stages.CORE_STAGE_NEEDS)
+        self.assertEqual(materialization["if"], stages.CORE_STAGE_IF)
+        self.assertIn("needs.conformance-fixtures.result == 'success'", materialization["if"])
+        self.assertTrue(materialization["if"].endswith(
             "(needs.ci_change_scope.outputs.rust == 'true' || "
-            "github.event_name != 'pull_request') }}",
-        )
+            "github.event_name != 'pull_request') }}"))
 
 
 
@@ -2626,10 +3154,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
 # contract. Keep the executable recipe, its graph and its fan-in explicit so
 # changing the producer cannot silently turn acceptance evidence into a no-op.
 STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
- 'needs': ['ci_change_scope', 'preflight-gate'],
- 'if': "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
-       "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != "
-       "'pull_request') }}",
+ 'needs': stages.PREFLIGHT_STAGE_NEEDS,
+ 'if': stages.PREFLIGHT_STAGE_IF,
  'runs-on': 'ubuntu-24.04',
  'timeout-minutes': 45,
  'env': {'RUSTFLAGS': '-D warnings -C target-feature=+crt-static -C '
