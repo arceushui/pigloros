@@ -33,7 +33,9 @@ pub struct CommunityInitializerOwnerV1 {
 impl CommunityInitializerOwnerV1 {
     /// Install the exact CSC1 bytes of every roster row, in roster order, at
     /// the trusted composition root, which alone holds the
-    /// [`AuthorityTrustRootSealV1`]. Without the seal it cannot be installed:
+    /// [`AuthorityTrustRootSealV1`]. The seal only proves the caller is that
+    /// root: the owner never evaluates authority, so it does not keep it.
+    /// Without the seal it cannot be installed:
     ///
     /// ```compile_fail,E0061
     /// use pos_core::community_lifecycle::CommunityDurableProfileV1;
@@ -50,7 +52,7 @@ impl CommunityInitializerOwnerV1 {
     /// `initializer_artifact_ref`, or its schema differs from the row's
     /// `state_schema_digest`.
     pub fn new(
-        _seal: &AuthorityTrustRootSealV1,
+        _seal: &'static AuthorityTrustRootSealV1,
         profile: &CommunityDurableProfileV1<'_>,
         states: Vec<Zeroizing<Vec<u8>>>,
     ) -> Result<Self, Error> {

@@ -18,13 +18,11 @@ test-support = ["sqlite", "pos-core/test-support"]
 # The Memory and SQLite counterfactual adapters mint ADR-064 commit evidence;
 # scripts/check_counterfactual_adapter_seal.py allows only this crate to enable
 # `counterfactual-adapter`.
-# The community owner mints its own `authority-trust-root` seal for each
-# per-request evaluation snapshot and verified authentication result (ADR-129
-# R6.2(5)); scripts/check_authority_trust_root_seal.py allows this crate.
-pos-core = { path = "../pos-core", features = [
-  "authority-trust-root",
-  "counterfactual-adapter",
-] }
+# The community owner never mints the `authority-trust-root` seal: its
+# composition root installs it with a `&'static` seal (#1374), and
+# scripts/check_authority_trust_root_seal.py refuses this crate enabling the
+# feature outside `[dev-dependencies]`.
+pos-core = { path = "../pos-core", features = ["counterfactual-adapter"] }
 pos-crypto = { path = "../pos-crypto" }
 ciborium = { workspace = true }
 blake3 = { workspace = true }
