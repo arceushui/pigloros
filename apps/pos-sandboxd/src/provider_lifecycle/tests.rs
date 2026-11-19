@@ -109,6 +109,9 @@ enum Fault {
     MainPid,
 }
 
+/// What the fake previous-runtime cleanup reports.
+type CleanupReport = Result<(Vec<[u8; 16]>, Duration), ProviderLifecycleError>;
+
 #[derive(Default)]
 struct State {
     units: Vec<FakeUnit>,
@@ -120,7 +123,7 @@ struct State {
     fault: Fault,
     cgroups: PathBuf,
     /// What the previous-runtime cleanup reports.
-    cleanup: Option<Result<Vec<[u8; 16]>, ProviderLifecycleError>>,
+    cleanup: Option<CleanupReport>,
     /// The previous-live sets the cleanup was asked to reconcile.
     cleaned: Vec<Vec<[u8; 16]>>,
 }
@@ -505,7 +508,7 @@ impl Harness {
                         state
                             .cleanup
                             .clone()
-                            .unwrap_or_else(|| Ok(previous_live.to_vec()))
+                            .unwrap_or_else(|| Ok((previous_live.to_vec(), Duration::ZERO)))
                     });
                 Box::pin(std::future::ready(reported))
             }),
@@ -1116,7 +1119,8 @@ fn the_previous_runtime_unit_is_stopped_and_its_attempts_reconciled() -> TestRes
         Fault::None,
     )?;
     let live = [[5; 16], [6; 16]];
-    harness.state.lock().map_err(|_| "poisoned fake")?.cleanup = Some(Ok(vec![[6; 16]]));
+    harness.state.lock().map_err(|_| "poisoned fake")?.cleanup =
+        Some(Ok((vec![[6; 16]], Duration::from_secs(9))));
     let observed = terminate_previous(&harness, &live, Duration::from_secs(10))?;
     assert_eq!(
         observed.challenge(),
@@ -1128,6 +1132,8 @@ fn the_previous_runtime_unit_is_stopped_and_its_attempts_reconciled() -> TestRes
         format!("/system.slice/{runtime}")
     );
     assert_eq!(observed.reconciled_attempt_ids(), [[6; 16]]);
+    // The wait the cleanup applied is reported as it was.
+    assert_eq!(observed.activation_wait(), Duration::from_secs(9));
     // Steps 1 and 2: the runtime unit is stopped and proven unloaded; the
     // slot's own recovery unit may stay loaded. Then the cleanup ran over
     // the previous-live set.

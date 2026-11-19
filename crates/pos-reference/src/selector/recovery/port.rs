@@ -9,6 +9,7 @@
 
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
+use std::time::Duration;
 
 use crate::selector::runtime_lifecycle::{CgroupPath, ObservationChallenge};
 
@@ -268,23 +269,34 @@ pub struct PreviousRuntimeObservation {
     lifecycle_scope_id: [u8; 16],
     control_group: CgroupPath,
     reconciled_attempt_ids: Vec<[u8; 16]>,
+    activation_wait: Duration,
 }
 
 impl PreviousRuntimeObservation {
-    /// Record one completed termination as the adapter observed it.
+    /// Record one completed termination as the adapter observed it, with
+    /// the #1200 D2 recent-activation wait its cleanup applied (zero
+    /// without a recent activation).
     #[must_use]
     pub const fn new(
         challenge: ObservationChallenge,
         lifecycle_scope_id: [u8; 16],
         control_group: CgroupPath,
         reconciled_attempt_ids: Vec<[u8; 16]>,
+        activation_wait: Duration,
     ) -> Self {
         Self {
             challenge,
             lifecycle_scope_id,
             control_group,
             reconciled_attempt_ids,
+            activation_wait,
         }
+    }
+
+    /// The recent-activation wait the cleanup applied beyond its deadline.
+    #[must_use]
+    pub const fn activation_wait(&self) -> Duration {
+        self.activation_wait
     }
 
     /// The echoed challenge.

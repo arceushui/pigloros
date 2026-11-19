@@ -76,6 +76,7 @@
 use std::error::Error;
 use std::future::Future;
 use std::io;
+use std::time::Duration;
 
 use futures_util::future::join_all;
 use tokio::time::{sleep, timeout_at, Instant};
@@ -258,6 +259,8 @@ where
 /// The root selector runs it to terminate a previous runtime. It never runs
 /// the egress probe, which proves the network fit for new admission rather
 /// than proving termination. The registry lock is released when it returns.
+/// Also returns the #1200 D2 recent-activation wait it applied beyond
+/// `deadline`: zero without a recent activation.
 ///
 /// # Errors
 /// Returns the first [`RestartReconciliationError`]. Nothing is removed from
@@ -268,13 +271,13 @@ pub async fn reconcile_cleanup<N>(
     network: &N,
     cleanup: AttemptCleanupDeadlines,
     deadline: Instant,
-) -> Reconciled<ReconciledRestart>
+) -> Reconciled<(ReconciledRestart, Duration)>
 where
     N: OrphanNetworkCleanup + Sync,
 {
     host_cleanup(transport, recovery, network, (cleanup, deadline))
         .await
-        .map(|(reconciled, _deadline)| reconciled)
+        .map(|(reconciled, extended)| (reconciled, extended.saturating_duration_since(deadline)))
 }
 
 /// The cleanup on this host's manager and kernel. Returns the reconciled

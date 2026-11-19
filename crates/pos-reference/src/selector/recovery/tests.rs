@@ -222,6 +222,8 @@ pub(crate) struct Script {
     pub(crate) terminate_advance_ms: u64,
     /// How far it advances during each slot reconciliation.
     pub(crate) reconcile_advance_ms: [u64; 2],
+    /// The recent-activation wait the termination reports, in milliseconds.
+    pub(crate) activation_wait_ms: u64,
     /// How many first terminations are refused before `terminate` applies.
     pub(crate) refused_terminations: usize,
 }
@@ -359,6 +361,7 @@ impl ProviderLifecyclePort for PeerPort {
             scope_of(reply, target.lifecycle_scope_id()),
             CgroupPath::new("/system.slice/previous.service")?,
             reconciled,
+            Duration::from_millis(self.script.activation_wait_ms),
         ))
     }
 
@@ -1230,8 +1233,14 @@ fn targets_and_observations_carry_exactly_what_they_name() -> TestResult {
     assert_eq!(launch.provider_binary().path(), "/path");
     assert_eq!(launch.provider_binary().digest(), [7; 32]);
     let cgroup = CgroupPath::new("/system.slice/x.service")?;
-    let observed =
-        PreviousRuntimeObservation::new(challenge, [5; 16], cgroup.clone(), live.to_vec());
+    let observed = PreviousRuntimeObservation::new(
+        challenge,
+        [5; 16],
+        cgroup.clone(),
+        live.to_vec(),
+        Duration::from_secs(3),
+    );
+    assert_eq!(observed.activation_wait(), Duration::from_secs(3));
     assert_eq!(observed.challenge(), challenge);
     assert_eq!(observed.lifecycle_scope_id(), [5; 16]);
     assert_eq!(observed.control_group(), &cgroup);
@@ -1296,19 +1305,45 @@ fn the_exchange_stream_refuses_io_past_its_deadline() -> TestResult {
 #[test]
 fn every_port_deadline_holds_exactly_at_and_fails_one_past() -> TestResult {
     for (script, expected) in [
+        // Without a recent activation the termination keeps its 10 s.
         (
             Script {
-                terminate_advance_ms: 80_000,
+                terminate_advance_ms: 10_000,
                 ..Script::default()
             },
             None,
         ),
         (
             Script {
-                terminate_advance_ms: 80_001,
+                terminate_advance_ms: 10_001,
                 ..Script::default()
             },
             Some(RecoveryError::DeadlineExceeded),
+        ),
+        // A reported recent-activation wait extends it by that wait only.
+        (
+            Script {
+                terminate_advance_ms: 80_000,
+                activation_wait_ms: 70_000,
+                ..Script::default()
+            },
+            None,
+        ),
+        (
+            Script {
+                terminate_advance_ms: 40_001,
+                activation_wait_ms: 30_000,
+                ..Script::default()
+            },
+            Some(RecoveryError::DeadlineExceeded),
+        ),
+        // A reported wait beyond 70 s is refused.
+        (
+            Script {
+                activation_wait_ms: 70_001,
+                ..Script::default()
+            },
+            Some(RecoveryError::Observation),
         ),
         (
             Script {
