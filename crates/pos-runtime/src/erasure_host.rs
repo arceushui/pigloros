@@ -883,7 +883,7 @@ pub struct LocalErasureSubmissionV1 {
     pub scope: ErasureScopeV1,
     /// The digest of the request's Idempotency-Key.
     pub idempotency_key_digest: ErasureReferenceV1,
-    /// The GMP1 mode-profile digest of the Gateway execution-mode binding
+    /// The digest of the Gateway execution-mode profile of the binding
     /// the request is submitted under.
     pub mode_profile: ErasureReferenceV1,
     /// The store binding epoch of that binding, at least 1.

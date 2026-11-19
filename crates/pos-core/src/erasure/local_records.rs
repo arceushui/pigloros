@@ -1084,7 +1084,7 @@ pub struct LocalErasureAdmissionV1 {
     pub request: ErasureReferenceV1,
     /// `CA(ELB1)` of the bundle active at submission.
     pub trust: ErasureReferenceV1,
-    /// The GMP1 mode-profile digest of the Gateway binding at submission.
+    /// The digest of the Gateway execution-mode profile bound at submission.
     pub mode_profile: ErasureReferenceV1,
     /// The store binding epoch of that Gateway binding, at least 1.
     pub binding_epoch: u64,
