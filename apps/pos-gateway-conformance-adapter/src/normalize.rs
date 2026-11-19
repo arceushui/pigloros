@@ -1,14 +1,16 @@
 //! The response normalization of the requirements text (section 4).
 //!
 //! A text value equal to a value the sub-case captured becomes its slot literal (`{consent}`,
-//! `{room}`), so an echo of a captured consent or room is pinned. The contract fixes neither
-//! Timeline and Event IDs, nor cursors, nor problem detail text, nor a room's correlation ID and
-//! the hashes that cover it, so they are permitted nondeterministic operational fields: a ULID
-//! `id`, `consent_ref`, `timeline_id` or `event_id` member, a `next_cursor` member that is a
-//! well-formed cursor, a `correlation_id` or `descriptor_hash` of lowercase hex digits that are
-//! not all zero, such a provenance digest of a Scenario Room revision, and every problem
-//! `detail` text member are replaced by placeholders, and every ULID segment of a problem
-//! `instance` path becomes `<ulid>`. Every other value stays as it is, so a malformed ID,
+//! `{room}`, `{erasure}`), so an echo of a captured consent, room or erasure is pinned. The
+//! contract fixes neither Timeline, Event and erasure IDs, nor cursors, nor problem detail text,
+//! nor a room's correlation ID and the hashes that cover it, nor the digests that cover a
+//! store's own erasure identity, so they are permitted nondeterministic operational fields: a
+//! ULID `id`, `consent_ref`, `timeline_id`, `event_id`, `request_id` or `operation_id` member,
+//! a `next_cursor` member that is a well-formed cursor, a `correlation_id` or `descriptor_hash`
+//! of lowercase hex digits that are not all zero, such a provenance digest of a Scenario Room
+//! revision or an erasure and such a `trust` bound input of an admission receipt, and every
+//! problem `detail` text member are replaced by placeholders, and every ULID segment of a
+//! problem `instance` or an `operation_url` path becomes `<ulid>`. Every other value stays as it is, so a malformed ID,
 //! cursor or hash, or an echo of another consent or room, cannot match.
 
 use serde_json::{json, Value};
@@ -27,9 +29,27 @@ pub fn observation_v1(status: u16, parsed: Option<Value>) -> Value {
     json!({"status": status, "body": body})
 }
 
-/// The `schema_id` of a Scenario Room revision, whose provenance digest covers its run-local
-/// descriptor hash and Event ID.
-const ROOM_REVISION_SCHEMA: &str = "urn:pigloros:gateway:v1:schema:scenario-room-revision";
+/// The `(schema_id, member, field)` rows of the digests a placeholder replaces in an object of
+/// that schema: a Scenario Room revision's provenance covers its run-local descriptor hash and
+/// Event ID, and an erasure's ERS1 state digest and an admission receipt's bundle digest cover
+/// the store's own erasure identity (#1449).
+const MASKED_DIGESTS: [(&str, &str, &str); 3] = [
+    (
+        "urn:pigloros:gateway:v1:schema:scenario-room-revision",
+        "provenance",
+        "digest",
+    ),
+    (
+        "urn:pigloros:gateway:v1:schema:erasure",
+        "provenance",
+        "digest",
+    ),
+    (
+        "urn:pigloros:gateway:v1:schema:admission-receipt",
+        "bound_inputs",
+        "trust",
+    ),
+];
 
 /// Normalize one parsed JSON response value.
 #[must_use]
@@ -67,15 +87,21 @@ pub fn substitute_captured_v1(value: Value, captured: &[(&str, &str)]) -> Value 
 fn normalize(value: Value, key: Option<&str>) -> Value {
     match value {
         Value::Object(members) => {
-            let revision =
-                members.get("schema_id").and_then(Value::as_str) == Some(ROOM_REVISION_SCHEMA);
+            let schema = members
+                .get("schema_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
             Value::Object(
                 members
                     .into_iter()
                     .map(|(name, member)| {
                         let mut normalized = normalize(member, Some(&name));
-                        if revision && name == "provenance" {
-                            mask_digest(&mut normalized);
+                        for (_, _, field) in MASKED_DIGESTS
+                            .iter()
+                            .filter(|(id, member, _)| *id == schema && *member == name)
+                        {
+                            mask_digest(&mut normalized, field);
                         }
                         (name, normalized)
                     })
@@ -106,9 +132,10 @@ const TEXT_MASKS: [TextMask; 4] = [
 
 fn normalize_text(key: Option<&str>, text: String) -> String {
     match key {
-        Some("id" | "instance" | "consent_ref" | "timeline_id" | "event_id") => {
-            normalize_ulid_segments(&text)
-        }
+        Some(
+            "id" | "instance" | "consent_ref" | "timeline_id" | "event_id" | "request_id"
+            | "operation_id" | "operation_url",
+        ) => normalize_ulid_segments(&text),
         _ => TEXT_MASKS
             .iter()
             .find(|(member, masked, _)| key == Some(*member) && masked(&text))
@@ -157,10 +184,10 @@ fn is_cursor(text: &str) -> bool {
     }
 }
 
-/// The `digest` of a room revision's provenance becomes `<hash>` when it is a hash.
-fn mask_digest(provenance: &mut Value) {
-    if let Some(digest) = provenance
-        .get_mut("digest")
+/// The `field` of a masked member becomes `<hash>` when it is a hash.
+fn mask_digest(member: &mut Value, field: &str) {
+    if let Some(digest) = member
+        .get_mut(field)
         .filter(|digest| digest.as_str().is_some_and(is_hash))
     {
         *digest = Value::from("<hash>");
