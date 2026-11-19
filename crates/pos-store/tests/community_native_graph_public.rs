@@ -1,7 +1,8 @@
 //! Native-graph assembly of one code-0 initialization (ADR-129 §2/§4,
 //! #560 A3c-2b′) through its public seam: the per-member COW1 records and
 //! their ARD1 children, the initial CMS1/CST1/CSH1, the CGR1 root and
-//! counts, the CGA1 result and every input refusal.
+//! counts, the CGA1 result and every input refusal; and the community
+//! extractor `prepare_community_artifact_batch_v1` over that graph.
 //!
 //! The graph shape is the owner decision on #560, note 22661. Every
 //! expected digest is computed independently with `blake3` from the ADR
@@ -14,12 +15,13 @@ use pos_core::community_lifecycle::{
     community_initializer_set_ref_v1, ArtifactRefV1, CommunityArtifactKindV1 as Kind,
     CommunityArtifactOperationV1 as Operation, CommunityArtifactPurposeV1 as Purpose,
     CommunityDigestListV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
-    CommunityDurableProfileV1, CommunityGenerationAdmissionV1, CommunityGraphRootV1,
-    CommunityInitializationRequestInputV1, CommunityInitializationRequestV1,
-    CommunityInitializationSourceV1 as Source, CommunityLifecycleErrorV1 as Error,
-    CommunityMemberBindingInputV1, CommunityMemberBindingV1, CommunityMemberProgressV1,
-    CommunityMemberSlotsV1, CommunityNativeNodeReferenceV1, CommunityPassFrontierV1,
-    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityProgressReferenceV1,
+    CommunityDurableProfileV1, CommunityGenerationAdmissionV1, CommunityGraphCountsV1,
+    CommunityGraphRootInputV1, CommunityGraphRootV1, CommunityInitializationRequestInputV1,
+    CommunityInitializationRequestV1, CommunityInitializationSourceV1 as Source,
+    CommunityLifecycleErrorV1 as Error, CommunityMemberBindingInputV1, CommunityMemberBindingV1,
+    CommunityMemberProgressV1, CommunityMemberSlotsV1, CommunityNativeNodeReferenceV1,
+    CommunityNativeNodeReferencesV1, CommunityPassFrontierV1, CommunityProfileMemberV1,
+    CommunityProfileRetentionV1, CommunityProgressReferenceV1, CommunityProtectedObjectV1,
     CommunityRecordKindsV1, CommunitySelectedHeadV1, CommunityStateContentV1,
 };
 use pos_core::{
@@ -27,9 +29,11 @@ use pos_core::{
     ErasureArtifactClassV1 as Class, Hash, ImplementationKeyV1, Seq, TimelineId,
 };
 use pos_store::community::{
-    CommunityArtifactProtectorV1, CommunityAssembledRecordV1, CommunityInitializationGraphInputV1,
-    CommunityInitializationGraphV1, CommunityInitializationMemberV1, CommunityInitializerOwnerV1,
-    CommunityProtectionCohortV1,
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1,
+    CommunityArtifactProtectorV1, CommunityArtifactRecordInputV1, CommunityAssembledRecordV1,
+    CommunityInitializationGraphInputV1, CommunityInitializationGraphV1,
+    CommunityInitializationMemberV1, CommunityInitializerOwnerV1, CommunityProtectionCohortV1,
+    CommunityRecordEvidenceV1,
 };
 use ulid::Ulid;
 use zeroize::Zeroizing;
@@ -50,6 +54,11 @@ const COB: Hash = Hash::from_bytes([0x40; 32]);
 const CPV: Hash = Hash::from_bytes([0x41; 32]);
 const SCOPE_COVER: Hash = Hash::from_bytes([0x42; 32]);
 const ENTRIES: [&str; 2] = ["Entry-A_1", "Entry-B_1"];
+const AUTHORIZATION: ArtifactRefV1 = ArtifactRefV1 {
+    schema_id: 0x4341_0002,
+    byte_length: 41,
+    digest: [0x51; 32],
+};
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -208,11 +217,7 @@ fn request_input<'a>(
             byte_length: 40,
             digest: [0x50; 32],
         },
-        authorization_ref: ArtifactRefV1 {
-            schema_id: 0x4341_0002,
-            byte_length: 41,
-            digest: [0x51; 32],
-        },
+        authorization_ref: AUTHORIZATION,
         evidence_not_after_micros: REQUEST_HORIZON,
     }
 }
@@ -288,9 +293,17 @@ fn sorted(mut edges: Vec<ArtifactChildEdgeV1>) -> Vec<ArtifactChildEdgeV1> {
 }
 
 /// The assembled two-member graph and the inputs it was built from.
-fn assembled(
-    fixture: &Fixture,
-) -> Fallible<(CommunityInitializationGraphV1, Vec<Hash>, Hash, Hash)> {
+/// An assembled two-member graph, the facts it binds and the protector
+/// whose key handle the extractor authenticates it with.
+struct Assembled {
+    graph: CommunityInitializationGraphV1,
+    digests: Vec<Hash>,
+    profile_digest: Hash,
+    request_digest: Hash,
+    protector: CommunityArtifactProtectorV1,
+}
+
+fn assembled(fixture: &Fixture) -> Fallible<Assembled> {
     let rows = fixture.rows()?;
     let profile = profile(&rows)?;
     let owner = fixture.owner(&profile)?;
@@ -308,8 +321,13 @@ fn assembled(
         &owner,
         &mut protector,
     )?;
-    let request_digest = request.digest();
-    Ok((graph, digests, profile.digest(), request_digest))
+    Ok(Assembled {
+        graph,
+        digests: digests.clone(),
+        profile_digest: profile.digest(),
+        request_digest: request.digest(),
+        protector,
+    })
 }
 
 /// Per slot: CSC1, CIS1, CSR1, `InitialState` CPN1, `StateRevision` CPN1,
@@ -467,11 +485,12 @@ fn check_admission(graph: &CommunityInitializationGraphV1, request_digest: Hash)
 #[test]
 fn assembles_the_initial_graph_of_every_member() -> TestResult {
     let fixture = Fixture::descending()?;
-    let (graph, digests, profile_digest, request_digest) = assembled(&fixture)?;
+    let assembled = assembled(&fixture)?;
+    let graph = &assembled.graph;
     check_records(graph.records());
-    check_progress(&graph, &digests, profile_digest)?;
-    check_root(&graph, profile_digest)?;
-    check_admission(&graph, request_digest)
+    check_progress(graph, &assembled.digests, assembled.profile_digest)?;
+    check_root(graph, assembled.profile_digest)?;
+    check_admission(graph, assembled.request_digest)
 }
 
 /// One input mutation that must refuse with `InvalidBinding`.
@@ -678,5 +697,303 @@ fn refuses_states_the_initializer_owner_does_not_hold() -> TestResult {
         .err(),
         Some(Error::InvalidBinding)
     );
+    Ok(())
+}
+
+/// The extractor input for an assembled graph's own records and root.
+fn batch_records(
+    graph: &CommunityInitializationGraphV1,
+) -> Vec<CommunityArtifactRecordInputV1<'_>> {
+    graph
+        .records()
+        .iter()
+        .map(|record| CommunityArtifactRecordInputV1 {
+            object: record.protected().object(),
+            registration: record.protected().registration(),
+        })
+        .collect()
+}
+
+fn batch_input<'a>(
+    assembled: &'a Assembled,
+    records: &'a [CommunityArtifactRecordInputV1<'a>],
+    graph_root: &'a [u8],
+) -> CommunityArtifactBatchInputV1<'a> {
+    CommunityArtifactBatchInputV1 {
+        store_incarnation: INCARNATION,
+        profile_digest: assembled.profile_digest,
+        operation_id: OPERATION,
+        authorization_ref: AUTHORIZATION,
+        owner_binding_digest: COB,
+        records,
+        graph_root,
+        selected_head: assembled.graph.selected_head(),
+        current_head: None,
+        expected_prior_head: None,
+    }
+}
+
+/// A CGR1 equal to `graph`'s except for its roots and counts.
+fn root_with(
+    graph: &CommunityInitializationGraphV1,
+    roots: &[CommunityNativeNodeReferenceV1],
+    counts: CommunityGraphCountsV1,
+) -> Fallible<Vec<u8>> {
+    let root = CommunityGraphRootV1::from_canonical_cbor(graph.graph_root())?;
+    Ok(CommunityGraphRootV1::new(CommunityGraphRootInputV1 {
+        roots: CommunityNativeNodeReferencesV1::from_references(roots),
+        graph_counts: counts,
+        ..*root.as_input()
+    })?
+    .to_canonical_cbor()
+    .to_vec())
+}
+
+fn roots_and_counts(
+    graph: &CommunityInitializationGraphV1,
+) -> Fallible<(Vec<CommunityNativeNodeReferenceV1>, CommunityGraphCountsV1)> {
+    let root = CommunityGraphRootV1::from_canonical_cbor(graph.graph_root())?;
+    Ok((
+        root.as_input().roots.iter().collect::<Result<_, _>>()?,
+        root.as_input().graph_counts,
+    ))
+}
+
+#[test]
+fn the_extractor_admits_the_assembled_initial_graph() -> TestResult {
+    let assembled = assembled(&Fixture::new()?)?;
+    let graph = &assembled.graph;
+    let records = batch_records(graph);
+    let batch = prepare_community_artifact_batch_v1(
+        &SEAL,
+        batch_input(&assembled, &records, graph.graph_root()),
+        &[&assembled.protector],
+    )?;
+    assert_eq!(batch.graph_root_digest(), adr_h("CGR1", graph.graph_root()));
+    assert_eq!(batch.records().len(), 10);
+    for (verified, record) in batch.records().iter().zip(graph.records()) {
+        let record = record.protected();
+        assert_eq!(verified.object(), record.object());
+        assert_eq!(verified.object_address(), record.object_address());
+        assert_eq!(verified.registration(), record.registration());
+        // The verified record carries the same COA1 bindings.
+        let verified_admission = verified.admission(&SEAL, 3, hash(0x75))?;
+        let admission = record.admission(&SEAL, 3, hash(0x75))?;
+        assert!(verified_admission.as_input() == admission.as_input());
+    }
+    Ok(())
+}
+
+/// Each refusal of a well-formed but unadmissible batch.
+#[test]
+fn the_extractor_refuses_a_stale_head_or_a_missing_key() -> TestResult {
+    let assembled = assembled(&Fixture::new()?)?;
+    let graph = &assembled.graph;
+    let records = batch_records(graph);
+    let input = batch_input(&assembled, &records, graph.graph_root());
+    let prepare = |input, keys: &[&CommunityArtifactProtectorV1]| {
+        prepare_community_artifact_batch_v1(&SEAL, input, keys).err()
+    };
+    // Note 22661, item 8: the current head must be the expected prior head.
+    let stale = CommunityArtifactBatchInputV1 {
+        current_head: Some(hash(0x76)),
+        ..input
+    };
+    assert_eq!(
+        prepare(stale, &[&assembled.protector]),
+        Some(Error::StaleFrontier)
+    );
+    let moved = CommunityArtifactBatchInputV1 {
+        expected_prior_head: Some(hash(0x76)),
+        ..input
+    };
+    assert_eq!(
+        prepare(moved, &[&assembled.protector]),
+        Some(Error::StaleFrontier)
+    );
+    // Matching non-null heads extend the selection.
+    let extended = CommunityArtifactBatchInputV1 {
+        current_head: Some(hash(0x76)),
+        expected_prior_head: Some(hash(0x76)),
+        ..input
+    };
+    assert_eq!(prepare(extended, &[&assembled.protector]), None);
+    // No key handle, or only another suboperation's, owns the records.
+    assert_eq!(prepare(input, &[]), Some(Error::EvidenceUnavailable));
+    let other = CommunityArtifactProtectorV1::provision(&SEAL, cohort()?)?;
+    assert_eq!(prepare(input, &[&other]), Some(Error::EvidenceUnavailable));
+    assert_eq!(prepare(input, &[&other, &assembled.protector]), None);
+    Ok(())
+}
+
+#[test]
+fn the_extractor_refuses_tampered_records() -> TestResult {
+    let assembled = assembled(&Fixture::new()?)?;
+    let graph = &assembled.graph;
+    let prepare = |records: &[CommunityArtifactRecordInputV1<'_>]| {
+        prepare_community_artifact_batch_v1(
+            &SEAL,
+            batch_input(&assembled, records, graph.graph_root()),
+            &[&assembled.protector],
+        )
+        .err()
+    };
+    let object = graph.records()[0].protected().object();
+    let cow1 = CommunityProtectedObjectV1::from_canonical_cbor(object)?;
+    let flip = |envelope: &[u8]| {
+        let mut envelope = envelope.to_vec();
+        let last = envelope.len() - 1;
+        envelope[last] ^= 1;
+        envelope
+    };
+    // A flipped tag in the content or proof envelope does not authenticate.
+    let content = flip(cow1.content_envelope());
+    let proof = flip(cow1.proof_envelope());
+    for (content, proof) in [
+        (content.as_slice(), cow1.proof_envelope()),
+        (cow1.content_envelope(), proof.as_slice()),
+    ] {
+        let tampered = CommunityProtectedObjectV1::new(content, proof)?.to_canonical_cbor();
+        let mut records = batch_records(graph);
+        records[0].object = &tampered;
+        assert_eq!(prepare(&records), Some(Error::EvidenceUnavailable));
+    }
+    // A COW1 that does not decode.
+    let mut records = batch_records(graph);
+    records[0].object = &object[..object.len() - 1];
+    assert_eq!(prepare(&records), Some(Error::InvalidEncoding));
+    // Another record's ARD1, or the ARD1 of an altered child list.
+    let mut records = batch_records(graph);
+    records[0].registration = graph.records()[1].protected().registration();
+    assert_eq!(prepare(&records), Some(Error::InvalidBinding));
+    Ok(())
+}
+
+#[test]
+fn the_extractor_refuses_an_incomplete_or_extended_closure() -> TestResult {
+    let mut assembled = assembled(&Fixture::new()?)?;
+    let extra = assembled.protector.protect(
+        Kind::StateContent,
+        &CommunityStateContentV1::new(SCHEMA, b"extra")?.to_canonical_cbor(),
+        CommunityRecordEvidenceV1 {
+            owner_binding_digest: COB,
+            host_provenance_digest: CPV,
+            children: &[],
+        },
+    )?;
+    let graph = &assembled.graph;
+    let prepare = |records: &[CommunityArtifactRecordInputV1<'_>], root: &[u8]| {
+        prepare_community_artifact_batch_v1(
+            &SEAL,
+            batch_input(&assembled, records, root),
+            &[&assembled.protector],
+        )
+        .err()
+    };
+    let root = graph.graph_root();
+    // A missing child: slot 0's CSC1 is absent.
+    let records = batch_records(graph);
+    assert_eq!(prepare(&records[1..], root), Some(Error::InvalidBinding));
+    // An authenticated record outside the closure.
+    let mut records = batch_records(graph);
+    records.push(CommunityArtifactRecordInputV1 {
+        object: extra.object(),
+        registration: extra.registration(),
+    });
+    assert_eq!(prepare(&records, root), Some(Error::InvalidBinding));
+    // A root set that leaves slot 1 unreached, even with matching counts.
+    let records = batch_records(graph);
+    let (roots, counts) = roots_and_counts(graph)?;
+    let one_root = root_with(graph, &roots[..1], counts)?;
+    assert_eq!(prepare(&records, &one_root), Some(Error::InvalidBinding));
+    // A root that names no `StateRevision` node.
+    let unknown = CommunityNativeNodeReferenceV1 {
+        node_digest: hash(0x77),
+        ..roots[0]
+    };
+    let unknown_root = root_with(graph, &[unknown, roots[1]], counts)?;
+    assert_eq!(
+        prepare(&records, &unknown_root),
+        Some(Error::InvalidBinding)
+    );
+    // Item 6: every count must be the exact ARD1-graph count.
+    for index in 0..6 {
+        let mut values = [
+            counts.registrations,
+            counts.edges,
+            counts.keys,
+            counts.maximum_depth,
+            counts.registration_bytes,
+            counts.artifact_bytes,
+        ];
+        values[index] += 1;
+        let altered = CommunityGraphCountsV1 {
+            registrations: values[0],
+            edges: values[1],
+            keys: values[2],
+            maximum_depth: values[3],
+            registration_bytes: values[4],
+            artifact_bytes: values[5],
+        };
+        let wrong = root_with(graph, &roots, altered)?;
+        assert_eq!(
+            prepare(&records, &wrong),
+            Some(Error::InvalidBinding),
+            "count {index}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_extractor_refuses_another_store_profile_head_or_request() -> TestResult {
+    let other = assembled(&Fixture::with_seed(1)?)?;
+    let assembled = assembled(&Fixture::new()?)?;
+    let graph = &assembled.graph;
+    let records = batch_records(graph);
+    let input = batch_input(&assembled, &records, graph.graph_root());
+    let prepare =
+        |input| prepare_community_artifact_batch_v1(&SEAL, input, &[&assembled.protector]).err();
+    let cases = [
+        CommunityArtifactBatchInputV1 {
+            store_incarnation: [0x5b; 16],
+            ..input
+        },
+        CommunityArtifactBatchInputV1 {
+            profile_digest: hash(0x78),
+            ..input
+        },
+        // A valid CSH1 that this CGR1 does not select.
+        CommunityArtifactBatchInputV1 {
+            selected_head: other.graph.selected_head(),
+            ..input
+        },
+        // Another COB1 than every CAR1 and CSR1 binds.
+        CommunityArtifactBatchInputV1 {
+            owner_binding_digest: hash(0x79),
+            ..input
+        },
+        // Note 22661, items 1 and 3: another CGI1 operation or authorization.
+        CommunityArtifactBatchInputV1 {
+            operation_id: [0x11; 16],
+            ..input
+        },
+        CommunityArtifactBatchInputV1 {
+            authorization_ref: ArtifactRefV1 {
+                digest: [0x52; 32],
+                ..AUTHORIZATION
+            },
+            ..input
+        },
+    ];
+    for (index, case) in cases.into_iter().enumerate() {
+        assert_eq!(prepare(case), Some(Error::InvalidBinding), "case {index}");
+    }
+    // Bytes that are not a CSH1.
+    let not_a_head = CommunityArtifactBatchInputV1 {
+        selected_head: graph.host_progress(),
+        ..input
+    };
+    assert_eq!(prepare(not_a_head), Some(Error::InvalidEncoding));
     Ok(())
 }

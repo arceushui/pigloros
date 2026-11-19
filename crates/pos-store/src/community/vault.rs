@@ -85,9 +85,8 @@ impl VaultKeyV1 {
         })
     }
 
-    /// Authenticate one canonical COE1 under this key, for tests that check
-    /// a sealed record decrypts to its exact plaintext.
-    #[cfg(test)]
+    /// Authenticate one canonical COE1 under this key, as the community
+    /// extractor does before it validates a protected record (#560 A3c-2b′-2).
     pub(super) fn open_envelope(&self, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         CommunityEncryptedEnvelopeV1::from_canonical_cbor(envelope).and_then(|envelope| {
             self.cipher
