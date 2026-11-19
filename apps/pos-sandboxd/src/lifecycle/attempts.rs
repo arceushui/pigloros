@@ -686,9 +686,8 @@ pub struct LiveAttemptIdentity {
 }
 
 impl LiveAttemptIdentity {
-    /// Whether the attempt ended clean: its slot is `Ended` with its cleanup
-    /// proved (the intent removed) or with nothing committed, the two ends a
-    /// cancel reports as `CancelledAndCleaned` (ADR-069 R11 §8.5). Only then may the
+    /// Whether the attempt ended with its cleanup proved: its slot is
+    /// `Ended` with the removed intent (ADR-069 R11 §8.5). Only then may the
     /// live revocation responder acknowledge it as cancelled; any other live
     /// attempt means no RCA1, and recovery follows (R11 D8).
     #[must_use]
@@ -749,8 +748,8 @@ impl LiveAttemptIdentity {
 ///
 /// This is the exact identity handoff to the sealed recovery (#349), and
 /// the live attempt state of the provider's revocation responder (ADR-069
-/// R11 §8.1): an attempt withdrawn before it started is reconciled and never
-/// listed.
+/// R11 §8.1): an attempt that never ran (withdrawn before it started, or
+/// ended by a failed input) is never listed.
 ///
 /// Only [`AttemptLifecycle::fence_and_snapshot`] creates one, once per
 /// runtime; it has no public constructor and cannot be cloned.
@@ -1128,7 +1127,7 @@ impl<I> AttemptLifecycle<I> {
                 ended.push((
                     *attempt_id,
                     Arc::clone(state),
-                    matches!(cleaned, Cleaned::NothingCommitted | Cleaned::Proved(_)),
+                    matches!(cleaned, Cleaned::Proved(_)),
                 ));
             }
         }
