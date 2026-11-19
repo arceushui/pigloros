@@ -411,14 +411,24 @@ pub struct ExecutionReleaseFields {
 /// Signed `ReleaseV1` (`RLS1`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRelease {
-    /// Signed body.
-    pub fields: ExecutionReleaseFields,
-    /// `RLS1` self-digest.
-    pub digest: [u8; 32],
+    fields: ExecutionReleaseFields,
+    digest: [u8; 32],
     signature: [u8; 64],
 }
 
 impl ExecutionRelease {
+    /// The signed body.
+    #[must_use]
+    pub const fn fields(&self) -> &ExecutionReleaseFields {
+        &self.fields
+    }
+
+    /// The `RLS1` self-digest.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
     /// Validate the fields and self-digest them: the only input the
     /// runtime-attestation signer accepts for an RLS1 (ADR-069 R9 §5).
     ///

@@ -909,7 +909,7 @@ fn validate_evidence(
         hcp1_digest: spx.authority.hcp1_digest,
     };
     let expected_receipt_authority = ReceiptAuthority {
-        agr1_digest: grant.grant_digest,
+        agr1_digest: grant.grant_digest(),
         spm1_digest: grant.authority.spm1_digest,
         provider_binary_digest: receipt.authority.provider_binary_digest,
         lps1_digest: grant.authority.lps1_digest,
@@ -960,7 +960,7 @@ fn result_matches_evidence(
     grant.request_id == result.request_id
         && grant.attempt_id == result.attempt_id
         && receipt.attempt_id == result.attempt_id
-        && result.agr1_digest == Some(grant.grant_digest)
+        && result.agr1_digest == Some(grant.grant_digest())
         && result.spr1_digest == Some(receipt.receipt_digest())
         && grant.runtime_attestation_key_id == receipt.runtime_attestation_key_id
         && receipt.runtime_attestation_key_id == result.runtime_attestation_key_id
@@ -987,7 +987,7 @@ fn receipt_matches_grant(
     grant: &AdmissionGrant,
     expected_authority: &ReceiptAuthority,
 ) -> bool {
-    receipt.authority.agr1_digest == grant.grant_digest
+    receipt.authority.agr1_digest == grant.grant_digest()
         && receipt.authority == *expected_authority
         && receipt.trust_epoch == grant.trust_epoch
         && receipt.revocation_epoch == grant.revocation_epoch
@@ -3224,7 +3224,9 @@ mod tests {
             Ok(())
         );
 
-        for field in 0..7 {
+        // Fields 7 to 10 are bound to the self-digested SPR1 only by
+        // `receipt_matches_grant`.
+        for field in 0..11 {
             let mut grant = evidence.grant.clone();
             match field {
                 0 => grant.request_id = [99; 16],
@@ -3234,6 +3236,10 @@ mod tests {
                 4 => grant.input_digest = [99; 32],
                 5 => grant.expected_launch_policy_digest = [99; 32],
                 6 => grant.exchange_plan_digests = vec![[99; 32]],
+                7 => grant.trust_epoch = 99,
+                8 => grant.revocation_epoch = 99,
+                9 => grant.policy_epoch = 99,
+                10 => grant.elm1_digest = [99; 32],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(

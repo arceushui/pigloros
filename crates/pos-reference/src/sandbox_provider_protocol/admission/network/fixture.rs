@@ -14,8 +14,8 @@ use crate::sandbox_provider_protocol::codec::{
     bytes_value, digest_with_domain, text_value, uint_value,
 };
 use crate::sandbox_provider_protocol::{
-    AdmissionAuthority, AdmissionGrant, NetworkCapability, NetworkExchangePlan,
-    NetworkRetentionPolicy, SandboxProviderProtocolError,
+    AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, NetworkCapability,
+    NetworkExchangePlan, NetworkRetentionPolicy, SandboxProviderProtocolError,
 };
 
 const REQUEST_DOMAIN: &[u8] = b"PiglorOS.NetworkRequestBytes.v1\0";
@@ -87,22 +87,26 @@ impl LocalNetworkAdmission {
         limits: NetworkProxyLimits,
     ) -> Self {
         Self {
-            grant: AuthenticatedAdmissionGrant(AdmissionGrant {
-                request_id: [0x1f; 16],
-                attempt_id,
-                expected_launch_policy_digest: authority.lps1_digest,
-                authority,
-                trust_epoch: epochs[0],
-                revocation_epoch: epochs[1],
-                policy_epoch: epochs[2],
-                elm1_digest: [2; 32],
-                input_digest: [3; 32],
-                exchange_plan_digests: exchanges.iter().map(|(plan, _)| plan.plan_digest).collect(),
-                expected_readback_set_digest: [4; 32],
-                runtime_attestation_key_id: "fixture-runtime-key".to_owned(),
-                grant_digest: [5; 32],
-                signature: [0; 64],
-            }),
+            grant: AuthenticatedAdmissionGrant(AdmissionGrant::unsigned_fixture(
+                AdmissionGrantFields {
+                    request_id: [0x1f; 16],
+                    attempt_id,
+                    expected_launch_policy_digest: authority.lps1_digest,
+                    authority,
+                    trust_epoch: epochs[0],
+                    revocation_epoch: epochs[1],
+                    policy_epoch: epochs[2],
+                    elm1_digest: [2; 32],
+                    input_digest: [3; 32],
+                    exchange_plan_digests: exchanges
+                        .iter()
+                        .map(|(plan, _)| plan.plan_digest)
+                        .collect(),
+                    expected_readback_set_digest: [4; 32],
+                    runtime_attestation_key_id: "fixture-runtime-key".to_owned(),
+                },
+                [5; 32],
+            )),
             exchanges,
             limits,
         }
