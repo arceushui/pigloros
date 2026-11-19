@@ -358,9 +358,11 @@ fn narrowed(double: u64, exponent_bits: u64, fraction_bits: u64) -> Option<u64> 
     // shift keeps zero, so capping the applied shift at 63 changes no result.
     let exact = u64::from(significand.trailing_zeros()) >= shift.min(64);
     (exact && target < (1 << exponent_bits) - 1).then(|| {
+        // The sign, exponent and fraction fields do not overlap, so the sums
+        // place each field without carries.
         ((double >> 63) << (exponent_bits + fraction_bits))
-            | (target << fraction_bits)
-            | ((significand >> shift.min(63)) & ((1 << fraction_bits) - 1))
+            + (target << fraction_bits)
+            + ((significand >> shift.min(63)) & ((1 << fraction_bits) - 1))
     })
 }
 
@@ -436,5 +438,32 @@ mod tests {
         assert_eq!(one.finish(), Err(Fault::Invalid));
         assert_eq!(one.unsigned(), Ok(2));
         assert_eq!(one.finish(), Ok(()));
+    }
+
+    #[test]
+    fn floats_at_a_precision_ceiling_take_the_next_width() {
+        // The largest half and single stay in their width; the next power of
+        // two needs the wider one, never the all-ones (infinity) exponent.
+        for (value, shortest) in [
+            (65_504.0, (0xf9, 2, 0x7bff)),
+            (65_536.0, (0xfa, 4, 0x4780_0000)),
+            (f64::from(f32::MAX), (0xfa, 4, 0x7f7f_ffff)),
+            (2_f64.powi(128), (0xfb, 8, 0x47f0_0000_0000_0000)),
+        ] {
+            assert_eq!(shortest_float(value), shortest, "{value}");
+        }
+        assert_eq!(
+            reader(&[0xfa, 0x47, 0x80, 0x00, 0x00]).float(),
+            Ok(65_536.0)
+        );
+        for bytes in [
+            &[0xf9, 0x7c, 0x00][..],
+            &[0xf9, 0xfc, 0x00],
+            &[0xf9, 0x7e, 0x00],
+            &[0xfa, 0x7f, 0x80, 0x00, 0x00],
+            &[0xfa, 0x7f, 0xc0, 0x00, 0x00],
+        ] {
+            assert_eq!(reader(bytes).float(), Err(Fault::Invalid), "{bytes:?}");
+        }
     }
 }
