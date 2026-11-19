@@ -21,15 +21,22 @@
 //!
 //! The authority never changes afterwards (R11 D9): no step is repeated.
 //!
-//! [`start_runtime_authority`] must complete before the runtime binds any
-//! socket or sends `READY=1`. That binding and notification come after the
-//! #1399 selector-owned runtime lifecycle (ADR-069 R11 §15) and consume the
-//! returned [`RuntimeAuthority`].
+//! The `provider-runtime` mode, `serve_provider_runtime`, runs these
+//! steps before any socket exists. The selector started this runtime as
+//! its runtime unit (#1399, R11 §5.0), so the mode then binds both SIC1
+//! endpoints, execute then control (`endpoint`, R11 §6), sends `READY=1`
+//! (`notify`) and serves both in state `Starting` (`serving`, R11 §7).
+//! Restart reconciliation, which opens admission, is not composed yet
+//! (R11 §15 slice 4): until it is, the runtime stays `Starting`.
 
+mod endpoint;
+mod notify;
+mod serving;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
+use std::ffi::OsStr;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -65,6 +72,67 @@ pub enum ProviderStartupError {
     /// Step 5: the attempt range holds fewer slots than admission can use.
     #[error("the attempt range holds fewer slots than admission can use")]
     SlotCount,
+}
+
+/// Why the `provider-runtime` mode stopped. No variant names a secret.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ProviderRuntimeError {
+    /// R11 §5.1 steps 2 to 6 refused, before any socket existed.
+    #[error(transparent)]
+    Startup(#[from] ProviderStartupError),
+    /// An endpoint lies at or under `/run/pigloros/sandbox` (R11 §6 M4).
+    #[error("a provider endpoint lies under the provider state directory")]
+    ReservedEndpoint,
+    /// An endpoint, its parent or a directory above it fails the §6 rules,
+    /// or a bound leaf lost its identity.
+    #[error("a provider endpoint or its parent is unsafe")]
+    UnsafeEndpoint,
+    /// A listener could not be bound or polled.
+    #[error("a provider endpoint is unavailable")]
+    EndpointUnavailable,
+}
+
+fn unsafe_endpoint<T>(_: T) -> ProviderRuntimeError {
+    ProviderRuntimeError::UnsafeEndpoint
+}
+
+fn unavailable<T>(_: T) -> ProviderRuntimeError {
+    ProviderRuntimeError::EndpointUnavailable
+}
+
+/// The `provider-runtime` mode (R11 §5.1): bind this process's startup
+/// authority, then bind, notify and serve until a listener invariant fails.
+///
+/// It reads `NOTIFY_SOCKET` and no other environment variable.
+pub(crate) fn serve_provider_runtime() -> ProviderRuntimeError {
+    serve_with(
+        start_runtime_authority,
+        std::env::var_os("NOTIFY_SOCKET").as_deref(),
+    )
+}
+
+/// The mode against the startup authority that `start` binds, notifying
+/// `notify_socket`.
+fn serve_with(
+    start: impl FnOnce() -> Result<RuntimeAuthority, ProviderStartupError>,
+    notify_socket: Option<&OsStr>,
+) -> ProviderRuntimeError {
+    start().map_or_else(ProviderRuntimeError::from, |(admitted, _, signer)| {
+        let (execute, control) = admitted
+            .bootstrap()
+            .installed()
+            .manifest()
+            .provider_sockets();
+        endpoint::bind_endpoints(execute, control).map_or_else(
+            |error| error,
+            |(execute, control)| {
+                notify::notify_ready(notify_socket);
+                let pool = usize::try_from(required_slots(admitted.provider().broker_hard_caps()))
+                    .unwrap_or(1);
+                serving::Responder::new(&admitted, &signer).serve(&execute, &control, pool)
+            },
+        )
+    })
 }
 
 /// The admitted provider, its SPI1 values and its runtime-attestation
