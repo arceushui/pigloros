@@ -20,7 +20,7 @@ ALLOWED_MANIFESTS = {
     "apps/piglor-gateway/Cargo.toml": '[features]\nowner = ["pos-core/authority-trust-root"]\n'
     + "[target.'cfg(unix)'.dependencies]\n"
     + ENABLING,
-    "crates/pos-store/Cargo.toml": "[dependencies]\n" + ENABLING,
+    "crates/pos-store/Cargo.toml": DEV_ONLY,
     "apps/pos-experiment/Cargo.toml": "[features]\n"
     + 'test-support = ["pos-core?/authority-trust-root"]\n'
     + "[build-dependencies]\n"
@@ -44,7 +44,6 @@ MINT_SITE_FILES = (
     "apps/piglor-gateway/src/local_principal.rs",
     "apps/pos-experiment/src/lib.rs",
     "apps/pos-plugin-conformance-adapter/src/main.rs",
-    "crates/pos-store/src/community/attestation.rs",
 )
 FEATURES_FLAG = "cargo test -p pos-state --features pos-core/authority-trust-root\n"
 
@@ -112,6 +111,21 @@ REJECTED_MANIFESTS = {
         '[features]\ndefault = ["authority-trust-root"]\nauthority-trust-root = []\n',
         DEFAULT,
     ),
+    "store dependency": (
+        "crates/pos-store/Cargo.toml",
+        "[dependencies]\n" + ENABLING,
+        DEPENDENCY,
+    ),
+    "store target dependency": (
+        "crates/pos-store/Cargo.toml",
+        "[target.'cfg(target_os = \"linux\")'.dependencies]\n" + ENABLING,
+        DEPENDENCY,
+    ),
+    "store forwarding feature": (
+        "crates/pos-store/Cargo.toml",
+        '[features]\nowner = ["pos-core/authority-trust-root"]\n',
+        "feature owner forwards authority-trust-root",
+    ),
     "store default feature": (
         "crates/pos-store/Cargo.toml",
         '[features]\ndefault = ["owner"]\nowner = ["pos-core/authority-trust-root"]\n',
@@ -166,8 +180,8 @@ ALLOWED_SOURCES = {
     + '    println!("cargo:rerun-if-changed=x");\n}\n',
     "apps/pos-plugin-conformance-adapter/src/runner.rs": "#[cfg(test)]\nmod tests;\n"
     + "pub fn open(seal: &'static AuthorityTrustRootSealV1) {}\n",
-    "crates/pos-store/src/community/attestation.rs": "static OWNER_SEAL: AuthorityTrustRootSealV1 = "
-    + MINT,
+    "crates/pos-store/src/community/attestation.rs": "pub(super) fn snapshot("
+    + "seal: &AuthorityTrustRootSealV1) {}\n",
     "crates/pos-store/src/community/owner.rs": "pub(crate) fn seal() "
     + "-> AuthorityTrustRootSealV1 {\n"
     + "pub fn install(seal: &AuthorityTrustRootSealV1) -> u8 {\n"
@@ -394,10 +408,10 @@ REJECTED_SOURCES = {
         PINNED,
     ),
     "non-enabling crate mint": ("plugins/agent/src/provider_driver.rs", SEAL_USE, PINNED),
-    "second store mint": (
+    "store mint at the former owner site": (
         "crates/pos-store/src/community/attestation.rs",
-        "static OWNER_SEAL: AuthorityTrustRootSealV1 = " + MINT + SEAL_USE,
-        "mints the authority trust-root seal 2 times, expected 1",
+        "static OWNER_SEAL: AuthorityTrustRootSealV1 = " + MINT,
+        PINNED,
     ),
     "store mint outside its pinned site": (
         "crates/pos-store/src/community/lifecycle_authority.rs",

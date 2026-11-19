@@ -229,8 +229,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         if major != 2 || usize::try_from(length) != Ok(N) {
             return Err(self.invalid());
         }
-        self.take(N)
-            .map(|bytes| std::array::from_fn(|index| bytes[index]))
+        self.fixed()
     }
 
     /// Consume a CBOR `null` when it is the next item.
@@ -265,6 +264,38 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         }
     }
 
+    fn fixed<const N: usize>(&mut self) -> Result<[u8; N], E> {
+        self.take(N)
+            .map(|bytes| std::array::from_fn(|index| bytes[index]))
+    }
+
+    /// Read a half, single or double precision float in the shortest of the
+    /// three that holds its value bit for bit.
+    ///
+    /// # Errors
+    /// Returns the invalid-encoding error for an item that is not a float, a
+    /// truncated argument, or a float that a narrower precision holds.
+    pub fn float(&mut self) -> Result<f64, E> {
+        let initial = self.byte()?;
+        let value = match initial {
+            0xf9 => self.fixed().map(|bytes| half(u16::from_be_bytes(bytes))),
+            0xfa => self
+                .fixed()
+                .map(|bytes| f64::from(f32::from_bits(u32::from_be_bytes(bytes)))),
+            0xfb => self
+                .fixed()
+                .map(|bytes| f64::from_bits(u64::from_be_bytes(bytes))),
+            _ => Err(self.invalid()),
+        };
+        value.and_then(|value| {
+            if shortest_float(value).0 == initial {
+                Ok(value)
+            } else {
+                Err(self.invalid())
+            }
+        })
+    }
+
     /// Require that every byte was consumed.
     ///
     /// # Errors
@@ -277,6 +308,75 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
             Err(self.invalid())
         }
     }
+}
+
+/// The binary64 value of half-precision `bits` with a finite exponent.
+///
+/// An all-ones exponent (an infinity or a NaN) decodes as the finite value
+/// `(1024 + fraction) * 2^6`, at least 65,536. No half holds that value, so the
+/// shortest-form check in [`Reader::float`] refuses it, as it refuses every
+/// infinity and NaN.
+fn half(bits: u16) -> f64 {
+    let fraction = f64::from(bits & 0x3ff);
+    let exponent = i32::from((bits >> 10) & 0x1f);
+    let magnitude = if exponent == 0 {
+        fraction * 2_f64.powi(-24)
+    } else {
+        (fraction + 1024.0) * 2_f64.powi(exponent - 25)
+    };
+    if bits & 0x8000 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+/// The 52 fraction bits of an IEEE 754 binary64 value.
+const DOUBLE_FRACTION: u64 = (1 << 52) - 1;
+
+/// The bits of the binary64 value `double` in the narrower IEEE 754 format with
+/// `exponent_bits` and `fraction_bits`, or `None` when that format cannot hold
+/// the value bit for bit.
+///
+/// A normal binary64 value narrows to a normal value when its exponent fits
+/// and its dropped fraction bits are zero, or to a subnormal value when the
+/// shifted-out significand bits are zero. Zero keeps its sign. Infinities,
+/// NaNs and binary64 subnormals never narrow.
+fn narrowed(double: u64, exponent_bits: u64, fraction_bits: u64) -> Option<u64> {
+    let bias = (1 << (exponent_bits - 1)) - 1;
+    let exponent = (double >> 52) & 0x7ff;
+    // The implicit bit 52 lies above the 52 fraction bits, so the sum sets it.
+    let significand = (double & DOUBLE_FRACTION) + (u64::from(exponent != 0) << 52);
+    let normal = exponent + bias > 1023;
+    let (target, shift) = if normal {
+        (exponent + bias - 1023, 52 - fraction_bits)
+    } else {
+        // `exponent <= 1023 - bias` here, so the shift is at least 53 - fraction_bits.
+        (0, 1076 - fraction_bits - bias - exponent)
+    };
+    // A shift of 64 or more is exact only for a zero significand, which any
+    // shift keeps zero, so capping the applied shift at 63 changes no result.
+    let exact = u64::from(significand.trailing_zeros()) >= shift.min(64);
+    (exact && target < (1 << exponent_bits) - 1).then(|| {
+        // The sign, exponent and fraction fields do not overlap, so the sums
+        // place each field without carries.
+        ((double >> 63) << (exponent_bits + fraction_bits))
+            + (target << fraction_bits)
+            + ((significand >> shift.min(63)) & ((1 << fraction_bits) - 1))
+    })
+}
+
+/// The initial byte, argument width and argument of the shortest of half,
+/// single or double precision that holds `value` bit for bit.
+///
+/// [`Reader::float`] accepts only this form, and the subject CBOR writer
+/// produces it.
+pub(crate) fn shortest_float(value: f64) -> (u8, usize, u64) {
+    let bits = value.to_bits();
+    narrowed(bits, 5, 10)
+        .map(|narrow| (0xf9, 2, narrow))
+        .or_else(|| narrowed(bits, 8, 23).map(|narrow| (0xfa, 4, narrow)))
+        .unwrap_or((0xfb, 8, bits))
 }
 
 #[cfg(test)]
@@ -338,5 +438,32 @@ mod tests {
         assert_eq!(one.finish(), Err(Fault::Invalid));
         assert_eq!(one.unsigned(), Ok(2));
         assert_eq!(one.finish(), Ok(()));
+    }
+
+    #[test]
+    fn floats_at_a_precision_ceiling_take_the_next_width() {
+        // The largest half and single stay in their width; the next power of
+        // two needs the wider one, never the all-ones (infinity) exponent.
+        for (value, shortest) in [
+            (65_504.0, (0xf9, 2, 0x7bff)),
+            (65_536.0, (0xfa, 4, 0x4780_0000)),
+            (f64::from(f32::MAX), (0xfa, 4, 0x7f7f_ffff)),
+            (2_f64.powi(128), (0xfb, 8, 0x47f0_0000_0000_0000)),
+        ] {
+            assert_eq!(shortest_float(value), shortest, "{value}");
+        }
+        assert_eq!(
+            reader(&[0xfa, 0x47, 0x80, 0x00, 0x00]).float(),
+            Ok(65_536.0)
+        );
+        for bytes in [
+            &[0xf9, 0x7c, 0x00][..],
+            &[0xf9, 0xfc, 0x00],
+            &[0xf9, 0x7e, 0x00],
+            &[0xfa, 0x7f, 0x80, 0x00, 0x00],
+            &[0xfa, 0x7f, 0xc0, 0x00, 0x00],
+        ] {
+            assert_eq!(reader(bytes).float(), Err(Fault::Invalid), "{bytes:?}");
+        }
     }
 }

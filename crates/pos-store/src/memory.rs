@@ -219,6 +219,9 @@ fn fail_next_visible_delete_for_test() {
 }
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
+///
+/// It is also the retained, non-durable store of a Memory community domain, whose Plugin
+/// trust registry is that profile's trust source (ADR-129 R6.5).
 pub struct MemoryStore {
     /// ADR-119 composition fallback registry state, keyed by `(scope, timeline)`.
     composition_fallback: composition_fallback_registry::MemoryCompositionFallbackStateV1,
