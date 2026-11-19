@@ -50,7 +50,7 @@ impl CommunityInitializerOwnerV1 {
     /// `initializer_artifact_ref`, or its schema differs from the row's
     /// `state_schema_digest`.
     pub fn new(
-        _seal: &AuthorityTrustRootSealV1,
+        _seal: &'static AuthorityTrustRootSealV1,
         profile: &CommunityDurableProfileV1<'_>,
         states: Vec<Zeroizing<Vec<u8>>>,
     ) -> Result<Self, Error> {

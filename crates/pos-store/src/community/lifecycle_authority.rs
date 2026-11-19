@@ -294,6 +294,7 @@ pub struct CommunityLifecycleAuthorityInputV1 {
 
 /// Installed community lifecycle authority with its trusted wall source.
 pub struct CommunityLifecycleAuthorityV1 {
+    seal: &'static AuthorityTrustRootSealV1,
     catalogue: CommunityAuthorityCatalogueV1,
     catalogue_digest: Hash,
     policy: ForkAuthenticationPolicyV1,
@@ -329,7 +330,7 @@ impl CommunityLifecycleAuthorityV1 {
     /// an empty or over-128-byte member recipient, and for a zero store
     /// incarnation.
     pub fn new(
-        _seal: &AuthorityTrustRootSealV1,
+        seal: &'static AuthorityTrustRootSealV1,
         input: CommunityLifecycleAuthorityInputV1,
         wall: impl TrustedWallSourceV1 + 'static,
     ) -> Result<Self, Error> {
@@ -356,6 +357,7 @@ impl CommunityLifecycleAuthorityV1 {
             return Err(Error::InvalidBinding);
         }
         Ok(Self {
+            seal,
             catalogue_digest: input.catalogue.digest(),
             catalogue: input.catalogue,
             policy: input.authentication_policy,
@@ -421,12 +423,14 @@ impl CommunityLifecycleAuthorityV1 {
             .ok()
             .and_then(|principal| self.catalogue.actor_for(principal))
             .and_then(|actor_entity_id| {
-                authenticated_result(verified).map(|authenticated| CommunityAuthorityCallV1 {
-                    catalogue_digest: self.catalogue_digest,
-                    request,
-                    authenticated,
-                    actor_entity_id,
-                    at_time,
+                authenticated_result(self.seal, verified).map(|authenticated| {
+                    CommunityAuthorityCallV1 {
+                        catalogue_digest: self.catalogue_digest,
+                        request,
+                        authenticated,
+                        actor_entity_id,
+                        at_time,
+                    }
                 })
             })
     }
@@ -620,6 +624,7 @@ impl CommunityLifecycleAuthorityV1 {
             })
             .and_then(|request| {
                 evaluation_snapshot(
+                    self.seal,
                     &self.attestation,
                     pins.authority_registry_digest,
                     call.authenticated.registry_binding_digest(),
