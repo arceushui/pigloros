@@ -387,9 +387,11 @@ fn rule_4_koe1_binds_the_accepted_ready_v1() -> TestResult {
     })?);
     other.rejects("another ReadyV1")?;
 
+    // A failed KOE1 opened no `/work`, so `work-after` is null.
     let failed = Fixture::released(TME1_A)?
         .koe1(&[4], integer(2))?
         .koe1(&[7], Value::Null)?
+        .tme1(&[21], Value::Null)?
         .tme1(&[26], integer(2))?;
     failed.accepts()?;
     let mut failed_other = failed;
@@ -525,8 +527,7 @@ fn rule_2_local_network_and_work_after_follow_mode_and_elm1() -> TestResult {
     unlimited.rejects("work-after without a /work limit")?;
     Fixture::observed(at_progress(1)?)?
         .tme1(&[21], Value::Null)?
-        .tme1(&[26], integer(2))?
-        .rejects("started with a unit and no work-after")?;
+        .rejects("a null work-after recorded as anything but code 2")?;
     let unbound = edit(&at_progress(1)?, |fields| {
         for index in [9, 10, 11, 21] {
             fields[index] = Value::Null;
@@ -792,4 +793,64 @@ fn r10_rule_7_the_feed_and_launch_failures_select_their_codes() -> TestResult {
     Fixture::released(TME1_E)?
         .tme1(&[26], Value::Null)?
         .rejects("an incomplete feed recorded as Completed")
+}
+
+/// `work-after` is present only when ELM1 limit 9 is nonzero and KOE1 has
+/// status 0 (owner decision 2026-11-19, R9 amendment review).
+#[test]
+fn rule_2_work_after_follows_a_status_0_koe1() -> TestResult {
+    // Status 0 with `work-after`: unchanged.
+    let present = Fixture::released(TME1_A)?;
+    let (requested, observed, termination, _) = present.records()?;
+    present.accepts()?;
+    assert_eq!(
+        termination.facts(&requested, &observed).classify().code(),
+        None
+    );
+    // Status 0 with a null `work-after`: missing evidence, code 2 and
+    // quarantine; the D5 `/work` identity check is skipped.
+    let unread = Fixture::released(TME1_A)?
+        .tme1(&[21], Value::Null)?
+        .tme1(&[26], integer(2))?;
+    let (requested, observed, termination, _) = unread.records()?;
+    unread.accepts()?;
+    let classification = termination.facts(&requested, &observed).classify();
+    assert_eq!(classification.contradiction(), None);
+    assert_eq!(classification.code(), Some(TerminalCode::CleanupFailed));
+    assert!(classification.quarantined());
+    // Status 2 (observation failed) and status 1 (not reached) with limit 9
+    // nonzero: a null `work-after` is valid and the cascade code stands.
+    let failed = Fixture::observed(with(&at_progress(1)?, &[21], Value::Null)?)?
+        .koe1(&[4], integer(2))?
+        .koe1(&[7], Value::Null)?;
+    let mut not_reached = Fixture::observed(edit(&at_progress(1)?, |fields| {
+        fields[21] = Value::Null;
+        fields[15] = integer(0);
+        fields[26] = integer(9);
+        Ok(())
+    })?)?;
+    not_reached.koe1 = unhex(KOE1_B)?;
+    not_reached.ready = None;
+    not_reached.rebind()?;
+    for (fixture, code) in [
+        (failed, TerminalCode::ProtocolFailure),
+        (not_reached, TerminalCode::IpcFailure),
+    ] {
+        let (requested, observed, termination, _) = fixture.records()?;
+        fixture.accepts()?;
+        let classification = termination.facts(&requested, &observed).classify();
+        assert_eq!(classification.code(), Some(code));
+        assert!(!classification.quarantined());
+    }
+    // ... and a present one is refused after a failed KOE1.
+    Fixture::observed(at_progress(1)?)?
+        .koe1(&[4], integer(2))?
+        .koe1(&[7], Value::Null)?
+        .rejects("work-after after a failed KOE1")?;
+    // Limit 9 zero with `work-after`: still refused.
+    Fixture::released(TME1_A)?
+        .with_limits(limits(OUTPUT_LIMIT, 0, 1, 0))?
+        .koe1(&[7, 11], Value::Null)?
+        .tme1(&[26], integer(2))?
+        .rejects("work-after without a /work limit")
 }
