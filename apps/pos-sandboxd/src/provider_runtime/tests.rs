@@ -21,16 +21,16 @@ use crate::{
     RuntimeAttestationSigner,
 };
 
-type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+pub(super) type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 /// The fixture's runtime-attestation seed and SPM1 key ID.
-const RUNTIME_SEED: [u8; 32] = [4; 32];
+pub(super) const RUNTIME_SEED: [u8; 32] = [4; 32];
 const RUNTIME_KEY_ID: &str = "runtime";
 const KEY_FILE: &str = "runtime-attestation.ed25519";
 
 /// SPI1 with the R11 §11 common values and an attempt IPv4 range of
 /// `ipv4_length` bits.
-fn spi1(ipv4_length: u64) -> TestResult<Vec<u8>> {
+pub(super) fn spi1(ipv4_length: u64) -> TestResult<Vec<u8>> {
     let int = |number: u64| Value::Integer(number.into());
     let unsigned = Value::Array(vec![
         Value::Text("SPI1".to_owned()),
@@ -54,7 +54,7 @@ fn spi1(ipv4_length: u64) -> TestResult<Vec<u8>> {
     encode(&Value::Array(vec![unsigned, digest]))
 }
 
-fn encode(value: &Value) -> TestResult<Vec<u8>> {
+pub(super) fn encode(value: &Value) -> TestResult<Vec<u8>> {
     let mut encoded = Vec::new();
     ciborium::into_writer(value, &mut encoded)?;
     Ok(encoded)
@@ -68,7 +68,7 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> TestResult {
 }
 
 /// Install SPI1 and `seed` as its key file beside the staged SIC1.
-fn install_spi1(document: &[u8], seed: &[u8; 32]) -> TestResult {
+pub(super) fn install_spi1(document: &[u8], seed: &[u8; 32]) -> TestResult {
     let root = Path::new(SANDBOX_ARTIFACT_ROOT);
     write_file(&root.join("provider-installation.cbor"), document, 0o400)?;
     fs::create_dir(root.join("provider-keys"))?;
@@ -88,7 +88,7 @@ fn remove_spi1() -> TestResult {
 }
 
 /// The admitted provider of the staged SIC1.
-fn admitted() -> TestResult<AdmittedSelectorProvider> {
+pub(super) fn admitted() -> TestResult<AdmittedSelectorProvider> {
     Ok(InstalledSelectorState::open()?
         .authenticate_bootstrap()?
         .admit_provider()?)
@@ -140,7 +140,7 @@ fn release_fields() -> ExecutionReleaseFields {
 }
 
 /// Bind against the staged SIC1, running as the provider binary itself.
-fn bind_as_provider() -> TestResult<Result<RuntimeAuthority, ProviderStartupError>> {
+pub(super) fn bind_as_provider() -> TestResult<Result<RuntimeAuthority, ProviderStartupError>> {
     let admitted = admitted()?;
     let binary = provider_binary(&admitted)?;
     Ok(bind(admitted, &binary, ProviderInstallation::open))
@@ -165,22 +165,32 @@ fn refuses_another_executable_before_spi1() -> TestResult {
     Ok(())
 }
 
+/// Run the test `name` again as root in the isolated container, or report
+/// that this process already is that run.
+pub(super) fn in_isolated_root(name: &str) -> TestResult<bool> {
+    if std::env::var_os("PIGLOROS_PRIVILEGED_COMPOSITION_TEST").is_some() {
+        return Ok(true);
+    }
+    let runner = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-isolated-test.sh");
+    let output = std::process::Command::new(runner)
+        .arg(std::env::current_exe()?)
+        .arg(name)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "isolated provider runtime test {name} failed: {:?}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(false)
+}
+
 #[test]
 fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
-    if std::env::var_os("PIGLOROS_PRIVILEGED_COMPOSITION_TEST").is_none() {
-        let runner =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-isolated-test.sh");
-        let output = std::process::Command::new(runner)
-            .arg(std::env::current_exe()?)
-            .arg("provider_runtime::tests::startup_binds_only_the_admitted_binary_installation_and_key")
-            .output()?;
-        assert!(
-            output.status.success(),
-            "isolated provider runtime test failed: {:?}\n{}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if !in_isolated_root(
+        "provider_runtime::tests::startup_binds_only_the_admitted_binary_installation_and_key",
+    )? {
         return Ok(());
     }
     let staged = StagedInstallation::stage()?;

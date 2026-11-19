@@ -8,16 +8,16 @@
 //! signing oracle.
 //!
 //! [`RuntimeSigned`] is sealed. Its kinds are a subset of the R9 §5 set, and
-//! a kind joins only when its encoder does: RLS1, SDY1, SPE1, SAU1, SPR1
-//! and SPY1 now. RQE1, KOE1, TME1 and RDY1 never do.
+//! a kind joins only when its encoder does: AGR1, RLS1, SDY1, SPE1, SAU1,
+//! SPR1 and SPY1 now. RQE1, KOE1, TME1 and RDY1 never do.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
 use super::codec::signature_message;
 use super::{
-    ExecutionReleaseFields, SandboxAuditRecordFields, SandboxDescribeResponseFields,
-    SandboxProviderErrorFields, SandboxProviderProtocolError, SandboxProviderReceiptFields,
-    SandboxProviderResultFields,
+    AdmissionGrantFields, ExecutionReleaseFields, SandboxAuditRecordFields,
+    SandboxDescribeResponseFields, SandboxProviderErrorFields, SandboxProviderProtocolError,
+    SandboxProviderReceiptFields, SandboxProviderResultFields,
 };
 
 mod runtime_signed_sealed {
@@ -34,6 +34,21 @@ pub trait RuntimeSigned: runtime_signed_sealed::Sealed {
 
     /// The runtime-attestation key ID the record names.
     fn key_id(body: &Self::Body) -> &str;
+}
+
+/// AGR1, the admission grant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Agr1 {}
+
+impl runtime_signed_sealed::Sealed for Agr1 {}
+
+impl RuntimeSigned for Agr1 {
+    const MAGIC: &'static str = "AGR1";
+    type Body = AdmissionGrantFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
 }
 
 /// RLS1, `ReleaseV1`.
