@@ -463,7 +463,11 @@ class KernelCacheTests(unittest.TestCase):
     """scripts/qemu-kernel-cache.sh against a `nix` stub that logs each call."""
 
     DRV = "/nix/store/0123456789abcdfghijklmnpqrsvwxya-linux-6.12.117.drv"
+    OUT = "/nix/store/0123456789abcdfghijklmnpqrsvwxyb-linux-6.12.117"
+    DEV = "/nix/store/0123456789abcdfghijklmnpqrsvwxyc-linux-6.12.117-dev"
     SECRET = "piglor-qemu-kernel-1:c2VjcmV0LWtleS1ieXRlcw=="
+    PUBLIC = "piglor-qemu-kernel-1:cHVibGljLWtleQ=="
+    NIXOS = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -472,21 +476,36 @@ class KernelCacheTests(unittest.TestCase):
         self.log = self.base / "nix.log"
         self.bin = self.base / "bin"
         self.bin.mkdir()
+        self.cache = self.base / "cache"
         self.stub_nix()
 
-    def stub_nix(self, drv: str = DRV, copy_status: int = 0) -> None:
-        # Each call logs its arguments; `copy --to` also logs the signing key
-        # file's mode and content, read while the copy runs.
+    def stub_nix(self, drv: str = DRV, dev: str = DEV, trusted: str | None = None,
+                 copy_status: int = 0, verify_status: int = 0, copy_sleep: int = 0) -> None:
+        # Each call logs its arguments. `key convert-secret-to-public` logs what
+        # it read on stdin; `copy --to` logs the signing key file's mode and
+        # content, read while the copy runs.
+        trusted = f"{self.NIXOS} {self.PUBLIC}" if trusted is None else trusted
         (self.bin / "nix").write_text(f"""#!/bin/bash
 printf '%s\\n' "$*" >>"{self.log}"
-case "$1" in
-eval) printf '%s' '{drv}' ;;
-copy)
+case "$1 $2" in
+eval*)
+  case "${{@: -1}}" in
+  *.drvPath) printf '%s' '{drv}' ;;
+  *.dev.outPath) printf '%s' '{dev}' ;;
+  *.outPath) printf '%s' '{self.OUT}' ;;
+  esac ;;
+"key convert-secret-to-public")
+  printf 'stdin %s\\n' "$(cat)" >>"{self.log}"
+  printf '%s\\n' '{self.PUBLIC}' ;;
+"config show") printf '%s\\n' '{trusted}' ;;
+"store verify") exit {verify_status} ;;
+copy*)
   for arg in "$@"; do
-    if [[ $arg == --to=* || $arg == file://*secret-key=* ]]; then
+    if [[ $arg == file://*secret-key=* ]]; then
       key="${{arg##*secret-key=}}"
-      printf 'key-mode %s\\nkey-content %s\\n' "$(stat -c %a "$key")" "$(cat "$key")" >>"{self.log}"
       printf '%s\\n' "$key" >"{self.base}/key-path"
+      printf 'key-mode %s\\nkey-content %s\\n' "$(stat -c %a "$key")" "$(cat "$key")" >>"{self.log}"
+      sleep {copy_sleep}
     fi
   done
   exit {copy_status} ;;
@@ -494,12 +513,15 @@ esac
 """)
         (self.bin / "nix").chmod(0o755)
 
-    def run_cache(self, *args: str, secret: str | None = None) -> subprocess.CompletedProcess:
+    def environment(self, secret: str | None) -> dict[str, str]:
         environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}")
         environment.pop("QEMU_KERNEL_CACHE_SIGNING_KEY", None)
         if secret is not None:
             environment["QEMU_KERNEL_CACHE_SIGNING_KEY"] = secret
-        return subprocess.run(["bash", str(KERNEL_CACHE), *args], env=environment,
+        return environment
+
+    def run_cache(self, *args: str, secret: str | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(KERNEL_CACHE), *args], env=self.environment(secret),
                               capture_output=True, text=True, check=False)
 
     def calls(self) -> list[str]:
@@ -508,6 +530,17 @@ esac
     def kernel(self, architecture: str) -> str:
         return (f"{ROOT}/deploy/nixos#nixosConfigurations.qemu-evidence-{architecture}"
                 ".config.boot.kernelPackages.kernel")
+
+    def path_evals(self, architecture: str) -> list[str]:
+        kernel = self.kernel(architecture)
+        return [f"eval --raw --no-update-lock-file {kernel}.outPath",
+                f"eval --raw --no-update-lock-file {kernel}.dev.outPath"]
+
+    def verify_call(self) -> str:
+        return f"store verify --store file://{self.cache} --sigs-needed 1 {self.OUT} {self.DEV}"
+
+    def key_path(self) -> pathlib.Path:
+        return pathlib.Path((self.base / "key-path").read_text().strip())
 
     def test_key_names_the_kernel_derivation(self):
         result = self.run_cache("key", "aarch64")
@@ -520,47 +553,113 @@ esac
         result = self.run_cache("key", "x86_64")
         self.assertEqual(result.returncode, 1)
         self.assertIn("unexpected kernel derivation path", result.stderr)
-        self.assertEqual(self.run_cache("key", "riscv64").returncode, 2)
-        self.assertEqual(self.run_cache("key").returncode, 2)
+        for args in (("key", "riscv64"), ("key",), ("build", "x86_64", "extra"),
+                     ("verify", "x86_64"), ("import", "riscv64", "dir"), ("sign", "x86_64")):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_cache(*args).returncode, 2)
 
-    def test_export_signs_with_a_private_temporary_key_file_and_removes_it(self):
-        out = self.base / "cache"
-        result = self.run_cache("export", "x86_64", str(out), secret=self.SECRET)
+    def test_build_builds_both_outputs_without_the_signing_key(self):
+        result = self.run_cache("build", "x86_64")
         self.assertEqual(result.returncode, 0, result.stderr)
         kernel = self.kernel("x86_64")
-        key_path = (self.base / "key-path").read_text().strip()
+        self.assertEqual(self.calls(),
+                         [f"build --no-update-lock-file --no-link --print-build-logs {kernel} {kernel}.dev"])
+
+    def test_export_signs_the_built_paths_with_a_private_temporary_key_file_then_verifies(self):
+        result = self.run_cache("export", "x86_64", str(self.cache), secret=self.SECRET)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        key_path = self.key_path()
         self.assertEqual(self.calls(), [
-            f"build --no-update-lock-file --no-link --print-build-logs {kernel} {kernel}.dev",
-            f"copy --no-update-lock-file --to file://{out}?compression=zstd&secret-key={key_path}"
-            f" {kernel} {kernel}.dev",
+            "key convert-secret-to-public",
+            f"stdin {self.SECRET}",
+            "config show trusted-public-keys",
+            *self.path_evals("x86_64"),
+            f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {self.OUT} {self.DEV}",
             "key-mode 600",
             f"key-content {self.SECRET}",
+            *self.path_evals("x86_64"),
+            self.verify_call(),
         ])
-        self.assertFalse(pathlib.Path(key_path).exists())
+        self.assertFalse(key_path.exists())
         self.assertNotIn(self.SECRET, result.stdout + result.stderr)
 
-    def test_export_removes_the_key_file_when_the_copy_fails(self):
+    def test_export_removes_the_key_file_and_skips_verify_when_the_copy_fails(self):
         self.stub_nix(copy_status=3)
-        result = self.run_cache("export", "x86_64", str(self.base / "cache"), secret=self.SECRET)
+        result = self.run_cache("export", "x86_64", str(self.cache), secret=self.SECRET)
         self.assertEqual(result.returncode, 3)
-        self.assertFalse(pathlib.Path((self.base / "key-path").read_text().strip()).exists())
+        self.assertFalse(self.key_path().exists())
+        self.assertNotIn(self.verify_call(), self.calls())
 
-    def test_export_without_the_signing_key_builds_nothing(self):
+    def test_export_removes_the_key_file_when_terminated(self):
+        self.stub_nix(copy_sleep=2)
+        process = subprocess.Popen(["bash", str(KERNEL_CACHE), "export", "x86_64", str(self.cache)],
+                                   env=self.environment(self.SECRET),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(process.kill)
+        deadline = time.monotonic() + 10
+        while not (self.base / "key-path").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        process.terminate()
+        self.assertEqual(process.wait(timeout=10), 143)
+        self.assertFalse(self.key_path().exists())
+
+    def test_export_fails_when_verification_fails(self):
+        self.stub_nix(verify_status=1)
+        result = self.run_cache("export", "x86_64", str(self.cache), secret=self.SECRET)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.calls()[-1], self.verify_call())
+
+    def test_export_refuses_a_key_the_daemon_does_not_trust(self):
+        for trusted in (self.NIXOS, f"{self.NIXOS} {self.PUBLIC}x", ""):
+            with self.subTest(trusted=trusted):
+                self.log.unlink(missing_ok=True)
+                self.stub_nix(trusted=trusted)
+                result = self.run_cache("export", "x86_64", str(self.cache), secret=self.SECRET)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("is not in trusted-public-keys", result.stderr)
+                self.assertFalse(any(call.startswith("copy") for call in self.calls()))
+                self.assertFalse((self.base / "key-path").exists())
+
+    def test_export_without_the_signing_key_does_nothing(self):
         for secret in (None, ""):
             with self.subTest(secret=secret):
-                result = self.run_cache("export", "x86_64", str(self.base / "cache"), secret=secret)
+                result = self.run_cache("export", "x86_64", str(self.cache), secret=secret)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("QEMU_KERNEL_CACHE_SIGNING_KEY is not set", result.stderr)
                 self.assertEqual(self.calls(), [])
 
-    def test_import_keeps_signature_checks(self):
-        out = self.base / "cache"
-        result = self.run_cache("import", "aarch64", str(out))
+    def test_the_secret_never_reaches_a_command_line(self):
+        self.run_cache("export", "x86_64", str(self.cache), secret=self.SECRET)
+        command_lines = [call for call in self.calls() if not call.startswith(("stdin ", "key-content "))]
+        self.assertTrue(command_lines)
+        for call in command_lines:
+            self.assertNotIn(self.SECRET, call)
+
+    def test_verify_requires_signatures_on_both_paths(self):
+        for status in (0, 1):
+            with self.subTest(status=status):
+                self.log.unlink(missing_ok=True)
+                self.stub_nix(verify_status=status)
+                result = self.run_cache("verify", "aarch64", str(self.cache))
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(self.calls(), [*self.path_evals("aarch64"), self.verify_call()])
+
+    def test_import_copies_the_concrete_paths_with_signature_checks(self):
+        result = self.run_cache("import", "aarch64", str(self.cache))
         self.assertEqual(result.returncode, 0, result.stderr)
-        kernel = self.kernel("aarch64")
-        self.assertEqual(self.calls(), [f"copy --no-update-lock-file --from file://{out} {kernel} {kernel}.dev"])
-        self.assertNotIn("--no-check-sigs", KERNEL_CACHE.read_text().replace(
-            "import never passes --no-check-sigs", ""))
+        self.assertEqual(self.calls(), [
+            *self.path_evals("aarch64"),
+            f"copy --from file://{self.cache} {self.OUT} {self.DEV}",
+        ])
+
+    def test_an_unexpected_output_path_stops_before_copying(self):
+        for dev in ("", "/nix/store/short-dev", "/nix/store/0123456789abcdfghijklmnpqrsvwxyc-dev/../etc"):
+            with self.subTest(dev=dev):
+                self.log.unlink(missing_ok=True)
+                self.stub_nix(dev=dev)
+                result = self.run_cache("import", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(any(call.startswith("copy") for call in self.calls()))
 
 
 if __name__ == "__main__":

@@ -76,9 +76,14 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
             lambda w: kernel(w).update(**{"continue-on-error": True}),
             lambda w: kernel(w).update(permissions={"contents": "write"}),
             lambda w: kernel(w)["env"].update(QEMU_KERNEL_CACHE_SIGNING_KEY="${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"),
-            lambda w: step(kernel(w), "Build and sign the kernel")["env"].update(
+            lambda w: step(kernel(w), "Sign the kernel")["env"].update(
                 QEMU_KERNEL_CACHE_SIGNING_KEY="${{ secrets.OTHER }}"),
-            lambda w: step(kernel(w), "Look up the kernel cache entry")["with"].pop("lookup-only"),
+            lambda w: step(kernel(w), "Sign the kernel").update(**{"if": "${{ always() }}"}),
+            lambda w: step(kernel(w), "Build the kernel").update(
+                env={"QEMU_KERNEL_CACHE_SIGNING_KEY": "${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"}),
+            lambda w: step(kernel(w), "kernel-restore")["with"].update(**{"lookup-only": True}),
+            lambda w: kernel(w)["steps"].remove(step(kernel(w), "Verify the cached kernel")),
+            lambda w: step(kernel(w), "Verify the cached kernel").update(**{"continue-on-error": True}),
             lambda w: step(kernel(w), "Save the signed kernel").update(**{"if": "${{ always() }}"}),
             lambda w: w["concurrency"].update(**{"cancel-in-progress": True}),
             lambda w: w[True]["push"].update(branches=["**"]),

@@ -134,9 +134,14 @@ jobs:
         with:
           path: ${{ runner.temp }}/qemu-kernel-cache
           key: ${{ steps.kernel-key.outputs.key }}
+      # The daemon still checks every signature. An entry it refuses leaves
+      # the store unchanged, and the next step builds the kernel from source.
       - name: Import the signed kernel
         if: ${{ steps.kernel-cache.outputs.cache-hit == 'true' }}
-        run: bash scripts/qemu-kernel-cache.sh import "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"
+        run: |
+          if ! bash scripts/qemu-kernel-cache.sh import "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"; then
+            echo '::warning::The cached kernel was refused; building it from source.'
+          fi
       - name: Build the pinned guest and record its store identities
         run: bash scripts/qemu-closure-evidence.sh build "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-closure-evidence"
       - name: Boot the guest under QEMU TCG without network
@@ -197,20 +202,27 @@ jobs:
       - name: Name the kernel cache entry
         id: kernel-key
         run: bash scripts/qemu-kernel-cache.sh key "${EVIDENCE_ARCHITECTURE}" >>"${GITHUB_OUTPUT}"
-      - name: Look up the kernel cache entry
-        id: kernel-lookup
+      # A full restore, so a hit is verified: an entry that is not intact and
+      # signed by the trusted key fails this job on main until it is deleted.
+      - name: Restore the kernel cache entry
+        id: kernel-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/qemu-kernel-cache
           key: ${{ steps.kernel-key.outputs.key }}
-          lookup-only: true
-      - name: Build and sign the kernel
-        if: ${{ steps.kernel-lookup.outputs.cache-hit != 'true' }}
+      - name: Verify the cached kernel
+        if: ${{ steps.kernel-restore.outputs.cache-hit == 'true' }}
+        run: bash scripts/qemu-kernel-cache.sh verify "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"
+      - name: Build the kernel
+        if: ${{ steps.kernel-restore.outputs.cache-hit != 'true' }}
+        run: bash scripts/qemu-kernel-cache.sh build "${EVIDENCE_ARCHITECTURE}"
+      - name: Sign the kernel
+        if: ${{ steps.kernel-restore.outputs.cache-hit != 'true' }}
         env:
           QEMU_KERNEL_CACHE_SIGNING_KEY: ${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}
         run: bash scripts/qemu-kernel-cache.sh export "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"
       - name: Save the signed kernel
-        if: ${{ steps.kernel-lookup.outputs.cache-hit != 'true' }}
+        if: ${{ steps.kernel-restore.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/qemu-kernel-cache
