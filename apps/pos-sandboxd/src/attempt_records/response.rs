@@ -177,12 +177,36 @@ where
         .and_then(|verified| new(verified, admitted.key()).map_err(Into::into))
 }
 
+/// One SAU1 event: its code and authority digests.
+type Event = (u8, Vec<[u8; 32]>);
+
+/// The SAU1 events to sign, never empty: a first event and the rest.
+struct Events {
+    first: Event,
+    rest: Vec<Event>,
+}
+
+impl Events {
+    /// The events in order; `None` when there are none.
+    fn new(events: impl IntoIterator<Item = Event>) -> Option<Self> {
+        let mut events = events.into_iter();
+        events.next().map(|first| Self {
+            first,
+            rest: events.collect(),
+        })
+    }
+}
+
 /// The SAU1 events of the attempt, in order, with their authority digests.
+///
+/// Events 11 and 13 bind the KOE1 digest whatever its status, including a
+/// status-2 KOE1 whose observation failed after `ReadyV1` (owner decision
+/// 2026-11-19, Q3).
 fn events(
     records: &AttemptRecords,
     grant: &AdmissionGrant,
     release: Option<[u8; 32]>,
-) -> Vec<(u8, Vec<[u8; 32]>)> {
+) -> Vec<Event> {
     let agr1 = grant.grant_digest();
     let koe1 = records.observed().digest();
     let lifecycle = records
@@ -205,7 +229,7 @@ fn events(
 }
 
 /// The terminal SAU1 event `[agr1, elm1, tme1]`, unless TME1 Completed.
-fn terminal_event(records: &AttemptRecords, grant: &AdmissionGrant) -> Option<(u8, Vec<[u8; 32]>)> {
+fn terminal_event(records: &AttemptRecords, grant: &AdmissionGrant) -> Option<Event> {
     records.classification().code().map(|code| {
         (
             code.code(),
@@ -218,33 +242,83 @@ fn terminal_event(records: &AttemptRecords, grant: &AdmissionGrant) -> Option<(u
     })
 }
 
-/// Sign `events` onto the SAU1 chain `prefix`, each linked to the one
-/// before.
+/// Where the next SAU1 record links: its sequence and the digest of the
+/// record before it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Link {
+    sequence: u64,
+    previous: Option<[u8; 32]>,
+}
+
+impl Link {
+    /// The link after the last record of `prefix`, or the start of a chain.
+    fn after(prefix: &[SandboxAuditRecord]) -> Self {
+        prefix.last().map_or(
+            Self {
+                sequence: 0,
+                previous: None,
+            },
+            |last| Self {
+                sequence: last.sequence + 1,
+                previous: Some(last.record_digest),
+            },
+        )
+    }
+}
+
+/// Sign one SAU1 event at `link`.
+fn sign_event<R: RuntimeAttestationSigner>(
+    signer: &R,
+    admitted: AdmittedRuntimeKey<'_>,
+    attempt_id: [u8; 16],
+    link: Link,
+    (event_code, authority_digests): Event,
+) -> Result<SandboxAuditRecord, RuntimeSignerError> {
+    let fields = SandboxAuditRecordFields {
+        attempt_id,
+        sequence: link.sequence,
+        event_code,
+        authority_digests,
+        previous_digest: link.previous,
+        runtime_attestation_key_id: admitted.key_id().to_owned(),
+    };
+    signed(
+        signer,
+        admitted,
+        SandboxAuditRecord::self_digested(fields),
+        SandboxAuditRecord::new,
+    )
+}
+
+/// The signed SAU1 records of `events` from `link`, and the digest of the
+/// last one, which SPR1 binds.
 fn chain<R: RuntimeAttestationSigner>(
     signer: &R,
     admitted: AdmittedRuntimeKey<'_>,
     attempt_id: [u8; 16],
-    mut chain: Vec<SandboxAuditRecord>,
-    events: Vec<(u8, Vec<[u8; 32]>)>,
-) -> Result<Vec<SandboxAuditRecord>, RuntimeSignerError> {
-    let first = u64::try_from(chain.len()).unwrap_or(u64::MAX);
-    for ((event_code, authority_digests), sequence) in events.into_iter().zip(first..) {
-        let fields = SandboxAuditRecordFields {
-            attempt_id,
-            sequence,
-            event_code,
-            authority_digests,
-            previous_digest: chain.last().map(|previous| previous.record_digest),
-            runtime_attestation_key_id: admitted.key_id().to_owned(),
-        };
-        chain.push(signed(
-            signer,
-            admitted,
-            SandboxAuditRecord::self_digested(fields),
-            SandboxAuditRecord::new,
-        )?);
-    }
-    Ok(chain)
+    link: Link,
+    events: Events,
+) -> Result<(Vec<SandboxAuditRecord>, [u8; 32]), RuntimeSignerError> {
+    let Events { first, rest } = events;
+    sign_event(signer, admitted, attempt_id, link, first).and_then(|first| {
+        let tip = (first.sequence, first.record_digest);
+        rest.into_iter()
+            .try_fold(
+                (vec![first], tip),
+                |(mut chain, (sequence, previous)), event| {
+                    let next = Link {
+                        sequence: sequence + 1,
+                        previous: Some(previous),
+                    };
+                    sign_event(signer, admitted, attempt_id, next, event).map(|record| {
+                        let tip = (record.sequence, record.record_digest);
+                        chain.push(record);
+                        (chain, tip)
+                    })
+                },
+            )
+            .map(|(chain, (_, sau1))| (chain, sau1))
+    })
 }
 
 /// SPR1's authority: AGR1's, with the admitted provider binary digest.
@@ -349,7 +423,7 @@ fn events_after(
     records: &AttemptRecords,
     grant: &AdmissionGrant,
     sent: &Sent,
-) -> Vec<(u8, Vec<[u8; 32]>)> {
+) -> Vec<Event> {
     if prefix.is_empty() {
         events(records, grant, sent.release_digest())
     } else {
@@ -357,8 +431,79 @@ fn events_after(
     }
 }
 
-/// Sign the events after `prefix`, then SPR1 over the chain's last record
-/// and SPY1 over SPR1, and retain them with what they bind.
+/// Sign SPR1 over the chain whose last record is `sau1`.
+fn sign_receipt<R: RuntimeAttestationSigner>(
+    signer: &R,
+    admitted: AdmittedRuntimeKey<'_>,
+    grant: &AdmissionGrant,
+    issued: &IssuedGrant,
+    records: &AttemptRecords,
+    sent: &Sent,
+    sau1: [u8; 32],
+) -> Result<SandboxProviderReceipt, RuntimeSignerError> {
+    signed(
+        signer,
+        admitted,
+        SandboxProviderReceipt::self_digested(receipt_fields(grant, issued, records, sent, sau1)),
+        SandboxProviderReceipt::new,
+    )
+}
+
+/// Sign SPY1 over `receipt` and `chain`.
+fn sign_result<R: RuntimeAttestationSigner>(
+    signer: &R,
+    admitted: AdmittedRuntimeKey<'_>,
+    grant: &AdmissionGrant,
+    records: &AttemptRecords,
+    sent: &Sent,
+    (receipt, chain): (&SandboxProviderReceipt, &[SandboxAuditRecord]),
+) -> Result<SandboxProviderResult, RuntimeSignerError> {
+    let fields = result_fields(grant, records, sent.output.clone(), receipt, chain);
+    signed(
+        signer,
+        admitted,
+        SandboxProviderResult::self_digested(fields),
+        SandboxProviderResult::new,
+    )
+}
+
+/// The signed records after `prefix`: the SAU1 chain, then SPR1 over its
+/// last record, then SPY1 over SPR1. A response with no event to sign is
+/// refused.
+fn sign_records<R: RuntimeAttestationSigner>(
+    signer: &R,
+    admitted: AdmittedRuntimeKey<'_>,
+    (grant, issued): (&AdmissionGrant, &IssuedGrant),
+    records: &AttemptRecords,
+    sent: &Sent,
+    prefix: Vec<SandboxAuditRecord>,
+) -> Result<Signed, RuntimeSignerError> {
+    let link = Link::after(&prefix);
+    Events::new(events_after(&prefix, records, grant, sent))
+        .ok_or(RuntimeSignerError::Protocol(
+            SandboxProviderProtocolError::InconsistentFields,
+        ))
+        .and_then(|events| chain(signer, admitted, grant.attempt_id, link, events))
+        .and_then(|(appended, sau1)| {
+            let chain = [prefix, appended].concat();
+            sign_receipt(signer, admitted, grant, issued, records, sent, sau1)
+                .map(|receipt| (chain, receipt))
+        })
+        .and_then(|(chain, receipt)| {
+            sign_result(signer, admitted, grant, records, sent, (&receipt, &chain))
+                .map(|result| (chain, receipt, result))
+        })
+}
+
+/// The signed SAU1 chain, SPR1 and SPY1 of one response.
+type Signed = (
+    Vec<SandboxAuditRecord>,
+    SandboxProviderReceipt,
+    SandboxProviderResult,
+);
+
+/// Sign the events after `prefix`, then SPR1 and SPY1, and retain them with
+/// what they bind.
 fn assemble<R: RuntimeAttestationSigner>(
     signer: &R,
     admitted: AdmittedRuntimeKey<'_>,
@@ -368,40 +513,17 @@ fn assemble<R: RuntimeAttestationSigner>(
     prefix: Vec<SandboxAuditRecord>,
 ) -> Result<RetainedResponse, RuntimeSignerError> {
     let grant = AdmissionGrant::from_canonical_cbor(issued.bytes())?;
-    let events = events_after(&prefix, &records, &grant, &sent);
-    chain(signer, admitted, grant.attempt_id, prefix, events)
-        .and_then(|chain| {
-            let sau1 = chain.last().map_or([0; 32], |last| last.record_digest);
-            let fields = receipt_fields(&grant, issued, &records, &sent, sau1);
-            signed(
-                signer,
-                admitted,
-                SandboxProviderReceipt::self_digested(fields),
-                SandboxProviderReceipt::new,
-            )
-            .map(|receipt| (chain, receipt))
+    let (chain, receipt, result) =
+        sign_records(signer, admitted, (&grant, issued), &records, &sent, prefix)?;
+    encoded(&chain, &receipt, &result, sent.release.as_ref())
+        .map(|encoded| RetainedResponse {
+            grant: issued.clone(),
+            records,
+            sent,
+            chain,
+            encoded,
         })
-        .and_then(|(chain, receipt)| {
-            let fields = result_fields(&grant, &records, sent.output.clone(), &receipt, &chain);
-            signed(
-                signer,
-                admitted,
-                SandboxProviderResult::self_digested(fields),
-                SandboxProviderResult::new,
-            )
-            .map(|result| (chain, receipt, result))
-        })
-        .and_then(|(chain, receipt, result)| {
-            encoded(&chain, &receipt, &result, sent.release.as_ref())
-                .map(|encoded| RetainedResponse {
-                    grant: issued.clone(),
-                    records,
-                    sent,
-                    chain,
-                    encoded,
-                })
-                .map_err(Into::into)
-        })
+        .map_err(Into::into)
 }
 
 impl<S: RequestedConfiguration> EndedAttempt<S> {
@@ -427,5 +549,18 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
             Sent::of(self.progress()),
             Vec::new(),
         )?)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{Event, Events};
+
+    #[test]
+    fn events_are_never_empty() {
+        assert!(Events::new(Vec::<Event>::new()).is_none());
+        let events = Events::new([(11, Vec::new()), (12, Vec::new())]);
+        assert!(events.is_some_and(|events| events.first.0 == 11 && events.rest.len() == 1));
     }
 }
