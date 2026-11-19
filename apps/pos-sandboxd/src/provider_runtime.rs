@@ -41,6 +41,8 @@
 mod endpoint;
 mod notify;
 mod reconcile;
+// `pub` only so its `pub(crate)` items pass Clippy's `redundant_pub_crate`;
+// nothing in it is public.
 pub mod recovery_peer;
 mod revocation;
 mod serving;

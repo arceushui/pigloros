@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -24,7 +24,7 @@ use rustix::fs::{flock, FlockOperation};
 use super::{endpoint_path, serve_with, RecoveryPeerError, RECOVERY_DIRECTORY, ROOT_UID};
 use crate::provider_runtime::tests::{
     admitted, cancellation_context, encode, in_isolated_root, install_spi1, remove_spi1,
-    revocation_update, spi1, TestResult, RUNTIME_SEED,
+    revocation_update, revocation_update_revoking, spi1, TestResult, RUNTIME_SEED,
 };
 use crate::provider_runtime::ProviderRuntimeError;
 
@@ -127,11 +127,25 @@ fn write_sir1(public_key: [u8; 32]) -> TestResult {
 /// What one peer run did: its result, and every byte its client read.
 type PeerRun = (Result<(), RecoveryPeerError>, Vec<u8>);
 
+/// How the client ends its request.
+#[derive(Clone, Copy)]
+enum Client {
+    /// It sends write EOF after its frames.
+    Ends,
+    /// It sends its frames and keeps its write side open.
+    StaysOpen,
+}
+
 /// Run the peer accepting a peer of `uid`, wait for `READY=1`, set the
 /// leaf's mode to `leaf_mode` if one is given, then connect and send
-/// `frames` and EOF. A connection the peer refused, or closed, reads
-/// nothing.
-fn run_peer(uid: u32, frames: &[&[u8]], leaf_mode: Option<u32>) -> TestResult<PeerRun> {
+/// `frames`, ending as `client` does. A connection the peer refused, or
+/// closed, reads nothing.
+fn run_peer(
+    uid: u32,
+    frames: &[&[u8]],
+    client: Client,
+    leaf_mode: Option<u32>,
+) -> TestResult<PeerRun> {
     let name = format!(
         "pigloros-recovery-peer-{}-{}",
         std::process::id(),
@@ -153,12 +167,14 @@ fn run_peer(uid: u32, frames: &[&[u8]], leaf_mode: Option<u32>) -> TestResult<Pe
         request.extend_from_slice(&u32::try_from(frame.len())?.to_be_bytes());
         request.extend_from_slice(frame);
     }
-    if let Ok(mut client) = UnixStream::connect(leaf()) {
+    if let Ok(mut stream) = UnixStream::connect(leaf()) {
         // A peer that refused the connection may already have closed it.
-        client.write_all(&request).ok();
-        client.shutdown(std::net::Shutdown::Write).ok();
-        client.set_read_timeout(Some(Duration::from_secs(5)))?;
-        match client.read_to_end(&mut read) {
+        stream.write_all(&request).ok();
+        if matches!(client, Client::Ends) {
+            stream.shutdown(std::net::Shutdown::Write).ok();
+        }
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        match stream.read_to_end(&mut read) {
             Err(error) if error.kind() != ErrorKind::ConnectionReset => return Err(error.into()),
             _ => {}
         }
@@ -224,27 +240,32 @@ fn refuses_without_an_acknowledgement(pair: &[&[u8]; 2]) -> TestResult {
     let refused = (Err(RecoveryPeerError::Refused), Vec::new());
     // The registry is missing, then held by a live owner, then holds a
     // record.
-    assert_eq!(run_peer(ROOT_UID, pair, None)?, refused);
+    assert_eq!(run_peer(ROOT_UID, pair, Client::Ends, None)?, refused);
     create_directory("/run/pigloros/sandbox", 0o700)?;
     create_directory(REGISTRY, 0o700)?;
     let held = File::open(REGISTRY)?;
     flock(&held, FlockOperation::NonBlockingLockExclusive)?;
-    assert_eq!(run_peer(ROOT_UID, pair, None)?, refused);
+    assert_eq!(run_peer(ROOT_UID, pair, Client::Ends, None)?, refused);
     drop(held);
     let intent = Path::new(REGISTRY).join("intent");
     fs::write(&intent, b"PAI1")?;
-    assert_eq!(run_peer(ROOT_UID, pair, None)?, refused);
+    assert_eq!(run_peer(ROOT_UID, pair, Client::Ends, None)?, refused);
     fs::remove_file(&intent)?;
     // A malformed exchange: RCC1 alone.
-    assert_eq!(run_peer(ROOT_UID, &pair[..1], None)?, refused);
+    assert_eq!(run_peer(ROOT_UID, &pair[..1], Client::Ends, None)?, refused);
+    // A client that sends nothing and keeps its stream open is refused at
+    // the 100 ms exchange deadline.
+    let started = Instant::now();
+    assert_eq!(run_peer(ROOT_UID, &[], Client::StaysOpen, None)?, refused);
+    assert!(started.elapsed() < Duration::from_secs(5));
     // A connection that is not from root, and a leaf that changed after
     // readiness.
     assert_eq!(
-        run_peer(4_242, &[], None)?,
+        run_peer(4_242, &[], Client::Ends, None)?,
         (Err(RecoveryPeerError::ForeignPeer), Vec::new())
     );
     assert_eq!(
-        run_peer(ROOT_UID, pair, Some(0o644))?,
+        run_peer(ROOT_UID, pair, Client::Ends, Some(0o644))?,
         (
             Err(RecoveryPeerError::Endpoint(
                 ProviderRuntimeError::UnsafeEndpoint
@@ -275,10 +296,20 @@ fn the_recovery_peer_answers_one_exchange_of_the_pending_sir1() -> TestResult {
     let context_bytes = context.to_canonical_cbor()?;
     let pair = [context_bytes.as_slice(), update.as_slice()];
     refuses_without_an_acknowledgement(&pair)?;
+    // No connection within the R12 §7.3 start bound: the peer exits.
+    let started = Instant::now();
+    assert_eq!(
+        serve_with(OsStr::new(ENDPOINT_ID), None, ROOT_UID),
+        Err(RecoveryPeerError::Endpoint(
+            ProviderRuntimeError::EndpointUnavailable
+        ))
+    );
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert!(!leaf().exists());
     // Step 7: the exchange is acknowledged under SIR1's runtime key, with the
     // registry's activation marker present, and the lock is free again.
     fs::write(Path::new(REGISTRY).join("activation"), b"")?;
-    let (outcome, read) = run_peer(ROOT_UID, &pair, None)?;
+    let (outcome, read) = run_peer(ROOT_UID, &pair, Client::Ends, None)?;
     assert_eq!(outcome, Ok(()));
     assert!(!read.is_empty(), "the acknowledged exchange wrote no RCA1");
     let acknowledgement = RevocationAcknowledgement::authenticate_for_context(
@@ -290,6 +321,27 @@ fn the_recovery_peer_answers_one_exchange_of_the_pending_sir1() -> TestResult {
         next,
     )?;
     assert_eq!(acknowledgement.cancelled_attempt_ids(), [[5; 16]]);
+    // R12 §5.6: the next RVS1 revokes SIR1's runtime key, and the RCA1 is
+    // still signed under it and authenticates.
+    let (revoking, next) = revocation_update_revoking(&admitted, &[KEY_ID], &[], 2)?;
+    let context = cancellation_context(&admitted, &revoking, Vec::new(), Vec::new())?;
+    let context_bytes = context.to_canonical_cbor()?;
+    let (outcome, read) = run_peer(
+        ROOT_UID,
+        &[context_bytes.as_slice(), revoking.as_slice()],
+        Client::Ends,
+        None,
+    )?;
+    assert_eq!(outcome, Ok(()));
+    assert!(!read.is_empty(), "the revoking exchange wrote no RCA1");
+    RevocationAcknowledgement::authenticate_for_context(
+        unframe(&read)?,
+        KEY_ID,
+        &runtime_key,
+        &context,
+        [70; 16],
+        next,
+    )?;
     flock(
         &File::open(REGISTRY)?,
         FlockOperation::NonBlockingLockExclusive,

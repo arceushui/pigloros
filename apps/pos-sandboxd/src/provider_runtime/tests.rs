@@ -390,6 +390,17 @@ pub(super) fn revocation_update(
     providers: &[[u8; 32]],
     nonce: u8,
 ) -> TestResult<(Vec<u8>, [u8; 32])> {
+    revocation_update_revoking(admitted, &[], providers, nonce)
+}
+
+/// [`revocation_update`] that also revokes the sorted trust `keys` (RVS1
+/// field 4) by key ID.
+pub(super) fn revocation_update_revoking(
+    admitted: &AdmittedSelectorProvider,
+    keys: &[&str],
+    providers: &[[u8; 32]],
+    nonce: u8,
+) -> TestResult<(Vec<u8>, [u8; 32])> {
     let bootstrap = admitted.bootstrap();
     let text = |value: &str| Value::Text(value.to_owned());
     let (next, next_digest) = policy_signed(
@@ -399,7 +410,7 @@ pub(super) fn revocation_update(
             Value::Integer(1.into()),
             Value::Bytes(bootstrap.trust().snapshot_digest().to_vec()),
             Value::Integer((bootstrap.revocation().revocation_epoch() + 1).into()),
-            Value::Array(Vec::new()),
+            Value::Array(keys.iter().map(|key| text(key)).collect()),
             Value::Array(
                 providers
                     .iter()

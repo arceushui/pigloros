@@ -20,8 +20,8 @@
 //!    its retained directory, and verifies mode `0600`, owner UID 0 and the
 //!    socket type;
 //! 5. sends `READY=1`;
-//! 6. accepts exactly one connection, which must have UID 0
-//!    `SO_PEERCRED`;
+//! 6. accepts exactly one connection within the 5 s peer start bound
+//!    (R12 §7.3), which must have UID 0 `SO_PEERCRED`;
 //! 7. answers it within 100 ms of the accept and sends server EOF after
 //!    RCA1.
 //!
@@ -44,6 +44,7 @@ use pos_reference::selector::installation::authority::{
     AuthorityResolution, PendingRecoveryRuntimeKey,
 };
 use pos_reference::selector::SelectorBoundaryError;
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use super::endpoint::ProviderEndpoint;
 use super::serving::{exchange_deadline, Deadlined};
@@ -62,6 +63,14 @@ pub(crate) const RECOVERY_PEER_ARGUMENT: &str = "recovery-peer";
 const RECOVERY_DIRECTORY: &str = "/run/pigloros/sandbox-selector-recovery";
 /// The `SO_PEERCRED` UID the one connection must have.
 const ROOT_UID: u32 = 0;
+/// How long the peer waits for its one connection after `READY=1`: the
+/// 5 s peer start bound of ADR-069 R12 §7.3 (`TimeoutStartUSec`, owner
+/// decision O2). The selector connects as soon as it saw readiness (R12 §6
+/// steps 8 and 9), so a peer still unconnected after that bound is orphaned.
+const ACCEPT_BOUND: Timespec = Timespec {
+    tv_sec: 5,
+    tv_nsec: 0,
+};
 
 /// Why the recovery peer exited without an acknowledgement. No variant
 /// names a secret.
@@ -137,14 +146,21 @@ fn endpoint_path(endpoint_id: &OsStr) -> Result<PathBuf, RecoveryPeerError> {
         .ok_or(RecoveryPeerError::Arguments)
 }
 
-/// The one connection, accepted in blocking mode between the endpoint's
-/// checks. An accept that yields no connection ends the peer.
+/// The one connection, accepted between the endpoint's checks once the
+/// listener is readable within [`ACCEPT_BOUND`]. No connection in time, or an
+/// accept that yields none, ends the peer, so it exits on every path even
+/// without the unit's own bounds.
 fn accept_one(endpoint: &ProviderEndpoint) -> Result<UnixStream, ProviderRuntimeError> {
-    endpoint
-        .listener()
-        .set_nonblocking(false)
+    let mut ready = [PollFd::new(endpoint.listener(), PollFlags::IN)];
+    poll(&mut ready, Some(&ACCEPT_BOUND))
         .map_err(unavailable)
-        .and_then(|()| endpoint.accept())
+        .and_then(|readable| {
+            if readable == 0 {
+                Err(ProviderRuntimeError::EndpointUnavailable)
+            } else {
+                endpoint.accept()
+            }
+        })
         .and_then(|accepted| accepted.ok_or(ProviderRuntimeError::EndpointUnavailable))
 }
 
