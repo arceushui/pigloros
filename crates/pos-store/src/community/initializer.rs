@@ -89,4 +89,10 @@ impl CommunityInitializerOwnerV1 {
     pub(super) fn holds(&self, digest: Hash) -> bool {
         self.states.contains_key(&digest)
     }
+
+    /// The installed canonical CSC1 bytes whose `H(CSC1)` is `digest`, for
+    /// the generation's own protected copy (#560 A3c-2b′).
+    pub(super) fn state(&self, digest: Hash) -> Option<&[u8]> {
+        self.states.get(&digest).map(|state| state.as_slice())
+    }
 }
