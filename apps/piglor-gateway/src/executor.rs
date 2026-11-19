@@ -4500,6 +4500,14 @@ mod tests {
         Ok(())
     }
 
+    /// Whether a blocking store reported entry within ten seconds, so a
+    /// command that never reaches it fails instead of hanging.
+    fn entered(receiver: &std::sync::mpsc::Receiver<()>) -> bool {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_ok()
+    }
+
     struct BlockingRootCountStore {
         inner: MemoryStore,
         entered: std::sync::mpsc::Sender<()>,
@@ -4824,9 +4832,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4882,9 +4888,7 @@ mod tests {
             tokio::spawn(async move { executor.create("first".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4939,9 +4943,7 @@ mod tests {
             tokio::spawn(async move { executor.create("started".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5488,9 +5490,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5537,9 +5537,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5586,9 +5584,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5669,9 +5665,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6280,9 +6274,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6534,9 +6526,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6702,9 +6692,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6769,9 +6757,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6852,9 +6838,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6972,9 +6956,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -7070,9 +7052,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -7177,9 +7157,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -7330,9 +7308,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
