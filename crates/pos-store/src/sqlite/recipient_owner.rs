@@ -1403,12 +1403,7 @@ impl SqliteStore {
         export_id: [u8; 16],
     ) -> Result<Vec<u8>, RecipientExportPublicationErrorV1> {
         validate_owner_directory(owner)?;
-        let stored = load_recipient_export_catalog(&self.conn, export_id)?
-            .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
-        if recipient_export_withdrawal_contains(&self.conn, export_id)? {
-            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
-        }
-        let expected = stored
+        let expected = unwithdrawn_recipient_export(&self.conn, export_id)?
             .validate_for(owner)
             .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
         self.with_erasure_read_fence(
@@ -2005,6 +2000,20 @@ fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreEr
             );",
         )
         .map_err(storage_error)
+}
+
+/// The catalog row of `export_id`, unless it is absent or an ADR-138
+/// recipient-export withdrawal has retracted it.
+fn unwithdrawn_recipient_export(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<StoredRecipientExportV1, RecipientExportPublicationErrorV1> {
+    let stored = load_recipient_export_catalog(connection, export_id)?
+        .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+    if recipient_export_withdrawal_contains(connection, export_id)? {
+        return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+    }
+    Ok(stored)
 }
 
 /// Whether an ADR-138 withdrawal row names `export_id`; such an identity is
