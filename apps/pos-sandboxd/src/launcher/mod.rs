@@ -28,6 +28,10 @@
 
 mod adapter;
 mod barrier;
+// Public so that its crate-visible reader is reachable from the rest of the
+// provider without Clippy's `redundant_pub_crate` lint; it exports nothing.
+#[doc(hidden)]
+pub mod clock;
 mod descriptors;
 mod environment;
 mod error;
