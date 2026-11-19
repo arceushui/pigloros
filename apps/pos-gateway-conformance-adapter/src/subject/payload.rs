@@ -465,6 +465,22 @@ mod tests {
         );
     }
 
+    /// An expired erasure bundle closes admissions with the closed authority's `503`, so the
+    /// wire alone cannot tell `authorized-erasure-expired` from `authorized-erasure-closed`:
+    /// each composition's bundle is pinned here.
+    #[test]
+    fn each_erasure_composition_names_its_bundle_expiry() {
+        for (composition, expiry) in [
+            (CompositionV2::AuthorizedErasure, Some(0)),
+            (CompositionV2::AuthorizedErasureHeld, Some(0)),
+            (CompositionV2::AuthorizedErasureExpired, Some(1)),
+            (CompositionV2::AuthorizedErasureClosed, None),
+            (CompositionV2::Authorized, None),
+        ] {
+            assert_eq!(composition.erasure_bundle_expiry(), expiry);
+        }
+    }
+
     #[test]
     fn other_prefixes_and_suffixes_name_no_route() {
         for route in ROUTES {
