@@ -24,6 +24,13 @@ EXPECTED_SERIAL_LINKER = b"""#!/bin/sh
 # ASan archive in parallel; this linker admits only one link at a time.
 exec flock "${RUNNER_TEMP:?}/asan-link.lock" cc "$@"
 """
+# Pull requests archive and run only the packages ci_change_scope resolved
+# (scripts/affected_packages.py); every other event, and a missing output,
+# selects the whole workspace.
+SCOPED_PACKAGES = (
+    "${{ github.event_name == 'pull_request' && "
+    "needs.ci_change_scope.outputs.rust_packages || '--workspace' }}"
+)
 EXPECTED_COMMAND = """set -euo pipefail
 test -x "/usr/bin/llvm-symbolizer-18"
 nextest_args=(
@@ -38,33 +45,47 @@ nextest_args=(
   --no-output-indent
   --test-threads 2
 )
+conformance=true
+if [[ "${CARGO_PACKAGES}" != --workspace ]]; then
+  nextest_args+=(--no-tests=pass)
+  if [[ " ${CARGO_PACKAGES} " != *" -p pos-conformance "* ]]; then
+    conformance=false
+  fi
+fi
 run_asan_partition() {
   ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
     cargo "${nextest_args[@]}" "$@"
 }
+run_conformance_partition() {
+  if [[ "${conformance}" == true ]]; then
+    run_asan_partition "$@"
+  else
+    printf 'pos-conformance is not in the affected packages; skipped: %s\\n' "$*"
+  fi
+}
 case "${ASAN_SHARD}" in
   bundle-coverage)
-    run_asan_partition \\
+    run_conformance_partition \\
       -E 'binary_id(pos-conformance::bundle_contract_coverage_public)'
     ;;
   bundle-public-1)
-    run_asan_partition \\
+    run_conformance_partition \\
       -E 'binary_id(pos-conformance::bundle_contract_public)' \\
       --partition slice:1/2 --run-ignored all
     ;;
   bundle-public-2)
-    run_asan_partition \\
+    run_conformance_partition \\
       -E 'binary_id(pos-conformance::bundle_contract_public)' \\
       --partition slice:2/2 --run-ignored all
     ;;
   moat-proof)
-    run_asan_partition \\
+    run_conformance_partition \\
       -E 'binary_id(pos-conformance::moat_proof_public)'
     ;;
   remainder-1)
     run_asan_partition -E 'not package(pos-conformance)' \\
       --partition slice:1/2
-    run_asan_partition \\
+    run_conformance_partition \\
       -E 'package(pos-conformance) & not (binary_id(pos-conformance::bundle_contract_coverage_public) | binary_id(pos-conformance::bundle_contract_public) | binary_id(pos-conformance::moat_proof_public))'
     ;;
   remainder-2)
@@ -80,8 +101,9 @@ python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
 """
 ARCHIVE_ARTIFACT = "asan-nextest-archive"
 EXPECTED_BUILD_COMMAND = """set -euo pipefail
+read -ra packages <<<"${CARGO_PACKAGES}"
 RUSTFLAGS="-Z sanitizer=address" \\
-  cargo +nightly-2026-07-01 nextest archive --workspace --all-features \\
+  cargo +nightly-2026-07-01 nextest archive "${packages[@]}" --all-features \\
   --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \\
   --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
 test -f "${RUNNER_TEMP}/asan-link.lock"
@@ -94,6 +116,7 @@ EXPECTED_BUILD_ENV = {
     ),
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+    "CARGO_PACKAGES": SCOPED_PACKAGES,
 }
 EXPECTED_SDK_HEADROOM_STEP = {
     "name": "Reclaim unused SDK headroom",
@@ -183,6 +206,7 @@ EXPECTED_STEP_ENV = {
         "suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:"
         "print_suppressions=1"
     ),
+    "CARGO_PACKAGES": SCOPED_PACKAGES,
 }
 # The shards start once the complete standard set (which includes asan-build)
 # passes and run beside diff mutation testing; ci-gate requires both results.
