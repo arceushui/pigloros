@@ -17,12 +17,12 @@ use pos_core::community_lifecycle::{
     community_capability_attestation_digest_v1, community_initializer_set_ref_v1, ArtifactRefV1,
     CommunityActorRowV1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
     CommunityArtifactPurposeV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
-    CommunityCurrentViewV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
-    CommunityDurableProfileV1, CommunityInitializationSourceV1 as Source,
-    CommunityKeyIntentInputV1, CommunityKeyIntentV1, CommunityKeyStateV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1, CommunityPassFrontierV1,
-    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityRecordKindsV1,
-    CommunityStateContentV1,
+    CommunityAuthorityEvidenceV1, CommunityCurrentViewV1, CommunityDurableBackendV1,
+    CommunityDurableProfileInputV1, CommunityDurableProfileV1, CommunityInitializationRequestV1,
+    CommunityInitializationSourceV1 as Source, CommunityKeyIntentInputV1, CommunityKeyIntentV1,
+    CommunityKeyStateV1, CommunityLifecycleErrorV1 as Error, CommunityMemberBindingV1,
+    CommunityMemberSlotsV1, CommunityPassFrontierV1, CommunityProfileMemberV1,
+    CommunityProfileRetentionV1, CommunityRecordKindsV1, CommunityStateContentV1,
 };
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
@@ -37,15 +37,19 @@ use pos_core::{
 };
 use pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1;
 use pos_store::community::{
-    CommunityAdministrativeRequestV1 as Request, CommunityAuthorityAdmissionV1,
-    CommunityInitializationInstallationV1, CommunityInitializationPlannerV1,
-    CommunityInitializeFormV1, CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
-    MemoryCommunityDomainV1,
+    CommunityAdministrativeRequestV1 as Request, CommunityArtifactProtectorV1,
+    CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1,
+    CommunityInitializationEvidenceInputV1, CommunityInitializationGraphInputV1,
+    CommunityInitializationGraphV1, CommunityInitializationInstallationV1,
+    CommunityInitializationMemberV1, CommunityInitializationPlannerV1, CommunityInitializeFormV1,
+    CommunityInitializerOwnerV1, CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
+    CommunityProtectionCohortV1, MemoryCommunityDomainV1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 use pos_store::MemoryTrustedClockAuthorityV1;
 use ulid::Ulid;
+use zeroize::Zeroizing;
 
 type Fallible<T> = Result<T, Box<dyn StdError>>;
 type TestResult = Fallible<()>;
@@ -70,6 +74,7 @@ const SCHEMA: Hash = Hash::from_bytes([0x22; 32]);
 const ENTRIES: [&str; 2] = ["Entry-A_1", "Entry-B_1"];
 const STATE_LIMITS: [u64; 2] = [4096, 100];
 const TRUST_SCOPE: &str = "scope";
+const ADDRESSES: [Hash; 2] = [Hash::from_bytes([0x71; 32]), Hash::from_bytes([0x72; 32])];
 
 const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
@@ -371,6 +376,14 @@ impl World {
 
     /// The installed authority's `Active` decision for `request`.
     fn admit(&mut self, request: Request) -> Fallible<CommunityAuthorityAdmissionV1> {
+        Ok(self.call_and_admit(request)?.1)
+    }
+
+    /// One authenticated call for `request` and its `Active` decision.
+    fn call_and_admit(
+        &mut self,
+        request: Request,
+    ) -> Fallible<(CommunityAuthorityCallV1, CommunityAuthorityAdmissionV1)> {
         let record = AuthenticatedPrincipalRecordV1 {
             principal: caller()?,
             adapter_id: ADAPTER.to_owned(),
@@ -391,9 +404,10 @@ impl World {
         let call = self
             .authority
             .authenticate(&credential, request, &mut self.domain)?;
-        Ok(self
+        let admission = self
             .authority
-            .authorize_administrative(&call, &self.domain, self.leaf)?)
+            .authorize_administrative(&call, &self.domain, self.leaf)?;
+        Ok((call, admission))
     }
 }
 
@@ -574,4 +588,246 @@ fn the_view_refuses_unavailable_evidence() -> TestResult {
         );
     }
     Ok(())
+}
+
+/// The protected initial graph of `records`, minted as the 2c-3 commit
+/// will: one `ExecutionState` cohort whose scope cover is the CSB1.
+fn graph(
+    planner: &CommunityInitializationPlannerV1<'_>,
+    profile: &CommunityDurableProfileV1<'_>,
+    roster: &Roster,
+    records: &pos_store::community::CommunityInitializationRecordsV1,
+) -> Fallible<CommunityInitializationGraphV1> {
+    let bindings = planner.bindings(GENERATION)?;
+    let members: Vec<CommunityMemberBindingV1<'_>> = bindings
+        .member_bindings()
+        .map(|bytes| CommunityMemberBindingV1::from_canonical_cbor(bytes, &roster.implementation))
+        .collect::<Result<_, _>>()?;
+    let entries: Vec<CommunityInitializationMemberV1<'_>> = members
+        .iter()
+        .zip(ADDRESSES)
+        .map(
+            |(binding, binding_envelope_address)| CommunityInitializationMemberV1 {
+                binding,
+                binding_envelope_address,
+            },
+        )
+        .collect();
+    let request = CommunityInitializationRequestV1::from_canonical_cbor(records.request())?;
+    let owner = CommunityInitializerOwnerV1::new(
+        &SEAL,
+        profile,
+        vec![Zeroizing::new(roster.state.clone()); 2],
+    )?;
+    let mut protector = CommunityArtifactProtectorV1::provision(
+        &SEAL,
+        CommunityProtectionCohortV1 {
+            parent_operation: CommunityArtifactOperationV1::Initialization(OPERATION),
+            timeline: target(),
+            generation: GENERATION,
+            purpose: CommunityArtifactPurposeV1::ExecutionState,
+            scope_set_digest: adr_h("ScopeSet", &[0x80]),
+            scope_cover_digest: records.scope_binding_digest(),
+            evidence_not_after_micros: HORIZON,
+            allowed_record_kinds: CommunityRecordKindsV1::empty()
+                .with(CommunityArtifactKindV1::StateContent)
+                .with(CommunityArtifactKindV1::StateRevisionOrHead)
+                .with(CommunityArtifactKindV1::ExecutionProvenance)
+                .with(CommunityArtifactKindV1::ClassificationProof),
+            member_slots: CommunityMemberSlotsV1::new(&[0, 1])?,
+            authority_request_digest: hash(0x44),
+        },
+    )?;
+    Ok(CommunityInitializationGraphV1::assemble(
+        &SEAL,
+        CommunityInitializationGraphInputV1 {
+            store_incarnation: INCARNATION,
+            producer_ordinal: 7,
+            request: &request,
+            profile,
+            members: &entries,
+            owner_binding_digest: bindings.owner_binding_digest(),
+            host_provenance_digest: records.provenance_digest(),
+            event_logical_head: Seq::ZERO,
+        },
+        &owner,
+        &mut protector,
+    )?)
+}
+
+/// The facts one planned initialization's CAU1 is built from.
+struct Operation<'a> {
+    world: &'a mut World,
+    planner: &'a CommunityInitializationPlannerV1<'a>,
+    profile: &'a CommunityDurableProfileV1<'a>,
+    call: &'a CommunityAuthorityCallV1,
+    admission: &'a CommunityAuthorityAdmissionV1,
+    records: &'a pos_store::community::CommunityInitializationRecordsV1,
+    graph: &'a CommunityInitializationGraphV1,
+    input: CommunityInitializationEvidenceInputV1<'a>,
+}
+
+/// Plan, view and assemble one initialization, then run `check` on it.
+fn with_operation(check: impl FnOnce(Operation<'_>) -> TestResult) -> TestResult {
+    let (store, _harness) = trusted_store(true)?;
+    let roster = Roster::new(&release_one(), None, None)?;
+    let rows = roster.rows()?;
+    let profile = profile(&rows)?;
+    let planner = planner(&profile)?;
+    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let (call, admission) = world.call_and_admit(planner.request())?;
+    let records = planner.records(GENERATION, &admission, &ADDRESSES)?;
+    let view = planner.current_view(
+        &world.domain,
+        &world.authority,
+        GENERATION,
+        &[&admission],
+        &[],
+    )?;
+    let graph = graph(&planner, &profile, &roster, &records)?;
+    let input = CommunityInitializationEvidenceInputV1 {
+        call: &call,
+        records: &records,
+        view: &view,
+        decisions: &[&admission, &admission],
+        graph: &graph,
+    };
+    check(Operation {
+        world: &mut world,
+        planner: &planner,
+        profile: &profile,
+        call: &call,
+        admission: &admission,
+        records: &records,
+        graph: &graph,
+        input,
+    })
+}
+
+/// R6.6 and A5.3(4): CAU1 binds the CGI1, every protected record, the
+/// CAV1, the call's decisions, the recipient (G6) and the clock bound (G1).
+#[test]
+fn the_authority_evidence_binds_the_whole_operation() -> TestResult {
+    with_operation(|operation| {
+        let Operation {
+            world,
+            planner,
+            call,
+            admission,
+            records,
+            graph,
+            input,
+            ..
+        } = operation;
+        let view = input.view;
+        let evidence = planner.authority_evidence(&world.authority, GENERATION, input)?;
+        assert_eq!(evidence.inventory_generation(), 0);
+        let decoded = CommunityAuthorityEvidenceV1::from_canonical_cbor(evidence.evidence())?;
+        assert_eq!(decoded.digest(), evidence.evidence_digest());
+        let fields = decoded.as_input();
+        assert_eq!(fields.store_incarnation, INCARNATION);
+        assert_eq!(fields.timeline, target());
+        assert_eq!(fields.generation, GENERATION);
+        assert!(fields.operation == CommunityArtifactOperationV1::Initialization(OPERATION));
+        assert_eq!(fields.input_identity, records.request_digest());
+        let mut objects: Vec<(Hash, Hash, Hash)> = graph
+            .records()
+            .iter()
+            .map(|record| {
+                let protected = record.protected();
+                (
+                    protected.object_address(),
+                    protected.registration().fields().artifact_digest,
+                    protected.registration().address(),
+                )
+            })
+            .collect();
+        objects.sort_unstable();
+        assert_eq!(objects.len(), 10);
+        assert_eq!(
+            fields
+                .object_bindings
+                .iter()
+                .map(|row| (
+                    row.object_address,
+                    row.artifact_digest,
+                    row.registration_address
+                ))
+                .collect::<Vec<_>>(),
+            objects
+        );
+        assert_eq!(fields.inventory_generation, 0);
+        assert_eq!(fields.current_premise_digest, view.view_digest());
+        // The decision given twice is one row.
+        assert_eq!(fields.decision_rows.len(), 1);
+        let row = fields.decision_rows[0];
+        let request = admission.request();
+        assert_eq!(
+            row.decision_digest,
+            Hash::from_bytes(admission.authorization_ref().digest)
+        );
+        assert_eq!(row.request_digest, request.binding_digest());
+        assert_eq!(row.leaf_grant_id, world.leaf);
+        assert_eq!(row.authority_timeline, authority_timeline());
+        assert_eq!(row.head_seq, request.at_position().as_u64());
+        assert_eq!(row.revocation_epoch, 0);
+        assert_eq!(row.policy_revision, POLICY_REVISION);
+        assert_eq!(
+            fields.recipient_identity_digest,
+            adr_h(
+                "RecipientIdentity",
+                &encode(&Value::Text("community-recipient".into()))?
+            )
+        );
+        assert_eq!(fields.clock_bound.reservation_id, call.reservation_id());
+        assert_eq!(fields.clock_bound.reservation_sample_micros, NOW);
+        assert_eq!(
+            fields.clock_bound.decision_bound_micros,
+            call.decision_bound().as_micros()
+        );
+        assert_eq!(fields.evidence_not_after_micros, HORIZON);
+
+        Ok(())
+    })
+}
+
+/// A call of another request, and no administrative decision, refuse.
+#[test]
+fn the_authority_evidence_refuses_another_call_or_no_administrative_decision() -> TestResult {
+    with_operation(|operation| {
+        let Operation {
+            world,
+            planner,
+            profile,
+            input,
+            ..
+        } = operation;
+        let (other, _) = world.call_and_admit(Request::derive(
+            &pos_store::community::CommunityAdministrativeOperationV1::Initialize {
+                timeline: target(),
+                operation_id: [0x11; 16],
+                initial_source: Source::Initializer(community_initializer_set_ref_v1(profile)),
+                expected_prior_generation: None,
+                expected_prior_head_digest: None,
+            },
+        )?)?;
+        for input in [
+            CommunityInitializationEvidenceInputV1 {
+                call: &other,
+                ..input
+            },
+            CommunityInitializationEvidenceInputV1 {
+                decisions: &[],
+                ..input
+            },
+        ] {
+            assert_eq!(
+                planner
+                    .authority_evidence(&world.authority, GENERATION, input)
+                    .err(),
+                Some(Error::InvalidBinding)
+            );
+        }
+        Ok(())
+    })
 }

@@ -30,6 +30,12 @@ use pos_core::community_lifecycle::{
     CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::community_lifecycle::{
+    community_recipient_identity_digest_v1, CommunityAuthorityEvidenceInputV1,
+    CommunityAuthorityEvidenceV1, CommunityClockBoundV1, CommunityDecisionRowV1,
+    CommunityObjectBindingV1,
+};
+#[cfg(target_os = "linux")]
+use pos_core::community_lifecycle::{
     CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyIntentV1, CommunityKeyStateV1,
     CommunityKeyViewRowV1, CommunityPassFrontierV1, CommunityTrustViewRowV1,
 };
@@ -37,13 +43,15 @@ use pos_core::RecordedDependencyClassV1;
 use pos_core::{AuthorityTrustRootSealV1, Hash, TimelineId};
 use zeroize::Zeroizing;
 
-use super::lifecycle_authority::CommunityLifecycleAuthorityV1;
 use super::lifecycle_authority::{
     CommunityAdministrativeActionV1, CommunityAdministrativeOperationV1,
     CommunityAdministrativeRequestV1, CommunityAuthorityAdmissionV1,
 };
+use super::lifecycle_authority::{CommunityAuthorityCallV1, CommunityLifecycleAuthorityV1};
 use super::native_graph::member_binding_ref;
+use super::native_graph::CommunityInitializationGraphV1;
 use super::private_hash::scope_set_digest;
+#[cfg(target_os = "linux")]
 use super::store_domain::CommunityStoreDomainV1;
 #[cfg(target_os = "linux")]
 use std::collections::BTreeSet;
@@ -153,6 +161,49 @@ impl CommunityInitializationViewV1 {
     }
 
     /// The inventory generation the view read (G5).
+    #[must_use]
+    pub const fn inventory_generation(&self) -> u64 {
+        self.inventory_generation
+    }
+}
+
+/// The facts the CAU1 of one planned initialization binds.
+#[derive(Clone, Copy)]
+pub struct CommunityInitializationEvidenceInputV1<'a> {
+    /// The call's authentication, for its trusted-clock bound (G1).
+    pub call: &'a CommunityAuthorityCallV1,
+    /// The planned CGI1, CSB1, CBQ1 and CPV1.
+    pub records: &'a CommunityInitializationRecordsV1,
+    /// The CAV1 the call read.
+    pub view: &'a CommunityInitializationViewV1,
+    /// Every `Active` decision of the call, the administrative one included.
+    pub decisions: &'a [&'a CommunityAuthorityAdmissionV1],
+    /// The protected initial graph.
+    pub graph: &'a CommunityInitializationGraphV1,
+}
+
+/// The CAU1 current authority evidence of one planned initialization.
+pub struct CommunityInitializationAuthorityV1 {
+    evidence: Zeroizing<Vec<u8>>,
+    evidence_digest: Hash,
+    inventory_generation: u64,
+}
+
+impl CommunityInitializationAuthorityV1 {
+    /// The canonical CAU1.
+    #[must_use]
+    pub fn evidence(&self) -> &[u8] {
+        &self.evidence
+    }
+
+    /// The ADR-128 `CurrentAuthority` commitment, every COA1's
+    /// `authority_evidence_digest`.
+    #[must_use]
+    pub const fn evidence_digest(&self) -> Hash {
+        self.evidence_digest
+    }
+
+    /// The inventory generation CAU1 read (G5).
     #[must_use]
     pub const fn inventory_generation(&self) -> u64 {
         self.inventory_generation
@@ -795,6 +846,114 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                 } else {
                     Err(Error::AdmissionDenied)
                 }
+            })
+    }
+
+    /// The CAU1 of this initialization (ADR-129 §3, R6.6, A5.3(4)).
+    ///
+    /// It binds the CGI1 of `input.records` as `input_identity`, every
+    /// protected record of `input.graph` as an object row, the inventory
+    /// generation and `H(CAV1)` of `input.view`, one decision row per
+    /// distinct decision in `input.decisions`, the installed member
+    /// recipient (G6), `input.call`'s trusted-clock reservation and decision
+    /// bound (G1) and the CDP1 horizon. Rows are sorted.
+    ///
+    /// # Errors
+    /// Returns `InvalidBinding` for a call of another request and when no
+    /// decision is the CGI1's administrative one (A5.3(4)). Codec refusals
+    /// of the assembled CAU1 pass through.
+    pub fn authority_evidence(
+        &self,
+        authority: &CommunityLifecycleAuthorityV1,
+        generation: [u8; 16],
+        input: CommunityInitializationEvidenceInputV1<'_>,
+    ) -> Result<CommunityInitializationAuthorityV1, Error> {
+        let CommunityInitializationEvidenceInputV1 {
+            call,
+            records,
+            view,
+            decisions,
+            graph,
+        } = input;
+        CommunityInitializationRequestV1::from_canonical_cbor(records.request())
+            .map(|request| request.as_input().authorization_ref.digest)
+            .and_then(|administrative| {
+                if *call.request() == self.request
+                    && decisions
+                        .iter()
+                        .any(|decision| decision.authorization_ref().digest == administrative)
+                {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidBinding)
+                }
+            })
+            .and_then(|()| {
+                let mut object_bindings: Vec<CommunityObjectBindingV1> = graph
+                    .records()
+                    .iter()
+                    .map(|record| {
+                        let protected = record.protected();
+                        CommunityObjectBindingV1 {
+                            object_address: protected.object_address(),
+                            artifact_digest: protected.registration().fields().artifact_digest,
+                            registration_address: protected.registration().address(),
+                        }
+                    })
+                    .collect();
+                object_bindings.sort_unstable();
+                let mut decision_rows: Vec<CommunityDecisionRowV1> = decisions
+                    .iter()
+                    .filter_map(|decision| {
+                        let request = decision.request();
+                        decision
+                            .decision()
+                            .grant_id()
+                            .map(|leaf_grant_id| CommunityDecisionRowV1 {
+                                decision_digest: Hash::from_bytes(
+                                    decision.authorization_ref().digest,
+                                ),
+                                request_digest: request.binding_digest(),
+                                leaf_grant_id,
+                                authority_timeline: request.authority_timeline(),
+                                head_seq: request.at_position().as_u64(),
+                                revocation_epoch: request.revocation_epoch(),
+                                policy_revision: request.capability_policy_revision(),
+                            })
+                    })
+                    .collect();
+                decision_rows.sort_unstable();
+                decision_rows.dedup();
+                CommunityAuthorityEvidenceV1::new(CommunityAuthorityEvidenceInputV1 {
+                    store_incarnation: self.installation.store_incarnation,
+                    timeline: self.form.timeline,
+                    generation,
+                    operation: CommunityArtifactOperationV1::Initialization(self.form.operation_id),
+                    input_identity: records.request_digest(),
+                    object_bindings,
+                    inventory_generation: view.inventory_generation(),
+                    current_premise_digest: view.view_digest(),
+                    decision_rows,
+                    recipient_identity_digest: community_recipient_identity_digest_v1(
+                        authority.member_recipient(),
+                    ),
+                    clock_bound: CommunityClockBoundV1 {
+                        reservation_id: call.reservation_id(),
+                        reservation_sample_micros: call.at_time().as_micros(),
+                        decision_bound_micros: call.decision_bound().as_micros(),
+                    },
+                    evidence_not_after_micros: self
+                        .installation
+                        .profile
+                        .as_input()
+                        .retention
+                        .generation_not_after_micros,
+                })
+                .map(|evidence| CommunityInitializationAuthorityV1 {
+                    evidence_digest: evidence.digest(),
+                    evidence: evidence.to_canonical_cbor(),
+                    inventory_generation: view.inventory_generation(),
+                })
             })
     }
 }

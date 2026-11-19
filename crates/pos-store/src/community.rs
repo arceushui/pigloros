@@ -44,7 +44,8 @@ pub use native_graph::{
     CommunityInitializationGraphV1, CommunityInitializationMemberV1,
 };
 pub use planner::{
-    CommunityInitializationBindingsV1, CommunityInitializationInstallationV1,
+    CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
+    CommunityInitializationEvidenceInputV1, CommunityInitializationInstallationV1,
     CommunityInitializationPlannerV1, CommunityInitializationRecordsV1,
     CommunityInitializationViewV1, CommunityInitializeFormV1,
 };
