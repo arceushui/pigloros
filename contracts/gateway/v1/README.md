@@ -210,8 +210,8 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
   caller reaches) and a Gateway without a Local erasure composition all answer the same
   `404 not-found-or-unavailable`. A saturated store executor is the one
   `429 resource-limit-exceeded` it answers, retryable without `Retry-After`. `state` is the
-  ADR-060 lifecycle of the verified ERS1 head, `provenance.digest` the raw ERS1 state digest (`host-derived`), and `mode_profile`
-  the binding the erasure was submitted under. `generation` is the head's ERS1 ordinal times
+  ADR-060 lifecycle of the verified ERS1 head, `provenance.digest` the raw ERS1 state digest
+  (`host-derived`), and `mode_profile` the binding the erasure was submitted under. `generation` is the head's ERS1 ordinal times
   2^16 plus the acknowledgements committed in the active attempt; every attempt closes with a
   new ERS1 state, so it never decreases. `acknowledgements` counts the frozen obligations
   and the positive acknowledgements, in total and per acknowledgement class (`classes`, an
