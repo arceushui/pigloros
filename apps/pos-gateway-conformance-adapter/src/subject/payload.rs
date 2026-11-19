@@ -474,8 +474,11 @@ mod tests {
                 .replace(ROOM_SLOT, "r")
                 .replace(ERASURE_SLOT, "e")
                 .replace(REVISION_SEGMENT, "1");
+            // A path ending in a slot names that route for any segment, so
+            // its longer neighbour is a further segment.
+            let longer = if route.path.ends_with('}') { "/x" } else { "x" };
             for path in [
-                format!("{concrete}x"),
+                format!("{concrete}{longer}"),
                 format!("{concrete}/"),
                 format!("/x{concrete}"),
                 concrete.to_uppercase(),
