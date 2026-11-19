@@ -34,9 +34,64 @@ CAPABILITIES = {NET_ADMIN_RUNNER: ["NET_ADMIN", "SYS_ADMIN"]}
 # tests (owner decision 2026-11-09, #911; NET_ADMIN_GUARDS).
 SECURITY_OPTIONS = {NET_ADMIN_RUNNER: ["no-new-privileges", "apparmor=unconfined"]}
 NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
+# ADR-135 §4 (#1422; owner decision 2026-11-16 on #1400): the Air-Gapped test
+# shape. It is not a Docker runner: it runs a test in a new user and network
+# namespace holding only `lo`, with empty capability sets, no_new_privs and
+# the pinned seccomp helper, and only where the host blocks unprivileged user
+# namespaces under `sudo -n -E unshare --net` with setpriv back to the
+# invoking user. It and its helper are pinned like the Docker runners, and
+# only the Gateway's Air-Gapped tests may own it.
+NAMESPACE_RUNNER = "air-gapped-namespace.sh"
+NAMESPACE_HELPER = "air_gapped_seccomp_exec.py"
+NAMESPACE_DIGESTS = {
+    NAMESPACE_RUNNER: "3c775924c0e1a8cc17eca4f15921a5339f00ea5b4547f3f601e6d345703c65fa",
+    NAMESPACE_HELPER: "5ac85eff890ffc95977879725d9104e78b997f658f889810d13d67a19dc0890d",
+}
+# The owner accepted this class on 2026-11-16 (#1400, #1422) with these owners, and the two
+# in-crate test sources #1423 needs for the Air-Gapped bind and serve tests.
+NAMESPACE_OWNER_ROOTS = (
+    "apps/piglor-gateway/tests/",
+    "apps/pos-gateway-conformance-adapter/tests/",
+    "apps/piglor-gateway/src/mode_profile/tests.rs",
+    "apps/piglor-gateway/src/main.rs",
+)
+NAMESPACE_SUDO = "exec sudo -n -E unshare --net"
+# The two capability shapes: none, or exactly CAP_NET_ADMIN for --hold-network-capability.
+NAMESPACE_CAPABILITIES = (
+    "CAPABILITIES=(--bounding-set=-all --inh-caps=-all --ambient-caps=-all)\n"
+    "if [[ ${1:-} == --hold-network-capability ]]; then\n"
+    "  shift\n"
+    "  CAPABILITIES=(--bounding-set=-all,+net_admin --inh-caps=-all,+net_admin"
+    " --ambient-caps=-all,+net_admin)\n"
+    "fi\n"
+    "readonly CAPABILITIES\n"
+)
+# The one other mention of sudo: the check that it exists before the fallback.
+NAMESPACE_SUDO_GUARD = (
+    "command -v sudo >/dev/null || {\n"
+    '  echo "air-gapped-namespace.sh: unprivileged user namespaces are blocked and sudo is absent"'
+    " >&2\n"
+    "  exit 2\n"
+    "}\n"
+)
+NAMESPACE_FRAGMENTS = (
+    "if unshare --user --map-root-user --net sh -c 'ip link set lo up' 2>/dev/null; then",
+    "exec unshare --user --map-root-user --net",
+    NAMESPACE_SUDO,
+    'setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups "${DROP[@]}"',
+    # Every capability is dropped, or, with --hold-network-capability (owner decision 2026-11-17,
+    # #1423), every capability but CAP_NET_ADMIN.
+    NAMESPACE_CAPABILITIES,
+    'readonly DROP=(--no-new-privs "${CAPABILITIES[@]}")',
+    "readonly LOOPBACK_UP='ip link set lo up && exec \"$@\"'",
+    'readonly HELPER=$(realpath -- "$(dirname -- "$0")/air_gapped_seccomp_exec.py")',
+    'python3 "$HELPER" "$@"',
+)
 # Where Rust sources live; every one is scanned for runner references.
 RUST_ROOTS = ("apps", "crates", "fuzz", "plugins", "scripts")
-# A Rust test self-locates a runner through exactly this literal.
+# A Rust test self-locates a runner through exactly this literal. Owner discovery
+# follows only it, for the Docker runners and the namespace runner alike; the
+# runners' content is protected by their pins whatever names them.
 RUNNER_REFERENCE = re.compile(r'\.join\("\.\./\.\./scripts/([^"\n]+)"\)')
 # Comments, then string literals (raw, plain, byte) and char literals, in the
 # order a Rust lexer meets them, so a quote inside one never starts another.
@@ -200,6 +255,61 @@ def check_runner(runner_path: Path) -> None:
             require(runner, fragment, runner_path)
 
 
+def pinned_content(path: Path, pinned: str) -> str:
+    """The text of the regular file `path`, which must be exactly `pinned`."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise SystemExit(f"{path}: the Air-Gapped test shape must be a regular file: {error}")
+    with os.fdopen(descriptor, "rb") as handle:
+        status = os.fstat(handle.fileno())
+        content = handle.read()
+    if not stat.S_ISREG(status.st_mode) or not status.st_mode & stat.S_IXUSR:
+        raise SystemExit(f"{path}: the Air-Gapped test shape must be an executable regular file")
+    if hashlib.sha256(content).hexdigest() != pinned:
+        raise SystemExit(
+            f"{path}: differs from its pinned content; review the change and update "
+            "NAMESPACE_DIGESTS in the same commit"
+        )
+    return content.decode("utf-8")
+
+
+def check_namespace_runner(scripts: Path) -> None:
+    """Fail unless the Air-Gapped test shape and its helper are exactly their pinned
+    content, and the runner keeps every structural guarantee."""
+    pinned_content(scripts / NAMESPACE_HELPER, NAMESPACE_DIGESTS[NAMESPACE_HELPER])
+    runner_path = scripts / NAMESPACE_RUNNER
+    runner = pinned_content(runner_path, NAMESPACE_DIGESTS[NAMESPACE_RUNNER])
+    if not runner.startswith(RUNNER_SHEBANG + "#") or RUNNER_ENVIRONMENT not in runner:
+        raise SystemExit(f"{runner_path}: must start with {RUNNER_SHEBANG!r} and a fixed PATH")
+    require(runner, NAMESPACE_SUDO_GUARD, runner_path)
+    code = "\n".join(
+        line
+        for line in runner.replace(NAMESPACE_SUDO_GUARD, "").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    if len(re.findall(r"\bsudo\b", code)) != 1 or code.count(NAMESPACE_SUDO) != 1:
+        raise SystemExit(f"{runner_path}: sudo is allowed only as its one namespace fallback")
+    if "docker" in code or "--privileged" in code or "--cap-add" in code:
+        raise SystemExit(f"{runner_path}: must not start a container or add capabilities")
+    if re.search(r"(?m)(?:^[ \t]*|[;&|][ \t]*)rm[ \t]+-[^\n]*r", runner):
+        raise SystemExit(f"{runner_path}: recursive host-path deletion is forbidden")
+    for fragment in NAMESPACE_FRAGMENTS:
+        require(runner, fragment, runner_path)
+    # CAP_NET_ADMIN is the only capability ever raised, the capability sets are chosen once,
+    # and the fallback switches back to exactly the invoking user.
+    raised = re.findall(r"[+]([a-z_]+)", code)
+    if set(raised) != {"net_admin"} or code.count("CAPABILITIES=(") != 2:
+        raise SystemExit(f"{runner_path}: raises a capability other than CAP_NET_ADMIN")
+    if code.count("--reuid") != 1 or code.count("--regid") != 1 or "keep-caps" in code:
+        raise SystemExit(f"{runner_path}: the fallback must switch back to the invoking user")
+    # Both shapes, the user namespace and the sudo fallback, bring `lo` up, drop the
+    # capabilities and run the program under the helper.
+    for fragment in ('sh -c "$LOOPBACK_UP" sh', '"${DROP[@]}"', 'python3 "$HELPER" "$@"'):
+        if code.count(fragment) != 2:
+            raise SystemExit(f"{runner_path}: both namespace shapes must use {fragment}")
+
+
 def literal_text(text: str) -> str:
     """Every string and char literal of a Rust source joined in order,
     lowercased and stripped of all but letters and digits."""
@@ -217,12 +327,16 @@ def check_runner_references(
     the one literal form the checker follows, and only the Local namespace
     adapter names anything of the NET_ADMIN runner."""
     for reference in references:
-        if reference not in runner_names:
+        if reference == NAMESPACE_RUNNER:
+            if not source.relative_to(root).as_posix().startswith(NAMESPACE_OWNER_ROOTS):
+                raise SystemExit(f"{source}: only the Air-Gapped tests may own {NAMESPACE_RUNNER}")
+        elif reference not in runner_names:
             raise SystemExit(
                 f"{source}: delegated test runner is not a discovered isolated runner: {reference}"
             )
     literals = literal_text(text)
-    if literals.count(ISOLATED_FRAGMENT) != len(references):
+    docker_references = [reference for reference in references if reference != NAMESPACE_RUNNER]
+    if literals.count(ISOLATED_FRAGMENT) != len(docker_references):
         raise SystemExit(
             f"{source}: names an isolated test runner other than through "
             '.join("../../scripts/<runner>")'
@@ -272,6 +386,18 @@ def main() -> None:
     for source, text in rust_sources.items():
         references[source] = RUNNER_REFERENCE.findall(text)
         check_runner_references(root, source, text, references[source], runner_names)
+
+    check_namespace_runner(root / "scripts")
+    namespace_owners = [
+        (source, text)
+        for source, text in rust_sources.items()
+        if NAMESPACE_RUNNER in references[source]
+    ]
+    if not namespace_owners:
+        raise SystemExit(f"{NAMESPACE_RUNNER}: no Rust test self-locates this runner")
+    for source, text in namespace_owners:
+        require(text, 'env!("CARGO_MANIFEST_DIR")', source)
+        require(text, '.arg(std::env::current_exe()?)', source)
 
     missing = set(RUNNER_DIGESTS) - runner_names
     if missing:

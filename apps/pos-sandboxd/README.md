@@ -144,6 +144,15 @@ composes the attempt:
 The live dm-verity table is #444 evidence, not a runtime check. Lifecycle
 cleanup (#1199/#1200) and packaged-build conformance (#444) remain separate.
 
+With the `test-support` feature, the `packaged_conformance` module and the
+`pos-sandboxd-conformance` binary drive this path in the #444 QEMU evidence
+guest only (`deploy/nixos/qemu-evidence`). The binary stages the dev/test
+installation around one image, admits it, registers and prepares one attempt,
+and calls `activate_admitted_root`. While its standard input stays open, it
+holds the mounted root so the guest can record the live kernel state. It then
+detaches the root and removes the directory. The feature is never enabled in
+deployable builds.
+
 `/work`, the sole writable mount, is requested as
 `TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read
 back as a typed `a(ss)` value. A zero ceiling requests no mount at all, because
@@ -225,7 +234,7 @@ job cannot supply another independently validated allow-list.
 The attempt also retains the SPM1-selected runtime key ID and authenticated
 verifying key. The production barrier requires that ID from its signer and
 verifies the produced signature under the admitted key before sending any
-release; a safe but incorrect key file cannot authorize execution.
+release; a key other than the admitted one cannot authorize execution.
 `AdmittedAttempt` derives the launcher source, byte length, BLAKE3 digest and
 device/inode from the authenticated SIC1 role-11 provider executable. Neither
 the execute job nor barrier evidence can supply a separate path or digest.

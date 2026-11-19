@@ -1,13 +1,14 @@
 //! Original owner and metadata-anchor data, never current-use/service authority.
 
-use super::envelope::{append_hex, owner_error};
+use super::envelope::owner_error;
 use super::{
     bounded_text, canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates,
     read_hashes, read_head, record_cursor, record_prefix, validate_coordinates, validate_horizon,
     CommunityLifecycleErrorV1 as Error, Result,
 };
 use crate::{
-    encode_bytes, encode_hash, encode_head, ArtifactRegistrationV1, Hash, OwnerIdV1, TimelineId,
+    append_hex, encode_bytes, encode_hash, encode_head, ArtifactRegistrationV1, Hash, OwnerIdV1,
+    TimelineId,
 };
 use zeroize::Zeroizing;
 

@@ -97,7 +97,7 @@ impl InstallationObjectKind {
     /// Installed root-image role.
     pub(crate) const ROOT_IMAGE: Self = Self(12);
     /// Installed provider executable, also used as the trusted launcher.
-    pub(crate) const PROVIDER_EXECUTABLE: Self = Self(11);
+    pub const PROVIDER_EXECUTABLE: Self = Self(11);
     /// Installed subject-executable role.
     pub(crate) const SUBJECT_EXECUTABLE: Self = Self(13);
 
@@ -412,10 +412,19 @@ impl HeldInstallationArtifact {
 #[derive(Debug)]
 pub struct InstalledSelectorState {
     root: File,
-    manifest_file: File,
     manifest_bytes: Vec<u8>,
     manifest: InstallationManifest,
     artifacts: BTreeMap<(InstallationObjectKind, [u8; 32]), HeldInstallationArtifact>,
+}
+
+/// The fixed installation as the selector finds it when it starts.
+#[derive(Debug)]
+pub(crate) enum FixedInstallation {
+    /// No SIR1 is pending: the state may be authenticated for admission.
+    Admissible(InstalledSelectorState),
+    /// A SIR1 is pending. The current SIC1 grants nothing until its recovery
+    /// completes (ADR-069 R12 §8).
+    RecoveryPending(InstalledSelectorState),
 }
 
 impl InstalledSelectorState {
@@ -425,15 +434,33 @@ impl InstalledSelectorState {
     /// Returns an error for unsafe ancestry, links, ownership, permissions,
     /// canonical SIC1 failures, missing indexed objects, or content mismatch.
     pub fn open() -> Result<Self, SelectorBoundaryError> {
-        File::open("/")
-            .map_err(|_| SelectorBoundaryError::Io)
-            .and_then(|filesystem_root| {
-                Path::new(SANDBOX_ARTIFACT_ROOT)
-                    .strip_prefix("/")
-                    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
-                    .and_then(|relative| open_directory_chain(filesystem_root, relative, 0))
+        fixed_artifact_root().and_then(|artifact_root| Self::open_at(&artifact_root))
+    }
+
+    /// Opens the fixed installation and reports whether a SIR1 is pending.
+    ///
+    /// # Errors
+    /// Returns the [`Self::open`] errors, and rejects a recovery pathname that
+    /// cannot be inspected.
+    pub(crate) fn open_fixed() -> Result<FixedInstallation, SelectorBoundaryError> {
+        fixed_artifact_root().and_then(|artifact_root| Self::open_fixed_at(&artifact_root, 0))
+    }
+
+    fn open_fixed_at(
+        root: &File,
+        expected_owner: u32,
+    ) -> Result<FixedInstallation, SelectorBoundaryError> {
+        validate_directory(root, expected_owner)
+            .and_then(|()| pending_recovery_exists(root))
+            .and_then(|pending| {
+                Self::open_current_at(root, expected_owner).map(|state| {
+                    if pending {
+                        FixedInstallation::RecoveryPending(state)
+                    } else {
+                        FixedInstallation::Admissible(state)
+                    }
+                })
             })
-            .and_then(|artifact_root| Self::open_at(&artifact_root))
     }
 
     fn open_at(root: &File) -> Result<Self, SelectorBoundaryError> {
@@ -443,28 +470,35 @@ impl InstalledSelectorState {
     fn open_at_for_owner(root: &File, expected_owner: u32) -> Result<Self, SelectorBoundaryError> {
         validate_directory(root, expected_owner)
             .and_then(|()| ensure_no_pending_recovery(root))
-            .and_then(|()| {
-                open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT, expected_owner)
-            })
-            .and_then(|manifest_file| {
-                read_complete_file(&manifest_file, MANIFEST_LIMIT).and_then(|manifest_bytes| {
-                    InstallationManifest::from_canonical_cbor(&manifest_bytes)
-                        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
-                        .and_then(|manifest| {
-                            open_indexed_artifacts(root, &manifest, expected_owner).and_then(
-                                |artifacts| {
-                                    root.try_clone().map_err(|_| SelectorBoundaryError::Io).map(
-                                        |root| Self {
-                                            root,
-                                            manifest_file,
-                                            manifest_bytes,
-                                            manifest,
-                                            artifacts,
-                                        },
-                                    )
-                                },
-                            )
-                        })
+            .and_then(|()| Self::open_current_at(root, expected_owner))
+    }
+
+    fn open_current_at(root: &File, expected_owner: u32) -> Result<Self, SelectorBoundaryError> {
+        open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT, expected_owner)
+            .and_then(|manifest_file| read_complete_file(&manifest_file, MANIFEST_LIMIT))
+            .and_then(|manifest_bytes| Self::open_recorded_at(root, manifest_bytes, expected_owner))
+    }
+
+    /// Opens the state one recorded SIC1 names beneath `root`.
+    ///
+    /// SIR1 embeds its previous and next SIC1. Each is reopened from the same
+    /// immutable objects, so recovery revalidates every object either state
+    /// names (ADR-069 R12 §4.1).
+    fn open_recorded_at(
+        root: &File,
+        manifest_bytes: Vec<u8>,
+        expected_owner: u32,
+    ) -> Result<Self, SelectorBoundaryError> {
+        InstallationManifest::from_canonical_cbor(&manifest_bytes)
+            .map_err(artifact_invalid)
+            .and_then(|manifest| {
+                open_indexed_artifacts(root, &manifest, expected_owner).and_then(|artifacts| {
+                    root.try_clone().map_err(io_failure).map(|root| Self {
+                        root,
+                        manifest_bytes,
+                        manifest,
+                        artifacts,
+                    })
                 })
             })
     }
@@ -476,10 +510,13 @@ impl InstalledSelectorState {
             .and_then(|metadata| Self::open_at_for_owner(root, metadata.uid()))
     }
 
-    /// Returns the retained manifest descriptor.
-    #[must_use]
-    pub const fn manifest_file(&self) -> &File {
-        &self.manifest_file
+    #[cfg(test)]
+    pub(crate) fn open_fixed_at_for_test(
+        root: &File,
+    ) -> Result<FixedInstallation, SelectorBoundaryError> {
+        root.metadata()
+            .map_err(io_failure)
+            .and_then(|metadata| Self::open_fixed_at(root, metadata.uid()))
     }
 
     /// Returns SIC1's original canonical bytes.
@@ -563,6 +600,37 @@ fn ensure_no_pending_recovery(root: &File) -> Result<(), SelectorBoundaryError> 
         Err(rustix::io::Errno::NOENT) => Ok(()),
         _ => Err(SelectorBoundaryError::ArtifactInvalid),
     }
+}
+
+/// Any node at the recovery pathname is a pending SIR1; the recovery loader
+/// then requires it to be the exact root-owned record.
+fn pending_recovery_exists(root: &File) -> Result<bool, SelectorBoundaryError> {
+    statat(root, RECOVERY_NAME, AtFlags::SYMLINK_NOFOLLOW)
+        .map(|_| true)
+        .or_else(|error| {
+            (error == rustix::io::Errno::NOENT)
+                .then_some(false)
+                .ok_or(SelectorBoundaryError::ArtifactInvalid)
+        })
+}
+
+fn fixed_artifact_root() -> Result<File, SelectorBoundaryError> {
+    File::open("/")
+        .map_err(io_failure)
+        .and_then(|filesystem_root| {
+            Path::new(SANDBOX_ARTIFACT_ROOT)
+                .strip_prefix("/")
+                .map_err(artifact_invalid)
+                .and_then(|relative| open_directory_chain(filesystem_root, relative, 0))
+        })
+}
+
+fn io_failure<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::Io
+}
+
+fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::ArtifactInvalid
 }
 
 fn manifest_digest(unsigned: &Value) -> Result<[u8; 32], ProtocolError> {
@@ -837,6 +905,7 @@ fn hex_name(digest: [u8; 32]) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod tests {
+    pub mod recovery;
     pub mod updates;
 
     use std::collections::BTreeMap;
@@ -1038,7 +1107,6 @@ pub mod tests {
             .collect();
         Ok(InstalledSelectorState {
             root: tempfile::tempdir().and_then(|directory| File::open(directory.path()))?,
-            manifest_file: tempfile::NamedTempFile::new()?.into_file(),
             manifest_bytes: Vec::new(),
             manifest: InstallationManifest {
                 root_key_id: "root".to_owned(),
@@ -1072,8 +1140,8 @@ pub mod tests {
                 architecture: SandboxArchitecture::X86_64,
                 root_hash: std::array::from_fn(|index| u8::try_from(index).unwrap_or(0)),
                 proof: proof.to_vec(),
-                certificate: IMAGE_CERTIFICATE,
-                key_description: IMAGE_KEY_DESCRIPTION,
+                certificate: IMAGE_CERTIFICATE.to_vec(),
+                key_description: IMAGE_KEY_DESCRIPTION.to_owned(),
             }
         }
 
@@ -1803,7 +1871,6 @@ pub mod tests {
         }
         let state = InstalledSelectorState::open_at_for_test(&root)?;
         assert!(!state.manifest_bytes().is_empty());
-        assert!(state.manifest_file().metadata()?.is_file());
         assert_eq!(state.manifest().objects().len(), 16);
         let authority = state.artifact(InstallationObjectKind::from_code(0)?, [1; 32])?;
         assert!(authority.file().metadata()?.is_file());
@@ -1934,9 +2001,19 @@ pub mod tests {
     fn pending_recovery_prevents_normal_startup() -> TestResult {
         let temporary = tempfile::tempdir()?;
         write_state(temporary.path())?;
-        fs::write(temporary.path().join("installation-update.cbor"), [1])?;
         let root = File::open(temporary.path())?;
+        assert!(matches!(
+            InstalledSelectorState::open_fixed_at_for_test(&root)?,
+            FixedInstallation::Admissible(_)
+        ));
+        fs::write(temporary.path().join("installation-update.cbor"), [1])?;
         assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
+        assert!(matches!(
+            InstalledSelectorState::open_fixed_at_for_test(&root)?,
+            FixedInstallation::RecoveryPending(_)
+        ));
+        assert_eq!(io_failure(()), SelectorBoundaryError::Io);
+        assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
         Ok(())
     }
 

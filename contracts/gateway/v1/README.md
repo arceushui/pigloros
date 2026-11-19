@@ -43,6 +43,16 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   request. It requires the `session.read` grant like any protected operation.
   `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on;
   a client accepts both.
+- `POST /v1/me/consent-revocations` is served (#309): the acting Principal revokes one of the
+  consents its `Session` lists, named by `consent_ref`, under the `consent.revoke` grant. The
+  revocation is a `consent.revoked.v1` Event on the Principal's consent Timeline whose sequence
+  is the ADR-039 fence; it takes effect before the next decision. From then on every operation
+  the consent governs (the granted operations of its purpose and data categories) is
+  `403 revoked`; every other operation stays available, and no consent ever governs reading the
+  Session, revoking a consent or the network capability. A consent the acting entity is not a
+  party to (its subject or grantee) is `404 not-found-or-unavailable`, and the Session lists only
+  the consents the acting entity is a party to. Revocation stops future protected work and deletes nothing;
+  erasure is a separate operation.
 - Open identifiers and server invariants. Frozen with Session, `ExecutionProfileId`,
   `GatewayModeProfileId`, `mode`, `execution_profile.reason` and `network_grants` are bounded,
   pattern-checked strings rather than enumerations, so a later v1 revision can add a profile,
@@ -69,6 +79,45 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   `examples/` and the gateway-client-conformance fixtures name the head; a frozen example under
   `compatibility/examples/` may name any revision of the chain, because rule 6 freezes its wire
   validity, not what the current release serves.
+- The Scenario Room routes are served (#303): `createScenarioRoom`, `deriveScenarioRoomRevision`
+  and `getScenarioRoomRevision`, each under its own grant (`scenario-room.create`, `.derive`,
+  `.read`). Every `persona` participant must be an actor the Principal's grant covers, and
+  `governance_ref` must be the host's governance record: the optional `governance_record_id` of
+  the Local Principal provisioning document. A room may name only the Plugin of the reviewed host
+  catalogue entry the Gateway ships (`gateway-world-actions` `0.1.0`). Each room is one Timeline,
+  and the revision's `commit` is its `room.revision.v1` Event. `privacy_export_ref` must name a consent the
+  acting Principal holds (the `consent_ref` of its `consent.granted.v1` Event): one it does not
+  hold is `403 consent-invalid` and a revoked one `403 revoked`, checked under the operation's
+  permit, so a revocation takes effect from the next room operation. The check precedes the
+  Idempotency-Key lookup, so even an exact retry after the consent was revoked is `403 revoked`:
+  a revoked consent stops all protected work on the room, replays included. Under decision 2a the
+  consent need not match the room's purpose or data categories; a later #309 consent scope may
+  narrow that. A room's Timeline is an ordinary root Timeline: it shares the root-Timeline
+  ceiling and its `room.revision.v1` and `room.request.v1` Events are readable through
+  `GET /v1/timelines/{timeline_id}/events` with the `timeline.events.read` grant.
+- A malformed body, a missing or malformed `Idempotency-Key` and a malformed room ID are
+  `400 invalid-request` before the authority decision and before any lookup; every other
+  answer of a room operation follows the decision. An `Idempotency-Key` of a room operation is
+  claimed once, as a plain Event on the host's request Timeline for a creation, or on the room's
+  own Timeline for a derive, and stays claimed for that Timeline's lifetime (no ADR-038
+  retention window applies to it). A refused request, a stale derive and a ceiling refusal
+  claim nothing, so the key stays free for another request. A derive whose parent is not the
+  head is decided before any key lookup or claim: it answers with the revision already derived
+  from that parent (`200`) when it hashes like that revision (ADR-041 section 7), and is
+  otherwise `409 append-conflict`, even when its `Idempotency-Key` was used for a different
+  request, which would else be `409 idempotency-conflict`. A new room's ID is its claim's Event ID, so a retry after an interrupted attempt finishes the same
+  room. A creation claims on the host's request Timeline (at most one claim per room, so the
+  root-Timeline ceiling of 64 keeps it far below its Event ceiling); a derive claims on the room's
+  own Timeline, which holds its claims and revisions, so a room holds at most half of
+  `events_per_timeline` revisions. A ceiling is a permanent `429 resource-limit-exceeded`
+  (`retryable: false`), as on every other route. Finding a claim reads its Timeline once, since
+  the host has no entity index.
+- A `ScenarioRoomRevision` (#303) is `principal-authored`. Its `provenance.digest` is
+  BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of
+  `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a
+  Crockford base32 ULID), in lower-case hex. The descriptor's `rule_set_hash` and `descriptor_hash` are the RFC 8785
+  hashes of the ADR-041 amendment of #303; `plugin_composition_hash` depends on the host's bundled
+  Plugins and cannot be recomputed by a client.
 - `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
   its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Until #461
   installs an EPF1, every Gateway resource reports `unavailable`.
@@ -84,6 +133,49 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   value that travels both ways and is fixed.
 - Events are ordered by Timeline sequence (`seq`), never by wall time. Draft values that must
   replay deterministically are integers (micro-units where fractional), never JSON numbers.
+
+## Preferences and OptionSpecs
+
+`POST /v1/preferences`, `POST /v1/option-specs` and their
+`GET .../{id}/revisions/{revision}` reads are served (#304). Both resources are user-authored and
+subject-scoped: the subject is the acting entity (`x-piglor-actor-entity`), which the Local
+Principal's grant must cover, and the operations need the grants `preference.create`,
+`preference.read`, `option-spec.create` and `option-spec.read`. A request carries
+`schema_version: 1`; any other version is `400 unsupported-version`.
+
+- **Revisions.** Without `parent` a request creates revision 1 of a new resource; with `parent`
+  it creates the next revision, and `parent` must name the current head (`409 append-conflict`
+  otherwise). A stored revision never changes. Identical content is never deduplicated: an exact
+  retry under the same `Idempotency-Key` returns the original revision (`200`), the same key with
+  another request is `409 idempotency-conflict`.
+- **Erasure.** Erasing a revision also rewrites the request digest its idempotency record kept,
+  which is derived from the content, to a constant, so no byte derived from the erased values
+  survives. A retry from the subject under that `Idempotency-Key`, with any request, then answers
+  `410 deleted`; a retry from another entity is `409 idempotency-conflict` and never learns of the
+  erasure.
+- **Views.** A revision is answered only to its subject; any other caller, and an unknown or
+  foreign parent, gets `404 not-found-or-unavailable`. A revision its subject erased answers
+  `410 deleted` to that subject from a payload-free tombstone (resource, revision, subject and
+  digest) and `404` to everyone else; no erased value is reconstructed. The Gateway keeps the
+  revisions in its own store, outside every Timeline, with the execution-mode binding their
+  commit recorded (`mode_profile`).
+- **Digests.** `digest` is BLAKE3 of the ASCII domain tag
+  `PiglorOS.GatewayPreferenceRevision.v1` or `PiglorOS.GatewayOptionSpecRevision.v1`, a 0x00
+  byte, and the revision's canonical bytes: the RFC 8949 §4.2.1 deterministic CBOR array
+  `[schema_id, schema_version, id, revision, parent_revision, subject_entity_id, entries]`, where
+  `schema_id` is the literal `$id` URN of the revision schema
+  (`urn:pigloros:gateway:v1:schema:preference-revision` or
+  `urn:pigloros:gateway:v1:schema:option-spec-revision`), IDs are canonical ULID text and
+  `parent_revision` is null for revision 1. A Preference entry is
+  `[dimension, weight_micro]`, ordered by `dimension`; an OptionSpec entry is
+  `[key, label, tags, lean_hint_micro, coordinates]` in the authored order, `tags` in byte
+  order, an absent `lean_hint_micro` or `coordinates` null and `coordinates` the array
+  `[x_micro, z_micro]`. The answered `weights`, `options` and `tags` follow the same order. A
+  `revision-ref` names a revision by `id`, `revision` and this `digest`.
+  `provenance.digest` is BLAKE3 of `PiglorOS.GatewayRevisionProvenance.v1`, a 0x00 byte and the
+  deterministic CBOR array `[origin, principal_id, subject_entity_id, mode_profile_id,
+  mode_profile_digest, binding_epoch, digest]`: text, ULIDs and lower-case hex digests, and an
+  unsigned `binding_epoch`. The golden examples carry recomputed values.
 
 ## Problems
 
@@ -127,7 +219,11 @@ a denial is `503 temporarily-unavailable` instead.
 
 A mutation that is retry-safe carries an `Idempotency-Key` header of 1 to 128 visible ASCII
 characters (schema `idempotency-key`); every Draft mutation requires one, and of the served
-routes `POST /v1/timelines/{timeline_id}/actions` does. Without it the request is
+routes `POST /v1/timelines/{timeline_id}/actions` and `POST /v1/me/consent-revocations` do. A
+consent revocation is monotonic: revoking a revoked consent returns its original revocation
+(`200`) whatever its key, and the revocation Event records the key (with the Principal and the
+acting entity), so reusing it for another consent is `409 idempotency-conflict`, also after a
+restart. Without it the request is
 `400 invalid-request`. Repeating the key with the same request returns the original result
 (`200` with the original committed Event for an action) without re-running approval; reusing
 it with a different request is `409 idempotency-conflict`. A rejected action is never retried by
@@ -165,7 +261,7 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    profile the deployment cannot serve is `409 incompatible-profile`; a Local deployment never
    reports or serves an Air-Gapped profile. The servable sets are Local {`replay-v1`,
    `deterministic-local-v1`, `live-local-v1`} and Air-Gapped {`replay-v1`,
-   `deterministic-air-gapped-v1`, plus the live Air-Gapped family once #1372 is accepted}. They
+   `deterministic-air-gapped-v1`, `live-air-gapped-v1`} (ADR-135 §6). They
    are a server invariant, not a schema rule: an `installed` `execution_profile.profile_id` is
    always in the servable set of the resource's `mode_profile.mode`, while the schema keeps the
    identifier open so a later family stays within v1. A profile in the set is served only once
@@ -177,7 +273,7 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    | `deterministic-local-v1` | 409 | 409 always (not servable) | Local: #1364 |
    | `deterministic-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #1364 |
    | `live-local-v1` | 409 | 409 always (not servable) | Local: #461 |
-   | live Air-Gapped family | n/a | 409 | Air-Gapped: #1372, then #461 |
+   | `live-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #461 installs its EPF1 |
 
    The positive Draft examples that bind a profile show the answer once that profile is served.
 4. **Unknown members are handled as each schema declares.** An open request object (no
@@ -217,9 +313,9 @@ since the merge base with `main`: a pull request cannot loosen the baseline toge
 contract. `servers` and `info.version` are not frozen: a client must not hard-code the server
 URL, and the description's revision label is not part of the wire contract. The golden examples
 `unsupported-version-api-major`, `not-found-unrouted-path`, `unknown-required-schema-event-type`,
-`unsupported-version-legacy-event-type`, `draft-scenario-room-unsupported-schema-version`,
+`unsupported-version-legacy-event-type`, `scenario-room-unsupported-schema-version`,
 `draft-decision-preview-incompatible-profile`, `draft-decision-preview-profile-not-installed`,
-`draft-replay-incompatible-profile` and
+`draft-replay-incompatible-profile`, `preference-unsupported-schema-version` and
 `compatible-unknown-optional-member-ignored` are the negotiation and unknown-member cases.
 
 ## Changing the contract

@@ -31,7 +31,10 @@ pub mod composition_fallback;
 #[cfg(target_os = "linux")]
 pub mod counterfactual;
 pub mod driver;
+pub mod erasure_authority_view;
 pub mod erasure_host;
+#[cfg(target_os = "linux")]
+pub mod erasure_local_authority;
 pub mod error;
 pub mod measured_process_image;
 pub mod output_admission;
@@ -69,10 +72,25 @@ pub use driver::{
     ObservationView, ProjectionKey, RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput,
     TimelineHistorySegment,
 };
+pub use erasure_authority_view::{
+    ErasureAuthorityReadViewV1, ErasureRecordedScopeV1, ErasureViewListErrorV1,
+};
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
-    ErasureReadSenderV1,
+    ErasureReadSenderV1, LocalErasureSubmissionBindingV1, LocalErasureSubmissionV1,
+    LocalErasureSubmitErrorV1,
+};
+#[cfg(target_os = "linux")]
+pub use erasure_local_authority::{
+    compiled_local_erasure_policy_v1, local_erasure_execution_binding_v1,
+    LocalErasureClassificationRowV1, LocalErasureCompositionErrorV1,
+    LocalErasureCompositionInputsV1, LOCAL_ERASURE_AUTO_RETRY_MAX_V1,
+    LOCAL_ERASURE_CLASSIFICATION_COUNT_V1, LOCAL_ERASURE_CLASSIFICATION_V1,
+    LOCAL_ERASURE_EXECUTOR_ID_V1, LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1,
+    LOCAL_ERASURE_EXECUTOR_VERSION_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
+    LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
 };
 pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
 pub use measured_process_image::MeasuredProcessImageV1;

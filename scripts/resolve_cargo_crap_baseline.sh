@@ -11,7 +11,7 @@ BASELINE_RETRY_DELAY_SECONDS=10
 # A main run that has not registered yet is awaited only for the shorter
 # registration window.
 MAIN_RUN_POLL_DELAY_SECONDS=60
-BASELINE_WAIT_LIMIT_SECONDS=7200
+BASELINE_WAIT_LIMIT_SECONDS=1800
 MAIN_RUN_REGISTRATION_LIMIT_SECONDS=600
 # A transient GitHub API failure is retried; persistent failures fail closed
 # without reaching the bootstrap decision.
@@ -25,7 +25,9 @@ GH_API_RETRY_DELAY_SECONDS=30
 # above its ancestor score unnoticed, and code main added after the ancestor
 # is charged to this pull request as new. The older baseline is weaker in one
 # way, accepted by the owner (2026-11-16) for the bounded walk: a function main
-# improved after the ancestor may regrow up to its ancestor score.
+# improved after the ancestor may regrow up to its ancestor score. The owner
+# shortened the wait to 30 minutes (2026-11-18): an idle runner held up to two
+# hours per pull request cost more than that rarer, bounded weakness.
 # First-parent history is main's own history because main lands only squash
 # and merge-queue commits, so the trusted base is always on its mainline. The
 # walk adds at most this many sequential artifact queries after the wait

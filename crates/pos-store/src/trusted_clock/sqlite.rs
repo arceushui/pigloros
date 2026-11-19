@@ -179,8 +179,9 @@ impl SqliteTrustedClockAuthorityV1 {
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the file cannot be opened, lacks
-    /// the complete `SqliteStore` ARD1 catalog (`artifact_registrations` and
-    /// `artifact_registration_operations`), the schema objects cannot be
+    /// the complete `SqliteStore` ARD1 catalog (`artifact_registrations`,
+    /// `artifact_registration_operations` and
+    /// `artifact_registration_timelines`), the schema objects cannot be
     /// created, or an existing trusted-clock table or trigger differs from
     /// its reviewed definition.
     pub fn open(path: &str) -> Result<Self, CoreError> {

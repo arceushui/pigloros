@@ -732,15 +732,48 @@ pub(crate) fn read_single_credential(
     service_uid: u32,
     maximum: usize,
 ) -> Result<Zeroizing<Vec<u8>>, LocalForkAuthenticationErrorV1> {
+    open_exact_credentials(directory, &[name], service_uid)
+        .and_then(|credentials| credentials.read(name, maximum))
+}
+
+/// A protected systemd credential directory that holds exactly the
+/// credentials it was opened for.
+pub(crate) struct ExactCredentialsV1 {
+    directory: File,
+    service_uid: u32,
+}
+
+impl ExactCredentialsV1 {
+    /// Read the credential `name`, at most `maximum` bytes, with the
+    /// custody checks of [`read_single_credential`].
+    pub(crate) fn read(
+        &self,
+        name: &str,
+        maximum: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, LocalForkAuthenticationErrorV1> {
+        read_bounded_credential(&self.directory, name, self.service_uid, maximum)
+            .map(Zeroizing::new)
+    }
+}
+
+/// Open a protected systemd credential directory that must hold exactly
+/// the credentials `names`, given in sorted order.
+pub(crate) fn open_exact_credentials(
+    directory: &Path,
+    names: &[&str],
+    service_uid: u32,
+) -> Result<ExactCredentialsV1, LocalForkAuthenticationErrorV1> {
     open_credential_directory(directory, service_uid).and_then(|directory| {
         sorted_credential_names(&directory)
-            .and_then(|names| {
-                (names == [name])
+            .and_then(|found| {
+                (found == names)
                     .then_some(())
                     .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
             })
-            .and_then(|()| read_bounded_credential(&directory, name, service_uid, maximum))
-            .map(Zeroizing::new)
+            .map(|()| ExactCredentialsV1 {
+                directory,
+                service_uid,
+            })
     })
 }
 

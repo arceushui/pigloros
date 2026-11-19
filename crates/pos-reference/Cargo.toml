@@ -11,9 +11,12 @@ publish.workspace = true
 # public-seam tests in other crates. Never enable in deployable builds; the
 # fixture's test-only keys grant no authority. Enforced by
 # scripts/check_test_support_features.py in CI.
-test-support = []
+test-support = ["dep:base64"]
 
 [dependencies]
+# Decodes the root-verity-sig signature in the `test-support` installation
+# fixture only.
+base64 = { workspace = true, features = ["alloc"], optional = true }
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 ciborium-ll = "0.2.2"
@@ -43,6 +46,7 @@ rustix = { version = "1.1.4", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+base64 = { workspace = true, features = ["alloc"] }
 rand = { workspace = true }
 
 [lints]
