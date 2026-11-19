@@ -57,9 +57,9 @@ pub use authority_catalogue::{
     MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1,
 };
 pub use authority_evidence::{
-    CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityClockBoundV1,
-    CommunityDecisionRowV1, CommunityObjectBindingV1, MAX_COMMUNITY_DECISION_ROWS_V1,
-    MAX_COMMUNITY_OBJECT_BINDINGS_V1,
+    community_recipient_identity_digest_v1, CommunityAuthorityEvidenceInputV1,
+    CommunityAuthorityEvidenceV1, CommunityClockBoundV1, CommunityDecisionRowV1,
+    CommunityObjectBindingV1, MAX_COMMUNITY_DECISION_ROWS_V1, MAX_COMMUNITY_OBJECT_BINDINGS_V1,
 };
 pub use budget_quote::{
     CommunityBudgetQuoteInputV1, CommunityBudgetQuoteV1, CommunityDueMemberBudgetV1,

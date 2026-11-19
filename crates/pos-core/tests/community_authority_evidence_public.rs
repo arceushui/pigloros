@@ -7,19 +7,19 @@
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
-    CommunityArtifactOperationV1 as Operation, CommunityAuthorityEvidenceInputV1 as EvidenceInput,
-    CommunityAuthorityEvidenceV1 as Evidence, CommunityAuthorityViewRowV1 as AuthorityRow,
-    CommunityClockBoundV1 as ClockBound, CommunityClockLatchV1 as ClockLatch,
-    CommunityCurrentViewInputV1 as ViewInput, CommunityCurrentViewV1 as View,
-    CommunityDecisionRowV1 as Decision, CommunityKeyStateV1 as KeyState,
-    CommunityKeyViewRowV1 as KeyRow, CommunityLifecycleErrorV1 as Error,
-    CommunityMaterializationReferenceV1 as Materialized, CommunityObjectBindingV1 as Object,
-    CommunityPassFrontierV1 as Frontier, CommunityPassKeyV1 as PassKey,
-    CommunityScopeStateV1 as ScopeState, CommunityScopeViewRowV1 as ScopeRow,
-    CommunityTrustViewRowV1 as TrustRow, MAX_COMMUNITY_DECISION_ROWS_V1,
-    MAX_COMMUNITY_OBJECT_BINDINGS_V1, MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1,
-    MAX_COMMUNITY_VIEW_KEY_ROWS_V1, MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1,
-    MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
+    community_recipient_identity_digest_v1, CommunityArtifactOperationV1 as Operation,
+    CommunityAuthorityEvidenceInputV1 as EvidenceInput, CommunityAuthorityEvidenceV1 as Evidence,
+    CommunityAuthorityViewRowV1 as AuthorityRow, CommunityClockBoundV1 as ClockBound,
+    CommunityClockLatchV1 as ClockLatch, CommunityCurrentViewInputV1 as ViewInput,
+    CommunityCurrentViewV1 as View, CommunityDecisionRowV1 as Decision,
+    CommunityKeyStateV1 as KeyState, CommunityKeyViewRowV1 as KeyRow,
+    CommunityLifecycleErrorV1 as Error, CommunityMaterializationReferenceV1 as Materialized,
+    CommunityObjectBindingV1 as Object, CommunityPassFrontierV1 as Frontier,
+    CommunityPassKeyV1 as PassKey, CommunityScopeStateV1 as ScopeState,
+    CommunityScopeViewRowV1 as ScopeRow, CommunityTrustViewRowV1 as TrustRow,
+    MAX_COMMUNITY_DECISION_ROWS_V1, MAX_COMMUNITY_OBJECT_BINDINGS_V1,
+    MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1, MAX_COMMUNITY_VIEW_KEY_ROWS_V1,
+    MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1, MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
 };
 use pos_core::{ErasureArtifactClassV1 as Class, Hash, KeyRoleV1, TimelineId};
 
@@ -1333,5 +1333,23 @@ fn cav1_rejects_unknown_codes_and_noncanonical_framing() -> TestResult {
         View::from_canonical_cbor(&encode(&latch)?).err(),
         Some(Error::InvalidEncoding)
     );
+    Ok(())
+}
+
+/// G6 (#560, 2026-11-19): the recipient digest hashes the canonical CBOR
+/// text item, not the raw UTF-8.
+#[test]
+fn the_recipient_digest_hashes_the_cbor_text_item() -> TestResult {
+    for recipient in ["community-recipient", &"r".repeat(128)] {
+        let item = encode(&text(recipient))?;
+        assert_eq!(
+            community_recipient_identity_digest_v1(recipient),
+            domain_digest("RecipientIdentity", &item)
+        );
+        assert_ne!(
+            community_recipient_identity_digest_v1(recipient),
+            domain_digest("RecipientIdentity", recipient.as_bytes())
+        );
+    }
     Ok(())
 }
