@@ -963,8 +963,34 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
 /// L3: the CBQ1 byte maximum of a 13-member roster, written out by hand
 /// from the CPN1 field list. Each member adds its 1,000-byte State limit,
 /// CIS1 1,024, CSR1 512 and its two one-input CPN1s at the widest producer
-/// ordinal: 695 bytes for slots 0..=11, and 698 from slot 12 on, where node
-/// ordinals 24 and up take a two-byte CBOR head.
+/// ordinal: 695 bytes for slots 0..=11, and 698 from slot 12 on.
+///
+/// `InitialState` CPN1 of slot s (node ordinal 2s), 381 bytes for s <= 11:
+/// - 7: array(16) head 1, `h'CPN1'` 1 + 4, version 1;
+/// - 51: incarnation, T and G, each bstr(16) 1 + 16;
+/// - 11: producer ordinal `u64::MAX` 1 + 8; node ordinal 1; kind 1;
+/// - 40: content ref array(2) 1, `h'CIS1'` 5, digest bstr(32) 2 + 32;
+/// - 1: dependency class 2;
+/// - 31: rule array(2) 1, text(27) `pos.community.initial-state` 2 + 27,
+///   version 1;
+/// - 3: input index array(2) 1, form 1 1, refs array(1) 1;
+/// - 132: variant-3 ref array(5) 1, tag 3 1, `h'CMB1'` 5, locator
+///   bstr(55) 2 + 55, envelope address 34, CMB1 digest 34. The locator is
+///   array(6) 1, T 17, G 17, producer form 1, control ID 17, role 11 1,
+///   slot 1;
+/// - 102: scope, authorization and provenance digests, 3 x 34;
+/// - 3: horizon 1,000 as `0x19 0x03e8`.
+///
+/// `StateRevision` CPN1 (node ordinal 2s+1), 314 bytes for s <= 11: the
+/// same 7 + 51 + 11 + 40 + 1, a 32-byte rule (`pos.community.state-revision`
+/// is 28 bytes), the 3 index bytes, a 64-byte native ref (array(2) 1, tag 0
+/// 1, node ref array(4) 1, incarnation 17, producer `u64::MAX` 9, node
+/// ordinal 2s 1, digest 34), then 102 + 3. 381 + 314 = 695.
+///
+/// From slot 12, node ordinals 24 and 25 no longer fit a one-byte CBOR
+/// head and take two bytes (`0x18 n`): each CPN1's own node ordinal grows
+/// by one, and so does the `StateRevision` node's native input ordinal 24,
+/// so 695 + 3 = 698. The locator's slot 12 still fits one byte.
 #[test]
 fn a_thirteen_member_quote_has_the_hand_computed_bytes() -> TestResult {
     let fixture = Fixture::new()?;
