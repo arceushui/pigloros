@@ -427,24 +427,35 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
         let (attempt_id, agr1_digest) = (self.attempt_id(), grant.digest());
         let reached = Reached::of(self.progress());
         let requested = reached.start.evidence(attempt_id, agr1_digest)?;
-        let observed = observation_evidence(
+        observation_evidence(
             reached.evidence,
             attempt_id,
             agr1_digest,
             requested.digest(),
-        )?;
-        let mut fields = self.termination_fields(&reached, observed.digest())?;
+        )
+        .and_then(|observed| self.terminate(&reached, requested, observed))
+    }
+
+    /// Seal the TME1 that binds `observed` and classify it.
+    fn terminate(
+        &self,
+        reached: &Reached<'_, S>,
+        requested: RequestedConfigurationEvidence,
+        observed: KernelObservationEvidence,
+    ) -> Result<AttemptRecords, EvidenceFault> {
+        let mut fields = self.termination_fields(reached, observed.digest())?;
         let draft = TerminationEvidence::new(&fields)?;
         let classification = draft.facts(&requested, &observed).classify();
         fields.contradiction = classification.contradiction();
         fields.terminal_code = classification.code();
-        let termination = TerminationEvidence::new(&fields)?;
-        Ok(AttemptRecords {
-            requested,
-            observed,
-            termination,
-            classification,
-        })
+        TerminationEvidence::new(&fields)
+            .map(|termination| AttemptRecords {
+                requested,
+                observed,
+                termination,
+                classification,
+            })
+            .map_err(EvidenceFault::from)
     }
 
     /// The TME1 fields before classification.

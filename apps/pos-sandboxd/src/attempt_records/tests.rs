@@ -194,13 +194,24 @@ fn evidence(
     baseline: [Vec<u8>; 4],
     terminal: TerminalResources,
 ) -> TestResult<ResourceEvidence> {
+    evidence_of(release, (CGROUP, CGROUP), baseline, terminal)
+}
+
+/// [`evidence`] with the baseline snapshot's and the bound unit's cgroup
+/// identities (`(st_dev, inode)`) given.
+fn evidence_of(
+    release: ReleaseOutcome,
+    (baseline_cgroup, unit_cgroup): ((u64, u64), (u64, u64)),
+    baseline: [Vec<u8>; 4],
+    terminal: TerminalResources,
+) -> TestResult<ResourceEvidence> {
     let resources = ReleaseResources::new(
         ACTIVATED,
-        AttemptLimitEventSnapshot::for_test(CGROUP, baseline, (1_000, 1))?,
+        AttemptLimitEventSnapshot::for_test(baseline_cgroup, baseline, (1_000, 1))?,
         EffectiveCgroupLimits::for_test(CGROUP)?,
     );
     let mut evidence = ResourceEvidence::new(Some(resources), release);
-    evidence.conclude(Some((INVOCATION, CGROUP)), terminal);
+    evidence.conclude(Some((INVOCATION, unit_cgroup)), terminal);
     Ok(evidence)
 }
 
@@ -815,6 +826,57 @@ fn an_unreleased_local_attempt_records_its_proxy_and_barrier() -> TestResult {
         records.classification().code(),
         Some(TerminalCode::ProtocolFailure)
     );
+    Ok(())
+}
+
+/// An unreleased Local attempt whose resource evidence is `evidence`.
+fn unreleased(evidence: ResourceEvidence) -> TestResult<Result<AttemptRecords, EvidenceFault>> {
+    let progress = AttemptProgress::Failed {
+        error: ExecuteError::ReleaseTimeout,
+        unit: UnitState::Killed,
+        started: Some(start()),
+        evidence: Some(evidence),
+    };
+    Ok(EndedAttempt::for_test(
+        ATTEMPT,
+        admission(SandboxExecutionMode::Local, Some(input(true))),
+        None,
+        progress,
+        (cleanup(true)?, Some(CLEANED_AT)),
+    )
+    .records())
+}
+
+/// A `ReadyV1` whose observation never froze is a status-2 KOE1 that binds
+/// that `ReadyV1` (R9 §4.4).
+#[test]
+fn a_ready_without_a_frozen_observation_is_koe1_status_2() -> TestResult {
+    let terminal = terminal(&Released::default())?;
+    let release = ReleaseOutcome::new(Some(READY1), None, None);
+    let records = unreleased(evidence(release, quiet(), terminal)?)??;
+    assert_recomputed(&records);
+    assert!(matches!(
+        records.observed().fields().status,
+        KernelObservationStatus::ObservationFailed {
+            ready1_digest: READY1
+        }
+    ));
+    Ok(())
+}
+
+/// A bound unit or a baseline whose cgroup device is outside the kernel's
+/// bounds has no R9 identity: no records.
+#[test]
+fn an_unrepresentable_unit_or_baseline_cgroup_is_a_fault() -> TestResult {
+    let out_of_bounds = (u64::MAX, 1);
+    for cgroups in [(CGROUP, out_of_bounds), (out_of_bounds, CGROUP)] {
+        let terminal = terminal(&Released::default())?;
+        let evidence = evidence_of(release(None)?, cgroups, quiet(), terminal)?;
+        assert!(matches!(
+            unreleased(evidence)?,
+            Err(EvidenceFault::Unrepresentable)
+        ));
+    }
     Ok(())
 }
 

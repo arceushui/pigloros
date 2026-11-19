@@ -154,6 +154,7 @@ impl AttemptLimitEventSnapshot {
     /// captured at `observed` seconds and nanoseconds, for the terminal
     /// records' tests. Its parsed counters are unused there and zero.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn for_test(
         identity: (u64, u64),
         raw: [Vec<u8>; 4],
