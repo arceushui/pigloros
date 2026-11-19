@@ -2,12 +2,15 @@
 //! reconciled, serves it to the daemon and re-issues it (Redmine #443
 //! journal 22723, 8c).
 
+use std::cell::OnceCell;
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::sync::Arc;
 
 use pos_reference::provider_admission::execution::FailedInput;
-use pos_reference::sandbox_provider_protocol::{RequestAuthority, SandboxReconcileRequest};
+use pos_reference::sandbox_provider_protocol::{
+    RequestAuthority, RuntimeSigned, SandboxReconcileRequest, SelfDigested,
+};
 
 use super::super::{
     signed_grant, signer, signing_key, Released, TestResult, AGR1, ATTEMPT, KEY_ID,
@@ -15,8 +18,8 @@ use super::super::{
 use super::{timed_out_transfer, verified};
 use crate::{
     AdmittedRuntimeKey, AttemptLifecycle, AttemptLifecycleError, EvidenceFault,
-    KeyFileRuntimeSigner, ResponseFault, RuntimeSignerError, StagingLedger, StagingLimits,
-    SystemdAttemptRegistry,
+    KeyFileRuntimeSigner, ResponseFault, RetainedResponse, RuntimeAttestationSigner,
+    RuntimeSignerError, StagingLedger, StagingLimits, SystemdAttemptRegistry,
 };
 
 /// A lifecycle over a fresh registry tree, and its ledger.
@@ -127,6 +130,73 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     assert!(matches!(
         lifecycle.reissue_response(ATTEMPT, digest, timed_out_transfer(), &signer(), admitted),
         Err(AttemptLifecycleError::UnknownAttempt)
+    ));
+    Ok(())
+}
+
+/// A signer whose first signature waits for a concurrent re-issue of the
+/// same response to store its successor first.
+struct Racing<'a> {
+    lifecycle: &'a AttemptLifecycle,
+    agr1_digest: [u8; 32],
+    admitted: AdmittedRuntimeKey<'a>,
+    signer: KeyFileRuntimeSigner,
+    winner: OnceCell<Result<Arc<RetainedResponse>, AttemptLifecycleError>>,
+}
+
+impl RuntimeAttestationSigner for Racing<'_> {
+    fn runtime_attestation_key_id(&self) -> &str {
+        self.signer.runtime_attestation_key_id()
+    }
+
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+        self.winner.get_or_init(|| {
+            self.lifecycle.reissue_response(
+                ATTEMPT,
+                self.agr1_digest,
+                timed_out_transfer(),
+                &self.signer,
+                self.admitted,
+            )
+        });
+        self.signer.sign(record)
+    }
+}
+
+/// Of two concurrent re-issues, the first to store wins: the other keeps
+/// and returns the winner's successor instead of its own.
+#[test]
+fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    let ended = Released {
+        grant: Some(grant),
+        ..Released::default()
+    }
+    .ended()?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    lifecycle.retain_response(&ended, &signer(), admitted)?;
+    let racing = Racing {
+        lifecycle: &lifecycle,
+        agr1_digest: digest,
+        admitted,
+        signer: signer(),
+        winner: OnceCell::new(),
+    };
+    let returned =
+        lifecycle.reissue_response(ATTEMPT, digest, timed_out_transfer(), &racing, admitted)?;
+    let winner = racing
+        .winner
+        .into_inner()
+        .ok_or("no concurrent re-issue")??;
+    verified(&winner)?;
+    assert!(Arc::ptr_eq(&returned, &winner));
+    assert!(Arc::ptr_eq(
+        &lifecycle.terminal_response(ATTEMPT, digest)?,
+        &winner
     ));
     Ok(())
 }

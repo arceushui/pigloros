@@ -1123,6 +1123,7 @@ jobs:
           --exclude 'src/executor/scenario_room/tests.rs'
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
+          --exclude 'src/attempt_records/tests/**'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1180,6 +1181,7 @@ jobs:
           --exclude 'src/executor/scenario_room/tests.rs'
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
+          --exclude 'src/attempt_records/tests/**'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
