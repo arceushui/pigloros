@@ -69,6 +69,11 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
                 run='nix copy --no-check-sigs --from "file://${RUNNER_TEMP}/qemu-kernel-cache"'),
             lambda w: step(evidence(w), "Import the signed kernel").pop("if"),
             lambda w: evidence(w)["steps"].append(copy.deepcopy(step(kernel(w), "Save the signed kernel"))),
+            lambda w: w["jobs"].pop("kernel-cache-selftest"),
+            lambda w: w["jobs"]["kernel-cache-selftest"].update(environment="qemu-kernel-cache"),
+            lambda w: w["jobs"]["kernel-cache-selftest"].update(**{"continue-on-error": True}),
+            lambda w: step(w["jobs"]["kernel-cache-selftest"], "Sign, verify and import a throwaway path").update(
+                env={"QEMU_KERNEL_CACHE_SIGNING_KEY": "${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"}),
             lambda w: kernel(w).pop("environment"),
             lambda w: kernel(w).update(environment="production"),
             lambda w: kernel(w).pop("if"),

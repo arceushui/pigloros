@@ -15,6 +15,7 @@ import io
 import json
 import os
 import pathlib
+import signal
 import socket
 import subprocess
 import sys
@@ -466,8 +467,12 @@ class KernelCacheTests(unittest.TestCase):
     OUT = "/nix/store/0123456789abcdfghijklmnpqrsvwxyb-linux-6.12.117"
     DEV = "/nix/store/0123456789abcdfghijklmnpqrsvwxyc-linux-6.12.117-dev"
     SECRET = "piglor-qemu-kernel-1:c2VjcmV0LWtleS1ieXRlcw=="
-    PUBLIC = "piglor-qemu-kernel-1:cHVibGljLWtleQ=="
+    PUBLIC = KERNEL_SIGNING_PUBLIC_KEY
     NIXOS = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+    THROWAWAY_SECRET = "qemu-kernel-cache-selftest:dGhyb3dhd2F5LXNlY3JldA=="
+    THROWAWAY_PUBLIC = "qemu-kernel-cache-selftest:dGhyb3dhd2F5LXB1YmxpYw=="
+    SAMPLE = "/nix/store/0123456789abcdfghijklmnpqrsvwxyd-qemu-kernel-cache-selftest"
+    REFUSED = "error: cannot add path because it lacks a signature by a trusted key"
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -480,13 +485,22 @@ class KernelCacheTests(unittest.TestCase):
         self.stub_nix()
 
     def stub_nix(self, drv: str = DRV, dev: str = DEV, trusted: str | None = None,
-                 copy_status: int = 0, verify_status: int = 0, copy_sleep: int = 0) -> None:
-        # Each call logs its arguments. `key convert-secret-to-public` logs what
-        # it read on stdin; `copy --to` logs the signing key file's mode and
-        # content, read while the copy runs.
+                 public: str | None = None, copy_status: int = 0, verify_status: int = 0,
+                 copy_sleep: int = 0, import_status: int = 0, import_message: str = REFUSED) -> None:
+        # Each call logs its arguments, and whether it inherited the signing
+        # secret. `key convert-secret-to-public` logs what it read on stdin;
+        # `copy --to` logs the signing key file's mode and content, read while
+        # the copy runs; `store verify` logs a NIX_CONFIG override and passes
+        # with one, otherwise it exits with verify_status.
+        self.log.unlink(missing_ok=True)
+        (self.base / "key-path").unlink(missing_ok=True)
         trusted = f"{self.NIXOS} {self.PUBLIC}" if trusted is None else trusted
+        public = self.PUBLIC if public is None else public
         (self.bin / "nix").write_text(f"""#!/bin/bash
 printf '%s\\n' "$*" >>"{self.log}"
+if [[ -n ${{QEMU_KERNEL_CACHE_SIGNING_KEY:-}} ]]; then
+  printf 'inherited-secret\\n' >>"{self.log}"
+fi
 case "$1 $2" in
 eval*)
   case "${{@: -1}}" in
@@ -495,10 +509,28 @@ eval*)
   *.outPath) printf '%s' '{self.OUT}' ;;
   esac ;;
 "key convert-secret-to-public")
-  printf 'stdin %s\\n' "$(cat)" >>"{self.log}"
-  printf '%s\\n' '{self.PUBLIC}' ;;
+  secret="$(cat)"
+  printf 'stdin %s\\n' "$secret" >>"{self.log}"
+  if [[ $secret == '{self.THROWAWAY_SECRET}' ]]; then
+    printf '%s\\n' '{self.THROWAWAY_PUBLIC}'
+  else
+    printf '%s\\n' '{public}'
+  fi ;;
+"key generate-secret") printf '%s\\n' '{self.THROWAWAY_SECRET}' ;;
 "config show") printf '%s\\n' '{trusted}' ;;
-"store verify") exit {verify_status} ;;
+"store add-file") printf '%s\\n' '{self.SAMPLE}' ;;
+"store delete") ;;
+"store verify")
+  if [[ -n ${{NIX_CONFIG:-}} ]]; then
+    printf 'NIX_CONFIG=%s\\n' "$NIX_CONFIG" >>"{self.log}"
+    exit 0
+  fi
+  exit {verify_status} ;;
+"copy --from")
+  if (({import_status} != 0)); then
+    printf '%s\\n' '{import_message}' >&2
+  fi
+  exit {import_status} ;;
 copy*)
   for arg in "$@"; do
     if [[ $arg == file://*secret-key=* ]]; then
@@ -537,7 +569,7 @@ esac
                 f"eval --raw --no-update-lock-file {kernel}.dev.outPath"]
 
     def verify_call(self) -> str:
-        return f"store verify --store file://{self.cache} --sigs-needed 1 {self.OUT} {self.DEV}"
+        return f"store verify --recursive --store file://{self.cache} --sigs-needed 1 {self.OUT} {self.DEV}"
 
     def key_path(self) -> pathlib.Path:
         return pathlib.Path((self.base / "key-path").read_text().strip())
@@ -545,7 +577,7 @@ esac
     def test_key_names_the_kernel_derivation(self):
         result = self.run_cache("key", "aarch64")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "key=qemu-kernel-aarch64-0123456789abcdfghijklmnpqrsvwxya\n")
+        self.assertEqual(result.stdout, "key=qemu-kernel-piglor-qemu-kernel-1-aarch64-0123456789abcdfghijklmnpqrsvwxya\n")
         self.assertEqual(self.calls(), [f"eval --raw --no-update-lock-file {self.kernel('aarch64')}.drvPath"])
 
     def test_key_refuses_an_unexpected_derivation_or_architecture(self):
@@ -554,7 +586,8 @@ esac
         self.assertEqual(result.returncode, 1)
         self.assertIn("unexpected kernel derivation path", result.stderr)
         for args in (("key", "riscv64"), ("key",), ("build", "x86_64", "extra"),
-                     ("verify", "x86_64"), ("import", "riscv64", "dir"), ("sign", "x86_64")):
+                     ("verify", "x86_64"), ("import", "riscv64", "dir"), ("sign", "x86_64"),
+                     ("selftest",), ("selftest", "dir", "extra")):
             with self.subTest(args=args):
                 self.assertEqual(self.run_cache(*args).returncode, 2)
 
@@ -582,6 +615,7 @@ esac
         ])
         self.assertFalse(key_path.exists())
         self.assertNotIn(self.SECRET, result.stdout + result.stderr)
+        self.assertNotIn("inherited-secret", self.calls())
 
     def test_export_removes_the_key_file_and_skips_verify_when_the_copy_fails(self):
         self.stub_nix(copy_status=3)
@@ -590,18 +624,20 @@ esac
         self.assertFalse(self.key_path().exists())
         self.assertNotIn(self.verify_call(), self.calls())
 
-    def test_export_removes_the_key_file_when_terminated(self):
-        self.stub_nix(copy_sleep=2)
-        process = subprocess.Popen(["bash", str(KERNEL_CACHE), "export", "x86_64", str(self.cache)],
-                                   env=self.environment(self.SECRET),
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(process.kill)
-        deadline = time.monotonic() + 10
-        while not (self.base / "key-path").exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        process.terminate()
-        self.assertEqual(process.wait(timeout=10), 143)
-        self.assertFalse(self.key_path().exists())
+    def test_export_removes_the_key_file_when_terminated_or_interrupted(self):
+        for signal_number, status in ((signal.SIGTERM, 143), (signal.SIGINT, 130)):
+            with self.subTest(signal=signal_number):
+                self.stub_nix(copy_sleep=2)
+                process = subprocess.Popen(["bash", str(KERNEL_CACHE), "export", "x86_64", str(self.cache)],
+                                           env=self.environment(self.SECRET),
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.addCleanup(process.kill)
+                deadline = time.monotonic() + 10
+                while not (self.base / "key-path").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                process.send_signal(signal_number)
+                self.assertEqual(process.wait(timeout=10), status)
+                self.assertFalse(self.key_path().exists())
 
     def test_export_fails_when_verification_fails(self):
         self.stub_nix(verify_status=1)
@@ -619,6 +655,14 @@ esac
                 self.assertIn("is not in trusted-public-keys", result.stderr)
                 self.assertFalse(any(call.startswith("copy") for call in self.calls()))
                 self.assertFalse((self.base / "key-path").exists())
+
+    def test_export_refuses_a_key_with_another_name(self):
+        other = "other-key-1:62KZ76u3AzKRSSsmRDqEanDdgOu7j81BXH5VINsQj9c="
+        self.stub_nix(public=other, trusted=f"{self.NIXOS} {other}")
+        result = self.run_cache("export", "x86_64", str(self.cache), secret=self.SECRET)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not named piglor-qemu-kernel-1", result.stderr)
+        self.assertFalse(any(call.startswith("copy") for call in self.calls()))
 
     def test_export_without_the_signing_key_does_nothing(self):
         for secret in (None, ""):
@@ -661,6 +705,66 @@ esac
                 self.assertEqual(result.returncode, 1)
                 self.assertFalse(any(call.startswith("copy") for call in self.calls()))
 
+
+    def selftest(self, **stub) -> subprocess.CompletedProcess:
+        self.stub_nix(**{"verify_status": 1, "import_status": 1, **stub})
+        return self.run_cache("selftest", str(self.cache))
+
+    def test_selftest_signs_verifies_and_is_refused_on_import(self):
+        result = self.selftest()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("kernel cache self-test passed", result.stdout)
+        calls = self.calls()
+        added = next(call for call in calls if call.startswith("store add-file"))
+        self.assertRegex(added, r"^store add-file --name qemu-kernel-cache-selftest /\S+$")
+        key_path = self.key_path()
+        verify = f"store verify --recursive --store file://{self.cache} --sigs-needed 1 {self.SAMPLE}"
+        self.assertEqual([call for call in calls if call != added], [
+            "config show trusted-public-keys",
+            "key generate-secret --key-name qemu-kernel-cache-selftest",
+            "key convert-secret-to-public",
+            f"stdin {self.THROWAWAY_SECRET}",
+            "config show trusted-public-keys",
+            f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {self.SAMPLE}",
+            "key-mode 600",
+            f"key-content {self.THROWAWAY_SECRET}",
+            verify,
+            f"NIX_CONFIG=trusted-public-keys = {self.THROWAWAY_PUBLIC}",
+            verify,
+            f"store delete {self.SAMPLE}",
+            f"copy --from file://{self.cache} {self.SAMPLE}",
+        ])
+        self.assertFalse(key_path.exists())
+
+    def test_selftest_requires_the_committed_signing_key_to_be_trusted(self):
+        for trusted in (self.NIXOS, f"{self.NIXOS} piglor-qemu-kernel-1:short=",
+                        f"{self.NIXOS} x{self.PUBLIC}"):
+            with self.subTest(trusted=trusted):
+                result = self.selftest(trusted=trusted)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("trusted-public-keys has no piglor-qemu-kernel-1 key", result.stderr)
+                self.assertFalse(any(call.startswith("key") for call in self.calls()))
+
+    def test_selftest_fails_when_the_throwaway_key_is_trusted(self):
+        result = self.selftest(trusted=f"{self.NIXOS} {self.PUBLIC} {self.THROWAWAY_PUBLIC}")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpectedly trusted", result.stderr)
+
+    def test_selftest_fails_when_an_untrusted_signature_verifies(self):
+        result = self.selftest(verify_status=0)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("passed verification", result.stderr)
+
+    def test_selftest_fails_when_the_daemon_imports_an_untrusted_path(self):
+        result = self.selftest(import_status=0)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the daemon imported", result.stderr)
+
+    def test_selftest_fails_when_the_import_fails_for_another_reason(self):
+        result = self.selftest(import_message="error: unsupported URI")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("other than its signature", result.stderr)
+        self.assertIn("error: unsupported URI", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

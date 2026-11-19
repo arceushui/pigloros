@@ -140,7 +140,8 @@ jobs:
         if: ${{ steps.kernel-cache.outputs.cache-hit == 'true' }}
         run: |
           if ! bash scripts/qemu-kernel-cache.sh import "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"; then
-            echo '::warning::The cached kernel was refused; building it from source.'
+            echo '::warning::qemu-kernel-cache refused: building the kernel from source.'
+            echo 'qemu-kernel-cache refused: the kernel was built from source.' >>"${GITHUB_STEP_SUMMARY}"
           fi
       - name: Build the pinned guest and record its store identities
         run: bash scripts/qemu-closure-evidence.sh build "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-closure-evidence"
@@ -173,8 +174,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Runs the cache's signing, verifying and import code with a throwaway key,
+  # so a pull request exercises the real Nix commands that main uses.
+  kernel-cache-selftest:
+    name: kernel cache self-test
+    needs: policy
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the hash-pinned Nix release
+        run: bash scripts/install-pinned-nix.sh
+      - name: Sign, verify and import a throwaway path
+        run: bash scripts/qemu-kernel-cache.sh selftest "${RUNNER_TEMP}/qemu-kernel-cache-selftest"
+
   # Builds the guest kernel once per kernel derivation on main, signs it with
   # the main-only key and saves it for pull requests (scripts/qemu-kernel-cache.sh).
+  # The qemu-kernel-cache environment allows only main to deploy; that is a
+  # repository setting this workflow's policy oracle cannot read.
   kernel-cache:
     name: kernel cache (${{ matrix.architecture }})
     needs: policy

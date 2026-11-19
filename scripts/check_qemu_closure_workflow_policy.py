@@ -41,7 +41,7 @@ PRODUCER_SHA256 = {
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "6ceb5c5e07c875e421beed6d58da4a157c67b7476c9ac799c5284c93f2f94f8d",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
-    "scripts/qemu-kernel-cache.sh": "fb8e1cdcd6c74d021f1030b35130454b83d01284eafe36e0ae7bcaec689e9fb3",
+    "scripts/qemu-kernel-cache.sh": "dcf79e9ea5605993fc3b677eefa36f9ffd61ec0d5a801c363d63603510e22517",
     "scripts/qemu-closure-evidence.sh": "7f9dc68a4fb67e20e21f8bd40cf36b4c0c0335fa4e0c6d69416194941f73c091",
     "scripts/check_qemu_closure_evidence.py": "77a82f944d01c5514f16dfd180899e32a83243005f7dee96f063abf3d12700ac",
     "deploy/nixos/flake.nix": "cfd9e71e22b18412dab4e3bc4d8a10ff702dcab3284f41c542a83947bce85e69",
@@ -133,7 +133,9 @@ EXPECTED = {
                  "if": "${{ steps.kernel-cache.outputs.cache-hit == 'true' }}",
                  "run": 'if ! bash scripts/qemu-kernel-cache.sh import "${EVIDENCE_ARCHITECTURE}"'
                         ' "${RUNNER_TEMP}/qemu-kernel-cache"; then\n'
-                        "  echo '::warning::The cached kernel was refused; building it from source.'\n"
+                        "  echo '::warning::qemu-kernel-cache refused: building the kernel from source.'\n"
+                        "  echo 'qemu-kernel-cache refused: the kernel was built from source.'"
+                        ' >>"${GITHUB_STEP_SUMMARY}"\n'
                         "fi\n"},
                 {"name": "Build the pinned guest and record its store identities",
                  "run": f'bash scripts/qemu-closure-evidence.sh build "${{EVIDENCE_ARCHITECTURE}}" {EVIDENCE}'},
@@ -160,6 +162,19 @@ EXPECTED = {
                      "path": "${{ runner.temp }}/qemu-closure-evidence/",
                      "if-no-files-found": "ignore", "retention-days": 7,
                  }},
+            ],
+        },
+        "kernel-cache-selftest": {
+            "name": "kernel cache self-test",
+            "needs": "policy",
+            "if": "${{ github.event_name == 'pull_request' }}",
+            "runs-on": "ubuntu-24.04",
+            "timeout-minutes": 20,
+            "steps": [
+                CHECKOUT_STEP,
+                INSTALL_NIX_STEP,
+                {"name": "Sign, verify and import a throwaway path",
+                 "run": 'bash scripts/qemu-kernel-cache.sh selftest "${RUNNER_TEMP}/qemu-kernel-cache-selftest"'},
             ],
         },
         "kernel-cache": {
