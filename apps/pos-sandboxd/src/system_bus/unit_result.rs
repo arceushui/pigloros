@@ -340,6 +340,23 @@ impl SystemdUnitResultObservation {
             .ok_or(SystemdUnitResultError::Inconsistent { result, main })
     }
 
+    /// A settled `failed` unit of `started` with invocation `[0x11; 16]`
+    /// that reported `result`, `code` and `status`, for the terminal
+    /// records' tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        started: &SystemdVerifiedStart,
+        result: &str,
+        code: i32,
+        status: i32,
+    ) -> Result<Self, SystemdUnitResultError> {
+        let state = UnitState {
+            active_state: "failed".to_owned(),
+            invocation_id: [0x11; 16],
+        };
+        Self::decode(started, state, result, code, status)
+    }
+
     /// Return the exact transient service-unit name.
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {

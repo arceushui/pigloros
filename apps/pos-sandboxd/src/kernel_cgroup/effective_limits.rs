@@ -181,6 +181,26 @@ pub struct EffectiveCgroupLimits {
 }
 
 impl EffectiveCgroupLimits {
+    /// Unlimited effective limits of the cgroup `identity`, for the terminal
+    /// records' tests.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn for_test(
+        identity: (u64, u64),
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let identity = super::BoundCgroupIdentity::for_test(identity)?;
+        let unlimited = || b"max\n".to_vec();
+        Ok(parse_limits(
+            identity,
+            [
+                unlimited(),
+                unlimited(),
+                unlimited(),
+                b"max 100000\n".to_vec(),
+            ],
+        )?)
+    }
+
     /// Return the exact deterministic unit name.
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {

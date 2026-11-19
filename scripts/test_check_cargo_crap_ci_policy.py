@@ -52,6 +52,8 @@ EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS = (
 EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
+    "src/execute/tests.rs",
+    "src/attempt_records/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
     "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",

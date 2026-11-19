@@ -568,7 +568,9 @@ fn tme1_rule_2_shape_at_progress_1() -> TestResult {
             (vec![change(&[7], integer(4))], false),
             (vec![change(&[7], integer(5))], false),
             (vec![change(&[27], vector_field(27)?)], false),
-            (vec![change(&[8], null())], false),
+            // A null start job is missing evidence (code 2), not a shape
+            // error (owner reading G1, Redmine #443 journal 22723).
+            (vec![change(&[8], null())], true),
             (vec![change(&[11], null())], false),
             (vec![change(&[10], null())], false),
             (
@@ -607,7 +609,7 @@ fn tme1_rule_2_shape_at_progress_2() -> TestResult {
             (vec![change(&[7], integer(0))], false),
             (vec![change(&[7], integer(3))], false),
             (vec![change(&[7], integer(5))], false),
-            (vec![change(&[8], null())], false),
+            (vec![change(&[8], null())], true),
             (vec![change(&[8], integer(1))], false),
             (vec![change(&[9], null()), change(&[24, 1], null())], false),
             (vec![change(&[10], null())], false),
