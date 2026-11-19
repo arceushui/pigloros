@@ -13,7 +13,6 @@ use pos_core::{
     local_erasure_request_v1, local_erasure_subject_v1, EntityId, ErasureAcknowledgementOutcomeV1,
     ErasureHostErrorV1, ErasureRecordedProgressV1, ErasureReferenceV1, ErasureScopeV1,
     ErasureStateV1, LocalErasureAdmissionV1, LocalErasureOwnerRowV1, PrincipalRefV1,
-    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
 };
 
 use super::{
@@ -21,13 +20,9 @@ use super::{
 };
 
 /// The `generation` stride of one ERS1 state: 2^16, above the 16,384
-/// acknowledgements of one attempt (ADR-136 §7).
+/// acknowledgements of one attempt (ADR-136 §7). Every attempt closes with
+/// a new ERS1 state, so closing one always advances the generation.
 const STATE_STRIDE: u64 = 1 << 16;
-
-/// The `generation` stride of one completed attempt: one more than the
-/// acknowledgements an attempt can hold, so closing an attempt always
-/// advances the generation.
-const ATTEMPT_STRIDE: u64 = ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT as u64 + 1;
 
 /// The acknowledgement counts of one acknowledgement class.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,9 +45,8 @@ pub struct LocalErasureProjectionV1 {
     pub state: ErasureStateV1,
     /// The scope class the ERQ1 names.
     pub scope: ErasureScopeV1,
-    /// The monotonic generation: the head's ERS1 ordinal times 2^16, plus
-    /// 16,385 per completed attempt, plus the acknowledgements committed
-    /// in the active attempt.
+    /// The monotonic generation: the head's ERS1 ordinal times 2^16 plus
+    /// the acknowledgements committed in the active attempt.
     pub generation: u64,
     /// The ELADM1 its submission retained.
     pub admission: LocalErasureAdmissionV1,
@@ -120,9 +114,7 @@ fn generation(ordinal: u64, progress: &ErasureRecordedProgressV1) -> u64 {
             .filter(|acknowledgement| acknowledgement.attempt() == attempt.reference())
             .count()
     });
-    ordinal * STATE_STRIDE
-        + progress.completed_attempt_count * ATTEMPT_STRIDE
-        + u64::try_from(active).unwrap_or(u64::MAX)
+    ordinal * STATE_STRIDE + u64::try_from(active).unwrap_or(u64::MAX)
 }
 
 impl ErasureCommandSenderV1<'_> {
