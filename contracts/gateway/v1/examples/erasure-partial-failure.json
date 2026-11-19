@@ -15,7 +15,7 @@
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:erasure",
       "id": "01JC0GATEWAYW90ERASVRE0001",
-      "generation": 409601,
+      "generation": 393216,
       "provenance": {
         "digest": "0404040404040404040404040404040404040404040404040404040404040404",
         "origin": "host-derived"

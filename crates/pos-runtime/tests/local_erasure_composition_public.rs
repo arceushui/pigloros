@@ -8162,8 +8162,8 @@ fn the_projection_never_tells_an_unknown_id_from_another_subjects() -> TestResul
 }
 
 /// ADR-136 §7: the projection of a driven request, step by step. Its
-/// generation is the ERS1 ordinal times 2^16, plus 16,385 per completed
-/// attempt, plus the acknowledgements of the active attempt, so it rises
+/// generation is the ERS1 ordinal times 2^16 plus the acknowledgements of
+/// the active attempt, so it rises
 /// with every committed step and never decreases; the acknowledgement
 /// counts are the frozen obligations and the effective positives, per
 /// class.
@@ -8219,7 +8219,7 @@ fn the_projection_follows_a_driven_request() -> TestResult {
     assert_eq!(generations[1..3], [1_u64 << 16, 2 << 16]);
     let last = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
     let ordinal = u64::try_from(history(&mut host, request)?.len())? - 1;
-    assert_eq!(last.generation, (ordinal << 16) + 16_385);
+    assert_eq!(last.generation, ordinal << 16);
     assert_eq!(last.state.lifecycle(), ErasureLifecycleV1::PartialFailure);
     assert_eq!(
         last.state.replay_claim(),
