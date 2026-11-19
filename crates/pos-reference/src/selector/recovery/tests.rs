@@ -264,6 +264,7 @@ impl PeerPort {
 
     /// The same port, reporting the peer's control group as `control_group`
     /// reads it, which the host under test must read alike.
+    #[cfg(target_os = "linux")]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn with_control_group(self, control_group: host::ProcessControlGroup) -> Self {
         Self {

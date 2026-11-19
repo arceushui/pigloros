@@ -104,6 +104,7 @@ impl RecoveryHost {
     /// The same view, reading each process's control group through
     /// `control_group` instead of `/proc/<pid>/cgroup`.
     #[cfg(test)]
+    #[cfg(target_os = "linux")]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn with_control_group(self, control_group: ProcessControlGroup) -> Self {
         Self {
