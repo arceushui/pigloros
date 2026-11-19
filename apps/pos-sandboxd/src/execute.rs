@@ -473,15 +473,29 @@ impl ExecuteError {
     /// own codes.
     #[must_use]
     pub fn launch_failure(&self) -> Option<LaunchFailure> {
+        self.pre_start_refusal().or_else(|| self.unpinned_unit())
+    }
+
+    /// The launch failure of an execution refused before its unit start
+    /// (1, 3, 4 or 5).
+    fn pre_start_refusal(&self) -> Option<LaunchFailure> {
         match self {
             Self::Recheck(_) | Self::RootIdentity => Some(LaunchFailure::PreStartRecheckFailed),
             Self::OutputReservation(refused) => Some(LaunchFailure::from(*refused)),
             Self::StdioChannel(_) => Some(LaunchFailure::StdioChannelFailed),
-            Self::Cgroup(source) => source
-                .downcast_ref::<crate::SystemdTransientUnitTransportError>()
-                .and_then(crate::SystemdTransientUnitTransportError::unit_ref_failure),
             _ => None,
         }
+    }
+
+    /// The launch failure of an execution whose unit could not be pinned
+    /// (2).
+    fn unpinned_unit(&self) -> Option<LaunchFailure> {
+        let Self::Cgroup(source) = self else {
+            return None;
+        };
+        source
+            .downcast_ref::<crate::SystemdTransientUnitTransportError>()
+            .and_then(crate::SystemdTransientUnitTransportError::unit_ref_failure)
     }
 
     /// The start that was requested and not verified, if this is why the
