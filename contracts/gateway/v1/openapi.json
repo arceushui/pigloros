@@ -3140,7 +3140,7 @@
         "tags": [
           "erasure"
         ],
-        "description": "Observe one of the acting subject's own erasures (#309, ADR-136 §7) under the `erasure.read` grant. The operation is consent-exempt. An unknown `erasure_id`, another subject's, a refused authority decision (which is recorded like any denial) and a Gateway without a Local erasure composition all answer the same `404 not-found-or-unavailable`; it never enumerates.",
+        "description": "Observe one of the acting subject's own erasures (#309, ADR-136 §7) under the `erasure.read` grant. The operation is consent-exempt. An unknown `erasure_id`, another subject's, a refused authority decision (which is recorded like any denial, or counted in its window's marker once over the denial-record bound) and a Gateway without a Local erasure composition all answer the same `404 not-found-or-unavailable`; it never enumerates.",
         "parameters": [
           {
             "$ref": "#/components/parameters/ErasureId"
@@ -3187,25 +3187,7 @@
             }
           },
           "404": {
-            "description": "`not-found-or-unavailable`: identical for an unknown id, another subject's id and a missing grant; it never enumerates.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "`resource-limit-exceeded` (retryable, with `Retry-After`): the caller or the host reached its denial-record bound for the current window.",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 1
-                }
-              }
-            },
+            "description": "`not-found-or-unavailable`: identical for an unknown id, another subject's id and a refused decision, including one over the denial-record bound; it never enumerates.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3765,7 +3747,7 @@
           "idempotency_key_digest",
           "bound_inputs"
         ],
-        "description": "The 202 answer of an asynchronous admission (erasure, Decision Preview, actions of #305/#306). It never claims that an Event committed or that anything was erased; the committed Event receipt or the resource it names does.",
+        "description": "The 202 answer of an asynchronous admission, such as `requestErasure`. It names the admitted request and the inputs it binds, and never claims that anything committed or was erased: the resource at `operation_url` reports the progress.",
         "properties": {
           "schema_id": {
             "const": "urn:pigloros:gateway:v1:schema:admission-receipt"
