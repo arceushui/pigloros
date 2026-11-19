@@ -14,8 +14,8 @@ use pos_core::{
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureLifecycleV1, ErasureReceiptInputV1,
-    ErasureReceiptV1, ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureReceiptV1, ErasureRecordedProgressV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
     ErasureStateTransitionV1, ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Hash,
     LocalErasureAuthorizationV1, LocalErasureBundleV1, LocalErasureIdempotencyV1,
     LocalErasureRejectionV1, LocalErasureSelectorV1, PersistedAuthorityV1, TimelineId,
@@ -26,7 +26,7 @@ use super::freeze::{extension_admitted, observation, ShortfallV1, LOCAL_FREEZE_P
 use super::{LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1};
 use crate::erasure_host::{
     local_principal_reference, local_subject_admission, LocalErasurePreparationV1,
-    LOCAL_ERASURE_REQUEST_OPERATION,
+    PreparedFreezeV1, LOCAL_ERASURE_REQUEST_OPERATION,
 };
 use crate::{ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1};
 
@@ -49,6 +49,9 @@ pub(super) struct LocalErasureAuthorityV1 {
     pub(super) revoked_key_ids: Vec<String>,
     /// The clock new admissions are checked against, in Unix seconds (UTC).
     pub(super) clock: fn() -> u64,
+    /// The installed TPS1 and the bundle's ELB1S, retained before every
+    /// freeze (ADR-136 Q9).
+    pub(super) retained_trust: Vec<Vec<u8>>,
     /// The Local Principal root grant (owner decision Q2).
     pub(super) principal_grant: Hash,
     /// The authority Timeline the root grant is issued on.
@@ -260,17 +263,45 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
         self.closure_fits(view, actor, scope)
     }
 
+    /// The draft's ELB1 and ELLR1 are retained with the installed TPS1 and
+    /// the bundle's ELB1S, so committed evidence keeps the trust it was
+    /// admitted under (ADR-136 Q9; ELTA1 waits for #448's operator-key
+    /// history).
     fn prepare_freeze(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
-    ) -> Result<(ErasureReferenceV1, Vec<Vec<u8>>), ErasureErrorV1> {
+    ) -> Result<PreparedFreezeV1, ErasureErrorV1> {
         self.admits_new_work()
             .and_then(|()| {
                 self.freeze_draft(view, request)
-                    .map_err(ErasureErrorV1::from)
+                    .map(Some)
+                    .or_else(ShortfallV1::resolved)
             })
-            .map(|draft| (draft.body_digest, draft.retained))
+            .map(|draft| {
+                draft.map(|draft| {
+                    let mut retained = draft.retained;
+                    retained.extend(self.retained_trust.iter().cloned());
+                    (draft.body_digest, retained)
+                })
+            })
+    }
+
+    fn prepare_attempt(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        erq1: &ErasureRequestV1,
+        progress: &ErasureRecordedProgressV1,
+    ) -> Result<Option<(ErasureRetryAdmissionV1, Vec<u8>)>, ErasureErrorV1> {
+        self.next_attempt(view, erq1, progress)
+    }
+
+    fn prepare_receipt(
+        &self,
+        erq1: &ErasureRequestV1,
+        progress: &ErasureRecordedProgressV1,
+    ) -> Result<(ErasureReceiptInputV1, Vec<Vec<u8>>), ErasureErrorV1> {
+        self.receipt_input(erq1, progress)
     }
 
     fn holds_subject(
