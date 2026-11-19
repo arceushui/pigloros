@@ -15,6 +15,7 @@ mod lifecycle_authority;
 mod memory_domain;
 mod metadata_authority;
 mod native_graph;
+mod planner;
 mod private_hash;
 mod protection;
 mod sealer;
@@ -41,6 +42,10 @@ pub use metadata_authority::{
 pub use native_graph::{
     CommunityAssembledRecordV1, CommunityInitializationGraphInputV1,
     CommunityInitializationGraphV1, CommunityInitializationMemberV1,
+};
+pub use planner::{
+    CommunityInitializationBindingsV1, CommunityInitializationInstallationV1,
+    CommunityInitializationPlannerV1, CommunityInitializationRecordsV1, CommunityInitializeFormV1,
 };
 pub use protection::{
     CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,

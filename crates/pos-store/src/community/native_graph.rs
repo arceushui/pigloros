@@ -365,20 +365,14 @@ fn plan_member<'a>(
         protected_owner_binding_digest: binding.protected_owner_binding_digest,
         evidence_not_after_micros: context.evidence_not_after_micros,
     };
-    // Item 1: the CMB1 locator names the initialization's control ID, the
-    // CMB1 whitelist index and the roster slot.
-    let cmb1 = [CommunityTypedInputRefV1::Metadata {
-        schema: CommunityMetadataSchemaV1::Cmb1,
-        locator: CommunityMetadataLocatorV1 {
-            timeline: context.timeline,
-            generation: context.generation,
-            producer: CommunityLocatorProducerV1::Control(request.operation_id),
-            record_role: CMB1_RECORD_ROLE,
-            slot,
-        },
-        envelope_address: member.binding_envelope_address,
-        private_record_digest: member_binding_digest,
-    }];
+    let cmb1 = [member_binding_ref(
+        context.timeline,
+        context.generation,
+        request.operation_id,
+        slot,
+        member.binding_envelope_address,
+        member_binding_digest,
+    )];
     let initial_kind = (u32::from(slot) * 2, CommunityNativeNodeKindV1::InitialState);
     let revision_kind = (
         u32::from(slot) * 2 + 1,
@@ -427,6 +421,31 @@ fn plan_member<'a>(
             CommunityInitializationProducerV1::new(producer_input)
                 .and_then(|producer| plan(state, producer))
         })
+}
+
+/// The variant-3 typed ref of slot `slot`'s CMB1 in its initialization
+/// (R6.1(6); owner decision on #560, note 22661, item 1): the locator names
+/// the initialization's control ID, the CMB1 whitelist index and the slot.
+pub(super) const fn member_binding_ref<'a>(
+    timeline: TimelineId,
+    generation: [u8; 16],
+    operation_id: [u8; 16],
+    slot: u16,
+    envelope_address: Hash,
+    member_binding_digest: Hash,
+) -> CommunityTypedInputRefV1<'a> {
+    CommunityTypedInputRefV1::Metadata {
+        schema: CommunityMetadataSchemaV1::Cmb1,
+        locator: CommunityMetadataLocatorV1 {
+            timeline,
+            generation,
+            producer: CommunityLocatorProducerV1::Control(operation_id),
+            record_role: CMB1_RECORD_ROLE,
+            slot,
+        },
+        envelope_address,
+        private_record_digest: member_binding_digest,
+    }
 }
 
 const fn content(record_magic: [u8; 4], logical_digest: Hash) -> CommunityContentReferenceV1 {
