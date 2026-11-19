@@ -4282,16 +4282,19 @@ mod tests {
     /// The cgroup2 stand-in of the isolated recovery tests: an empty
     /// directory, so every control group the in-process port reports is
     /// absent once its peer thread has ended.
+    #[cfg(target_os = "linux")]
     const ISOLATED_CGROUPS: &str = "/run/pigloros/test-cgroup2";
 
     /// The named control group the isolated recovery peer runs in. The
     /// container's private cgroup namespace puts this process at its root
     /// `/`, which no cleanup can prove absent, so the port and the host both
     /// read the peer's control group as this unit's.
+    #[cfg(target_os = "linux")]
     const ISOLATED_PEER_CGROUP: &str = "/system.slice/pigloros-recovery-peer.service";
 
     /// A live process's control group, read as [`ISOLATED_PEER_CGROUP`]: the
     /// process must still have a readable `/proc/<pid>/cgroup`.
+    #[cfg(target_os = "linux")]
     fn isolated_peer_cgroup(pid: std::num::NonZeroU64) -> Result<String, SelectorBoundaryError> {
         crate::selector::runtime_lifecycle::process_control_group(pid)
             .map(|_| ISOLATED_PEER_CGROUP.to_owned())
@@ -4301,6 +4304,7 @@ mod tests {
     /// stand-in, the peer's named control group and the monotonic clock. The
     /// peer is a thread of this process; its control group is absent from
     /// the empty stand-in once the peer has ended.
+    #[cfg(target_os = "linux")]
     fn isolated_recovery_host(
         directory: Arc<File>,
         executable_digest: runtime_start::ExecutableDigest,
@@ -4317,6 +4321,7 @@ mod tests {
 
     /// A port whose recovery peer is a thread of this process, and whose one
     /// runtime start answers the next state's `describe`.
+    #[cfg(target_os = "linux")]
     fn recovering_port(refused_terminations: usize) -> TestResult<Arc<InProcessProviderPort>> {
         Ok(Arc::new(InProcessProviderPort {
             recovery: Some(
@@ -4334,6 +4339,7 @@ mod tests {
     }
 
     /// One fixed installation with a pending SIR1; returns its exact SIU1.
+    #[cfg(target_os = "linux")]
     fn pending_fixed_installation() -> TestResult<Vec<u8>> {
         let root = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT);
         drop(crate::selector::installation::tests::materialize_root_selector_state(root)?);
