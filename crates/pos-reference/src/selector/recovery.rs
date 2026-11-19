@@ -152,9 +152,11 @@ pub(crate) fn require_absent_evaluator_endpoint(
 ///
 /// let _ = PendingRecoveryTarget {
 ///     identity: todo!(),
+///     operation: todo!(),
 ///     previous_installation_digest: [0; 32],
 ///     selector_nonce: [0; 16],
 ///     pending_update: Vec::new(),
+///     records: todo!(),
 /// };
 /// ```
 ///
