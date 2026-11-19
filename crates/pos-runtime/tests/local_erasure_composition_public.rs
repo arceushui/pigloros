@@ -8173,20 +8173,20 @@ fn the_projection_follows_a_driven_request() -> TestResult {
     let case = driver_case()?;
     let mut host = store.host(&case, 4_096)?;
     submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
-    let submitted = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
-    assert_eq!(submitted.erasure_id, erasure_id_of(1)?);
-    assert_eq!(submitted.state.lifecycle(), ErasureLifecycleV1::Submitted);
-    assert_eq!(submitted.scope, ErasureScopeV1::PrivateSubjectData);
-    assert_eq!(submitted.generation, 0);
+    let first = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
+    assert_eq!(first.erasure_id, erasure_id_of(1)?);
+    assert_eq!(first.state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(first.scope, ErasureScopeV1::PrivateSubjectData);
+    assert_eq!(first.generation, 0);
     assert_eq!(
-        (submitted.required, submitted.positive),
+        (first.required, first.positive),
         (0, 0),
         "nothing is frozen yet"
     );
-    assert!(submitted.classes.is_empty());
-    assert_eq!(submitted.admission.trust, trust_of(&case)?);
+    assert!(first.classes.is_empty());
+    assert_eq!(first.admission.trust, trust_of(&case)?);
     let request = request_of(1)?;
-    let mut previous = submitted.generation;
+    let mut previous = first.generation;
     let mut generations = vec![previous];
     let mut acknowledged = 0_u64;
     loop {
