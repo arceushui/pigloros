@@ -380,7 +380,7 @@ fn the_selector_cleanup_refuses_foreign_intents_and_releases_the_lock() -> TestR
             &transport,
             live,
             Instant::now() + Duration::from_secs(10),
-            || Network { fails },
+            Network { fails },
         ))
     };
 

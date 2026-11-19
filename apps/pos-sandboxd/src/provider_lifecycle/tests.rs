@@ -1507,36 +1507,18 @@ fn only_previous_live_intents_are_owned_and_reconciliation_failures_are_classifi
 }
 
 #[test]
-fn the_host_cleanup_needs_the_fixed_provider_installation() -> TestResult {
-    // This host has no SPI1 at its fixed path, so the cleanup refuses
-    // before it opens the registry.
+fn the_system_cleanup_needs_the_fixed_provider_installation() -> TestResult {
+    // This host has no SPI1 at its fixed path, so the production cleanup
+    // refuses before it opens the registry or sweeps a namespace.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let harness = Harness::new(Vec::new(), Fault::None)?;
-    let cleaned = runtime.block_on(host_cleanup(
+    let cleaned = runtime.block_on(system_cleanup(
         &harness.lifecycle.transport,
         &[],
         Instant::now() + Duration::from_secs(1),
-        || NoNetwork,
     ));
     assert_eq!(cleaned, Err(ProviderLifecycleError::Unavailable));
     Ok(())
-}
-
-/// An orphan sweep that the refused cleanup never reaches.
-struct NoNetwork;
-
-#[derive(Debug, thiserror::Error)]
-#[error("no network")]
-struct NoNetworkError;
-
-impl OrphanNetworkCleanup for NoNetwork {
-    type Error = NoNetworkError;
-
-    fn remove_orphans(
-        &self,
-    ) -> impl std::future::Future<Output = Result<(), NoNetworkError>> + Send {
-        std::future::ready(Err(NoNetworkError))
-    }
 }
