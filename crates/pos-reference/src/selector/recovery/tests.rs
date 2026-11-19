@@ -1300,8 +1300,8 @@ fn the_exchange_stream_refuses_io_past_its_deadline() -> TestResult {
 /// Review M2 and the cleanup bound: every port result is checked against
 /// its deadline on the selector's clock, exactly at the deadline it passes
 /// and one millisecond later it yields no proof. The previous-runtime
-/// termination may outlast its 10 s bound only by the 70 s recent-activation
-/// wait.
+/// termination may outlast its 10 s bound only by the D2 wait the port
+/// reports it applied, at most 70 s.
 #[test]
 fn every_port_deadline_holds_exactly_at_and_fails_one_past() -> TestResult {
     for (script, expected) in [
