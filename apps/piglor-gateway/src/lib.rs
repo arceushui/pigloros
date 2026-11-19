@@ -41,6 +41,8 @@ pub mod problem;
 pub mod revision;
 pub mod scenario_room;
 pub mod startup;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod store_installation;
 
 pub use authorization::{
     AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
