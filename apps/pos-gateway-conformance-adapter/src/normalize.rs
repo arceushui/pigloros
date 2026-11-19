@@ -10,8 +10,9 @@
 //! of lowercase hex digits that are not all zero, such a provenance digest of a Scenario Room
 //! revision or an erasure and such a `trust` bound input of an admission receipt, and every
 //! problem `detail` text member are replaced by placeholders, and every ULID segment of a
-//! problem `instance` or an `operation_url` path becomes `<ulid>`. Every other value stays as it is, so a malformed ID,
-//! cursor or hash, or an echo of another consent or room, cannot match.
+//! problem `instance` or an `operation_url` path becomes `<ulid>`. Every other value stays as
+//! it is, so a malformed ID, cursor or hash, or an echo of another consent or room, cannot
+//! match.
 
 use serde_json::{json, Value};
 

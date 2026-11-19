@@ -3196,6 +3196,16 @@
               }
             }
           },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable, without `Retry-After`): the store executor is saturated. A refused read past the denial-record bound answers the `404` instead.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "500": {
             "description": "`internal-safe-failure`: the erasure was admitted under an execution-mode profile this Gateway does not compile.",
             "content": {
