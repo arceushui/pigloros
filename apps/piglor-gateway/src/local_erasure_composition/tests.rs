@@ -221,10 +221,11 @@ async fn valid_credentials_compose_the_local_erasure_authority() -> TestResult {
     let driver = LocalErasureDriverTaskV1::spawn(&gateway, started);
     let trigger = driver.trigger().ok_or("a Local driver has a trigger")?;
     driver.stop().await;
-    // The stopped driver task released its wake: only `trigger` holds it.
-    assert_eq!(Arc::strong_count(&trigger.0), 1);
     assert!(gateway.shutdown().await.is_ok());
     drop(gateway);
+    // The stopped driver task and the dropped Gateway's admission hook
+    // released the wake: only `trigger` holds it.
+    assert_eq!(Arc::strong_count(&trigger.0), 1);
     Ok(())
 }
 
