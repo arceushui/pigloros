@@ -390,7 +390,7 @@ pub(super) fn derive_key_owner(
     OwnerIdV1::from_borrowed(&text).map_err(owner_error)
 }
 
-const fn owner_error(_: KeyRegistryErrorV1) -> Error {
+pub(super) const fn owner_error(_: KeyRegistryErrorV1) -> Error {
     Error::InvalidBinding
 }
 

@@ -1311,6 +1311,42 @@ fn the_coordinator_identity_is_the_domain_tagged_digest_of_the_store_identity() 
     Ok(())
 }
 
+#[test]
+fn the_erasure_host_timeline_is_the_ulid_prefix_of_the_store_identity_digest() -> TestResult {
+    let store_identity = ErasureReferenceV1::from_digest([0x5a; 32]);
+    // The 128-bit prefix of CA("ELHT1", [store_identity]), read as a ULID.
+    let digest = content_address("ELHT1", &[vec![0x81], bstr32([0x5a; 32])].concat()).digest();
+    let mut prefix = [0; 16];
+    prefix.copy_from_slice(&digest[..16]);
+    assert_eq!(
+        pos_core::local_erasure_host_timeline_v1(store_identity)?,
+        TimelineId::from_ulid(Ulid::from_bytes(prefix))
+    );
+    assert_ne!(
+        pos_core::local_erasure_host_timeline_v1(reference(0x5b))?,
+        pos_core::local_erasure_host_timeline_v1(store_identity)?
+    );
+    Ok(())
+}
+
+#[test]
+fn the_executor_version_digest_binds_the_executor_id_and_version() -> TestResult {
+    // CA("ELEXV1", [executor_id, version]) over a 31-byte text and a uint.
+    let id = "pigloros.local-erasure-executor";
+    let mut array = vec![0x82, 0x78, 31];
+    array.extend_from_slice(id.as_bytes());
+    array.push(0x01);
+    assert_eq!(
+        pos_core::local_erasure_executor_version_v1(id, 1)?,
+        content_address("ELEXV1", &array)
+    );
+    assert_ne!(
+        pos_core::local_erasure_executor_version_v1(id, 2)?,
+        pos_core::local_erasure_executor_version_v1(id, 1)?
+    );
+    Ok(())
+}
+
 /// `CA(tag, ·)` over hand-encoded canonical CBOR: BLAKE3 over the tag, a zero
 /// byte and the array bytes.
 fn content_address(tag: &str, array: &[u8]) -> ErasureReferenceV1 {
