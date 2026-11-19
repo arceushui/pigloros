@@ -3,18 +3,56 @@
 //! A pending SIR1 is loaded only from the fixed installation root, and only
 //! when the selector can rebuild it byte for byte from the installed objects
 //! (R12 §4.1). The loaded [`PendingRecoveryTarget`] names its exact
-//! transaction through [`RecoveryTransactionIdentity`]. Neither type can be
+//! transaction through [`RecoveryTransactionIdentity`], and each load draws
+//! a fresh in-memory [`RecoveryOperationId`]. Neither type can be
 //! constructed, cloned, serialized or decoded outside this module.
 //!
+//! One recovery operation (R12 §6) runs in this order:
+//! 1. [`ProviderTerminationAuthority::terminate_previous_runtime`] has the
+//!    port terminate and reconcile the previous runtime and its recovery
+//!    slot, checks each observation against the target and the kernel, and
+//!    mints a [`PreviousRuntimeTerminationProof`];
+//! 2. [`ProviderTerminationAuthority::start_recovery_peer`] consumes that
+//!    proof into a [`RecoveryPeerSession`], which starts nothing;
+//! 3. [`RecoveryPeerSession::conclude`] starts the one peer, runs the 100 ms
+//!    exchange, always cleans the slot under 5 s, and only then mints the
+//!    [`RecoveryPeerTerminationProof`];
+//! 4. [`complete_recovery`] publishes the next SIC1 and removes SIR1.
+//!
+//! Any failure drops every proof; the next operation starts again at `load`.
 //! While a target is pending the selector stays closed: it exposes no
 //! evaluator endpoint and its administrative listener answers only the
 //! mode-1 challenge of this transaction (R12 §8).
 
-use crate::selector::installation::authority::{InstallationChallenge, VerifiedPendingRecovery};
+mod authority;
+// A public module keeps the selector's crate-only host view compatible with
+// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod host;
+mod port;
+mod session;
+
+use crate::sandbox_provider_protocol::AuthenticatedRevocationAcknowledgement;
+use crate::selector::installation::authority::{
+    fresh_selector_id, AuthenticatedSelectorBootstrap, InstallationChallenge,
+    PendingRecoveryRecords, VerifiedPendingRecovery,
+};
 use crate::selector::installation::InstalledSelectorState;
+use crate::selector::runtime_lifecycle::{ProviderLifecycleError, ProviderLifecyclePort};
 use crate::selector::SelectorBoundaryError;
 
-/// Closed failures of one recovery operation.
+pub use authority::{
+    Consumed, PreviousRuntimeTerminationProof, ProofState, ProviderTerminationAuthority, Unconsumed,
+};
+pub(crate) use host::RecoveryHost;
+pub use port::{
+    PreviousRuntimeObservation, PreviousRuntimeTarget, RecoveryPeerLaunch, RecoveryPeerObservation,
+    RecoverySlotObservation, RecoverySlotTarget, VerifiedProviderBinary,
+};
+pub use session::{ConcludedRecovery, RecoveryPeerSession, RecoveryPeerTerminationProof};
+
+/// Closed failures of one recovery operation. Every one leaves SIR1 in
+/// place and the selector closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RecoveryError {
     /// The pending SIR1, or a record or object it names, failed authentication.
@@ -26,13 +64,58 @@ pub enum RecoveryError {
     /// closed until an operator removes it (ADR-069 R12 §8 M4).
     #[error("the evaluator endpoint exists while recovery is pending")]
     EvaluatorEndpointPresent,
+    /// The lifecycle port refused an operation.
+    #[error(transparent)]
+    Lifecycle(ProviderLifecycleError),
+    /// An observation does not echo its challenge or names another scope or
+    /// attempt set.
+    #[error("a lifecycle observation does not match its target")]
+    Observation,
+    /// The recorded previous main process is still alive.
+    #[error("the previous main process is alive")]
+    ProcessAlive,
+    /// A control group is present, or the cgroup2 mount cannot be proved.
+    #[error("a control group was not proven absent")]
+    CgroupPresent,
+    /// The recovery leaf is not the exact root-owned socket.
+    #[error("the recovery leaf is not the exact socket")]
+    Leaf,
+    /// The started peer is not the observed process running the SIR1 binary.
+    #[error("the recovery peer is not the observed process")]
+    PeerBinding,
+    /// The previous provider binary no longer has the SIR1 digest.
+    #[error("the previous provider binary changed")]
+    Binary,
+    /// The control exchange failed or missed its deadline.
+    #[error("the recovery exchange failed")]
+    Exchange,
+    /// The RCA1 is malformed, forged or names another transaction.
+    #[error("the recovery acknowledgement was refused")]
+    Acknowledgement,
+    /// A proof names another transaction, operation or RCA1.
+    #[error("recovery evidence names another transaction or operation")]
+    Mismatch,
+    /// A bound of the operation passed.
+    #[error("a recovery deadline passed")]
+    DeadlineExceeded,
 }
 
 impl From<RecoveryError> for SelectorBoundaryError {
     fn from(error: RecoveryError) -> Self {
         match error {
             RecoveryError::Boundary(error) => error,
-            RecoveryError::EvaluatorEndpointPresent => Self::ArtifactInvalid,
+            RecoveryError::Lifecycle(_)
+            | RecoveryError::Exchange
+            | RecoveryError::DeadlineExceeded => Self::SelectorUnavailable,
+            RecoveryError::EvaluatorEndpointPresent
+            | RecoveryError::Observation
+            | RecoveryError::ProcessAlive
+            | RecoveryError::CgroupPresent
+            | RecoveryError::Leaf
+            | RecoveryError::PeerBinding
+            | RecoveryError::Binary
+            | RecoveryError::Acknowledgement
+            | RecoveryError::Mismatch => Self::ArtifactInvalid,
         }
     }
 }
@@ -94,31 +177,37 @@ pub(crate) fn require_absent_evaluator_endpoint(
 #[derive(Debug)]
 pub struct PendingRecoveryTarget {
     identity: RecoveryTransactionIdentity,
+    operation: RecoveryOperationId,
     previous_installation_digest: [u8; 32],
     selector_nonce: [u8; 16],
     pending_update: Vec<u8>,
+    records: Box<PendingRecoveryRecords>,
 }
 
 impl PendingRecoveryTarget {
-    /// Loads the pending SIR1 of `installed`.
+    /// Loads the pending SIR1 of `installed` for one new recovery operation.
     ///
     /// SIR1 is decoded within its 48 MiB bound and must be rebuilt byte for
     /// byte: the current SIC1 equals its previous or next SIC1, both states
     /// and every object they name are revalidated, RCU1 is re-authenticated
     /// against the previous state, RCC1 is re-derived, and the previous
     /// role-3 runtime key is resolved from the previous SIC1, TRS1, RVS1 and
-    /// SPM1 even when the next RVS1 revokes it.
+    /// SPM1 even when the next RVS1 revokes it. Each load draws a fresh
+    /// [`RecoveryOperationId`].
     ///
     /// # Errors
     /// Returns [`RecoveryError::Boundary`] for any SIR1, record or object that
-    /// fails those checks.
+    /// fails those checks, or when no fresh operation ID can be drawn.
     pub(crate) fn load(installed: &InstalledSelectorState) -> Result<Self, RecoveryError> {
         VerifiedPendingRecovery::load(installed)
-            .map(Self::from_verified)
+            .and_then(|verified| {
+                RecoveryOperationId::fresh()
+                    .map(|operation| Self::from_verified(verified, operation))
+            })
             .map_err(RecoveryError::from)
     }
 
-    fn from_verified(verified: VerifiedPendingRecovery) -> Self {
+    fn from_verified(verified: VerifiedPendingRecovery, operation: RecoveryOperationId) -> Self {
         Self {
             identity: RecoveryTransactionIdentity {
                 sir1_digest: verified.sir1_digest,
@@ -128,9 +217,11 @@ impl PendingRecoveryTarget {
                 previous_live_attempt_ids: verified.previous_live_attempt_ids,
                 recovery_peer_slot: verified.recovery_peer_slot,
             },
+            operation,
             previous_installation_digest: verified.previous_installation_digest,
             selector_nonce: verified.selector_nonce,
             pending_update: verified.pending_update,
+            records: Box::new(verified.records),
         }
     }
 
@@ -152,6 +243,129 @@ impl PendingRecoveryTarget {
             self.previous_installation_digest,
             self.selector_nonce,
         )
+    }
+
+    /// Authenticates one RCA1 under the previous SIR1 runtime key, even when
+    /// the next RVS1 revokes it, and requires it to match this RCC1, RCU1
+    /// request ID and next RVS1 digest (R12 §6 step 11).
+    ///
+    /// # Errors
+    /// Returns [`RecoveryError::Acknowledgement`] for a malformed, forged,
+    /// foreign-key or foreign-transaction RCA1.
+    pub(crate) fn authenticate_recovery_acknowledgement(
+        &self,
+        rca1: &[u8],
+    ) -> Result<AuthenticatedRevocationAcknowledgement, RecoveryError> {
+        self.records
+            .authenticate_acknowledgement(rca1)
+            .map_err(|_| RecoveryError::Acknowledgement)
+    }
+
+    /// The SIR1 recovery-peer lifecycle-scope ID.
+    const fn recovery_lifecycle_scope_id(&self) -> [u8; 16] {
+        self.identity.recovery_peer_slot[1]
+    }
+
+    /// The SIR1 recovery-endpoint ID.
+    const fn endpoint_id(&self) -> [u8; 16] {
+        self.identity.recovery_peer_slot[2]
+    }
+}
+
+/// One recovery operation's in-memory identity.
+///
+/// It is fresh and nonzero for every load of a [`PendingRecoveryTarget`], is
+/// never written to disk or sent on any wire, and binds every proof of the
+/// operation, so proofs of two operations on one SIR1 never combine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoveryOperationId([u8; 16]);
+
+impl RecoveryOperationId {
+    fn fresh() -> Result<Self, SelectorBoundaryError> {
+        fresh_selector_id().map(Self)
+    }
+}
+
+/// Completes one recovery: publishes the next SIC1 and removes SIR1, only
+/// with both proofs and the RCA1 of one operation (R12 §6 steps 14 to 17).
+///
+/// The three pieces of evidence must name `pending_sir1`'s transaction and
+/// operation, the RCA1 must be the one the peer proof records, and it must
+/// match the target's RCC1. Then the recovery floor is verified, the next
+/// SIC1 is published (or verified when already current) and SIR1 is removed
+/// durably.
+///
+/// # Errors
+/// Returns [`RecoveryError::Mismatch`] for evidence of another transaction,
+/// operation or RCA1, and [`RecoveryError::Boundary`] when the floor changed
+/// or a durable step failed. SIR1 then stays.
+pub fn complete_recovery(
+    pending_sir1: PendingRecoveryTarget,
+    consumed_previous_runtime_termination_proof: PreviousRuntimeTerminationProof<Consumed>,
+    authenticated_rca1: AuthenticatedRevocationAcknowledgement,
+    recovery_peer_termination_proof: RecoveryPeerTerminationProof,
+) -> Result<AuthenticatedSelectorBootstrap, RecoveryError> {
+    // Every piece of evidence is consumed here, whatever the outcome.
+    let PreviousRuntimeTerminationProof {
+        identity: previous_identity,
+        operation: previous_operation,
+        ..
+    } = consumed_previous_runtime_termination_proof;
+    let RecoveryPeerTerminationProof {
+        identity: peer_identity,
+        operation: peer_operation,
+        acknowledgement_digest,
+        ..
+    } = recovery_peer_termination_proof;
+    let acknowledgement = authenticated_rca1;
+    authority::require(
+        previous_identity == pending_sir1.identity
+            && previous_operation == pending_sir1.operation
+            && peer_identity == pending_sir1.identity
+            && peer_operation == pending_sir1.operation
+            && acknowledgement.acknowledgement_digest() == acknowledgement_digest
+            && pending_sir1
+                .records
+                .acknowledgement_matches(&acknowledgement),
+        RecoveryError::Mismatch,
+    )
+    .and_then(|()| {
+        pending_sir1
+            .records
+            .publish_successor()
+            .map_err(RecoveryError::Boundary)
+    })
+}
+
+/// One completed recovery: the next state, and the exact RCA1 the peer sent.
+pub(crate) struct CompletedRecovery {
+    pub(crate) bootstrap: AuthenticatedSelectorBootstrap,
+    pub(crate) acknowledgement: Vec<u8>,
+}
+
+impl<P: ProviderLifecyclePort + ?Sized> ProviderTerminationAuthority<P> {
+    /// Runs one whole recovery operation on `target` (R12 §6): termination,
+    /// the one peer session, and completion.
+    ///
+    /// # Errors
+    /// Returns the operation's first [`RecoveryError`]. Every proof is then
+    /// dropped and SIR1 stays.
+    pub(crate) fn recover(
+        &self,
+        target: PendingRecoveryTarget,
+    ) -> Result<CompletedRecovery, RecoveryError> {
+        self.terminate_previous_runtime(&target)
+            .and_then(|proof| self.start_recovery_peer(&target, proof))
+            .and_then(RecoveryPeerSession::conclude)
+            .and_then(|(consumed, acknowledgement, peer)| {
+                let bytes = peer.acknowledgement_bytes().to_vec();
+                complete_recovery(target, consumed, acknowledgement, peer).map(|bootstrap| {
+                    CompletedRecovery {
+                        bootstrap,
+                        acknowledgement: bytes,
+                    }
+                })
+            })
     }
 }
 
@@ -200,142 +414,21 @@ pub struct RecoveryTransactionIdentity {
     recovery_peer_slot: [[u8; 16]; 3],
 }
 
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use std::fs::File;
-
-    use super::*;
-    use crate::selector::installation::tests::updates::{SuccessorRevocation, UpdateFixture};
-    use crate::selector::installation::FixedInstallation;
-
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-    fn pending_target(fixture: &UpdateFixture) -> TestResult<PendingRecoveryTarget> {
-        match InstalledSelectorState::open_fixed_at_for_test(&File::open(fixture.path())?)? {
-            FixedInstallation::RecoveryPending(installed) => {
-                Ok(PendingRecoveryTarget::load(&installed)?)
-            }
-            FixedInstallation::Admissible(_) => Err("no SIR1 is pending".into()),
+impl RecoveryTransactionIdentity {
+    /// The copy a proof holds of its transaction's identity.
+    fn duplicate(&self) -> Self {
+        Self {
+            sir1_digest: self.sir1_digest,
+            previous_provider_binding_digest: self.previous_provider_binding_digest,
+            previous_runtime_instance_id: self.previous_runtime_instance_id,
+            previous_lifecycle_scope_id: self.previous_lifecycle_scope_id,
+            previous_live_attempt_ids: self.previous_live_attempt_ids.clone(),
+            recovery_peer_slot: self.recovery_peer_slot,
         }
-    }
-
-    #[test]
-    fn a_reloaded_target_names_the_same_transaction() -> TestResult {
-        let fixture = UpdateFixture::new()?;
-        let (committed, request) = fixture.commit_pending_update(
-            vec![[41; 16], [42; 16]],
-            vec![[42; 16]],
-            SuccessorRevocation::Nothing,
-        )?;
-        let first = pending_target(&fixture)?;
-        let second = pending_target(&fixture)?;
-        assert_eq!(first.identity(), second.identity());
-        assert_eq!(first.identity().sir1_digest, committed.sir1_digest());
-        assert_eq!(
-            first.identity().previous_provider_binding_digest,
-            committed
-                .cancellation_context()?
-                .previous_provider_binding_digest
-        );
-        assert_eq!(
-            first.identity().previous_live_attempt_ids,
-            vec![[41; 16], [42; 16]]
-        );
-        assert_eq!(first.pending_update_bytes(), request);
-        Ok(())
-    }
-
-    #[test]
-    fn identity_equality_compares_every_element() -> TestResult {
-        let fixture = UpdateFixture::new()?;
-        fixture.commit_pending_update(
-            vec![[41; 16]],
-            vec![[41; 16]],
-            SuccessorRevocation::Nothing,
-        )?;
-        let reference = pending_target(&fixture)?.identity;
-        let mutations: [fn(&mut RecoveryTransactionIdentity); 6] = [
-            |identity| identity.sir1_digest[0] ^= 1,
-            |identity| identity.previous_provider_binding_digest[0] ^= 1,
-            |identity| identity.previous_runtime_instance_id[0] ^= 1,
-            |identity| identity.previous_lifecycle_scope_id[0] ^= 1,
-            |identity| identity.previous_live_attempt_ids.push([99; 16]),
-            |identity| identity.recovery_peer_slot[2][0] ^= 1,
-        ];
-        for mutate in mutations {
-            let mut changed = pending_target(&fixture)?.identity;
-            assert_eq!(changed, reference);
-            mutate(&mut changed);
-            assert_ne!(changed, reference);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn the_mode_one_challenge_names_the_pending_transaction() -> TestResult {
-        let fixture = UpdateFixture::new()?;
-        let (_committed, request) =
-            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
-        let target = pending_target(&fixture)?;
-        let challenge =
-            crate::evaluator_protocol::decode_canonical(&target.challenge().to_canonical_cbor()?)?;
-        let fields = crate::evaluator_protocol::array(&challenge, 5)?;
-        let update = crate::evaluator_protocol::decode_canonical(&request)?;
-        let update_fields = crate::evaluator_protocol::array(&update, 5)?;
-        assert_eq!(fields[0], ciborium::value::Value::Text("SICN1".to_owned()));
-        assert_eq!(fields[2], update_fields[2]);
-        assert_eq!(crate::evaluator_protocol::uint(&fields[4])?, 1);
-        let ciborium::value::Value::Bytes(rcu1) = &update_fields[4] else {
-            return Err("SIU1 RCU1 is not bytes".into());
-        };
-        let rcu1 = crate::evaluator_protocol::decode_canonical(rcu1)?;
-        let rcu1_fields =
-            crate::evaluator_protocol::array(&crate::evaluator_protocol::array(&rcu1, 3)?[0], 8)?;
-        assert_eq!(fields[3], rcu1_fields[6]);
-        Ok(())
-    }
-
-    #[test]
-    fn recovery_errors_close_as_boundary_errors() {
-        assert_eq!(
-            SelectorBoundaryError::from(RecoveryError::from(SelectorBoundaryError::Io)),
-            SelectorBoundaryError::Io
-        );
-        assert_eq!(
-            SelectorBoundaryError::from(RecoveryError::EvaluatorEndpointPresent),
-            SelectorBoundaryError::ArtifactInvalid
-        );
-    }
-
-    #[test]
-    fn any_node_at_the_evaluator_endpoint_stops_recovery_and_is_kept() -> TestResult {
-        let directory = tempfile::tempdir()?;
-        let endpoint = directory.path().join("sandbox-provider.sock");
-        require_absent_evaluator_endpoint(&endpoint)?;
-
-        drop(std::os::unix::net::UnixListener::bind(&endpoint)?);
-        assert_eq!(
-            require_absent_evaluator_endpoint(&endpoint),
-            Err(RecoveryError::EvaluatorEndpointPresent)
-        );
-        assert!(endpoint.exists());
-        std::fs::remove_file(&endpoint)?;
-
-        std::os::unix::fs::symlink("missing-target", &endpoint)?;
-        assert_eq!(
-            require_absent_evaluator_endpoint(&endpoint),
-            Err(RecoveryError::EvaluatorEndpointPresent)
-        );
-        assert!(std::fs::symlink_metadata(&endpoint).is_ok());
-
-        // A parent that is not a directory cannot be inspected.
-        let file = directory.path().join("file");
-        std::fs::write(&file, b"")?;
-        assert_eq!(
-            require_absent_evaluator_endpoint(&file.join("sandbox-provider.sock")),
-            Err(RecoveryError::Boundary(SelectorBoundaryError::Io))
-        );
-        Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod tests;
