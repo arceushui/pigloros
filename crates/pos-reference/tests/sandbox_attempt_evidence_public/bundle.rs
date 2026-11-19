@@ -387,13 +387,22 @@ fn rule_4_koe1_binds_the_accepted_ready_v1() -> TestResult {
     })?);
     other.rejects("another ReadyV1")?;
 
-    // A failed KOE1 opened no `/work`, so `work-after` is null.
+    // A failed KOE1 opened no `/work`, so `work-after` is null. Nothing
+    // else is a candidate, so the cascade ends in the fail-closed fallback,
+    // code 2 (R9 §4.6.5): a released attempt Completes only after a
+    // status-0 KOE1.
     let failed = Fixture::released(TME1_A)?
         .koe1(&[4], integer(2))?
         .koe1(&[7], Value::Null)?
         .tme1(&[21], Value::Null)?
         .tme1(&[26], integer(2))?;
+    let (requested, observed, termination, _) = failed.records()?;
     failed.accepts()?;
+    let classification = termination.facts(&requested, &observed).classify();
+    assert_eq!(classification.code(), Some(TerminalCode::CleanupFailed));
+    assert!(!classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
     let mut failed_other = failed;
     failed_other.ready = Some(LauncherReady::new(LauncherReadyFields {
         nonce: [0x09; 32],
@@ -823,18 +832,23 @@ fn rule_2_work_after_follows_a_status_0_koe1() -> TestResult {
     let failed = Fixture::observed(with(&at_progress(1)?, &[21], Value::Null)?)?
         .koe1(&[4], integer(2))?
         .koe1(&[7], Value::Null)?;
-    let mut not_reached = Fixture::observed(edit(&at_progress(1)?, |fields| {
-        fields[21] = Value::Null;
-        fields[15] = integer(0);
-        fields[26] = integer(9);
-        Ok(())
-    })?)?;
-    not_reached.koe1 = unhex(KOE1_B)?;
-    not_reached.ready = None;
-    not_reached.rebind()?;
+    let not_reached = |work_after: bool| -> TestResult<Fixture> {
+        let mut fixture = Fixture::observed(edit(&at_progress(1)?, |fields| {
+            if !work_after {
+                fields[21] = Value::Null;
+            }
+            fields[15] = integer(0);
+            fields[26] = integer(9);
+            Ok(())
+        })?)?;
+        fixture.koe1 = unhex(KOE1_B)?;
+        fixture.ready = None;
+        fixture.rebind()?;
+        Ok(fixture)
+    };
     for (fixture, code) in [
         (failed, TerminalCode::ProtocolFailure),
-        (not_reached, TerminalCode::IpcFailure),
+        (not_reached(false)?, TerminalCode::IpcFailure),
     ] {
         let (requested, observed, termination, _) = fixture.records()?;
         fixture.accepts()?;
@@ -842,7 +856,8 @@ fn rule_2_work_after_follows_a_status_0_koe1() -> TestResult {
         assert_eq!(classification.code(), Some(code));
         assert!(!classification.quarantined());
     }
-    // ... and a present one is refused after a failed KOE1.
+    // ... and a present one is refused after a not-reached or failed KOE1.
+    not_reached(true)?.rejects("work-after after a not-reached KOE1")?;
     Fixture::observed(at_progress(1)?)?
         .koe1(&[4], integer(2))?
         .koe1(&[7], Value::Null)?
