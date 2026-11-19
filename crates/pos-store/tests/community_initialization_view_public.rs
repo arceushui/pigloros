@@ -22,7 +22,7 @@ use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMaterializationV1, CommunityPassFrontierV1,
 };
 use pos_core::trusted_clock::{TrustedClockOverrunLatchRowV1, TrustedClockStorePortV1};
-use pos_core::{Hash, KeyRoleV1};
+use pos_core::{AuthorityTrustRootSealV1, Hash, KeyRoleV1};
 use pos_store::community::{
     CommunityAdministrativeOperationV1, CommunityAdministrativeRequestV1 as Request,
     CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1,
@@ -32,6 +32,9 @@ use pos_store::community::{
 use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 use pos_store::MemoryTrustedClockAuthorityV1;
+
+/// The trust-root seal of the test composition.
+const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
 
 type TestResult = Fallible<()>;
 
@@ -45,8 +48,13 @@ fn the_view_reads_every_row_from_the_domain() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
-    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let planner = planner(&SEAL, &profile)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     let admission = world.admit(planner.request())?;
     let again = world.admit(planner.request())?;
     let metadata = key(0x0b, CommunityArtifactPurposeV1::LifecycleControl)?;
@@ -149,8 +157,8 @@ fn trust_rows_deny_or_refuse() -> TestResult {
         let roster = Roster::new(&release_one(), pmf1, release)?;
         let rows = roster.rows()?;
         let profile = profile(&rows)?;
-        let planner = planner(&profile)?;
-        let mut world = World::new(store, scope, MemoryTrustedClockAuthorityV1::new())?;
+        let planner = planner(&SEAL, &profile)?;
+        let mut world = World::new(&SEAL, store, scope, MemoryTrustedClockAuthorityV1::new())?;
         let admission = world.admit(planner.request())?;
         assert_eq!(
             planner
@@ -175,9 +183,9 @@ fn the_view_refuses_unavailable_evidence() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
+    let planner = planner(&SEAL, &profile)?;
     let clock = MemoryTrustedClockAuthorityV1::new();
-    let mut world = World::new(store, TRUST_SCOPE, clock.handle())?;
+    let mut world = World::new(&SEAL, store, TRUST_SCOPE, clock.handle())?;
     let admission = world.admit(planner.request())?;
     // A domain sharing the clock but holding no grant chain.
     let bare = MemoryCommunityDomainV1::new(MemoryStore::new(), INCARNATION, clock.handle())?;
@@ -238,8 +246,13 @@ fn with_operation(check: impl FnOnce(Operation<'_>) -> TestResult) -> TestResult
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
-    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let planner = planner(&SEAL, &profile)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     let (call, admission) = world.call_and_admit(planner.request(), LEAVES[0])?;
     let records = planner.records(GENERATION, &admission, &ADDRESSES)?;
     let view = planner.current_view(
@@ -249,7 +262,7 @@ fn with_operation(check: impl FnOnce(Operation<'_>) -> TestResult) -> TestResult
         &[&admission, &admission],
         &[],
     )?;
-    let graph = graph(&planner, &profile, &roster, &records, GENERATION)?;
+    let graph = graph(&SEAL, &planner, &profile, &roster, &records, GENERATION)?;
     let input = CommunityInitializationEvidenceInputV1 {
         call: &call,
         records: &records,
@@ -376,8 +389,15 @@ fn the_authority_evidence_refuses_inputs_that_do_not_belong_together() -> TestRe
             LEAVES[0],
         )?;
         let other_records = planner.records(OTHER_GENERATION, admission, &ADDRESSES)?;
-        let other_graph = graph(planner, profile, roster, &other_records, OTHER_GENERATION)?;
-        let elsewhere = planner_at(profile, other_timeline())?;
+        let other_graph = graph(
+            &SEAL,
+            planner,
+            profile,
+            roster,
+            &other_records,
+            OTHER_GENERATION,
+        )?;
+        let elsewhere = planner_at(&SEAL, profile, other_timeline())?;
         let other_view = elsewhere.current_view(
             &world.domain,
             &world.authority,
@@ -520,9 +540,9 @@ fn the_view_reads_the_clock_latch() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
+    let planner = planner(&SEAL, &profile)?;
     let clock = MemoryTrustedClockAuthorityV1::new();
-    let mut world = World::new(store, TRUST_SCOPE, clock.handle())?;
+    let mut world = World::new(&SEAL, store, TRUST_SCOPE, clock.handle())?;
     let admission = world.admit(planner.request())?;
     let write = |overrun_count: i64| -> TestResult {
         let mut port = clock.handle();
@@ -576,8 +596,13 @@ fn the_view_refuses_rows_that_collide() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
-    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let planner = planner(&SEAL, &profile)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     let first = world.admit(planner.request())?;
     let (_, second) = world.call_and_admit(planner.request(), LEAVES[1])?;
     let key = key(0x0b, CommunityArtifactPurposeV1::LifecycleControl)?;

@@ -378,6 +378,7 @@ impl CommunityLifecycleAuthorityV1 {
     }
 
     /// The CAP1-pinned Plugin trust scope of every CAV1 trust row (D9).
+    #[cfg(target_os = "linux")]
     pub(super) fn trust_scope(&self) -> &str {
         &self.catalogue.as_input().trust_scope
     }

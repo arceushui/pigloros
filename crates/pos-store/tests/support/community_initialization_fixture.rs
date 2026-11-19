@@ -52,8 +52,6 @@ use crate::plugin_trust_registry_fixtures::{release_one, Harness, ManifestSpec};
 /// A fallible fixture step.
 pub type Fallible<T> = Result<T, Box<dyn StdError>>;
 
-/// The trust-root seal of the test composition.
-pub const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
 /// CAP1 authority registry digest.
 pub const REGISTRY: Hash = Hash::from_bytes([31; 32]);
 /// CAP1 capability policy revision.
@@ -301,11 +299,12 @@ pub fn profile<'a>(
 /// # Errors
 /// Returns the planner refusal.
 pub fn planner_at<'a>(
+    seal: &'static AuthorityTrustRootSealV1,
     profile: &'a CommunityDurableProfileV1<'a>,
     timeline: TimelineId,
 ) -> Fallible<CommunityInitializationPlannerV1<'a>> {
     Ok(CommunityInitializationPlannerV1::new(
-        &SEAL,
+        seal,
         CommunityInitializationInstallationV1 {
             store_incarnation: INCARNATION,
             profile,
@@ -329,9 +328,10 @@ pub fn planner_at<'a>(
 /// # Errors
 /// Returns the planner refusal.
 pub fn planner<'a>(
+    seal: &'static AuthorityTrustRootSealV1,
     profile: &'a CommunityDurableProfileV1<'a>,
 ) -> Fallible<CommunityInitializationPlannerV1<'a>> {
-    planner_at(profile, target())
+    planner_at(seal, profile, target())
 }
 
 /// One CKP1 key intent: `byte` names its protection operation.
@@ -442,6 +442,7 @@ impl World {
     /// # Errors
     /// Returns the fixture construction error.
     pub fn new(
+        seal: &'static AuthorityTrustRootSealV1,
         mut store: MemoryStore,
         scope: &str,
         clock: MemoryTrustedClockAuthorityV1,
@@ -456,13 +457,8 @@ impl World {
             .map(CapabilityGrantV1::binding_digest)
             .collect::<Result<Vec<_>, _>>()?;
         bindings.sort_unstable();
-        let attestation = AuthorityRegistrySnapshotV1::try_new(
-            &SEAL,
-            REGISTRY,
-            vec![hash(41)],
-            bindings,
-            vec![],
-        )?;
+        let attestation =
+            AuthorityRegistrySnapshotV1::try_new(seal, REGISTRY, vec![hash(41)], bindings, vec![])?;
         let host = AuthorityPersistenceHostV1::new(&attestation);
         store.bind_authority_persistence(host.persistence_binding())?;
         for grant in &grants {
@@ -470,7 +466,7 @@ impl World {
             store.issue_capability_grant(permit, grant)?;
         }
         let catalogue = CommunityAuthorityCatalogueV1::new(
-            &SEAL,
+            seal,
             CommunityAuthorityCatalogueInputV1 {
                 fap1_digest: fap1()?.digest()?,
                 audience: AUDIENCE.to_owned(),
@@ -491,7 +487,7 @@ impl World {
         Ok(Self {
             domain: MemoryCommunityDomainV1::new(store, INCARNATION, clock)?,
             authority: CommunityLifecycleAuthorityV1::new(
-                &SEAL,
+                seal,
                 CommunityLifecycleAuthorityInputV1 {
                     catalogue,
                     authentication_policy: fap1()?,
@@ -578,6 +574,7 @@ pub fn trusted_store(admit: bool) -> Fallible<(MemoryStore, Harness)> {
 /// # Errors
 /// Returns the fixture construction or assembly error.
 pub fn graph(
+    seal: &'static AuthorityTrustRootSealV1,
     planner: &CommunityInitializationPlannerV1<'_>,
     profile: &CommunityDurableProfileV1<'_>,
     roster: &Roster,
@@ -601,12 +598,12 @@ pub fn graph(
         .collect();
     let request = CommunityInitializationRequestV1::from_canonical_cbor(records.request())?;
     let owner = CommunityInitializerOwnerV1::new(
-        &SEAL,
+        seal,
         profile,
         vec![Zeroizing::new(roster.state.clone()); 2],
     )?;
     let mut protector = CommunityArtifactProtectorV1::provision(
-        &SEAL,
+        seal,
         CommunityProtectionCohortV1 {
             parent_operation: CommunityArtifactOperationV1::Initialization(OPERATION),
             timeline: target(),
@@ -625,7 +622,7 @@ pub fn graph(
         },
     )?;
     Ok(CommunityInitializationGraphV1::assemble(
-        &SEAL,
+        seal,
         CommunityInitializationGraphInputV1 {
             store_incarnation: INCARNATION,
             producer_ordinal: 7,

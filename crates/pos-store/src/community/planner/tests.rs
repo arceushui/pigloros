@@ -12,8 +12,8 @@ use pos_core::trusted_clock::{
     GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
 };
 use pos_core::{
-    AuthorizationRequestV1, EventId, Hash, ImplementationKeyV1, PersistedAuthorityV1,
-    SchemaVersion, Seq, TimelineId,
+    AuthorityTrustRootSealV1, AuthorizationRequestV1, EventId, Hash, ImplementationKeyV1,
+    PersistedAuthorityV1, SchemaVersion, Seq, TimelineId,
 };
 use ulid::Ulid;
 
@@ -28,6 +28,9 @@ use crate::plugin_trust_registry::{
     ActivationEventIdentityV1, ActiveReleaseV1, RetainedPolicyStateV1,
 };
 use crate::MemoryTrustedClockAuthorityV1;
+
+/// The trust-root seal of the test composition.
+const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
 
 type TestResult = Fallible<()>;
 
@@ -161,8 +164,13 @@ fn trust_reads_refuse_before_any_denial() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
-    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let planner = planner(&SEAL, &profile)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     let admission = world.admit(planner.request())?;
     for (policy, actives, expected) in [
         (Ok(policy(Some(-1))), None, Error::EvidenceUnavailable),
@@ -224,8 +232,13 @@ fn trust_rows_follow_plugin_order_with_the_scope_floors() -> TestResult {
         })
         .collect::<Fallible<Vec<_>>>()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
-    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let planner = planner(&SEAL, &profile)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     let admission = world.admit(planner.request())?;
     let actives = vec![
         (
@@ -281,8 +294,13 @@ fn a_non_zero_inventory_generation_flows_into_every_record() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner = planner(&profile)?;
-    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let planner = planner(&SEAL, &profile)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     let (call, admission) = world.call_and_admit(planner.request(), LEAVES[0])?;
     let records = planner.records(GENERATION, &admission, &ADDRESSES)?;
     let fake = Fake {
@@ -293,7 +311,7 @@ fn a_non_zero_inventory_generation_flows_into_every_record() -> TestResult {
     assert_eq!(view.inventory_generation(), 7);
     let decoded = CommunityCurrentViewV1::from_canonical_cbor(view.view())?;
     assert_eq!(decoded.as_input().inventory_generation, 7);
-    let graph = graph(&planner, &profile, &roster, &records, GENERATION)?;
+    let graph = graph(&SEAL, &planner, &profile, &roster, &records, GENERATION)?;
     let evidence = planner.authority_evidence(
         &world.authority,
         GENERATION,
@@ -344,8 +362,13 @@ fn authority_and_decision_rows_are_ordered_and_current() -> TestResult {
     let roster = Roster::release_one()?;
     let rows = roster.rows()?;
     let profile = profile(&rows)?;
-    let planner: CommunityInitializationPlannerV1<'_> = planner(&profile)?;
-    let mut world = World::new(store, TRUST_SCOPE, MemoryTrustedClockAuthorityV1::new())?;
+    let planner: CommunityInitializationPlannerV1<'_> = planner(&SEAL, &profile)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
     let first = world.admit(planner.request())?;
     let (_, second) = world.call_and_admit(planner.request(), LEAVES[1])?;
     let fake = Fake {
