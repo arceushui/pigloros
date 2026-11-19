@@ -29,16 +29,16 @@ use rustix::fs::{
 use super::{unavailable, unsafe_endpoint, ProviderRuntimeError};
 
 /// The provider's own state directory, which no endpoint may enter (M4).
-const SANDBOX_STATE: &str = "/run/pigloros/sandbox";
+pub(super) const SANDBOX_STATE: &str = "/run/pigloros/sandbox";
 /// The mode of each bound leaf.
 const LEAF_MODE: u32 = 0o600;
 /// The group and other write bits.
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 
-const DIRECTORY_OPEN: OFlags = OFlags::RDONLY
+pub(super) const DIRECTORY_OPEN: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
-const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
+pub(super) const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
 
@@ -196,7 +196,7 @@ pub(super) fn bind_endpoints(
 }
 
 /// Open `parent` from `/` one component at a time, each beneath the last.
-fn open_parent(parent: &Path) -> Result<File, ProviderRuntimeError> {
+pub(super) fn open_parent(parent: &Path) -> Result<File, ProviderRuntimeError> {
     parent
         .strip_prefix("/")
         .map_err(unsafe_endpoint)
