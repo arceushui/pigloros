@@ -16,8 +16,9 @@ implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, a
 and revocation state. A host without a provisioned Local Principal answers every protected
 operation `401 unauthenticated`. The other Wave 9 resource
 families (Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections, ensembles,
-Replays, evidence, exports, consent revocation and erasure) are Draft operations of the contract
-that their owner tickets (#303 to #309) will serve. WebSocket streaming remains deferred.
+Replays, evidence, exports and erasure) are Draft operations of the contract that their owner
+tickets (#303 to #309) will serve; consent revocation is served (#309, see
+[Consents](#consents)). WebSocket streaming remains deferred.
 
 ## Run
 
@@ -44,6 +45,16 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
   network. Air-Gapped accepts no grant, so it refuses OwnTracks, a non-loopback bind and any
   network `LEDGER_SOURCE`; `LEDGER_SOURCE` must always be a local path. Each refusal happens before
   the store, the ledger or a listener opens.
+- **Air-Gapped serves only without a network path (ADR-135 §4).** Before the store, ledger or
+  listeners open, `air-gapped-no-route` reads this process's `/proc/self` facts and refuses unless
+  its network namespace holds only `lo` (plus the kernel's fallback tunnel devices, without
+  addresses, routes or multicast memberships), it holds none of `CAP_NET_ADMIN`, `CAP_NET_RAW` and
+  `CAP_SYS_ADMIN` (nor keeps them in its bounding set without `NoNewPrivs`), and a seccomp filter
+  is installed. A missing or unparsable fact refuses (a kernel without `/proc/net/igmp` included);
+  with IPv6 disabled the IPv6 files count as empty. Run it in a dedicated namespace, for example a
+  unit with `PrivateNetwork=yes`, `NoNewPrivileges=yes`, an empty `CapabilityBoundingSet=` and
+  `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`; HTTP clients join that namespace
+  (`JoinsNamespaceOf=`). The tests run in the equivalent `scripts/air-gapped-namespace.sh` shape.
 - **The store records its mode.** The first `serve` of an empty SQLite store binds it to the
   profile. A later `serve` must name the same profile; a populated store that no `serve` bound is
   refused (recreate development stores). Only `migrate-mode` changes the mode, while no other
@@ -90,8 +101,11 @@ actor_entity_ids = ["01JC0GATEWAYQ0CA1ACT0R0000"]
 operations = ["session.read", "timeline.create", "timeline.events.read", "timeline.signals.append"]
 ```
 
-The grantable operations are `session.read`, `timeline.create`, `timeline.events.read`,
-`timeline.signals.append`, `ledger.predictions.create` and `world.action.v1.submit`, plus the
+The grantable operations are `consent.revoke`, `session.read`, `timeline.create`,
+`timeline.events.read`, `timeline.signals.append`, `ledger.predictions.create`,
+`world.action.v1.submit`, `preference.create`, `preference.read`, `option-spec.create`,
+`option-spec.read`, `scenario-room.create`, `scenario-room.derive` and `scenario-room.read`, plus
+the
 Principal network capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
 and only makes the Session report `network: capability-granted` in Local mode. Encrypt it like the
 Fork-admission credentials and provision:
@@ -107,10 +121,75 @@ systemctl start piglor-gateway-local-principal-provision.service
 Provisioning records one root capability grant in the database's authority records; the authority
 registry snapshot and the Principal's evidence are derived from that record. An exact retry is
 unchanged. `serve` only reads the record: before each protected decision it compares the record
-with the authority it holds and, when another writer recorded a revocation, rebuilds the
-authority from the record, so the next request is answered `403 revoked`. A signal's `entity_id`
+with the authority it holds and, when another writer recorded a revocation of a Principal without
+consents, rebuilds the authority from the record, so the next request is answered `403 revoked`.
+A Principal with consents is read through the consent Timeline, which the serving host owns: once
+another process records anything to the store, the host's protected reads and writes fail closed,
+and once that includes a revocation, every decision its grants cover fails closed as
+`503 temporarily-unavailable` (retryable) until the host restarts, and the restarted host sees it
+(see [SQLite and host ownership](#sqlite-and-host-ownership)). A signal's `entity_id`
 must be the request's actor; any other entity is a recorded `403 unauthorized`. An unprovisioned
 host answers every protected route `401` before reading the request body.
+
+### Consents
+
+The document may also bind consents (#309, ADR-039) with a `[consent]` table: the subject who
+consents and the actor the consents grant (both listed actors, shared by every consent), and one
+`[[consent.grants]]` entry per consent, naming the ADR-059 purpose it covers and its data
+categories (operation resources):
+
+```toml
+operations = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
+
+[consent]
+subject_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
+grantee_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
+
+[[consent.grants]]
+purpose = "operation"
+data_categories = ["timeline"]
+export_permitted = false
+```
+
+A consent governs the granted operations whose purpose is its `purpose` (`operation`, `read` or
+`action`) and whose resource is one of its `data_categories`; every operation is governed by at
+most one consent, and at least one operation by none. No consent governs `session.read`,
+`consent.revoke` or `gateway.network.v1`: the owner's exempt set keeps reading the Session
+available, revoking must stay possible after any revocation, and the network capability
+authorizes no data operation. Provisioning records each consent as one `consent.granted.v1`
+Event on the Principal's consent Timeline, a root Timeline under a fixed identity that no client
+can create, read or append, and gives each consent its own consent-bound grant of exactly the
+operations it governs. All consents of one Principal share one subject and one grantee, the
+subject of its one consent Timeline. Provisioning checks before it writes anything: a store that
+holds another Principal, or other consents, refuses the document. An exact retry records nothing.
+
+`POST /v1/me/consent-revocations` revokes one consent the Session lists, named by its
+`consent_ref`, under the `consent.revoke` grant. The host appends its `consent.revoked.v1` Event
+while it holds the authority commit fence exclusively, after every operation admitted before has
+completed, and recomposes its consents before the next decision; from then on every operation the
+consent governs, a World action included, is `403 revoked`, while every other operation stays
+available. Revoking a revoked consent returns the original revocation (`200`), byte for byte: its
+`generation` is its fence and its `mode_profile` the binding its commit was produced under. The
+host reads the consent Timeline head before every decision, and a restarted host recomposes every
+revocation from it. Once another process records anything to the store, the host fails closed
+(`503 temporarily-unavailable`) on every read of the consent Timeline, so a revocation recorded
+there makes every decision the host's grants cover fail closed until the host restarts; the
+restarted host then sees it.
+
+### Preferences and OptionSpecs
+
+`POST /v1/preferences` and `POST /v1/option-specs` (#304) create revision 1 of a user-authored
+Preference or OptionSpec, or with `parent` its next revision; `GET .../{id}/revisions/{revision}`
+reads one. Each needs its own grant, and the acting entity is the revision's subject: only that
+subject is answered, any other caller gets `404`. The Gateway stores the revisions in its own
+database tables, outside every Timeline, each in one transaction with its idempotency record and
+the execution-mode binding it was produced under, so they survive a restart. A parent must be the
+current head (`409 append-conflict`), and only `Idempotency-Key` makes a retry return the original
+revision. Erasure (the host-only `GatewayRevisionPortV1::erase_gateway_revision`, which the subject
+erasure workflow #309 drives) deletes the row under `secure_delete`, checkpoints the write-ahead
+log, rewrites the request digest of the idempotency record to a constant and keeps a payload-free
+tombstone, so the subject then reads `410 deleted`, its retries under the key answer `410` and
+every other caller gets `404` (or `409` for a retry under the same key). The contract README states the digests.
 
 ### Session
 
@@ -118,12 +197,13 @@ host answers every protected route `401` before reading the request body.
 actor, and the Principal's grant must cover that actor and `session.read`. The answer is derived
 by the host alone: the Principal's ID and the actors of its grant, the names of every grantable
 operation and capability its recorded grant covers for that actor (decided by the same evaluator
-as every request, recording nothing), its consents (none: a Local Principal grant binds no
-consent), the current execution mode with the operator's `--network-grant` values and the
+as every request, recording nothing), its consents (each named by the `EventId` of its
+`consent.granted.v1` Event, `granted` or `revoked`), the current execution mode with the operator's `--network-grant` values and the
 Principal's network posture (`absent` in Air-Gapped mode; `capability-granted` in Local mode only
 with `gateway.network.v1`, otherwise `denied`), and the EPF1 `execution_profile`, `unavailable`
-until #461. `generation` is the head position of the recorded authority chain, so it advances with
-every grant or revocation. The contract's `Session` schema states the provenance digest.
+until #461. `generation` is the head position of the recorded authority (both grants when it
+binds consents) plus the consent Timeline head, so it advances with every grant, consent or
+revocation. The contract's `Session` schema states the provenance digest.
 
 **One Principal per database.** A database holds exactly one Local Principal, and rotation or a
 changed grant is not supported yet. Provisioning a different document is refused with

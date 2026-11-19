@@ -81,5 +81,36 @@ fn command_effect_panic_poisons_the_public_host() -> Result<(), Box<dyn Error + 
     }));
     assert!(result.is_err());
     assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Poisoned);
+    // A host that is not ready builds no authority view.
+    assert_eq!(
+        host.authority_view().err(),
+        Some(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+/// A host-owned root Timeline opens once under its well-known identity: the
+/// first open creates it, a later open returns the recorded Timeline
+/// unchanged, on both adapters.
+#[test]
+fn a_root_timeline_opens_once_under_its_identity() -> Result<(), Box<dyn Error + Send + Sync>> {
+    for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let id = pos_core::TimelineId::new();
+        let mut commands = host.command_sender()?;
+        assert!(!commands.records_timeline(id)?);
+        let opened = commands.open_root_timeline(id, "host-owned")?;
+        assert!(commands.records_timeline(id)?);
+        assert!(!commands.records_timeline(pos_core::TimelineId::new())?);
+        assert_eq!(opened.id(), id);
+        assert_eq!(opened.meta.name.as_deref(), Some("host-owned"));
+        assert!(opened.meta.fork_point.is_none());
+        let reopened = commands.open_root_timeline(id, "renamed")?;
+        assert_eq!(reopened, opened);
+        assert_eq!(commands.timeline(id)?, Some(opened));
+    }
     Ok(())
 }

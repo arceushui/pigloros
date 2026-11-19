@@ -1,4 +1,5 @@
-//! The ADR-069 R9 V1 attempt evidence records and their verifier.
+//! The ADR-069 R9 V1 attempt evidence records and their verifier, as R10
+//! extends them with the provider stdio channels and the stdin feed.
 //!
 //! Three closed, unsigned, self-digested records carry the evidence that the
 //! runtime-signed SPR1, SAU1 and RLS1 bind by digest (R9 §4):
@@ -100,7 +101,10 @@ macro_rules! closed_codes {
 
 closed_codes! {
     AttemptProgressCode: [NotStarted, StartedNotReleased, Released];
-    LaunchFailure: [RootNotActivated, PreStartRecheckFailed, UnitRefFailed];
+    LaunchFailure: [
+        RootNotActivated, PreStartRecheckFailed, UnitRefFailed, OutputReservationRefused,
+        StdioChannelFailed, AdmissionClosed,
+    ];
     StartJobResult: [Done, Canceled, Timeout, Failed, Dependency, Skipped];
     Contradiction: [IdentityChanged, TimeReversed, CounterDecreased];
     ServiceResultCode: [
@@ -428,13 +432,15 @@ impl AttemptEvidence {
     }
 
     /// Rule 9: the admission ledger is within ELM1 IDs 13 and 14, and the
-    /// output ceiling is reached only at ELM1 ID 8.
+    /// output capture accepts at most ELM1 ID 8 bytes and reaches the
+    /// ceiling only at exactly that many (R10 §4.6).
     fn ledger_within(&self, limits: Limits) -> bool {
         let termination = self.termination.fields();
         termination.admission.active_attempts <= limits.live_attempts
             && termination.admission.incomplete_inputs <= limits.incomplete_inputs
             && termination.output_capture.is_none_or(|capture| {
-                !capture.ceiling_reached || capture.accepted_bytes == limits.output
+                capture.accepted_bytes <= limits.output
+                    && (!capture.ceiling_reached || capture.accepted_bytes == limits.output)
             })
     }
 

@@ -34,14 +34,18 @@ pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
 pub mod problem;
+pub mod revision;
+pub mod scenario_room;
 pub mod startup;
 
 pub use authorization::{
     AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
     GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
-    GatewayAuthorityDenial, GatewayAuthoritySourceV1, GatewayAuthorization,
-    GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
-    GatewayAuthorizationRequest, GatewayAuthorizationTarget, GatewayOperationV1,
+    GatewayAuthorityDenial, GatewayAuthorityRecordV1, GatewayAuthoritySourceV1,
+    GatewayAuthorization, GatewayAuthorizationAudit, GatewayAuthorizationDecision,
+    GatewayAuthorizationError, GatewayAuthorizationRequest, GatewayAuthorizationTarget,
+    GatewayConsentRecordV1, GatewayConsentRevocationV1, GatewayConsentV1,
+    GatewayConsentedAuthorityV1, GatewayConsentsV1, GatewayOperationV1, GatewayPinnedAuthorityV1,
     LocalAuthenticationAdapter, PendingAuthorityDenial, RecordedAuthorityDenial,
     MAX_DENIAL_RECORDS_PER_MINUTE, MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
@@ -115,7 +119,7 @@ fn gateway_output_binding<P: Plugin>(
     gateway_output_binding_with_profile(
         plugin,
         configuration_details,
-        mode.registration_profile_id().unwrap_or_default(),
+        mode.registration_profile_id(),
     )
 }
 
@@ -367,7 +371,7 @@ mod coverage_tests {
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
         let registry = super::fixture_action_registry_builder(std::iter::empty(), None).test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
-        for selection in [Some("live-local-v1"), None] {
+        for selection in ["live-local-v1", "live-air-gapped-v1"] {
             assert!(matches!(
                 super::gateway_action_registry_builder(std::iter::empty(), None, selection),
                 Err(RuntimeError::OutputAdmission(
@@ -491,7 +495,7 @@ mod coverage_tests {
             registry.register_from_host_catalogue_entry(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
-                Some("live-local-v1"),
+                "live-local-v1",
             ),
             Err(RuntimeError::OutputAdmission(
                 OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
@@ -550,7 +554,7 @@ mod coverage_tests {
             registry.register_from_host_catalogue_entry(
                 &foreign,
                 &ForeignApproverConfiguration,
-                Some("live-local-v1"),
+                "live-local-v1",
             ),
             registry.register_host_catalogue_fixture(
                 &foreign,
@@ -1365,12 +1369,13 @@ fn gateway_action_registry_with_authority(
 
 // The production registry selects the reviewed Gateway entry with installed
 // evidence for the profile the bound execution mode selects (ADR-134 §7,
-// field 9: Local `live-local-v1`, Air-Gapped none). No installed Gateway EPF1
-// exists, so it fails closed; #461 owns positive activation.
+// field 9: Local `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135).
+// No installed Gateway EPF1 exists, so it fails closed; #461 owns positive
+// activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    registration_profile_id: Option<&str>,
+    registration_profile_id: &str,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
         registry.register_from_host_catalogue_entry(entry, frozen, registration_profile_id)
@@ -3015,6 +3020,21 @@ impl Gateway {
         timeline_id: &str,
         revocation: ConsentRevokedV1,
     ) -> Result<Event, GatewayError> {
+        self.issue_keyed_consent_revocation(timeline_id, revocation, None)
+            .await
+    }
+
+    /// Append one Gateway-owned consent revocation at its durable fence,
+    /// recording `key` as the revocation Event's correlation identity (#309).
+    ///
+    /// # Errors
+    /// Returns a closed Timeline, fence, or bounded append error.
+    pub(crate) async fn issue_keyed_consent_revocation(
+        &self,
+        timeline_id: &str,
+        revocation: ConsentRevokedV1,
+        key: Option<pos_core::CorrelationId>,
+    ) -> Result<Event, GatewayError> {
         let timeline = match parse_timeline_id(timeline_id) {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
@@ -3048,7 +3068,7 @@ impl Gateway {
             .store
             .append_consent_revocation(
                 timeline,
-                revocation.clone(),
+                (revocation.clone(), key),
                 scope,
                 self.consent_authority.append_permit(),
                 self.limits.max_events_per_timeline,
@@ -3171,7 +3191,7 @@ impl Gateway {
                 maximum: MAX_EVENTS_PER_POLL,
             });
         }
-        let id = parse_timeline_id(timeline_id)?;
+        let id = parse_timeline_id(timeline_id).and_then(client_timeline)?;
         // A cursor is derived only from visible Events. Scan in bounded chunks
         // so protected Events cannot hide later public Events in the same page.
         let mut next_seq = from_seq.max(1);
@@ -3433,7 +3453,7 @@ impl Gateway {
         request: HumanActionRequest<'_>,
         authorization: Arc<GatewayAuthorization>,
     ) -> Result<AdmittedAction, GatewayError> {
-        let timeline = match parse_timeline_id(request.timeline_id) {
+        let timeline = match parse_timeline_id(request.timeline_id).and_then(client_timeline) {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
@@ -3710,7 +3730,7 @@ impl Gateway {
         entity_id: &str,
         signal: &SocietySignal,
     ) -> Result<Event, GatewayError> {
-        let timeline = parse_timeline_id(timeline_id)?;
+        let timeline = parse_timeline_id(timeline_id).and_then(client_timeline)?;
         let entity = parse_entity_id(entity_id)?;
         let draft = draft_signal(entity, signal);
         debug_assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
@@ -4084,6 +4104,17 @@ fn encode_gateway_actuator_params(
         })
 }
 
+/// `timeline`, unless it is the Local Principal's consent Timeline (#309):
+/// only the host's consent seams read or append it, so a client append, read
+/// or action naming it is `404 not-found-or-unavailable`.
+fn client_timeline(timeline: TimelineId) -> Result<TimelineId, GatewayError> {
+    if timeline == local_principal::local_principal_consent_timeline() {
+        Err(GatewayError::ResourceUnavailable)
+    } else {
+        Ok(timeline)
+    }
+}
+
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
     Ulid::from_string(s)
         .map(TimelineId::from_ulid)
@@ -4378,8 +4409,9 @@ mod tests {
         drop(gateway);
     }
 
-    /// ADR-134 §7: registration follows the bound mode's selection and fails
-    /// closed in both modes until an EPF1 is installed (#461, #1372).
+    /// ADR-134 §7: registration follows the bound mode's selection (Local
+    /// `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135) and fails
+    /// closed in both modes until #461 installs an EPF1.
     #[tokio::test]
     async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
         for mode in [
@@ -4790,8 +4822,11 @@ mod tests {
 
     #[test]
     fn gateway_action_registry_builder_propagates_binding_errors() {
-        let too_many_bodies =
-            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None, None);
+        let too_many_bodies = gateway_action_registry_builder(
+            std::iter::repeat(EntityId::new()),
+            None,
+            "live-local-v1",
+        );
         assert!(matches!(
             too_many_bodies,
             Err(pos_runtime::RuntimeError::OutputAdmission(

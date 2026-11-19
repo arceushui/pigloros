@@ -893,6 +893,12 @@ pub(super) fn state_provenance(
         })
     })
 }
+/// The index of `receipt_digest` in the canonical ERC1 array of
+/// `receipt_fields`.
+pub(super) const RECEIPT_DIGEST_FIELD: usize = 16;
+/// The index of `signature` in the canonical ERC1 array of
+/// `receipt_fields`.
+pub(super) const RECEIPT_SIGNATURE_FIELD: usize = 17;
 pub(super) fn receipt_fields(input: &ErasureReceiptInputV1) -> Vec<Value> {
     vec![
         text(ERASURE_RECEIPT_TAG_V1),
@@ -928,7 +934,7 @@ pub(super) fn receipt_value(input: &ErasureReceiptInputV1) -> Value {
 }
 pub(super) fn receipt_core_value(input: &ErasureReceiptInputV1) -> Value {
     let mut fields = receipt_fields(input);
-    fields.remove(16);
+    fields.remove(RECEIPT_DIGEST_FIELD);
     Value::Array(fields)
 }
 pub(super) fn acknowledgement_value(ack: ErasureAcknowledgementV1) -> Value {

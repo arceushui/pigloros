@@ -380,6 +380,9 @@ fn read_record(
             cited,
             ..extracted(*b"CPN1", node.1.node_digest, children)
         }),
+        // `check_shape` identifies a CSR1 as the record without a node that
+        // has exactly two resolved children. A new record family admitted
+        // here must not have that shape unless `check_shape` is revisited.
         _ => Err(Error::InvalidBinding),
     }
 }
@@ -530,7 +533,11 @@ fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
 /// and the CSR1 members are exactly the CSH1 members.
 ///
 /// A `StateRevision` input sits at an even ordinal, where only an
-/// `InitialState` node can, so its kind needs no separate check.
+/// `InitialState` node can, so its kind needs no separate check. Likewise
+/// a CSR1 is the only record without a node that has children (CSC1 and
+/// CIS1 have none), so its two resolved children identify it. That holds
+/// only because `read_record`'s match is closed: every other record kind
+/// refuses there.
 fn check_shape(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> Result<(), Error> {
     let nodes: Vec<CommunityNativeNodeReferenceV1> = extracted
         .iter()
@@ -541,14 +548,14 @@ fn check_shape(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> Re
     let mut members = BTreeSet::new();
     let mut linked = true;
     for (record, children) in extracted.iter().zip(edges) {
-        match (record.magic, record.node, children.as_slice()) {
-            (_, Some((CommunityNativeNodeKindV1::StateRevision, _)), [revision, _, initial]) => {
+        match (record.node, children.as_slice()) {
+            (Some((CommunityNativeNodeKindV1::StateRevision, _)), [revision, _, initial]) => {
                 // The resolved node is exactly the cited one, coordinates
                 // included, not just a node with the cited digest.
                 linked &= extracted[*initial].producer == extracted[*revision].producer
                     && extracted[*initial].node.map(|(_, reference)| reference) == record.cited;
             }
-            (magic, None, [_, producer]) if magic == *b"CSR1" => {
+            (None, [_, producer]) => {
                 linked &=
                     extracted[*producer].member == record.member && members.insert(record.member);
             }

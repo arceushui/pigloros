@@ -1,0 +1,69 @@
+#!/bin/bash -p
+# ADR-135 §4 "CI, conformance and local test runs" (#1422): run PROGRAM [ARGUMENT...] in the
+# Air-Gapped test shape, a new network namespace that holds only `lo` (brought up), with empty
+# effective, permitted, inheritable, ambient and bounding capability sets, no_new_privs, and the
+# test seccomp address-family filter of scripts/air_gapped_seccomp_exec.py.
+#
+# The preferred shape is an unprivileged user namespace (`unshare --user --map-root-user
+# --net`): `lo` is brought up while the mapped root still holds CAP_NET_ADMIN in it, then
+# setpriv empties the bounding and inheritable sets, so the final exec leaves CapPrm and CapEff
+# empty even for that root. When the host blocks unprivileged user namespaces (AppArmor
+# kernel.apparmor_restrict_unprivileged_userns on ubuntu-24.04), the fallback is
+# `sudo -n unshare --net` with the same `lo` step and setpriv back to the invoking user and
+# group (--reuid/--regid/--init-groups), so the program never runs as real root and file
+# permissions and SO_PEERCRED stay unchanged. Neither shape reproduces the deployment unit's
+# InaccessiblePaths= or its exact RestrictAddressFamilies= set; #462 verifies those.
+#
+# With --hold-network-capability as its first argument (owner decision 2026-11-17, #1423), the shape
+# is the same except that PROGRAM holds exactly CAP_NET_ADMIN (bounding, inheritable and
+# ambient sets of that one capability), so a test can prove the Air-Gapped mode refuses a
+# process that could configure its network. In the sudo fallback it still runs as the
+# invoking user, never as real root.
+#
+# This is a test harness and never a production override: the Gateway reads only /proc/self.
+#
+# bash -p reads no BASH_ENV or ENV file and imports no shell functions; the fixed PATH below
+# chooses every program this runner starts. The environment is otherwise passed through
+# (sudo -E), so test and coverage variables reach PROGRAM, except the variables sudo always
+# strips (LD_PRELOAD, LD_LIBRARY_PATH and the like) in the fallback.
+set -euo pipefail
+readonly RUNNER_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=$RUNNER_PATH
+
+CAPABILITIES=(--bounding-set=-all --inh-caps=-all --ambient-caps=-all)
+if [[ ${1:-} == --hold-network-capability ]]; then
+  shift
+  CAPABILITIES=(--bounding-set=-all,+net_admin --inh-caps=-all,+net_admin --ambient-caps=-all,+net_admin)
+fi
+readonly CAPABILITIES
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: $0 [--hold-network-capability] PROGRAM [ARGUMENT...]" >&2
+  exit 2
+fi
+
+for tool in unshare ip setpriv python3; do
+  command -v "$tool" >/dev/null || {
+    echo "air-gapped-namespace.sh: $tool is required" >&2
+    exit 2
+  }
+done
+
+readonly HELPER=$(realpath -- "$(dirname -- "$0")/air_gapped_seccomp_exec.py")
+readonly DROP=(--no-new-privs "${CAPABILITIES[@]}")
+# Bring `lo` up while CAP_NET_ADMIN is still held, then exec the rest of the arguments.
+readonly LOOPBACK_UP='ip link set lo up && exec "$@"'
+
+# Probe the whole user-namespace step, `lo` included, before choosing it.
+if unshare --user --map-root-user --net sh -c 'ip link set lo up' 2>/dev/null; then
+  exec unshare --user --map-root-user --net \
+    sh -c "$LOOPBACK_UP" sh setpriv "${DROP[@]}" python3 "$HELPER" "$@"
+fi
+command -v sudo >/dev/null || {
+  echo "air-gapped-namespace.sh: unprivileged user namespaces are blocked and sudo is absent" >&2
+  exit 2
+}
+exec sudo -n -E unshare --net \
+  sh -c "$LOOPBACK_UP" sh \
+  setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups "${DROP[@]}" \
+  python3 "$HELPER" "$@"

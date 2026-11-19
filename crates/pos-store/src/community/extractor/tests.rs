@@ -139,12 +139,44 @@ fn protect(
     protect_owned(protector, kind, plaintext, children, COB)
 }
 
+/// The facts `read_root` checks the CGR1 and its CSH1 against each other
+/// and the request by.
+#[derive(Clone, Copy)]
+struct Binding {
+    head_timeline: TimelineId,
+    head_generation: [u8; 16],
+    head_profile: Hash,
+    root_profile: Hash,
+    /// The CSH1 digest the CGR1 names, if not the real one.
+    head_digest: Option<Hash>,
+}
+
+impl Binding {
+    const EXACT: Self = Self {
+        head_timeline: timeline(),
+        head_generation: GENERATION,
+        head_profile: PROFILE,
+        root_profile: PROFILE,
+        head_digest: None,
+    };
+}
+
 /// A CSH1 over `members` and the CGR1 that selects it with `roots` and
 /// `counts`.
 fn head_and_root(
     members: &[Hash],
     roots: &[CommunityNativeNodeReferenceV1],
     counts: CommunityGraphCountsV1,
+) -> Fallible<(Vec<u8>, Vec<u8>)> {
+    bound_head_and_root(members, roots, counts, Binding::EXACT)
+}
+
+/// [`head_and_root`] with the binding facts of `binding`.
+fn bound_head_and_root(
+    members: &[Hash],
+    roots: &[CommunityNativeNodeReferenceV1],
+    counts: CommunityGraphCountsV1,
+    binding: Binding,
 ) -> Fallible<(Vec<u8>, Vec<u8>)> {
     let heads: Vec<CommunityMemberHeadV1> = members
         .iter()
@@ -154,12 +186,12 @@ fn head_and_root(
         })
         .collect();
     let head = CommunitySelectedHeadV1::new(CommunitySelectedHeadInputV1 {
-        timeline: timeline(),
-        generation: GENERATION,
+        timeline: binding.head_timeline,
+        generation: binding.head_generation,
         frontier: CommunityPassFrontierV1::Initial,
         member_heads: CommunityMemberHeadsV1::from_members(&heads),
         event_logical_head: Seq::ZERO,
-        profile_digest: PROFILE,
+        profile_digest: binding.head_profile,
         host_progress_digest: hash(3),
     })?
     .to_canonical_cbor()
@@ -168,8 +200,8 @@ fn head_and_root(
         store_incarnation: INCARNATION,
         timeline: timeline(),
         generation: GENERATION,
-        profile_digest: PROFILE,
-        selected_head_digest: adr_h("CSH1", &head),
+        profile_digest: binding.root_profile,
+        selected_head_digest: binding.head_digest.unwrap_or_else(|| adr_h("CSH1", &head)),
         roots: CommunityNativeNodeReferencesV1::from_references(roots),
         graph_counts: counts,
         evidence_not_after_micros: HORIZON,
@@ -756,6 +788,79 @@ fn forge(spec: &Spec) -> Fallible<Result<(), Error>> {
     let protected = protect_plain(&mut key, spec, &plain)?;
     let (initial, revision) = nodes(&mut key, spec, &plain, &protected)?;
     prepare_forged(&mut key, spec, &plain, &protected, (&initial, &revision))
+}
+
+/// `read_root` refuses a CGR1 or CSH1 that fails any one of its binding
+/// facts while every other holds: the request's store incarnation, the
+/// CGR1 profile, the CSH1 digest the CGR1 names, and the CSH1 timeline,
+/// generation and profile. A whole batch would also refuse most of these
+/// at a record, so only `read_root` alone shows each fact decides.
+#[test]
+fn read_root_refuses_each_binding_fact_alone() -> TestResult {
+    let exact = Binding::EXACT;
+    let graph_counts = CommunityGraphCountsV1 {
+        registrations: 1,
+        edges: 0,
+        keys: 0,
+        maximum_depth: 1,
+        registration_bytes: 0,
+        artifact_bytes: 0,
+    };
+    let read = |binding: Binding, incarnation: [u8; 16]| -> Fallible<Result<(), Error>> {
+        let (head, root) = bound_head_and_root(&[MEMBER], &SOME_ROOT, graph_counts, binding)?;
+        let batch = CommunityArtifactBatchInputV1 {
+            store_incarnation: incarnation,
+            ..batch(&[], &head, &root)
+        };
+        Ok(read_root(&batch).map(|_| ()))
+    };
+    assert_eq!(read(exact, INCARNATION)?, Ok(()));
+    let cases = [
+        (exact, [0x5b; 16]),
+        (
+            Binding {
+                root_profile: hash(0x31),
+                ..exact
+            },
+            INCARNATION,
+        ),
+        (
+            Binding {
+                head_digest: Some(hash(0x32)),
+                ..exact
+            },
+            INCARNATION,
+        ),
+        (
+            Binding {
+                head_timeline: TimelineId::from_ulid(Ulid::from_bytes([0x0f; 16])),
+                ..exact
+            },
+            INCARNATION,
+        ),
+        (
+            Binding {
+                head_generation: [0x21; 16],
+                ..exact
+            },
+            INCARNATION,
+        ),
+        (
+            Binding {
+                head_profile: hash(0x31),
+                ..exact
+            },
+            INCARNATION,
+        ),
+    ];
+    for (index, (binding, incarnation)) in cases.into_iter().enumerate() {
+        assert_eq!(
+            read(binding, incarnation)?,
+            Err(Error::InvalidBinding),
+            "case {index}"
+        );
+    }
+    Ok(())
 }
 
 #[test]

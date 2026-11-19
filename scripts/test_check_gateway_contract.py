@@ -54,11 +54,33 @@ TIMELINES = "/v1/timelines"
 EVENTS = "/v1/timelines/{timeline_id}/events"
 PREVIEWS = "/v1/decision-previews"
 # A Draft read whose family has both a positive and a fail-closed example.
-PREFERENCE = "/v1/preferences/{preference_id}/revisions/{revision}"
+PREVIEW = "/v1/decision-previews/{preview_id}"
+# A Draft creation that answers `201`.
+PREVIEW_ACTIONS = "/v1/decision-previews/{preview_id}/actions"
 
 
 def example(name: str) -> dict:
     return checker.load(checker.EXAMPLES / f"{name}.json")  # type: ignore[return-value]
+
+
+# Keywords whose value is data, compared verbatim rather than as a schema.
+DATA_KEYWORDS = {"enum", "const", "default"}
+
+
+def without_annotations(value: object) -> object:
+    """`value` without its annotation keywords (`checker.ANNOTATIONS`). The compatibility
+    comparison ignores them, and a description may be updated within v1 (ADR-135 §6), while
+    `--append-only` keeps the baseline's frozen text: a fresh freeze then equals the baseline
+    in everything but those annotations. A schema map keyed by a property name is kept."""
+    if isinstance(value, dict):
+        return {
+            key: item if key in DATA_KEYWORDS else without_annotations(item)
+            for key, item in value.items()
+            if key not in checker.ANNOTATIONS or isinstance(item, dict)
+        }
+    if isinstance(value, list):
+        return [without_annotations(item) for item in value]
+    return value
 
 
 LOCAL_MODE = "gateway-mode-local-v1"
@@ -242,10 +264,10 @@ class CheckGatewayContractTest(unittest.TestCase):
         examples = [
             (name, item)
             for name, item in checker.load_examples()
-            if item["operation_id"] not in ("createPreference", "getPreferenceRevision")
+            if item["operation_id"] not in ("createDecisionPreview", "getDecisionPreview")
             or item["response"]["status"] < 400
         ]
-        with self.assertRaisesRegex(checker.ContractError, "family preference"):
+        with self.assertRaisesRegex(checker.ContractError, "family decision-preview"):
             checker.check_examples(contract(), examples)
 
     def test_a_draft_mutation_without_an_idempotency_key_is_rejected(self) -> None:
@@ -263,15 +285,15 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_operation_must_be_structurally_draft(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["paths"][PREFERENCE]["get"]["x-pigloros-owner"]
+        del document["paths"][PREVIEW]["get"]["x-pigloros-owner"]
         with self.assertRaisesRegex(checker.ContractError, "owner ticket"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"][PREFERENCE]["get"]["description"] = "Read the preference."
+        document["paths"][PREVIEW]["get"]["description"] = "Read the preview."
         with self.assertRaisesRegex(checker.ContractError, "does not start with Draft"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["paths"][PREFERENCE]["get"]["tags"] = []
+        document["paths"][PREVIEW]["get"]["tags"] = []
         with self.assertRaisesRegex(checker.ContractError, "one family tag"):
             checker.check_description(contract(document=document))
 
@@ -283,7 +305,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_read_answers_an_enveloped_resource(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        answer = document["paths"][PREFERENCE]["get"]["responses"]["200"]["content"]
+        answer = document["paths"][PREVIEW]["get"]["responses"]["200"]["content"]
         answer["application/json"]["schema"] = {
             "$ref": "#/components/schemas/CommittedEventReceipt"
         }
@@ -294,14 +316,14 @@ class CheckGatewayContractTest(unittest.TestCase):
         document = copy.deepcopy(DOCUMENT)
         answer = document["paths"]["/health"]["get"]["responses"]["200"]["content"]
         answer["application/json"]["schema"] = {
-            "$ref": "#/components/schemas/PreferenceRevision"
+            "$ref": "#/components/schemas/DecisionPreview"
         }
         with self.assertRaisesRegex(checker.ContractError, "served operations reach the Draft"):
             checker.check_description(contract(document=document))
 
     def test_a_draft_operation_reaching_an_unmarked_schema_is_rejected(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        del document["components"]["schemas"]["PreferenceRevision"]["x-pigloros-maturity"]
+        del document["components"]["schemas"]["DecisionPreview"]["x-pigloros-maturity"]
         with self.assertRaisesRegex(checker.ContractError, "neither Draft nor served"):
             checker.check_description(contract(document=document))
 
@@ -338,7 +360,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_every_draft_array_bound_is_a_stated_limit(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        document["x-pigloros-limits"]["room_rules"]["enforced_by"]["schema"].pop()
+        document["x-pigloros-limits"]["ensemble_forks"]["enforced_by"]["schema"].pop(0)
         with self.assertRaisesRegex(checker.ContractError, "is not a stated limit"):
             checker.check_description(contract(document=document))
 
@@ -350,7 +372,7 @@ class CheckGatewayContractTest(unittest.TestCase):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
         schemas = document["components"]["schemas"]
-        del schemas["CommittedEventReceipt"]["properties"]["event_schema_id"]["maxLength"]
+        del schemas["AdmissionReceipt"]["properties"]["operation_url"]["maxLength"]
         with self.assertRaisesRegex(checker.ContractError, "unbounded string"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
@@ -387,11 +409,12 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_profile_identifiers_are_open_but_namespaced(self) -> None:
         """The servable sets of README rule 3 are a server invariant, not a schema rule: the
-        identifiers are open so a later family (#1372) stays within v1, but the Gateway mode
-        and ADR-058 namespaces stay disjoint and a known mode profile keeps its mode."""
+        identifiers are open so a later family (`live-air-gapped-v1`) stays within v1, but the
+        Gateway mode and ADR-058 namespaces stay disjoint and a known mode profile keeps its
+        mode."""
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
-        body = example("draft-preference-get")["response"]["body"]
+        body = example("preference-get")["response"]["body"]
         self.assertEqual(body["mode_profile"]["mode"], "local")
         self.assertEqual(subject.schema_errors(body, schema), [])
         installed = {"profile_kind": "epf1", "state": "installed", "profile_digest": "0" * 64}
@@ -428,7 +451,7 @@ class CheckGatewayContractTest(unittest.TestCase):
     def test_a_resource_discloses_its_produced_under_mode_profile(self) -> None:
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
-        body = example("draft-preference-get")["response"]["body"]
+        body = example("preference-get")["response"]["body"]
         mode = body["mode_profile"]
         self.assertTrue(subject.schema_errors(
             {key: value for key, value in body.items() if key != "mode_profile"}, schema))
@@ -535,7 +558,10 @@ class CheckGatewayContractTest(unittest.TestCase):
                 for path in checker.FIXTURE_ORACLES.glob("*.json"):
                     if path.name != "positive.json":
                         (Path(only_head) / path.name).write_bytes(path.read_bytes())
-                with self.assertRaisesRegex(checker.ContractError, "^positive.json: .*head"):
+                # The first input naming the Local profile is refused, not an oracle.
+                with self.assertRaisesRegex(
+                    checker.ContractError, r"^(?!oracle )[\w-]+\.json: .*head"
+                ):
                     checker.check_fixtures(subject, oracles=Path(only_head))
         with tempfile.TemporaryDirectory() as empty:
             with self.assertRaisesRegex(checker.ContractError, "no gateway-client-conformance"):
@@ -593,6 +619,21 @@ class CheckGatewayContractTest(unittest.TestCase):
         rejected(lambda d: d["profiles"][0].update(registration_profile_id="live-local-v1"))
         rejected(lambda d: d["profiles"][1].update(registration_profile_id=None))
         rejected(lambda d: d["profiles"][1].update(startup_predicates=["linux"]))
+        # ADR-135 §7.5: field 9 is required in both modes, and tag 6 is Air-Gapped only.
+        rejected(lambda d: d["profiles"][0].update(registration_profile_id=None))
+        rejected(lambda d: d["profiles"][0].update(
+            startup_predicates=d["profiles"][0]["startup_predicates"][:5]))
+        rejected(lambda d: d["profiles"][1].update(
+            startup_predicates=[*d["profiles"][1]["startup_predicates"], "air-gapped-no-route"]))
+        rejected(lambda d: d["profiles"][0].update(
+            startup_predicates=[*d["profiles"][0]["startup_predicates"],
+                                "bundle-closure-verified"]))
+        rejected(lambda d: d["profiles"][0].update(previous_mode_profile_digest=None),
+                 "gateway-mode-air-gapped-v1 does not name its rotation-chain predecessor")
+        self.assertEqual(
+            declaration["profiles"][0]["previous_mode_profile_digest"],
+            checker.MODE_PROFILE_ROTATION_CHAINS["gateway-mode-air-gapped-v1"][-2],
+        )
         rejected(lambda d: d["profiles"].reverse(), "not sorted")
         rejected(lambda d: d["profiles"][1].update(
             semantic_version="1.1.0", previous_mode_profile_digest="a" * 64),
@@ -739,24 +780,29 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_draft_values_are_bounded_integers(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        receipt = document["components"]["schemas"]["CommittedEventReceipt"]["properties"]
-        del receipt["seq"]["maximum"]
+        reference = document["components"]["schemas"]["RevisionRef"]["properties"]
+        del reference["revision"]["maximum"]
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["components"]["parameters"]["Revision"]["schema"].pop("maximum")
+        projection = document["paths"]["/v1/timelines/{timeline_id}/projection"]["get"]
+        at_seq = next(p for p in projection["parameters"] if p.get("name") == "at_seq")
+        at_seq["schema"].pop("maximum")
         with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        request = document["components"]["schemas"]["CreatePreferenceRequest"]["properties"]
-        request["weights"]["items"]["properties"]["weight_micro"]["type"] = "number"
+        request = document["components"]["schemas"]["SimulatedActionRequest"]["properties"]
+        request["observed_seq"]["type"] = "number"
         with self.assertRaisesRegex(checker.ContractError, "JSON number"):
             checker.check_description(contract(document=document))
         subject = contract()
-        body = example("draft-preference-create")["request"]["body"]
+        body = example("preference-create")["request"]["body"]
         schema = {"$ref": "#/components/schemas/CreatePreferenceRequest"}
         self.assertEqual(subject.schema_errors(body, schema), [])
-        fractional = {"weights": [{"dimension": "nature", "weight_micro": 0.5}]}
+        fractional = {
+            "schema_version": 1,
+            "weights": [{"dimension": "nature", "weight_micro": 0.5}],
+        }
         self.assertTrue(subject.schema_errors(fractional, schema))
         operation = DOCUMENT["paths"][
             "/v1/preferences/{preference_id}/revisions/{revision}"
@@ -769,7 +815,7 @@ class CheckGatewayContractTest(unittest.TestCase):
 
     def test_a_draft_creation_answers_a_closed_or_enveloped_body(self) -> None:
         document = copy.deepcopy(DOCUMENT)
-        answer = document["paths"]["/v1/preferences"]["post"]["responses"]["201"]["content"]
+        answer = document["paths"][PREVIEW_ACTIONS]["post"]["responses"]["201"]["content"]
         answer["application/json"]["schema"] = {"$ref": "#/components/schemas/ActionRequest"}
         with self.assertRaisesRegex(checker.ContractError, "closed or enveloped"):
             checker.check_description(contract(document=document))
@@ -1025,6 +1071,22 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "does not declare the window"):
             checker.check_compatibility(contract(), baseline=baseline)
 
+    def test_a_fresh_freeze_differs_from_the_baseline_only_in_annotations(self) -> None:
+        fresh = checker.freeze(contract(), None)
+        baseline = checker.load(checker.BASELINE)
+        self.assertEqual(without_annotations(fresh), without_annotations(baseline))
+        # A property named like an annotation is a schema, never dropped.
+        self.assertEqual(
+            without_annotations({"properties": {"description": {"type": "string"}},
+                                 "description": "text", "title": "t"}),
+            {"properties": {"description": {"type": "string"}}},
+        )
+        self.assertNotEqual(without_annotations({"type": "string"}),
+                            without_annotations({"type": "integer"}))
+        # Data is compared verbatim, annotation-named keys inside it included.
+        self.assertNotEqual(without_annotations({"const": {"description": "a"}}),
+                            without_annotations({"const": {"description": "b"}}))
+
     def test_a_new_problem_code_stays_in_v1_and_freezes(self) -> None:
         document, registry = with_problem_code("quota-exhausted")
         current = contract(document=document, registry=registry)
@@ -1038,7 +1100,9 @@ class CheckGatewayContractTest(unittest.TestCase):
         checker.check_appended(baseline, frozen)
         self.assertGreater(checker.check_compatibility(current, baseline=frozen), 0)
         self.assertEqual(checker.freeze(current, frozen), frozen)
-        self.assertEqual(checker.freeze(current, None), frozen)
+        self.assertEqual(
+            without_annotations(checker.freeze(current, None)), without_annotations(frozen)
+        )
         # Once frozen, the new code is as permanent as the others.
         with self.assertRaisesRegex(checker.ContractError, "quota-exhausted was removed"):
             checker.check_compatibility(contract(), baseline=frozen)
@@ -1132,7 +1196,9 @@ class CheckGatewayContractTest(unittest.TestCase):
             self.assertEqual(frozen["paths"][path], baseline["paths"][path])
         checker.check_appended(baseline, frozen)
         self.assertGreater(checker.check_compatibility(promoted, baseline=frozen), 0)
-        self.assertEqual(checker.freeze(contract(), None), baseline)
+        self.assertEqual(
+            without_annotations(checker.freeze(contract(), None)), without_annotations(baseline)
+        )
         self.assertEqual(checker.freeze(contract(), baseline), baseline)
 
     def test_freezing_merges_optional_additions_into_frozen_entries(self) -> None:
@@ -1289,7 +1355,10 @@ class CheckGatewayContractTest(unittest.TestCase):
             self.assertEqual(checker.freeze_examples(contract(), checker.EXAMPLES, target), [])
             baseline = Path(directory) / "baseline.json"
             checker.write_baseline(contract(), baseline)
-            self.assertEqual(checker.load(baseline), checker.load(checker.BASELINE))
+            self.assertEqual(
+                without_annotations(checker.load(baseline)),
+                without_annotations(checker.load(checker.BASELINE)),
+            )
 
     def test_the_command_line_takes_freeze_or_append_only(self) -> None:
         self.assertEqual(checker.main(["--write"]), 2)
@@ -1339,7 +1408,7 @@ class CheckGatewayContractTest(unittest.TestCase):
                 self.assert_breaking(document, message)
         baseline = checker.load(checker.BASELINE)
         frozen = baseline["x-pigloros-limits"]
-        self.assertNotIn("room_plugins", frozen)
+        self.assertNotIn("trace_items", frozen)
         current = copy.deepcopy(DOCUMENT["x-pigloros-limits"])
         prefixes = checker.served_pointer_prefixes(contract())
         checker.check_frozen_limits(frozen, current, prefixes)
@@ -1372,7 +1441,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "surface is not the surface"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
-        document["x-pigloros-limits"]["room_rules"]["surface"] = "served"
+        document["x-pigloros-limits"]["trace_items"]["surface"] = "served"
         with self.assertRaisesRegex(checker.ContractError, "surface is not the surface"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)

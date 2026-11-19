@@ -6,7 +6,7 @@
   "profiles": [
     {
       "mode_profile_id": "gateway-mode-air-gapped-v1",
-      "semantic_version": "1.0.0",
+      "semantic_version": "2.0.0",
       "mode": "air-gapped",
       "network_allowed": false,
       "ingress": [
@@ -18,11 +18,12 @@
         "listeners-within-ingress",
         "network-features-granted",
         "no-network-ledger-source",
-        "store-mode-binding"
+        "store-mode-binding",
+        "air-gapped-no-route"
       ],
       "revocation_freshness": "current-by-construction",
-      "registration_profile_id": null,
-      "previous_mode_profile_digest": null
+      "registration_profile_id": "live-air-gapped-v1",
+      "previous_mode_profile_digest": "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5"
     },
     {
       "mode_profile_id": "gateway-mode-local-v1",
