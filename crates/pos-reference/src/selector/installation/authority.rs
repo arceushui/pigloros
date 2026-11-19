@@ -8,7 +8,10 @@ pub use recovery_identity::{
     AdmittedProviderRuntime, InstallationRecoverySnapshot, ProviderRuntimeSlot,
 };
 pub use resolve::{AuthorityResolution, InstalledAuthorityObjects};
-pub use update::{CommittedInstallationUpdate, InstallationChallenge, ValidatedInstallationUpdate};
+pub use update::{
+    CommittedInstallationUpdate, InstallationChallenge, PendingRecoveryRuntimeKey,
+    ValidatedInstallationUpdate,
+};
 
 use ed25519_dalek::VerifyingKey;
 use rustix::rand::{getrandom, GetRandomFlags};
