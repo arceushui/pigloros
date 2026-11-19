@@ -32,7 +32,7 @@ ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
 # two imported policy modules are pinned too: they supply EXPECTED's headroom
 # step and the graph comparison.
 PRODUCER_SHA256 = {
-    "scripts/check_asan_ci_policy.py": "ccf1c401c0d65022506efdea50f1d87674deeacc6f3631f31c5812f2f9b4ced2",
+    "scripts/check_asan_ci_policy.py": "0a8f4d68e47621851f713519759e80f42ff334232771fe06da995632392b068d",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "d87e1b027174070441483c29bc0526cfbbf8d0fcbd73d034a44479361c822711",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",

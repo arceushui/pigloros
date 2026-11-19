@@ -9,6 +9,7 @@ Shared reference for humans and agents.
 3. Prefer deleting/simplifying unhittable branches over exemptions.
 4. Do not use rustdoc ` ```ignore ` fences — use ` ```text ` or a real doctest.
 5. Pull requests recognized as documentation-only by `.github/rust-scope.yml` skip Rust test, coverage, and cargo-crap jobs; Rust-affecting changes retain those gates.
+6. On a Rust-affecting pull request whose changes all lie inside workspace member directories, `test-shard`, doctests, `feature-matrix`, `clippy`, `rustdoc` and the ASan archive and shards run only the members the change can affect (`scripts/affected_packages.py`; see [How CI chooses its scope](../CONTRIBUTING.md#affected-package-scope-phase-1)). Coverage, cargo-crap and mutation keep the whole workspace, and pushes to `main`, manual runs and Trunk merge-queue test pull requests run the whole workspace everywhere. Every selected test still runs exactly once across the shards; only a scoped selection lets a shard or ASan partition run no test.
 
 ## Enforcement
 
@@ -226,7 +227,10 @@ targets, and execution scope remain.
 `scripts/check_asan_ci_policy.py` enforces the exact archive-build job and
 serial linker wrapper, shard matrix and filtersets, test-thread cap,
 fail-closed aggregate, and complete ASan scope by parsing the workflow's
-executable YAML semantics. Adversarial fixtures prove that disabled/non-failing
+executable YAML semantics. On a pull request the archive and shards take the
+affected-package selection, which defaults to `--workspace` for every other
+event and for a missing scope output; a selection without `pos-conformance`
+skips the four conformance-only partitions explicitly. Adversarial fixtures prove that disabled/non-failing
 steps, environment-based test runners, detached sanitizer flags, `--no-run`,
 shell success overrides, skipped prerequisites, injected setup steps, and
 test-skip arguments are rejected. The ASan job graph and pinned setup-step

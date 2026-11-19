@@ -50,10 +50,27 @@ CORE_CACHE_KEYS = {
 }
 CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
 CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
+# Phase-1 package scope: on a pull request these jobs build, lint and test only
+# the packages ci_change_scope resolved with scripts/affected_packages.py. Any
+# other event, and a missing output, selects the whole workspace.
+SCOPED_PACKAGES = (
+    "${{ github.event_name == 'pull_request' && "
+    "needs.ci_change_scope.outputs.rust_packages || '--workspace' }}"
+)
+SCOPED_DOC_PACKAGES = (
+    "${{ github.event_name == 'pull_request' && "
+    "needs.ci_change_scope.outputs.rust_doc_packages || '--workspace' }}"
+)
+SCOPED_PACKAGE_JOBS = frozenset(
+    {"feature-matrix", "test", "test-shard", "clippy", "rustdoc", "asan-build", "asan"}
+)
+READ_SCOPED_PACKAGES = 'read -ra packages <<<"${CARGO_PACKAGES}"\n'
 FEATURE_MATRIX_STEPS = (
     {
         "name": "cargo check (no default features)",
-        "run": "cargo check --workspace --all-targets --no-default-features --locked",
+        "env": {"CARGO_PACKAGES": SCOPED_PACKAGES},
+        "run": READ_SCOPED_PACKAGES
+        + 'cargo check "${packages[@]}" --all-targets --no-default-features --locked\n',
     },
     {
         "name": "Plugin trust registry Memory vectors (no default features)",
@@ -64,7 +81,9 @@ FEATURE_MATRIX_STEPS = (
     },
     {
         "name": "cargo check (all features, all targets)",
-        "run": "cargo check --workspace --all-targets --all-features --locked",
+        "env": {"CARGO_PACKAGES": SCOPED_PACKAGES},
+        "run": READ_SCOPED_PACKAGES
+        + 'cargo check "${packages[@]}" --all-targets --all-features --locked\n',
     },
     {
         "name": "Prove reference evaluator implementation independence",
@@ -77,14 +96,56 @@ FEATURE_MATRIX_STEPS = (
 )
 WORKSPACE_DOCTEST_STEP = {
     "name": "cargo test doctests (all features, ignored included)",
+    "env": {"CARGO_DOC_PACKAGES": SCOPED_DOC_PACKAGES},
     "run": "set -euo pipefail\n"
-    "cargo test --workspace --all-features --locked --doc -- --include-ignored "
+    'if [[ "${CARGO_DOC_PACKAGES}" == none ]]; then\n'
+    "  echo 'No affected package has a library target; no doctest is in scope.'\n"
+    "  exit 0\n"
+    "fi\n"
+    'read -ra packages <<<"${CARGO_DOC_PACKAGES}"\n'
+    'cargo test "${packages[@]}" --all-features --locked --doc -- --include-ignored '
     "2>&1 | tee /tmp/cargo-doctest.log\n",
+}
+WORKSPACE_DOCTEST_SUMMARY_STEP = {
+    "name": "Require no ignored test in the doctest summary",
+    "env": {"CARGO_DOC_PACKAGES": SCOPED_DOC_PACKAGES},
+    "run": "set -euo pipefail\n"
+    'if [[ "${CARGO_DOC_PACKAGES}" != none ]]; then\n'
+    "  bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-doctest.log\n"
+    "fi\n",
 }
 WORKSPACE_RUSTDOC_STEP = {
     "name": "cargo doc (warnings denied)",
-    "env": {"CARGO_INCREMENTAL": "0", "RUSTDOCFLAGS": "-D warnings"},
-    "run": "cargo doc --workspace --all-features --no-deps --locked",
+    "env": {
+        "CARGO_INCREMENTAL": "0",
+        "RUSTDOCFLAGS": "-D warnings",
+        "CARGO_PACKAGES": SCOPED_PACKAGES,
+    },
+    "run": READ_SCOPED_PACKAGES
+    + 'cargo doc "${packages[@]}" --all-features --no-deps --locked\n',
+}
+TEST_SHARD_STEP = {
+    "name": "cargo nextest partition (all features, ignored included)",
+    "env": {"SHARD": "${{ matrix.shard }}", "CARGO_PACKAGES": SCOPED_PACKAGES},
+    "run": "set -euo pipefail\n"
+    'log="${RUNNER_TEMP}/nextest-shard.log"\n'
+    + READ_SCOPED_PACKAGES
+    + "no_tests=fail\n"
+    'if [[ "${CARGO_PACKAGES}" != --workspace ]]; then\n'
+    "  no_tests=pass\n"
+    "fi\n"
+    "printf 'nextest partition: slice:%s/3\\n' \"${SHARD}\" >\"${log}\"\n"
+    'cargo nextest run "${packages[@]}" --all-features --locked \\\n'
+    "  --user-config-file none --ignore-default-filter \\\n"
+    '  --run-ignored all --no-fail-fast --no-tests="${no_tests}" \\\n'
+    '  --partition "slice:${SHARD}/3" 2>&1 | tee -a "${log}"\n',
+}
+CLIPPY_WORKSPACE_STEP = {
+    "name": "cargo clippy (workspace lint policy, pedantic, deny warnings)",
+    "env": {"CARGO_PACKAGES": SCOPED_PACKAGES},
+    "run": READ_SCOPED_PACKAGES
+    + 'cargo clippy "${packages[@]}" --all-features --all-targets --locked -- \\\n'
+    "  -D warnings -W clippy::pedantic\n",
 }
 RUSTDOC_JOB_IF = (
     "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
@@ -151,6 +212,10 @@ PREFLIGHT_POLICY_STEPS = {
         {
             "name": "Test CI workflow policy",
             "run": "python scripts/test_ci_workflow_policy.py",
+        },
+        {
+            "name": "Test the affected-package resolver",
+            "run": "python scripts/test_affected_packages.py",
         },
         {
             "name": "Test mutation workflow policy",
@@ -390,6 +455,63 @@ OWNER_WINDOWS_SCOPE_STEP = {
         'fi\n'
         'printf \'owner_windows=%s\\n\' "${scope}" >> "$GITHUB_OUTPUT"\n'
     ),
+}
+RUST_PACKAGES_SCOPE_STEP = {
+    "name": "Resolve the affected Rust packages",
+    "id": "rust_packages",
+    "env": {
+        "EVENT_NAME": "${{ github.event_name }}",
+        "DETECTED": "${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.rust || '' }}",
+        "HEAD_REF": "${{ github.head_ref }}",
+        "CHANGED_FILES": "${{ github.event.pull_request.changed_files }}",
+        "PULL_NUMBER": "${{ github.event.pull_request.number }}",
+        "GH_TOKEN": "${{ github.token }}",
+    },
+    "run": (
+        'packages=--workspace\n'
+        'doc_packages=--workspace\n'
+        "selection='^(--workspace|-p [A-Za-z0-9_-]+( -p [A-Za-z0-9_-]+)*)$'\n"
+        'listing="${RUNNER_TEMP}/pull-request-files.jsonl"\n'
+        'if [[ "${EVENT_NAME}" != pull_request || "${DETECTED}" != true ]]; then\n'
+        "  echo 'Not a scoped pull request; running the whole workspace.'\n"
+        'elif [[ "${HEAD_REF}" == trunk-merge/* ]]; then\n'
+        "  echo 'Merge-queue test pull request; running the whole workspace.'\n"
+        'elif [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then\n'
+        "  echo '::warning::The changed-file list may be truncated; running the whole workspace.'\n"
+        'elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then\n'
+        "  echo '::warning::The pull request number is unavailable; running the whole workspace.'\n"
+        'elif ! gh api --method GET --paginate -f per_page=100 \\\n'
+        '  "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \\\n'
+        '  --jq \'.[] | {filename, previous_filename}\' >"${listing}"; then\n'
+        "  echo '::warning::Changed files could not be listed; running the whole workspace.'\n"
+        'elif ! resolved="$(python3 scripts/affected_packages.py \\\n'
+        '  --expected-files "$((10#${CHANGED_FILES}))" "${listing}")"; then\n'
+        "  echo '::warning::The affected packages could not be resolved; running the whole workspace.'\n"
+        'else\n'
+        '  mapfile -t lines <<<"${resolved}"\n'
+        '  candidate="${lines[0]-}"\n'
+        '  candidate="${candidate#rust_packages=}"\n'
+        '  doc_candidate="${lines[1]-}"\n'
+        '  doc_candidate="${doc_candidate#rust_doc_packages=}"\n'
+        '  if (( ${#lines[@]} == 2 )) \\\n'
+        '    && [[ "${lines[0]-}" == rust_packages=* && "${lines[1]-}" == rust_doc_packages=* ]] \\\n'
+        '    && [[ "${candidate}" =~ ${selection} ]] \\\n'
+        '    && [[ "${doc_candidate}" == none || "${doc_candidate}" =~ ${selection} ]] \\\n'
+        '    && [[ "${candidate}" != --workspace || "${doc_candidate}" == --workspace ]]; then\n'
+        '    packages="${candidate}"\n'
+        '    doc_packages="${doc_candidate}"\n'
+        '  else\n'
+        "    echo '::warning::The affected-package output is malformed; running the whole workspace.'\n"
+        '  fi\n'
+        'fi\n'
+        'printf \'Rust packages: %s\\nDoctest packages: %s\\n\' "${packages}" "${doc_packages}"\n'
+        'printf \'rust_packages=%s\\n\' "${packages}" >> "$GITHUB_OUTPUT"\n'
+        'printf \'rust_doc_packages=%s\\n\' "${doc_packages}" >> "$GITHUB_OUTPUT"\n'
+    ),
+}
+RUST_PACKAGES_OUTPUTS = {
+    "rust_packages": "${{ steps.rust_packages.outputs.rust_packages }}",
+    "rust_doc_packages": "${{ steps.rust_packages.outputs.rust_doc_packages }}",
 }
 CORE_JOB_NEEDS = ["ci_change_scope", "preflight-gate"]
 CORE_JOB_IF = (
@@ -883,6 +1005,64 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
 
 def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
     return any(scope_matches(path, patterns) for path in paths)
+
+
+def mentions_package_scope(value: object) -> bool:
+    return "rust_packages" in str(value) or "rust_doc_packages" in str(value)
+
+
+def assert_rust_package_scope(workflow: dict) -> None:
+    """Phase-1 package scope: resolved once, from the trusted base, fail-safe.
+
+    Only the plain test and lint jobs read it, only through the exact step
+    environment that ignores it outside pull requests and defaults a missing
+    value to the whole workspace.
+    """
+    jobs = workflow["jobs"]
+    scope = jobs["ci_change_scope"]
+    outputs = scope.get("outputs", {})
+    for key, value in RUST_PACKAGES_OUTPUTS.items():
+        if outputs.get(key) != value:
+            raise AssertionError("package scope must come only from its resolving step")
+    steps = scope["steps"]
+    if [step for step in steps if step.get("id") == "rust_packages"] != [RUST_PACKAGES_SCOPE_STEP]:
+        raise AssertionError("package scope must default to the whole workspace")
+    ids = [step.get("id") for step in steps]
+    if ids.index("rust_packages") < ids.index("scope"):
+        raise AssertionError("package scope must follow change detection")
+    for step in steps:
+        if step.get("id") != "rust_packages" and mentions_package_scope(step):
+            raise AssertionError("only the resolving step may produce the package scope")
+    expected_env = {"CARGO_PACKAGES": SCOPED_PACKAGES, "CARGO_DOC_PACKAGES": SCOPED_DOC_PACKAGES}
+    readers = set()
+    for name, job in jobs.items():
+        if name == "ci_change_scope":
+            continue
+        if mentions_package_scope({key: value for key, value in job.items() if key != "steps"}):
+            raise AssertionError(f"{name} may read the package scope only in a step environment")
+        for step in job.get("steps", []):
+            env = step.get("env", {})
+            if mentions_package_scope({key: value for key, value in step.items() if key != "env"}):
+                raise AssertionError(f"{name} may read the package scope only in a step environment")
+            for key, value in env.items():
+                if key in expected_env and value != expected_env[key]:
+                    raise AssertionError(f"{name} must default {key} to the whole workspace")
+                if key not in expected_env and mentions_package_scope(value):
+                    raise AssertionError(f"{name} may read the package scope only as {sorted(expected_env)}")
+                if key in expected_env:
+                    readers.add(name)
+    if readers != SCOPED_PACKAGE_JOBS:
+        raise AssertionError(
+            f"only the phase-1 jobs may use the package scope: {sorted(readers ^ SCOPED_PACKAGE_JOBS)}"
+        )
+    for owner, step in (
+        ("test", WORKSPACE_DOCTEST_SUMMARY_STEP),
+        ("test-shard", TEST_SHARD_STEP),
+        ("clippy", CLIPPY_WORKSPACE_STEP),
+    ):
+        if [candidate for candidate in jobs[owner]["steps"]
+                if candidate.get("name") == step["name"]] != [step]:
+            raise AssertionError(f"{owner} must run the exact scoped step")
 
 
 def assert_codeql_preparation_contract(workflow: dict) -> None:
@@ -1627,6 +1807,208 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                             (root / prototype / guest / "generated/community_plugin.rs")
                             .read_text(encoding="utf-8"), "generated\n",
                         )
+
+    def test_package_scope_is_trusted_and_defaults_to_the_workspace(self) -> None:
+        assert_rust_package_scope(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_package_scope_rejects_weakened_resolution_or_consumers(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+
+        def step(w: dict) -> dict:
+            return next(s for s in w["jobs"]["ci_change_scope"]["steps"]
+                        if s.get("id") == "rust_packages")
+
+        def env_of(job: str, name: str):
+            def find(w: dict) -> dict:
+                return next(s for s in w["jobs"][job]["steps"] if s.get("name") == name)["env"]
+            return find
+
+        shard_env = env_of("test-shard", TEST_SHARD_STEP["name"])
+        clippy_env = env_of("clippy", CLIPPY_WORKSPACE_STEP["name"])
+        doc_env = env_of("test", WORKSPACE_DOCTEST_SUMMARY_STEP["name"])
+        coverage_step = lambda w: next(  # noqa: E731
+            s for s in w["jobs"]["coverage"]["steps"] if "run" in s)
+        for label, change in (
+            ("output from paths-filter", lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                rust_packages="${{ steps.scope.outputs.rust_packages }}")),
+            ("output default narrowed", lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                rust_packages="${{ steps.rust_packages.outputs.rust_packages || '-p pos-core' }}")),
+            ("doc output dropped", lambda w: w["jobs"]["ci_change_scope"]["outputs"].pop(
+                "rust_doc_packages")),
+            ("step removed", lambda w: w["jobs"]["ci_change_scope"]["steps"].remove(step(w))),
+            ("step conditional", lambda w: step(w).update(**{"if": "always()"})),
+            ("step tolerant", lambda w: step(w).update(**{"continue-on-error": True})),
+            ("push scoped", lambda w: step(w)["env"].update(DETECTED="${{ steps.scope.outputs.rust }}")),
+            ("queue scoped", lambda w: step(w).update(run=step(w)["run"].replace(
+                "trunk-merge/*", "trunk-queue/*"))),
+            ("truncated list", lambda w: step(w).update(run=step(w)["run"].replace(
+                ">= 3000", "> 3000"))),
+            ("unchecked output", lambda w: step(w).update(run=step(w)["run"].replace(
+                '&& [[ "${candidate}" =~ ${selection} ]] \\\n', ""))),
+            ("default narrowed", lambda w: step(w).update(run=step(w)["run"].replace(
+                "packages=--workspace\n", "packages='-p pos-core'\n", 1))),
+            ("moved before detection", lambda w: w["jobs"]["ci_change_scope"]["steps"].insert(
+                1, w["jobs"]["ci_change_scope"]["steps"].pop(
+                    w["jobs"]["ci_change_scope"]["steps"].index(step(w))))),
+            ("second producer", lambda w: w["jobs"]["ci_change_scope"]["steps"].insert(
+                -1, {"name": "x", "run": "echo rust_packages=-p a >> \"$GITHUB_OUTPUT\""})),
+            ("scoped on push", lambda w: shard_env(w).update(
+                CARGO_PACKAGES="${{ needs.ci_change_scope.outputs.rust_packages }}")),
+            ("missing output narrowed", lambda w: clippy_env(w).update(
+                CARGO_PACKAGES="${{ github.event_name == 'pull_request' && "
+                "needs.ci_change_scope.outputs.rust_packages || '-p pos-core' }}")),
+            ("hard-coded selection", lambda w: clippy_env(w).update(CARGO_PACKAGES="-p pos-core")),
+            ("doc scope on push", lambda w: doc_env(w).update(
+                CARGO_DOC_PACKAGES="${{ needs.ci_change_scope.outputs.rust_doc_packages }}")),
+            ("phase-1 job unscoped", lambda w: shard_env(w).pop("CARGO_PACKAGES")),
+            ("scope in run text", lambda w: shard_env(w).update(
+                SCOPE="${{ needs.ci_change_scope.outputs.rust_packages }}")),
+            ("scope in job env", lambda w: w["jobs"]["test-shard"].update(
+                env={"CARGO_PACKAGES": SCOPED_PACKAGES})),
+            ("coverage scoped", lambda w: coverage_step(w).setdefault("env", {}).update(
+                CARGO_PACKAGES=SCOPED_PACKAGES)),
+            ("cargo-crap scoped", lambda w: w["jobs"]["cargo-crap"]["steps"][-1].setdefault(
+                "env", {}).update(CARGO_PACKAGES=SCOPED_PACKAGES)),
+            ("shard runs every package", lambda w: next(
+                s for s in w["jobs"]["test-shard"]["steps"]
+                if s.get("name") == TEST_SHARD_STEP["name"]).update(
+                run=TEST_SHARD_STEP["run"].replace('"${packages[@]}"', "--workspace"))),
+            ("shard passes empty workspace", lambda w: next(
+                s for s in w["jobs"]["test-shard"]["steps"]
+                if s.get("name") == TEST_SHARD_STEP["name"]).update(
+                run=TEST_SHARD_STEP["run"].replace("no_tests=fail", "no_tests=pass"))),
+            ("doctest summary skipped", lambda w: next(
+                s for s in w["jobs"]["test"]["steps"]
+                if s.get("name") == WORKSPACE_DOCTEST_SUMMARY_STEP["name"]).update(
+                run="true\n")),
+        ):
+            mutated = copy.deepcopy(workflow)
+            change(mutated)
+            with self.subTest(change=label), self.assertRaises(AssertionError):
+                assert_rust_package_scope(mutated)
+
+    def resolve_package_scope(
+        self, *, event: str = "pull_request", detected: str = "true",
+        head_ref: str = "feature/scope", changed: str = "1", number: str = "848",
+        gh_status: int = 0, listing: str | None = None, python_stub: str | None = None,
+        with_script: bool = True,
+    ) -> tuple[dict[str, str], list[str], str]:
+        """Run the resolving step against a small workspace with a fake gh."""
+        if listing is None:
+            listing = '{"filename":"crates/a/src/lib.rs","previous_filename":null}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for member, manifest in (
+                ("crates/a", '[package]\nname = "a"\n'),
+                ("crates/b", '[package]\nname = "b"\n[dependencies]\na = { path = "../a" }\n'),
+                ("apps/c", '[package]\nname = "c"\n[dev-dependencies]\nb = { path = "../../crates/b" }\n'),
+            ):
+                (root / member / "src").mkdir(parents=True)
+                (root / member / "Cargo.toml").write_text(manifest, encoding="utf-8")
+                entry = "main.rs" if member == "apps/c" else "lib.rs"
+                (root / member / "src" / entry).write_text("\n", encoding="utf-8")
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/*", "apps/c"]\n', encoding="utf-8")
+            (root / ".github").mkdir()
+            (root / ".github/rust-scope.yml").write_bytes(FILTER_PATH.read_bytes())
+            if with_script:
+                (root / "scripts").mkdir()
+                (root / "scripts/affected_packages.py").write_bytes(
+                    (ROOT / "scripts/affected_packages.py").read_bytes())
+            tools = root / "bin"
+            tools.mkdir()
+            calls = root / "gh-calls"
+            (tools / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\0\' "$@" >> "${GH_CALLS}"\n'
+                'printf \'%s\' "${GH_FAKE_OUTPUT}"\n'
+                'exit "${GH_FAKE_STATUS}"\n',
+                encoding="utf-8",
+            )
+            (tools / "gh").chmod(0o755)
+            if python_stub is not None:
+                (tools / "python3").write_text(
+                    "#!/usr/bin/env bash\n" + python_stub, encoding="utf-8")
+                (tools / "python3").chmod(0o755)
+            output = root / "output"
+            temp = root / "runner-temp"
+            temp.mkdir()
+            env = RUST_PACKAGES_SCOPE_STEP["env"]
+            self.assertEqual(set(env), {"EVENT_NAME", "DETECTED", "HEAD_REF", "CHANGED_FILES",
+                                        "PULL_NUMBER", "GH_TOKEN"})
+            completed = subprocess.run(
+                ["bash", "-e", "-c", RUST_PACKAGES_SCOPE_STEP["run"]], check=True,
+                capture_output=True, text=True, cwd=root,
+                env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
+                         EVENT_NAME=event, DETECTED=detected, HEAD_REF=head_ref,
+                         CHANGED_FILES=changed, PULL_NUMBER=number, RUNNER_TEMP=str(temp),
+                         GITHUB_REPOSITORY="owner/repository", GITHUB_OUTPUT=str(output),
+                         GH_CALLS=str(calls), GH_FAKE_STATUS=str(gh_status),
+                         GH_FAKE_OUTPUT=listing),
+            )
+            values = dict(
+                line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            arguments = calls.read_text(encoding="utf-8").split("\0")[:-1] if calls.exists() else []
+            return values, arguments, completed.stdout
+
+    FULL_SCOPE = {"rust_packages": "--workspace", "rust_doc_packages": "--workspace"}
+
+    def test_package_scope_selects_affected_members_on_a_pull_request(self) -> None:
+        values, calls, _ = self.resolve_package_scope()
+        self.assertEqual(values, {"rust_packages": "-p a -p b -p c",
+                                  "rust_doc_packages": "-p a -p b"})
+        self.assertEqual(calls, [
+            "api", "--method", "GET", "--paginate", "-f", "per_page=100",
+            "repos/owner/repository/pulls/848/files",
+            "--jq", ".[] | {filename, previous_filename}",
+        ])
+        values, _, _ = self.resolve_package_scope(
+            listing='{"filename":"apps/c/src/main.rs"}\n')
+        self.assertEqual(values, {"rust_packages": "-p c", "rust_doc_packages": "none"})
+
+    def test_package_scope_runs_the_workspace_whenever_unsure(self) -> None:
+        for label, overrides in (
+            ("push", {"event": "push"}),
+            ("dispatch", {"event": "workflow_dispatch"}),
+            ("failed detection", {"detected": ""}),
+            ("documentation only", {"detected": "false"}),
+            ("merge queue", {"head_ref": "trunk-merge/main/1"}),
+            ("api limit", {"changed": "3000"}),
+            ("zero-padded api limit", {"changed": "03000"}),
+            ("unknown count", {"changed": ""}),
+            ("malformed count", {"changed": "1; true"}),
+            ("count mismatch", {"changed": "2"}),
+            ("unknown pull request", {"number": ""}),
+            ("api failure", {"gh_status": 1}),
+            ("empty listing", {"listing": ""}),
+            ("root manifest", {"listing": '{"filename":"Cargo.toml"}\n'}),
+            ("lockfile", {"listing": '{"filename":"Cargo.lock"}\n'}),
+            ("rename out of a member", {"listing":
+                '{"filename":"crates/a/x.rs","previous_filename":"scripts/x.rs"}\n'}),
+            ("base without the script", {"with_script": False}),
+            ("script failure", {"python_stub": "exit 1\n"}),
+            ("one line", {"python_stub": "echo rust_packages=-p a\n"}),
+            ("extra line", {"python_stub":
+                "printf 'rust_packages=-p a\\nrust_doc_packages=-p a\\nx=y\\n'\n"}),
+            ("swapped lines", {"python_stub":
+                "printf 'rust_doc_packages=-p a\\nrust_packages=-p a\\n'\n"}),
+            ("injected arguments", {"python_stub":
+                "printf 'rust_packages=-p a --exclude b\\nrust_doc_packages=-p a\\n'\n"}),
+            ("shell text", {"python_stub":
+                "printf 'rust_packages=-p a;true\\nrust_doc_packages=-p a\\n'\n"}),
+            ("empty selection", {"python_stub":
+                "printf 'rust_packages=\\nrust_doc_packages=none\\n'\n"}),
+            ("workspace without doctests", {"python_stub":
+                "printf 'rust_packages=--workspace\\nrust_doc_packages=none\\n'\n"}),
+            ("malformed doc selection", {"python_stub":
+                "printf 'rust_packages=-p a\\nrust_doc_packages=-p\\n'\n"}),
+        ):
+            with self.subTest(label=label):
+                values, calls, _ = self.resolve_package_scope(**overrides)
+                self.assertEqual(values, self.FULL_SCOPE)
+                if label in ("push", "dispatch", "failed detection", "documentation only",
+                             "merge queue", "api limit", "zero-padded api limit"):
+                    self.assertEqual(calls, [])
 
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)

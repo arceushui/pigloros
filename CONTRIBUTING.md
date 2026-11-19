@@ -137,6 +137,35 @@ stateDiagram-v2
     RustGates --> [*]: "ci-gate and required checks pass"
 ```
 
+### Affected-package scope (phase 1)
+
+A Rust-affecting pull request does not always run every package through the
+plain test and lint jobs. The same trusted-base scope job runs
+`scripts/affected_packages.py`, which maps every changed path (both sides of a
+rename) to the workspace member whose directory contains it and selects:
+
+- every changed member;
+- every member that depends on a selected member through any dependency kind
+  (normal, dev, build, target-specific, `workspace = true`);
+- every member whose Rust sources name a changed path or a selected member's
+  files (`include_bytes!`, `include_str!`, `CARGO_MANIFEST_DIR` joins, and
+  workspace-relative paths); a library-side reader also selects its dependents.
+
+`test-shard`, the doctests in `test`, `feature-matrix`, `clippy`, `rustdoc`,
+`asan-build` and `asan` then run with `-p` for exactly that set. Coverage,
+cargo-crap, mutation, CodeQL, Docker, conformance, `ledger-windows` and
+`owner-bridge-windows` keep their own scope.
+
+Any doubt runs the whole workspace (`--workspace`): a push to `main`, a manual
+run, a Trunk merge-queue test pull request (`trunk-merge/*`), failed change
+detection, a changed-file list that may be truncated (3000 files) or cannot be
+listed, a path outside every member that is not documentation (the root
+manifest, `Cargo.lock`, toolchain and Cargo configuration, scripts, fixtures,
+workflows, a new crate), or a resolver failure. Because every Cargo command
+runs with `--locked`, a change to the internal dependency graph also changes
+`Cargo.lock` and so runs everything. The merge queue therefore always tests
+the whole workspace before anything reaches `main`.
+
 ## Required CI sequence
 
 CI is deliberately staged. A broken pull request receives useful feedback
