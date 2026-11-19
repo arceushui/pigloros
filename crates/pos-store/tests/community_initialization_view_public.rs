@@ -831,3 +831,41 @@ fn the_authority_evidence_refuses_another_call_or_no_administrative_decision() -
         Ok(())
     })
 }
+
+/// ADR-128 §3: one COA1 per protected record, binding the CAU1.
+#[test]
+fn every_protected_record_gets_its_coa1() -> TestResult {
+    with_operation(|operation| {
+        let Operation {
+            world,
+            planner,
+            records,
+            graph,
+            input,
+            ..
+        } = operation;
+        let evidence = planner.authority_evidence(&world.authority, GENERATION, input)?;
+        let admissions = planner.admissions(graph, &evidence)?;
+        assert_eq!(admissions.len(), graph.records().len());
+        let owner = planner.bindings(GENERATION)?.owner_binding_digest();
+        for (admission, record) in admissions.iter().zip(graph.records()) {
+            let fields = admission.as_input();
+            let protected = record.protected();
+            assert_eq!(fields.protected_object_address, protected.object_address());
+            assert_eq!(
+                fields.artifact_digest,
+                protected.registration().fields().artifact_digest
+            );
+            assert_eq!(
+                fields.registration_address,
+                protected.registration().address()
+            );
+            assert_eq!(fields.owner_binding_digest, owner);
+            assert_eq!(fields.scope_cover_digest, records.scope_binding_digest());
+            assert_eq!(fields.evidence_not_after_micros, HORIZON);
+            assert_eq!(fields.admission_inventory_generation, 0);
+            assert_eq!(fields.authority_evidence_digest, evidence.evidence_digest());
+        }
+        Ok(())
+    })
+}

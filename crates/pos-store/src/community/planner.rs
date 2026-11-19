@@ -30,9 +30,9 @@ use pos_core::community_lifecycle::{
     CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::community_lifecycle::{
-    community_recipient_identity_digest_v1, CommunityAuthorityEvidenceInputV1,
-    CommunityAuthorityEvidenceV1, CommunityClockBoundV1, CommunityDecisionRowV1,
-    CommunityObjectBindingV1,
+    community_recipient_identity_digest_v1, CommunityArtifactAdmissionV1,
+    CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityClockBoundV1,
+    CommunityDecisionRowV1, CommunityObjectBindingV1,
 };
 #[cfg(target_os = "linux")]
 use pos_core::community_lifecycle::{
@@ -102,6 +102,7 @@ pub struct CommunityInitializeFormV1 {
 
 /// One planned code-0 initialization.
 pub struct CommunityInitializationPlannerV1<'a> {
+    seal: &'static AuthorityTrustRootSealV1,
     installation: CommunityInitializationInstallationV1<'a>,
     form: CommunityInitializeFormV1,
     request: CommunityAdministrativeRequestV1,
@@ -297,7 +298,7 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     /// that differs from the R6.1(7) derivation over the installed roster
     /// (P6, I31), and a State-limit count other than the roster's.
     pub fn new(
-        _seal: &'static AuthorityTrustRootSealV1,
+        seal: &'static AuthorityTrustRootSealV1,
         installation: CommunityInitializationInstallationV1<'a>,
         form: CommunityInitializeFormV1,
     ) -> Result<Self, Error> {
@@ -317,6 +318,7 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                     == installation.profile.as_input().roster.len()
             {
                 Ok(Self {
+                    seal,
                     installation,
                     form,
                     request,
@@ -955,5 +957,30 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                     inventory_generation: view.inventory_generation(),
                 })
             })
+    }
+
+    /// One COA1 per protected record of `graph`, binding `evidence`'s CAU1
+    /// commitment and inventory generation (ADR-128 §3, ADR-129 §3). The
+    /// object, ARD1, COB1, scope-cover and horizon fields come from each
+    /// protected record itself.
+    ///
+    /// # Errors
+    /// The COA1 codec refusals pass through.
+    pub fn admissions(
+        &self,
+        graph: &CommunityInitializationGraphV1,
+        evidence: &CommunityInitializationAuthorityV1,
+    ) -> Result<Vec<CommunityArtifactAdmissionV1>, Error> {
+        graph
+            .records()
+            .iter()
+            .map(|record| {
+                record.protected().admission(
+                    self.seal,
+                    evidence.inventory_generation(),
+                    evidence.evidence_digest(),
+                )
+            })
+            .collect()
     }
 }
