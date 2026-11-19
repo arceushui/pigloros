@@ -122,6 +122,47 @@ impl AttemptRecords {
     pub const fn classification(&self) -> &TerminalClassification {
         &self.classification
     }
+
+    /// The records with the successor of this first, Completed TME1 after
+    /// its output transfer timed out (R9 §4.7): every field is copied except
+    /// `output-transfer`, now the incomplete `transfer`, the predecessor's
+    /// digest and the recomputed terminal code.
+    fn successor(&self, transfer: TransferRecord) -> Result<Self, EvidenceFault> {
+        let stored = self.termination.fields();
+        let reissuable = stored.previous_tme1_digest.is_none()
+            && stored.output_transfer.is_none()
+            && self.classification.code().is_none()
+            && !transfer.complete;
+        if !reissuable {
+            return Err(EvidenceFault::NotReissuable);
+        }
+        let mut fields = stored.clone();
+        fields.output_transfer = Some(transfer);
+        fields.previous_tme1_digest = Some(self.termination.digest());
+        classified(self.requested.clone(), self.observed.clone(), fields)
+    }
+}
+
+/// Classify the TME1 of `fields` from the records themselves, and record
+/// its contradiction and terminal code (R9 §6 rule 7).
+fn classified(
+    requested: RequestedConfigurationEvidence,
+    observed: KernelObservationEvidence,
+    mut fields: TerminationEvidenceFields,
+) -> Result<AttemptRecords, EvidenceFault> {
+    TerminationEvidence::new(&fields)
+        .map(|draft| draft.facts(&requested, &observed).classify())
+        .and_then(|classification| {
+            fields.contradiction = classification.contradiction();
+            fields.terminal_code = classification.code();
+            TerminationEvidence::new(&fields).map(|termination| AttemptRecords {
+                requested,
+                observed,
+                termination,
+                classification,
+            })
+        })
+        .map_err(EvidenceFault::from)
 }
 
 /// Why no terminal records exist for an ended attempt.
@@ -143,6 +184,10 @@ pub enum EvidenceFault {
     /// The record encoders refused the facts.
     #[error(transparent)]
     Record(#[from] SandboxProviderProtocolError),
+    /// Only a first, Completed TME1 has an output transfer to re-issue, and
+    /// only once that transfer is incomplete (R9 §4.7).
+    #[error("the termination evidence has no output transfer to re-issue")]
+    NotReissuable,
 }
 
 /// How a start that was requested is known (RQE1).
@@ -433,18 +478,8 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
             agr1_digest,
             requested.digest(),
         )?;
-        let mut fields = self.termination_fields(&reached, observed.digest())?;
-        let draft = TerminationEvidence::new(&fields)?;
-        let classification = draft.facts(&requested, &observed).classify();
-        fields.contradiction = classification.contradiction();
-        fields.terminal_code = classification.code();
-        let termination = TerminationEvidence::new(&fields)?;
-        Ok(AttemptRecords {
-            requested,
-            observed,
-            termination,
-            classification,
-        })
+        let fields = self.termination_fields(&reached, observed.digest())?;
+        classified(requested, observed, fields)
     }
 
     /// The TME1 fields before classification.
