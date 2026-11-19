@@ -158,6 +158,24 @@ impl CommunityArtifactProtectorV1 {
         })
     }
 
+    /// The scope cohort this suboperation protects.
+    pub(super) const fn cohort(&self) -> &CommunityProtectionCohortV1 {
+        &self.cohort
+    }
+
+    /// Authenticate one COE1 under this suboperation's key, for tests that
+    /// check a protected record's exact plaintext.
+    #[cfg(test)]
+    pub(super) fn open_envelope(&self, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+        self.key.open_envelope(envelope)
+    }
+
+    /// Credits this suboperation's key has burned.
+    #[cfg(test)]
+    pub(super) const fn burned_credits(&self) -> u32 {
+        self.key.burned_credits()
+    }
+
     /// The clear CKP1 intent of this suboperation's key.
     #[must_use]
     pub const fn key_intent(&self) -> &CommunityKeyIntentV1 {
