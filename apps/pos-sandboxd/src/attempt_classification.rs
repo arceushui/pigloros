@@ -4,6 +4,8 @@
 //! `pos-reference`, shared with every verifier that recomputes a TME1. These
 //! conversions give it the codes of the evidence the provider already holds:
 //! how a released attempt ended, and the unit's `Result` and main exit code.
+//! A refused output reservation converts to its `launch-failure` in
+//! `pos-reference`.
 //! The lifecycle assembles the facts when it emits the terminal records.
 //!
 //! [`TerminationFacts::classify`]: pos_reference::sandbox_provider_protocol::TerminationFacts::classify
