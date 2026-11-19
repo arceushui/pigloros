@@ -14,6 +14,7 @@ mod lifecycle_authority;
 mod memory_domain;
 mod metadata_authority;
 mod private_hash;
+mod protection;
 mod sealer;
 mod vault;
 
@@ -29,4 +30,8 @@ pub use memory_domain::{
 };
 pub use metadata_authority::{
     metadata_resource, CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
+};
+pub use protection::{
+    CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,
+    CommunityRecordEvidenceV1,
 };

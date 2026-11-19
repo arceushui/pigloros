@@ -1,13 +1,42 @@
 //! Original owner and metadata-anchor data, never current-use/service authority.
 
+use super::envelope::owner_error;
 use super::{
     bounded_text, canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates,
     read_hashes, read_head, record_cursor, record_prefix, validate_coordinates, validate_horizon,
     CommunityLifecycleErrorV1 as Error, Result,
 };
-use crate::append_hex;
-use crate::{encode_bytes, encode_hash, encode_head, Hash, TimelineId};
+use crate::{
+    append_hex, encode_bytes, encode_hash, encode_head, ArtifactRegistrationV1, Hash, OwnerIdV1,
+    TimelineId,
+};
 use zeroize::Zeroizing;
+
+/// The ADR-128 artifact-catalogue owner `community-artifact:<T32>:<G32>`.
+fn catalogue_owner_text(timeline: TimelineId, generation: [u8; 16]) -> Zeroizing<String> {
+    let mut owner = Zeroizing::new(String::with_capacity(84));
+    owner.push_str("community-artifact:");
+    append_hex(&mut owner, &timeline.inner().to_bytes());
+    owner.push(':');
+    append_hex(&mut owner, &generation);
+    owner
+}
+
+/// The ARD1 owner reference of the generation's artifact-catalogue owner
+/// `community-artifact:<T32>:<G32>` (ADR-128 §1, §3), the same spelling COB1
+/// binds.
+///
+/// # Errors
+/// Returns `InvalidBinding` if the owner text is not a valid `OwnerIdV1`.
+/// The text is always 84 ASCII bytes, so this does not occur for any T/G.
+pub fn community_catalogue_owner_reference_v1(
+    timeline: TimelineId,
+    generation: [u8; 16],
+) -> Result<Hash> {
+    OwnerIdV1::from_borrowed(&catalogue_owner_text(timeline, generation))
+        .map(|owner| ArtifactRegistrationV1::owner_reference(&owner))
+        .map_err(owner_error)
+}
 
 /// Untrusted original COB1 fields; the catalogue-owner spelling is derived.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -59,16 +88,9 @@ impl CommunityOwnerBindingV1 {
             {
                 return Err(Error::InvalidBinding);
             }
-            validate_horizon(input.evidence_not_after_micros).map(|()| {
-                let mut catalogue_owner = Zeroizing::new(String::with_capacity(84));
-                catalogue_owner.push_str("community-artifact:");
-                append_hex(&mut catalogue_owner, &input.timeline.inner().to_bytes());
-                catalogue_owner.push(':');
-                append_hex(&mut catalogue_owner, &input.generation);
-                Self {
-                    input,
-                    catalogue_owner,
-                }
+            validate_horizon(input.evidence_not_after_micros).map(|()| Self {
+                input,
+                catalogue_owner: catalogue_owner_text(input.timeline, input.generation),
             })
         })
     }
