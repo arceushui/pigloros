@@ -26,7 +26,7 @@ fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips
 }
 
 const fn expected_static_hardening_properties(
-) -> [(&'static str, &'static str, SystemdHardeningValue); 29] {
+) -> [(&'static str, &'static str, SystemdHardeningValue); 32] {
     [
         ("Type", "s", SystemdHardeningValue::String("exec")),
         ("DynamicUser", "b", SystemdHardeningValue::Bool(true)),
@@ -89,6 +89,10 @@ const fn expected_static_hardening_properties(
             SystemdHardeningValue::String("control-group"),
         ),
         ("SendSIGKILL", "b", SystemdHardeningValue::Bool(true)),
+        // ADR-069 R10 §4.2: no enum routes a standard stream anywhere.
+        ("StandardInput", "s", SystemdHardeningValue::String("null")),
+        ("StandardOutput", "s", SystemdHardeningValue::String("null")),
+        ("StandardError", "s", SystemdHardeningValue::String("null")),
     ]
 }
 
