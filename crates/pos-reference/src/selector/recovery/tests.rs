@@ -1414,10 +1414,15 @@ fn a_leaf_replaced_after_readiness_or_its_probe_is_refused_and_kept() -> TestRes
     let first = bind_leaf(&leaf)?;
     let ready = host.ready_leaf(endpoint)?;
     host.require_same_leaf(endpoint, ready)?;
-    // I8: another inode between readiness and connect.
+    // I8: another inode between readiness and connect. A second hard link
+    // keeps the first inode allocated, so the replacement cannot reuse its
+    // number (a freed socket inode may be reused at once).
     drop(first);
+    let kept = operation.recovery.path().join("kept-first-inode");
+    std::fs::hard_link(&leaf, &kept)?;
     std::fs::remove_file(&leaf)?;
     let second = bind_leaf(&leaf)?;
+    assert_ne!(host.ready_leaf(endpoint)?, ready);
     assert_eq!(
         host.require_same_leaf(endpoint, ready),
         Err(RecoveryError::Leaf)
@@ -1431,6 +1436,7 @@ fn a_leaf_replaced_after_readiness_or_its_probe_is_refused_and_kept() -> TestRes
     assert!(leaf.exists());
     // An absent leaf is never ready.
     std::fs::remove_file(&leaf)?;
+    std::fs::remove_file(&kept)?;
     assert_eq!(host.ready_leaf(endpoint), Err(RecoveryError::Leaf));
     Ok(())
 }
