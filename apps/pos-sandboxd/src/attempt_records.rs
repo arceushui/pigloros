@@ -390,9 +390,10 @@ fn snapshots(
 }
 
 /// TME1 `work-after`: `/work` after exit, read through the handle the
-/// frozen KOE1 observation opened (R9 §4.6.3). One that could not be read is
-/// null: beside a KOE1 that recorded `/work`, that is missing evidence, which
-/// the classifier selects as code 2.
+/// frozen KOE1 observation opened (R9 §4.6.3). After a failed KOE1 (status 1
+/// or 2) no handle exists and it is null, which is valid; after a status-0
+/// KOE1 one that could not be read is null too, which is missing evidence,
+/// code 2 (owner decision 2026-11-19, R9 amendment review).
 fn work_after(evidence: Option<&ResourceEvidence>) -> Option<WorkStatfsFacts> {
     evidence
         .and_then(ResourceEvidence::terminal)
