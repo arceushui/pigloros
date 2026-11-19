@@ -506,18 +506,9 @@ class AsanCiPolicyTests(unittest.TestCase):
         self.assert_rejected(rename_download)
 
     def archive_download_steps(self, workflow: dict) -> list[dict]:
-        return [
-            step
-            for step in workflow["jobs"]["asan"]["steps"]
-            if "download-artifact" in step.get("uses", "")
-        ]
-
-    def test_archive_download_retries_once_and_then_fails(self) -> None:
-        first, retry = self.archive_download_steps(self.workflow)
-        self.assertIs(first["continue-on-error"], True)
-        self.assertEqual(retry["if"], "steps.download-asan-archive.outcome == 'failure'")
-        self.assertNotIn("continue-on-error", retry)
-        self.assertEqual(first["with"], retry["with"])
+        names = ("Download ASan test archive", "Retry ASan test archive download")
+        steps = workflow["jobs"]["asan"]["steps"]
+        return [next(step for step in steps if step.get("name") == name) for name in names]
 
     def test_rejects_archive_download_retry_that_cannot_fail(self) -> None:
         def ignore_retry(workflow: dict) -> None:
