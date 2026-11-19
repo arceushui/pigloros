@@ -184,6 +184,7 @@ mod tests {
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(projected, Ok(None));
         assert!(executor.shutdown().await.is_ok());
+        drop(executor);
         Ok(())
     }
 
@@ -208,6 +209,7 @@ mod tests {
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(submitted.err(), Some(LocalErasureSubmitErrorV1::Unserved));
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 
