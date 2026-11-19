@@ -617,11 +617,20 @@ impl SystemdTransientUnitTransport {
         verified: &SystemdVerifiedStart,
         root: CgroupRoot,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        self.bind_invoked_cgroup(verified, root).await
+    }
+
+    /// Bind the verified unit's cgroup and name the invocation it was bound
+    /// for: TME1 `unit` (ADR-069 R9 §4.6.3), whether or not a kernel
+    /// observation follows.
+    async fn bind_invoked_cgroup(
+        &self,
+        verified: &SystemdVerifiedStart,
+        root: CgroupRoot,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
         let bound = self
             .bind_unit_cgroup(&verified.unit_name, &verified.unit_path, root)
             .await?;
-        // TME1 `unit` names the invocation whose cgroup was bound (ADR-069
-        // R9 §4.6.3), whether or not a kernel observation follows.
         let invocation = self.read_invocation_id(&verified.unit_name).await?;
         Ok(bound.invoked(invocation))
     }
