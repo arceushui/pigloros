@@ -664,12 +664,22 @@ fn every_unsafe_object_is_captured_as_unsafe_and_never_deleted() -> TestResult {
 
 #[test]
 fn a_final_object_replaced_after_capture_is_kept_and_stays_retracted() -> TestResult {
-    let damages: [Damage; 2] = [
+    let damages: [Damage; 3] = [
         |fixture, export_id| {
             let bytes = std::fs::read(fixture.final_path(export_id))?;
             replace_file(&fixture.final_path(export_id), &bytes, 0o600)
         },
         symlink_final,
+        // The captured inode itself grows: only its length differs.
+        |fixture, export_id| {
+            std::io::Write::write_all(
+                &mut std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(fixture.final_path(export_id))?,
+                b"x",
+            )?;
+            Ok(())
+        },
     ];
     for damage in damages {
         let (mut fixture, (_, export_id)) = published()?;

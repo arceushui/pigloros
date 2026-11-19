@@ -20,7 +20,7 @@
 //! reservation and serving reads fail closed with a storage error, and T1
 //! cannot record a withdrawal there.
 
-use std::{collections::BTreeSet, fs::File, io::Read, os::unix::fs::MetadataExt};
+use std::{collections::BTreeSet, fs::File, io::Read};
 
 use pos_core::{
     local_erasure_export_recipient_v1, recipient_owner_id_from_grantee, CoreError, EntityId,
@@ -55,6 +55,17 @@ const FINAL_MISSING: u8 = 2;
 /// Capture status: the final or staging object is unsafe, or the final
 /// object's length or digest differs from the catalog's.
 const UNSAFE: u8 = 3;
+
+/// Every custody object open here: read-only, non-blocking and never through
+/// a link.
+const OBJECT_OPEN: OFlags = OFlags::RDONLY
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::NOFOLLOW);
+/// Every custody object name resolves beneath its directory only.
+const OBJECT_RESOLVE: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_MAGICLINKS);
 
 /// Why [`SqliteStore::attach_recipient_custody`] refused; nothing was
 /// attached.
@@ -710,9 +721,9 @@ fn capture_final(
     let opened = recipient_openat2(
         &owner.directory_file,
         name.as_slice(),
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        OBJECT_OPEN,
         Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        OBJECT_RESOLVE,
     );
     match opened {
         Err(rustix::io::Errno::NOENT) => EntryV1::Absent,
@@ -806,9 +817,9 @@ fn unlink_captured(
     let opened = recipient_openat2(
         &owner.directory_file,
         name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        OBJECT_OPEN,
         Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        OBJECT_RESOLVE,
     );
     match opened {
         Err(rustix::io::Errno::NOENT) => Ok(()),
@@ -817,10 +828,11 @@ fn unlink_captured(
             .map_err(storage_error)
             .and_then(|file| file.metadata().map_err(storage_error))
             .and_then(|metadata| {
-                if RecipientPrivateFileIdentityV1::from_metadata(&metadata) == expected
-                    && metadata.nlink() == 1
+                // A safe name entry has one link, so the descriptor and the
+                // name holding the captured object fix its link count.
+                let opened = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
+                if (opened, stat_entry(owner, name)) == (expected, EntryV1::Safe(expected))
                     && length.is_none_or(|length| metadata.len() == length)
-                    && stat_entry(owner, name) == EntryV1::Safe(expected)
                 {
                     recipient_unlinkat(&owner.directory_file, name, AtFlags::empty())
                         .map_err(storage_error)
