@@ -9,6 +9,8 @@ import sys
 
 import yaml
 
+from ci_stage_policy import ASAN_IF, CORE_STAGE_IF, CORE_STAGE_NEEDS, STANDARD_STAGE_NEEDS
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXPECTED_SUPPRESSION = (
@@ -126,12 +128,9 @@ df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
 }
 EXPECTED_BUILD_JOB = {
     "name": "asan build (nextest archive)",
-    "needs": ["ci_change_scope", "core-gate"],
-    "if": (
-        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-        "needs.core-gate.result == 'success' && "
-        "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
-    ),
+    # Starts once the complete core set passes (the core-gate pass rule).
+    "needs": CORE_STAGE_NEEDS,
+    "if": CORE_STAGE_IF,
     "runs-on": "ubuntu-24.04",
     "timeout-minutes": 60,
     "steps": [
@@ -185,17 +184,10 @@ EXPECTED_STEP_ENV = {
         "print_suppressions=1"
     ),
 }
-EXPECTED_SCOPE_JOB = [
-    "ci_change_scope",
-    "standard-gate",
-    "asan-build",
-]
-# The shards run beside diff mutation testing; ci-gate requires both results.
-EXPECTED_SCOPE_IF = (
-    "${{ !cancelled() && needs.standard-gate.result == 'success' && "
-    "needs.asan-build.result == 'success' && "
-    "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
-)
+# The shards start once the complete standard set (which includes asan-build)
+# passes and run beside diff mutation testing; ci-gate requires both results.
+EXPECTED_SCOPE_JOB = STANDARD_STAGE_NEEDS
+EXPECTED_SCOPE_IF = ASAN_IF
 EXPECTED_JOB_KEYS = {
     "name",
     "needs",

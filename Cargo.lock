@@ -2669,18 +2669,18 @@ dependencies = [
 
 [[package]]
 name = "cranelift-assembler-x64"
-version = "0.136.6"
+version = "0.136.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aecefa88696b62f833cc0c997d19c93246b0268e2aaf23e0e8692e527f6de088"
+checksum = "c19fba13ee427c4dd29488ea51127e945bf07fd9d79093f14c9cc57f74acf757"
 dependencies = [
  "cranelift-assembler-x64-meta",
 ]
 
 [[package]]
 name = "cranelift-assembler-x64-meta"
-version = "0.136.6"
+version = "0.136.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1391a2546f5edf06a0ff5e9430d73c2713fd536aefec53200dc21846d1467f53"
+checksum = "dd88c766346fcc14bbadbd68cb11e9bc1e555e99f7e8f6b1f4c27a73ca659bec"
 dependencies = [
  "cranelift-srcgen",
 ]
@@ -2752,15 +2752,15 @@ dependencies = [
 
 [[package]]
 name = "cranelift-codegen-shared"
-version = "0.136.6"
+version = "0.136.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6595667b7d505cf85d5bdd014e6f57ad6128183238f8e372319d9384782472f5"
+checksum = "ba5d321229c3e00a17d7bb3633529ffdf97a13bcf4962fd2e92f1e0fd39360aa"
 
 [[package]]
 name = "cranelift-control"
-version = "0.136.6"
+version = "0.136.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f26ffdbfcd24c3833d730849e6d132af34a400a2b89b44446015c01eecbea21d"
+checksum = "71cd63450256d0f80f7a0527e133452f84fa6e1ca73c7db6ca2a9e8cc89d1c18"
 dependencies = [
  "arbitrary",
 ]
@@ -2809,9 +2809,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-srcgen"
-version = "0.136.6"
+version = "0.136.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36508559c8839a8b6ee091f9deaa9cfe620a82f1abb5e358a0a0c65290583622"
+checksum = "3748e3c77c0717359cd4c089e1dc057221eb8598a9c18b0b5afccb5685975abb"
 
 [[package]]
 name = "crc32fast"
@@ -5688,29 +5688,29 @@ dependencies = [
 
 [[package]]
 name = "pin-project"
-version = "1.1.13"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2466b2336ed02bcdca6b294417127b90ec92038d1d5c4fbeac971a922e0e0924"
+checksum = "a6c2123f4708bbd422630a6dae7c03f678b1ce1f1c99e4c4b3beac69c8174cc9"
 dependencies = [
  "pin-project-internal",
 ]
 
 [[package]]
 name = "pin-project-internal"
-version = "1.1.13"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96395f0a926bc13b1c17622aaddda1ecb55d49c8f1bf9777e4d877800a43f8b"
+checksum = "358938fd6df944c1e44bb328b60fb275f13c804aac47ba26a1165d45a3f87756"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.10",
 ]
 
 [[package]]
 name = "pin-project-lite"
-version = "0.2.17"
+version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+checksum = "c938015719552d665fd0553b90d96cd7ff58e83e4c061ca99e6bb78865a72752"
 
 [[package]]
 name = "piper"

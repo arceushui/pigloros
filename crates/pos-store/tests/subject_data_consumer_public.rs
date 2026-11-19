@@ -18,6 +18,7 @@ use pos_core::{
 use pos_crypto::key_roles::{
     destroy_registered_signing_key, sign_timeline_event_for_registered_role, SigningKeyMaterial,
 };
+use pos_crypto::preference_weights::MAX_PREFERENCE_WEIGHTS_PLAINTEXT_BYTES;
 use pos_crypto::signing::generate_keypair;
 use pos_crypto::subject_ciphertext::SubjectCiphertextV1;
 use pos_crypto::subject_data::{
@@ -37,7 +38,7 @@ use pos_crypto::subject_nonce_ledger::{
 use pos_store::subject_data_consumer::{
     append_subject_preference_weights, destroy_subject_key, read_subject_field,
     SubjectDataAppendV1, SubjectDataConsumerErrorV1 as Refusal, SubjectKeyringV1,
-    SubjectNonceReservationPortV1, VolatileSubjectNonceLedgerV1, MAX_SUBJECT_FIELD_PLAINTEXT_BYTES,
+    SubjectNonceReservationPortV1, VolatileSubjectNonceLedgerV1,
     PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
@@ -65,6 +66,59 @@ fn pattern<const N: usize>(seed: u8) -> [u8; N] {
         next = next.wrapping_mul(31).wrapping_add(17);
         next
     })
+}
+
+/// One `[score, confidence]` value of `[0.5, 1.0]` in half precision.
+const HALF_WEIGHT: [u8; 7] = [0x82, 0xf9, 0x38, 0x00, 0xf9, 0x3c, 0x00];
+
+/// The accepted ADR-097 B4 plaintext `{name: [0.5, 1.0]}`, written byte by
+/// byte, for a valid name of at most 23 bytes.
+fn weight_set(name: &str) -> Vec<u8> {
+    let mut bytes = vec![0xa1, 0x60 + u8::try_from(name.len()).unwrap_or(u8::MAX)];
+    bytes.extend_from_slice(name.as_bytes());
+    bytes.extend_from_slice(&HALF_WEIGHT);
+    bytes
+}
+
+/// The largest accepted plaintext: 64 sorted 64-byte names, each holding two
+/// double-precision floats.
+fn largest_weight_set() -> Vec<u8> {
+    let mut bytes = vec![0xb8, 64];
+    for index in 0..64 {
+        bytes.extend_from_slice(&[0x78, 64]);
+        bytes.extend(format!("{}{index:02}", "n".repeat(62)).into_bytes());
+        bytes.push(0x82);
+        for value in [-0.1_f64, 0.3] {
+            bytes.push(0xfb);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    bytes
+}
+
+/// Plaintexts that each break one ADR-097 B4 rule: over 8 KiB, a float that
+/// half precision holds written as single, NaN, no entries, an uppercase
+/// name, a duplicate name, a tag, and a trailing byte.
+fn invalid_weight_sets() -> Vec<Vec<u8>> {
+    let mut over = largest_weight_set();
+    over.resize(MAX_PREFERENCE_WEIGHTS_PLAINTEXT_BYTES + 1, 0);
+    let mut duplicate = weight_set("a");
+    duplicate[0] = 0xa2;
+    duplicate.extend_from_slice(&weight_set("a")[1..]);
+    let mut tagged = vec![0xc0];
+    tagged.extend(weight_set("a"));
+    let mut trailing = weight_set("a");
+    trailing.push(0);
+    vec![
+        over,
+        vec![0xa1, 0x61, b'a', 0x82, 0xfa, 0x3f, 0, 0, 0, 0xf9, 0x3c, 0],
+        vec![0xa1, 0x61, b'a', 0x82, 0xf9, 0x7e, 0, 0xf9, 0x3c, 0],
+        vec![0xa0],
+        weight_set("A"),
+        duplicate,
+        tagged,
+        trailing,
+    ]
 }
 
 /// The public wrap and the test's own copy of the private inputs behind it.
@@ -360,7 +414,7 @@ fn exercise_round_trip<S: Adapter>(store: &mut S) -> TestResult {
         read(store, &fx.keys, fx.timeline),
         field(Err(SubjectFieldReadError::NoValue))
     );
-    let first = append(store, &mut fx, 1, b"first weights")?;
+    let first = append(store, &mut fx, 1, &weight_set("first"))?;
     let data = subject_data(&first)?;
     assert_eq!(
         (
@@ -391,7 +445,7 @@ fn exercise_round_trip<S: Adapter>(store: &mut S) -> TestResult {
     assert_eq!(store.read_own(fx.timeline, SeqRange::all())?, vec![first]);
     assert_eq!(
         read(store, &fx.keys, fx.timeline),
-        present(b"first weights")
+        present(&weight_set("first"))
     );
 
     // Neither a later Event of another subject nor a later Event of another
@@ -413,15 +467,15 @@ fn exercise_round_trip<S: Adapter>(store: &mut S) -> TestResult {
     )?;
     assert_eq!(
         read(store, &fx.keys, fx.timeline),
-        present(b"first weights")
+        present(&weight_set("first"))
     );
 
     // Each Event carries the complete value; the latest one wins.
-    let second = append(store, &mut fx, 1, b"second weights")?;
+    let second = append(store, &mut fx, 1, &weight_set("second"))?;
     assert_eq!(subject_data(&second)?.ciphertext().counter(), 2);
     assert_eq!(
         read(store, &fx.keys, fx.timeline),
-        present(b"second weights")
+        present(&weight_set("second"))
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 3]);
     Ok(())
@@ -435,18 +489,19 @@ fn round_trip_delivers_the_latest_value_once_in_both_adapters() -> TestResult {
 
 fn exercise_handoff<S: Adapter>(store: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    let exact = vec![0x5a; MAX_SUBJECT_FIELD_PLAINTEXT_BYTES];
-    let over = vec![0x5a; MAX_SUBJECT_FIELD_PLAINTEXT_BYTES + 1];
-    assert_eq!(MAX_SUBJECT_FIELD_PLAINTEXT_BYTES, 8_192);
+    let largest = largest_weight_set();
+    assert_eq!(largest.len(), 5_442);
 
-    // One over the raw cap is refused before a counter is reserved.
-    assert_eq!(
-        append(store, &mut fx, 1, &over).err(),
-        Some(Refusal::PlaintextBoundExceeded)
-    );
+    // Every grammar refusal comes before a counter is reserved.
+    for invalid in invalid_weight_sets() {
+        assert_eq!(
+            append(store, &mut fx, 1, &invalid).err(),
+            Some(Refusal::InvalidPlaintext)
+        );
+    }
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 1]);
-    append(store, &mut fx, 1, &exact)?;
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(&exact));
+    append(store, &mut fx, 1, &largest)?;
+    assert_eq!(read(store, &fx.keys, fx.timeline), present(&largest));
 
     // The handed-off value is one fresh allocation that its caller can wipe.
     let (outcome, mut delivered) = read(store, &fx.keys, fx.timeline);
@@ -474,44 +529,47 @@ fn exercise_handoff<S: Adapter>(store: &mut S) -> TestResult {
         (Err(SubjectFieldOwnerReadErrorV1::CallbackFailed), 1)
     );
 
-    // A committed value one over the raw cap is an integrity outcome, and an
-    // independently produced value at the cap is still delivered.
+    // A committed value that breaks the grammar, including one over the raw
+    // cap, is an integrity outcome, and an independently produced largest
+    // value is still delivered.
     let owner = (&fx.owner, fx.owner_identity);
+    for (counter, invalid) in (900..).zip(invalid_weight_sets()) {
+        append_crafted(store, &fx, SUBJECT, owner, &mut |input| {
+            seal(
+                &fx.key,
+                counter,
+                PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
+                &invalid,
+                input,
+            )
+        })?;
+        assert_eq!(
+            read(store, &fx.keys, fx.timeline),
+            field(Err(SubjectFieldReadError::Integrity))
+        );
+    }
     append_crafted(store, &fx, SUBJECT, owner, &mut |input| {
         seal(
             &fx.key,
-            900,
+            999,
             PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
-            &over,
+            &largest,
             input,
         )
     })?;
-    assert_eq!(
-        read(store, &fx.keys, fx.timeline),
-        field(Err(SubjectFieldReadError::Integrity))
-    );
-    append_crafted(store, &fx, SUBJECT, owner, &mut |input| {
-        seal(
-            &fx.key,
-            901,
-            PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
-            &exact,
-            input,
-        )
-    })?;
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(&exact));
+    assert_eq!(read(store, &fx.keys, fx.timeline), present(&largest));
     Ok(())
 }
 
 #[test]
-fn raw_cap_and_callback_handoff_are_exact_in_both_adapters() -> TestResult {
+fn plaintext_grammar_and_callback_handoff_are_exact_in_both_adapters() -> TestResult {
     exercise_handoff(&mut MemoryStore::new())?;
     exercise_handoff(&mut SqliteStore::open_in_memory()?)
 }
 
 fn exercise_wrong_keys<S: Adapter>(store: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    append(store, &mut fx, 1, b"weights")?;
+    append(store, &mut fx, 1, &weight_set("weights"))?;
     let reservations = fx.nonces.clone();
     assert_eq!(
         fx.keyring(EntityId::from_ulid(Ulid::nil())).err(),
@@ -527,7 +585,10 @@ fn exercise_wrong_keys<S: Adapter>(store: &mut S) -> TestResult {
         fx.keys.unlock(forged.wrap.clone(), &forged.prf()),
         Err(Refusal::AlreadyUnlocked)
     );
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("weights"))
+    );
     assert_eq!(
         read(store, &mismatched, fx.timeline),
         field(Err(SubjectFieldReadError::Integrity))
@@ -536,7 +597,7 @@ fn exercise_wrong_keys<S: Adapter>(store: &mut S) -> TestResult {
         timeline_id: fx.timeline,
         epoch: 1,
         signing: &fx.owner,
-        weights: b"forged",
+        weights: &weight_set("forged"),
     };
     assert_eq!(
         append_subject_preference_weights(store, &mut mismatched, &mut fx.nonces, &request).err(),
@@ -548,11 +609,11 @@ fn exercise_wrong_keys<S: Adapter>(store: &mut S) -> TestResult {
     fx.keys
         .unlock(unregistered.wrap.clone(), &unregistered.prf())?;
     assert_eq!(
-        append(store, &mut fx, 3, b"unregistered").err(),
+        append(store, &mut fx, 3, &weight_set("unregistered")).err(),
         Some(Refusal::KeyNotActive)
     );
     assert_eq!(
-        append(store, &mut fx, 2, b"locked").err(),
+        append(store, &mut fx, 2, &weight_set("locked")).err(),
         Some(Refusal::KeyLocked)
     );
 
@@ -568,7 +629,10 @@ fn exercise_wrong_keys<S: Adapter>(store: &mut S) -> TestResult {
         field(Err(SubjectFieldReadError::Integrity))
     );
     assert_eq!(fx.nonces, reservations);
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("weights"))
+    );
     Ok(())
 }
 
@@ -608,7 +672,7 @@ fn exercise_other_subject<S: Adapter>(store: &mut S) -> TestResult {
         field(Err(SubjectFieldReadError::NoValue))
     );
     assert_eq!(read(store, &other, empty), integrity());
-    append(store, &mut fx, 1, b"weights")?;
+    append(store, &mut fx, 1, &weight_set("weights"))?;
     assert_eq!(read(store, &other, fx.timeline), integrity());
     assert_eq!(
         other.unlock(other_key.wrap.clone(), &other_key.prf()),
@@ -625,7 +689,10 @@ fn exercise_other_subject<S: Adapter>(store: &mut S) -> TestResult {
     destroy_subject_key(store, &mut other, destruction)?;
     assert_eq!(read(store, &other, fx.timeline), integrity());
     assert_eq!(read(store, &retained, fx.timeline), integrity());
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("weights"))
+    );
 
     // A committed payload transplanted from another subject is not this
     // subject's field, whether or not this subject's key is unlocked.
@@ -641,7 +708,7 @@ fn exercise_other_subject<S: Adapter>(store: &mut S) -> TestResult {
                 &other_key,
                 1,
                 PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
-                b"foreign",
+                &weight_set("foreign"),
                 &foreign,
             )
         },
@@ -672,7 +739,7 @@ fn exercise_faulty_ports<S: Adapter>(store: &mut S) -> TestResult {
         timeline_id: fx.timeline,
         epoch: 1,
         signing: &fx.owner,
-        weights: b"weights",
+        weights: &weight_set("weights"),
     };
     let refused_reservation = Some(Refusal::NonceReservationRefused);
 
@@ -728,7 +795,7 @@ fn exercise_failed_appends<S: Adapter>(store: &mut S) -> TestResult {
         timeline_id: fx.timeline,
         epoch: 1,
         signing: &fx.gateway,
-        weights: b"weights",
+        weights: &weight_set("weights"),
     };
     assert_eq!(
         append_subject_preference_weights(store, &mut fx.keys, &mut fx.nonces, &gateway_signed)
@@ -770,7 +837,7 @@ fn exercise_failed_appends<S: Adapter>(store: &mut S) -> TestResult {
     );
     destroy_registered_signing_key(&mut fx.owner, destruction, &mut scratch)?;
     assert_eq!(
-        append(store, &mut fx, 1, b"unsigned").err(),
+        append(store, &mut fx, 1, &weight_set("unsigned")).err(),
         Some(Refusal::AppendRefused)
     );
     assert_eq!(
@@ -778,7 +845,10 @@ fn exercise_failed_appends<S: Adapter>(store: &mut S) -> TestResult {
         vec![committed]
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 4]);
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("weights"))
+    );
     Ok(())
 }
 
@@ -790,7 +860,7 @@ fn failed_append_commits_nothing_and_spends_its_counter_in_both_adapters() -> Te
 
 fn exercise_untrusted_events<S: Adapter>(store: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    append(store, &mut fx, 1, b"weights")?;
+    append(store, &mut fx, 1, &weight_set("weights"))?;
     let owner = (&fx.owner, fx.owner_identity);
     let integrity = || field(Err(SubjectFieldReadError::Integrity));
 
@@ -805,7 +875,7 @@ fn exercise_untrusted_events<S: Adapter>(store: &mut S) -> TestResult {
                 &fx.key,
                 900,
                 PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
-                b"gateway",
+                &weight_set("gateway"),
                 input,
             )
         },
@@ -814,7 +884,13 @@ fn exercise_untrusted_events<S: Adapter>(store: &mut S) -> TestResult {
 
     // The latest Event is never skipped in favour of an earlier valid one.
     append_crafted(store, &fx, SUBJECT, owner, &mut |input| {
-        seal(&fx.key, 901, "persona.unregistered", b"other field", input)
+        seal(
+            &fx.key,
+            901,
+            "persona.unregistered",
+            &weight_set("other-field"),
+            input,
+        )
     })?;
     assert_eq!(read(store, &fx.keys, fx.timeline), integrity());
     append_crafted(store, &fx, SUBJECT, owner, &mut |_| {
@@ -822,9 +898,12 @@ fn exercise_untrusted_events<S: Adapter>(store: &mut S) -> TestResult {
     })?;
     assert_eq!(read(store, &fx.keys, fx.timeline), integrity());
 
-    let restored = append(store, &mut fx, 1, b"restored")?;
+    let restored = append(store, &mut fx, 1, &weight_set("restored"))?;
     assert_eq!(subject_data(&restored)?.ciphertext().counter(), 2);
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"restored"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("restored"))
+    );
     Ok(())
 }
 
@@ -836,7 +915,7 @@ fn unverified_or_malformed_latest_event_is_an_integrity_outcome_in_both_adapters
 
 fn exercise_rotation<S: Adapter>(store: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    append(store, &mut fx, 1, b"epoch one")?;
+    append(store, &mut fx, 1, &weight_set("epoch-one"))?;
     let rotated = subject_key(SUBJECT, 2, 0x40)?;
     let mut registry = store.load_key_registry()?.ok_or("key registry is absent")?;
     registry.register_key(KeyRegistrationV1::new(
@@ -855,20 +934,26 @@ fn exercise_rotation<S: Adapter>(store: &mut S) -> TestResult {
 
     // The retained epoch still decrypts but no longer encrypts, and a refusal
     // before reservation spends no counter.
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"epoch one"));
     assert_eq!(
-        append(store, &mut fx, 1, b"stale").err(),
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("epoch-one"))
+    );
+    assert_eq!(
+        append(store, &mut fx, 1, &weight_set("stale")).err(),
         Some(Refusal::KeyNotActive)
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 2, 1]);
 
-    let event = append(store, &mut fx, 2, b"epoch two")?;
+    let event = append(store, &mut fx, 2, &weight_set("epoch-two"))?;
     let data = subject_data(&event)?;
     assert_eq!(
         (data.ciphertext().epoch(), data.ciphertext().counter()),
         (2, 1)
     );
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"epoch two"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("epoch-two"))
+    );
 
     // Locking the latest value's epoch never falls back to the older value.
     fx.keys.lock(2);
@@ -877,11 +962,14 @@ fn exercise_rotation<S: Adapter>(store: &mut S) -> TestResult {
         field(Err(SubjectFieldReadError::KeyUnavailable))
     );
     assert_eq!(
-        append(store, &mut fx, 2, b"locked").err(),
+        append(store, &mut fx, 2, &weight_set("locked")).err(),
         Some(Refusal::KeyLocked)
     );
     fx.keys.unlock(rotated.wrap.clone(), &rotated.prf())?;
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"epoch two"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("epoch-two"))
+    );
     Ok(())
 }
 
@@ -901,7 +989,7 @@ fn destruction_request(fx: &Fixture, authorization: u8) -> KeyDestructionRequest
 
 fn exercise_pending_destruction<S: Adapter>(store: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    append(store, &mut fx, 1, b"weights")?;
+    append(store, &mut fx, 1, &weight_set("weights"))?;
     let request = destruction_request(&fx, 7);
 
     // A request for another material fingerprint or another owner's key is
@@ -930,7 +1018,10 @@ fn exercise_pending_destruction<S: Adapter>(store: &mut S) -> TestResult {
             Err(Refusal::DestructionRefused)
         );
     }
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("weights"))
+    );
 
     // Pending destruction denies encryption and decryption without redacting.
     store.begin_key_registry_destruction(request)?;
@@ -941,7 +1032,7 @@ fn exercise_pending_destruction<S: Adapter>(store: &mut S) -> TestResult {
         unavailable()
     );
     assert_eq!(
-        append(store, &mut fx, 1, b"late").err(),
+        append(store, &mut fx, 1, &weight_set("late")).err(),
         Some(Refusal::KeyNotActive)
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 2]);
@@ -970,7 +1061,7 @@ fn pending_destruction_is_unavailable_and_resumes_in_both_adapters() -> TestResu
 
 fn exercise_confirmed_destruction<S: Adapter>(store: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    append(store, &mut fx, 1, b"weights")?;
+    append(store, &mut fx, 1, &weight_set("weights"))?;
     let request = destruction_request(&fx, 7);
     let mut retained = fx.keyring(SUBJECT)?;
     retained.unlock(fx.key.wrap.clone(), &fx.key.prf())?;
@@ -1008,14 +1099,14 @@ fn exercise_confirmed_destruction<S: Adapter>(store: &mut S) -> TestResult {
         );
     }
     assert_eq!(
-        append(store, &mut fx, 1, b"late").err(),
+        append(store, &mut fx, 1, &weight_set("late")).err(),
         Some(Refusal::KeyLocked)
     );
     let late = SubjectDataAppendV1 {
         timeline_id: fx.timeline,
         epoch: 1,
         signing: &fx.owner,
-        weights: b"late",
+        weights: &weight_set("late"),
     };
     assert_eq!(
         append_subject_preference_weights(store, &mut retained, &mut fx.nonces, &late).err(),
@@ -1034,7 +1125,7 @@ fn confirmed_destruction_redacts_and_retries_idempotently_in_both_adapters() -> 
 
 fn exercise_erasure_boundary<S: Adapter>(store: &mut S, unbound: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    append(store, &mut fx, 1, b"weights")?;
+    append(store, &mut fx, 1, &weight_set("weights"))?;
 
     // A fail-closed containment gate refuses the read, and a store with no
     // registry has no active key.
@@ -1047,7 +1138,7 @@ fn exercise_erasure_boundary<S: Adapter>(store: &mut S, unbound: &mut S) -> Test
         timeline_id: fx.timeline,
         epoch: 1,
         signing: &fx.owner,
-        weights: b"weights",
+        weights: &weight_set("weights"),
     };
     assert_eq!(
         append_subject_preference_weights(unbound, &mut fx.keys, &mut fx.nonces, &unregistered)
@@ -1062,7 +1153,10 @@ fn exercise_erasure_boundary<S: Adapter>(store: &mut S, unbound: &mut S) -> Test
         refused(SubjectFieldOwnerReadErrorV1::ReadUnavailableBeforeDelivery)
     );
     // Once the Timeline is access-frozen, nothing is decrypted or delivered.
-    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
+    assert_eq!(
+        read(store, &fx.keys, fx.timeline),
+        present(&weight_set("weights"))
+    );
     fx.gate.freeze_timeline_for_test(fx.timeline);
     assert_eq!(
         read(store, &fx.keys, fx.timeline),
@@ -1114,7 +1208,7 @@ fn assert_no_private_bytes(bytes: &[u8], fx: &Fixture, weights: &[u8]) {
 
 fn exercise_private_bytes<S: Adapter>(store: &mut S) -> TestResult {
     let mut fx = fixture(store)?;
-    let weights: [u8; 48] = pattern(0xc0);
+    let weights = weight_set("private-dimension-c0ffe");
     let event = append(store, &mut fx, 1, &weights)?;
     assert_eq!(read(store, &fx.keys, fx.timeline), present(&weights));
     let visible = core_visible_bytes(store, &fx)?;
@@ -1136,7 +1230,7 @@ fn exercise_wrong_role<S: Adapter>(store: &mut S) -> TestResult {
     // The same owner, epoch and root fingerprint under another encryption role.
     let mut fx = fixture_with_role(store, KeyRoleV1::ExportRecipientEncryption)?;
     assert_eq!(
-        append(store, &mut fx, 1, b"weights").err(),
+        append(store, &mut fx, 1, &weight_set("weights")).err(),
         Some(Refusal::KeyNotActive)
     );
     let request = destruction_request(&fx, 7);
@@ -1162,12 +1256,12 @@ fn unreadable_sqlite_registry_is_unavailable_rather_than_inactive() -> TestResul
     let path = path.to_str().ok_or("temporary path is not UTF-8")?;
     let mut store = SqliteStore::open(path)?;
     let mut fx = fixture(&mut store)?;
-    append(&mut store, &mut fx, 1, b"weights")?;
+    append(&mut store, &mut fx, 1, &weight_set("weights"))?;
     let changed = rusqlite::Connection::open(path)?
         .execute("UPDATE key_registry SET state_cbor = x'ff'", [])?;
     assert_eq!(changed, 1);
     assert_eq!(
-        append(&mut store, &mut fx, 1, b"late").err(),
+        append(&mut store, &mut fx, 1, &weight_set("late")).err(),
         Some(Refusal::RegistryUnavailable)
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 2]);
@@ -1189,7 +1283,7 @@ fn reopened_sqlite_store_redacts_and_never_held_private_bytes() -> TestResult {
     let path = path.to_str().ok_or("temporary path is not UTF-8")?;
     let mut store = SqliteStore::open(path)?;
     let mut fx = fixture(&mut store)?;
-    let weights: [u8; 48] = pattern(0xc0);
+    let weights = weight_set("private-dimension-c0ffe");
     let event = append(&mut store, &mut fx, 1, &weights)?;
     assert_eq!(read(&mut store, &fx.keys, fx.timeline), present(&weights));
 

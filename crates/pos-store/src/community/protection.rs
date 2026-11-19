@@ -163,9 +163,8 @@ impl CommunityArtifactProtectorV1 {
         &self.cohort
     }
 
-    /// Authenticate one COE1 under this suboperation's key, for tests that
-    /// check a protected record's exact plaintext.
-    #[cfg(test)]
+    /// Authenticate one COE1 under this suboperation's key. The caller must
+    /// check that the envelope's header binds this key's intent.
     pub(super) fn open_envelope(&self, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         self.key.open_envelope(envelope)
     }
@@ -228,6 +227,39 @@ impl CommunityArtifactProtectorV1 {
             })
     }
 
+    /// Protect `plaintext` with a CAR1 that claims `claimed` and, when
+    /// `fresh_envelope`, the address of a second envelope of the same
+    /// plaintext: a record whose proof does not bind its content, for the
+    /// extractor's CAR1 checks.
+    #[cfg(test)]
+    pub(super) fn protect_with_mismatched_proof(
+        &mut self,
+        kind: CommunityArtifactKindV1,
+        plaintext: &[u8],
+        claimed: &[u8],
+        fresh_envelope: bool,
+        evidence: CommunityRecordEvidenceV1<'_>,
+    ) -> Result<CommunityProtectedRecordV1, Error> {
+        self.header(kind).and_then(|header| {
+            let identity = header.key_identity();
+            self.key
+                .seal_envelope(header, plaintext)
+                .and_then(|content| {
+                    let claimed_content = if fresh_envelope {
+                        self.header(kind)
+                            .and_then(|header| self.key.seal_envelope(header, plaintext))
+                    } else {
+                        Ok(content.clone())
+                    };
+                    claimed_content
+                        .and_then(|claimed_content| {
+                            self.seal_proof(kind, claimed, &claimed_content, evidence)
+                        })
+                        .and_then(|proof| self.object(&content, &proof, evidence, identity))
+                })
+        })
+    }
+
     fn header(&self, kind: CommunityArtifactKindV1) -> Result<CommunityArtifactHeaderV1, Error> {
         CommunityArtifactHeaderV1::new(CommunityArtifactHeaderInputV1 {
             timeline: self.cohort.timeline,
@@ -287,39 +319,53 @@ impl CommunityArtifactProtectorV1 {
         })
     }
 
-    /// The ARD1 fields of ADR-128 §3. Optionality and the transition rule
-    /// follow the record's purpose (owner decision on #560, 2026-11-16):
-    /// `Required` for `ExecutionState` and `LifecycleControl`, `Optional` for
-    /// `PresentationTrace` and `ReplayEvidence`, and `Remove` for all four.
-    /// The community extractor must check the same mapping.
+    /// The ARD1 fields of ADR-128 §3, under this suboperation's key.
     fn registration(
         &self,
         object: &[u8],
         children: &[ArtifactChildEdgeV1],
         identity: KeyIdentityV1,
     ) -> Result<ArtifactRegistrationV1, Error> {
-        let class = artifact_class(self.cohort.purpose);
-        community_catalogue_owner_reference_v1(self.cohort.timeline, self.cohort.generation)
-            .and_then(|owner_reference| {
-                ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
-                    artifact_class: class,
-                    artifact_digest: ArtifactRegistrationV1::artifact_digest(class, object),
-                    owner_reference,
-                    data_class: ArtifactDataClassV1::PrivateSubjectData,
-                    optionality: optionality(self.cohort.purpose),
-                    transition_rule: ArtifactTransitionRuleV1::Remove,
-                    required_key_roles: vec![KeyRoleV1::CommunityArtifactEncryption],
-                    key_dependencies: vec![ArtifactKeyDependencyV1 {
-                        identity,
-                        material_digest: self.key.intent().as_input().material_fingerprint,
-                        private_material_required: true,
-                    }],
-                    child_artifacts: children.to_vec(),
-                })
-                .ok()
-                .ok_or(Error::InvalidBinding)
-            })
+        derive_registration(self.key.intent(), object, children, identity)
     }
+}
+
+/// The exact ARD1 of one COW1 protected under `intent`'s key (ADR-128 §3).
+///
+/// Optionality and the transition rule follow the record's purpose (owner
+/// decision on #560, note 22649): `Required` for `ExecutionState` and
+/// `LifecycleControl`, `Optional` for `PresentationTrace` and
+/// `ReplayEvidence`, and `Remove` for all four. The protector derives each
+/// ARD1 here and the community extractor re-derives and compares it.
+pub(super) fn derive_registration(
+    intent: &CommunityKeyIntentV1,
+    object: &[u8],
+    children: &[ArtifactChildEdgeV1],
+    identity: KeyIdentityV1,
+) -> Result<ArtifactRegistrationV1, Error> {
+    let intent = intent.as_input();
+    let class = artifact_class(intent.purpose);
+    community_catalogue_owner_reference_v1(intent.timeline, intent.generation).and_then(
+        |owner_reference| {
+            ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+                artifact_class: class,
+                artifact_digest: ArtifactRegistrationV1::artifact_digest(class, object),
+                owner_reference,
+                data_class: ArtifactDataClassV1::PrivateSubjectData,
+                optionality: optionality(intent.purpose),
+                transition_rule: ArtifactTransitionRuleV1::Remove,
+                required_key_roles: vec![KeyRoleV1::CommunityArtifactEncryption],
+                key_dependencies: vec![ArtifactKeyDependencyV1 {
+                    identity,
+                    material_digest: intent.material_fingerprint,
+                    private_material_required: true,
+                }],
+                child_artifacts: children.to_vec(),
+            })
+            .ok()
+            .ok_or(Error::InvalidBinding)
+        },
+    )
 }
 
 /// One protected record: the exact COW1, its address and its unpublished
@@ -334,6 +380,25 @@ pub struct CommunityProtectedRecordV1 {
 }
 
 impl CommunityProtectedRecordV1 {
+    /// A record the community extractor authenticated and re-derived.
+    pub(super) const fn from_parts(
+        object: Zeroizing<Vec<u8>>,
+        object_address: Hash,
+        registration: ArtifactRegistrationV1,
+        owner_binding_digest: Hash,
+        scope_cover_digest: Hash,
+        evidence_not_after_micros: u64,
+    ) -> Self {
+        Self {
+            object,
+            object_address,
+            registration,
+            owner_binding_digest,
+            scope_cover_digest,
+            evidence_not_after_micros,
+        }
+    }
+
     /// The exact canonical COW1 bytes.
     #[must_use]
     pub fn object(&self) -> &[u8] {
