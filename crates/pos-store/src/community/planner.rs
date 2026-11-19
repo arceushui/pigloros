@@ -29,16 +29,24 @@ use pos_core::community_lifecycle::{
     CommunityScopeMembersV1, CommunitySelectionV1, CommunityTypedInputRefV1,
     CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
+use pos_core::community_lifecycle::{
+    CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyIntentV1, CommunityKeyStateV1,
+    CommunityKeyViewRowV1, CommunityPassFrontierV1, CommunityTrustViewRowV1,
+};
 use pos_core::RecordedDependencyClassV1;
 use pos_core::{AuthorityTrustRootSealV1, Hash, TimelineId};
 use zeroize::Zeroizing;
 
+use super::lifecycle_authority::CommunityLifecycleAuthorityV1;
 use super::lifecycle_authority::{
     CommunityAdministrativeActionV1, CommunityAdministrativeOperationV1,
     CommunityAdministrativeRequestV1, CommunityAuthorityAdmissionV1,
 };
 use super::native_graph::member_binding_ref;
 use super::private_hash::scope_set_digest;
+use super::store_domain::CommunityStoreDomainV1;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 
 /// The fixed CIS1 encoding maximum, a CBQ1 byte term.
 const CIS1_BYTES: u64 = 1024;
@@ -121,6 +129,33 @@ impl CommunityInitializationBindingsV1 {
     #[must_use]
     pub fn member_binding_digests(&self) -> impl ExactSizeIterator<Item = Hash> + '_ {
         self.members.iter().map(|(_, digest)| *digest)
+    }
+}
+
+/// The CAV1 current view of one planned initialization.
+pub struct CommunityInitializationViewV1 {
+    view: Zeroizing<Vec<u8>>,
+    view_digest: Hash,
+    inventory_generation: u64,
+}
+
+impl CommunityInitializationViewV1 {
+    /// The canonical CAV1. It is transient: it need not be retained.
+    #[must_use]
+    pub fn view(&self) -> &[u8] {
+        &self.view
+    }
+
+    /// `H(CAV1)`, CAU1's `current_premise_digest`.
+    #[must_use]
+    pub const fn view_digest(&self) -> Hash {
+        self.view_digest
+    }
+
+    /// The inventory generation the view read (G5).
+    #[must_use]
+    pub const fn inventory_generation(&self) -> u64 {
+        self.inventory_generation
     }
 }
 
@@ -599,5 +634,167 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                 provenance: provenance.to_canonical_cbor(),
             })
         })
+    }
+
+    /// The CAV1 this initialization reads inside its guard (ADR-129 §3,
+    /// R6.5, R6.7).
+    ///
+    /// A code-0 initialize reads no selected head, so the frontier is
+    /// `[0]` and the head ref is null; its scope set is empty, so it has no
+    /// scope rows. The other rows are read now from `domain`:
+    /// - one authority row per distinct chain row of `decisions`, the
+    ///   call's `Active` decisions;
+    /// - one trust row per distinct `(CAP1 trust scope, CNT1 Plugin ID)` of
+    ///   the roster, from the domain's own Plugin trust registry;
+    /// - one key row per key in `keys`, every key the operation read or
+    ///   created before CAU1: the metadata CKP1 and the `ExecutionState`
+    ///   cohort key (owner decision 3, 2026-11-19), all `Available`;
+    /// - the domain clock's latch and the inventory generation (G5).
+    ///
+    /// Trust rows map an absent floor or UTC second to 0 (owner decision,
+    /// 2026-11-19).
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for another domain, a decision without
+    /// a leaf or with an unloadable chain, a missing trust scope, any
+    /// registry error, a negative trusted UTC second and a missing clock
+    /// latch. Only once every row is read, `AdmissionDenied` when a member's
+    /// Plugin has no active release or its active PMF1 or release differs
+    /// from the member's (R6.5(4)). Codec refusals of the assembled view
+    /// pass through.
+    #[cfg(target_os = "linux")]
+    pub fn current_view<D: CommunityStoreDomainV1>(
+        &self,
+        domain: &D,
+        authority: &CommunityLifecycleAuthorityV1,
+        generation: [u8; 16],
+        decisions: &[&CommunityAuthorityAdmissionV1],
+        keys: &[&CommunityKeyIntentV1],
+    ) -> Result<CommunityInitializationViewV1, Error> {
+        if domain.store_incarnation() != self.installation.store_incarnation {
+            return Err(Error::EvidenceUnavailable);
+        }
+        domain.clock_latch().and_then(|clock_latch| {
+            decisions
+                .iter()
+                .map(|decision| {
+                    decision
+                        .decision()
+                        .grant_id()
+                        .ok_or(Error::EvidenceUnavailable)
+                        .and_then(|leaf| domain.authority_row(leaf, decision.request()))
+                })
+                .collect::<Result<Vec<_>, Error>>()
+                .and_then(|mut authority_rows| {
+                    authority_rows.sort_by_key(|row| {
+                        (
+                            row.authority_timeline.inner().to_bytes(),
+                            row.head_seq,
+                            row.revocation_epoch,
+                        )
+                    });
+                    authority_rows.dedup();
+                    self.trust_rows(domain, authority.trust_scope())
+                        .and_then(|trust_rows| {
+                            let mut key_rows: Vec<CommunityKeyViewRowV1> = keys
+                                .iter()
+                                .map(|key| key.key_view_row(CommunityKeyStateV1::Available))
+                                .collect();
+                            key_rows.sort_by(|a, b| {
+                                (a.owner.as_bytes(), a.role.code(), a.epoch).cmp(&(
+                                    b.owner.as_bytes(),
+                                    b.role.code(),
+                                    b.epoch,
+                                ))
+                            });
+                            let inventory_generation = domain.inventory_generation();
+                            CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
+                                store_incarnation: self.installation.store_incarnation,
+                                timeline: self.form.timeline,
+                                generation,
+                                inventory_generation,
+                                frontier: CommunityPassFrontierV1::Initial,
+                                selected_head: None,
+                                scope_rows: vec![],
+                                authority_rows,
+                                trust_rows,
+                                key_rows,
+                                clock_latch,
+                            })
+                            .map(|view| {
+                                CommunityInitializationViewV1 {
+                                    view_digest: view.digest(),
+                                    view: view.to_canonical_cbor(),
+                                    inventory_generation,
+                                }
+                            })
+                        })
+                })
+        })
+    }
+
+    /// One trust row per distinct roster Plugin ID under `scope`: every row
+    /// is read before any denial is judged, so a 12 always wins over a 10.
+    #[cfg(target_os = "linux")]
+    fn trust_rows<D: CommunityStoreDomainV1>(
+        &self,
+        domain: &D,
+        scope: &str,
+    ) -> Result<Vec<CommunityTrustViewRowV1>, Error> {
+        let roster = self.installation.profile.as_input().roster;
+        let plugins: BTreeSet<&str> = roster
+            .iter()
+            .map(|row| row.implementation().plugin_id())
+            .collect();
+        plugins
+            .iter()
+            .map(|plugin_id| {
+                domain
+                    .plugin_trust(scope, plugin_id)
+                    .and_then(|(policy, active)| {
+                        u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
+                            .ok()
+                            .ok_or(Error::EvidenceUnavailable)
+                            .map(|utc| (*plugin_id, policy, active, utc))
+                    })
+            })
+            .collect::<Result<Vec<_>, Error>>()
+            .and_then(|reads| {
+                let admitted = |plugin_id: &str, pmf1: Hash, release: Hash| {
+                    reads.iter().any(|(id, _, active, _)| {
+                        *id == plugin_id
+                            && active.as_ref().is_some_and(|active| {
+                                active.pmf1_digest() == *pmf1.as_bytes()
+                                    && active.release_digest() == *release.as_bytes()
+                            })
+                    })
+                };
+                if roster.iter().all(|row| {
+                    let implementation = row.implementation();
+                    admitted(
+                        implementation.plugin_id(),
+                        row.digests()[0],
+                        implementation.release_digest(),
+                    )
+                }) {
+                    Ok(reads
+                        .into_iter()
+                        .filter_map(|(plugin_id, policy, active, utc)| {
+                            active.map(|active| CommunityTrustViewRowV1 {
+                                scope: scope.to_owned(),
+                                plugin_id: plugin_id.to_owned(),
+                                policy_digest: Hash::from_bytes(policy.tps1_digest()),
+                                policy_floor: policy.ptr1_floor().map_or(0, |(floor, _)| floor),
+                                release_floor: policy.prv1_floor().map_or(0, |(floor, _)| floor),
+                                highest_trusted_utc_second: utc,
+                                active_manifest_digest: Hash::from_bytes(active.pmf1_digest()),
+                                active_release_digest: Hash::from_bytes(active.release_digest()),
+                            })
+                        })
+                        .collect())
+                } else {
+                    Err(Error::AdmissionDenied)
+                }
+            })
     }
 }

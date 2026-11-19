@@ -17,7 +17,7 @@
 //! `SQLite` domain adds the second in Stack B (A5.6, R6.10 parity).
 
 use pos_core::community_lifecycle::{
-    CommunityAuthorityViewRowV1, CommunityLifecycleErrorV1 as Error,
+    CommunityAuthorityViewRowV1, CommunityClockLatchV1, CommunityLifecycleErrorV1 as Error,
 };
 use pos_core::trusted_clock::{
     reserve_trusted_clock, GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
@@ -29,6 +29,10 @@ use pos_core::{
 };
 
 use super::private_hash::authority_bindings_digest;
+#[cfg(target_os = "linux")]
+use crate::plugin_trust_registry::{
+    ActiveReleaseV1, PluginTrustPolicyRegistryV1, RetainedPolicyStateV1,
+};
 
 use super::memory_domain::MemoryCommunityDomainV1;
 
@@ -69,6 +73,28 @@ pub trait CommunityStoreDomainV1 {
     /// committed inventory effect, read into CAU1 and compared-and-swapped
     /// with CSI1 on commit.
     fn inventory_generation(&self) -> u64;
+
+    /// The CAV1 `clock_latch` of this domain's installed trusted clock: its
+    /// overrun count and whether it is latched (ADR-129 §3).
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` when no latch row is committed yet or
+    /// the row is out of range.
+    fn clock_latch(&self) -> Result<CommunityClockLatchV1, Error>;
+
+    /// The Plugin trust state of `(scope, plugin_id)` in this domain's own
+    /// `PluginTrustPolicyRegistryV1` (R6.5(1)): the retained policy state
+    /// and the active release, if any.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for a missing scope or any registry
+    /// error (R6.5(4)).
+    #[cfg(target_os = "linux")]
+    fn plugin_trust(
+        &self,
+        scope: &str,
+        plugin_id: &str,
+    ) -> Result<(RetainedPolicyStateV1, Option<ActiveReleaseV1>), Error>;
 
     /// The CAV1 authority row of the chain `leaf_grant_id` names, read now
     /// from this domain's own authority store (ADR-129 §3, R6.7).
@@ -149,5 +175,34 @@ impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
 
     fn inventory_generation(&self) -> u64 {
         self.inventory_generation
+    }
+
+    fn clock_latch(&self) -> Result<CommunityClockLatchV1, Error> {
+        self.clock
+            .rows()
+            .overrun_latch
+            .first()
+            .and_then(|row| {
+                u64::try_from(row.overrun_count)
+                    .ok()
+                    .map(|overrun_count| CommunityClockLatchV1 {
+                        overrun_count,
+                        latched: row.latched != 0,
+                    })
+            })
+            .ok_or(Error::EvidenceUnavailable)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn plugin_trust(
+        &self,
+        scope: &str,
+        plugin_id: &str,
+    ) -> Result<(RetainedPolicyStateV1, Option<ActiveReleaseV1>), Error> {
+        self.store
+            .retained_policy_state(scope)
+            .ok()
+            .zip(self.store.active_release(scope, plugin_id).ok())
+            .ok_or(Error::EvidenceUnavailable)
     }
 }

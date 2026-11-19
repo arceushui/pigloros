@@ -377,6 +377,11 @@ impl CommunityLifecycleAuthorityV1 {
         })
     }
 
+    /// The CAP1-pinned Plugin trust scope of every CAV1 trust row (D9).
+    pub(super) fn trust_scope(&self) -> &str {
+        &self.catalogue.as_input().trust_scope
+    }
+
     /// Authenticate one administrative call from its one FAE1 (R6.2(3)).
     ///
     /// The FAE1 must decode canonically, verify under the installed FAP1,
