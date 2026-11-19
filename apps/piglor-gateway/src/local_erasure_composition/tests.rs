@@ -7,9 +7,8 @@ use std::time::Duration;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use pos_core::{
-    local_erasure_bundle_signing_message_v1, EntityId, ErasureHostErrorV1, ErasureLifecycleV1,
-    ErasureReferenceV1, ErasureScopeV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    OwnerIdV1, PrincipalRefV1,
+    local_erasure_bundle_signing_message_v1, EntityId, ErasureLifecycleV1, ErasureReferenceV1,
+    ErasureScopeV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1, OwnerIdV1, PrincipalRefV1,
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
@@ -183,6 +182,8 @@ fn submission() -> TestResult<LocalErasureSubmissionV1> {
         actor: actor()?,
         scope: ErasureScopeV1::PrivateSubjectData,
         idempotency_key_digest: ErasureReferenceV1::from_digest([0x11; 32]),
+        mode_profile: ErasureReferenceV1::from_digest([0x12; 32]),
+        binding_epoch: 1,
     })
 }
 
@@ -234,9 +235,7 @@ async fn without_the_flag_the_composition_stays_closed() -> TestResult {
         host.command_sender()?
             .submit_local_erasure(&submission()?)
             .err(),
-        Some(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::AuthorizationDenied
-        ))
+        Some(LocalErasureSubmitErrorV1::Unserved)
     );
     let started = erasure.start(&mut host);
     assert_eq!(started.sweep(), None);
@@ -517,6 +516,7 @@ fn submitted() -> TestResult<Submitted> {
         .command_sender()?
         .submit_local_erasure(&submission()?)
         .map_err(|error| format!("{error:?}"))?
+        .state
         .request();
     // A second subject's request beside it.
     host.command_sender()?
