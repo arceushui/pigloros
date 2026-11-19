@@ -209,7 +209,7 @@ fn report(what: &str, error: &impl std::fmt::Display) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs::{self, File};
-    use std::io::{Read as _, Write as _};
+    use std::io::Read as _;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::PathBuf;
 
