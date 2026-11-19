@@ -160,8 +160,10 @@ impl ErasureCommandSenderV1<'_> {
         else {
             return Ok(None);
         };
+        // The history holds the head and each predecessor, so the head's
+        // ordinal is one less than its length.
         let ordinal = reads.erasure_state_history(request)?.map_or(0, |history| {
-            u64::try_from(history.len()).unwrap_or(u64::MAX) - 1
+            u64::try_from(history.len().saturating_sub(1)).unwrap_or(u64::MAX)
         });
         let progress = self.recorded_local_progress(request)?.unwrap_or_default();
         let admission = self

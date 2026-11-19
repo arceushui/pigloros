@@ -8085,6 +8085,29 @@ fn a_crash_left_admission_binds_the_resubmission() -> TestResult {
     Ok(())
 }
 
+/// A retained ELADM1 that does not decode may be the request's own, so the
+/// submission fails closed rather than retain a second one.
+#[test]
+fn an_undecodable_admission_fails_the_submission_closed() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut corrupt = Vec::new();
+    ciborium::into_writer(
+        &ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("ELADM1".to_owned()),
+            ciborium::value::Value::Integer(1.into()),
+        ]),
+        &mut corrupt,
+    )?;
+    store.retain(&[corrupt])?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    refused_without_retention(
+        &store,
+        &mut host,
+        &submission(1, ErasureScopeV1::PrivateSubjectData)?,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::RecoveryUnavailable),
+    )
+}
+
 /// A binding epoch of zero names no binding: the submission is refused and
 /// retains nothing.
 #[test]
