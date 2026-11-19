@@ -443,15 +443,52 @@ class AsanCiPolicyTests(unittest.TestCase):
                 {"needs": ["ci_change_scope", "preflight-gate"]}
             )
         )
-
-    def test_archive_build_must_require_core_gate_success(self) -> None:
-        def drop_core_gate_condition(workflow: dict) -> None:
-            job = workflow["jobs"]["asan-build"]
-            job["if"] = job["if"].replace(
-                "needs.core-gate.result == 'success' && ", ""
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-build"].update(
+                {"needs": ["ci_change_scope", "core-gate"]}
             )
+        )
+        for dropped in ("coverage", "test-shards", "trunk-pr"):
+            with self.subTest(dropped=dropped):
+                self.assert_rejected(
+                    lambda workflow, dropped=dropped: workflow["jobs"]["asan-build"].update(
+                        {"needs": [need for need in workflow["jobs"]["asan-build"]["needs"]
+                                   if need != dropped]}
+                    )
+                )
 
-        self.assert_rejected(drop_core_gate_condition)
+    def test_archive_build_must_require_the_core_pass_rule(self) -> None:
+        for check in (
+            "needs.clippy.result == 'success' && ",
+            "needs.ci_change_scope.result == 'success' && ",
+        ):
+            def drop_core_condition(workflow: dict, check: str = check) -> None:
+                job = workflow["jobs"]["asan-build"]
+                job["if"] = job["if"].replace(check, "", 1)
+
+            with self.subTest(check=check):
+                self.assert_rejected(drop_core_condition)
+
+    def test_shards_must_wait_for_the_complete_standard_set(self) -> None:
+        for dropped in ("codeql", "static-launcher", "coverage"):
+            with self.subTest(dropped=dropped):
+                self.assert_rejected(
+                    lambda workflow, dropped=dropped: workflow["jobs"]["asan"].update(
+                        {"needs": [need for need in workflow["jobs"]["asan"]["needs"]
+                                   if need != dropped]}
+                    )
+                )
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"].update(
+                {"needs": ["ci_change_scope", "standard-gate", "asan-build"]}
+            )
+        )
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"].update(
+                {"if": workflow["jobs"]["asan"]["if"].replace(
+                    "needs.codeql.result == 'success' && ", "")}
+            )
+        )
 
     def test_archive_build_requires_instrumented_complete_scope(self) -> None:
         for fragment in (
@@ -504,6 +541,35 @@ class AsanCiPolicyTests(unittest.TestCase):
             download["with"]["name"] = "asan-nextest-archive-other"
 
         self.assert_rejected(rename_download)
+
+    def archive_download_steps(self, workflow: dict) -> list[dict]:
+        names = ("Download ASan test archive", "Retry ASan test archive download")
+        steps = workflow["jobs"]["asan"]["steps"]
+        return [next(step for step in steps if step.get("name") == name) for name in names]
+
+    def test_rejects_archive_download_retry_that_cannot_fail(self) -> None:
+        def ignore_retry(workflow: dict) -> None:
+            self.archive_download_steps(workflow)[1]["continue-on-error"] = True
+
+        self.assert_rejected(ignore_retry)
+
+    def test_rejects_dropped_archive_download_retry(self) -> None:
+        def drop_retry(workflow: dict) -> None:
+            steps = workflow["jobs"]["asan"]["steps"]
+            steps.remove(self.archive_download_steps(workflow)[1])
+
+        self.assert_rejected(drop_retry)
+
+    def test_rejects_unconditional_archive_clear(self) -> None:
+        def always_clear(workflow: dict) -> None:
+            clear = next(
+                step
+                for step in workflow["jobs"]["asan"]["steps"]
+                if step.get("name") == "Clear the failed ASan archive download"
+            )
+            del clear["if"]
+
+        self.assert_rejected(always_clear)
 
     def test_rejects_ignored_missing_archive_upload(self) -> None:
         def ignore_missing_archive(workflow: dict) -> None:
