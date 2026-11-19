@@ -177,6 +177,7 @@ impl CommunityAssembledRecordV1 {
 
 /// The complete initial graph of one generation, ready for the extractor.
 pub struct CommunityInitializationGraphV1 {
+    request_digest: Hash,
     records: Vec<CommunityAssembledRecordV1>,
     member_progress: Vec<Zeroizing<Vec<u8>>>,
     host_progress: Vec<u8>,
@@ -267,6 +268,12 @@ impl CommunityInitializationGraphV1 {
                         .and_then(|members| finish(&input, context, &plans, members))
                 })
         })
+    }
+
+    /// `H(CGI1)` of the request this graph was minted from.
+    #[must_use]
+    pub const fn request_digest(&self) -> Hash {
+        self.request_digest
     }
 
     /// Every protected record: per slot, CSC1, CIS1, CSR1 and the
@@ -726,6 +733,7 @@ fn finish(
                             evidence_not_after_micros: context.evidence_not_after_micros,
                         })
                         .map(|admission| CommunityInitializationGraphV1 {
+                            request_digest: context.request_digest,
                             records,
                             member_progress,
                             host_progress: host.to_canonical_cbor(),

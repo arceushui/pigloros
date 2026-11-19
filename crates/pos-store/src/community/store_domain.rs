@@ -17,7 +17,8 @@
 //! `SQLite` domain adds the second in Stack B (A5.6, R6.10 parity).
 
 use pos_core::community_lifecycle::{
-    CommunityAuthorityViewRowV1, CommunityClockLatchV1, CommunityLifecycleErrorV1 as Error,
+    community_authority_bindings_digest_v1, CommunityAuthorityViewRowV1, CommunityClockLatchV1,
+    CommunityLifecycleErrorV1 as Error,
 };
 use pos_core::trusted_clock::{
     reserve_trusted_clock, GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
@@ -28,7 +29,6 @@ use pos_core::{
     PersistedAuthorityV1,
 };
 
-use super::private_hash::authority_bindings_digest;
 #[cfg(target_os = "linux")]
 use crate::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustPolicyRegistryV1, RetainedPolicyStateV1,
@@ -82,19 +82,27 @@ pub trait CommunityStoreDomainV1 {
     /// the row is out of range.
     fn clock_latch(&self) -> Result<CommunityClockLatchV1, Error>;
 
-    /// The Plugin trust state of `(scope, plugin_id)` in this domain's own
-    /// `PluginTrustPolicyRegistryV1` (R6.5(1)): the retained policy state
-    /// and the active release, if any.
+    /// The retained policy state of `scope` in this domain's own
+    /// `PluginTrustPolicyRegistryV1` (R6.5(1)).
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a missing scope or any registry
     /// error (R6.5(4)).
     #[cfg(target_os = "linux")]
-    fn plugin_trust(
+    fn plugin_trust_policy(&self, scope: &str) -> Result<RetainedPolicyStateV1, Error>;
+
+    /// The active release of `(scope, plugin_id)` in the same registry, if
+    /// any.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for a missing scope or any registry
+    /// error (R6.5(4)).
+    #[cfg(target_os = "linux")]
+    fn active_release(
         &self,
         scope: &str,
         plugin_id: &str,
-    ) -> Result<(RetainedPolicyStateV1, Option<ActiveReleaseV1>), Error>;
+    ) -> Result<Option<ActiveReleaseV1>, Error>;
 
     /// The CAV1 authority row of the chain `leaf_grant_id` names, read now
     /// from this domain's own authority store (ADR-129 §3, R6.7).
@@ -103,9 +111,13 @@ pub trait CommunityStoreDomainV1 {
     /// persisted ones read with the chain. The registry digest and policy
     /// revisions are the CAP1-pinned values the evaluated request carried.
     /// The binding digest covers the chain's current, re-stamped CPG1
-    /// binding digests, root to leaf, and the BLAKE3 of each persisted
-    /// canonical CRF1, in persisted order (owner decision on #560,
-    /// 2026-11-19).
+    /// binding digests, root to leaf (owner decision 12), and each persisted
+    /// CRF1's digest in persisted Timeline order. A CRF1 digest is the
+    /// BLAKE3 of its canonical CRF1 bytes (owner decision 14), the record
+    /// identity, as a CPG1 binding digest is the BLAKE3 of the canonical
+    /// CPG1. It is not `CapabilityRevocationV1`'s private field-wise
+    /// binding digest: that one binds a revocation permit to the
+    /// persistence host's attestation and is no record identity.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for an unloadable chain or record.
@@ -133,8 +145,8 @@ pub trait CommunityStoreDomainV1 {
                         .collect::<Result<Vec<_>, _>>()
                         .ok(),
                 )
-                .and_then(|(grant_digests, revocation_digests)| {
-                    authority_bindings_digest(&grant_digests, &revocation_digests)
+                .map(|(grant_digests, revocation_digests)| {
+                    community_authority_bindings_digest_v1(&grant_digests, &revocation_digests)
                 })
                 .zip(grants.last())
                 .map(|(binding_digest, leaf)| CommunityAuthorityViewRowV1 {
@@ -194,15 +206,21 @@ impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
     }
 
     #[cfg(target_os = "linux")]
-    fn plugin_trust(
-        &self,
-        scope: &str,
-        plugin_id: &str,
-    ) -> Result<(RetainedPolicyStateV1, Option<ActiveReleaseV1>), Error> {
+    fn plugin_trust_policy(&self, scope: &str) -> Result<RetainedPolicyStateV1, Error> {
         self.store
             .retained_policy_state(scope)
             .ok()
-            .zip(self.store.active_release(scope, plugin_id).ok())
+            .ok_or(Error::EvidenceUnavailable)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn active_release(
+        &self,
+        scope: &str,
+        plugin_id: &str,
+    ) -> Result<Option<ActiveReleaseV1>, Error> {
+        PluginTrustPolicyRegistryV1::active_release(&self.store, scope, plugin_id)
+            .ok()
             .ok_or(Error::EvidenceUnavailable)
     }
 }

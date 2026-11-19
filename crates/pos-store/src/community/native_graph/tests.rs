@@ -424,6 +424,7 @@ fn reference(node_ordinal: u32, node: &[u8]) -> CommunityNativeNodeReferenceV1 {
 fn records_decrypt_to_the_decided_initial_graph() -> TestResult {
     let assembled = assemble(PRODUCER)?;
     let graph = assembled.graph?;
+    assert_eq!(graph.request_digest(), assembled.request_digest);
     // Five records per member, two credits each.
     assert_eq!(assembled.plaintexts.len(), 10);
     assert_eq!(assembled.burned, 20);

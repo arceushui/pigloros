@@ -794,6 +794,7 @@ fn an_authorized_initialize_binds_the_exact_request_and_refs() -> TestResult {
     assert!(decision.is_allowed());
     assert_eq!(decision.request_digest(), expected.binding_digest());
     assert_eq!(decision.grant_id(), Some(leaf.grant_id()));
+    assert_eq!(admission.leaf_grant_id(), leaf.grant_id());
     assert_eq!(decision.actor_entity_id(), actor());
 
     let aud = decision.encode()?;

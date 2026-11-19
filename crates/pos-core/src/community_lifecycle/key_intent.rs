@@ -222,8 +222,12 @@ impl CommunityKeyIntentV1 {
     }
 
     /// This key's CAV1 key row in `state` (ADR-129 §3): its role7 owner
-    /// text, epoch 1, material fingerprint and intent digest. The state is
-    /// the one the qualified owner read from its own vault.
+    /// text, epoch 1, material fingerprint and intent digest.
+    ///
+    /// The state is the one the qualified owner read from its own vault.
+    /// Until key destruction lands, the initialize planner is passed only
+    /// keys its caller read as `Available` and marks them so (owner
+    /// decision on #560, 2026-11-19).
     #[must_use]
     pub fn key_view_row(&self, state: CommunityKeyStateV1) -> CommunityKeyViewRowV1 {
         CommunityKeyViewRowV1 {

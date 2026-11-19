@@ -74,11 +74,11 @@ pub use copy_inventory::{
     CommunityCopyStateV1,
 };
 pub use current_view::{
-    CommunityAuthorityViewRowV1, CommunityClockLatchV1, CommunityCurrentViewInputV1,
-    CommunityCurrentViewV1, CommunityKeyStateV1, CommunityKeyViewRowV1, CommunityScopeStateV1,
-    CommunityScopeViewRowV1, CommunityTrustViewRowV1, MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1,
-    MAX_COMMUNITY_VIEW_KEY_ROWS_V1, MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1,
-    MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
+    community_authority_bindings_digest_v1, CommunityAuthorityViewRowV1, CommunityClockLatchV1,
+    CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyStateV1,
+    CommunityKeyViewRowV1, CommunityScopeStateV1, CommunityScopeViewRowV1, CommunityTrustViewRowV1,
+    MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1, MAX_COMMUNITY_VIEW_KEY_ROWS_V1,
+    MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1, MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
 };
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,

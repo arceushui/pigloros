@@ -16,6 +16,8 @@
 //! It reads no domain and commits nothing: every backend's initialize entry
 //! uses the same planner, so they mint byte-identical records (R6.5).
 
+#[cfg(target_os = "linux")]
+use crate::plugin_trust_registry::{ActiveReleaseV1, RetainedPolicyStateV1};
 use pos_core::community_lifecycle::{
     community_initializer_set_ref_v1, CommunityArtifactOperationV1, CommunityBudgetQuoteV1,
     CommunityContentReferenceV1, CommunityDigestListV1, CommunityDueMemberBudgetV1,
@@ -36,8 +38,9 @@ use pos_core::community_lifecycle::{
 };
 #[cfg(target_os = "linux")]
 use pos_core::community_lifecycle::{
-    CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyIntentV1, CommunityKeyStateV1,
-    CommunityKeyViewRowV1, CommunityPassFrontierV1, CommunityTrustViewRowV1,
+    CommunityAuthorityViewRowV1, CommunityCurrentViewInputV1, CommunityCurrentViewV1,
+    CommunityKeyIntentV1, CommunityKeyStateV1, CommunityKeyViewRowV1, CommunityPassFrontierV1,
+    CommunityTrustViewRowV1,
 };
 use pos_core::RecordedDependencyClassV1;
 use pos_core::{AuthorityTrustRootSealV1, Hash, TimelineId};
@@ -145,7 +148,10 @@ impl CommunityInitializationBindingsV1 {
 pub struct CommunityInitializationViewV1 {
     view: Zeroizing<Vec<u8>>,
     view_digest: Hash,
+    timeline: TimelineId,
+    generation: [u8; 16],
     inventory_generation: u64,
+    decision_rows: Vec<CommunityDecisionRowV1>,
 }
 
 impl CommunityInitializationViewV1 {
@@ -175,10 +181,8 @@ pub struct CommunityInitializationEvidenceInputV1<'a> {
     pub call: &'a CommunityAuthorityCallV1,
     /// The planned CGI1, CSB1, CBQ1 and CPV1.
     pub records: &'a CommunityInitializationRecordsV1,
-    /// The CAV1 the call read.
+    /// The CAV1 the call read, with the decisions it read them for.
     pub view: &'a CommunityInitializationViewV1,
-    /// Every `Active` decision of the call, the administrative one included.
-    pub decisions: &'a [&'a CommunityAuthorityAdmissionV1],
     /// The protected initial graph.
     pub graph: &'a CommunityInitializationGraphV1,
 }
@@ -695,26 +699,31 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     /// A code-0 initialize reads no selected head, so the frontier is
     /// `[0]` and the head ref is null; its scope set is empty, so it has no
     /// scope rows. The other rows are read now from `domain`:
-    /// - one authority row per distinct chain row of `decisions`, the
-    ///   call's `Active` decisions;
+    /// - the domain clock's latch;
+    /// - one authority row per distinct chain of `decisions`, the call's
+    ///   `Active` decisions, each still current at its chain's head and
+    ///   epoch (A5.4);
     /// - one trust row per distinct `(CAP1 trust scope, CNT1 Plugin ID)` of
     ///   the roster, from the domain's own Plugin trust registry;
-    /// - one key row per key in `keys`, every key the operation read or
-    ///   created before CAU1: the metadata CKP1 and the `ExecutionState`
-    ///   cohort key (owner decision 3, 2026-11-19), all `Available`;
-    /// - the domain clock's latch and the inventory generation (G5).
+    /// - one key row per key in `keys`: every key the operation read or
+    ///   created before CAU1, the metadata CKP1 and the `ExecutionState`
+    ///   cohort key (owner decision 3). The caller passes only keys it read
+    ///   as `Available`, and every row says so (owner decision 15); reading
+    ///   a key's real state lands with key destruction;
+    /// - the inventory generation (G5).
     ///
-    /// Trust rows map an absent floor or UTC second to 0 (owner decision,
-    /// 2026-11-19).
+    /// The view also keeps the CAU1 decision rows of the same decisions, so
+    /// the two records cannot diverge.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` for another domain, a decision without
-    /// a leaf or with an unloadable chain, a missing trust scope, any
-    /// registry error, a negative trusted UTC second and a missing clock
-    /// latch. Only once every row is read, `AdmissionDenied` when a member's
-    /// Plugin has no active release or its active PMF1 or release differs
-    /// from the member's (R6.5(4)). Codec refusals of the assembled view
-    /// pass through.
+    /// Returns `EvidenceUnavailable` for another domain, a missing or
+    /// out-of-range clock latch, an unloadable chain, a decision whose
+    /// chain head or epoch has moved, a missing trust scope, any registry
+    /// error and a negative trusted UTC second. Only after every read,
+    /// `AdmissionDenied` for a member Plugin with no active release or
+    /// whose active PMF1 or release differs from the member's (R6.5(4)).
+    /// `InvalidBinding` for a repeated key or two different rows of one
+    /// chain coordinate.
     #[cfg(target_os = "linux")]
     pub fn current_view<D: CommunityStoreDomainV1>(
         &self,
@@ -728,66 +737,44 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             return Err(Error::EvidenceUnavailable);
         }
         domain.clock_latch().and_then(|clock_latch| {
-            decisions
-                .iter()
-                .map(|decision| {
-                    decision
-                        .decision()
-                        .grant_id()
-                        .ok_or(Error::EvidenceUnavailable)
-                        .and_then(|leaf| domain.authority_row(leaf, decision.request()))
-                })
-                .collect::<Result<Vec<_>, Error>>()
-                .and_then(|mut authority_rows| {
-                    authority_rows.sort_by_key(|row| {
-                        (
-                            row.authority_timeline.inner().to_bytes(),
-                            row.head_seq,
-                            row.revocation_epoch,
-                        )
-                    });
-                    authority_rows.dedup();
-                    self.trust_rows(domain, authority.trust_scope())
-                        .and_then(|trust_rows| {
-                            let mut key_rows: Vec<CommunityKeyViewRowV1> = keys
-                                .iter()
-                                .map(|key| key.key_view_row(CommunityKeyStateV1::Available))
-                                .collect();
-                            key_rows.sort_by(|a, b| {
-                                (a.owner.as_bytes(), a.role.code(), a.epoch).cmp(&(
-                                    b.owner.as_bytes(),
-                                    b.role.code(),
-                                    b.epoch,
-                                ))
-                            });
-                            let inventory_generation = domain.inventory_generation();
-                            CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
-                                store_incarnation: self.installation.store_incarnation,
-                                timeline: self.form.timeline,
-                                generation,
-                                inventory_generation,
-                                frontier: CommunityPassFrontierV1::Initial,
-                                selected_head: None,
-                                scope_rows: vec![],
-                                authority_rows,
-                                trust_rows,
-                                key_rows,
-                                clock_latch,
-                            })
-                            .map(|view| {
-                                CommunityInitializationViewV1 {
-                                    view_digest: view.digest(),
-                                    view: view.to_canonical_cbor(),
-                                    inventory_generation,
-                                }
-                            })
+            authority_rows(domain, decisions).and_then(|authority_rows| {
+                self.trust_rows(domain, authority.trust_scope())
+                    .and_then(|trust_rows| {
+                        let inventory_generation = domain.inventory_generation();
+                        CommunityCurrentViewV1::new(CommunityCurrentViewInputV1 {
+                            store_incarnation: self.installation.store_incarnation,
+                            timeline: self.form.timeline,
+                            generation,
+                            inventory_generation,
+                            frontier: CommunityPassFrontierV1::Initial,
+                            selected_head: None,
+                            scope_rows: vec![],
+                            authority_rows,
+                            trust_rows,
+                            key_rows: key_rows(keys),
+                            clock_latch,
                         })
-                })
+                        .map(|view| CommunityInitializationViewV1 {
+                            view_digest: view.digest(),
+                            view: view.to_canonical_cbor(),
+                            timeline: self.form.timeline,
+                            generation,
+                            inventory_generation,
+                            decision_rows: decision_rows(decisions),
+                        })
+                    })
+            })
         })
     }
 
-    /// One trust row per distinct roster Plugin ID under `scope`: every row
-    /// is read before any denial is judged, so a 12 always wins over a 10.
+    /// One trust row per distinct roster Plugin ID under `scope`.
+    ///
+    /// Every read happens before any denial is judged, so a 12 always wins
+    /// over a 10: the scope's policy (an absent floor or UTC second maps to
+    /// 0, a negative UTC second is 12; owner decision 10), then each
+    /// Plugin's active release. Then a Plugin with no active release, or
+    /// whose active PMF1 or release differs from one of its members', is
+    /// `AdmissionDenied` (owner decision 11).
     #[cfg(target_os = "linux")]
     fn trust_rows<D: CommunityStoreDomainV1>(
         &self,
@@ -799,71 +786,81 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             .iter()
             .map(|row| row.implementation().plugin_id())
             .collect();
-        plugins
-            .iter()
-            .map(|plugin_id| {
-                domain
-                    .plugin_trust(scope, plugin_id)
-                    .and_then(|(policy, active)| {
-                        u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
-                            .ok()
-                            .ok_or(Error::EvidenceUnavailable)
-                            .map(|utc| (*plugin_id, policy, active, utc))
-                    })
-            })
-            .collect::<Result<Vec<_>, Error>>()
-            .and_then(|reads| {
-                let admitted = |plugin_id: &str, pmf1: Hash, release: Hash| {
-                    reads.iter().any(|(id, _, active, _)| {
-                        *id == plugin_id
-                            && active.as_ref().is_some_and(|active| {
-                                active.pmf1_digest() == *pmf1.as_bytes()
-                                    && active.release_digest() == *release.as_bytes()
-                            })
-                    })
-                };
-                if roster.iter().all(|row| {
-                    let implementation = row.implementation();
-                    admitted(
-                        implementation.plugin_id(),
-                        row.digests()[0],
-                        implementation.release_digest(),
-                    )
-                }) {
-                    Ok(reads
-                        .into_iter()
-                        .filter_map(|(plugin_id, policy, active, utc)| {
-                            active.map(|active| CommunityTrustViewRowV1 {
-                                scope: scope.to_owned(),
-                                plugin_id: plugin_id.to_owned(),
-                                policy_digest: Hash::from_bytes(policy.tps1_digest()),
-                                policy_floor: policy.ptr1_floor().map_or(0, |(floor, _)| floor),
-                                release_floor: policy.prv1_floor().map_or(0, |(floor, _)| floor),
-                                highest_trusted_utc_second: utc,
-                                active_manifest_digest: Hash::from_bytes(active.pmf1_digest()),
-                                active_release_digest: Hash::from_bytes(active.release_digest()),
-                            })
+        domain.plugin_trust_policy(scope).and_then(|policy| {
+            u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
+                .ok()
+                .ok_or(Error::EvidenceUnavailable)
+                .and_then(|utc| {
+                    plugins
+                        .iter()
+                        .map(|plugin_id| {
+                            domain
+                                .active_release(scope, plugin_id)
+                                .map(|active| (*plugin_id, active))
                         })
-                        .collect())
-                } else {
-                    Err(Error::AdmissionDenied)
-                }
-            })
+                        .collect::<Result<Vec<_>, Error>>()
+                        .and_then(|actives| {
+                            actives
+                                .into_iter()
+                                .map(|(plugin_id, active)| {
+                                    self.trust_row(scope, plugin_id, &policy, utc, active)
+                                })
+                                .collect()
+                        })
+                })
+        })
+    }
+
+    /// One Plugin's trust row, once its active release admits every member
+    /// of that Plugin (owner decision 11).
+    #[cfg(target_os = "linux")]
+    fn trust_row(
+        &self,
+        scope: &str,
+        plugin_id: &str,
+        policy: &RetainedPolicyStateV1,
+        utc: u64,
+        active: Option<ActiveReleaseV1>,
+    ) -> Result<CommunityTrustViewRowV1, Error> {
+        let Some(active) = active else {
+            return Err(Error::AdmissionDenied);
+        };
+        let roster = self.installation.profile.as_input().roster;
+        let admitted = roster
+            .iter()
+            .filter(|row| row.implementation().plugin_id() == plugin_id)
+            .all(|row| {
+                active.pmf1_digest() == *row.digests()[0].as_bytes()
+                    && active.release_digest() == *row.implementation().release_digest().as_bytes()
+            });
+        if !admitted {
+            return Err(Error::AdmissionDenied);
+        }
+        Ok(CommunityTrustViewRowV1 {
+            scope: scope.to_owned(),
+            plugin_id: plugin_id.to_owned(),
+            policy_digest: Hash::from_bytes(policy.tps1_digest()),
+            policy_floor: policy.ptr1_floor().map_or(0, |(floor, _)| floor),
+            release_floor: policy.prv1_floor().map_or(0, |(floor, _)| floor),
+            highest_trusted_utc_second: utc,
+            active_manifest_digest: Hash::from_bytes(active.pmf1_digest()),
+            active_release_digest: Hash::from_bytes(active.release_digest()),
+        })
     }
 
     /// The CAU1 of this initialization (ADR-129 §3, R6.6, A5.3(4)).
     ///
     /// It binds the CGI1 of `input.records` as `input_identity`, every
     /// protected record of `input.graph` as an object row, the inventory
-    /// generation and `H(CAV1)` of `input.view`, one decision row per
-    /// distinct decision in `input.decisions`, the installed member
-    /// recipient (G6), `input.call`'s trusted-clock reservation and decision
-    /// bound (G1) and the CDP1 horizon. Rows are sorted.
+    /// generation, `H(CAV1)` and the decision rows of `input.view`, the
+    /// installed member recipient (G6), `input.call`'s trusted-clock
+    /// reservation and decision bound (G1) and the CDP1 horizon.
     ///
     /// # Errors
-    /// Returns `InvalidBinding` for a call of another request and when no
-    /// decision is the CGI1's administrative one (A5.3(4)). Codec refusals
-    /// of the assembled CAU1 pass through.
+    /// Returns `InvalidBinding` when the inputs do not belong together: a
+    /// call of another request, a graph of another CGI1, a view of another
+    /// Timeline or generation, or a view whose decisions lack the CGI1's
+    /// administrative one (A5.3(4)). Codec refusals pass through.
     pub fn authority_evidence(
         &self,
         authority: &CommunityLifecycleAuthorityV1,
@@ -874,89 +871,67 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             call,
             records,
             view,
-            decisions,
             graph,
         } = input;
-        CommunityInitializationRequestV1::from_canonical_cbor(records.request())
-            .map(|request| request.as_input().authorization_ref.digest)
-            .and_then(|administrative| {
-                if *call.request() == self.request
-                    && decisions
+        self.check_evidence(generation, input).and_then(|()| {
+            CommunityAuthorityEvidenceV1::new(CommunityAuthorityEvidenceInputV1 {
+                store_incarnation: self.installation.store_incarnation,
+                timeline: self.form.timeline,
+                generation,
+                operation: CommunityArtifactOperationV1::Initialization(self.form.operation_id),
+                input_identity: records.request_digest(),
+                object_bindings: object_rows(graph),
+                inventory_generation: view.inventory_generation(),
+                current_premise_digest: view.view_digest(),
+                decision_rows: view.decision_rows.clone(),
+                recipient_identity_digest: community_recipient_identity_digest_v1(
+                    authority.member_recipient(),
+                ),
+                clock_bound: CommunityClockBoundV1 {
+                    reservation_id: call.reservation_id(),
+                    reservation_sample_micros: call.at_time().as_micros(),
+                    decision_bound_micros: call.decision_bound().as_micros(),
+                },
+                evidence_not_after_micros: self
+                    .installation
+                    .profile
+                    .as_input()
+                    .retention
+                    .generation_not_after_micros,
+            })
+            .map(|evidence| CommunityInitializationAuthorityV1 {
+                evidence_digest: evidence.digest(),
+                evidence: evidence.to_canonical_cbor(),
+                inventory_generation: view.inventory_generation(),
+            })
+        })
+    }
+
+    /// The CAU1 inputs belong to this initialization and to each other.
+    fn check_evidence(
+        &self,
+        generation: [u8; 16],
+        input: CommunityInitializationEvidenceInputV1<'_>,
+    ) -> Result<(), Error> {
+        let view = input.view;
+        CommunityInitializationRequestV1::from_canonical_cbor(input.records.request()).and_then(
+            |request| {
+                let administrative = Hash::from_bytes(request.as_input().authorization_ref.digest);
+                if *input.call.request() == self.request
+                    && input.graph.request_digest() == input.records.request_digest()
+                    && view.timeline == self.form.timeline
+                    && view.generation == generation
+                    && view
+                        .decision_rows
                         .iter()
-                        .any(|decision| decision.authorization_ref().digest == administrative)
+                        .any(|row| row.decision_digest == administrative)
                 {
                     Ok(())
                 } else {
                     Err(Error::InvalidBinding)
                 }
-            })
-            .and_then(|()| {
-                let mut object_bindings: Vec<CommunityObjectBindingV1> = graph
-                    .records()
-                    .iter()
-                    .map(|record| {
-                        let protected = record.protected();
-                        CommunityObjectBindingV1 {
-                            object_address: protected.object_address(),
-                            artifact_digest: protected.registration().fields().artifact_digest,
-                            registration_address: protected.registration().address(),
-                        }
-                    })
-                    .collect();
-                object_bindings.sort_unstable();
-                let mut decision_rows: Vec<CommunityDecisionRowV1> = decisions
-                    .iter()
-                    .filter_map(|decision| {
-                        let request = decision.request();
-                        decision
-                            .decision()
-                            .grant_id()
-                            .map(|leaf_grant_id| CommunityDecisionRowV1 {
-                                decision_digest: Hash::from_bytes(
-                                    decision.authorization_ref().digest,
-                                ),
-                                request_digest: request.binding_digest(),
-                                leaf_grant_id,
-                                authority_timeline: request.authority_timeline(),
-                                head_seq: request.at_position().as_u64(),
-                                revocation_epoch: request.revocation_epoch(),
-                                policy_revision: request.capability_policy_revision(),
-                            })
-                    })
-                    .collect();
-                decision_rows.sort_unstable();
-                decision_rows.dedup();
-                CommunityAuthorityEvidenceV1::new(CommunityAuthorityEvidenceInputV1 {
-                    store_incarnation: self.installation.store_incarnation,
-                    timeline: self.form.timeline,
-                    generation,
-                    operation: CommunityArtifactOperationV1::Initialization(self.form.operation_id),
-                    input_identity: records.request_digest(),
-                    object_bindings,
-                    inventory_generation: view.inventory_generation(),
-                    current_premise_digest: view.view_digest(),
-                    decision_rows,
-                    recipient_identity_digest: community_recipient_identity_digest_v1(
-                        authority.member_recipient(),
-                    ),
-                    clock_bound: CommunityClockBoundV1 {
-                        reservation_id: call.reservation_id(),
-                        reservation_sample_micros: call.at_time().as_micros(),
-                        decision_bound_micros: call.decision_bound().as_micros(),
-                    },
-                    evidence_not_after_micros: self
-                        .installation
-                        .profile
-                        .as_input()
-                        .retention
-                        .generation_not_after_micros,
-                })
-                .map(|evidence| CommunityInitializationAuthorityV1 {
-                    evidence_digest: evidence.digest(),
-                    evidence: evidence.to_canonical_cbor(),
-                    inventory_generation: view.inventory_generation(),
-                })
-            })
+            },
+        )
     }
 
     /// One COA1 per protected record of `graph`, binding `evidence`'s CAU1
@@ -1017,3 +992,104 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             .collect()
     }
 }
+
+/// One CAV1 authority row per distinct chain of `decisions`, read now from
+/// `domain`, in `(T, head, epoch)` order. A decision whose chain head or
+/// epoch has moved since its evaluation is stale (A5.4, A5.5: 12).
+#[cfg(target_os = "linux")]
+fn authority_rows<D: CommunityStoreDomainV1>(
+    domain: &D,
+    decisions: &[&CommunityAuthorityAdmissionV1],
+) -> Result<Vec<CommunityAuthorityViewRowV1>, Error> {
+    decisions
+        .iter()
+        .map(|decision| {
+            let request = decision.request();
+            domain
+                .authority_row(decision.leaf_grant_id(), request)
+                .and_then(|row| {
+                    if row.head_seq == request.at_position().as_u64()
+                        && row.revocation_epoch == request.revocation_epoch()
+                    {
+                        Ok(row)
+                    } else {
+                        Err(Error::EvidenceUnavailable)
+                    }
+                })
+        })
+        .collect::<Result<Vec<_>, Error>>()
+        .map(|mut rows| {
+            rows.sort_by_key(|row| {
+                (
+                    row.authority_timeline.inner().to_bytes(),
+                    row.head_seq,
+                    row.revocation_epoch,
+                )
+            });
+            rows.dedup();
+            rows
+        })
+}
+
+/// One `Available` CAV1 key row per key, in `(owner, role, epoch)` order.
+#[cfg(target_os = "linux")]
+fn key_rows(keys: &[&CommunityKeyIntentV1]) -> Vec<CommunityKeyViewRowV1> {
+    let mut rows: Vec<CommunityKeyViewRowV1> = keys
+        .iter()
+        .map(|key| key.key_view_row(CommunityKeyStateV1::Available))
+        .collect();
+    rows.sort_by(|a, b| {
+        (a.owner.as_bytes(), a.role.code(), a.epoch).cmp(&(
+            b.owner.as_bytes(),
+            b.role.code(),
+            b.epoch,
+        ))
+    });
+    rows
+}
+
+/// One CAU1 decision row per distinct decision, in tuple order.
+#[cfg(target_os = "linux")]
+fn decision_rows(decisions: &[&CommunityAuthorityAdmissionV1]) -> Vec<CommunityDecisionRowV1> {
+    let mut rows: Vec<CommunityDecisionRowV1> = decisions
+        .iter()
+        .map(|decision| {
+            let request = decision.request();
+            CommunityDecisionRowV1 {
+                decision_digest: Hash::from_bytes(decision.authorization_ref().digest),
+                request_digest: request.binding_digest(),
+                leaf_grant_id: decision.leaf_grant_id(),
+                authority_timeline: request.authority_timeline(),
+                head_seq: request.at_position().as_u64(),
+                revocation_epoch: request.revocation_epoch(),
+                policy_revision: request.capability_policy_revision(),
+            }
+        })
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+/// One CAU1 object row per protected record, in triple order.
+fn object_rows(graph: &CommunityInitializationGraphV1) -> Vec<CommunityObjectBindingV1> {
+    let mut rows: Vec<CommunityObjectBindingV1> = graph
+        .records()
+        .iter()
+        .map(|record| {
+            let protected = record.protected();
+            CommunityObjectBindingV1 {
+                object_address: protected.object_address(),
+                artifact_digest: protected.registration().fields().artifact_digest,
+                registration_address: protected.registration().address(),
+            }
+        })
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

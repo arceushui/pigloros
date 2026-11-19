@@ -740,6 +740,7 @@ impl CommunityAuthorityCallV1 {
 pub struct CommunityAuthorityAdmissionV1 {
     request: AuthorizationRequestV1,
     decision: AuthorizationDecisionV1,
+    leaf_grant_id: Hash,
     authorization_ref: ArtifactRefV1,
     principal_ref: ArtifactRefV1,
 }
@@ -755,6 +756,14 @@ impl CommunityAuthorityAdmissionV1 {
     #[must_use]
     pub const fn decision(&self) -> &AuthorizationDecisionV1 {
         &self.decision
+    }
+
+    /// The leaf grant the `Active` decision evaluated, captured when the
+    /// admission was minted: only an `Active` decision, which always names
+    /// its leaf, is admitted.
+    #[must_use]
+    pub const fn leaf_grant_id(&self) -> Hash {
+        self.leaf_grant_id
     }
 
     /// `[0x4341_0002, len(AUD1), BLAKE3-256(AUD1)]` over the canonical AUD1.
@@ -779,12 +788,16 @@ fn admission(
         .encode()
         .ok()
         .zip(decision.principal().encode().ok())
-        .map(|(aud, principal)| CommunityAuthorityAdmissionV1 {
-            authorization_ref: artifact_ref(COMMUNITY_AUD_SCHEMA_V1, &aud),
-            principal_ref: artifact_ref(COMMUNITY_PRINCIPAL_SCHEMA_V1, &principal),
-            request,
-            decision,
-        })
+        .zip(decision.grant_id())
+        .map(
+            |((aud, principal), leaf_grant_id)| CommunityAuthorityAdmissionV1 {
+                authorization_ref: artifact_ref(COMMUNITY_AUD_SCHEMA_V1, &aud),
+                principal_ref: artifact_ref(COMMUNITY_PRINCIPAL_SCHEMA_V1, &principal),
+                request,
+                decision,
+                leaf_grant_id,
+            },
+        )
 }
 
 fn artifact_ref(schema_id: u32, bytes: &CanonicalBytes) -> ArtifactRefV1 {
