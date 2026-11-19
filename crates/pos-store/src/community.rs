@@ -18,6 +18,7 @@ mod native_graph;
 mod private_hash;
 mod protection;
 mod sealer;
+mod store_domain;
 mod vault;
 
 pub use extractor::{
