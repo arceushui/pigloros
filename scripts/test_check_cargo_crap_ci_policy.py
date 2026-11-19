@@ -60,6 +60,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/provider_runtime/serving/tests.rs",
     "src/scenario_room/tests.rs",
     "src/executor/scenario_room/tests.rs",
+    "src/local_erasure_provision/tests.rs",
     "src/mode_profile/tests.rs",
 )
 EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS = (
