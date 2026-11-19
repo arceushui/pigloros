@@ -112,7 +112,7 @@ impl CleanupBudget {
     }
 
     /// The absolute deadlines of a cleanup that starts at `start`.
-    fn deadlines(self, start: Instant) -> AttemptCleanupDeadlines {
+    pub(crate) fn deadlines(self, start: Instant) -> AttemptCleanupDeadlines {
         self.phases
             .shifted(start.saturating_duration_since(self.base))
     }
