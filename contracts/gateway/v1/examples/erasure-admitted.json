@@ -1,15 +1,14 @@
 {
-  "name": "draft-erasure-admitted",
+  "name": "erasure-admitted",
   "operation_id": "requestErasure",
   "request": {
     "headers": {
       "Idempotency-Key": "client-1-21",
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
     },
     "body": {
-      "scopes": [
-        "private-subject-data"
-      ],
+      "scope": "private-subject-data",
       "impact_acknowledged": true
     }
   },
@@ -18,13 +17,15 @@
     "status": 202,
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:admission-receipt",
-      "request_id": "01JC0GATEWAYW90REQVEST0001",
-      "operation_id": "01JC0GATEWAYW90QPERAT10N01",
+      "request_id": "01JC0GATEWAYW90ERASVRE0001",
+      "operation_id": "01JC0GATEWAYW90ERASVRE0001",
       "state": "admitted",
       "operation_url": "/v1/me/erasures/01JC0GATEWAYW90ERASVRE0001",
       "idempotency_key_digest": "0909090909090909090909090909090909090909090909090909090909090909",
       "bound_inputs": {
-        "scope": "1919191919191919191919191919191919191919191919191919191919191919"
+        "mode_profile": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "policy": "1919191919191919191919191919191919191919191919191919191919191919",
+        "trust": "2929292929292929292929292929292929292929292929292929292929292929"
       }
     }
   }
