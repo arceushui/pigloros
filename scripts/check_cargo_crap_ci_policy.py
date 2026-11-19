@@ -86,6 +86,8 @@ TEST_ONLY_EXCLUSIONS = (
     "src/ordinary_fork_lineage_tests.rs",
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
+    "src/execute/tests.rs",
+    "src/attempt_records/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
     "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
