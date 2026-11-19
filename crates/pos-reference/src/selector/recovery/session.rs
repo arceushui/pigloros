@@ -2,12 +2,14 @@
 //! unconditional cleanup (ADR-069 R12 §6 steps 7 to 13, §4.3 guard).
 
 use std::net::Shutdown;
-use std::time::Duration;
+use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
 use super::authority::{
     fresh_challenge, require, Consumed, PreviousRuntimeTerminationProof,
     ProviderTerminationAuthority, Unconsumed,
 };
+use super::host::{exchange_error, ClockedStream, LeafIdentity};
 use super::port::{
     RecoveryPeerLaunch, RecoveryPeerObservation, RecoverySlotTarget, VerifiedProviderBinary,
 };
@@ -54,6 +56,11 @@ const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 /// fn duplicate<T: Clone>() {}
 /// duplicate::<RecoveryPeerTerminationProof>();
 /// ```
+// R12 §4.3 lists the peer PID, start ticks, cgroup absence and leaf
+// absence among this proof's fields. Those facts are checked before the
+// proof is minted, and no reader needs them afterwards, so they are not
+// stored: a field nothing reads fails the dead-code lint. The R12 field
+// list is informative; the deviation is queued with the owner.
 #[derive(Debug)]
 pub struct RecoveryPeerTerminationProof {
     pub(super) identity: RecoveryTransactionIdentity,
@@ -200,7 +207,7 @@ impl<P: ProviderLifecyclePort + ?Sized> RecoveryPeerSession<'_, P> {
     fn verify_started(
         &self,
         observed: &RecoveryPeerObservation,
-    ) -> Result<super::host::LeafIdentity, RecoveryError> {
+    ) -> Result<LeafIdentity, RecoveryError> {
         let host = self.guard.authority.host();
         host.verify_peer_process(
             observed.main_pid(),
@@ -216,11 +223,12 @@ impl<P: ProviderLifecyclePort + ?Sized> RecoveryPeerSession<'_, P> {
 
     /// R12 §6 steps 9 to 11: one connection, RCC1 and RCU1, write EOF, one
     /// RCA1 and server EOF, all before the 100 ms deadline on the selector's
-    /// clock, then RCA1 authenticated under the SIR1 runtime key.
+    /// clock, the leaf unchanged before and after, then RCA1 authenticated
+    /// under the SIR1 runtime key.
     fn exchange(
         &self,
         observed: &RecoveryPeerObservation,
-        leaf: super::host::LeafIdentity,
+        leaf: LeafIdentity,
     ) -> Result<Exchanged, RecoveryError> {
         let host = self.guard.authority.host();
         let target = self.target;
@@ -236,38 +244,9 @@ impl<P: ProviderLifecyclePort + ?Sized> RecoveryPeerSession<'_, P> {
             .and_then(|(context, deadline)| {
                 host.connect_peer(endpoint, observed.main_pid())
                     .and_then(|stream| host.require_same_leaf(endpoint, leaf).map(|()| stream))
-                    .and_then(|stream| {
-                        let mut clocked = host.clocked(&stream, deadline);
-                        control_framing::write_frame(&mut clocked, &context, FRAME_LIMIT)
-                            .and_then(|()| {
-                                control_framing::write_frame(
-                                    &mut clocked,
-                                    target.records.revocation_update_bytes(),
-                                    FRAME_LIMIT,
-                                )
-                            })
-                            .map_err(|_| RecoveryError::Exchange)
-                            .and_then(|()| {
-                                stream
-                                    .shutdown(Shutdown::Write)
-                                    .map_err(|_| RecoveryError::Exchange)
-                            })
-                            .and_then(|()| {
-                                control_framing::read_frame(&mut clocked, FRAME_LIMIT)
-                                    .ok()
-                                    .flatten()
-                                    .ok_or(RecoveryError::Exchange)
-                            })
-                            .and_then(|bytes| {
-                                control_framing::require_eof(&mut clocked)
-                                    .map_err(|_| RecoveryError::Exchange)
-                                    .and_then(|()| {
-                                        require(clocked.within_deadline(), RecoveryError::Exchange)
-                                    })
-                                    .map(|()| bytes)
-                            })
-                    })
+                    .and_then(|stream| self.converse(&stream, deadline, &context))
             })
+            .and_then(|bytes| host.require_same_leaf(endpoint, leaf).map(|()| bytes))
             .and_then(|bytes| {
                 target
                     .authenticate_recovery_acknowledgement(&bytes)
@@ -277,6 +256,44 @@ impl<P: ProviderLifecyclePort + ?Sized> RecoveryPeerSession<'_, P> {
                     })
             })
     }
+
+    /// The framed request, client write EOF, then one RCA1 frame and server
+    /// EOF, all by `deadline`.
+    fn converse(
+        &self,
+        stream: &UnixStream,
+        deadline: Instant,
+        context: &[u8],
+    ) -> Result<Vec<u8>, RecoveryError> {
+        let mut clocked = self.guard.authority.host().clocked(stream, deadline);
+        send_request(
+            &mut clocked,
+            [context, self.target.records.revocation_update_bytes()],
+        )
+        .and_then(|()| stream.shutdown(Shutdown::Write).map_err(exchange_error))
+        .and_then(|()| receive_acknowledgement(&mut clocked))
+    }
+}
+
+/// RCC1 then RCU1, one frame each.
+fn send_request(clocked: &mut ClockedStream<'_>, frames: [&[u8]; 2]) -> Result<(), RecoveryError> {
+    frames.into_iter().try_for_each(|frame| {
+        control_framing::write_frame(&mut *clocked, frame, FRAME_LIMIT).map_err(exchange_error)
+    })
+}
+
+/// One RCA1 frame and server EOF, before the deadline.
+fn receive_acknowledgement(clocked: &mut ClockedStream<'_>) -> Result<Vec<u8>, RecoveryError> {
+    control_framing::read_frame(&mut *clocked, FRAME_LIMIT)
+        .ok()
+        .flatten()
+        .ok_or(RecoveryError::Exchange)
+        .and_then(|bytes| {
+            control_framing::require_eof(&mut *clocked)
+                .map_err(exchange_error)
+                .and_then(|()| require(clocked.within_deadline(), RecoveryError::Exchange))
+                .map(|()| bytes)
+        })
 }
 
 /// The session's unwinding guard (R12 §4.3 m2). Armed immediately before
@@ -317,7 +334,7 @@ impl<'a, P: ProviderLifecyclePort + ?Sized> CleanupGuard<'a, P> {
             self.authority
                 .reconcile_slot(self.target, deadline, started)
                 .and_then(|()| host.remove_stale_leaf(self.target.endpoint_id()))
-                .and_then(|()| require(host.now() <= deadline, RecoveryError::DeadlineExceeded))
+                .and_then(|()| self.authority.require_within(deadline, Duration::ZERO))
         })
     }
 }

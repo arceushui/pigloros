@@ -12,8 +12,10 @@
 //! connection without a reply, keeps SIR1 and stays in `RecoveryPending`; no
 //! operation is retried automatically.
 
+use std::io::Write as _;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -24,7 +26,8 @@ use super::{
 use crate::selector::installation::authority::AuthenticatedSelectorBootstrap;
 use crate::selector::installation::{FixedInstallation, InstalledSelectorState};
 use crate::selector::recovery::{
-    CompletedRecovery, PendingRecoveryTarget, ProviderTerminationAuthority,
+    require_absent_evaluator_endpoint, CompletedRecovery, PendingRecoveryTarget,
+    ProviderTerminationAuthority, RecoveryError,
 };
 use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
 use crate::selector::SelectorBoundaryError;
@@ -39,6 +42,7 @@ pub(super) struct PendingRecovery {
     reopen: InstallationOpener,
     authority: ProviderTerminationAuthority<dyn ProviderLifecyclePort + Send + Sync>,
     opening: NormalOpen,
+    evaluator: PathBuf,
 }
 
 impl PendingRecovery {
@@ -51,6 +55,7 @@ impl PendingRecovery {
             reopen: Box::new(InstalledSelectorState::open_fixed),
             authority: opening.authority(),
             opening,
+            evaluator: PathBuf::from(crate::selector::SANDBOX_SELECTOR_SOCKET),
         }
     }
 
@@ -100,7 +105,13 @@ impl PendingRecovery {
                         thread::sleep(Duration::from_millis(10));
                         None
                     },
-                    |stream| self.answer(stream).ok(),
+                    |stream| {
+                        self.answer(stream)
+                            .inspect_err(|error| {
+                                report("administrative connection closed", error);
+                            })
+                            .ok()
+                    },
                 )
             })
     }
@@ -154,34 +165,44 @@ impl PendingRecovery {
             })
     }
 
-    /// Runs one new recovery operation. It reloads SIR1 from the
-    /// installation, which must still name the pending transaction, and
-    /// draws a fresh operation ID (R12 §4.1).
+    /// Runs one new recovery operation. The evaluator pathname must still
+    /// be absent (R12 §8 M4, I13: checked at each transition). The operation
+    /// reloads SIR1 from the installation, which must still name the pending
+    /// transaction, and draws a fresh operation ID (R12 §4.1). A failure is
+    /// reported on standard error by its closed kind.
     ///
     /// # Errors
-    /// Returns [`SelectorBoundaryError::ArtifactInvalid`] when SIR1 is gone,
-    /// fails authentication, or names another transaction, and the
-    /// operation's own failure otherwise. SIR1 then stays.
+    /// Returns [`SelectorBoundaryError::ArtifactInvalid`] when an evaluator
+    /// node exists, or SIR1 is gone, fails authentication or names another
+    /// transaction, and the operation's own failure otherwise. SIR1 then
+    /// stays.
     pub(super) fn begin_recovery_operation(
         &self,
     ) -> Result<CompletedRecovery, SelectorBoundaryError> {
-        (self.reopen)()
+        require_absent_evaluator_endpoint(&self.evaluator)
+            .and_then(|()| (self.reopen)().map_err(RecoveryError::from))
             .and_then(|installation| match installation {
                 FixedInstallation::RecoveryPending(installed) => {
-                    PendingRecoveryTarget::load(&installed).map_err(SelectorBoundaryError::from)
+                    PendingRecoveryTarget::load(&installed)
                 }
-                FixedInstallation::Admissible(_) => Err(SelectorBoundaryError::ArtifactInvalid),
+                FixedInstallation::Admissible(_) => Err(RecoveryError::Mismatch),
             })
             .and_then(|operation| {
                 if operation.identity() == self.target.identity() {
-                    self.authority
-                        .recover(operation)
-                        .map_err(SelectorBoundaryError::from)
+                    self.authority.recover(operation)
                 } else {
-                    Err(SelectorBoundaryError::ArtifactInvalid)
+                    Err(RecoveryError::Mismatch)
                 }
             })
+            .inspect_err(|error| report("recovery operation failed", error))
+            .map_err(SelectorBoundaryError::from)
     }
+}
+
+/// One line on standard error with the closed failure kind; it names no
+/// secret.
+fn report(what: &str, error: &impl std::fmt::Display) {
+    writeln!(std::io::stderr(), "pos-root-selector: {what}: {error}").ok();
 }
 
 #[cfg(test)]
@@ -190,8 +211,9 @@ mod tests {
     use std::fs::{self, File};
     use std::io::{Read as _, Write as _};
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
+    use std::path::Path;
     use std::sync::Arc;
 
     use super::*;
@@ -282,6 +304,7 @@ mod tests {
             reopen,
             authority: ProviderTerminationAuthority::new(port, host),
             opening,
+            evaluator: directories.recovery.path().join("sandbox-provider.sock"),
         })
     }
 
@@ -523,6 +546,35 @@ mod tests {
             .flatten()
             .is_some());
         assert!(!fixture.path().join(RECOVERY_NAME).exists());
+        Ok(())
+    }
+
+    /// R12 §8 M4 and I13: every new operation first requires the evaluator
+    /// pathname absent; a node there stops it before any port call, and
+    /// the node is kept.
+    #[test]
+    fn an_evaluator_node_stops_each_new_operation_before_it_starts() -> TestResult {
+        let fixture = UpdateFixture::new()?;
+        let (_committed, request) =
+            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
+        let directories = Directories::new()?;
+        let recovery = pending_with(
+            &fixture,
+            own_uid(fixture.path())?,
+            &directories,
+            Script::default(),
+        )?;
+        drop(std::os::unix::net::UnixListener::bind(&recovery.evaluator)?);
+        let (result, _, reply) = exchange(&recovery, Some(&request))?;
+        assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
+        assert!(reply.is_empty());
+        assert!(recovery.evaluator.exists());
+        assert!(fixture.path().join(RECOVERY_NAME).exists());
+        // Once the node is gone, the same SIU1 completes recovery.
+        fs::remove_file(&recovery.evaluator)?;
+        let (result, _, reply) = exchange(&recovery, Some(&request))?;
+        assert_eq!(result, Ok(()));
+        assert!(!reply.is_empty());
         Ok(())
     }
 }

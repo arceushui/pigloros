@@ -217,9 +217,11 @@ pub(crate) struct Script {
     pub(crate) reconcile: [Reply; 2],
     pub(crate) start: Reply,
     pub(crate) peer: Peer,
-    /// Advance the selector's clock by 10 s during the second
-    /// reconciliation, so the cleanup passes its 5 s bound.
-    pub(crate) slow_cleanup: bool,
+    /// How far the selector's clock advances, in milliseconds, during the
+    /// termination of the previous runtime.
+    pub(crate) terminate_advance_ms: u64,
+    /// How far it advances during each slot reconciliation.
+    pub(crate) reconcile_advance_ms: [u64; 2],
     /// How many first terminations are refused before `terminate` applies.
     pub(crate) refused_terminations: usize,
 }
@@ -339,6 +341,8 @@ impl ProviderLifecyclePort for PeerPort {
         }
         // A new operation: its first slot reconciliation comes next.
         self.reconciles.store(0, Ordering::SeqCst);
+        self.clock
+            .fetch_add(self.script.terminate_advance_ms, Ordering::SeqCst);
         let reply = self.script.terminate;
         if let Reply::Refuse(error) = reply {
             return Err(error);
@@ -366,9 +370,10 @@ impl ProviderLifecyclePort for PeerPort {
         self.record(Call::Reconcile(deadline));
         self.stop_peer();
         let index = self.reconciles.fetch_add(1, Ordering::SeqCst);
-        if index == 1 && self.script.slow_cleanup {
-            self.clock.fetch_add(10_000, Ordering::SeqCst);
-        }
+        self.clock.fetch_add(
+            self.script.reconcile_advance_ms[index.min(1)],
+            Ordering::SeqCst,
+        );
         let reply = self.script.reconcile[index.min(1)];
         if let Reply::Refuse(error) = reply {
             return Err(error);
@@ -553,10 +558,7 @@ impl Operation {
 
     fn host(&self, port: &PeerPort, digest: ExecutableDigestFn) -> TestResult<RecoveryHost> {
         Ok(RecoveryHost::for_test(
-            (
-                Arc::new(File::open(self.recovery.path())?),
-                self.recovery.path().to_path_buf(),
-            ),
+            Arc::new(File::open(self.recovery.path())?),
             std::fs::metadata(self.recovery.path())?.uid(),
             (self.cgroups.path().to_path_buf(), |_| true),
             digest,
@@ -601,7 +603,7 @@ pub(crate) fn test_host(
     clock: RecoveryClockFn,
 ) -> TestResult<RecoveryHost> {
     Ok(RecoveryHost::for_test(
-        (Arc::new(File::open(recovery)?), recovery.to_path_buf()),
+        Arc::new(File::open(recovery)?),
         std::fs::metadata(recovery)?.uid(),
         (cgroups.to_path_buf(), |_| true),
         peer_executable_digest,
@@ -668,18 +670,7 @@ fn one_operation_terminates_exchanges_cleans_and_publishes_the_successor() -> Te
 fn a_revoked_runtime_key_still_acknowledges_and_a_published_successor_is_verified() -> TestResult {
     let operation = Operation::new(Vec::new(), SuccessorRevocation::RuntimeKey)?;
     // Crash row 7: the next SIC1 is already current; SIR1 is still pending.
-    let update = crate::evaluator_protocol::decode_canonical(&operation.request)?;
-    let ciborium::value::Value::Bytes(next) = &crate::evaluator_protocol::array(&update, 5)?[3]
-    else {
-        return Err("SIU1 successor manifest is not bytes".into());
-    };
-    let manifest = operation
-        .fixture
-        .path()
-        .join(crate::selector::installation::MANIFEST_NAME);
-    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::write(&manifest, next)?;
-    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o400))?;
+    publish_next(&operation)?;
     let (result, _port) = recover(&operation, Script::default())?;
     result?;
     assert!(!operation.sir1().exists());
@@ -815,7 +806,7 @@ fn a_remaining_control_group_or_a_foreign_mount_fails_closed() -> TestResult {
         Err(RecoveryError::CgroupPresent)
     );
     let not_cgroup2 = RecoveryHost::for_test(
-        (directory, operation.recovery.path().to_path_buf()),
+        directory,
         0,
         (operation.cgroups.path().to_path_buf(), host::is_cgroup2),
         peer_executable_digest,
@@ -826,10 +817,7 @@ fn a_remaining_control_group_or_a_foreign_mount_fails_closed() -> TestResult {
         Err(RecoveryError::CgroupPresent)
     );
     let missing_mount = RecoveryHost::for_test(
-        (
-            Arc::new(File::open(operation.recovery.path())?),
-            operation.recovery.path().to_path_buf(),
-        ),
+        Arc::new(File::open(operation.recovery.path())?),
         0,
         (operation.cgroups.path().join("missing"), |_| true),
         peer_executable_digest,
@@ -996,7 +984,7 @@ fn a_failed_start_or_cleanup_yields_no_proof() -> TestResult {
         ),
         (
             Script {
-                slow_cleanup: true,
+                reconcile_advance_ms: [0, 10_000],
                 ..Script::default()
             },
             RecoveryError::DeadlineExceeded,
@@ -1297,5 +1285,265 @@ fn the_exchange_stream_refuses_io_past_its_deadline() -> TestResult {
         Err(std::io::ErrorKind::TimedOut)
     );
     client.read_exact(&mut byte)?;
+    Ok(())
+}
+
+/// Review M2 and the cleanup bound: every port result is checked against
+/// its deadline on the selector's clock, exactly at the deadline it passes
+/// and one millisecond later it yields no proof. The previous-runtime
+/// termination may outlast its 10 s bound only by the 70 s recent-activation
+/// wait.
+#[test]
+fn every_port_deadline_holds_exactly_at_and_fails_one_past() -> TestResult {
+    for (script, expected) in [
+        (
+            Script {
+                terminate_advance_ms: 80_000,
+                ..Script::default()
+            },
+            None,
+        ),
+        (
+            Script {
+                terminate_advance_ms: 80_001,
+                ..Script::default()
+            },
+            Some(RecoveryError::DeadlineExceeded),
+        ),
+        (
+            Script {
+                reconcile_advance_ms: [5_000, 0],
+                ..Script::default()
+            },
+            None,
+        ),
+        (
+            Script {
+                reconcile_advance_ms: [5_001, 0],
+                ..Script::default()
+            },
+            Some(RecoveryError::DeadlineExceeded),
+        ),
+        (
+            Script {
+                reconcile_advance_ms: [0, 5_000],
+                ..Script::default()
+            },
+            None,
+        ),
+        (
+            Script {
+                reconcile_advance_ms: [0, 5_001],
+                ..Script::default()
+            },
+            Some(RecoveryError::DeadlineExceeded),
+        ),
+        // Before the peer starts, any control group may be reported; after
+        // it started, only the peer's.
+        (
+            Script {
+                reconcile: [Reply::OtherCgroup, Reply::Echo],
+                ..Script::default()
+            },
+            None,
+        ),
+    ] {
+        let operation = Operation::new(vec![[41; 16]], SuccessorRevocation::Nothing)?;
+        let (result, _port) = recover(&operation, script)?;
+        assert_eq!(result.err(), expected, "{script:?}");
+        assert_eq!(operation.sir1().exists(), expected.is_some(), "{script:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_peer_credentials_must_be_the_owner_and_the_observed_process() -> TestResult {
+    let pid = NonZeroU64::new(41).ok_or("zero pid")?;
+    assert!(host::peer_matches((7, 41), 7, pid));
+    assert!(!host::peer_matches((8, 41), 7, pid));
+    assert!(!host::peer_matches((7, 42), 7, pid));
+    assert!(!host::peer_matches((8, 42), 7, pid));
+    Ok(())
+}
+
+#[test]
+fn a_leaf_replaced_after_readiness_or_its_probe_is_refused_and_kept() -> TestResult {
+    let operation = Operation::new(Vec::new(), SuccessorRevocation::Nothing)?;
+    let port = operation.port(Script::default());
+    let host = operation.standard_host(&port)?;
+    let endpoint = [0xcd; 16];
+    let leaf = operation
+        .recovery
+        .path()
+        .join(format!("{}.sock", hex(&endpoint)));
+    let first = bind_leaf(&leaf)?;
+    let ready = host.ready_leaf(endpoint)?;
+    host.require_same_leaf(endpoint, ready)?;
+    // I8: another inode between readiness and connect.
+    drop(first);
+    std::fs::remove_file(&leaf)?;
+    let second = bind_leaf(&leaf)?;
+    assert_eq!(
+        host.require_same_leaf(endpoint, ready),
+        Err(RecoveryError::Leaf)
+    );
+    // A refusing leaf whose (dev, ino) changed since it was probed is kept.
+    drop(second);
+    assert_eq!(
+        host.remove_refusing_leaf(&host::leaf_name(endpoint), ready),
+        Err(RecoveryError::Leaf)
+    );
+    assert!(leaf.exists());
+    // An absent leaf is never ready.
+    std::fs::remove_file(&leaf)?;
+    assert_eq!(host.ready_leaf(endpoint), Err(RecoveryError::Leaf));
+    Ok(())
+}
+
+/// Set once the exiting thread may end.
+static THREAD_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A digest of the fixture binary for any PID, that first ends the thread
+/// it was asked about and waits until the kernel no longer lists it.
+fn exiting_thread_digest(pid: NonZeroU64, _length: u64) -> Result<[u8; 32], SelectorBoundaryError> {
+    THREAD_EXIT.store(true, Ordering::SeqCst);
+    let stat = format!("/proc/{pid}/stat");
+    let started = Instant::now();
+    while Path::new(&stat).exists() && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    if Path::new(&stat).exists() {
+        Err(SelectorBoundaryError::SelectorUnavailable)
+    } else {
+        Ok(*blake3::hash(b"exact provider binary").as_bytes())
+    }
+}
+
+/// A digest of the fixture binary for any live task of this host.
+fn any_executable_digest(pid: NonZeroU64, _length: u64) -> Result<[u8; 32], SelectorBoundaryError> {
+    std::fs::metadata(format!("/proc/{pid}/stat"))
+        .map(|_| *blake3::hash(b"exact provider binary").as_bytes())
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+}
+
+/// The observed process must still be the same one after its executable
+/// was hashed: a thread observed alive, whose task ends while it is
+/// hashed, is refused by the second start-ticks check only.
+#[test]
+fn the_peer_must_outlive_the_hash_of_its_executable() -> TestResult {
+    let operation = Operation::new(Vec::new(), SuccessorRevocation::Nothing)?;
+    let digest = *blake3::hash(b"exact provider binary").as_bytes();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        // `/proc/thread-self` names `<pid>/task/<tid>`.
+        let tid = std::fs::read_link("/proc/thread-self")
+            .ok()
+            .and_then(|link| link.file_name()?.to_str()?.parse::<u64>().ok());
+        let _sent = sender.send(tid);
+        while !THREAD_EXIT.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    let tid = receiver
+        .recv()?
+        .and_then(NonZeroU64::new)
+        .ok_or("no thread ID")?;
+    let ticks = crate::selector::runtime_lifecycle::process_start_time_ticks(tid)?;
+    let cgroup = CgroupPath::new(&crate::selector::runtime_lifecycle::process_control_group(
+        tid,
+    )?)?;
+    let port = operation.port(Script::default());
+    let live = operation.host(&port, any_executable_digest)?;
+    live.verify_peer_process(tid, ticks, &cgroup, (digest, 0))?;
+    let exiting = operation.host(&port, exiting_thread_digest)?;
+    assert_eq!(
+        exiting.verify_peer_process(tid, ticks, &cgroup, (digest, 0)),
+        Err(RecoveryError::PeerBinding)
+    );
+    thread.join().map_err(|_| "the exiting thread panicked")?;
+    Ok(())
+}
+
+/// The next SIC1 of `operation`, published as the current one (crash row 7).
+fn publish_next(operation: &Operation) -> TestResult {
+    let update = crate::evaluator_protocol::decode_canonical(&operation.request)?;
+    let ciborium::value::Value::Bytes(next) = &crate::evaluator_protocol::array(&update, 5)?[3]
+    else {
+        return Err("SIU1 successor manifest is not bytes".into());
+    };
+    let manifest = operation
+        .fixture
+        .path()
+        .join(crate::selector::installation::MANIFEST_NAME);
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::write(&manifest, next)?;
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o400))?;
+    Ok(())
+}
+
+/// One crash boundary of R12 §9 as durable state.
+#[derive(Clone, Copy, Debug)]
+enum Row {
+    /// 2 and 6: SIR1 committed, current = previous, the slot empty.
+    Committed,
+    /// 3 and 5: the peer's leaf survived, refusing (its unit is gone).
+    PeerLeaf,
+    /// 4: a failed exchange left the leaf and the RCA1 was never valid.
+    FailedExchange,
+    /// 7: the next SIC1 is current, SIR1 still pending.
+    NextCurrent,
+}
+
+/// R12 I12: each crash row is durable state plus a fake-port state. The
+/// full sequence runs from it; its idempotent first steps run twice first,
+/// as after a second crash at the same boundary. Row 8 is the completed
+/// state: no SIR1, the normal open of the next SIC1.
+#[test]
+fn every_crash_row_recovers_from_its_durable_state() -> TestResult {
+    for row in [
+        Row::Committed,
+        Row::PeerLeaf,
+        Row::FailedExchange,
+        Row::NextCurrent,
+    ] {
+        let operation = Operation::new(vec![[41; 16]], SuccessorRevocation::Nothing)?;
+        let target = operation.target()?;
+        let leaf = operation
+            .recovery
+            .path()
+            .join(format!("{}.sock", hex(&target.endpoint_id())));
+        match row {
+            Row::Committed => {}
+            Row::PeerLeaf => drop(bind_leaf(&leaf)?),
+            Row::FailedExchange => {
+                let (failed, _port) = recover(
+                    &operation,
+                    Script {
+                        peer: Peer::Garbage,
+                        reconcile: [
+                            Reply::Echo,
+                            Reply::Refuse(ProviderLifecycleError::ResidualResource),
+                        ],
+                        ..Script::default()
+                    },
+                )?;
+                assert!(failed.is_err(), "{row:?}");
+                assert!(leaf.exists(), "{row:?}: the failed cleanup kept the leaf");
+            }
+            Row::NextCurrent => publish_next(&operation)?,
+        }
+        let port = operation.port(Script::default());
+        let authority = operation.authority(&port)?;
+        for _ in 0..2 {
+            drop(authority.terminate_previous_runtime(&operation.target()?)?);
+            assert!(!leaf.exists(), "{row:?}");
+        }
+        authority.recover(operation.target()?)?;
+        assert!(!operation.sir1().exists(), "{row:?}");
+        // Row 8, twice: no SIR1 is pending any more.
+        for _ in 0..2 {
+            assert!(operation.target().is_err(), "{row:?}");
+        }
+    }
     Ok(())
 }

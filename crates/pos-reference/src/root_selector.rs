@@ -4292,10 +4292,7 @@ mod tests {
         executable_digest: runtime_start::ExecutableDigest,
     ) -> RecoveryHost {
         RecoveryHost::for_test(
-            (
-                directory,
-                Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE),
-            ),
+            directory,
             ROOT_UID,
             (PathBuf::from(ISOLATED_CGROUPS), |_| true),
             executable_digest,
