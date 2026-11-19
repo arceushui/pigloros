@@ -396,9 +396,15 @@ impl<'a> Responder<'a> {
     /// peer that is not root is dropped with zero bytes read and written; so
     /// is every peer once the runtime is `Revoked`, after the peer check.
     fn answer(&self, stream: &UnixStream, admission: Admission) {
-        if trusted_peer(stream, self.peer_uid) && !self.revocation.observer().revoked() {
+        if self.answers(stream) {
             self.answer_root(stream, admission);
         }
+    }
+
+    /// Whether an execute-socket peer gets an answer: it is root, checked
+    /// first, and the runtime is not `Revoked`.
+    fn answers(&self, stream: &UnixStream) -> bool {
+        trusted_peer(stream, self.peer_uid) && !self.revocation.observer().revoked()
     }
 
     /// Answer one control-socket connection, `accepted` at that instant,
