@@ -5,10 +5,10 @@
 use std::error::Error;
 
 use pos_reference::sandbox_provider_protocol::{
-    AttemptProgressCode, CancelSource, CleanupResult, Contradiction, KernelObservationStatus,
-    LaunchFailure, LocalNetworkSession, LocalNetworkTermination, RequestedConfigurationStatus,
-    SandboxExecutionMode, SandboxLimit, SandboxTerminalOutcome, StartJobResult, TerminalCode,
-    TransferRecord, WATCHDOG_GRACE_NS,
+    AttemptProgressCode, BarrierFailure, CancelSource, CleanupResult, Contradiction,
+    KernelObservationStatus, LaunchFailure, LocalNetworkSession, LocalNetworkTermination,
+    RequestedConfigurationStatus, SandboxExecutionMode, SandboxLimit, SandboxTerminalOutcome,
+    StartJobResult, TerminalCode, TransferRecord, WATCHDOG_GRACE_NS,
 };
 
 use super::{AttemptAdmission, AttemptRecords, EvidenceFault};
@@ -814,10 +814,7 @@ fn an_unreleased_local_attempt_records_its_proxy_and_barrier() -> TestResult {
     assert_recomputed(&records);
     let fields = records.termination().fields();
     assert_eq!(fields.progress, AttemptProgressCode::StartedNotReleased);
-    assert_eq!(
-        fields.barrier_failure,
-        Some(pos_reference::sandbox_provider_protocol::BarrierFailure::RecheckExpired)
-    );
+    assert_eq!(fields.barrier_failure, Some(BarrierFailure::RecheckExpired));
     assert!(fields
         .local_network
         .is_some_and(|network| network.termination.is_none() && !network.watchdog_closed));
@@ -831,6 +828,14 @@ fn an_unreleased_local_attempt_records_its_proxy_and_barrier() -> TestResult {
 
 /// An unreleased Local attempt whose resource evidence is `evidence`.
 fn unreleased(evidence: ResourceEvidence) -> TestResult<Result<AttemptRecords, EvidenceFault>> {
+    unreleased_in(SandboxExecutionMode::Local, evidence)
+}
+
+/// An unreleased attempt in `mode` whose resource evidence is `evidence`.
+fn unreleased_in(
+    mode: SandboxExecutionMode,
+    evidence: ResourceEvidence,
+) -> TestResult<Result<AttemptRecords, EvidenceFault>> {
     let progress = AttemptProgress::Failed {
         error: ExecuteError::ReleaseTimeout,
         unit: UnitState::Killed,
@@ -839,12 +844,63 @@ fn unreleased(evidence: ResourceEvidence) -> TestResult<Result<AttemptRecords, E
     };
     Ok(EndedAttempt::for_test(
         ATTEMPT,
-        admission(SandboxExecutionMode::Local, Some(input(true))),
+        admission(mode, Some(input(true))),
         None,
         progress,
         (cleanup(true)?, Some(CLEANED_AT)),
     )
     .records())
+}
+
+/// The barrier's own refusal is recorded over the expiry the release
+/// timeout would otherwise imply (R9 §4.6.1).
+#[test]
+fn the_barrier_refusal_is_recorded_as_given() -> TestResult {
+    let terminal = terminal(&Released::default())?;
+    let refused = release(None)?.refused(Some(BarrierFailure::ReadyMismatch));
+    let records = unreleased(evidence(refused, quiet(), terminal)?)??;
+    assert_recomputed(&records);
+    assert_eq!(
+        records.termination().fields().barrier_failure,
+        Some(BarrierFailure::ReadyMismatch)
+    );
+    Ok(())
+}
+
+/// Before a release, a baseline without its terminal snapshot records
+/// neither (R9 §4.6.3): the pair is missing evidence.
+#[test]
+fn an_unreleased_baseline_without_its_terminal_records_neither() -> TestResult {
+    let started = verified_start()?;
+    let terminal = TerminalResources::new(
+        Err(crate::AttemptCgroupError::InvalidPath),
+        None,
+        Ok(SystemdUnitResultObservation::for_test(
+            &started, "success", 1, 0,
+        )?),
+        Ok(()),
+    );
+    let records = unreleased(evidence(release(None)?, quiet(), terminal)?)??;
+    assert_recomputed(&records);
+    let fields = records.termination().fields();
+    assert_eq!(fields.progress, AttemptProgressCode::StartedNotReleased);
+    assert!(fields.unit.is_some());
+    assert!(fields.baseline.is_none() && fields.terminal.is_none());
+    Ok(())
+}
+
+/// Only a Local attempt has a proxy to close: an unreleased air-gapped
+/// attempt records no local network (R9 §4.6.3).
+#[test]
+fn an_unreleased_air_gapped_attempt_records_no_proxy() -> TestResult {
+    let terminal = terminal(&Released::default())?;
+    let evidence = evidence(release(None)?, quiet(), terminal)?;
+    let records = unreleased_in(SandboxExecutionMode::AirGapped, evidence)??;
+    assert_recomputed(&records);
+    let fields = records.termination().fields();
+    assert_eq!(fields.progress, AttemptProgressCode::StartedNotReleased);
+    assert!(fields.local_network.is_none());
+    Ok(())
 }
 
 /// A `ReadyV1` whose observation never froze is a status-2 KOE1 that binds
