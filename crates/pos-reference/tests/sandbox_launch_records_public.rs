@@ -135,7 +135,7 @@ fn rdy1_matches_the_golden_vector_and_round_trips() -> TestResult {
 #[test]
 fn rls1_matches_the_golden_vector_verifies_and_round_trips() -> TestResult {
     let record = release()?;
-    assert_eq!(hex(&record.digest), RLS1_DIGEST);
+    assert_eq!(hex(&record.digest()), RLS1_DIGEST);
     let bytes = record.to_canonical_cbor()?;
     assert_eq!(hex(&bytes), RLS1_FULL);
     let decoded = ExecutionRelease::from_canonical_cbor(&bytes)?;
@@ -314,7 +314,7 @@ fn rls1_signer_rejects_every_zero_field_and_a_zero_signature() -> TestResult {
         Err(SandboxProviderProtocolError::SignatureInvalid)
     );
     let release = ExecutionRelease::new(verified, &key.verifying_key())?;
-    assert_eq!(release.digest, record.digest());
+    assert_eq!(release.digest(), record.digest());
     release.verify_signature(&key.verifying_key())?;
     Ok(())
 }

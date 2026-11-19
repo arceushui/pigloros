@@ -100,11 +100,12 @@ pub use evidence::{
     RootMount, TerminationEvidence, TerminationEvidenceFields, TransferRecord,
 };
 pub use execution::{
-    AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
-    PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
-    SandboxPayloadChunk, SandboxProviderError, SandboxProviderErrorCode,
-    SandboxProviderErrorFields, SandboxProviderReceipt, SandboxProviderReceiptFields,
-    SandboxProviderResult, SandboxProviderResultFields, SandboxTerminalOutcome,
+    AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, ExecuteAuthority,
+    NetworkExchangePlan, PayloadDescriptor, PayloadDirection, PayloadStreamValidator,
+    ReceiptAuthority, SandboxExecuteRequest, SandboxPayloadChunk, SandboxProviderError,
+    SandboxProviderErrorCode, SandboxProviderErrorFields, SandboxProviderReceipt,
+    SandboxProviderReceiptFields, SandboxProviderResult, SandboxProviderResultFields,
+    SandboxTerminalOutcome,
 };
 pub use launch::{
     blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
@@ -117,7 +118,7 @@ pub use operations::{
     SandboxReconcileRequest, SandboxReconcileResponse,
 };
 pub use signing::{
-    Rca1, Rls1, RuntimeSigned, Sau1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Verified,
+    Agr1, Rca1, Rls1, RuntimeSigned, Sau1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Verified,
 };
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
