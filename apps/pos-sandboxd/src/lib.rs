@@ -17,6 +17,12 @@ use std::sync::{
     Arc, OnceLock,
 };
 
+// Public module reachability keeps the channel, payload and capture items
+// the execute path shares `pub(crate)` without Clippy's `redundant_pub_crate`
+// lint, as for `provider_lifecycle` below.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod adapter_stdio;
 #[cfg(target_os = "linux")]
 mod attempt;
 #[cfg(target_os = "linux")]
@@ -297,6 +303,8 @@ pub(crate) struct RecordedRootEntry {
 }
 
 #[cfg(target_os = "linux")]
+pub use adapter_stdio::{AdapterIo, FencedOutput, ReleasedOutput, StdioChannelError};
+#[cfg(target_os = "linux")]
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
 pub use attempt_evidence::{
@@ -389,9 +397,9 @@ pub use runtime_signer::{
 };
 #[cfg(target_os = "linux")]
 pub use staging::{
-    AdmittedEntry, ControlFloor, FailedInput, InputRefusal, IssuedGrant, StagedInput,
-    StagingCharge, StagingDirectory, StagingError, StagingLedger, StagingLimits, StagingUsage,
-    VerifiedStagedInput,
+    AdmittedEntry, ControlFloor, FailedInput, InputRefusal, IssuedGrant, OutputReservationRefused,
+    StagedInput, StagingCharge, StagingDirectory, StagingError, StagingLedger, StagingLimits,
+    StagingUsage, VerifiedStagedInput,
 };
 
 pub use hardening::{
@@ -425,7 +433,7 @@ pub use transient_unit::{
     SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdServiceLimits,
     SystemdServiceLimitsError, SystemdTransientUnitNumericValue, SystemdTransientUnitProperty,
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
-    TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
+    TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError, UnitStdio,
 };
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
@@ -494,6 +502,9 @@ enum SystemdDynamicPropertyKind {
     ExtraFileDescriptors,
     TemporaryFileSystem,
     ExecStart,
+    StandardInputFileDescriptor,
+    StandardOutputFileDescriptor,
+    StandardErrorFileDescriptor,
 }
 
 impl SystemdTransientUnitPropertyKind {
@@ -517,13 +528,24 @@ impl SystemdDynamicPropertyKind {
         }
     }
 
-    /// The last kinds; `TemporaryFileSystem` is the final one.
+    /// The last kinds.
     const fn tail_name(self) -> &'static str {
         match self {
             Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
+            Self::TemporaryFileSystem => "TemporaryFileSystem",
+            last => last.last_name(),
+        }
+    }
+
+    /// The command and the standard descriptors;
+    /// `StandardErrorFileDescriptor` is the final kind.
+    const fn last_name(self) -> &'static str {
+        match self {
             Self::ExecStart => "ExecStart",
-            _ => "TemporaryFileSystem",
+            Self::StandardInputFileDescriptor => "StandardInputFileDescriptor",
+            Self::StandardOutputFileDescriptor => "StandardOutputFileDescriptor",
+            _ => "StandardErrorFileDescriptor",
         }
     }
 }
