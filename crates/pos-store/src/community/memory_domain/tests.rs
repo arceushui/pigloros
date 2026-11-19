@@ -467,13 +467,24 @@ fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
             Some(Error::InvalidBinding)
         );
     }
-    let domain = MemoryCommunityDomainV1::new(
+    let mut domain = MemoryCommunityDomainV1::new(
         MemoryStore::new(),
         INCARNATION,
         MemoryTrustedClockAuthorityV1::new(),
     )?;
     assert_eq!(domain.store_incarnation(), INCARNATION);
     assert!(!domain.is_bootstrapped());
+    // G5: the inventory generation starts at 0.
+    assert_eq!(
+        super::super::store_domain::CommunityStoreDomainV1::inventory_generation(&domain),
+        0
+    );
+    // The seam reads the domain's own counter.
+    domain.inventory_generation = 7;
+    assert_eq!(
+        super::super::store_domain::CommunityStoreDomainV1::inventory_generation(&domain),
+        7
+    );
     Ok(())
 }
 
@@ -481,6 +492,8 @@ fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
 fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> TestResult {
     let world = bootstrapped()?;
     assert!(world.domain.is_bootstrapped());
+    // Bootstrap is not an inventory effect (G5).
+    assert_eq!(world.domain.inventory_generation, 0);
     assert_eq!(world.domain.keys.len(), 1);
     let record = world.record()?;
     let key = world.key()?;

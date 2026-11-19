@@ -56,6 +56,12 @@ pub trait CommunityStoreDomainV1 {
         wall: &mut dyn TrustedWallSourceV1,
         mono: &mut dyn GuardMonotonicSourceV1,
     ) -> Result<TrustedClockReservationV1, Error>;
+
+    /// The domain's current community inventory generation (owner decision
+    /// on #560, note 22722, G5): 0 at bootstrap, incremented once per
+    /// committed inventory effect, read into CAU1 and compared-and-swapped
+    /// with CSI1 on commit.
+    fn inventory_generation(&self) -> u64;
 }
 
 impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
@@ -78,5 +84,9 @@ impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
         reserve_trusted_clock(&mut self.clock, wall, mono, &mut WaitBudgetV1::new(), None)
             .ok()
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    fn inventory_generation(&self) -> u64 {
+        self.inventory_generation
     }
 }

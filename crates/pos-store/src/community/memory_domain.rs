@@ -143,6 +143,9 @@ pub struct MemoryCommunityDomainV1 {
     pub(super) clock: MemoryTrustedClockAuthorityV1,
     pub(super) keys: BTreeMap<[u8; 16], VaultKeyV1>,
     pub(super) bootstrap: Option<BootstrapRecordV1>,
+    /// The community inventory generation (G5): 0 at bootstrap, advanced
+    /// only by a committed inventory effect.
+    pub(super) inventory_generation: u64,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -176,6 +179,7 @@ impl MemoryCommunityDomainV1 {
                 clock,
                 keys: BTreeMap::new(),
                 bootstrap: None,
+                inventory_generation: 0,
             })
         }
     }
