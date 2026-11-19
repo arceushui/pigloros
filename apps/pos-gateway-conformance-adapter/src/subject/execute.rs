@@ -496,7 +496,7 @@ impl Slots {
     }
 
     /// The slot `capture` fills and the JSON pointer of its value in the response.
-    fn slot(&mut self, capture: CaptureV2) -> (&mut Option<String>, &'static str) {
+    const fn slot(&mut self, capture: CaptureV2) -> (&mut Option<String>, &'static str) {
         match capture {
             CaptureV2::Timeline => (&mut self.timeline, "/id"),
             CaptureV2::Room => (&mut self.room, "/id"),
