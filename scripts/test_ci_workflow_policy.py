@@ -1759,6 +1759,17 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 90.0}),
             lambda w: w["jobs"]["owner-bridge-windows"].update(**{"if": "false"}),
             lambda w: w["jobs"]["owner-bridge-windows"]["steps"][0]["with"].update(**{"persist-credentials": 0}),
+            # The full 1,000-ceremony readiness soak must stay in the lane.
+            lambda w: w["jobs"].pop("readiness-soak"),
+            lambda w: w["jobs"]["readiness-soak"]["steps"][-1]["env"].update(
+                OWNER_BRIDGE_READINESS_RUNS_PER_WORKER="5"),
+            lambda w: w["jobs"]["readiness-soak"]["steps"][-1].update(**{"continue-on-error": True}),
+            lambda w: w["jobs"]["readiness-soak"]["steps"][-1].update(
+                run=w["jobs"]["readiness-soak"]["steps"][-1]["run"].replace(
+                    "--exact $test --nocapture", "--exact $test --nocapture --skip native")),
+            lambda w: next(s for s in w["jobs"]["owner-bridge-windows"]["steps"]
+                           if s.get("id") == "coverage")["env"].pop(
+                "OWNER_BRIDGE_READINESS_RUNS_PER_WORKER"),
         ):
             changed = copy.deepcopy(native); mutate(changed)
             with self.subTest(mutate=mutate), self.assertRaises(AssertionError):

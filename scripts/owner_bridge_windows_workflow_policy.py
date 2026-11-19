@@ -103,7 +103,8 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                               'id': 'coverage',
                                               'timeout-minutes': 65,
                                               'shell': 'pwsh',
-                                              'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}'},
+                                              'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}',
+                                                      'OWNER_BRIDGE_READINESS_RUNS_PER_WORKER': '5'},
                                               'run': NATIVE_COVERAGE_COMMAND},
                                              {'name': 'Enforce both changed-line Windows coverage '
                                                       'floors',
@@ -304,7 +305,52 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
            'path': '${{ runner.temp }}/owner-windows-failed-diagnostic/',
            'if-no-files-found': 'error'}}])
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'd9cbbe71ee059045818acf456c549895c44b5ee758663187a0b1ed08e74d60bc',
+# The full readiness soak (4 workers x 250 real ceremonies) runs
+# uninstrumented in its own job; the coverage job above drives 4 x 5.
+READINESS_SOAK_COMMAND = """$ErrorActionPreference = 'Stop'
+$test = 'tests::native_window_environment_and_buffers_lifecycle'
+# A renamed test would otherwise filter to zero tests and pass.
+$listed = cargo test -p pos-owner-bridge-windows --all-features --locked --lib -- --include-ignored --list --exact $test
+if ($LASTEXITCODE -ne 0) { throw 'Readiness soak build failed' }
+if (@($listed | Where-Object { $_ -eq "${test}: test" }).Count -ne 1) { throw 'Readiness soak test not found' }
+cargo test -p pos-owner-bridge-windows --all-features --locked --lib -- --include-ignored --exact $test --nocapture
+if ($LASTEXITCODE -ne 0) { throw 'Native readiness soak failed' }
+"""
+EXPECTED_NATIVE["jobs"]["readiness-soak"] = {
+    "runs-on": "windows-latest",
+    "timeout-minutes": 90,
+    "env": {"RUSTC_BOOTSTRAP": "1"},
+    "steps": [
+        {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+         "with": {"persist-credentials": False}},
+        {"uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+         "with": {"toolchain": "1.97.1"}},
+        {"name": "Prepare retained runtime for real native fixtures",
+         "id": "runtime",
+         "shell": "pwsh",
+         "env": {"GH_TOKEN": "${{ github.token }}"},
+         "run": './scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"'},
+        {"name": "Stop the storage service before timed native fixtures",
+         "shell": "pwsh",
+         "run": "$service = Get-Service -Name StorSvc -ErrorAction SilentlyContinue\n"
+                "if ($service) {\n"
+                "  Set-Service -Name StorSvc -StartupType Disabled\n"
+                "  Stop-Service -Name StorSvc -Force\n"
+                '  Write-Output "HOST_QUIESCE service=StorSvc before=$($service.Status) '
+                'after=$((Get-Service -Name StorSvc).Status)"\n'
+                "} else {\n"
+                "  Write-Output 'HOST_QUIESCE service=StorSvc absent'\n"
+                "}\n"},
+        {"name": "Run the full native readiness soak",
+         "timeout-minutes": 65,
+         "shell": "pwsh",
+         "env": {"OWNER_BRIDGE_TEST_RUNTIME": "${{ steps.runtime.outputs.runtime }}",
+                 "OWNER_BRIDGE_READINESS_RUNS_PER_WORKER": "250"},
+         "run": READINESS_SOAK_COMMAND},
+    ],
+}
+
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'ec175ad26f377785a112b707d91f433dd7c8b5ed3f6a318c0c80d3c3870302d0',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 

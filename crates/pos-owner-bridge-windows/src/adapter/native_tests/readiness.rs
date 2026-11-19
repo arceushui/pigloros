@@ -24,7 +24,14 @@ use super::{pass, pass_unwind, retirement, TestResult};
 use crate::{NativeFactory, NativePulse, StaPump};
 
 const WORKERS: usize = 4;
-const RUNS_PER_WORKER: usize = 250;
+/// Ceremonies each worker runs. The owner-bridge-windows workflow sets 250 in
+/// its uninstrumented readiness-soak job (1,000 real ceremonies) and a short
+/// sweep in its coverage job; the fixture refuses to run without a value.
+const RUNS_PER_WORKER_ENV: &str = "OWNER_BRIDGE_READINESS_RUNS_PER_WORKER";
+
+fn runs_per_worker() -> usize {
+    pass(pass(std::env::var(RUNS_PER_WORKER_ENV)).parse())
+}
 
 pub(super) fn run(runtime_path: &Path, root: &Path) {
     lifecycle_stage("readiness.loopback-start");
@@ -33,6 +40,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) {
     ));
     lifecycle_stage("readiness.workers-spawn");
     let foreground = Arc::new(Foreground::default());
+    let runs = runs_per_worker();
     let mut workers = Vec::new();
     for worker in 0..WORKERS {
         let path = runtime_path.to_path_buf();
@@ -40,7 +48,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) {
         let loopback = loopback.clone();
         let foreground = Arc::clone(&foreground);
         workers.push(thread::spawn(move || {
-            run_worker(&path, root, loopback, &foreground, worker)
+            run_worker(&path, root, loopback, &foreground, worker, runs)
         }));
     }
     // Every creating STA retires its accepted owners before its join completes.
@@ -58,7 +66,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) {
     for result in reports {
         completed += pass_unwind(result);
     }
-    assert_eq!(completed, 1_000);
+    assert_eq!(completed, WORKERS * runs);
 }
 
 fn run_worker(
@@ -67,6 +75,7 @@ fn run_worker(
     mut loopback: SharedLoopback,
     foreground: &Foreground,
     worker: usize,
+    runs: usize,
 ) -> usize {
     lifecycle_stage(&format!("readiness.worker{worker}.verify-runtime"));
     pass(crate::create_private_directory(&root));
@@ -89,8 +98,8 @@ fn run_worker(
         .map_err(pos_owner_bridge::SurfaceError::error),
     );
     lifecycle_stage(&format!("readiness.worker{worker}.ceremonies"));
-    for iteration in 0..RUNS_PER_WORKER {
-        let number = pass(u64::try_from(worker * RUNS_PER_WORKER + iteration + 1));
+    for iteration in 0..runs {
+        let number = pass(u64::try_from(worker * runs + iteration + 1));
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&number.to_le_bytes());
         let started = Instant::now();
@@ -123,7 +132,7 @@ fn run_worker(
     worker_stage(worker, "timer-stopped");
     drop(factory);
     worker_stage(worker, "apartment-released");
-    RUNS_PER_WORKER
+    runs
 }
 
 // Constant-memory observations of existing driver and STA pump calls.
