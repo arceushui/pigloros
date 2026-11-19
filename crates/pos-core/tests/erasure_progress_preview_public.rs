@@ -21,7 +21,8 @@ use pos_core::{
     ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeV1, ErasureStateTransitionV1, LocalErasureNegativeResultV1,
-    LocalErasureOwnerResultV1, LocalOwnerEffectV1, PreparedLocalOwnerEffectV1,
+    LocalErasureOwnerResultV1, LocalOwnerEffectV1, LocalOwnerResultBindingV1,
+    PreparedLocalOwnerEffectV1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -443,18 +444,16 @@ impl ErasureAuthorityExecutionV1 for NegativeExecutor {
             owner_ref: destruction.owner,
             error: ErasureErrorV1::ArtifactDeletionFailed,
         };
-        let owner_result = LocalErasureOwnerResultV1 {
-            request: command.request,
-            attempt: destruction.provenance,
-            obligation: destruction.obligation,
-            command: destruction.command,
-            owner_ref: destruction.owner,
-            error: Some(effect.error),
-            effect_digest: effect.reference()?,
-        };
         let prepared = PreparedLocalOwnerEffectV1::new(
             LocalOwnerEffectV1::Negative(effect.to_canonical_cbor()?),
-            &owner_result.to_canonical_cbor()?,
+            LocalOwnerResultBindingV1 {
+                request: command.request,
+                attempt: destruction.provenance,
+                obligation: destruction.obligation,
+                command: destruction.command,
+                owner_ref: destruction.owner,
+                error: Some(effect.error),
+            },
         )?;
         let result = ErasureOwnerResultV1::bind(command, prepared.owner_result().canonical_cbor())?;
         context.push(prepared);
