@@ -218,6 +218,7 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
     let outcomes = std::thread::scope(|scope| {
         let run = move |mut scenario: Scenario, attempt: &AdmittedAttempt, ready, peer| {
             let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
                 .enable_time()
                 .build()
                 .map_err(|error| error.to_string())?;
