@@ -544,24 +544,23 @@ fn the_anchor_generation_is_derived_only_on_the_anchor_timeline() -> TestResult 
     let anchor = CommunityMetadataAnchorV1::new(INCARNATION, target(), ANCHOR_GENERATION, &policy)?;
 
     let empty = selection(INCARNATION, &[])?;
-    assert_eq!(
-        planner.generation(&anchor, &empty)?,
-        Some(ANCHOR_GENERATION)
-    );
+    assert_eq!(planner.generation(&anchor, &empty)?, ANCHOR_GENERATION);
     // Another Timeline's row leaves `anchor_G` unconsumed. The rows are in
     // Timeline order: the anchor row is first, then the other one.
     let others = [floor(other_timeline())];
     let other = selection(INCARNATION, &others)?;
-    assert_eq!(
-        planner.generation(&anchor, &other)?,
-        Some(ANCHOR_GENERATION)
-    );
+    assert_eq!(planner.generation(&anchor, &other)?, ANCHOR_GENERATION);
+    // Once a committed CGI1 has consumed `anchor_G`, code 0 is stale.
     let consumed_rows = [floor(target()), floor(other_timeline())];
     let consumed = selection(INCARNATION, &consumed_rows)?;
-    assert_eq!(planner.generation(&anchor, &consumed)?, None);
     let only_anchor = [floor(target())];
     let anchored = selection(INCARNATION, &only_anchor)?;
-    assert_eq!(planner.generation(&anchor, &anchored)?, None);
+    for selection in [&consumed, &anchored] {
+        assert_eq!(
+            planner.generation(&anchor, selection).err(),
+            Some(Error::StaleGeneration)
+        );
+    }
 
     let elsewhere =
         CommunityMetadataAnchorV1::new(INCARNATION, other_timeline(), ANCHOR_GENERATION, &policy)?;
@@ -689,7 +688,8 @@ fn records_mint_cgi1_csb1_cbq1_and_cpv1() -> TestResult {
     assert_eq!(scope_fields.policy_revision, SOURCE_CATALOGUE);
     assert_eq!(scope_fields.evidence_not_after_micros, HORIZON);
 
-    let mut due = vec![
+    // Roster order, as in the CGI1 member list and the CPV1 refs.
+    let due = vec![
         CommunityDueMemberBudgetV1 {
             member_binding_digest: digests[0],
             negotiated_tuple_digest: TUPLES[0],
@@ -699,7 +699,6 @@ fn records_mint_cgi1_csb1_cbq1_and_cpv1() -> TestResult {
             negotiated_tuple_digest: TUPLES[1],
         },
     ];
-    due.sort_by_key(|row| row.member_binding_digest);
     let quote =
         CommunityBudgetQuoteV1::initialization(target(), GENERATION, profile.digest(), due)?;
     assert_eq!(records.budget_quote(), quote.to_canonical_cbor().as_slice());
@@ -758,7 +757,11 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
         );
     }
     let admission = world.admit(planner.request())?;
-    for addresses in [&ADDRESSES[..1], &[ADDRESSES[0], Hash::zero()][..]] {
+    for addresses in [
+        &ADDRESSES[..1],
+        &[ADDRESSES[0], Hash::zero()][..],
+        &[ADDRESSES[0], ADDRESSES[0]][..],
+    ] {
         assert_eq!(
             planner.records(GENERATION, &admission, addresses).err(),
             Some(Error::InvalidBinding)
@@ -768,5 +771,44 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
         planner.records([0; 16], &admission, &ADDRESSES).err(),
         Some(Error::InvalidBinding)
     );
+    Ok(())
+}
+
+/// Owner decision 6 (2026-11-19): a roster whose CBQ1 byte maximum exceeds
+/// the CDP1 shared per-record limit is refused before anything is minted.
+#[test]
+fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
+    let fixture = Fixture::new()?;
+    let entries: Vec<String> = (0..43).map(|index| format!("Entry-{index:02}")).collect();
+    let rows = entries
+        .iter()
+        .map(|entry| {
+            Ok(CommunityProfileMemberV1::new(
+                entry,
+                &fixture.implementation,
+                hash(4),
+                SCHEMA,
+                TUPLES[0],
+                fixture.initializer(0),
+            )?)
+        })
+        .collect::<Fallible<Vec<_>>>()?;
+    let oversized = profile(&rows)?;
+    let planner =
+        CommunityInitializationPlannerV1::new(&SEAL, installation(&oversized), form(&oversized))?;
+    let mut world = World::new()?;
+    let admission = world.admit(planner.request())?;
+    let addresses: Vec<Hash> = (0..43_u8).map(|index| hash(0x80 + index)).collect();
+    assert_eq!(
+        planner.records(GENERATION, &admission, &addresses).err(),
+        Some(Error::BoundsExceeded)
+    );
+    // 42 members fit: 42 x 3,147,312 bytes is under 128 MiB.
+    let fitting = profile(&rows[..42])?;
+    let planner =
+        CommunityInitializationPlannerV1::new(&SEAL, installation(&fitting), form(&fitting))?;
+    assert!(planner
+        .records(GENERATION, &admission, &addresses[..42])
+        .is_ok());
     Ok(())
 }

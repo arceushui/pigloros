@@ -10,7 +10,7 @@ use pos_core::community_lifecycle::{
     CommunityBudgetQuoteInputV1 as QuoteInput, CommunityBudgetQuoteV1 as Quote,
     CommunityDueMemberBudgetV1 as Due, CommunityLifecycleErrorV1 as Error,
     CommunitySharedCountsV1 as Counts, COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1,
-    MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
+    COMMUNITY_SHARED_RECORD_LIMITS_V1, MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
 };
 use pos_core::{Hash, TimelineId};
 
@@ -133,6 +133,11 @@ fn cbq1_round_trips_the_exact_ten_fields() -> TestResult {
         maximum_required_bytes: u64::MAX,
         ..input()
     })?;
+    // Roster order, not digest order.
+    assert_round_trip(&QuoteInput {
+        due_members: vec![due(12, 11), due(10, 13)],
+        ..input()
+    })?;
     // The full 64-member roster.
     assert_round_trip(&QuoteInput {
         due_members: (1..=64).map(|member| due(member, 200)).collect(),
@@ -199,13 +204,13 @@ fn cbq1_refuses_invalid_bindings() {
             due_members: vec![due(10, 0), due(12, 11)],
             ..input()
         },
-        // Descending and duplicate member digests.
+        // A repeated member digest, adjacent or not.
         QuoteInput {
-            due_members: vec![due(12, 11), due(10, 11)],
+            due_members: vec![due(10, 11), due(10, 12)],
             ..input()
         },
         QuoteInput {
-            due_members: vec![due(10, 11), due(10, 12)],
+            due_members: vec![due(10, 11), due(12, 11), due(10, 13)],
             ..input()
         },
     ];
@@ -271,18 +276,48 @@ fn cbq1_decoding_rejects_noncanonical_and_foreign_records() -> TestResult {
         value.as_array_mut().ok_or("array")?[index] = replacement;
         assert_eq!(decode_error(&value)?, Some(Error::InvalidEncoding));
     }
-    let mut unsorted = quote_value(&QuoteInput {
-        due_members: vec![due(10, 11), due(12, 11)],
-        ..input()
-    });
-    if let Some(Value::Array(rows)) = unsorted.as_array_mut().ok_or("array")?.get_mut(6) {
-        rows.reverse();
+    let mut repeated = quote_value(&input());
+    if let Some(Value::Array(rows)) = repeated.as_array_mut().ok_or("array")?.get_mut(6) {
+        rows[1] = rows[0].clone();
     }
-    assert_eq!(decode_error(&unsorted)?, Some(Error::InvalidBinding));
+    assert_eq!(decode_error(&repeated)?, Some(Error::InvalidBinding));
     let oversized = vec![0; MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1 + 1];
     assert_eq!(
         Quote::from_canonical_cbor(&oversized).err(),
         Some(Error::BoundsExceeded)
     );
+    Ok(())
+}
+
+/// Owner decision 6 (2026-11-19): each maximum must fit its CDP1 shared
+/// per-record limit, exactly at the limit and not one over.
+#[test]
+fn quotes_fit_the_shared_record_limits_exactly() -> TestResult {
+    let [nodes, edges, bytes] = COMMUNITY_SHARED_RECORD_LIMITS_V1;
+    assert_eq!(
+        COMMUNITY_SHARED_RECORD_LIMITS_V1,
+        [65_536, 262_144, 134_217_728]
+    );
+    let at = |nodes, edges, bytes| {
+        Quote::new(QuoteInput {
+            maximum_required_nodes: nodes,
+            maximum_required_edges: edges,
+            maximum_required_bytes: bytes,
+            ..input()
+        })
+    };
+    at(nodes, edges, bytes)?.require_within(COMMUNITY_SHARED_RECORD_LIMITS_V1)?;
+    for (n, e, b) in [
+        (nodes + 1, edges, bytes),
+        (nodes, edges + 1, bytes),
+        (nodes, edges, bytes + 1),
+    ] {
+        assert_eq!(
+            at(n, e, b)?
+                .require_within(COMMUNITY_SHARED_RECORD_LIMITS_V1)
+                .err(),
+            Some(Error::BoundsExceeded)
+        );
+    }
     Ok(())
 }

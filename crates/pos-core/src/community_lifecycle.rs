@@ -162,7 +162,7 @@ pub use prepared::{
 pub use profile::{
     community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
-    COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+    COMMUNITY_INITIALIZER_SET_SCHEMA_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{

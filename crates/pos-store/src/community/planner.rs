@@ -26,7 +26,7 @@ use pos_core::community_lifecycle::{
     CommunityOwnerBindingInputV1, CommunityOwnerBindingV1, CommunityScopeBindingInputV1,
     CommunityScopeBindingV1, CommunityScopeCoverageRowV1, CommunityScopeCoverageRowsV1,
     CommunityScopeMembersV1, CommunitySelectionV1, CommunityTypedInputRefV1,
-    CommunityTypedInputRefsV1,
+    CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash, TimelineId};
 use zeroize::Zeroizing;
@@ -235,20 +235,21 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     ///
     /// `anchor` and `selection` are the domain's validated CMA1 and current
     /// CSI1. A code-0 initialize is admissible only on `anchor_T` (D7). Its
-    /// G is `anchor_G` while CSI1 has no `anchor_T` row; once a committed
-    /// CGI1 has consumed `anchor_G` (D8), this returns `None`: no anchor
-    /// generation remains, and the caller has already looked up a retry by
-    /// `(anchor_T, operation_id)` before allocating (R6.3(4)).
+    /// G is `anchor_G` while CSI1 has no `anchor_T` row. The caller has
+    /// already looked up a retry by `(anchor_T, operation_id)` before
+    /// allocating (R6.3(4)).
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` when the caller's Timeline is not
     /// `anchor_T`, or the anchor or selection belongs to another store
-    /// incarnation.
+    /// incarnation; and `StaleGeneration` (an A5.5 step-4 result) once a
+    /// committed CGI1 has consumed `anchor_G` (D8; owner decision on #560,
+    /// 2026-11-19).
     pub fn generation(
         &self,
         anchor: &CommunityMetadataAnchorV1,
         selection: &CommunitySelectionV1<'_>,
-    ) -> Result<Option<[u8; 16]>, Error> {
+    ) -> Result<[u8; 16], Error> {
         let anchor = anchor.as_input();
         let selection = selection.as_input();
         let incarnation = self.installation.store_incarnation;
@@ -264,7 +265,13 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             .try_fold(false, |seen, row| {
                 row.map(|row| seen || row.timeline == anchor.anchor_timeline)
             })
-            .map(|seen| (!seen).then_some(anchor.anchor_generation))
+            .and_then(|seen| {
+                if seen {
+                    Err(Error::StaleGeneration)
+                } else {
+                    Ok(anchor.anchor_generation)
+                }
+            })
     }
 
     /// COB1 and the roster's host-derived CMB1s for `generation` (G2).
@@ -329,12 +336,17 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     /// CMB1 ref, no scope members and the CDP1 `source_catalogue_digest` as
     /// its policy revision. The CPV1 names the same refs as its sources, the
     /// CDP1 `execution_profile_digest` as its rule bundle and `H(CBQ1)` as
-    /// its budget identity (G3).
+    /// its budget identity (G3). The CBQ1 due rows, the CGI1 member list and
+    /// the CPV1 refs are all in roster order.
+    ///
+    /// Before minting the CGI1, the CBQ1 maxima must fit the CDP1 shared
+    /// per-record limits (owner decision on #560, 2026-11-19).
     ///
     /// # Errors
     /// Returns `InvalidBinding` for an admission of another request, an
-    /// address count other than the roster's, a zero address and every
-    /// [`Self::bindings`] refusal.
+    /// address count other than the roster's, a zero or repeated address and
+    /// every [`Self::bindings`] refusal; and `BoundsExceeded` for a quote
+    /// over the shared limits.
     pub fn records(
         &self,
         generation: [u8; 16],
@@ -347,30 +359,65 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             || decided.action() != CommunityAdministrativeActionV1::Initialize.as_str()
             || decided.environment_constraints() != [expected.operation_constraint()]
             || envelope_addresses.len() != self.installation.profile.as_input().roster.len()
+            || envelope_addresses
+                .iter()
+                .enumerate()
+                .any(|(index, address)| envelope_addresses[..index].contains(address))
         {
             return Err(Error::InvalidBinding);
         }
         self.bindings(generation).and_then(|bindings| {
             let digests: Vec<Hash> = bindings.member_binding_digests().collect();
-            self.request_record(generation, admission, &digests)
-                .and_then(|request| {
-                    let refs: Vec<CommunityTypedInputRefV1<'_>> = digests
-                        .iter()
-                        .zip(envelope_addresses)
-                        .zip(0_u16..)
-                        .map(|((digest, address), slot)| {
-                            member_binding_ref(
-                                self.form.timeline,
-                                generation,
-                                self.form.operation_id,
-                                slot,
-                                *address,
-                                *digest,
-                            )
-                        })
-                        .collect();
-                    self.evidence(generation, request, &refs, &digests)
-                })
+            self.quote(generation, &digests).and_then(|quote| {
+                self.request_record(generation, admission, &digests)
+                    .and_then(|request| {
+                        let refs: Vec<CommunityTypedInputRefV1<'_>> = digests
+                            .iter()
+                            .zip(envelope_addresses)
+                            .zip(0_u16..)
+                            .map(|((digest, address), slot)| {
+                                member_binding_ref(
+                                    self.form.timeline,
+                                    generation,
+                                    self.form.operation_id,
+                                    slot,
+                                    *address,
+                                    *digest,
+                                )
+                            })
+                            .collect();
+                        self.evidence(generation, request, &refs, &quote)
+                    })
+            })
+        })
+    }
+
+    /// The CBQ1 initialization quote, in roster order, within the CDP1
+    /// shared per-record limits (G3).
+    fn quote(
+        &self,
+        generation: [u8; 16],
+        digests: &[Hash],
+    ) -> Result<CommunityBudgetQuoteV1, Error> {
+        let profile = self.installation.profile;
+        let due = digests
+            .iter()
+            .zip(profile.as_input().roster)
+            .map(|(digest, row)| CommunityDueMemberBudgetV1 {
+                member_binding_digest: *digest,
+                negotiated_tuple_digest: row.digests()[2],
+            })
+            .collect();
+        CommunityBudgetQuoteV1::initialization(
+            self.form.timeline,
+            generation,
+            profile.digest(),
+            due,
+        )
+        .and_then(|quote| {
+            quote
+                .require_within(COMMUNITY_SHARED_RECORD_LIMITS_V1)
+                .map(|()| quote)
         })
     }
 
@@ -398,13 +445,13 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
         .map(|request| (request.to_canonical_cbor(), request.digest()))
     }
 
-    /// The CSB1, CBQ1 and CPV1 over the members' CMB1 refs.
+    /// The CSB1 and CPV1 over the members' CMB1 refs, with the CBQ1.
     fn evidence(
         &self,
         generation: [u8; 16],
         (request, request_digest): (Zeroizing<Vec<u8>>, Hash),
         refs: &[CommunityTypedInputRefV1<'_>],
-        digests: &[Hash],
+        quote: &CommunityBudgetQuoteV1,
     ) -> Result<CommunityInitializationRecordsV1, Error> {
         let installation = self.installation;
         let profile = installation.profile.as_input();
@@ -420,15 +467,7 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             })
             .collect();
         coverage.sort_by_key(|row| row.typed_input_ref_digest);
-        let mut due: Vec<CommunityDueMemberBudgetV1> = digests
-            .iter()
-            .zip(profile.roster)
-            .map(|(digest, row)| CommunityDueMemberBudgetV1 {
-                member_binding_digest: *digest,
-                negotiated_tuple_digest: row.digests()[2],
-            })
-            .collect();
-        due.sort_by_key(|row| row.member_binding_digest);
+        let budget_quote_digest = quote.digest();
         CommunityScopeBindingV1::new(CommunityScopeBindingInputV1 {
             store_incarnation: installation.store_incarnation,
             timeline,
@@ -441,35 +480,28 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
             evidence_not_after_micros: horizon,
         })
         .and_then(|scope| {
-            CommunityBudgetQuoteV1::initialization(
+            let scope_binding_digest = scope.digest();
+            CommunityOriginalProvenanceV1::new(CommunityOriginalProvenanceInputV1 {
+                store_incarnation: installation.store_incarnation,
                 timeline,
                 generation,
-                installation.profile.digest(),
-                due,
-            )
-            .and_then(|quote| {
-                CommunityOriginalProvenanceV1::new(CommunityOriginalProvenanceInputV1 {
-                    store_incarnation: installation.store_incarnation,
-                    timeline,
-                    generation,
-                    operation,
-                    input_identity: request_digest,
-                    scope_binding_digest: scope.digest(),
-                    source_root_refs: CommunityTypedInputRefsV1::from_references(refs),
-                    rule_bundle_digest: profile.execution_profile_digest,
-                    budget_identity: quote.digest(),
-                    evidence_not_after_micros: horizon,
-                })
-                .map(|provenance| CommunityInitializationRecordsV1 {
-                    request,
-                    request_digest,
-                    scope_binding: scope.to_canonical_cbor(),
-                    scope_binding_digest: scope.digest(),
-                    budget_quote: quote.to_canonical_cbor(),
-                    budget_quote_digest: quote.digest(),
-                    provenance: provenance.to_canonical_cbor(),
-                    provenance_digest: provenance.digest(),
-                })
+                operation,
+                input_identity: request_digest,
+                scope_binding_digest,
+                source_root_refs: CommunityTypedInputRefsV1::from_references(refs),
+                rule_bundle_digest: profile.execution_profile_digest,
+                budget_identity: budget_quote_digest,
+                evidence_not_after_micros: horizon,
+            })
+            .map(|provenance| CommunityInitializationRecordsV1 {
+                request,
+                request_digest,
+                scope_binding: scope.to_canonical_cbor(),
+                scope_binding_digest,
+                budget_quote: quote.to_canonical_cbor(),
+                budget_quote_digest,
+                provenance_digest: provenance.digest(),
+                provenance: provenance.to_canonical_cbor(),
             })
         })
     }

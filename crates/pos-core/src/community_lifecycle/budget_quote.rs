@@ -5,8 +5,10 @@
 //! worst-case nodes, edges and bytes the operation may add. It excludes
 //! every future CPK1/CPN1/CGR1/CPD1/CPS1/CPC1, so no
 //! provenance-to-budget-to-result cycle exists. Valid bytes do not prove
-//! that the counts were read from real recorded sets or that the maxima fit:
-//! the concrete planner derives and checks them.
+//! that the counts were read from real recorded sets, and a decoded quote is
+//! not checked against any limit: the concrete planner derives the quote and
+//! refuses one whose maxima exceed the CDP1 shared per-record limits
+//! ([`CommunityBudgetQuoteV1::require_within`]) before it mints anything.
 
 use super::{
     canonical_end, digest, encode_coordinates, read_coordinates, read_hash, read_hashes, read_head,
@@ -85,7 +87,7 @@ pub struct CommunityBudgetQuoteInputV1 {
     pub profile_digest: Hash,
     /// Shared counts of the actual prior recorded sets.
     pub prior_shared_counts: CommunitySharedCountsV1,
-    /// 1..=64 due rows, strictly ascending by CMB1 digest.
+    /// 1..=64 due rows with distinct CMB1 digests, in roster order.
     pub due_members: Vec<CommunityDueMemberBudgetV1>,
     /// Worst-case nodes the operation may add.
     pub maximum_required_nodes: u64,
@@ -104,8 +106,8 @@ impl CommunityBudgetQuoteV1 {
     ///
     /// # Errors
     /// Returns `BoundsExceeded` for no or more than 64 due rows, and
-    /// `InvalidBinding` for zero coordinates or digests and due rows that
-    /// are not strictly ascending by CMB1 digest.
+    /// `InvalidBinding` for zero coordinates or digests and a repeated CMB1
+    /// digest. Roster order itself is the planner's to check.
     pub fn new(input: CommunityBudgetQuoteInputV1) -> Result<Self> {
         if !(1..=MAX_COMMUNITY_MEMBERS_V1).contains(&input.due_members.len()) {
             return Err(Error::BoundsExceeded);
@@ -114,8 +116,10 @@ impl CommunityBudgetQuoteV1 {
             || input.due_members.iter().any(|row| {
                 [row.member_binding_digest, row.negotiated_tuple_digest].contains(&Hash::zero())
             })
-            || !input.due_members.is_sorted_by(|a, b| {
-                a.member_binding_digest.as_bytes() < b.member_binding_digest.as_bytes()
+            || input.due_members.iter().enumerate().any(|(index, row)| {
+                input.due_members[..index]
+                    .iter()
+                    .any(|prior| prior.member_binding_digest == row.member_binding_digest)
             });
         if invalid {
             return Err(Error::InvalidBinding);
@@ -150,6 +154,29 @@ impl CommunityBudgetQuoteV1 {
             maximum_required_edges: 2 * members,
             maximum_required_bytes: members * COMMUNITY_INITIALIZATION_MEMBER_BYTES_V1,
         })
+    }
+
+    /// Require each worst-case maximum to fit its shared per-record limit,
+    /// `[nodes, edges, bytes]` (owner decision on #560, 2026-11-19).
+    ///
+    /// # Errors
+    /// Returns `BoundsExceeded` when any maximum exceeds its limit.
+    pub fn require_within(&self, limits: [u64; 3]) -> Result<()> {
+        let input = self.as_input();
+        let maxima = [
+            input.maximum_required_nodes,
+            input.maximum_required_edges,
+            input.maximum_required_bytes,
+        ];
+        if maxima
+            .iter()
+            .zip(limits)
+            .any(|(maximum, limit)| *maximum > limit)
+        {
+            Err(Error::BoundsExceeded)
+        } else {
+            Ok(())
+        }
     }
 
     /// Borrow the exact fields without checking any recorded set.
