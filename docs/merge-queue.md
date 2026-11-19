@@ -111,7 +111,10 @@ these.
     to this bypass list lets merges skip the queue and reset it.
   - `Require Rust quality gates` — required checks `ci-gate`,
     `diff mutation testing`, `Trunk Code Quality` and `CodeQL (Rust)`;
-    "require branches to be up to date" stays **off**.
+    "require branches to be up to date" stays **off**. The intermediate
+    `preflight-gate`, `core-gate` and `standard-gate` jobs are not required
+    checks: each later CI stage waits for their underlying jobs directly, and
+    they only report stage verdicts to `ci-gate`.
   - `main` — pull request required (0 approvals), resolved conversations,
     linear history, CodeQL alerts block (code scanning rule). That rule needs
     an uploaded CodeQL analysis for every pull-request head, so the `codeql`
