@@ -416,6 +416,7 @@ impl PreparedLocalOwnerEffectV1 {
 /// effect digest and object of one owner effect, with an ELNEG1 checked
 /// against `binding`.
 fn effect_parts(effect: LocalOwnerEffectV1, binding: &LocalOwnerResultBindingV1) -> EffectPartsV1 {
+    let tag = effect_tag(&effect);
     match effect {
         LocalOwnerEffectV1::KeyTombstone {
             request,
@@ -432,21 +433,12 @@ fn effect_parts(effect: LocalOwnerEffectV1, binding: &LocalOwnerResultBindingV1)
             None,
             Ok((receipt_digest(tombstone.deletion_receipt), None)),
         ),
-        LocalOwnerEffectV1::ArtifactDisposition(record) => {
-            (None, None, None, record_effect(record, "ELAD1"))
-        }
-        LocalOwnerEffectV1::CacheGeneration(record) => {
-            (None, None, None, record_effect(record, "ELCG1"))
-        }
         LocalOwnerEffectV1::Negative(record) => (
             None,
             None,
             None,
-            negative_bound_by(&record, binding).and_then(|()| record_effect(record, "ELNEG1")),
+            negative_bound_by(&record, binding).and_then(|()| record_effect(record, tag)),
         ),
-        LocalOwnerEffectV1::ReplicaPurge(record) => {
-            (None, None, None, record_effect(record, "ELRP1"))
-        }
         LocalOwnerEffectV1::RecipientExportWithdrawal(record) => {
             let withdrawal = LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor(&record)
                 .map(|elxw1| RecipientExportWithdrawalBindingV1::from(&elxw1));
@@ -454,9 +446,27 @@ fn effect_parts(effect: LocalOwnerEffectV1, binding: &LocalOwnerResultBindingV1)
                 None,
                 None,
                 withdrawal.as_ref().ok().copied(),
-                withdrawal.and_then(|_| record_effect(record, "ELXW1")),
+                withdrawal.and_then(|_| record_effect(record, tag)),
             )
         }
+        LocalOwnerEffectV1::ArtifactDisposition(record)
+        | LocalOwnerEffectV1::CacheGeneration(record)
+        | LocalOwnerEffectV1::ReplicaPurge(record) => {
+            (None, None, None, record_effect(record, tag))
+        }
+    }
+}
+
+/// The tag of the record `effect` commits beside its ELO1; a tombstone
+/// commits none.
+const fn effect_tag(effect: &LocalOwnerEffectV1) -> &'static str {
+    match effect {
+        LocalOwnerEffectV1::KeyTombstone { .. } | LocalOwnerEffectV1::ExistingTombstone(_) => "",
+        LocalOwnerEffectV1::ArtifactDisposition(_) => "ELAD1",
+        LocalOwnerEffectV1::CacheGeneration(_) => "ELCG1",
+        LocalOwnerEffectV1::Negative(_) => "ELNEG1",
+        LocalOwnerEffectV1::ReplicaPurge(_) => "ELRP1",
+        LocalOwnerEffectV1::RecipientExportWithdrawal(_) => "ELXW1",
     }
 }
 
