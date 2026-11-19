@@ -81,6 +81,7 @@ macro_rules! submit {
     }};
 }
 
+pub mod erasure;
 pub mod scenario_room;
 
 #[cfg(test)]

@@ -59,11 +59,14 @@ pub enum ProblemCodeV1 {
     ResourceLimitExceeded,
     TemporarilyUnavailable,
     InternalSafeFailure,
+    ErasureScopeRetained,
+    ErasureScopeTooLarge,
+    ErasureQuotaExhausted,
 }
 
 impl ProblemCodeV1 {
     /// Every code, in registry order.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 25] = [
         Self::InvalidRequest,
         Self::UnsupportedVersion,
         Self::IncompatibleProfile,
@@ -86,6 +89,9 @@ impl ProblemCodeV1 {
         Self::ResourceLimitExceeded,
         Self::TemporarilyUnavailable,
         Self::InternalSafeFailure,
+        Self::ErasureScopeRetained,
+        Self::ErasureScopeTooLarge,
+        Self::ErasureQuotaExhausted,
     ];
 
     /// The stable wire code.
@@ -114,6 +120,9 @@ impl ProblemCodeV1 {
             Self::ResourceLimitExceeded => "resource-limit-exceeded",
             Self::TemporarilyUnavailable => "temporarily-unavailable",
             Self::InternalSafeFailure => "internal-safe-failure",
+            Self::ErasureScopeRetained => "erasure-scope-retained",
+            Self::ErasureScopeTooLarge => "erasure-scope-too-large",
+            Self::ErasureQuotaExhausted => "erasure-quota-exhausted",
         }
     }
 
@@ -143,6 +152,9 @@ impl ProblemCodeV1 {
             Self::ResourceLimitExceeded => "Resource limit exceeded",
             Self::TemporarilyUnavailable => "Temporarily unavailable",
             Self::InternalSafeFailure => "Internal safe failure",
+            Self::ErasureScopeRetained => "Erasure scope retained",
+            Self::ErasureScopeTooLarge => "Erasure scope too large",
+            Self::ErasureQuotaExhausted => "Erasure quota exhausted",
         }
     }
 }
