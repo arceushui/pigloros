@@ -5914,9 +5914,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "blake3",
+ "ed25519-dalek",
  "piglor-gateway",
  "piglor-ledger",
+ "pos-conformance",
  "pos-core",
+ "pos-crypto",
  "pos-reference",
  "pos-runtime",
  "pos-store",
