@@ -1662,7 +1662,7 @@ async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<
         started_cgroup_transport(behavior, service).await?;
     let reads_before_binding = reads.load(Ordering::SeqCst);
     let mut bound = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1696,7 +1696,7 @@ async fn a_bind_whose_invocation_is_unreadable_is_refused() -> Result<(), Box<dy
     let (transport, _server, verified, temporary) =
         started_cgroup_transport(ManagerBehavior::default(), service).await?;
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1757,7 +1757,7 @@ async fn cgroup_binding_rejects_lost_unit_lookup() -> Result<(), Box<dyn Error>>
     let (transport, _server, verified, temporary) =
         started_cgroup_transport(behavior, service).await?;
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1786,7 +1786,7 @@ async fn cgroup_binding_rechecks_unit_name_after_open() -> Result<(), Box<dyn Er
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(behavior, service).await?;
         let error = transport
-            .bind_cgroup_with_root(
+            .bind_invoked_cgroup(
                 &verified,
                 CgroupRoot::for_test(File::open(temporary.path())?),
             )
@@ -1813,7 +1813,7 @@ async fn cgroup_binding_rejects_unit_substitution_before_property_read(
     let reads_before_binding = reads.load(Ordering::SeqCst);
     verified.unit_path = OwnedObjectPath::try_from(UNRELATED_UNIT_PATH)?;
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1845,7 +1845,7 @@ async fn cgroup_binding_rejects_reverse_lookup_failure_and_substitution(
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(behavior, service).await?;
         let error = transport
-            .bind_cgroup_with_root(
+            .bind_invoked_cgroup(
                 &verified,
                 CgroupRoot::for_test(File::open(temporary.path())?),
             )
@@ -1868,7 +1868,7 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
     let (transport, _server, verified, temporary) =
         started_cgroup_transport(ManagerBehavior::default(), service).await?;
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1889,7 +1889,7 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
     let reads_before_binding = reads.load(Ordering::SeqCst);
     threshold.store(reads_before_binding + 1, Ordering::SeqCst);
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1911,7 +1911,7 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
     let reads_before_binding = reads.load(Ordering::SeqCst);
     threshold.store(reads_before_binding + 1, Ordering::SeqCst);
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1934,7 +1934,7 @@ async fn cgroup_binding_rejects_invalid_and_missing_kernel_paths() -> Result<(),
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(ManagerBehavior::default(), service).await?;
         let error = transport
-            .bind_cgroup_with_root(
+            .bind_invoked_cgroup(
                 &verified,
                 CgroupRoot::for_test(File::open(temporary.path())?),
             )
