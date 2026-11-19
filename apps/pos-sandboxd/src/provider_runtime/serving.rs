@@ -91,6 +91,9 @@ const RECHECK: Timespec = Timespec {
     tv_nsec: 10_000_000,
 };
 
+/// The only UID whose connections either socket answers (R11 §6 step 6).
+const ROOT_UID: u32 = 0;
+
 /// The control-socket exchange bound from accept (R11 §8.3 step 1).
 const CONTROL_EXCHANGE: Duration = Duration::from_millis(100);
 
@@ -254,13 +257,15 @@ struct Workers<'scope> {
 
 /// The startup authority that answers requests, its one signer, the
 /// admission state restart reconciliation sets (unset while `Starting`),
-/// the revocation responder and the control state it leaves.
+/// the revocation responder and the control state it leaves, and the one
+/// peer UID both sockets answer.
 pub(super) struct Responder<'a> {
     admitted: &'a AdmittedSelectorProvider,
     signer: &'a KeyFileRuntimeSigner,
     admission: &'a OnceLock<AdmissionState>,
     revocation:
         RevocationUpdateResponder<'a, KeyFileRuntimeSigner, LiveAttempts<'a>, ControlState<'a>>,
+    peer_uid: u32,
 }
 
 impl<'a> Responder<'a> {
@@ -289,6 +294,7 @@ impl<'a> Responder<'a> {
                     admitted,
                 },
             ),
+            peer_uid: ROOT_UID,
         }
     }
 
@@ -323,10 +329,7 @@ impl<'a> Responder<'a> {
     ) -> Result<(), ProviderRuntimeError> {
         workers.answered.retain(|worker| !worker.is_finished());
         workers.refusing.retain(|worker| !worker.is_finished());
-        // While every answered and every refusing slot is busy the execute
-        // listener is not polled; the control listener and both endpoint
-        // checks still are.
-        let accepting = workers.answered.len() < pool || workers.refusing.len() < pool.max(1);
+        let accepting = accepting(workers.answered.len(), workers.refusing.len(), pool);
         let mut ready = [
             PollFd::new(control.listener(), PollFlags::IN),
             PollFd::new(
@@ -340,12 +343,7 @@ impl<'a> Responder<'a> {
         ];
         poll(&mut ready, (!accepting).then_some(&RECHECK))
             .map_err(unavailable)
-            .map(|_| {
-                (
-                    !ready[0].revents().is_empty(),
-                    accepting && !ready[1].revents().is_empty(),
-                )
-            })
+            .map(|_| readiness(accepting, ready[0].revents(), ready[1].revents()))
             .and_then(|readiness| {
                 execute
                     .verify()
@@ -374,10 +372,7 @@ impl<'a> Responder<'a> {
                     })
             })
             .map(|(control_missed, execute_ready, accepted)| {
-                // An accept that produced nothing (such as `EMFILE`) backs
-                // off briefly instead of spinning on a listener that stays
-                // readable.
-                let missed = control_missed || (execute_ready && accepted.is_none());
+                let missed = missed(control_missed, execute_ready, accepted.is_some());
                 thread::sleep(ACCEPT_BACKOFF * u32::from(missed));
                 let admission = if workers.answered.len() < pool {
                     Admission::Answered
@@ -401,29 +396,32 @@ impl<'a> Responder<'a> {
     /// peer that is not root is dropped with zero bytes read and written; so
     /// is every peer once the runtime is `Revoked`, after the peer check.
     fn answer(&self, stream: &UnixStream, admission: Admission) {
-        if root_peer(stream) && !self.revocation.observer().revoked() {
+        if trusted_peer(stream, self.peer_uid) && !self.revocation.observer().revoked() {
             self.answer_root(stream, admission);
         }
     }
 
-    /// Answer one control-socket connection of a root peer, `accepted` at
-    /// that instant, through the revocation responder. The exchange closes
-    /// execute admission before anything is read; the responder reports the
-    /// fence and the acknowledgement before each has an effect.
+    /// Answer one control-socket connection, `accepted` at that instant,
+    /// then send server write EOF once an RCA1 was written. A peer that is
+    /// not root is dropped with zero bytes read and written.
     fn exchange(&self, stream: &UnixStream, accepted: Instant) {
-        if root_peer(stream) {
-            self.revocation.observer().advance(EXECUTE_CLOSED);
-            let deadline = exchange_deadline(accepted);
-            match self
-                .revocation
-                .respond(&mut Deadlined::until(stream, deadline), deadline)
-            {
-                ExchangeOutcome::Acknowledged | ExchangeOutcome::Resent => {
-                    stream.shutdown(std::net::Shutdown::Write).ok();
-                }
-                ExchangeOutcome::Refused { .. } => {}
-            }
+        if trusted_peer(stream, self.peer_uid) && self.respond(stream, accepted) {
+            stream.shutdown(std::net::Shutdown::Write).ok();
         }
+    }
+
+    /// Answer a root peer's control connection through the revocation
+    /// responder: whether it acknowledged or resent an RCA1. The exchange
+    /// closes execute admission before anything is read; the responder
+    /// reports the fence and the acknowledgement before each has an effect.
+    fn respond(&self, stream: &UnixStream, accepted: Instant) -> bool {
+        self.revocation.observer().advance(EXECUTE_CLOSED);
+        let deadline = exchange_deadline(accepted);
+        matches!(
+            self.revocation
+                .respond(&mut Deadlined::until(stream, deadline), deadline),
+            ExchangeOutcome::Acknowledged | ExchangeOutcome::Resent
+        )
     }
 
     /// Answer a root peer's connection: read it under the initial control
@@ -669,9 +667,33 @@ impl<'a> Responder<'a> {
     }
 }
 
-/// Whether the `SO_PEERCRED` UID of `stream`'s peer is 0 (R11 §6 step 6).
-fn root_peer(stream: &UnixStream) -> bool {
-    rustix::net::sockopt::socket_peercred(stream).is_ok_and(|peer| peer.uid.is_root())
+/// Whether the acceptor polls the execute listener, given its `answered`
+/// and `refusing` workers: while every answered and every refusing slot is
+/// busy it is not polled; the control listener and both endpoint checks
+/// still are.
+fn accepting(answered: usize, refusing: usize, pool: usize) -> bool {
+    answered < pool || refusing < pool.max(1)
+}
+
+/// Whether one poll found the control and the execute listener ready. The
+/// execute listener counts only while `accepting`: while it is not polled
+/// for input, whatever else it reports is no connection to accept.
+const fn readiness(accepting: bool, control: PollFlags, execute: PollFlags) -> (bool, bool) {
+    (!control.is_empty(), accepting && !execute.is_empty())
+}
+
+/// Whether an accept produced nothing (such as `EMFILE`): a control accept
+/// that `control_missed`, or an execute accept that was `execute_ready` but
+/// not `execute_accepted`. Then the acceptor backs off briefly instead of
+/// spinning on a listener that stays readable.
+const fn missed(control_missed: bool, execute_ready: bool, execute_accepted: bool) -> bool {
+    control_missed || (execute_ready && !execute_accepted)
+}
+
+/// Whether the `SO_PEERCRED` UID of `stream`'s peer is `uid` (R11 §6 step
+/// 6: [`ROOT_UID`] outside tests).
+fn trusted_peer(stream: &UnixStream, uid: u32) -> bool {
+    rustix::net::sockopt::socket_peercred(stream).is_ok_and(|peer| peer.uid.as_raw() == uid)
 }
 
 /// One complete frame, or step 1's refusal.

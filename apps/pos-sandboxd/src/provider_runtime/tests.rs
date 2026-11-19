@@ -384,22 +384,22 @@ fn policy_signed(magic: &str, unsigned: Value) -> TestResult<(Vec<u8>, [u8; 32])
 }
 
 /// An RCU1 of the staged installation to the next RVS1 epoch, revoking the
-/// sorted `providers`, with `nonce`; and that next RVS1's digest.
+/// sorted `providers`, with the nonce `update_nonce` derives from `seed`;
+/// and that next RVS1's digest.
 pub(super) fn revocation_update(
     admitted: &AdmittedSelectorProvider,
     providers: &[[u8; 32]],
-    nonce: u8,
+    seed: u8,
 ) -> TestResult<(Vec<u8>, [u8; 32])> {
-    revocation_update_revoking(admitted, &[], providers, nonce)
+    key_and_provider_revocation_update(admitted, &[], providers, seed)
 }
 
-/// [`revocation_update`] that also revokes the sorted trust `keys` (RVS1
-/// field 4) by key ID.
-pub(super) fn revocation_update_revoking(
+/// As `revocation_update`, also revoking the sorted key IDs `keys`.
+pub(super) fn key_and_provider_revocation_update(
     admitted: &AdmittedSelectorProvider,
     keys: &[&str],
     providers: &[[u8; 32]],
-    nonce: u8,
+    seed: u8,
 ) -> TestResult<(Vec<u8>, [u8; 32])> {
     let bootstrap = admitted.bootstrap();
     let text = |value: &str| Value::Text(value.to_owned());
@@ -410,7 +410,7 @@ pub(super) fn revocation_update_revoking(
             Value::Integer(1.into()),
             Value::Bytes(bootstrap.trust().snapshot_digest().to_vec()),
             Value::Integer((bootstrap.revocation().revocation_epoch() + 1).into()),
-            Value::Array(keys.iter().map(|key| text(key)).collect()),
+            Value::Array(keys.iter().copied().map(text).collect()),
             Value::Array(
                 providers
                     .iter()
@@ -430,11 +430,20 @@ pub(super) fn revocation_update_revoking(
             Value::Bytes(bootstrap.revocation().snapshot_digest().to_vec()),
             Value::Bytes(next),
             Value::Bytes(next_digest.to_vec()),
-            Value::Bytes(vec![nonce; 16]),
+            Value::Bytes(update_nonce(seed).to_vec()),
             text("policy"),
         ]),
     )?;
     Ok((rcu1, next_digest))
+}
+
+/// A distinct RCU1 nonce for each `seed`, derived through a labelled hash.
+fn update_nonce(seed: u8) -> [u8; 16] {
+    let digest = blake3::Hasher::new()
+        .update(b"PiglorOS.SandboxdRevocationUpdateFixtureNonce.v1\0")
+        .update(&[seed])
+        .finalize();
+    std::array::from_fn(|index| digest.as_bytes()[index])
 }
 
 /// The RCC1 of a committed update to `rcu1`, with the `live` and

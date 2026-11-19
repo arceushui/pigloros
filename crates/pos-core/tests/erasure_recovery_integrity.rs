@@ -1962,3 +1962,160 @@ fn recovery_revalidates_scope_and_resolution_host_admissions() -> Result<(), Era
     );
     Ok(())
 }
+
+/// Recover `request` from `adapter` while the host verifier refuses its
+/// first call of `operation`: recovery must fail with the host's error.
+fn assert_host_verifier_refusal_fails_recovery(
+    adapter: PublicCoordinatorPort,
+    request: ErasureRequestV1,
+    operation: PublicCoordinatorOperation,
+) {
+    let faulted = adapter.with_operation_fault(PublicCoordinatorFault {
+        operation,
+        occurrence: 0,
+    });
+    let provenance = request.provenance();
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(faulted, COORDINATOR).submit(request, provenance),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+}
+
+#[test]
+fn recovery_reverifies_completed_attempt_acknowledgement_and_receipt_evidence(
+) -> Result<(), ErasureErrorV1> {
+    for operation in [
+        PublicCoordinatorOperation::ValidateAttemptAdmission,
+        PublicCoordinatorOperation::ValidateAcknowledgement,
+        PublicCoordinatorOperation::ValidateReceipt,
+    ] {
+        let graph = completed_graph(vec![target(10)], None)?;
+        assert_host_verifier_refusal_fails_recovery(graph.adapter, graph.request, operation);
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_reverifies_the_active_attempt_and_its_acknowledgements() -> Result<(), ErasureErrorV1> {
+    for operation in [
+        PublicCoordinatorOperation::ValidateAttemptAdmission,
+        PublicCoordinatorOperation::ValidateAcknowledgement,
+    ] {
+        let graph = active_graph(vec![target(10), target(20)], None)?;
+        let request = graph.request.reference();
+        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR).acknowledge(
+            request,
+            acknowledgement(request, target(10), reference(171))?,
+        )?;
+        assert_host_verifier_refusal_fails_recovery(graph.adapter, graph.request, operation);
+    }
+    Ok(())
+}
+
+/// A request whose attempt 0 ends in a partial failure (one positive and
+/// one negative acknowledgement, one receipt) and whose retry is active
+/// with one positive acknowledgement: two attempts, three
+/// acknowledgements and one receipt to recover.
+fn retried_graph() -> Result<ActiveGraph, ErasureErrorV1> {
+    let mut targets = vec![target(10), target(20)];
+    targets.sort_unstable();
+    let request = request()?;
+    let port = port(targets.clone(), None);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(21))?;
+    coordinator.freeze_access(request.reference(), freeze_transition())?;
+    coordinator.dispatch_attempt(
+        request.reference(),
+        &admission(request.reference(), &targets)?,
+    )?;
+    coordinator.acknowledge(
+        request.reference(),
+        acknowledgement(request.reference(), targets[0], reference(171))?,
+    )?;
+    coordinator.acknowledge(
+        request.reference(),
+        ErasureAcknowledgementV1 {
+            outcome: ErasureAcknowledgementOutcomeV1::Negative,
+            ..acknowledgement(request.reference(), targets[1], reference(172))?
+        },
+    )?;
+    let partial = coordinator.finalize(request.reference(), receipt_input(&targets))?;
+    assert_eq!(partial.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    let retry = fixture_retry_admission(RetryAdmissionFixture {
+        request: request.reference(),
+        attempt_ordinal: 1,
+        source_receipt: Some(partial.receipt_digest()),
+        obligations: &[fixture_obligation(request.reference(), targets[1])?],
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 21,
+        deadline_position: 30,
+        authorization_provenance: reference(10),
+    })?;
+    coordinator.dispatch_attempt(request.reference(), &retry)?;
+    coordinator.acknowledge(
+        request.reference(),
+        acknowledgement(request.reference(), targets[1], reference(173))?,
+    )?;
+    Ok(ActiveGraph { adapter, request })
+}
+
+#[test]
+fn recovery_verifies_each_record_exactly_once() -> Result<(), ErasureErrorV1> {
+    let graph = retried_graph()?;
+    let before = graph.adapter.verifier_calls();
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .submit(graph.request.clone(), graph.request.provenance())?;
+    let after = graph.adapter.verifier_calls();
+    let calls: [u64; 3] = std::array::from_fn(|kind| after[kind] - before[kind]);
+    // Attempt admissions, acknowledgements, receipts.
+    assert_eq!(calls, [2, 3, 1]);
+    Ok(())
+}
+
+#[test]
+fn recovery_fails_on_a_later_host_verifier_refusal() -> Result<(), ErasureErrorV1> {
+    for (operation, occurrence) in [
+        // The retry's admission.
+        (PublicCoordinatorOperation::ValidateAttemptAdmission, 1),
+        // The second acknowledgement of attempt 0.
+        (PublicCoordinatorOperation::ValidateAcknowledgement, 1),
+        // The retry's acknowledgement.
+        (PublicCoordinatorOperation::ValidateAcknowledgement, 2),
+    ] {
+        let graph = retried_graph()?;
+        let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+            operation,
+            occurrence,
+        });
+        let provenance = graph.request.provenance();
+        assert_eq!(
+            ErasureCoordinatorStateMachineV1::new(faulted, COORDINATOR)
+                .submit(graph.request, provenance),
+            Err(ErasureErrorV1::TrustSnapshotInvalid)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_structural_failure_precedes_the_host_verifier() -> Result<(), ErasureErrorV1> {
+    // The active attempt no longer matches the manifest's state, so
+    // recovery refuses it (`ProvenanceMissing`) before the host verifier,
+    // which would refuse it with `TrustSnapshotInvalid`.
+    let graph = active_graph(vec![target(10)], None)?;
+    graph.adapter.replace_manifest_with_state_lifecycle(
+        graph.request.reference(),
+        ErasureLifecycleV1::DestructionDispatched,
+    )?;
+    let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::ValidateAttemptAdmission,
+        occurrence: 0,
+    });
+    let before = faulted.verifier_calls();
+    assert_recovery_fails(faulted.clone(), &graph.request);
+    assert_eq!(faulted.verifier_calls(), before);
+    Ok(())
+}

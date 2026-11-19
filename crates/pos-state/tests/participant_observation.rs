@@ -77,14 +77,17 @@ fn retained_observation(observation: &AuthorizedObservationV1) -> &ObservationSn
 }
 
 fn authenticated_principal(principal: PrincipalRefV1) -> AuthenticatedPrincipalResultV1 {
-    AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-        principal,
-        adapter_id: "test-adapter".to_owned(),
-        assurance: AssuranceLevelV1::try_new(1).test_ok(),
-        issued_at: WallTime::from_micros(1),
-        expires_at: WallTime::from_micros(100),
-        binding_digest: hash_from_repeated_byte(5),
-    })
+    AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        AuthenticatedPrincipalDraftV1 {
+            principal,
+            adapter_id: "test-adapter".to_owned(),
+            assurance: AssuranceLevelV1::try_new(1).test_ok(),
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(100),
+            binding_digest: hash_from_repeated_byte(5),
+        },
+    )
     .test_ok()
 }
 
@@ -306,6 +309,7 @@ fn authority_fixture_with_identity_presence(present: [bool; 3]) -> AuthorityFixt
     })
     .test_ok();
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![request.authenticated().registry_binding_digest()],
         vec![grant.binding_digest().test_ok()],
@@ -374,6 +378,7 @@ fn materialization_requires_each_observation_identity_before_projection_access()
 fn unresolved_principal_precedes_missing_observation_identity() {
     let fixture = authority_fixture_with_identity_presence([true, false, true]);
     let untrusted_registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         fixture.request.authority_registry_digest(),
         vec![hash_from_repeated_byte(99)],
         Vec::new(),
@@ -609,6 +614,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
     );
 
     let stripped_registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         fixture.request.authority_registry_digest(),
         vec![fixture.request.authenticated().registry_binding_digest()],
         Vec::new(),
@@ -707,6 +713,7 @@ fn materialization_canonicalizes_nested_projection_values() {
 fn materialization_rejects_denied_authority_and_empty_reducer_names() {
     let fixture = authority_fixture();
     let untrusted_registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         fixture.request.authority_registry_digest(),
         vec![fixture.request.authenticated().registry_binding_digest()],
         Vec::new(),

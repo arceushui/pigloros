@@ -807,6 +807,1115 @@
           }
         }
       }
+    },
+    "/v1/me/consent-revocations": {
+      "post": {
+        "operationId": "revokeConsent",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "consent"
+        ],
+        "description": "Revoke one of the acting Principal's own consents (#309, ADR-039), named by the `EventId` of its `consent.granted.v1` Event (`consent_ref`, D7), as the Principal's `Session` lists it. The revocation is one `consent.revoked.v1` Event on the Principal's consent Timeline; its sequence is the ADR-039 fence. It is recorded after every protected operation admitted before it completes and takes effect before the next decision: from then on every operation the consent governs is `403 revoked`, while the operations no consent governs (among them reading the Session and revoking a consent) stay available. Revocation stops future protected work; it is distinct from erasure and deletes nothing. It is monotonic: revoking a revoked consent returns its original revocation (`200`). The operation itself requires the `consent.revoke` grant like any protected operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and it must be the consent's subject or grantee. Without it the revocation is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentRevocationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The revocation this request recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRevocation"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The consent was already revoked: its original revocation. An exact retry after a recorded revocation answers this way.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRevocation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request`, including a missing or malformed `Idempotency-Key`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (no grant covers the actor and `consent.revoke`) or `revoked` (the Principal's grant was revoked or expired).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: the Principal holds no such consent, or the acting entity is neither its subject nor its grantee; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`: the `Idempotency-Key` already named another consent.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: the request body exceeds the Gateway body bound.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state, read its consents or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms": {
+      "post": {
+        "operationId": "createScenarioRoom",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "description": "Create revision 1 of a Scenario Room from a declarative ADR-041 descriptor (#303). The server assigns the room ID and correlation ID, sorts the lists canonically, resolves every plugin against the reviewed host catalogue entry it ships, and computes the three ADR-041 hashes (Redmine #303 amendment of ADR-041). The decision requires `scenario-room.create` for the acting entity and covers every `persona` participant as an actor; `governance_ref` must name the host's governance record.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScenarioRoomRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed first revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry (the same `Idempotency-Key` and request): the revision it committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (including a `persona` participant the Principal's grant does not cover), `revoked` or `consent-invalid` (a `privacy_export_ref` that names no consent granted to the Principal). The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`: a plugin the deployment does not bundle at exactly that version, a rule whose first segment names no requested plugin, or a `governance_ref` that names no governance record of the host.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms/{room_id}/revisions": {
+      "post": {
+        "operationId": "deriveScenarioRoomRevision",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "description": "Derive the next immutable revision of a Scenario Room from its head revision `parent_revision` (#303; ADR-041 sections 5, 7 and 9). A complete new descriptor; there is no automatic merge. Requires `scenario-room.derive`, with the same persona and governance rules as `createScenarioRoom`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeriveScenarioRoomRevisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry, or a derive whose `parent_revision` is no longer the head and whose descriptor equals the revision already derived from that parent (ADR-041 section 7): the existing revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized`, `revoked` or `consent-invalid`, as for `createScenarioRoom`. The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: no such room or `parent_revision`, identical for a missing and a protected room.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`, as for `createScenarioRoom`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms/{room_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getScenarioRoomRevision",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "description": "Read one immutable Scenario Room revision (#303). Requires `scenario-room.read` for the acting entity; the decision precedes the lookup, and an unknown room or revision answers like a protected one.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomId"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `revoked`: the authority decision precedes any lookup.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: the denial-record bound; retryable, with `Retry-After`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/preferences": {
+      "post": {
+        "operationId": "createPreference",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "preference"
+        ],
+        "description": "Create revision 1 of a subject-scoped Preference or, with `parent`, the next revision of one (#304). The Local Principal's grant must cover `preference.create` for the acting entity, which becomes the revision's subject. The revision is immutable and stored with its idempotency record and its execution-mode binding in one commit.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity, which is the subject; the Local Principal's grant must cover it. Without it the request is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePreferenceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry: the original revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key` or a violated admission rule) or `unsupported-version` (a `schema_version` other than 1).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (no grant covers the actor and `preference.create`) or `revoked`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: the parent is unknown, erased or of another subject.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` (the key was used for another request) or `append-conflict` (`parent` is no longer the head).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "`deleted`: an exact retry of a request whose revision its subject erased.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/preferences/{preference_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getPreferenceRevision",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "preference"
+        ],
+        "description": "Read one immutable Preference revision (#304). The Local Principal's grant must cover `preference.read` for the acting entity, and only the revision's subject is answered; an erased revision is `410 deleted` to its subject.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PreferenceId"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity, which is the subject; the Local Principal's grant must cover it. Without it the request is `401 unauthenticated`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request`: the path does not name a canonical revision.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (no grant covers the actor and `preference.read`) or `revoked`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing revision and one of another subject; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "`deleted`: the subject erased this revision; answered only to its subject.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/option-specs": {
+      "post": {
+        "operationId": "createOptionSpec",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "option-spec"
+        ],
+        "description": "Create revision 1 of a subject-scoped OptionSpec or, with `parent`, the next revision of one (#304). The Local Principal's grant must cover `option-spec.create` for the acting entity, which becomes the revision's subject. The revision is immutable and stored with its idempotency record and its execution-mode binding in one commit.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity, which is the subject; the Local Principal's grant must cover it. Without it the request is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOptionSpecRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionSpecRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry: the original revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionSpecRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key` or a violated admission rule) or `unsupported-version` (a `schema_version` other than 1).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (no grant covers the actor and `option-spec.create`) or `revoked`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: the parent is unknown, erased or of another subject.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` (the key was used for another request) or `append-conflict` (`parent` is no longer the head).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "`deleted`: an exact retry of a request whose revision its subject erased.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/option-specs/{option_spec_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getOptionSpecRevision",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "option-spec"
+        ],
+        "description": "Read one immutable OptionSpec revision (#304). The Local Principal's grant must cover `option-spec.read` for the acting entity, and only the revision's subject is answered; an erased revision is `410 deleted` to its subject.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OptionSpecId"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity, which is the subject; the Local Principal's grant must cover it. Without it the request is `401 unauthenticated`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionSpecRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request`: the path does not name a canonical revision.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (no grant covers the actor and `option-spec.read`) or `revoked`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing revision and one of another subject; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "`deleted`: the subject erased this revision; answered only to its subject.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1891,6 +3000,846 @@
         "maxLength": 64,
         "pattern": "^gateway-mode-[a-z0-9]+(-[a-z0-9]+)*-v[1-9][0-9]*$",
         "description": "A Gateway execution-mode profile (GMP1, ADR-134 §1). Its `gateway-mode-` namespace is disjoint from the ADR-058 `ExecutionProfileId`: neither is ever accepted where the other is expected. The profiles are composition-verified, never installed, qualified or a reproducibility claim; their public declaration is `execution-mode-profiles.json`. The set is open, so an ADR-134 amendment may add a profile within v1. Server invariant in v1: the Gateway serves only `gateway-mode-local-v1` and `gateway-mode-air-gapped-v1`."
+      },
+      "ConsentRevocation": {
+        "$id": "urn:pigloros:gateway:v1:schema:consent-revocation",
+        "type": "object",
+        "description": "A recorded consent revocation (#309). `id` is the `EventId` of its `consent.revoked.v1` Event and `generation` the revocation's ADR-039 fence: its sequence on the Principal's consent Timeline, from which it is effective. It is the consent fence, not the `Session` authority generation (D8): a `Session` read at or after the revocation reports `generation` greater than or equal to it. It stops future protected work the consent governs and is distinct from erasure. `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayConsentRevocation.v1` || 0x00 || the 16 bytes of the 128-bit big-endian value of the Principal's ID (its `Session` `id`) decoded as a Crockford base32 ULID || `generation` as a big-endian u64 || the ASCII `mode_profile.mode_profile_digest` || `mode_profile.binding_epoch` as a big-endian u64), and its origin is `host-derived`. `mode_profile` is the binding the revocation's commit was produced under, so every answer about one revocation is the same.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "mode_profile",
+          "execution_profile",
+          "availability",
+          "consent_ref",
+          "state",
+          "future_protected_work"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:consent-revocation"
+          },
+          "consent_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "state": {
+            "const": "revoked"
+          },
+          "future_protected_work": {
+            "const": "denied"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "ConsentRevocationRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:consent-revocation-request",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "consent_ref"
+        ],
+        "properties": {
+          "consent_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          }
+        }
+      },
+      "CreateScenarioRoomRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-scenario-room-request",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "descriptor"
+        ],
+        "properties": {
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-input"
+          }
+        }
+      },
+      "DeriveScenarioRoomRevisionRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:derive-scenario-room-revision-request",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A complete new descriptor derived from `parent_revision`; there is no automatic merge.",
+        "required": [
+          "parent_revision",
+          "descriptor"
+        ],
+        "properties": {
+          "parent_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-input"
+          }
+        }
+      },
+      "ScenarioRoomRevision": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
+        "type": "object",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID), in lower-case hex.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "revision",
+          "provenance",
+          "mode_profile",
+          "execution_profile",
+          "availability",
+          "descriptor",
+          "parent_revision",
+          "commit"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:scenario-room-revision"
+          },
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor"
+          },
+          "parent_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "commit": {
+            "$ref": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CommittedEventReceipt": {
+        "$id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "timeline_id",
+          "event_id",
+          "seq",
+          "event_schema_id",
+          "next_cursor"
+        ],
+        "description": "The authoritative commit receipt: the Event at its Timeline sequence and the cursor that observes its Projection.",
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+          },
+          "timeline_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "event_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "event_schema_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:event-cursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ScenarioRoomDescriptor": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The admitted ADR-041 descriptor: the payload of one `room.revision.v1` Event, encoded as the RFC 8785 bytes of this object. `plugin_composition_hash`, `rule_set_hash` and `descriptor_hash` are defined by the Redmine #303 amendment of ADR-041; a client recomputes `rule_set_hash` and `descriptor_hash` from the members.",
+        "required": [
+          "room_id",
+          "revision",
+          "schema_version",
+          "tick_duration_ms",
+          "max_ticks",
+          "scheduler_seed",
+          "scheduler_policy",
+          "intervention_policy",
+          "plugins",
+          "rules",
+          "participants",
+          "initial_conditions",
+          "governance_ref",
+          "privacy_export_ref",
+          "correlation_id",
+          "plugin_composition_hash",
+          "rule_set_hash",
+          "descriptor_hash"
+        ],
+        "properties": {
+          "room_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "tick_duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "max_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "scheduler_seed": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "32 seed bytes in hex (ADR-041)."
+          },
+          "scheduler_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "intervention_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "plugins": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plugin_id",
+                "version"
+              ],
+              "properties": {
+                "plugin_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                }
+              }
+            },
+            "description": "Plugins already admitted and bundled by the deployment trust policy; a room cannot discover, install or retrieve a Plugin."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "value_micro"
+              ],
+              "properties": {
+                "rule_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "participants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "kind"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "kind": {
+                  "enum": [
+                    "persona",
+                    "agent",
+                    "society",
+                    "world-body"
+                  ]
+                }
+              }
+            }
+          },
+          "initial_conditions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "dimension",
+                "value_micro"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "governance_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "privacy_export_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "correlation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "pattern": "^(?!0{32})[0-9a-f]{32}$",
+            "description": "16 runtime-generated non-zero bytes; never caller supplied."
+          },
+          "plugin_composition_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "rule_set_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "descriptor_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          }
+        }
+      },
+      "ScenarioRoomInput": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-input",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the room ID, revision, correlation ID and hashes are server-owned and cannot be supplied. The server admits the lists sorted (plugins by `plugin_id`, rules by `rule_id`, participants by `entity_id`, initial conditions by `entity_id` then `dimension`) and refuses a duplicate key, a `plugin_id` containing `.`, a `rule_id` whose first `.`-separated segment names no requested plugin, and an initial condition whose `entity_id` is not a participant. Every plugin must be bundled by the deployment at exactly its `version`. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`), measured on the admitted `room.revision.v1` payload.",
+        "required": [
+          "schema_version",
+          "tick_duration_ms",
+          "max_ticks",
+          "scheduler_seed",
+          "scheduler_policy",
+          "intervention_policy",
+          "plugins",
+          "rules",
+          "participants",
+          "initial_conditions",
+          "governance_ref",
+          "privacy_export_ref"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "tick_duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "max_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "scheduler_seed": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "32 seed bytes in hex (ADR-041)."
+          },
+          "scheduler_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "intervention_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "plugins": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plugin_id",
+                "version"
+              ],
+              "properties": {
+                "plugin_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                }
+              }
+            },
+            "description": "Plugins already admitted and bundled by the deployment trust policy; a room cannot discover, install or retrieve a Plugin."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "value_micro"
+              ],
+              "properties": {
+                "rule_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "participants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "kind"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "kind": {
+                  "enum": [
+                    "persona",
+                    "agent",
+                    "society",
+                    "world-body"
+                  ]
+                }
+              }
+            }
+          },
+          "initial_conditions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "dimension",
+                "value_micro"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                }
+              }
+            }
+          },
+          "governance_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "privacy_export_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          }
+        }
+      },
+      "CreateOptionSpecRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-option-spec-request",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "options"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1,
+            "description": "The schema version of the request; any other version is `400 unsupported-version`."
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "label",
+                "tags"
+              ],
+              "properties": {
+                "key": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "label": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:label"
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "uniqueItems": true,
+                  "items": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                  },
+                  "description": "A set of keys; the revision answers them in byte order."
+                },
+                "lean_hint_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
+                },
+                "coordinates": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "x_micro",
+                    "z_micro"
+                  ],
+                  "properties": {
+                    "x_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                    },
+                    "z_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The user-supplied alternatives, in the order the revision keeps; a key appears once (checked at admission). A label is at most 128 UTF-8 bytes (`x-pigloros-limits.label_bytes`)."
+          },
+          "parent": {
+            "$ref": "urn:pigloros:gateway:v1:schema:revision-parent"
+          }
+        },
+        "description": "Without `parent` it creates revision 1 of a new OptionSpec; with `parent` the next revision, whose current head `parent` must name (`409 append-conflict` otherwise). The subject is the acting entity, as for a Preference. Identical content is never deduplicated."
+      },
+      "CreatePreferenceRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-preference-request",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Without `parent` it creates revision 1 of a new Preference; with `parent` it creates the next revision of that Preference, whose current head `parent` must name (`409 append-conflict` otherwise). The subject is the acting entity (`x-piglor-actor-entity`), which the Local Principal's grant must cover; a parent of another subject is `404 not-found-or-unavailable`. Identical content is never deduplicated: a retry is recognized only by its `Idempotency-Key`.",
+        "required": [
+          "schema_version",
+          "weights"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1,
+            "description": "The schema version of the request; any other version is `400 unsupported-version`."
+          },
+          "weights": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "dimension",
+                "weight_micro"
+              ],
+              "properties": {
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "weight_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
+                }
+              }
+            },
+            "description": "Named dimension weights in [-1, 1] as integer micro-units; a dimension appears once (checked at admission). They are a set: the revision answers them ordered by `dimension`."
+          },
+          "parent": {
+            "$ref": "urn:pigloros:gateway:v1:schema:revision-parent"
+          }
+        }
+      },
+      "OptionSpecRevision": {
+        "$id": "urn:pigloros:gateway:v1:schema:option-spec-revision",
+        "type": "object",
+        "description": "One immutable subject-scoped OptionSpec revision, answered only to its subject: any other caller gets the same `404 not-found-or-unavailable` as for an unknown revision. A revision its subject erased answers `410 deleted` to that subject from a payload-free tombstone and `404 not-found-or-unavailable` to everyone else; no erased value is reconstructed. `provenance.origin` is `principal-authored`, and `mode_profile` is the binding the producing commit recorded. `provenance.digest` is BLAKE3 of `PiglorOS.GatewayRevisionProvenance.v1`, a 0x00 byte and the deterministic CBOR array `[origin, principal_id, subject_entity_id, mode_profile_id, mode_profile_digest, binding_epoch, digest]` (text, ULIDs and lower-case hex digests, `binding_epoch` an unsigned integer): the authoring Principal (`Session.principal.principal_id`) and the execution-mode binding the producing commit recorded.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "revision",
+          "provenance",
+          "mode_profile",
+          "execution_profile",
+          "availability",
+          "schema_version",
+          "subject_entity_id",
+          "options",
+          "parent_revision",
+          "digest"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:option-spec-revision"
+          },
+          "schema_version": {
+            "const": 1,
+            "description": "The schema version the revision was created under."
+          },
+          "subject_entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid",
+            "description": "The subject the revision is scoped to: the acting entity that created it."
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "label",
+                "tags"
+              ],
+              "properties": {
+                "key": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "label": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:label"
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "uniqueItems": true,
+                  "items": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                  }
+                },
+                "lean_hint_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
+                },
+                "coordinates": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "x_micro",
+                    "z_micro"
+                  ],
+                  "properties": {
+                    "x_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                    },
+                    "z_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The user-supplied alternatives in their authored order, each with its tags in byte order."
+          },
+          "parent_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "BLAKE3 of the ASCII domain tag `PiglorOS.GatewayOptionSpecRevision.v1` followed by a 0x00 byte and the revision's canonical bytes: the RFC 8949 §4.2.1 deterministic CBOR array `[schema_id, schema_version, id, revision, parent_revision, subject_entity_id, options]` (IDs as canonical ULID text, `parent_revision` null for revision 1), where each option is `[key, label, tags, lean_hint_micro, coordinates]` in revision order, with `tags` in byte order, `lean_hint_micro` null when absent and `coordinates` the array `[x_micro, z_micro]` or null. A `revision-ref` names a revision by its `id`, `revision` and this digest."
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "PreferenceRevision": {
+        "$id": "urn:pigloros:gateway:v1:schema:preference-revision",
+        "type": "object",
+        "description": "One immutable subject-scoped Preference revision, answered only to its subject: any other caller gets the same `404 not-found-or-unavailable` as for an unknown revision. A revision its subject erased answers `410 deleted` to that subject from a payload-free tombstone and `404 not-found-or-unavailable` to everyone else; no erased value is reconstructed. `provenance.origin` is `principal-authored`, and `mode_profile` is the binding the producing commit recorded. `provenance.digest` is BLAKE3 of `PiglorOS.GatewayRevisionProvenance.v1`, a 0x00 byte and the deterministic CBOR array `[origin, principal_id, subject_entity_id, mode_profile_id, mode_profile_digest, binding_epoch, digest]` (text, ULIDs and lower-case hex digests, `binding_epoch` an unsigned integer): the authoring Principal (`Session.principal.principal_id`) and the execution-mode binding the producing commit recorded.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "revision",
+          "provenance",
+          "mode_profile",
+          "execution_profile",
+          "availability",
+          "schema_version",
+          "subject_entity_id",
+          "weights",
+          "parent_revision",
+          "digest"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:preference-revision"
+          },
+          "schema_version": {
+            "const": 1,
+            "description": "The schema version the revision was created under."
+          },
+          "subject_entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid",
+            "description": "The subject the revision is scoped to: the acting entity that created it."
+          },
+          "weights": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "dimension",
+                "weight_micro"
+              ],
+              "properties": {
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "weight_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
+                }
+              }
+            },
+            "description": "Named dimension weights in [-1, 1] as integer micro-units, ordered by `dimension`."
+          },
+          "parent_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "BLAKE3 of the ASCII domain tag `PiglorOS.GatewayPreferenceRevision.v1` followed by a 0x00 byte and the revision's canonical bytes: the RFC 8949 §4.2.1 deterministic CBOR array `[schema_id, schema_version, id, revision, parent_revision, subject_entity_id, weights]` (IDs as canonical ULID text, `parent_revision` null for revision 1), where each weight is `[dimension, weight_micro]`, ordered by `dimension`. A `revision-ref` names a revision by its `id`, `revision` and this digest."
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "Label": {
+        "$id": "urn:pigloros:gateway:v1:schema:label",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+        "description": "Participant-authored display text without control characters. Its UTF-8 encoding is at most 128 bytes (`x-pigloros-limits.label_bytes`, enforced at admission); `maxLength` is the coarse character bound that follows from it."
+      },
+      "RevisionParent": {
+        "$id": "urn:pigloros:gateway:v1:schema:revision-parent",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The current head revision of the resource a new revision derives from.",
+        "required": [
+          "id",
+          "revision"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
       }
     },
     "parameters": {
@@ -1904,6 +3853,40 @@
       },
       "TimelineId": {
         "name": "timeline_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "Revision": {
+        "name": "revision",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "RoomId": {
+        "name": "room_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "OptionSpecId": {
+        "name": "option_spec_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "PreferenceId": {
+        "name": "preference_id",
         "in": "path",
         "required": true,
         "schema": {
@@ -2195,6 +4178,160 @@
         "schema": [
           "/components/schemas/SessionModeProfile/properties/network_grants/maxItems"
         ]
+      }
+    },
+    "room_descriptor_bytes": {
+      "value": 4096,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "adr",
+      "source": "ADR-041 section 1",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "room_plugins": {
+      "value": 32,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "adr",
+      "source": "ADR-041 section 1; pos-runtime MAX_REQUIRED_PLUGINS_V1",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/plugins/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/plugins/maxItems",
+          "/components/schemas/PreviewEvidence/properties/plugins/maxItems"
+        ]
+      }
+    },
+    "room_rules": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "adr",
+      "source": "ADR-041 section 1",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/rules/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/rules/maxItems"
+        ]
+      }
+    },
+    "room_participants": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/participants/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/participants/maxItems"
+        ]
+      }
+    },
+    "room_initial_conditions": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/initial_conditions/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/initial_conditions/maxItems"
+        ]
+      }
+    },
+    "horizon_ticks": {
+      "value": 65535,
+      "unit": "ticks",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "pos-runtime counterfactual MAX_SUFFIX_TICK_SPAN",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/max_ticks/maximum",
+          "/components/schemas/ScenarioRoomDescriptor/properties/max_ticks/maximum",
+          "/components/schemas/CreateEnsembleRequest/properties/horizon_ticks/maximum",
+          "/components/schemas/Ensemble/properties/horizon_ticks/maximum"
+        ]
+      }
+    },
+    "preference_dimensions": {
+      "value": 64,
+      "unit": "items",
+      "scope": "per-input",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreatePreferenceRequest/properties/weights/maxItems",
+          "/components/schemas/PreferenceRevision/properties/weights/maxItems"
+        ]
+      }
+    },
+    "options_per_spec": {
+      "value": 16,
+      "unit": "items",
+      "scope": "per-input",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreateOptionSpecRequest/properties/options/maxItems",
+          "/components/schemas/OptionSpecRevision/properties/options/maxItems",
+          "/components/schemas/DecisionPreview/properties/recommendation/oneOf/2/properties/scores/maxItems"
+        ]
+      }
+    },
+    "option_tags": {
+      "value": 16,
+      "unit": "items",
+      "scope": "per-input",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreateOptionSpecRequest/properties/options/items/properties/tags/maxItems",
+          "/components/schemas/OptionSpecRevision/properties/options/items/properties/tags/maxItems"
+        ]
+      }
+    },
+    "label_bytes": {
+      "value": 128,
+      "unit": "bytes",
+      "scope": "structural",
+      "origin": "code",
+      "source": "pos-crypto plugin_manifest MAX_LABEL_BYTES; UTF-8 bytes checked at admission, Label maxLength is only the coarse character bound",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "runtime": {
+          "code": "invalid-request",
+          "status": 400
+        }
       }
     }
   },

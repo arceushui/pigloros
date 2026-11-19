@@ -32,9 +32,13 @@ pub const ABI_MINOR: u16 = 0;
 pub const SCHEMA_ID: &str = "pigloros.gateway-client-conformance.case.v2";
 
 /// The route capabilities the adapter implements, sorted.
-pub const CAPABILITY_IDS: [&str; 7] = [
+pub const CAPABILITY_IDS: [&str; 11] = [
+    "consent.revoke",
     "gateway.health.read",
     "gateway.ledger.read",
+    "scenario-room.create",
+    "scenario-room.derive",
+    "scenario-room.read",
     "session.read",
     "timeline.create",
     "timeline.events.read",
@@ -44,6 +48,10 @@ pub const CAPABILITY_IDS: [&str; 7] = [
 
 /// The actor of the authorized compositions' fixture Local Principal.
 pub const ACTOR_ENTITY_ID: &str = "01JC0GATEWAYF1XTVREACT0R00";
+
+/// The single-participant Scenario Room governance record the `authorized-rooms` composition's
+/// fixture Local Principal records (#303).
+pub const GOVERNANCE_RECORD_ID: &str = "01JC0GATEWAYW90G0VERN00001";
 
 /// The World body the fixture action payloads name.
 pub const BODY_ENTITY_ID: &str = "01JC0GATEWAYF1XTVREB0DY000";

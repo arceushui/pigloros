@@ -1,4 +1,5 @@
-//! RQE1, the requested-configuration evidence of ADR-069 R9 §4.3.
+//! RQE1, the requested-configuration evidence of ADR-069 R9 §4.3, with the
+//! R10 §4.3 and §4.4 stdio properties and value code 10.
 
 use std::collections::BTreeSet;
 
@@ -31,6 +32,17 @@ const MAX_DESCRIPTOR_NAME_BYTES: usize = 255;
 const ROOT_IMAGE_POLICY: &str = "RootImagePolicy";
 /// Read back as `ExtraFileDescriptorNames` (`as`) under this name.
 const EXTRA_FILE_DESCRIPTORS: &str = "ExtraFileDescriptors";
+/// The three R10 stdio descriptors: requested as `h` (code 10), and each
+/// read back as its `…FileDescriptorName` (`s`) under this name.
+const STDIO_DESCRIPTORS: [&str; 3] = [
+    "StandardInputFileDescriptor",
+    "StandardOutputFileDescriptor",
+    "StandardErrorFileDescriptor",
+];
+/// The three R10 stdio enums, each requested and read back as `null`.
+const STDIO_ENUMS: [&str; 3] = ["StandardInput", "StandardOutput", "StandardError"];
+/// The R10 §4.3 verified value of a stdio enum.
+const STDIO_ENUM_VALUE: &str = "null";
 
 /// One typed D-Bus value as RQE1 records it; its variant is its value code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,10 +68,12 @@ pub enum DbusValue {
     Commands(Vec<(String, Vec<String>, bool)>),
     /// 9, `a(hs)` with its descriptor names only, in submission order.
     DescriptorNames(Vec<String>),
+    /// 10, `h`: one descriptor, which is never recorded (R10 §4.4).
+    Descriptor,
 }
 
 impl DbusValue {
-    /// The R9 value code.
+    /// The R9 or R10 value code.
     #[must_use]
     pub const fn code(&self) -> u8 {
         match self {
@@ -72,17 +86,33 @@ impl DbusValue {
             Self::BindPaths(_) => 6,
             Self::StringPairs(_) => 7,
             Self::Commands(_) => 8,
-            Self::DescriptorNames(_) => 9,
+            Self::DescriptorNames(_) | Self::Descriptor => self.descriptor_code(),
+        }
+    }
+
+    /// Code 9 lists descriptor names; code 10 is one descriptor, which is
+    /// never recorded (R10 §4.4).
+    const fn descriptor_code(&self) -> u8 {
+        if matches!(self, Self::Descriptor) {
+            10
+        } else {
+            9
         }
     }
 
     fn value(&self) -> Value {
-        let payload = match self {
+        Value::Array(vec![uint_value(u64::from(self.code())), self.payload()])
+    }
+
+    /// The value-code-specific payload of [`Self::value`].
+    fn payload(&self) -> Value {
+        match self {
             Self::Bool(value) => Value::Bool(*value),
             Self::String(value) => text_value(value),
             Self::U64(value) => uint_value(*value),
             Self::U32(value) => uint_value(u64::from(*value)),
             Self::StringArray(values) | Self::DescriptorNames(values) => texts_value(values),
+            Self::Descriptor => Value::Null,
             Self::FlaggedStrings(flag, values) => {
                 Value::Array(vec![Value::Bool(*flag), texts_value(values)])
             }
@@ -119,13 +149,17 @@ impl DbusValue {
                     })
                     .collect(),
             ),
-        };
-        Value::Array(vec![uint_value(u64::from(self.code())), payload])
+        }
     }
 
     fn decode(value: &Value) -> Result<Self> {
         let [code, payload] = array::<2>(value)?;
-        match uint(code)? {
+        Self::decode_payload(uint(code)?, payload)
+    }
+
+    /// The value of code `code` from its payload.
+    fn decode_payload(code: u64, payload: &Value) -> Result<Self> {
+        match code {
             0 => bool_value(payload).map(Self::Bool),
             1 => dbus_text(payload).map(Self::String),
             2 => uint(payload).map(Self::U64),
@@ -158,6 +192,8 @@ impl DbusValue {
                 .map(descriptor_name)
                 .collect::<Result<_>>()
                 .map(Self::DescriptorNames),
+            10 if payload == &Value::Null => Ok(Self::Descriptor),
+            10 => Err(SandboxProviderProtocolError::InvalidEncoding),
             _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
         }
     }
@@ -230,7 +266,8 @@ impl RequestedConfigurationEvidenceFields {
 
     /// The status decides which lists exist; a readback carries the R9
     /// §4.3 value code of each property, and a verified one exactly the
-    /// requested names and `RootImagePolicy`.
+    /// requested names and `RootImagePolicy`, with the R10 §4.3 value of
+    /// every stdio property.
     fn validate(&self) -> Result<()> {
         use RequestedConfigurationStatus as Status;
         match (self.status, &self.requested, &self.readback) {
@@ -239,9 +276,7 @@ impl RequestedConfigurationEvidenceFields {
                 consistent(requested_codes_match(requested))
             }
             (Status::Verified, Some(requested), Some(readback)) => consistent(
-                requested_codes_match(requested)
-                    && readback_codes_match(requested, readback)
-                    && readback_complete(requested, readback),
+                requested_codes_match(requested) && readback_verified(requested, readback),
             ),
             (Status::Mismatch, Some(requested), Some(readback)) => consistent(
                 requested_codes_match(requested) && readback_codes_match(requested, readback),
@@ -305,9 +340,15 @@ impl RequestedConfigurationEvidence {
     }
 }
 
-/// The submitted value code of each requested property the R9 §4.3 table
-/// fixes; the static hardening properties keep their own signatures.
+/// The submitted value code of each requested property the R9 §4.3 and
+/// R10 §4.3 tables fix; the static hardening properties keep their own
+/// signatures. Code 10 is valid only under the three stdio descriptor names.
 fn requested_code(name: &str) -> Option<u8> {
+    r9_requested_code(name).or_else(|| stdio_requested_code(name))
+}
+
+/// The R9 §4.3 table of submitted value codes.
+fn r9_requested_code(name: &str) -> Option<u8> {
     match name {
         "RootDirectory" => Some(1),
         "SystemCallFilter" | "RestrictAddressFamilies" => Some(5),
@@ -322,25 +363,43 @@ fn requested_code(name: &str) -> Option<u8> {
     }
 }
 
-/// `RootImagePolicy` is never requested, and every requested property the
-/// table fixes has its submitted code.
+/// The R10 §4.3 table: each stdio enum is submitted as `s` and each stdio
+/// descriptor as `h`.
+fn stdio_requested_code(name: &str) -> Option<u8> {
+    if STDIO_ENUMS.contains(&name) {
+        Some(1)
+    } else if STDIO_DESCRIPTORS.contains(&name) {
+        Some(10)
+    } else {
+        None
+    }
+}
+
+/// `RootImagePolicy` is never requested, every requested property the
+/// table fixes has its submitted code, and code 10 appears under no other
+/// name.
 fn requested_codes_match(requested: &[DbusProperty]) -> bool {
     requested.iter().all(|property| {
+        let code = property.value.code();
         property.name != ROOT_IMAGE_POLICY
-            && requested_code(&property.name).is_none_or(|code| code == property.value.code())
+            && requested_code(&property.name)
+                .map_or(code != DbusValue::Descriptor.code(), |fixed| fixed == code)
     })
 }
 
-/// Every readback entry has its R9 §4.3 value code: `RootImagePolicy` is
-/// `s`, `ExtraFileDescriptors` is read back as `as`, and every other
-/// property is read back with the code it was requested with. A mismatch
-/// may read back `ExtraFileDescriptors` without having requested it, as
-/// the table allows.
+/// Every readback entry has its R9 §4.3 or R10 §4.3 value code:
+/// `RootImagePolicy` and the three stdio descriptors (read back as their
+/// names) are `s`, `ExtraFileDescriptors` is read back as `as`, and every
+/// other property is read back with the code it was requested with, so
+/// code 10 is never read back. A mismatch may read back
+/// `ExtraFileDescriptors` or a stdio descriptor without having requested
+/// it, as the tables allow.
 fn readback_codes_match(requested: &[DbusProperty], readback: &[DbusProperty]) -> bool {
     readback.iter().all(|property| {
         let expected = match property.name.as_str() {
             ROOT_IMAGE_POLICY => Some(1),
             EXTRA_FILE_DESCRIPTORS => Some(4),
+            name if STDIO_DESCRIPTORS.contains(&name) => Some(1),
             name => requested
                 .iter()
                 .find(|requested| requested.name == name)
@@ -363,6 +422,38 @@ fn readback_complete(requested: &[DbusProperty], readback: &[DbusProperty]) -> b
         .map(|property| property.name.as_str())
         .collect::<BTreeSet<_>>();
     expected == actual
+}
+
+/// A verified readback carries the R9 §4.3 and R10 §4.3 value code of each
+/// property, exactly the requested names and `RootImagePolicy`, and the
+/// R10 §4.3 value of every stdio property.
+fn readback_verified(requested: &[DbusProperty], readback: &[DbusProperty]) -> bool {
+    readback_codes_match(requested, readback)
+        && readback_complete(requested, readback)
+        && stdio_verified(readback)
+}
+
+/// A verified readback has the R10 §4.3 value of every stdio property it
+/// names: `"null"` for the three enums and `""` for the three descriptor
+/// names, so no stream is routed to the journal, a terminal, a socket or a
+/// file.
+fn stdio_verified(readback: &[DbusProperty]) -> bool {
+    readback.iter().all(|property| {
+        verified_stdio_value(&property.name)
+            .is_none_or(|verified| property.value == DbusValue::String(verified.to_owned()))
+    })
+}
+
+/// The R10 §4.3 verified readback value under `name`, if it is a stdio
+/// property.
+fn verified_stdio_value(name: &str) -> Option<&'static str> {
+    if STDIO_ENUMS.contains(&name) {
+        Some(STDIO_ENUM_VALUE)
+    } else if STDIO_DESCRIPTORS.contains(&name) {
+        Some("")
+    } else {
+        None
+    }
 }
 
 fn properties_value(properties: &[DbusProperty]) -> Value {

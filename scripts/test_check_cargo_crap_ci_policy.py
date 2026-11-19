@@ -53,7 +53,19 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
+    "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
+    "src/provider_runtime/tests.rs",
+    "src/provider_runtime/endpoint/tests.rs",
+    "src/provider_runtime/serving/tests.rs",
+    "src/provider_runtime/revocation/tests.rs",
+    "src/scenario_room/tests.rs",
+    "src/executor/scenario_room/tests.rs",
+    "src/mode_profile/tests.rs",
+)
+EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS = (
+    "src/adapter/native_tests.rs",
+    "src/adapter/native_tests/**",
 )
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",
@@ -71,6 +83,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/action_admission_tests.rs",
     *EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS,
     *EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS,
+    *EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS,
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -538,6 +551,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/provider_barrier/production.rs",
             "src/provider_lifecycle.rs",
             "src/provider_lifecycle/production.rs",
+            "src/adapter.rs",
+            "src/adapter/native.rs",
+            "src/adapter/native_tests_production.rs",
+            "src/adapter/surface/native_tests/production.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):
@@ -890,17 +907,17 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(logs["output"], "")
         delays = [int(delay) for delay in logs["sleep_calls"].split()]
-        # The 290 s short window plus 115 one-minute polls stays inside 7200 s;
+        # The 290 s short window plus 25 one-minute polls stays inside 1800 s;
         # one more poll would exceed the bound, so the resolver stops.
-        self.assertEqual(delays, [10] * 29 + [60] * 115)
-        self.assertLessEqual(sum(delays), 7200)
+        self.assertEqual(delays, [10] * 29 + [60] * 25)
+        self.assertLessEqual(sum(delays), 1800)
         self.assertEqual(
             self.gh_calls(logs),
-            ["artifacts"] * 30 + ["runs", "jobs", "artifacts"] * 115 + ["runs", "jobs"],
+            ["artifacts"] * 30 + ["runs", "jobs", "artifacts"] * 25 + ["runs", "jobs"],
         )
         self.assertIn(
             f"::error::Trusted main baseline unavailable: main ci.yml run 777 for trusted base "
-            f"{EXAMPLE_BASE_SHA} is still in_progress after 7190s; the 7200s wait bound "
+            f"{EXAMPLE_BASE_SHA} is still in_progress after 1790s; the 1800s wait bound "
             f"expired without cargo-crap-baseline-{EXAMPLE_BASE_SHA}{NO_ANCESTOR_REASON}",
             result.stdout,
         )
@@ -1099,8 +1116,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
         self.assert_ancestor_baseline(result, logs, "e" * 40, "4949")
         delays = [int(delay) for delay in logs["sleep_calls"].split()]
-        self.assertEqual(delays, [10] * 29 + [60] * 115)
-        self.assertIn("the 7200s wait bound expired", result.stdout)
+        self.assertEqual(delays, [10] * 29 + [60] * 25)
+        self.assertIn("the 1800s wait bound expired", result.stdout)
 
     def test_resolver_waits_for_main_before_using_an_ancestor_baseline(self) -> None:
         result, logs = self.run_resolver(
@@ -1409,7 +1426,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_rejects_weakened_main_run_wait(self) -> None:
         mutations = {
-            "longer bound": ("BASELINE_WAIT_LIMIT_SECONDS=7200", "BASELINE_WAIT_LIMIT_SECONDS=72000"),
+            "longer bound": ("BASELINE_WAIT_LIMIT_SECONDS=1800", "BASELINE_WAIT_LIMIT_SECONDS=7200"),
+            "shorter bound": ("BASELINE_WAIT_LIMIT_SECONDS=1800", "BASELINE_WAIT_LIMIT_SECONDS=300"),
             "faster poll": ("MAIN_RUN_POLL_DELAY_SECONDS=60", "MAIN_RUN_POLL_DELAY_SECONDS=1"),
             "unbounded wait": (
                 "if ((elapsed + MAIN_RUN_POLL_DELAY_SECONDS > BASELINE_WAIT_LIMIT_SECONDS)); then",
@@ -1429,10 +1447,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_cargo_crap_timeouts_cover_the_bounded_wait(self) -> None:
         self.assert_rejected(
-            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 135})
+            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 60})
         )
         self.assert_rejected(
-            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 140})
+            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 150})
         )
         self.assert_rejected(
             lambda workflow: self.cargo_crap_step(
@@ -1442,8 +1460,22 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assert_rejected(
             lambda workflow: self.cargo_crap_step(
                 workflow, "Resolve trusted cargo-crap baseline"
-            ).update({"timeout-minutes": 125})
+            ).update({"timeout-minutes": 40})
         )
+
+    def test_cargo_crap_timeouts_leave_room_beyond_the_wait_bound(self) -> None:
+        resolver = RESOLVER_PATH.read_text(encoding="utf-8")
+        wait = next(
+            int(line.split("=", 1)[1])
+            for line in resolver.splitlines()
+            if line.startswith("BASELINE_WAIT_LIMIT_SECONDS=")
+        )
+        job = self.workflow["jobs"]["cargo-crap"]
+        step = self.cargo_crap_step(self.workflow, "Resolve trusted cargo-crap baseline")
+        # The step must outlast the wait by the ancestor walk and API retries,
+        # and the job must leave the pre-steps and scoring their own budget.
+        self.assertGreaterEqual(step["timeout-minutes"] * 60, wait + 15 * 60)
+        self.assertGreaterEqual(job["timeout-minutes"], step["timeout-minutes"] + 20)
 
     def test_rejects_resolver_give_up_paths_that_skip_the_recheck_or_reason(self) -> None:
         mutations = {

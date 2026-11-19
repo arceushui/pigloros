@@ -58,6 +58,10 @@ fn resolution_names_only_the_installed_current_or_published_transition() -> Test
         admitted.bootstrap().revocation(),
     )?;
     assert!(committed.cancellation_context()?.binds(&request));
+    // A context naming another RCU1's wire digest does not bind this one.
+    let mut foreign = committed.cancellation_context()?;
+    foreign.rcu1_wire_digest = [0x33; 32];
+    assert!(!foreign.binds(&request));
     // (a) with SIR1 pending, in both modes.
     let live = AuthorityResolution::Live {
         retained_revocation_digest: current,

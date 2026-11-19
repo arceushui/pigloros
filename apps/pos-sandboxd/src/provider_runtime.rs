@@ -21,7 +21,7 @@
 //!
 //! The authority never changes afterwards (R11 D9): no step is repeated.
 //!
-//! The `provider-runtime` mode, [`serve_provider_runtime`], runs these
+//! The `provider-runtime` mode, `serve_provider_runtime`, runs these
 //! steps and step 7 (`reconcile`: the system bus, the exclusive attempt
 //! recovery and the staging directory) before any socket exists. The
 //! selector started this runtime as its runtime unit (#1399, R11 §5.0), so
@@ -151,18 +151,27 @@ impl AttemptStateSource for LiveAttempts<'_> {
             let Some(lifecycle) = lifecycle else {
                 return Some(Vec::new());
             };
-            lifecycle.fence_and_snapshot().await.ok().map(|snapshot| {
-                snapshot
-                    .attempts()
-                    .iter()
-                    .map(|attempt| AttemptCleanupState {
-                        attempt_id: attempt.attempt_id(),
-                        cleanup_proved: attempt.cleanup_proved(),
-                    })
-                    .collect()
-            })
+            fenced_attempt_states(lifecycle).await
         }
     }
+}
+
+/// Fence `lifecycle` for good and read each live attempt of its one
+/// snapshot as the responder does; `None` once it was fenced before or a
+/// live attempt's record is unreadable.
+pub(crate) async fn fenced_attempt_states<I>(
+    lifecycle: &AttemptLifecycle<I>,
+) -> Option<Vec<AttemptCleanupState>> {
+    lifecycle.fence_and_snapshot().await.ok().map(|snapshot| {
+        snapshot
+            .attempts()
+            .iter()
+            .map(|attempt| AttemptCleanupState {
+                attempt_id: attempt.attempt_id(),
+                cleanup_proved: attempt.cleanup_proved(),
+            })
+            .collect()
+    })
 }
 
 fn unsafe_endpoint<T>(_: T) -> ProviderRuntimeError {

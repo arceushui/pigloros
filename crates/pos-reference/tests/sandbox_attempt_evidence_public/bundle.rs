@@ -7,17 +7,22 @@ use pos_reference::sandbox_provider_protocol::{
     KernelObservationEvidence, LauncherReady, LauncherReadyFields, NamespaceIdentity,
     ReceiptAuthority, RequestedConfigurationEvidence, SandboxArchitecture, SandboxExecutionMode,
     SandboxLimit, SandboxProviderProtocolError as ProtocolError, SandboxProviderReceipt,
-    TerminalCode, TerminationEvidence,
+    SandboxProviderReceiptFields, TerminalCode, TerminationEvidence,
 };
 
 use super::observed::provider_namespaces;
 use super::oracle::{
     edit, filled, integer, self_digest, set, text, unhex, with, wrapped_digest, TestResult,
 };
+use super::response::{runtime_key, sign};
 use super::terminated::at_progress;
-use super::vectors::{KOE1_A, KOE1_B, RQE1_A, RQE1_B, TME1_A, TME1_B, TME1_C};
+use super::vectors::{
+    KOE1_A, KOE1_B, RQE1_A, RQE1_B, TME1_A, TME1_B, TME1_C, TME1_D, TME1_E, TME1_F,
+};
 
 const WORK_LIMIT: u64 = 1_048_576;
+/// ELM1[8]: exactly the 70 bytes of `S` that TME1-A captures (R10 §8.3).
+const OUTPUT_LIMIT: u64 = 70;
 
 const fn ready_fields() -> LauncherReadyFields {
     LauncherReadyFields {
@@ -49,7 +54,7 @@ fn limits(output: u64, work: u64, live: u64, incomplete: u64) -> Vec<SandboxLimi
 }
 
 /// The decoded RQE1, KOE1 and TME1, and the TME1 they succeed.
-type Records = (
+pub(super) type Records = (
     RequestedConfigurationEvidence,
     KernelObservationEvidence,
     TerminationEvidence,
@@ -58,14 +63,14 @@ type Records = (
 
 /// The ELM1 fields besides its limits.
 const BROKER_CAPS: [u8; 32] = [0x61; 32];
-const APT1: [u8; 32] = [0x62; 32];
-const LPS1: [u8; 32] = [0x63; 32];
+pub(super) const APT1: [u8; 32] = [0x62; 32];
+pub(super) const LPS1: [u8; 32] = [0x63; 32];
 const PROFILE: [u8; 32] = [0x64; 32];
 const FIXTURE: [u8; 32] = [0x65; 32];
-const RUNTIME_KEY: &str = "runtime";
+pub(super) const RUNTIME_KEY: &str = "runtime";
 
 /// The ELM1 self-digest of `limits`, by the oracle.
-fn elm1_digest(limits: &[SandboxLimit]) -> TestResult<[u8; 32]> {
+pub(super) fn elm1_digest(limits: &[SandboxLimit]) -> TestResult<[u8; 32]> {
     let limits = limits
         .iter()
         .map(|limit| {
@@ -93,18 +98,18 @@ fn elm1_digest(limits: &[SandboxLimit]) -> TestResult<[u8; 32]> {
 
 /// One attempt's records and what a verifier holds, with the records'
 /// digest bindings kept intact as they are edited.
-struct Fixture {
+pub(super) struct Fixture {
     rqe1: Vec<u8>,
     koe1: Vec<u8>,
     tme1: Vec<u8>,
     previous: Option<Vec<u8>>,
-    ready: Option<LauncherReady>,
-    limits: Vec<SandboxLimit>,
+    pub(super) ready: Option<LauncherReady>,
+    pub(super) limits: Vec<SandboxLimit>,
     broker_caps: [u8; 32],
     mode: SandboxExecutionMode,
     architecture: SandboxArchitecture,
     provider: [NamespaceIdentity; 6],
-    grant: ([u8; 16], [u8; 32]),
+    pub(super) grant: ([u8; 16], [u8; 32]),
     elm1: Option<[u8; 32]>,
 }
 
@@ -119,7 +124,7 @@ impl Fixture {
             tme1,
             previous: None,
             ready: Some(ready),
-            limits: limits(5, WORK_LIMIT, 1, 0),
+            limits: limits(OUTPUT_LIMIT, WORK_LIMIT, 1, 0),
             broker_caps: BROKER_CAPS,
             mode: SandboxExecutionMode::AirGapped,
             architecture: SandboxArchitecture::X86_64,
@@ -131,13 +136,18 @@ impl Fixture {
         Ok(fixture)
     }
 
-    fn released(vector: &str) -> TestResult<Self> {
+    pub(super) fn released(vector: &str) -> TestResult<Self> {
         Self::observed(unhex(vector)?)
     }
 
     /// RQE1-B, KOE1-B and a progress-0 TME1: nothing was started.
-    fn not_started() -> TestResult<Self> {
-        let mut fixture = Self::observed(at_progress(0)?)?;
+    pub(super) fn not_started() -> TestResult<Self> {
+        Self::unstarted(at_progress(0)?)
+    }
+
+    /// RQE1-B, KOE1-B and the progress-0 `tme1`.
+    fn unstarted(tme1: Vec<u8>) -> TestResult<Self> {
+        let mut fixture = Self::observed(tme1)?;
         fixture.rqe1 = unhex(RQE1_B)?;
         fixture.koe1 = unhex(KOE1_B)?;
         fixture.ready = None;
@@ -166,22 +176,22 @@ impl Fixture {
         self.rebind().map(|()| self)
     }
 
-    fn rqe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
+    pub(super) fn rqe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
         self.rqe1 = with(&self.rqe1, path, value)?;
         self.rebind().map(|()| self)
     }
 
-    fn koe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
+    pub(super) fn koe1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
         self.koe1 = with(&self.koe1, path, value)?;
         self.rebind().map(|()| self)
     }
 
-    fn tme1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
+    pub(super) fn tme1(mut self, path: &[usize], value: Value) -> TestResult<Self> {
         self.tme1 = with(&self.tme1, path, value)?;
         Ok(self)
     }
 
-    fn records(&self) -> TestResult<Records> {
+    pub(super) fn records(&self) -> TestResult<Records> {
         Ok((
             RequestedConfigurationEvidence::from_canonical_cbor(&self.rqe1)?,
             KernelObservationEvidence::from_canonical_cbor(&self.koe1)?,
@@ -237,7 +247,7 @@ impl Fixture {
         ))
     }
 
-    fn accepts(&self) -> TestResult<AttemptEvidence> {
+    pub(super) fn accepts(&self) -> TestResult<AttemptEvidence> {
         Ok(self.verify()??)
     }
 
@@ -274,6 +284,21 @@ fn verify_accepts_the_vectors_and_every_progress() -> TestResult {
             Fixture::not_started()?,
             None,
             Some(TerminalCode::CleanupFailed),
+        ),
+        (
+            Fixture::released(TME1_D)?.with_limits(limits(OUTPUT_LIMIT - 1, WORK_LIMIT, 1, 0))?,
+            None,
+            Some(TerminalCode::FileOrOutputLimit),
+        ),
+        (
+            Fixture::released(TME1_E)?,
+            None,
+            Some(TerminalCode::ProtocolFailure),
+        ),
+        (
+            Fixture::unstarted(unhex(TME1_F)?)?,
+            None,
+            Some(TerminalCode::ProtocolFailure),
         ),
     ] {
         let (requested, observed, termination, _) = fixture.records()?;
@@ -432,7 +457,7 @@ fn rule_4_koe1_binds_the_accepted_ready_v1() -> TestResult {
 /// verified against ELM1 limit 9 `limit`.
 fn work(limit: u64, capacity: u64) -> TestResult<Fixture> {
     Fixture::released(TME1_A)?
-        .with_limits(limits(5, limit, 1, 0))?
+        .with_limits(limits(OUTPUT_LIMIT, limit, 1, 0))?
         .koe1(&[7, 11, 1], integer(capacity))?
         .tme1(&[21, 1], integer(capacity))
 }
@@ -465,7 +490,7 @@ fn rule_4_work_capacity_is_exactly_the_limit_rounded_up_to_a_block() -> TestResu
         .tme1(&[26], integer(2))?;
     unobserved.rejects("no KOE1 work with a nonzero limit")?;
     let none = Fixture::released(TME1_A)?
-        .with_limits(limits(5, 0, 1, 0))?
+        .with_limits(limits(OUTPUT_LIMIT, 0, 1, 0))?
         .koe1(&[7, 11], Value::Null)?
         .tme1(&[21], Value::Null)?;
     none.accepts().map(|_| ())
@@ -494,7 +519,7 @@ fn rule_2_local_network_and_work_after_follow_mode_and_elm1() -> TestResult {
         .rejects("air-gapped started with a proxy session")?;
 
     let unlimited = Fixture::released(TME1_A)?
-        .with_limits(limits(5, 0, 1, 0))?
+        .with_limits(limits(OUTPUT_LIMIT, 0, 1, 0))?
         .koe1(&[7, 11], Value::Null)?
         .tme1(&[26], integer(2))?;
     unlimited.rejects("work-after without a /work limit")?;
@@ -518,22 +543,38 @@ fn rule_9_admission_ledger_and_output_ceiling_are_within_elm1() -> TestResult {
     let ledger = |output, live, incomplete| -> TestResult<Fixture> {
         Fixture::released(TME1_A)?.with_limits(limits(output, WORK_LIMIT, live, incomplete))
     };
-    ledger(5, 0, 0)?.rejects("live attempts above ELM1 13")?;
-    ledger(5, 1, 0)?
+    ledger(OUTPUT_LIMIT, 0, 0)?.rejects("live attempts above ELM1 13")?;
+    ledger(OUTPUT_LIMIT, 1, 0)?
         .tme1(&[20, 1], integer(1))?
         .rejects("incomplete inputs above ELM1 14")?;
-    ledger(5, 1, 1)?.tme1(&[20, 1], integer(1))?.accepts()?;
-    let ceiling = Value::Array(vec![integer(5), Value::Bool(true), Value::Bool(true)]);
-    ledger(5, 1, 0)?
+    ledger(OUTPUT_LIMIT, 1, 1)?
+        .tme1(&[20, 1], integer(1))?
+        .accepts()?;
+    let ceiling = Value::Array(vec![
+        integer(OUTPUT_LIMIT),
+        Value::Bool(true),
+        Value::Bool(false),
+    ]);
+    ledger(OUTPUT_LIMIT, 1, 0)?
         .tme1(&[17], ceiling.clone())?
         .tme1(&[26], integer(7))?
         .accepts()?;
-    ledger(6, 1, 0)?
+    ledger(OUTPUT_LIMIT + 1, 1, 0)?
         .tme1(&[17], ceiling)?
         .tme1(&[26], integer(7))?
         .rejects("ceiling reached below ELM1 8")?;
+    // Exactly ELM1[8] framed bytes, then end of stream, is Completed.
+    ledger(OUTPUT_LIMIT, 1, 0)?.accepts()?;
+    ledger(OUTPUT_LIMIT - 1, 1, 0)?.rejects("a capture above ELM1 8")?;
+    // TME1-D: the ceiling at ELM1[8] = 69, and the same capture over 68.
+    Fixture::released(TME1_D)?
+        .with_limits(limits(OUTPUT_LIMIT - 1, WORK_LIMIT, 1, 0))?
+        .accepts()?;
+    Fixture::released(TME1_D)?
+        .with_limits(limits(OUTPUT_LIMIT - 2, WORK_LIMIT, 1, 0))?
+        .rejects("TME1-D over ELM1 8 = 68")?;
     for missing in [8, 9, 13, 14] {
-        let mut remaining = limits(5, WORK_LIMIT, 1, 0);
+        let mut remaining = limits(OUTPUT_LIMIT, WORK_LIMIT, 1, 0);
         remaining.retain(|limit| limit.limit_id != missing);
         Fixture::released(TME1_A)?
             .with_limits(remaining)?
@@ -637,7 +678,7 @@ type ReceiptChange = (&'static str, Box<dyn Fn(&mut SandboxProviderReceipt)>);
 
 fn receipt(fixture: &Fixture) -> TestResult<SandboxProviderReceipt> {
     let (requested, observed, termination, _) = fixture.records()?;
-    Ok(SandboxProviderReceipt {
+    let record = SandboxProviderReceipt::self_digested(SandboxProviderReceiptFields {
         attempt_id: [0x11; 16],
         authority: ReceiptAuthority {
             agr1_digest: [0x22; 32],
@@ -665,9 +706,12 @@ fn receipt(fixture: &Fixture) -> TestResult<SandboxProviderReceipt> {
         termination_evidence: termination.digest(),
         sau1_digest: [0x4a; 32],
         runtime_attestation_key_id: "runtime".to_owned(),
-        receipt_digest: [0x4b; 32],
-        signature: [0x4c; 64],
-    })
+    })?;
+    let key = runtime_key();
+    Ok(SandboxProviderReceipt::new(
+        sign(record, &key)?,
+        &key.verifying_key(),
+    )?)
 }
 
 #[test]
@@ -723,4 +767,29 @@ fn rules_5_and_6_spr1_binds_the_records() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn r10_rule_7_the_feed_and_launch_failures_select_their_codes() -> TestResult {
+    // A released attempt without `adapter-input` lacks evidence: code 2.
+    Fixture::released(TME1_A)?
+        .tme1(&[27], Value::Null)?
+        .tme1(&[26], integer(2))?
+        .accepts()?;
+    Fixture::released(TME1_A)?
+        .tme1(&[27], Value::Null)?
+        .rejects("Completed without the stdin feed")?;
+    // A closed ledger quarantines (code 2); a channel failure is code 9.
+    for (failure, code) in [(5, 2), (4, 9)] {
+        let record = edit(&unhex(TME1_F)?, |fields| {
+            set(fields, &[7], integer(failure))?;
+            set(fields, &[26], integer(code))
+        })?;
+        Fixture::unstarted(record.clone())?.accepts()?;
+        Fixture::unstarted(with(&record, &[26], integer(10))?)?
+            .rejects(&format!("launch failure {failure} as code 10"))?;
+    }
+    Fixture::released(TME1_E)?
+        .tme1(&[26], Value::Null)?
+        .rejects("an incomplete feed recorded as Completed")
 }

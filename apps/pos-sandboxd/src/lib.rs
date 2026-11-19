@@ -61,6 +61,14 @@ pub mod provider_runtime;
 mod release_barrier;
 #[cfg(target_os = "linux")]
 mod restart;
+// The #444 QEMU evidence guest's driver, compiled only with `test-support`
+// and only for the two architectures the evidence guest runs on.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    feature = "test-support"
+))]
+pub mod packaged_conformance;
 #[cfg(target_os = "linux")]
 mod root_attachment;
 #[cfg(target_os = "linux")]
@@ -623,18 +631,36 @@ impl SystemCallFilter {
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
     let arguments: Vec<_> = arguments.into_iter().collect();
-    match arguments.as_slice() {
-        [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => {
-            let error = provider_runtime::serve_provider_runtime();
-            report(&format!("pos-sandboxd: {error}"));
+    match run_mode(&arguments) {
+        None => {
+            report(
+                "usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime \
+                 | recovery-peer <endpoint-id-hex>",
+            );
+            std::process::ExitCode::from(2)
+        }
+        Some(Ok(())) => std::process::ExitCode::SUCCESS,
+        Some(Err(diagnostic)) => {
+            report(&diagnostic);
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// Run the mode `arguments` name and return its outcome, with the diagnostic
+/// for a failure, or `None` when they name no mode.
+#[cfg(target_os = "linux")]
+fn run_mode(arguments: &[std::ffi::OsString]) -> Option<Result<(), String>> {
+    match arguments {
+        [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => {
+            let error = provider_runtime::serve_provider_runtime();
+            Some(Err(format!("pos-sandboxd: {error}")))
+        }
         [mode, endpoint_id] if mode == provider_runtime::recovery_peer::RECOVERY_PEER_ARGUMENT => {
-            let outcome = provider_runtime::recovery_peer::serve_recovery_peer(endpoint_id);
-            if let Err(error) = outcome {
-                report(&format!("pos-sandboxd: {error}"));
-            }
-            std::process::ExitCode::from(u8::from(outcome.is_err()))
+            Some(
+                provider_runtime::recovery_peer::serve_recovery_peer(endpoint_id)
+                    .map_err(|error| format!("pos-sandboxd: {error}")),
+            )
         }
         [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
             let error = lpv1
@@ -642,16 +668,9 @@ pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::proc
                 .map_or(launcher::LauncherError::Parameters, |hex| {
                     launcher::run_launch_barrier(hex)
                 });
-            report(&format!("pos-sandboxd: {error}"));
-            std::process::ExitCode::FAILURE
+            Some(Err(format!("pos-sandboxd: {error}")))
         }
-        _ => {
-            report(
-                "usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime \
-                 | recovery-peer <endpoint-id-hex>",
-            );
-            std::process::ExitCode::from(2)
-        }
+        _ => None,
     }
 }
 

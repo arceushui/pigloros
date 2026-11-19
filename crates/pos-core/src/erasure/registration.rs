@@ -518,7 +518,7 @@ fn encode_registration(fields: &ArtifactRegistrationFieldsV1) -> Vec<u8> {
     encode_head(&mut out, 0, fields.artifact_class.code());
     encode_blob(&mut out, fields.artifact_digest.as_bytes());
     encode_blob(&mut out, fields.owner_reference.as_bytes());
-    encode_head(&mut out, 0, data_class_code(fields.data_class));
+    encode_head(&mut out, 0, u64::from(fields.data_class));
     encode_head(&mut out, 0, optionality_code(fields.optionality));
     encode_head(&mut out, 0, transition_code(fields.transition_rule));
     encode_head(&mut out, 4, fields.required_key_roles.len() as u64);
@@ -557,16 +557,6 @@ fn encode_text(out: &mut Vec<u8>, text: &str) {
 fn encode_blob(out: &mut Vec<u8>, bytes: &[u8]) {
     encode_head(out, 2, bytes.len() as u64);
     out.extend_from_slice(bytes);
-}
-
-const fn data_class_code(value: ArtifactDataClassV1) -> u64 {
-    match value {
-        ArtifactDataClassV1::PrivateSubjectData => 0,
-        ArtifactDataClassV1::ConsentedSharedData => 1,
-        ArtifactDataClassV1::PublicRecord => 2,
-        ArtifactDataClassV1::AggregateData => 3,
-        ArtifactDataClassV1::StructuralAuditMetadata => 4,
-    }
 }
 
 const fn optionality_code(value: ArtifactOptionalityV1) -> u64 {
@@ -670,14 +660,10 @@ impl<'a> Reader<'a> {
     }
 
     fn data_class(&mut self) -> Result<ArtifactDataClassV1, ArtifactRegistrationErrorV1> {
-        match self.head(0)? {
-            0 => Ok(ArtifactDataClassV1::PrivateSubjectData),
-            1 => Ok(ArtifactDataClassV1::ConsentedSharedData),
-            2 => Ok(ArtifactDataClassV1::PublicRecord),
-            3 => Ok(ArtifactDataClassV1::AggregateData),
-            4 => Ok(ArtifactDataClassV1::StructuralAuditMetadata),
-            _ => Err(ArtifactRegistrationErrorV1::UnsupportedValue),
-        }
+        self.head(0).and_then(|code| {
+            ArtifactDataClassV1::from_code(code)
+                .map_err(|_| ArtifactRegistrationErrorV1::UnsupportedValue)
+        })
     }
 
     fn optionality(&mut self) -> Result<ArtifactOptionalityV1, ArtifactRegistrationErrorV1> {

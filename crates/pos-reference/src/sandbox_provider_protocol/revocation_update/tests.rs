@@ -129,6 +129,30 @@ fn the_rca1_producer_refuses_invalid_fields_and_a_foreign_key() -> TestResult {
     Ok(())
 }
 
+/// The RCA1 record names the key ID of its fields, which the signer checks
+/// against the admitted key, and it authenticates under that key ID only.
+#[test]
+fn an_rca1_names_and_authenticates_under_its_own_key_id() -> TestResult {
+    let seed = blake3::Hasher::new()
+        .update(b"PiglorOS.RevocationAcknowledgementTestKey.v1\0")
+        .finalize();
+    let key = SigningKey::from_bytes(seed.as_bytes());
+    let record = RevocationAcknowledgement::self_digested(fields())?;
+    assert_eq!(record.key_id(), "runtime");
+    let other = RevocationAcknowledgement::self_digested(RevocationAcknowledgementFields {
+        runtime_attestation_key_id: "other".to_owned(),
+        ..fields()
+    })?;
+    assert_eq!(other.key_id(), "other");
+    let bytes = signed(fields(), &key)?.to_canonical_cbor()?;
+    RevocationAcknowledgement::authenticate(&bytes, "runtime", &key.verifying_key())?;
+    assert_eq!(
+        RevocationAcknowledgement::authenticate(&bytes, "other", &key.verifying_key()).err(),
+        Some(SandboxRevocationUpdateError::AcknowledgementMismatch)
+    );
+    Ok(())
+}
+
 #[test]
 fn claimed_digests_need_an_rcu1_wrapper() {
     assert!(RevocationUpdateRequest::claimed_revocation_digests(b"\xff").is_err());

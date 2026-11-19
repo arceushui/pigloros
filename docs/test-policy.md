@@ -36,8 +36,11 @@ to prove its own unmutated scratch copy before testing mutations. A fixture
 missing only from the copied tree must fail the baseline rather than count as
 a caught mutant. The aggregate gate requires the shared baseline and every
 shard. This also applies to manual workflow dispatch. The separate baseline has
-the normal test job's 30-minute limit; mutant limits remain 120 seconds for tests, 600 seconds for
-builds, and a 60-minute shard watchdog. `scripts/test_mutation_workflow_policy.py`
+the normal test job's 30-minute limit. Mutant limits are 240 seconds for tests,
+600 seconds for builds, and a 60-minute shard watchdog. The test limit also
+bounds each shard's unmutated baseline, and pos-store's suite takes about 120
+seconds or more (mutation run 44010869119 timed out its baseline at the former
+120-second limit). `scripts/test_mutation_workflow_policy.py`
 locks this dependency and exercises failed, cancelled, missing and skipped
 results against the actual fan-in shell. Harness startup failures are not
 evidence that a mutation was caught.
@@ -126,17 +129,22 @@ mirrored by `scripts/check_cargo_crap_ci_policy.py` and its independent adversar
 tests. Family wildcards, production neighbours, and score-tolerance changes
 remain rejected; all fixture cases still execute in the workspace test run.
 
-Each successful `main` workflow publishes a 90-day baseline artifact named for
-its exact commit. A pull request downloads the artifact for its base SHA, so
-newly merged functions become existing baseline entries on the next change.
-The pull request job polls for the artifact for up to five minutes to cover the
-short interval while the corresponding `main` cargo-crap job is still finishing.
-It trusts only an unexpired artifact attached to the exact base commit on the
-repository's `main` branch; it does not wait for unrelated slower jobs such as
-ASan. The aggregate `main` gate remains responsible for keeping `main` green.
-If that trusted artifact has expired or no successful `main` cargo-crap job has
-published one for the base, the pull request must rebase onto a newer `main`
-commit with a trusted baseline.
+Each successful `main` cargo-crap job publishes a 90-day baseline artifact named
+for its exact commit. The job starts as soon as hosted coverage (and the native
+lane, when in scope) succeeds, without waiting for the other core jobs, so the
+baseline appears as early as possible. A pull request downloads the artifact
+for its base SHA, so newly merged functions become existing baseline entries on
+the next change. While `main`'s run for that base is still working, the pull
+request job polls for up to 30 minutes. It trusts only an unexpired artifact
+attached to the exact commit on the repository's `main` branch. The aggregate
+`main` gate remains responsible for keeping `main` green. If the base never
+gets a baseline within that bound, the job uses the baseline of the nearest
+first-parent `main` ancestor among the 30 commits before it; a function `main`
+improved after that ancestor may then regrow up to its ancestor score, which
+the owner accepted. With no trusted baseline in that window, the job fails
+closed (pull requests that change no Rust, Cargo or toolchain input bootstrap
+instead). A failed `core-gate` no longer stops cargo-crap from running; `ci-gate`
+still fails on it.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,

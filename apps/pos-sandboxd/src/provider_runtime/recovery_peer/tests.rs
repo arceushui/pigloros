@@ -23,8 +23,9 @@ use rustix::fs::{flock, FlockOperation};
 
 use super::{endpoint_path, serve_with, RecoveryPeerError, RECOVERY_DIRECTORY, ROOT_UID};
 use crate::provider_runtime::tests::{
-    admitted, cancellation_context, encode, in_isolated_root, install_spi1, remove_spi1,
-    revocation_update, revocation_update_revoking, spi1, TestResult, RUNTIME_SEED,
+    admitted, cancellation_context, encode, in_isolated_root, install_spi1,
+    key_and_provider_revocation_update, remove_spi1, revocation_update, spi1, TestResult,
+    RUNTIME_SEED,
 };
 use crate::provider_runtime::ProviderRuntimeError;
 
@@ -323,7 +324,7 @@ fn the_recovery_peer_answers_one_exchange_of_the_pending_sir1() -> TestResult {
     assert_eq!(acknowledgement.cancelled_attempt_ids(), [[5; 16]]);
     // R12 §5.6: the next RVS1 revokes SIR1's runtime key, and the RCA1 is
     // still signed under it and authenticates.
-    let (revoking, next) = revocation_update_revoking(&admitted, &[KEY_ID], &[], 2)?;
+    let (revoking, next) = key_and_provider_revocation_update(&admitted, &[KEY_ID], &[], 2)?;
     let context = cancellation_context(&admitted, &revoking, Vec::new(), Vec::new())?;
     let context_bytes = context.to_canonical_cbor()?;
     let (outcome, read) = run_peer(

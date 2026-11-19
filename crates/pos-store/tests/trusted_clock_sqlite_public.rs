@@ -106,7 +106,10 @@ fn authenticated(byte: u8) -> AuthenticatedPrincipalResultV1 {
         expires_at: WallTime::from_micros(FAR),
         binding_digest: Hash::from_bytes([7; 32]),
     };
-    ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
+    ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        draft,
+    ))
 }
 
 fn mono(offsets: &[Duration]) -> ScriptedGuardMonotonicSourceV1 {
@@ -262,7 +265,8 @@ fn shared_memory_authority_fails_the_durability_read_back() -> TestResult {
     let store = Connection::open(&path)?;
     store.execute_batch(
         "CREATE TABLE artifact_registrations (owner_id TEXT);
-         CREATE TABLE artifact_registration_operations (owner_id TEXT)",
+         CREATE TABLE artifact_registration_operations (owner_id TEXT);
+         CREATE TABLE artifact_registration_timelines (timeline_id BLOB)",
     )?;
     let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
     let refused = reserve(&mut authority, T0).err();

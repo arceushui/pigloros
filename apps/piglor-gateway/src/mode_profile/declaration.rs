@@ -31,8 +31,7 @@ struct DeclaredProfileV1 {
     ingress: Vec<String>,
     startup_predicates: Vec<String>,
     revocation_freshness: String,
-    #[serde(deserialize_with = "Option::deserialize")]
-    registration_profile_id: Option<String>,
+    registration_profile_id: String,
     #[serde(deserialize_with = "Option::deserialize")]
     previous_mode_profile_digest: Option<String>,
 }
@@ -43,12 +42,13 @@ const INGRESS: [(&str, u8); 3] = [
     ("public-read-only", 2),
     ("fork-admission-socket", 3),
 ];
-const PREDICATES: [(&str, u8); 5] = [
+const PREDICATES: [(&str, u8); 6] = [
     ("linux", 1),
     ("listeners-within-ingress", 2),
     ("network-features-granted", 3),
     ("no-network-ledger-source", 4),
     ("store-mode-binding", 5),
+    ("air-gapped-no-route", 6),
 ];
 const FRESHNESS: [(&str, u8); 2] = [("current-by-construction", 1), ("observed-persisted", 2)];
 

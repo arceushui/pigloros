@@ -60,7 +60,9 @@ env:
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
 # any Cargo-heavy work. The core gates then run together; core-gate releases
-# at most eight heavy standard jobs plus the lightweight cargo-crap analysis.
+# at most eight heavy standard jobs. The lightweight cargo-crap analysis starts
+# as soon as hosted coverage (and the native lane, when in scope) succeeds, so
+# main publishes its trusted baseline without waiting for the other core jobs.
 # Mutation and the ASan shards follow standard-gate as the final expensive
 # stage and run beside each other. The native Windows owner lane starts after
 # the ledger Windows runner and runs beside every other stage: only cargo-crap
@@ -710,8 +712,8 @@ jobs:
         run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
       - name: Exercise the unsupported non-Linux EPF1 boundary
         run: cargo test -p pos-runtime --features test-support --test non_linux_profile --locked -- --include-ignored
-      - name: Exercise the unsupported Windows subject encryptor profile
-        run: cargo test -p pos-owner-bridge --lib --locked only_linux_supports_the_nonce_ledger_and_encryptor_lock -- --include-ignored
+      - name: Exercise the Windows subject encryptor platform admission
+        run: cargo test -p pos-owner-bridge --lib --locked linux_and_windows_support_the_nonce_ledger_and_encryptor_lock -- --include-ignored
       - name: Check narrower-target Replay representation boundaries
         run: cargo check -p pos-runtime --target i686-pc-windows-msvc --locked
       - name: Exercise narrower-target registry cardinality refusals
@@ -758,10 +760,13 @@ jobs:
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
+      # Library and binary targets only: the shim's test targets depend on
+      # pos-crypto, whose C build cannot target MSVC from this Linux runner.
+      # The native owner-bridge-windows job lints every target with these flags.
       - name: Cross-target lint the Windows owner shim
         run: >
           cargo clippy -p pos-owner-bridge-windows --target x86_64-pc-windows-msvc
-          --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+          --all-features --locked -- -D warnings -W clippy::pedantic
       - name: Staged reducer purity guard (ADR-113 §7)
         run: bash scripts/check-reducer-purity-guard.sh
       - name: Exercise Windows shim coverage exclusions with real metadata
@@ -976,22 +981,24 @@ jobs:
 
   cargo-crap:
     name: cargo-crap
+    # Starts from coverage, not core-gate: the score depends only on the LCOV
+    # inputs, and ci-gate still requires core-gate. On main this publishes the
+    # trusted baseline that pull requests wait for as early as possible.
     needs:
       - ci_change_scope
       - coverage
-      - core-gate
       - owner-bridge-windows
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
     # The native lane must succeed unless the trusted scope explicitly left it
     # out of this pull request.
-    if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     # Budget: the pre-steps (full-history checkout, install-action, LCOV
-    # downloads), the resolver step's 130-minute bound on waiting for main's
+    # downloads), the resolver step's 45-minute bound on waiting for main's
     # trusted baseline (see that step), then scoring and uploads, all within
-    # 150 minutes.
-    timeout-minutes: 150
+    # 70 minutes.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1032,14 +1039,15 @@ jobs:
         run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
-      # Polls up to 120 minutes while main's ci.yml run for the trusted base is
+      # Polls up to 30 minutes while main's ci.yml run for the trusted base is
       # still producing its cargo-crap baseline, then falls back to the nearest
       # first-parent main ancestor's baseline (fetch-depth 0 above provides that
-      # history), then fails closed as before. The extra minutes cover the last
-      # poll, GitHub API retry backoff and the ancestor walk.
+      # history), then fails closed as before. The extra 15 minutes cover the
+      # last poll and the 30-commit ancestor walk even when GitHub API calls
+      # need retries; a step that still runs out of time fails closed.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
-        timeout-minutes: 130
+        timeout-minutes: 45
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
@@ -1104,7 +1112,17 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/revision/tests.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/provider_runtime/tests.rs'
+          --exclude 'src/provider_runtime/endpoint/tests.rs'
+          --exclude 'src/provider_runtime/serving/tests.rs'
+          --exclude 'src/provider_runtime/revocation/tests.rs'
+          --exclude 'src/scenario_room/tests.rs'
+          --exclude 'src/executor/scenario_room/tests.rs'
+          --exclude 'src/mode_profile/tests.rs'
+          --exclude 'src/adapter/native_tests.rs'
+          --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
@@ -1149,7 +1167,17 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/revision/tests.rs'
           --exclude 'src/provider_lifecycle/tests.rs'
+          --exclude 'src/provider_runtime/tests.rs'
+          --exclude 'src/provider_runtime/endpoint/tests.rs'
+          --exclude 'src/provider_runtime/serving/tests.rs'
+          --exclude 'src/provider_runtime/revocation/tests.rs'
+          --exclude 'src/scenario_room/tests.rs'
+          --exclude 'src/executor/scenario_room/tests.rs'
+          --exclude 'src/mode_profile/tests.rs'
+          --exclude 'src/adapter/native_tests.rs'
+          --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
@@ -1725,6 +1753,8 @@ jobs:
           python scripts/test_check_test_support_features.py
       - name: Test rust-test-policy test-code classification
         run: python scripts/test_rust_test_policy.py
+      - name: Test the Air-Gapped test namespace helpers
+        run: python scripts/test_air_gapped_seccomp_exec.py
       - name: Check the community Plugin handoff READMEs
         run: |
           python scripts/check_handoff_readme.py
@@ -1765,6 +1795,10 @@ jobs:
         run: |
           python scripts/check_counterfactual_adapter_seal.py
           python scripts/test_check_counterfactual_adapter_seal.py
+      - name: Check authority trust-root seal policy
+        run: |
+          python scripts/check_authority_trust_root_seal.py
+          python scripts/test_check_authority_trust_root_seal.py
       - name: Check trusted-clock port implementation policy
         run: |
           python scripts/check_trusted_clock_port_impls.py

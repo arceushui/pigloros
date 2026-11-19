@@ -21,15 +21,18 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxExecuteRequest, SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
 };
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
+use rustix::event::PollFlags;
 
 use super::{
-    exchange_deadline, root_peer, ControlState, Responder, EXECUTE_CLOSED, FENCED, LIVE, REVOKED,
+    accepting, exchange_deadline, missed, readiness, trusted_peer, Admission, ControlState,
+    Deadlined, Responder, EXECUTE_CLOSED, FENCED, LIVE, REVOKED,
 };
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::reconcile::ReconcileError;
 use crate::provider_runtime::tests::{
     bind_as_provider, cancellation_context, encode, in_isolated_root, install_spi1,
-    revocation_update, spi1, test_lifecycle, Scripted, TestResult, RUNTIME_SEED,
+    key_and_provider_revocation_update, revocation_update, spi1, test_lifecycle, Scripted,
+    TestResult, RUNTIME_SEED,
 };
 use crate::provider_runtime::ExchangeObserver;
 use crate::provider_runtime::{
@@ -309,6 +312,10 @@ fn refuses_by_precedence(key: &VerifyingKey, authority: Authority) -> TestResult
     // A record whose magic names no operation of this socket.
     let foreign = request("SPX1", 1, Vec::new(), false)?;
     assert_invalid(&exchange(&[&foreign])?, key, None, Code::InvalidEncoding)?;
+    // A describe record with a trailing byte names its operation in its
+    // magic but is no canonical record: step 1.
+    let trailing = [describe([1; 16], authority)?, vec![0]].concat();
+    assert_invalid(&exchange(&[&trailing])?, key, None, Code::InvalidEncoding)?;
     // Steps 2, 3 and 5.
     let version = request(
         "SDQ1",
@@ -393,6 +400,18 @@ fn refuses_by_precedence(key: &VerifyingKey, authority: Authority) -> TestResult
         Code::AuthorityMismatch,
     )?;
     Ok(())
+}
+
+/// A 2 MiB record is within the 16 MiB frame bound (ADR-069 §4), so it is
+/// read whole and refused at step 2, not at step 1 as an oversized frame.
+fn reads_a_record_above_one_mebibyte(key: &VerifyingKey) -> TestResult {
+    let large = request("SDQ1", 2, vec![Value::Bytes(vec![0; 2 << 20])], false)?;
+    assert_invalid(
+        &exchange(&[&large])?,
+        key,
+        Some(0),
+        SandboxProviderErrorCode::UnsupportedVersion,
+    )
 }
 
 /// Cancel and reconcile pass step 6 and get SPE1 `code`: 11 while the
@@ -574,17 +593,25 @@ fn refuses_execute_while_starting(key: &VerifyingKey, staged: &StagedInstallatio
     // another version, and EVR1 without its SPX1.
     let trailing = [evaluation, &[0]].concat();
     assert_invalid(&exchange(&[&trailing])?, key, None, Code::InvalidEncoding)?;
-    let mut fields: Value = ciborium::from_reader(evaluation)?;
-    if let Value::Array(values) = &mut fields {
-        values[1] = Value::Integer(2.into());
+    // EVR1 of another version, with a zero request ID, and with another
+    // self-digest.
+    for (field, value, code) in [
+        (1, Value::Integer(2.into()), Code::UnsupportedVersion),
+        (2, Value::Bytes(vec![0; 16]), Code::FieldOutOfBounds),
+        (14, Value::Bytes(vec![0x77; 32]), Code::DigestMismatch),
+    ] {
+        let mut fields: Value = ciborium::from_reader(evaluation)?;
+        if let Value::Array(values) = &mut fields {
+            values[field] = value;
+        }
+        let changed = encode(&fields)?;
+        assert_invalid(
+            &exchange(&[&changed, staged.request()])?,
+            key,
+            Some(1),
+            code,
+        )?;
     }
-    let old_evaluation = encode(&fields)?;
-    assert_invalid(
-        &exchange(&[&old_evaluation, staged.request()])?,
-        key,
-        Some(1),
-        Code::UnsupportedVersion,
-    )?;
     let mut record: Value = ciborium::from_reader(staged.request())?;
     if let Value::Array(values) = &mut record {
         if let Value::Array(unsigned) = &mut values[0] {
@@ -677,6 +704,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
         )
     );
     refuses_by_precedence(&key, retained)?;
+    reads_a_record_above_one_mebibyte(&key)?;
     answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
     refuses_execute_while_starting(&key, &staged)?;
     // A root control connection is closed with zero bytes.
@@ -813,11 +841,79 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
 }
 
 #[test]
-fn only_a_root_peer_is_answered() -> TestResult {
-    // On a non-root host the peer of a socket pair is not root; in the
-    // isolated container it is.
+fn a_deadlined_stream_has_nothing_to_flush() -> TestResult {
+    // A Unix stream has no buffered output: flushing writes nothing.
+    let (local, mut peer) = UnixStream::pair()?;
+    Deadlined::new(&local, Duration::from_secs(1)).flush()?;
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
+    Ok(())
+}
+
+#[test]
+fn only_the_trusted_peer_uid_is_answered() -> TestResult {
+    // The peer of a socket pair runs as this process's UID.
     let (local, _) = UnixStream::pair()?;
-    assert_eq!(root_peer(&local), rustix::process::geteuid().is_root());
+    let uid = rustix::process::geteuid().as_raw();
+    assert!(trusted_peer(&local, uid));
+    assert!(!trusted_peer(&local, uid + 1));
+    Ok(())
+}
+
+/// Assert that `peer` reads nothing, not even server write EOF, and that
+/// all of `sent` is still unread at `server`: the connection was dropped
+/// before anything was read or written.
+fn assert_dropped_unread(server: &UnixStream, peer: &mut UnixStream, sent: &[u8]) -> TestResult {
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
+    let mut unread = vec![0; sent.len() + 1];
+    let mut reader = server;
+    assert_eq!(reader.read(&mut unread)?, sent.len());
+    assert_eq!(&unread[..sent.len()], sent);
+    Ok(())
+}
+
+/// A peer of another UID gets zero bytes on either socket: neither the
+/// revocation responder nor the execute answer reads its request, and the
+/// control state stays `Live` (R11 §6 step 6).
+fn drops_an_untrusted_peer(
+    admitted: &AdmittedSelectorProvider,
+    signer: &crate::KeyFileRuntimeSigner,
+    retained: Authority,
+) -> TestResult {
+    let starting = OnceLock::new();
+    let untrusted = Responder {
+        peer_uid: rustix::process::geteuid().as_raw() + 1,
+        ..Responder::new(admitted, signer, &starting)
+    };
+    let (update, _) = revocation_update(admitted, &[], 4)?;
+    let context = cancellation_context(admitted, &update, Vec::new(), Vec::new())?;
+    let sent = framed(&[&context.to_canonical_cbor()?, &update])?;
+    let (server, mut peer) = UnixStream::pair()?;
+    peer.write_all(&sent)?;
+    untrusted.exchange(&server, Instant::now());
+    assert_dropped_unread(&server, &mut peer, &sent)?;
+    assert_eq!(
+        untrusted.revocation.observer().state.load(Ordering::SeqCst),
+        LIVE
+    );
+    let sent = framed(&[&describe([4; 16], retained)?])?;
+    let (server, mut peer) = UnixStream::pair()?;
+    peer.write_all(&sent)?;
+    untrusted.answer(&server, Admission::Answered);
+    assert_dropped_unread(&server, &mut peer, &sent)?;
+    assert_eq!(
+        untrusted.revocation.observer().state.load(Ordering::SeqCst),
+        LIVE
+    );
     Ok(())
 }
 
@@ -836,6 +932,7 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
     the_control_state_only_advances(&admitted)?;
+    drops_an_untrusted_peer(&admitted, &signer, retained)?;
     let starting = OnceLock::new();
     // An acknowledged update fences the runtime for good; describe still
     // answers and execute is refused with 11 (invariant 24).
@@ -890,11 +987,12 @@ fn a_control_exchange_ends_100_ms_after_its_accept() {
 
 /// The live control state only advances: the fence and an acknowledgement
 /// that does not revoke this runtime leave it `Fenced`; one that revokes
-/// its SPM1 makes it `Revoked` (R11 §7.1).
+/// its SPM1, its binary or its runtime-attestation key, each alone, makes it
+/// `Revoked` (R11 §7.1).
 fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestResult {
     let bootstrap = admitted.bootstrap();
-    let next = |providers: &[[u8; 32]], nonce| -> TestResult<_> {
-        let (update, _) = revocation_update(admitted, providers, nonce)?;
+    let next_revoking = |keys: &[&str], providers: &[[u8; 32]], nonce| -> TestResult<_> {
+        let (update, _) = key_and_provider_revocation_update(admitted, keys, providers, nonce)?;
         Ok(RevocationUpdateRequest::authenticate(
             &update,
             bootstrap.trust(),
@@ -902,6 +1000,23 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
         )?
         .next_revocation)
     };
+    let next = |providers: &[[u8; 32]], nonce| next_revoking(&[], providers, nonce);
+    let manifest = admitted.provider().manifest();
+    for (keys, providers, nonce) in [
+        (Vec::new(), vec![manifest.binary_digest], 10),
+        (
+            vec![manifest.runtime_attestation_key_id.as_str()],
+            Vec::new(),
+            11,
+        ),
+    ] {
+        let control = ControlState {
+            state: AtomicU8::new(FENCED),
+            admitted,
+        };
+        control.acknowledging(bootstrap.trust(), &next_revoking(&keys, &providers, nonce)?);
+        assert!(control.revoked());
+    }
     let control = ControlState {
         state: AtomicU8::new(LIVE),
         admitted,
@@ -915,12 +1030,50 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
     assert_eq!(state(), FENCED);
     control.acknowledging(bootstrap.trust(), &next(&[], 7)?);
     assert!(!control.revoked());
-    let manifest = admitted.provider().manifest().manifest_digest;
-    control.acknowledging(bootstrap.trust(), &next(&[manifest], 8)?);
+    control.acknowledging(bootstrap.trust(), &next(&[manifest.manifest_digest], 8)?);
     assert!(control.revoked());
     assert_eq!(state(), REVOKED);
     // A later acknowledgement that revokes nothing cannot undo it.
     control.acknowledging(bootstrap.trust(), &next(&[], 9)?);
     assert_eq!(state(), REVOKED);
     Ok(())
+}
+
+#[test]
+fn the_execute_listener_is_polled_while_either_pool_has_a_free_slot() {
+    // A free answered slot alone, a free refusing slot alone, and neither.
+    assert!(accepting(0, 1, 1));
+    assert!(accepting(1, 0, 1));
+    assert!(accepting(1, 1, 2));
+    assert!(!accepting(1, 1, 1));
+    assert!(!accepting(2, 3, 2));
+    // Pool 0 still runs one refusal at a time.
+    assert!(accepting(0, 0, 0));
+    assert!(!accepting(0, 1, 0));
+}
+
+#[test]
+fn execute_readiness_counts_only_while_accepting() {
+    let none = PollFlags::empty();
+    assert_eq!(readiness(true, none, none), (false, false));
+    assert_eq!(readiness(true, PollFlags::IN, none), (true, false));
+    assert_eq!(readiness(true, none, PollFlags::IN), (false, true));
+    // While not accepting, whatever the execute listener reports is ignored.
+    assert_eq!(readiness(false, none, PollFlags::IN), (false, false));
+    assert_eq!(
+        readiness(false, PollFlags::IN, PollFlags::HUP),
+        (true, false)
+    );
+}
+
+#[test]
+fn only_an_accept_that_produced_nothing_backs_off() {
+    // A control accept that missed, alone.
+    assert!(missed(true, false, false));
+    assert!(missed(true, true, true));
+    // An execute accept that was ready and produced nothing, alone.
+    assert!(missed(false, true, false));
+    // A ready execute accept that produced a connection, and no accept.
+    assert!(!missed(false, true, true));
+    assert!(!missed(false, false, false));
 }

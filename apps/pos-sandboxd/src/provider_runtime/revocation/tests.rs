@@ -2,7 +2,7 @@
 //! isolated container (invariants 20 to 22 and 26, live side).
 
 use std::future::Future;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Cursor, ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -273,6 +273,31 @@ fn an_unwritten_acknowledgement_is_lost(
     Ok(())
 }
 
+/// A 2 MiB frame is within the 16 MiB frame bound (ADR-069 §4): the whole
+/// exchange is read to the client's EOF before the frame fails to decode as
+/// RCC1, and no fence is taken.
+fn reads_a_frame_above_one_mebibyte(
+    admitted: &AdmittedSelectorProvider,
+    signer: &KeyFileRuntimeSigner,
+) -> TestResult {
+    let (update, _) = revocation_update(admitted, &[], 6)?;
+    let mut bytes = Vec::new();
+    for frame in [vec![0xff; 2 << 20], update] {
+        bytes.extend(u32::try_from(frame.len())?.to_be_bytes());
+        bytes.extend(frame);
+    }
+    let length = u64::try_from(bytes.len())?;
+    let mut stream = Cursor::new(bytes);
+    let source = Fixed::new(Some(Vec::new()));
+    assert_eq!(
+        responder(admitted, signer, &source, Quiet).respond(&mut stream, Instant::now() + BOUND),
+        ExchangeOutcome::Refused { fenced: false }
+    );
+    assert_eq!(stream.position(), length);
+    assert_eq!(source.taken.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
 /// The steps an observer saw, and what the client had read by then.
 struct Recording<'a> {
     events: &'a Mutex<Vec<&'static str>>,
@@ -381,6 +406,7 @@ fn the_responder_acknowledges_only_clean_fenced_updates() -> TestResult {
     acknowledges_once_and_resends(&admitted, &signer)?;
     refuses_unclean_views(&admitted, &signer)?;
     an_unwritten_acknowledgement_is_lost(&admitted, &signer)?;
+    reads_a_frame_above_one_mebibyte(&admitted, &signer)?;
     observes_each_step_before_it_happens(&admitted, &signer)?;
     the_live_view_is_the_fenced_lifecycle()?;
     drop(staged);

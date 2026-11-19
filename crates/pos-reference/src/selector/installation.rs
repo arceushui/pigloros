@@ -1140,8 +1140,8 @@ pub mod tests {
                 architecture: SandboxArchitecture::X86_64,
                 root_hash: std::array::from_fn(|index| u8::try_from(index).unwrap_or(0)),
                 proof: proof.to_vec(),
-                certificate: IMAGE_CERTIFICATE,
-                key_description: IMAGE_KEY_DESCRIPTION,
+                certificate: IMAGE_CERTIFICATE.to_vec(),
+                key_description: IMAGE_KEY_DESCRIPTION.to_owned(),
             }
         }
 

@@ -36,7 +36,7 @@ fi
 # Pin the complete reviewed parsed program, including comments and heredoc data.
 # This policy snapshot is not a shell-semantics oracle; digest changes need review.
 MUTATION_RUN_SHA256 = (
-    "a798fb277929c47b4be189e4fd9e8495e217f2961c98b24fc1bb76ac1874a905"
+    "8db86bdd9fb7b873e7014b286b0e61ec0f3134a508fe490a0cc2be044746a70b"
 )
 
 
@@ -125,7 +125,7 @@ def check_contract(workflow: dict) -> None:
         "timeout --foreground 60m cargo mutants --workspace --all-features "
         '--in-diff "${{ runner.temp }}/changes.diff" --no-shuffle '
         '--shard "${{ matrix.shard }}/16" --baseline run --jobs 1 '
-        "--timeout 120 --build-timeout 600 --cap-lints true --cargo-arg=--locked "
+        "--timeout 240 --build-timeout 600 --cap-lints true --cargo-arg=--locked "
         "-- -- -Zunstable-options --fail-fast --include-ignored --test-threads=4 "
         "mutation_status=$? set -e"
     )
@@ -268,7 +268,8 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
             ("--jobs 1", "--jobs 2"),
             ("--jobs 1", "--jobs 4"),
             ("--test-threads=4", "--test-threads=2"),
-            ("--timeout 120", "--timeout 121"),
+            ("--timeout 240", "--timeout 120"),
+            ("--timeout 240", "--timeout 241"),
             ("--build-timeout 600", "--build-timeout 601"),
             ("--foreground 60m", "--foreground 61m"),
         ):
