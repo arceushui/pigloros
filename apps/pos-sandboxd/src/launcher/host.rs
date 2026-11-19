@@ -7,15 +7,11 @@
 
 use std::{ffi::CString, fs::File, io};
 
-use rustix::{
-    fs::{open, Mode, OFlags},
-    time::{clock_gettime, ClockId},
-};
+use rustix::fs::{open, Mode, OFlags};
 
 use super::{adapter::open_beneath, descriptors::scan_proc_self_fd, exec::replace_process_image};
 
 const ROOT_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
-const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
 /// What the launch barrier needs from its surroundings.
 pub(super) trait LaunchHost {
@@ -67,12 +63,7 @@ impl LaunchHost for ProcessHost {
     }
 
     fn monotonic_ns(&self) -> io::Result<u64> {
-        let now = clock_gettime(ClockId::Monotonic);
-        let seconds = u64::try_from(now.tv_sec).unwrap_or_default();
-        let nanoseconds = u64::try_from(now.tv_nsec).unwrap_or_default();
-        Ok(seconds
-            .saturating_mul(NANOSECONDS_PER_SECOND)
-            .saturating_add(nanoseconds))
+        super::clock::monotonic_ns()
     }
 
     fn replace_process(&self, adapter: &File, argv: &[CString]) -> io::Error {
