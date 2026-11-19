@@ -9,6 +9,17 @@ import sys
 
 import yaml
 
+from ci_stage_policy import (
+    CODEQL_IF,
+    CORE_STAGE_IF,
+    CORE_STAGE_NEEDS,
+    DOCKER_BUILD_IF,
+    MAIN_REPORT_IF,
+    MAIN_REPORT_NEEDS,
+    PREFLIGHT_STAGE_IF,
+    PREFLIGHT_STAGE_NEEDS,
+)
+
 
 CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 INSTALL_ACTION = "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32"
@@ -18,11 +29,7 @@ BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 COVERAGE_MERGER = "scripts/merge_owner_bridge_lcov.py"
 COVERAGE_MERGER_SHA256 = '5aded2c2efd208194ac002c902ea86773e95b75dddbd2323c8f5e4303768a99d'
 MERGE_COVERAGE_COMMAND = 'python scripts/merge_owner_bridge_lcov.py --linux "${{ runner.temp }}/coverage.lcov" --native "${{ runner.temp }}/owner-windows-lcov/owner-windows.lcov" --receipt "${{ runner.temp }}/owner-windows-lcov/owner-windows-lcov-receipt.json" --workspace "${{ github.workspace }}" --checkout "${{ github.sha }}" --output "${{ runner.temp }}/cargo-crap-coverage.lcov"\n'
-SCOPED_JOB_IF = (
-    "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
-    "(needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request') }}"
-)
+SCOPED_JOB_IF = PREFLIGHT_STAGE_IF
 SCOPED_CARGO_CRAP_JOB_IF = (
     "${{ !cancelled() && needs.coverage.result == 'success' && "
     "(needs.owner-bridge-windows.result == 'success' || "
@@ -122,23 +129,34 @@ ANALYZE_COMMAND = (
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
-# Standard-stage jobs start from core-gate; cargo-crap starts from coverage.
-# None consumes cargo-crap output, so the native Windows lane that cargo-crap waits for never
-# delays or hides their findings. ci-gate requires cargo-crap directly.
+# Standard-stage jobs start from the complete core set (the core-gate pass
+# rule); cargo-crap starts from coverage. None consumes cargo-crap output, so
+# the native Windows lane that cargo-crap waits for never delays or hides their
+# findings. ci-gate requires cargo-crap directly.
 STAGED_MAIN_JOBS = {
-    "rustdoc": ["ci_change_scope", "core-gate"],
-    "reference-evaluator-release": ["ci_change_scope", "core-gate"],
-    "materialize-conformance-bundles": [
-        "ci_change_scope",
-        "conformance-fixtures",
-        "core-gate",
-    ],
-    "audit": ["ci_change_scope", "core-gate"],
-    "docker-build": ["ci_change_scope", "core-gate", "third-party-notices"],
-    "world-client-wasm": ["ci_change_scope", "core-gate"],
-    "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
-    "asan-build": ["ci_change_scope", "core-gate"],
+    **dict.fromkeys(
+        (
+            "rustdoc",
+            "reference-evaluator-release",
+            "materialize-conformance-bundles",
+            "audit",
+            "world-client-wasm",
+            "asan-build",
+        ),
+        (CORE_STAGE_NEEDS, CORE_STAGE_IF),
+    ),
+    "docker-build": (CORE_STAGE_NEEDS, DOCKER_BUILD_IF),
+    "world-client-browser-parity": (
+        ["ci_change_scope", "world-client-wasm"],
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "needs.world-client-wasm.result == 'success' && "
+        "(needs.ci_change_scope.outputs.rust == 'true' || "
+        "github.event_name != 'pull_request') }}",
+    ),
 }
+# Mutation and the ASan shards start from the standard pass rule, never from
+# cargo-crap.
+STANDARD_STAGE_JOBS = ("mutation-checks", "asan")
 
 
 CI_GATE_CARGO_CRAP_CHECK = (
@@ -171,7 +189,7 @@ def named_step(steps: list[object], name: str) -> dict:
     return matches[0]
 
 
-def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
+def check_staged_main_job(jobs: dict, name: str, needs: list[str], expected: str) -> None:
     job = jobs.get(name)
     require(isinstance(job, dict), f"missing staged main job {name!r}")
     require(job.get("needs") == needs, f"{name} direct dependencies changed")
@@ -191,19 +209,15 @@ def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
         "github.event_name != 'pull_request'" in condition,
         f"{name} must retain Rust-scope filtering",
     )
+    require(condition == expected, f"{name} must use its canonical stage condition")
 
 
-# Deliberate tripwire: this mirrors the `codeql` job `if` in ci.yml, so an
-# edit to that condition must be made in both places.
-CODEQL_CONDITION = (
-    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "(needs.core-gate.result == 'success' || "
-    "needs.ci_change_scope.outputs.rust == 'false') }}"
-)
+# The `codeql` job `if` in ci.yml must equal the canonical stage condition.
+CODEQL_CONDITION = CODEQL_IF
 
 
 def check_codeql_job(jobs: dict) -> None:
-    """CodeQL waits for core-gate on Rust PRs but always runs for docs-only PRs.
+    """CodeQL waits for the core set on Rust PRs but always runs for docs-only PRs.
 
     The main ruleset's code_scanning rule needs an uploaded analysis for every
     pull-request head, so a Rust-scope skip would make documentation-only pull
@@ -212,14 +226,14 @@ def check_codeql_job(jobs: dict) -> None:
     job = jobs.get("codeql")
     require(isinstance(job, dict), "missing codeql job")
     require(
-        job.get("needs") == ["ci_change_scope", "core-gate"],
+        job.get("needs") == CORE_STAGE_NEEDS,
         "codeql direct dependencies changed",
     )
     condition = job.get("if")
     require(isinstance(condition, str), "codeql must have a job condition")
     require(
         " ".join(condition.split()) == CODEQL_CONDITION,
-        "codeql must run once core-gate succeeds, and always for documentation-only pull requests",
+        "codeql must run once the core set passes, and always for documentation-only pull requests",
     )
 
 
@@ -446,7 +460,7 @@ def check_workflow(
     require(isinstance(coverage, dict), "missing required coverage job")
     require("continue-on-error" not in coverage, "coverage job must be blocking")
     require(
-        coverage.get("needs") == ["ci_change_scope", "preflight-gate"],
+        coverage.get("needs") == PREFLIGHT_STAGE_NEEDS,
         "coverage must wait for the trusted scope and fast preflight",
     )
     require(
@@ -650,11 +664,17 @@ def check_workflow(
     )
 
     # cargo-crap waits for the native Windows lane. ci-gate requires it, so
-    # standard-gate (which mutation and ASan follow) must not wait for it.
+    # neither standard-gate nor mutation and ASan (which follow the standard
+    # pass rule) may wait for it.
     standard = jobs.get("standard-gate")
     require(isinstance(standard, dict), "missing aggregate standard-gate")
     require("cargo-crap" not in standard.get("needs", []),
             "standard-gate must not delay mutation and ASan behind cargo-crap")
+    for name in STANDARD_STAGE_JOBS:
+        stage_job = jobs.get(name)
+        require(isinstance(stage_job, dict), f"missing standard-stage job {name!r}")
+        require("cargo-crap" not in stage_job.get("needs", []),
+                f"{name} must not wait for cargo-crap")
     aggregate = jobs.get("ci-gate")
     require(isinstance(aggregate, dict), "missing aggregate ci-gate")
     require(aggregate.get("if") == "${{ always() }}", "ci-gate must always evaluate cargo-crap")
@@ -679,16 +699,15 @@ def check_workflow(
     for name in MAIN_REPORT_JOBS:
         report = jobs.get(name)
         require(isinstance(report, dict), f"missing main report job {name!r}")
-        require(report.get("needs") == ["standard-gate", "cargo-crap"],
-                f"{name} must wait for standard-gate and cargo-crap")
+        require(report.get("needs") == MAIN_REPORT_NEEDS,
+                f"{name} must wait for the standard set and cargo-crap")
         require(
-            report.get("if") == "${{ github.event_name != 'pull_request' && "
-            "needs.standard-gate.result == 'success' && needs.cargo-crap.result == 'success' }}",
+            report.get("if") == MAIN_REPORT_IF,
             f"{name} must run only after successful standard checks and cargo-crap",
         )
 
-    for name, needs in STAGED_MAIN_JOBS.items():
-        check_staged_main_job(jobs, name, needs)
+    for name, (needs, condition) in STAGED_MAIN_JOBS.items():
+        check_staged_main_job(jobs, name, needs, condition)
     check_codeql_job(jobs)
 
 
