@@ -10,9 +10,14 @@
 //!
 //! [`TerminationFacts::classify`]: pos_reference::sandbox_provider_protocol::TerminationFacts::classify
 
-use pos_reference::sandbox_provider_protocol::{EndingCode, MainExitCode, ServiceResultCode};
+use pos_reference::sandbox_provider_protocol::{
+    CgroupEmptyBasis, EndingCode, MainExitCode, ServiceFacts, ServiceResultCode,
+};
 
-use crate::{AttemptEnding, SystemdMainExit, SystemdServiceResult};
+use crate::{
+    AttemptCgroupEmptyBasis, AttemptEnding, SystemdMainExit, SystemdServiceResult,
+    SystemdUnitResultObservation,
+};
 
 impl From<AttemptEnding> for EndingCode {
     fn from(ending: AttemptEnding) -> Self {
@@ -60,6 +65,34 @@ impl From<SystemdMainExit> for MainExitCode {
             SystemdMainExit::Exited { .. } => Self::Exited,
             SystemdMainExit::Killed { .. } => Self::Killed,
             SystemdMainExit::Dumped { .. } => Self::Dumped,
+        }
+    }
+}
+
+/// TME1 `service`: the unit's `Result`, `ExecMainCode` and
+/// `ExecMainStatus`, which is the exit status or the signal number.
+impl From<&SystemdUnitResultObservation> for ServiceFacts {
+    fn from(observation: &SystemdUnitResultObservation) -> Self {
+        let main = observation.main_exit();
+        let exec_main_status = match main {
+            SystemdMainExit::NotRecorded => 0,
+            SystemdMainExit::Exited { status } => status,
+            SystemdMainExit::Killed { signal } | SystemdMainExit::Dumped { signal } => signal,
+        };
+        Self {
+            result: observation.result().into(),
+            exec_main_code: main.into(),
+            exec_main_status,
+        }
+    }
+}
+
+/// TME1 `cleanup.empty-basis`.
+impl From<AttemptCgroupEmptyBasis> for CgroupEmptyBasis {
+    fn from(basis: AttemptCgroupEmptyBasis) -> Self {
+        match basis {
+            AttemptCgroupEmptyBasis::Events => Self::Events,
+            AttemptCgroupEmptyBasis::Deleted => Self::Deleted,
         }
     }
 }

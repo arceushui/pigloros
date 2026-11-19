@@ -30,6 +30,8 @@ mod attempt_classification;
 #[cfg(target_os = "linux")]
 mod attempt_evidence;
 #[cfg(target_os = "linux")]
+mod attempt_records;
+#[cfg(target_os = "linux")]
 mod attempt_registry;
 #[cfg(target_os = "linux")]
 mod execute;
@@ -308,13 +310,16 @@ pub use adapter_stdio::{AdapterIo, FencedOutput, ReleasedOutput, StdioChannelErr
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
 pub use attempt_evidence::{
-    ReleaseOutcome, ReleaseResources, ResourceEvidence, TerminalResources, TerminalServiceError,
+    BoundUnit, ReleaseOutcome, ReleaseResources, ResourceEvidence, TerminalResources,
+    TerminalServiceError,
 };
+#[cfg(target_os = "linux")]
+pub use attempt_records::{AttemptAdmission, AttemptRecords, EvidenceFault};
 #[cfg(target_os = "linux")]
 pub use execute::{
     execute, AttemptCancel, AttemptEnding, AttemptExecution, CancelSignal, ExecuteError,
     ExecuteFailure, ExecuteJob, LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest,
-    UnitCgroup, UnitHost, UnitKiller, UnitState,
+    StartFailure, UnitCgroup, UnitHost, UnitKiller, UnitState, UnverifiedStart,
 };
 #[cfg(target_os = "linux")]
 pub use kernel_observation::observation_evidence;
@@ -425,8 +430,8 @@ pub use system_bus::{
 #[cfg(target_os = "linux")]
 pub use system_bus::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 pub use transient_unit::{
-    verified_requested_configuration, RequestedConfiguration, RequestedConfigurationProperty,
-    RequestedConfigurationValue,
+    unverified_requested_configuration, verified_requested_configuration, RequestedConfiguration,
+    RequestedConfigurationProperty, RequestedConfigurationValue,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,

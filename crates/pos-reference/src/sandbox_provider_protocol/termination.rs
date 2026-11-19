@@ -724,8 +724,9 @@ impl TerminationFacts {
     /// Required evidence is absent (R9 O6).
     ///
     /// That is unit evidence out of step with the unit, a field §4.6.3 or
-    /// R10 §4.8 requires at this progress, or one of KOE1 `work` and
-    /// `work-after` without the other.
+    /// R10 §4.8 requires at this progress, a start job whose result was not
+    /// observed (owner reading G1, Redmine #443 journal 22723), or one of
+    /// KOE1 `work` and `work-after` without the other.
     const fn missing_evidence(&self) -> bool {
         self.unit_evidence_missing()
             || self.released_evidence_missing()

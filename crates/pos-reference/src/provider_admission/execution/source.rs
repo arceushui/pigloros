@@ -29,7 +29,7 @@ use crate::{
 use super::super::{HeldImageAdmission, ProviderImageSnapshot};
 use super::{
     AdmittedProviderExecution, Clock, ConnectionIdentity, ExecutionSource, FailedInput, GrantState,
-    InputRefusal, IssuedGrant, OutputReservationRefused, PreparedProviderExecution,
+    GrantedFacts, InputRefusal, IssuedGrant, OutputReservationRefused, PreparedProviderExecution,
     ProviderExecutionPolicy, RetainedCase, StagingCharge, StagingError, StagingLedger,
     TransferWindow,
 };
@@ -474,6 +474,13 @@ impl PreparedProviderExecution {
                 &self.policy().commitment,
             )
             .map_err(|_| StagingError::InvalidSignature)?;
+        let facts = Arc::new(GrantedFacts {
+            limits: self.policy().effective_limits().to_vec(),
+            limits_digest: self.policy().effective_limits_digest(),
+            mode: snapshot.launch_policy().execution_mode,
+            provider_binary_digest: admitted.manifest().binary_digest,
+            negative_probe_evidence: admitted.host_profile().negative_probe_evidence,
+        });
         let length = u32::try_from(grant.len()).map_err(invalid)?;
         // A supplied signer may block while installation or the floor changes.
         snapshot
@@ -507,6 +514,7 @@ impl PreparedProviderExecution {
                                 incomplete_inputs: usage.queued_inputs,
                             },
                             issued_at: (self.clock)().ok(),
+                            admitted: facts,
                         });
                     })
             })
@@ -1541,6 +1549,30 @@ mod tests {
         Ok(())
     }
 
+    /// The admitted facts the terminal records need are retained with the
+    /// grant: ELM1 under the digest AGR1 names, the mode, and SPR1's
+    /// provider binary and negative-probe digests (Redmine #443 journal
+    /// 22723).
+    fn assert_granted_facts(entry: &super::super::AdmittedEntry<'_>, elm1_digest: [u8; 32]) {
+        let issued = entry.grant();
+        assert_eq!(issued.effective_limits(), entry.policy().effective_limits());
+        assert_eq!(issued.effective_limits_digest(), elm1_digest);
+        let snapshot = entry.admission().snapshot();
+        assert_eq!(
+            issued.execution_mode(),
+            snapshot.launch_policy().execution_mode
+        );
+        let provider = snapshot.admitted.provider();
+        assert_eq!(
+            issued.provider_binary_digest(),
+            provider.manifest().binary_digest
+        );
+        assert_eq!(
+            issued.negative_probe_evidence(),
+            provider.host_profile().negative_probe_evidence
+        );
+    }
+
     #[test]
     fn admitted_input_preserves_bytes_policy_and_the_live_floor() -> TestResult {
         use super::super::staging::StagingDirectory;
@@ -1595,6 +1627,7 @@ mod tests {
         );
         let issued_at = issued.issued_at().ok_or("no issue time")?;
         assert!(transfer.start <= issued_at && issued_at <= transfer.finish);
+        assert_granted_facts(&verified.entry(), sent_grant.elm1_digest);
         assert!(transfer.finish <= transfer.deadline);
         assert_eq!(
             verified.entry().policy().request_digest(),
