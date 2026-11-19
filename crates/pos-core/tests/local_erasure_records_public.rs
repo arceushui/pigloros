@@ -14,14 +14,14 @@ use pos_core::{
     LocalErasurePolicyV1, LocalErasureRedactionV1, LocalErasureRejectionV1,
     LocalErasureReplicaPurgeV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
     LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
-    LocalOwnerEffectV1, PreparedLocalOwnerEffectV1, TimelineId,
+    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1, TimelineId,
     ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
     LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
     LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
 };
 use ulid::Ulid;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const fn reference(seed: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([seed; 32])
@@ -1775,18 +1775,25 @@ fn owner_effect_records_match_hand_written_golden_vectors() -> TestResult {
     )
 }
 
+/// The ELO1 binding of the owner results these tests prepare.
+const BINDING: LocalOwnerResultBindingV1 = LocalOwnerResultBindingV1 {
+    request: reference(46),
+    attempt: reference(49),
+    obligation: reference(50),
+    command: reference(47),
+    owner_ref: reference(51),
+    error: None,
+};
+
+/// The ELO1 a prepared owner effect assembled.
+fn prepared_elo1(prepared: &PreparedLocalOwnerEffectV1) -> TestResult<LocalErasureOwnerResultV1> {
+    Ok(LocalErasureOwnerResultV1::from_canonical_cbor(
+        prepared.owner_result().canonical_cbor(),
+    )?)
+}
+
 #[test]
 fn each_owner_effect_retains_only_its_own_record() -> TestResult {
-    let elo1 = LocalErasureOwnerResultV1 {
-        request: reference(46),
-        attempt: reference(49),
-        obligation: reference(50),
-        command: reference(47),
-        owner_ref: reference(51),
-        error: None,
-        effect_digest: REPLICA_PURGE.reference()?,
-    }
-    .to_canonical_cbor()?;
     let elad1 = disposition(
         ARTIFACT_CLASSES[3],
         LocalErasureRedactionV1::Redacted,
@@ -1796,7 +1803,6 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
     let elcg1 = cache_generation(7).to_canonical_cbor()?;
     let elneg1 = negative(ErasureErrorV1::BackupInventoryIncomplete).to_canonical_cbor()?;
     let elrp1 = REPLICA_PURGE.to_canonical_cbor()?;
-    let owner_result = ErasureRetainedObjectV1::new(&elo1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
     for (effect, record, tag) in [
         (
             LocalOwnerEffectV1::ArtifactDisposition(elad1.clone()),
@@ -1814,21 +1820,38 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
             "ELRP1",
         ),
     ] {
-        let prepared = PreparedLocalOwnerEffectV1::new(effect, &elo1)?;
+        let prepared = PreparedLocalOwnerEffectV1::new(effect, BINDING)?;
         let retained = prepared.effect_object().ok_or("no effect object")?;
         assert_eq!(retained.tag(), tag);
         assert_eq!(retained.canonical_cbor(), record.as_slice());
+        let address =
+            ErasureRetainedObjectV1::new(record, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?.reference();
+        assert_eq!(retained.reference(), address);
+        // The ELO1 is the binding's, and binds the record by its content
+        // address: no caller supplies the digest.
         assert_eq!(
-            retained.reference(),
-            ErasureRetainedObjectV1::new(record, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?.reference()
+            prepared_elo1(&prepared)?,
+            LocalErasureOwnerResultV1 {
+                request: BINDING.request,
+                attempt: BINDING.attempt,
+                obligation: BINDING.obligation,
+                command: BINDING.command,
+                owner_ref: BINDING.owner_ref,
+                error: None,
+                effect_digest: address,
+            }
         );
-        assert_eq!(prepared.owner_result(), &owner_result);
+        assert_eq!(prepared.owner_result().tag(), "ELO1");
         assert!(prepared.key_tombstone().is_none());
+        assert!(prepared.existing_tombstone().is_none());
     }
-    // The ELO1 binds the ELRP1 by its content address.
     assert_eq!(
-        LocalErasureOwnerResultV1::from_canonical_cbor(&elo1)?.effect_digest,
-        ErasureRetainedObjectV1::new(&elrp1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?.reference()
+        prepared_elo1(&PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::ReplicaPurge(elrp1.clone()),
+            BINDING
+        )?)?
+        .effect_digest,
+        REPLICA_PURGE.reference()?
     );
     // A record under another variant's tag is refused.
     for effect in [
@@ -1839,77 +1862,67 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
         LocalOwnerEffectV1::ReplicaPurge(elad1),
     ] {
         assert_eq!(
-            PreparedLocalOwnerEffectV1::new(effect, &elo1),
+            PreparedLocalOwnerEffectV1::new(effect, BINDING),
             Err(ErasureErrorV1::InvalidEncoding)
         );
     }
     Ok(())
 }
 
-/// An ELNEG1 commits only with a negative ELO1 that binds it as its
-/// `effect_digest` and carries its command, owner reference and closed
-/// error code (ADR-136 §4a); any other owner result is refused.
+/// An ELNEG1 commits only under a binding that carries its command, owner
+/// reference and closed error code, and its ELO1 binds it by its content
+/// address (ADR-136 §4a); any other binding is refused.
 #[test]
 fn a_negative_effect_is_bound_only_by_its_matching_elo1() -> TestResult {
     let effect = negative(ErasureErrorV1::BackupInventoryIncomplete);
     let elneg1 = effect.to_canonical_cbor()?;
-    let bound_result = LocalErasureOwnerResultV1 {
-        request: reference(46),
-        attempt: reference(49),
-        obligation: reference(50),
+    let bound = LocalOwnerResultBindingV1 {
         command: effect.command,
         owner_ref: effect.owner_ref,
         error: Some(effect.error),
-        effect_digest: effect.reference()?,
+        ..BINDING
     };
-    let elo1 = |error| {
-        LocalErasureOwnerResultV1 {
-            error,
-            ..bound_result
-        }
-        .to_canonical_cbor()
-    };
-    let bound = elo1(Some(ErasureErrorV1::BackupInventoryIncomplete))?;
     let prepared =
-        PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), &bound)?;
+        PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), bound)?;
     assert_eq!(
         prepared
             .effect_object()
             .map(ErasureRetainedObjectV1::canonical_cbor),
         Some(elneg1.as_slice())
     );
-    assert_eq!(prepared.owner_result().canonical_cbor(), bound.as_slice());
-    // Another closed code, a positive result, or another command, owner
-    // reference or effect digest, each alone, does not bind the ELNEG1.
+    let elo1 = prepared_elo1(&prepared)?;
+    assert_eq!(elo1.effect_digest, effect.reference()?);
+    assert_eq!(elo1.error, Some(ErasureErrorV1::BackupInventoryIncomplete));
+    // Another closed code, a positive result, or another command or owner
+    // reference, each alone, does not bind the ELNEG1.
     for other in [
-        elo1(Some(ErasureErrorV1::ArtifactDeletionFailed))?,
-        elo1(None)?,
-        LocalErasureOwnerResultV1 {
+        LocalOwnerResultBindingV1 {
+            error: Some(ErasureErrorV1::ArtifactDeletionFailed),
+            ..bound
+        },
+        LocalOwnerResultBindingV1 {
+            error: None,
+            ..bound
+        },
+        LocalOwnerResultBindingV1 {
             command: reference(51),
-            ..bound_result
-        }
-        .to_canonical_cbor()?,
-        LocalErasureOwnerResultV1 {
-            owner_ref: reference(51),
-            ..bound_result
-        }
-        .to_canonical_cbor()?,
-        LocalErasureOwnerResultV1 {
-            effect_digest: reference(51),
-            ..bound_result
-        }
-        .to_canonical_cbor()?,
+            ..bound
+        },
+        LocalOwnerResultBindingV1 {
+            owner_ref: reference(52),
+            ..bound
+        },
     ] {
         assert_eq!(
-            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), &other),
+            PreparedLocalOwnerEffectV1::new(LocalOwnerEffectV1::Negative(elneg1.clone()), other),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
-    // An owner result that is not a canonical ELO1 is refused.
+    // An ELNEG1 that is not canonical is refused.
     assert_eq!(
         PreparedLocalOwnerEffectV1::new(
-            LocalOwnerEffectV1::Negative(elneg1),
-            &REPLICA_PURGE.to_canonical_cbor()?
+            LocalOwnerEffectV1::Negative(REPLICA_PURGE.to_canonical_cbor()?),
+            bound
         ),
         Err(ErasureErrorV1::InvalidEncoding)
     );
