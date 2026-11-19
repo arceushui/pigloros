@@ -404,12 +404,9 @@ async fn get_erasure_answers_one_not_found() -> TestResult {
     );
     assert_eq!(body["external_copies"], "not-covered");
     let text = String::from_utf8(own.bytes.clone())?;
-    for withheld in [
-        created["id"].as_str().unwrap_or("missing"),
-        &actor.to_string(),
-        &other.to_string(),
-    ] {
-        assert!(!text.contains(withheld), "{withheld}");
+    let owned = created["id"].as_str().ok_or("no Timeline id")?.to_owned();
+    for withheld in [owned, actor.to_string(), other.to_string()] {
+        assert!(!text.contains(&withheld), "{withheld}");
     }
     let foreign = served.read(other, &id).await?;
     let unknown = served.read(actor, &Ulid::nil().to_string()).await?;
@@ -436,6 +433,8 @@ async fn get_erasure_answers_one_not_found() -> TestResult {
 #[tokio::test]
 async fn parallel_requests_of_one_subject_admit_one() -> TestResult {
     let (served, driver) = Served::local(&SERVED, compiled())?;
+    // No driver may take the admitted request to its receipt in between.
+    driver.stop().await;
     let actor = actor()?;
     let (first, second) = tokio::join!(
         served.request(actor, "erasure-a", "private-subject-data"),
@@ -453,7 +452,7 @@ async fn parallel_requests_of_one_subject_admit_one() -> TestResult {
         )
     );
     assert!(!answers[1].headers.contains_key("retry-after"));
-    served.stop(driver).await?;
+    served.gateway.shutdown().await?;
     Ok(())
 }
 
@@ -588,11 +587,33 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next()
             generations.windows(2).all(|pair| pair[0] <= pair[1]),
             "{generations:?}"
         );
+        // The actor has no role-0 key, so its closure is the store target's
+        // cache signal and replica and its one Timeline's payload, which
+        // no Local owner can destroy: the erasure ends in a partial
+        // failure, and the positive cache signal redacts the views.
         let last = observed.last().ok_or("no projection")?;
         assert_eq!(last["state"], "partial-failure");
-        assert_eq!(last["replay_claim"], "unverifiable-artifacts-missing");
-        assert_eq!(last["acknowledgements"]["required"], 5);
-        assert_eq!(last["acknowledgements"]["positive"], 3);
+        assert_eq!(
+            last["replay_claim"],
+            "exact-authoritative-with-redacted-views"
+        );
+        let acknowledgements = &last["acknowledgements"];
+        assert_eq!(acknowledgements["required"], 3);
+        let classes = acknowledgements["classes"]
+            .as_array()
+            .ok_or("no classes")?
+            .iter()
+            .map(|class| {
+                (
+                    class["class"].as_str().unwrap_or_default().to_owned(),
+                    class["positive"].as_u64().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(classes[0], ("client-cache-signal".to_owned(), 1));
+        assert_eq!(classes[1].0, "local-replica");
+        assert_eq!(classes[2], ("timeline-payload".to_owned(), 0));
+        assert_eq!(classes.len(), 3);
     }
     let events = |timeline: &str| format!("/v1/timelines/{timeline}/events");
     let frozen = served
