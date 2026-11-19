@@ -190,7 +190,7 @@ fn check_release(
     ready: &LauncherReady,
     now_monotonic_ns: u64,
 ) -> Result<(), LauncherError> {
-    let fields = &release.fields;
+    let fields = release.fields();
     let defect = if fields.attempt_id != parameters.attempt_id {
         Some(ReleaseDefect::Attempt)
     } else if fields.nonce != parameters.nonce {

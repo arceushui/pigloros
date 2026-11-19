@@ -17,8 +17,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 
 use crate::sandbox_provider_protocol::{
-    ExecuteAuthority, PartitionDescriptor, PartitionRole, PayloadDescriptor, RequestAuthority,
-    SandboxArchitecture, SandboxExecuteRequest,
+    Agr1, ExecuteAuthority, PartitionDescriptor, PartitionRole, PayloadDescriptor,
+    RequestAuthority, SandboxArchitecture, SandboxExecuteRequest, SelfDigested, Verified,
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
@@ -255,13 +255,30 @@ impl StagedInstallation {
         Ok(())
     }
 
-    /// The installed test runtime signer, used only inside disposable fixtures.
-    #[must_use]
-    pub fn sign_grant(message: &[u8]) -> [u8; 64] {
+    /// The installed test runtime signer, used only inside disposable
+    /// fixtures: it signs the sealed AGR1 and verifies before returning it.
+    ///
+    /// # Errors
+    /// None in practice: the signature verifies under its own key.
+    pub fn sign_grant(record: SelfDigested<Agr1>) -> std::io::Result<Verified<Agr1>> {
+        Self::sign_grant_with(&[4; 32], record)
+    }
+
+    /// Sign the sealed AGR1 with the Ed25519 seed `seed` and verify it under
+    /// that seed's own public key, which need not be the admitted one.
+    ///
+    /// # Errors
+    /// None in practice: the signature verifies under its own key.
+    pub fn sign_grant_with(
+        seed: &[u8; 32],
+        record: SelfDigested<Agr1>,
+    ) -> std::io::Result<Verified<Agr1>> {
         use ed25519_dalek::Signer as _;
-        ed25519_dalek::SigningKey::from_bytes(&[4; 32])
-            .sign(message)
-            .to_bytes()
+        let key = ed25519_dalek::SigningKey::from_bytes(seed);
+        let signature = key.sign(&record.signature_message()).to_bytes();
+        record
+            .verify(signature, &key.verifying_key())
+            .map_err(std::io::Error::other)
     }
 }
 

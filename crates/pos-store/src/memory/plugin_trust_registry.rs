@@ -10,7 +10,14 @@
 //! The Event append runs under the same guards, in the same order, as
 //! `EventStore::append`: the erasure fence is the outermost scope, then the
 //! non-geographic draft, fork, and visibility guards, then the append itself.
-//! This adapter is test-only parity for the durable `SQLite` adapter.
+//! This adapter is the retained-Memory community profile's Plugin trust
+//! source (ADR-129 revision 6, R6.5): the CAV1 trust rows of a Memory
+//! community domain are read from this registry of the domain's own
+//! `MemoryStore`. It runs the shared planner with the same receipts and
+//! errors as the `SQLite` adapter. Its state is not durable, so the
+//! composition root populates it only through the existing installer path
+//! (`install_plugin_release_v1`, and `rollback`) before admission opens.
+//! Like the `SQLite` adapter it is Linux-only.
 //!
 //! `evaluate_current_release` (revision 5) reads the committed state through `&self`: the
 //! adapter has no lock, so nothing is written and no snapshot is taken.
