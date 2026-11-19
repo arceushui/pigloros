@@ -9,6 +9,7 @@
 //! records, State or the backing store.
 
 mod attestation;
+mod extractor;
 mod initializer;
 mod lifecycle_authority;
 mod memory_domain;
@@ -17,8 +18,13 @@ mod native_graph;
 mod private_hash;
 mod protection;
 mod sealer;
+mod store_domain;
 mod vault;
 
+pub use extractor::{
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
+    CommunityArtifactRecordInputV1,
+};
 pub use initializer::CommunityInitializerOwnerV1;
 pub use lifecycle_authority::{
     CommunityAdministrativeActionV1, CommunityAdministrativeOperationV1,
