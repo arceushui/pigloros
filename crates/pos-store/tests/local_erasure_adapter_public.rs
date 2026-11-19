@@ -9,9 +9,9 @@ use pos_core::{
     ErasurePersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1,
     EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryStateV1, KeyRoleV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
-    LocalOwnerEffectV1, Seq, TimelineId, TimelineMeta, TimelineMode,
-    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
-    LOCAL_OWNER_RESULT_MAX_BYTES_V1,
+    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1, Seq, TimelineId,
+    TimelineMeta, TimelineMode, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -60,6 +60,44 @@ fn sized_record(tag: &str, total: usize) -> Result<Vec<u8>, Box<dyn std::error::
 fn address(bytes: &[u8]) -> Result<ErasureReferenceV1, ErasureErrorV1> {
     ErasureRetainedObjectV1::new(bytes, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
         .map(|object| object.reference())
+}
+
+/// The ELO1 binding of seed `seed`, positive.
+fn binding(seed: u8) -> LocalOwnerResultBindingV1 {
+    let at = |offset: u8| ErasureReferenceV1::from_digest([seed.wrapping_add(offset); 32]);
+    LocalOwnerResultBindingV1 {
+        request: at(0),
+        attempt: at(1),
+        obligation: at(2),
+        command: at(3),
+        owner_ref: at(4),
+        error: None,
+    }
+}
+
+/// The outcome of one owner-effect commit and the ELO1 its preparation
+/// assembled.
+type Committed = (Result<ErasureReferenceV1, ErasureErrorV1>, Vec<u8>);
+
+/// Prepare `effect` under `owner` and commit it. A preparation refusal is
+/// the outer error.
+fn commit(
+    store: &mut impl LocalErasureStore,
+    effect: LocalOwnerEffectV1,
+    owner: LocalOwnerResultBindingV1,
+) -> Result<Committed, ErasureErrorV1> {
+    PreparedLocalOwnerEffectV1::new(effect, owner).map(|prepared| {
+        let elo1 = prepared.owner_result().canonical_cbor().to_vec();
+        (store.commit_local_owner_effect(prepared), elo1)
+    })
+}
+
+/// The `effect_digest` of the committed ELO1 at `elo1`, read back.
+fn committed_effect_digest(
+    store: &impl LocalErasureStore,
+    elo1: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, Box<dyn std::error::Error>> {
+    Ok(LocalErasureOwnerResultV1::from_canonical_cbor(&store.read_object(elo1)?)?.effect_digest)
 }
 
 const fn limits() -> Result<ErasureRecoveryLimitsV1, ErasureErrorV1> {
@@ -275,7 +313,8 @@ fn seed_pending_destruction(store: &mut impl LocalErasureStore) -> TestResult {
 
 /// Each owner record has its own ADR-136 size bound: exactly the bound is
 /// admitted and one byte over is refused. An ELNEG1 commits only as a
-/// canonical record bound by its ELO1, so its own decoder bounds it.
+/// canonical record its binding carries, so its own decoder bounds it. The
+/// ELO1 is assembled by the preparation, so it is always within its bound.
 fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
     for (tag, bound, seed) in [
         ("ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 30),
@@ -289,39 +328,22 @@ fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
         };
         let at_bound = sized_record(tag, bound)?;
         assert_eq!(at_bound.len(), bound);
-        let elo1 = record("ELO1", seed)?;
+        let (committed, elo1) = commit(store, effect(at_bound.clone()), binding(seed))?;
+        assert_eq!(committed?, address(&elo1)?);
         assert_eq!(
-            store.commit_local_owner_effect(effect(at_bound), &elo1)?,
-            address(&elo1)?
+            committed_effect_digest(&*store, address(&elo1)?)?,
+            address(&at_bound)?
         );
         assert_eq!(
-            store.commit_local_owner_effect(
-                effect(sized_record(tag, bound + 1)?),
-                &record("ELO1", seed + 10)?
-            ),
+            commit(store, effect(sized_record(tag, bound + 1)?), binding(seed)).map(drop),
             Err(ErasureErrorV1::ScopeInvalid)
         );
     }
-    let at_bound = sized_record("ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1)?;
-    assert_eq!(at_bound.len(), LOCAL_OWNER_RESULT_MAX_BYTES_V1);
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 40)?),
-            &at_bound
-        )?,
-        address(&at_bound)?
-    );
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 41)?),
-            &sized_record("ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1 + 1)?
-        ),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
     Ok(())
 }
 
-/// A negative effect commits with the ELO1 carrying its closed error code.
+/// A negative effect commits with the ELO1 carrying its closed error code
+/// and binding it by its content address.
 fn negative_owner_effect(store: &mut impl LocalErasureStore) -> TestResult {
     let negative = LocalErasureNegativeResultV1 {
         command: ErasureReferenceV1::from_digest([12; 32]),
@@ -329,25 +351,95 @@ fn negative_owner_effect(store: &mut impl LocalErasureStore) -> TestResult {
         error: ErasureErrorV1::ArtifactDeletionFailed,
     };
     let elneg1 = negative.to_canonical_cbor()?;
-    let negative_elo1 = LocalErasureOwnerResultV1 {
-        request: ErasureReferenceV1::from_digest([14; 32]),
-        attempt: ErasureReferenceV1::from_digest([15; 32]),
-        obligation: ErasureReferenceV1::from_digest([16; 32]),
+    let bound = LocalOwnerResultBindingV1 {
         command: negative.command,
         owner_ref: negative.owner_ref,
         error: Some(negative.error),
-        effect_digest: negative.reference()?,
-    }
-    .to_canonical_cbor()?;
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::Negative(elneg1.clone()),
-            &negative_elo1
-        )?,
-        address(&negative_elo1)?
-    );
+        ..binding(14)
+    };
+    let (committed, negative_elo1) =
+        commit(store, LocalOwnerEffectV1::Negative(elneg1.clone()), bound)?;
+    assert_eq!(committed?, address(&negative_elo1)?);
     assert_eq!(store.read_object(address(&negative_elo1)?)?, negative_elo1);
     assert_eq!(store.read_object(address(&elneg1)?)?, elneg1);
+    assert_eq!(
+        committed_effect_digest(&*store, address(&negative_elo1)?)?,
+        address(&elneg1)?
+    );
+    assert_eq!(
+        LocalErasureOwnerResultV1::from_canonical_cbor(&negative_elo1)?.error,
+        Some(ErasureErrorV1::ArtifactDeletionFailed)
+    );
+    Ok(())
+}
+
+/// The committed tombstone, and the existing tombstone a later binding
+/// commits against: each ELO1 binds the tombstone's deletion receipt.
+fn tombstone_owner_effects(store: &mut impl LocalErasureStore) -> TestResult {
+    // The tombstone and its ELO1 commit together.
+    let receipt = deletion_receipt(&key_request());
+    let tombstone = LocalOwnerEffectV1::KeyTombstone {
+        request: Box::new(key_request()),
+        deletion_receipt: receipt,
+    };
+    let receipt_digest = ErasureReferenceV1::from_digest(*receipt.as_bytes());
+    let (committed, elo1) = commit(store, tombstone.clone(), binding(200))?;
+    assert_eq!(committed?, address(&elo1)?);
+    let registry = store.load_key_registry()?.ok_or("missing registry")?;
+    let held = registry
+        .tombstone(key_identity())
+        .ok_or("missing tombstone")?;
+    assert_eq!(store.read_object(address(&elo1)?)?, elo1);
+    assert_eq!(
+        committed_effect_digest(&*store, address(&elo1)?)?,
+        receipt_digest
+    );
+
+    // Repeating the committed tombstone is idempotent: a positive result
+    // bound to the existing effect.
+    let (repeated, repeated_elo1) = commit(store, tombstone, binding(201))?;
+    assert_eq!(repeated?, address(&repeated_elo1)?);
+
+    // Another binding commits against the tombstone the registry holds.
+    let (existing, existing_elo1) = commit(
+        store,
+        LocalOwnerEffectV1::ExistingTombstone(Box::new(held)),
+        binding(203),
+    )?;
+    assert_eq!(existing?, address(&existing_elo1)?);
+    assert_eq!(
+        committed_effect_digest(&*store, address(&existing_elo1)?)?,
+        receipt_digest
+    );
+    // A tombstone the registry does not hold commits no ELO1.
+    let (unheld, unheld_elo1) = commit(
+        store,
+        LocalOwnerEffectV1::ExistingTombstone(Box::new(pos_core::KeyTombstoneV1 {
+            deletion_receipt: Hash::from_bytes([3; 32]),
+            ..held
+        })),
+        binding(204),
+    )?;
+    assert_eq!(unheld, Err(ErasureErrorV1::KeyDestructionFailed));
+    assert_eq!(
+        store.read_object(address(&unheld_elo1)?),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    // A tombstone the registry refuses commits no ELO1.
+    let (refused, late) = commit(
+        store,
+        LocalOwnerEffectV1::KeyTombstone {
+            request: Box::new(key_request()),
+            deletion_receipt: Hash::from_bytes([3; 32]),
+        },
+        binding(202),
+    )?;
+    assert_eq!(refused, Err(ErasureErrorV1::KeyDestructionFailed));
+    assert_eq!(
+        store.read_object(address(&late)?),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
 
@@ -370,87 +462,35 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
             13,
         ),
     ] {
-        let elo1 = record("ELO1", seed)?;
-        assert_eq!(
-            store.commit_local_owner_effect(effect, &elo1)?,
-            address(&elo1)?
-        );
+        let (committed, elo1) = commit(store, effect, binding(seed))?;
+        assert_eq!(committed?, address(&elo1)?);
         assert_eq!(store.read_object(address(&elo1)?)?, elo1);
         assert_eq!(
             store.read_object(address(&record(tag, 1)?)?)?,
             record(tag, 1)?
+        );
+        // The committed ELO1 binds exactly the committed effect.
+        assert_eq!(
+            committed_effect_digest(&*store, address(&elo1)?)?,
+            address(&record(tag, 1)?)?
         );
     }
 
     negative_owner_effect(store)?;
     owner_effect_bounds(store)?;
 
-    // A record effect under the wrong tag, or a non-ELO1 owner result,
-    // commits nothing.
-    let refused = record("ELO1", 100)?;
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::ArtifactDisposition(record("ELCG1", 2)?),
-            &refused
-        ),
-        Err(ErasureErrorV1::InvalidEncoding)
-    );
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::ReplicaPurge(record("ELRP1", 2)?),
-            &record("ELS1", 2)?
-        ),
-        Err(ErasureErrorV1::InvalidEncoding)
-    );
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::ReplicaPurge(record("ELNEG1", 3)?),
-            &refused
-        ),
-        Err(ErasureErrorV1::InvalidEncoding)
-    );
-    assert_eq!(
-        store.read_object(address(&refused)?),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
+    // A record effect under the wrong tag is never prepared.
+    for effect in [
+        LocalOwnerEffectV1::ArtifactDisposition(record("ELCG1", 2)?),
+        LocalOwnerEffectV1::ReplicaPurge(record("ELNEG1", 3)?),
+    ] {
+        assert_eq!(
+            commit(store, effect, binding(100)).map(drop),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
 
-    // The tombstone and its ELO1 commit together.
-    let tombstone = LocalOwnerEffectV1::KeyTombstone {
-        request: Box::new(key_request()),
-        deletion_receipt: deletion_receipt(&key_request()),
-    };
-    let elo1 = record("ELO1", 200)?;
-    assert_eq!(
-        store.commit_local_owner_effect(tombstone.clone(), &elo1)?,
-        address(&elo1)?
-    );
-    let registry = store.load_key_registry()?.ok_or("missing registry")?;
-    assert!(registry.tombstone(key_identity()).is_some());
-    assert_eq!(store.read_object(address(&elo1)?)?, elo1);
-
-    // Repeating the committed tombstone is idempotent: a positive result
-    // bound to the existing effect.
-    let repeated = record("ELO1", 201)?;
-    assert_eq!(
-        store.commit_local_owner_effect(tombstone, &repeated)?,
-        address(&repeated)?
-    );
-
-    // A tombstone the registry refuses commits no ELO1.
-    let refused_tombstone = LocalOwnerEffectV1::KeyTombstone {
-        request: Box::new(key_request()),
-        deletion_receipt: Hash::from_bytes([3; 32]),
-    };
-    let late = record("ELO1", 202)?;
-    assert_eq!(
-        store.commit_local_owner_effect(refused_tombstone, &late),
-        Err(ErasureErrorV1::KeyDestructionFailed)
-    );
-    assert_eq!(
-        store.read_object(address(&late)?),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    Ok(())
+    tombstone_owner_effects(store)
 }
 
 #[test]
@@ -692,17 +732,15 @@ fn sweep_takes_only_the_retained_copy_of_an_evidence_object() -> TestResult {
 }
 
 fn unbound_registry_refuses(store: &mut impl LocalErasureStore) -> TestResult {
-    let elo1 = record("ELO1", 1)?;
-    assert_eq!(
-        store.commit_local_owner_effect(
-            LocalOwnerEffectV1::KeyTombstone {
-                request: Box::new(key_request()),
-                deletion_receipt: deletion_receipt(&key_request()),
-            },
-            &elo1
-        ),
-        Err(ErasureErrorV1::KeyDestructionFailed)
-    );
+    let (refused, elo1) = commit(
+        store,
+        LocalOwnerEffectV1::KeyTombstone {
+            request: Box::new(key_request()),
+            deletion_receipt: deletion_receipt(&key_request()),
+        },
+        binding(1),
+    )?;
+    assert_eq!(refused, Err(ErasureErrorV1::KeyDestructionFailed));
     assert_eq!(
         store.read_object(address(&elo1)?),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -744,22 +782,16 @@ fn sqlite_authority_snapshot_does_not_rebind_a_stale_inventory() -> TestResult {
         request: Box::new(key_request()),
         deletion_receipt: deletion_receipt(&key_request()),
     };
-    let stale = record("ELO1", 1)?;
-    assert_eq!(
-        store.commit_local_owner_effect(tombstone(), &stale),
-        Err(ErasureErrorV1::KeyDestructionFailed)
-    );
+    let (refused, stale) = commit(&mut store, tombstone(), binding(1))?;
+    assert_eq!(refused, Err(ErasureErrorV1::KeyDestructionFailed));
     assert_eq!(
         store.read_object(address(&stale)?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     store.complete_erasure_inventory_snapshot_with_limits(limits()?)?;
-    let current = record("ELO1", 2)?;
-    assert_eq!(
-        store.commit_local_owner_effect(tombstone(), &current)?,
-        address(&current)?
-    );
+    let (committed, current) = commit(&mut store, tombstone(), binding(2))?;
+    assert_eq!(committed?, address(&current)?);
     Ok(())
 }
 
@@ -819,11 +851,8 @@ fn sqlite_tombstone_with_an_unloadable_registry_inserts_no_owner_result() -> Tes
         request: Box::new(key_request()),
         deletion_receipt: deletion_receipt(&key_request()),
     };
-    let refused = record("ELO1", 1)?;
-    assert_eq!(
-        store.commit_local_owner_effect(tombstone(), &refused),
-        Err(ErasureErrorV1::KeyDestructionFailed)
-    );
+    let (outcome, refused) = commit(&mut store, tombstone(), binding(1))?;
+    assert_eq!(outcome, Err(ErasureErrorV1::KeyDestructionFailed));
     assert_eq!(
         store.read_object(address(&refused)?),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -834,10 +863,7 @@ fn sqlite_tombstone_with_an_unloadable_registry_inserts_no_owner_result() -> Tes
         rusqlite::params![saved],
     )?;
     store.complete_erasure_inventory_snapshot_with_limits(limits()?)?;
-    let committed = record("ELO1", 2)?;
-    assert_eq!(
-        store.commit_local_owner_effect(tombstone(), &committed)?,
-        address(&committed)?
-    );
+    let (outcome, committed) = commit(&mut store, tombstone(), binding(2))?;
+    assert_eq!(outcome?, address(&committed)?);
     Ok(())
 }
