@@ -432,9 +432,9 @@ impl AttemptEvidence {
             (Some(bytes), Some(digest)) => {
                 let release = ExecutionRelease::from_canonical_cbor(bytes)?;
                 release.verify_signature(key)?;
-                let fields = &release.fields;
+                let fields = release.fields();
                 consistent(
-                    release.digest == digest
+                    release.digest() == digest
                         && fields.attempt_id == receipt.attempt_id
                         && Some(fields.ready1_digest) == receipt.ready1_digest
                         && [fields.trs1_digest, fields.rvs1_digest, fields.apt1_digest]
@@ -609,7 +609,7 @@ fn granted(
     let by_grant = (
         [grant.request_id, grant.attempt_id],
         [
-            grant.grant_digest,
+            grant.grant_digest(),
             grant.elm1_digest,
             admitted.hcp1_digest,
             admitted.spm1_digest,
