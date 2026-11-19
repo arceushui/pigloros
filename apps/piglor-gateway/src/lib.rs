@@ -8116,13 +8116,11 @@ mod tests {
         drop(unavailable);
     }
 
-    #[tokio::test]
+    /// A Gateway with no authorizer over a [`ScriptedStore`] in `mode`.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn store_error_paths_append_and_read() {
-        let empty_append = Gateway {
-            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
-                mode: ScriptMode::EmptyAppend,
-            })),
+    fn scripted_gateway(mode: ScriptMode) -> Gateway {
+        Gateway {
+            store: executor::StoreExecutor::new(Box::new(ScriptedStore { mode })),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
@@ -8133,7 +8131,13 @@ mod tests {
             authorization: None,
             authorization_required: false,
             local_erasure_wake: Arc::default(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn store_error_paths_append_and_read() {
+        let empty_append = scripted_gateway(ScriptMode::EmptyAppend);
         let tl = empty_append.create_timeline("e", None).await.test_ok();
         let err = empty_append
             .append_action(
@@ -8146,21 +8150,7 @@ mod tests {
             .test_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
-        let fail_get_timeline = Gateway {
-            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
-                mode: ScriptMode::FailGetTimeline,
-            })),
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            action_registry: gateway_action_registry(),
-            authorization: None,
-            authorization_required: false,
-            local_erasure_wake: Arc::default(),
-        };
+        let fail_get_timeline = scripted_gateway(ScriptMode::FailGetTimeline);
         let err = fail_get_timeline
             .append_action(
                 &TimelineId::new().to_string(),
@@ -8172,21 +8162,7 @@ mod tests {
             .test_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
-        let fail_append = Gateway {
-            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
-                mode: ScriptMode::FailAppend,
-            })),
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            action_registry: gateway_action_registry(),
-            authorization: None,
-            authorization_required: false,
-            local_erasure_wake: Arc::default(),
-        };
+        let fail_append = scripted_gateway(ScriptMode::FailAppend);
         let tl = fail_append.create_timeline("a", None).await.test_ok();
         let err = fail_append
             .append_action(
@@ -8199,21 +8175,7 @@ mod tests {
             .test_err();
         assert!(matches!(err, GatewayError::Store(_)));
 
-        let fail_read = Gateway {
-            store: executor::StoreExecutor::new(Box::new(ScriptedStore {
-                mode: ScriptMode::FailRead,
-            })),
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            action_registry: gateway_action_registry(),
-            authorization: None,
-            authorization_required: false,
-            local_erasure_wake: Arc::default(),
-        };
+        let fail_read = scripted_gateway(ScriptMode::FailRead);
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
             .await
@@ -8262,19 +8224,7 @@ mod tests {
             ),
         ];
         for (mode, expected) in cases {
-            let gateway = Gateway {
-                store: executor::StoreExecutor::new(Box::new(ScriptedStore { mode })),
-                bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-                limits: GatewayLimits::LOCAL_DEFAULT,
-                owntracks_enabled: false,
-                consent_authority: ConsentAuthority::new(),
-                consent_history_locks: new_consent_history_locks(),
-                pending_consent_cleanup: new_pending_consent_cleanup(),
-                action_registry: gateway_action_registry(),
-                authorization: None,
-                authorization_required: false,
-                local_erasure_wake: Arc::default(),
-            };
+            let gateway = scripted_gateway(mode);
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
                 .await

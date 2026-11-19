@@ -31,7 +31,9 @@ use crate::http::{router, AppState};
 use crate::local_erasure_composition::tests::{
     actor, erasure_world_granting, other_actor, principal, World,
 };
-use crate::local_erasure_composition::{LocalErasureDriverTaskV1, LocalErasureServeV1};
+use crate::local_erasure_composition::{
+    LocalErasureDriverTaskV1, LocalErasureServeV1, LocalErasureStartV1,
+};
 use crate::local_erasure_provision::tests::{TestResult, SIGNER_SEED};
 use crate::local_principal::local_gateway;
 use crate::mode_profile::{test_attach_host, test_binding, GatewayModeProfileIdV1};
@@ -91,10 +93,22 @@ impl Served {
             &mode,
         );
         let started = erasure.start(&mut host);
-        let gateway = local_gateway(host, None, &mode)?;
+        Ok(Self::driven(
+            world,
+            local_gateway(host, None, &mode)?,
+            started,
+        ))
+    }
+
+    /// `gateway` serving `world`, with the driver of `started` running.
+    fn driven(
+        world: World,
+        gateway: Gateway,
+        started: LocalErasureStartV1,
+    ) -> (Self, LocalErasureDriverTaskV1) {
         let driver =
             LocalErasureDriverTaskV1::spawn_every(&gateway, started, Duration::from_hours(1));
-        Ok((Self::routed(world, gateway), driver))
+        (Self::routed(world, gateway), driver)
     }
 
     /// A world whose root grant covers `operations`, served with the closed
@@ -541,6 +555,7 @@ async fn a_closed_gateway_serves_no_erasure() -> TestResult {
         .await?;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     served.gateway.shutdown().await?;
+    drop(served);
     Ok(())
 }
 
@@ -692,6 +707,7 @@ async fn a_subject_past_its_quota_is_refused_for_good() -> TestResult {
 /// retryable one.
 #[test]
 fn every_submit_refusal_has_its_answer() {
+    use crate::problem::ProblemCodeV1 as Code;
     let answer = |error| {
         let problem = submit_refusal(error);
         (
@@ -700,7 +716,6 @@ fn every_submit_refusal_has_its_answer() {
             problem.body("/")["retryable"].clone(),
         )
     };
-    use crate::problem::ProblemCodeV1 as Code;
     assert_eq!(
         answer(LocalErasureSubmitErrorV1::AdmissionsClosed),
         (
@@ -877,12 +892,14 @@ async fn an_erasure_needs_a_decided_subject() -> TestResult {
         StatusCode::UNAUTHORIZED
     );
     gateway.shutdown().await?;
+    drop(gateway);
     let served = Served::closed(&SERVED)?;
     assert_eq!(
         status_of(&served.app, "GET", &format!("/v1/me/erasures/{id}"), false).await?,
         StatusCode::UNAUTHORIZED
     );
     served.gateway.shutdown().await?;
+    drop(served);
     Ok(())
 }
 
@@ -892,17 +909,20 @@ async fn an_erasure_needs_a_decided_subject() -> TestResult {
 #[tokio::test]
 async fn a_stopped_executor_answers_unavailable() -> TestResult {
     let actor = EntityId::new();
-    let gateway = crate::gateway_with_erasure_host_and_authorization(
-        ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, compiled())?,
-        [],
-        crate::authorization::test_erasure_authorization_for(actor),
-    )?;
-    let served = Served::routed(erasure_world_granting(&SERVED)?, gateway);
+    let served = Served::routed(
+        erasure_world_granting(&SERVED)?,
+        crate::gateway_with_erasure_host_and_authorization(
+            ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, compiled())?,
+            [],
+            crate::authorization::test_erasure_authorization_for(actor),
+        )?,
+    );
     served.gateway.shutdown().await?;
     let refused = served
         .request(actor, "erasure-1", "private-subject-data")
         .await?;
     let unread = served.read(actor, &Ulid::nil().to_string()).await?;
+    drop(served);
     for answer in [refused, unread] {
         assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(answer.json()?["code"], "temporarily-unavailable");
