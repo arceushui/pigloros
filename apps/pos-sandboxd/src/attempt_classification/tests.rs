@@ -1,8 +1,24 @@
 //! Every provider ending and unit result keeps its closed R9 code.
 
-use pos_reference::sandbox_provider_protocol::{EndingCode, MainExitCode, ServiceResultCode};
+use pos_reference::sandbox_provider_protocol::{
+    EndingCode, LaunchFailure, MainExitCode, ServiceResultCode,
+};
 
-use crate::{AttemptEnding, SystemdMainExit, SystemdServiceResult};
+use crate::{AttemptEnding, OutputReservationRefused, SystemdMainExit, SystemdServiceResult};
+
+#[test]
+fn a_refused_output_reservation_keeps_its_launch_failure() {
+    // R10 §4.7: a full ledger is code 3 (candidate 10), a closed one code 5
+    // (candidate 2, quarantine).
+    assert_eq!(
+        LaunchFailure::from(OutputReservationRefused::AggregateExceeded),
+        LaunchFailure::OutputReservationRefused
+    );
+    assert_eq!(
+        LaunchFailure::from(OutputReservationRefused::AdmissionClosed),
+        LaunchFailure::AdmissionClosed
+    );
+}
 
 #[test]
 fn every_attempt_ending_keeps_its_tme1_code() {
