@@ -4042,8 +4042,9 @@ pub trait ErasureRecordedAttemptReadV1: recorded_scope_sealed::Sealed {
 ///
 /// [`ErasureRecordedProgressReadV1`] builds it by the same complete core
 /// recovery a coordinator runs before any lifecycle command, so a driver can
-/// build an ERRA1 from it and a signer can re-derive from it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// build an ERRA1 from it and a signer can re-derive from it. Its default
+/// is the progress of a request with no obligation and no attempt.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ErasureRecordedProgressV1 {
     /// The frozen EROS1 obligations, in the obligation set's order.
     pub obligations: Vec<ErasureObligationV1>,
