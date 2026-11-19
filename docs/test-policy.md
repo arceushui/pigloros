@@ -76,11 +76,16 @@ request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
 `crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
 `ci-gate` requires the lane's success whenever it is in scope.
 
-The Windows job runs the complete native test suite, including all 1,000 real
-readiness cases, once under coverage instrumentation. Portable bridge and owner
-executable tests run separately, along with native doctests. The retained runtime
-is prepared before these tests. No test-exclusion filters are used; the complete
-native suite executes once while producing its coverage evidence.
+The Windows lane has two blocking jobs that run side by side. The coverage job
+runs the complete native test suite once under coverage instrumentation, with no
+test-exclusion filters; its readiness fixture drives 4 workers x 5 real
+ceremonies, which reaches the same code. The `readiness-soak` job runs that
+fixture uninstrumented with the full 4 workers x 250 = 1,000 real ceremonies.
+It fails if the fixture is renamed away. Under instrumentation the soak alone
+took about 40 minutes and pushed slow runners past the 65-minute step limit.
+The fixture refuses to run without `OWNER_BRIDGE_READINESS_RUNS_PER_WORKER`.
+Portable bridge and owner executable tests run separately, along with native
+doctests. The retained runtime is prepared before these tests.
 
 `covgate` reads the detailed LLVM JSON report produced by the completed
 `cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test
