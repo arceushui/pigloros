@@ -21,7 +21,7 @@ const X86_64: &[u8] = include_bytes!(
     "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
 
-const EXPECTED_PROPERTY_NAMES: [&str; 44] = [
+const EXPECTED_PROPERTY_NAMES: [&str; 50] = [
     "Type",
     "RootDirectory",
     "BindReadOnlyPaths",
@@ -55,6 +55,9 @@ const EXPECTED_PROPERTY_NAMES: [&str; 44] = [
     "UMask",
     "KillMode",
     "SendSIGKILL",
+    "StandardInput",
+    "StandardOutput",
+    "StandardError",
     "MemoryMax",
     "MemorySwapMax",
     "TasksMax",
@@ -66,6 +69,9 @@ const EXPECTED_PROPERTY_NAMES: [&str; 44] = [
     "ExtraFileDescriptors",
     "TemporaryFileSystem",
     "ExecStart",
+    "StandardInputFileDescriptor",
+    "StandardOutputFileDescriptor",
+    "StandardErrorFileDescriptor",
 ];
 
 #[test]
@@ -87,11 +93,11 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     assert_eq!(properties[2].dbus_signature(), "a(ssbt)");
     assert_eq!(properties[28].dbus_signature(), "(bas)");
     assert_eq!(properties[29].dbus_signature(), "(bas)");
-    for property in &properties[33..40] {
+    for property in &properties[36..43] {
         assert_eq!(property.dbus_signature(), "t");
     }
-    assert_eq!(properties[40].dbus_signature(), "u");
-    assert_eq!(properties[41].dbus_signature(), "a(hs)");
+    assert_eq!(properties[43].dbus_signature(), "u");
+    assert_eq!(properties[44].dbus_signature(), "a(hs)");
 
     match properties[1].value() {
         SystemdTransientUnitValue::RootDirectory(value) => {
@@ -141,7 +147,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
-    match properties[40].value() {
+    match properties[43].value() {
         SystemdTransientUnitValue::Numeric(
             SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value),
         ) => {
@@ -153,7 +159,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("FileDescriptorStoreMax must have a u value".into()),
     }
-    match properties[41].value() {
+    match properties[44].value() {
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
             assert_eq!(
                 <Vec<(OwnedFd, String)> as Type>::SIGNATURE.to_string(),
@@ -178,8 +184,8 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
 fn work_mount_property_has_the_exact_dbus_encoding() -> Result<(), Box<dyn Error>> {
     let request = request(LaunchMode::AirGapped)?;
     let properties = request.requested_properties();
-    assert_eq!(properties[42].dbus_signature(), "a(ss)");
-    match properties[42].value() {
+    assert_eq!(properties[45].dbus_signature(), "a(ss)");
+    match properties[45].value() {
         SystemdTransientUnitValue::TemporaryFileSystem(value) => {
             assert_eq!(
                 <Vec<(String, String)> as Type>::SIGNATURE.to_string(),
@@ -223,7 +229,7 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
 #[test]
 fn exec_start_is_the_last_property_with_its_dbus_signature() -> Result<(), Box<dyn Error>> {
     let request = request(LaunchMode::AirGapped)?;
-    let property = &request.requested_properties()[43];
+    let property = &request.requested_properties()[46];
     assert_eq!(property.name(), "ExecStart");
     assert_eq!(property.dbus_signature(), "a(sasb)");
     let commands = exec_start(&request);
@@ -285,7 +291,7 @@ fn verifier_rejects_a_substituted_exec_start() -> Result<(), Box<dyn Error>> {
     tolerant[0].2 = true;
     for substituted in [other_argument, other_path, tolerant, Vec::new()] {
         let mut readback = exact.clone();
-        readback[43] = SystemdTransientUnitReadback::new(
+        readback[46] = SystemdTransientUnitReadback::new(
             "ExecStart",
             SystemdTransientUnitReadbackValue::ExecStart(substituted),
         );
@@ -322,7 +328,7 @@ fn work_mount_is_sized_by_elm1_work_bytes_and_absent_at_zero() -> Result<(), Box
         let mut limits = complete_effective_limits();
         limits[9].value = work_bytes;
         let request = request_with_limits(LaunchMode::AirGapped, &limits)?;
-        match request.requested_properties()[42].value() {
+        match request.requested_properties()[45].value() {
             SystemdTransientUnitValue::TemporaryFileSystem(value) => assert_eq!(value, &expected),
             _value => return Err("TemporaryFileSystem must have an a(ss) value".into()),
         }
@@ -356,7 +362,7 @@ fn verifier_rejects_a_substituted_work_mount() -> Result<(), Box<dyn Error>> {
         ],
     ] {
         let mut readback = exact.clone();
-        readback[42] = SystemdTransientUnitReadback::new(
+        readback[45] = SystemdTransientUnitReadback::new(
             "TemporaryFileSystem",
             SystemdTransientUnitReadbackValue::TemporaryFileSystem(substituted),
         );
@@ -366,7 +372,7 @@ fn verifier_rejects_a_substituted_work_mount() -> Result<(), Box<dyn Error>> {
         );
     }
     let mut mistyped = exact;
-    mistyped[42] = SystemdTransientUnitReadback::new(
+    mistyped[45] = SystemdTransientUnitReadback::new(
         "TemporaryFileSystem",
         SystemdTransientUnitReadbackValue::StringArray(vec!["/work".to_owned()]),
     );
@@ -382,7 +388,7 @@ fn elm1_service_limit_values_have_exact_dbus_encoding() -> Result<(), Box<dyn Er
     let request = request(LaunchMode::AirGapped)?;
     let properties = request.requested_properties();
     for (property, expected) in
-        properties[33..40]
+        properties[36..43]
             .iter()
             .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
     {
@@ -418,7 +424,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
             }
             _value => return Err("RestrictAddressFamilies must have a (bas) value".into()),
         }
-        match properties[41].value() {
+        match properties[44].value() {
             SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                 assert_eq!(value.len(), 1);
                 assert_eq!(value[0].1, "piglor-release-v1");
@@ -523,17 +529,17 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
     );
     let mut nonzero_descriptor_store =
         exact_readback(&request, &authority.expected_effective_names);
-    nonzero_descriptor_store[40] = SystemdTransientUnitReadback::new(
+    nonzero_descriptor_store[43] = SystemdTransientUnitReadback::new(
         "FileDescriptorStoreMax",
         SystemdTransientUnitReadbackValue::U32(1),
     );
     let mut missing_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    missing_descriptor[41] = SystemdTransientUnitReadback::new(
+    missing_descriptor[44] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(Vec::new()),
     );
     let mut extra_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    extra_descriptor[41] = SystemdTransientUnitReadback::new(
+    extra_descriptor[44] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-host-service-v1".to_owned(),
@@ -542,7 +548,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         ]),
     );
     let mut reordered_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    reordered_descriptor[41] = SystemdTransientUnitReadback::new(
+    reordered_descriptor[44] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-release-v1".to_owned(),
@@ -726,7 +732,7 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
     let mut missing = exact_readback(&request, &authority.expected_effective_names);
     missing.remove(33);
     let mut extra = exact_readback(&request, &authority.expected_effective_names);
-    let duplicated = extra[33].clone();
+    let duplicated = extra[36].clone();
     extra.insert(34, duplicated);
     let mut reordered = exact_readback(&request, &authority.expected_effective_names);
     reordered.swap(33, 34);
@@ -736,7 +742,7 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
             Err(TransientUnitRequestError::ReadbackMismatch)
         );
     }
-    for index in 33..40 {
+    for index in 36..43 {
         let mut readback = exact_readback(&request, &authority.expected_effective_names);
         readback[index] = SystemdTransientUnitReadback::new(
             EXPECTED_PROPERTY_NAMES[index],
@@ -748,7 +754,7 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
         );
     }
     let mut mistyped = exact_readback(&request, &authority.expected_effective_names);
-    mistyped[33] = SystemdTransientUnitReadback::new(
+    mistyped[36] = SystemdTransientUnitReadback::new(
         "MemoryMax",
         SystemdTransientUnitReadbackValue::U32(134_217_728),
     );
@@ -778,13 +784,21 @@ fn root_and_launcher() -> Result<(CheckedRoot, LauncherSource), Box<dyn Error>> 
 
 fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
     let (root, launcher) = root_and_launcher()?;
+    let (release, stdio) = unit_descriptors()?;
     Ok(TransientUnitLaunchInputs::new(
         root,
         launcher,
         mode,
-        descriptor()?,
+        release,
         crate::test_fixtures::invocation()?,
+        stdio,
     ))
+}
+
+/// The release descriptor and the standard descriptors of a unit no adapter
+/// runs under.
+fn unit_descriptors() -> Result<(OwnedFd, crate::UnitStdio), Box<dyn Error>> {
+    Ok((descriptor()?, crate::UnitStdio::for_test()?))
 }
 
 fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
@@ -869,6 +883,10 @@ fn exact_readback(
                 SystemdTransientUnitValue::ExecStart(value) => {
                     SystemdTransientUnitReadbackValue::ExecStart(value.clone())
                 }
+                // `…FileDescriptorName` reads back empty (ADR-069 R10 §4.3).
+                SystemdTransientUnitValue::StandardDescriptor(_) => {
+                    SystemdTransientUnitReadbackValue::String(String::new())
+                }
             };
             SystemdTransientUnitReadback::new(property.name(), value)
         })
@@ -887,7 +905,7 @@ fn property_clone_propagates_value_failure() {
 }
 
 /// Every dynamic kind with the name systemd gives it.
-fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 9] {
+fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 12] {
     [
         (SystemdDynamicPropertyKind::RootDirectory, "RootDirectory"),
         (
@@ -921,6 +939,18 @@ fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 9] {
             "TemporaryFileSystem",
         ),
         (SystemdDynamicPropertyKind::ExecStart, "ExecStart"),
+        (
+            SystemdDynamicPropertyKind::StandardInputFileDescriptor,
+            "StandardInputFileDescriptor",
+        ),
+        (
+            SystemdDynamicPropertyKind::StandardOutputFileDescriptor,
+            "StandardOutputFileDescriptor",
+        ),
+        (
+            SystemdDynamicPropertyKind::StandardErrorFileDescriptor,
+            "StandardErrorFileDescriptor",
+        ),
     ]
 }
 
@@ -936,7 +966,10 @@ const fn is_dynamic_kind(kind: SystemdDynamicPropertyKind) -> bool {
         | SystemdDynamicPropertyKind::FileDescriptorStoreMax
         | SystemdDynamicPropertyKind::ExtraFileDescriptors
         | SystemdDynamicPropertyKind::TemporaryFileSystem
-        | SystemdDynamicPropertyKind::ExecStart => true,
+        | SystemdDynamicPropertyKind::ExecStart
+        | SystemdDynamicPropertyKind::StandardInputFileDescriptor
+        | SystemdDynamicPropertyKind::StandardOutputFileDescriptor
+        | SystemdDynamicPropertyKind::StandardErrorFileDescriptor => true,
     }
 }
 
@@ -983,6 +1016,7 @@ fn pinned_signatures() -> Vec<(SystemdTransientUnitValue, &'static str)> {
             "a(ss)",
         ),
         (SystemdTransientUnitValue::ExecStart(Vec::new()), "a(sasb)"),
+        (SystemdTransientUnitValue::StandardDescriptor(None), "h"),
     ]
 }
 
@@ -997,7 +1031,8 @@ const fn is_value_kind(value: &SystemdTransientUnitValue) -> bool {
         | SystemdTransientUnitValue::Numeric(_)
         | SystemdTransientUnitValue::ExtraFileDescriptors(_)
         | SystemdTransientUnitValue::TemporaryFileSystem(_)
-        | SystemdTransientUnitValue::ExecStart(_) => true,
+        | SystemdTransientUnitValue::ExecStart(_)
+        | SystemdTransientUnitValue::StandardDescriptor(_) => true,
     }
 }
 
@@ -1055,12 +1090,15 @@ fn the_requested_configuration_is_the_submitted_values_with_descriptor_names_onl
             {
                 crate::RequestedConfigurationValue::DescriptorNames(names.clone())
             }
+            _ if recorded.name().ends_with("FileDescriptor") => {
+                crate::RequestedConfigurationValue::Descriptor
+            }
             value => crate::RequestedConfigurationValue::Typed(value.clone()),
         };
         assert_eq!(*recorded.value(), expected, "{}", recorded.name());
     }
     assert_eq!(
-        configuration[41].value(),
+        configuration[44].value(),
         &crate::RequestedConfigurationValue::DescriptorNames(vec![
             "piglor-host-service-v1".to_owned(),
             "piglor-release-v1".to_owned(),
@@ -1184,5 +1222,157 @@ fn a_start_with_no_requested_properties_is_no_rqe1() -> Result<(), Box<dyn Error
             .map(|_| ()),
         Err(pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError::FieldOutOfBounds)
     );
+    Ok(())
+}
+
+/// The three standard descriptors are `h` values moved into the one
+/// submission: afterwards the request holds no unit end (ADR-069 R10 §4.1).
+#[test]
+fn the_standard_descriptors_move_into_the_one_submission() -> Result<(), Box<dyn Error>> {
+    let mut request = request(LaunchMode::AirGapped)?;
+    let standard = |properties: &[SystemdTransientUnitProperty]| {
+        properties[47..]
+            .iter()
+            .map(|property| match property.value() {
+                SystemdTransientUnitValue::StandardDescriptor(descriptor) => {
+                    Some(descriptor.is_some())
+                }
+                _other => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(standard(request.requested_properties()), [Some(true); 3]);
+    for property in &request.requested_properties()[47..] {
+        assert_eq!(property.dbus_signature(), "h");
+    }
+    let submitted = request.requested_properties_for_submission()?;
+    assert_eq!(standard(&submitted), [Some(true); 3]);
+    assert_eq!(standard(request.requested_properties()), [Some(false); 3]);
+    // A second submission has no descriptor left to send.
+    let again = request.requested_properties_for_submission()?;
+    assert_eq!(standard(&again), [Some(false); 3]);
+    // The other descriptors are still duplicated for every submission.
+    assert!(matches!(
+        again[44].value(),
+        SystemdTransientUnitValue::ExtraFileDescriptors(descriptors) if descriptors.len() == 1
+    ));
+    Ok(())
+}
+
+/// The stdio readback (ADR-069 R10 §4.3): all three enums `null` and all
+/// three descriptor names empty; anything else is refused.
+#[test]
+fn the_verifier_rejects_any_other_stdio_readback() -> Result<(), Box<dyn Error>> {
+    let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
+    let request = request(LaunchMode::AirGapped)?;
+    let exact = exact_readback(&request, &authority.expected_effective_names);
+    assert_eq!(request.verify_readback(&exact), Ok(()));
+    for (index, name) in [
+        (33, "StandardInput"),
+        (34, "StandardOutput"),
+        (35, "StandardError"),
+    ] {
+        for routed in ["journal", "fd", "inherit", "tty"] {
+            let mut readback = exact.clone();
+            readback[index] = SystemdTransientUnitReadback::new(
+                name,
+                SystemdTransientUnitReadbackValue::Static(
+                    crate::SystemdHardeningReadbackValue::String(routed.to_owned()),
+                ),
+            );
+            assert_eq!(
+                request.verify_readback(&readback),
+                Err(TransientUnitRequestError::ReadbackMismatch),
+                "{name}={routed}"
+            );
+        }
+    }
+    for index in 47..50 {
+        let name = exact[index].name().to_owned();
+        let mut named = exact.clone();
+        named[index] = SystemdTransientUnitReadback::new(
+            name.clone(),
+            SystemdTransientUnitReadbackValue::String("stdin".to_owned()),
+        );
+        let mut mistyped = exact.clone();
+        mistyped[index] =
+            SystemdTransientUnitReadback::new(name, SystemdTransientUnitReadbackValue::U32(0));
+        for readback in [named, mistyped] {
+            assert_eq!(
+                request.verify_readback(&readback),
+                Err(TransientUnitRequestError::ReadbackMismatch)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// No TTY property and no `Exec*` property other than `ExecStart` is ever
+/// requested: each would reach the stdio channels (ADR-069 R10 §4.2, I13).
+#[test]
+fn no_tty_and_no_other_command_property_is_requested() -> Result<(), Box<dyn Error>> {
+    for mode in [
+        LaunchMode::Local {
+            host_service: descriptor()?,
+        },
+        LaunchMode::AirGapped,
+    ] {
+        let request = request(mode)?;
+        let names = request
+            .requested_properties()
+            .iter()
+            .map(SystemdTransientUnitProperty::name)
+            .collect::<Vec<_>>();
+        assert!(!names.iter().any(|name| name.starts_with("TTY")));
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.starts_with("Exec"))
+                .collect::<Vec<_>>(),
+            [&"ExecStart"]
+        );
+    }
+    Ok(())
+}
+
+/// The six R10 stdio rows of a verified start's RQE1 (ADR-069 R10 §4.3 and
+/// §4.4): three `null` enums, and three descriptors recorded as code 10
+/// whose names read back empty.
+#[test]
+fn a_verified_start_records_the_stdio_rows() -> Result<(), Box<dyn Error>> {
+    use pos_reference::sandbox_provider_protocol::DbusValue;
+    let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
+    let request = request(LaunchMode::AirGapped)?;
+    let readback = exact_readback(&request, &authority.expected_effective_names);
+    request.verify_readback(&readback)?;
+    let evidence = crate::verified_requested_configuration(
+        [0x41; 16],
+        [0x53; 32],
+        &request.requested_configuration(),
+        &readback,
+        &SystemdManagerReadback::new(
+            SystemdManagerReadbackOnlyProperty::RootImagePolicy,
+            "root=verity+signed+absent",
+        ),
+    )?;
+    let fields = evidence.fields();
+    let requested = fields.requested.as_ref().ok_or("requested")?;
+    let recorded = fields.readback.as_ref().ok_or("readback")?;
+    let value = |list: &[pos_reference::sandbox_provider_protocol::DbusProperty], name: &str| {
+        list.iter()
+            .find(|property| property.name == name)
+            .map(|property| property.value.clone())
+    };
+    for stream in ["StandardInput", "StandardOutput", "StandardError"] {
+        let null = Some(DbusValue::String("null".to_owned()));
+        assert_eq!(value(requested, stream), null);
+        assert_eq!(value(recorded, stream), null);
+        let descriptor = format!("{stream}FileDescriptor");
+        assert_eq!(value(requested, &descriptor), Some(DbusValue::Descriptor));
+        assert_eq!(
+            value(recorded, &descriptor),
+            Some(DbusValue::String(String::new()))
+        );
+    }
     Ok(())
 }
