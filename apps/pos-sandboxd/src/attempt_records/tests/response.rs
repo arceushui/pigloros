@@ -128,6 +128,48 @@ fn a_denied_release_is_event_13() -> TestResult {
     Ok(())
 }
 
+/// Events 11 and 13 bind a status-2 KOE1, whose observation failed after
+/// `ReadyV1` (owner decision 2026-11-19, Q3).
+#[test]
+fn a_failed_observation_is_bound_by_events_11_and_13() -> TestResult {
+    let grant = signed_grant()?;
+    let run = Released::default();
+    let progress = AttemptProgress::Failed {
+        error: ExecuteError::ReleaseTimeout,
+        unit: UnitState::Killed,
+        started: Some(start()),
+        evidence: Some(evidence(
+            crate::ReleaseOutcome::new(Some(super::READY1), None, None),
+            super::quiet(),
+            terminal(&run)?,
+        )?),
+    };
+    let ended = EndedAttempt::for_test(
+        ATTEMPT,
+        admission_of(
+            Some(&grant),
+            pos_reference::sandbox_provider_protocol::SandboxExecutionMode::AirGapped,
+            Some(input(true)),
+        ),
+        None,
+        progress,
+        (cleanup(true)?, Some(CLEANED_AT)),
+    );
+    let retained = sign(&ended)?;
+    let koe1 = retained.records().observed();
+    assert!(matches!(
+        koe1.fields().status,
+        pos_reference::sandbox_provider_protocol::KernelObservationStatus::ObservationFailed { .. }
+    ));
+    let (_, events) = verified(&retained)?;
+    assert_eq!(events, [11, 13, 10]);
+    for bytes in &retained.response().audit[..2] {
+        let record = SandboxAuditRecord::from_canonical_cbor(bytes)?;
+        assert_eq!(record.authority_digests.last(), Some(&koe1.digest()));
+    }
+    Ok(())
+}
+
 #[test]
 fn a_withdrawn_attempt_is_one_cancelled_event() -> TestResult {
     let grant: SignedGrant = signed_grant()?;
