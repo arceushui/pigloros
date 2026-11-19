@@ -4284,9 +4284,23 @@ mod tests {
     /// absent once its peer thread has ended.
     const ISOLATED_CGROUPS: &str = "/run/pigloros/test-cgroup2";
 
+    /// The named control group the isolated recovery peer runs in. The
+    /// container's private cgroup namespace puts this process at its root
+    /// `/`, which no cleanup can prove absent, so the port and the host both
+    /// read the peer's control group as this unit's.
+    const ISOLATED_PEER_CGROUP: &str = "/system.slice/pigloros-recovery-peer.service";
+
+    /// A live process's control group, read as [`ISOLATED_PEER_CGROUP`]: the
+    /// process must still have a readable `/proc/<pid>/cgroup`.
+    fn isolated_peer_cgroup(pid: std::num::NonZeroU64) -> Result<String, SelectorBoundaryError> {
+        crate::selector::runtime_lifecycle::process_control_group(pid)
+            .map(|_| ISOLATED_PEER_CGROUP.to_owned())
+    }
+
     /// The fixed recovery directory with the root owner, the cgroup2
-    /// stand-in and the monotonic clock. The peer is a thread of this
-    /// process, whose own cgroup always exists in the real mount.
+    /// stand-in, the peer's named control group and the monotonic clock. The
+    /// peer is a thread of this process; its control group is absent from
+    /// the empty stand-in once the peer has ended.
     fn isolated_recovery_host(
         directory: Arc<File>,
         executable_digest: runtime_start::ExecutableDigest,
@@ -4298,19 +4312,23 @@ mod tests {
             executable_digest,
             Arc::new(std::time::Instant::now),
         )
+        .with_control_group(isolated_peer_cgroup)
     }
 
     /// A port whose recovery peer is a thread of this process, and whose one
     /// runtime start answers the next state's `describe`.
     fn recovering_port(refused_terminations: usize) -> TestResult<Arc<InProcessProviderPort>> {
         Ok(Arc::new(InProcessProviderPort {
-            recovery: Some(crate::selector::recovery::tests::PeerPort::new(
-                &Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE),
-                crate::selector::recovery::tests::Script {
-                    refused_terminations,
-                    ..crate::selector::recovery::tests::Script::default()
-                },
-            )),
+            recovery: Some(
+                crate::selector::recovery::tests::PeerPort::new(
+                    &Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE),
+                    crate::selector::recovery::tests::Script {
+                        refused_terminations,
+                        ..crate::selector::recovery::tests::Script::default()
+                    },
+                )
+                .with_control_group(isolated_peer_cgroup),
+            ),
             ..InProcessProviderPort::starting(vec![replacement_runtime()?])
         }))
     }

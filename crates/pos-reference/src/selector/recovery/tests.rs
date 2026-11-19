@@ -240,6 +240,8 @@ pub(crate) struct PeerPort {
     /// The control group the last start reported: an honest cleanup names
     /// it, since the slot's unit is the started peer's.
     started: Mutex<Option<CgroupPath>>,
+    /// How this process's control group is read, as the host reads it.
+    control_group: host::ProcessControlGroup,
     reconciles: AtomicUsize,
     terminations: AtomicUsize,
 }
@@ -254,9 +256,27 @@ impl PeerPort {
             calls: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
             started: Mutex::new(None),
+            control_group: crate::selector::runtime_lifecycle::process_control_group,
             reconciles: AtomicUsize::new(0),
             terminations: AtomicUsize::new(0),
         }
+    }
+
+    /// The same port, reporting the peer's control group as `control_group`
+    /// reads it, which the host under test must read alike.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn with_control_group(self, control_group: host::ProcessControlGroup) -> Self {
+        Self {
+            control_group,
+            ..self
+        }
+    }
+
+    /// The peer's control group: this process's, as the port reads it.
+    fn peer_cgroup(&self) -> Result<CgroupPath, ProviderLifecycleError> {
+        (self.control_group)(own_pid())
+            .map_err(|_| ProviderLifecycleError::Contradiction)
+            .and_then(|cgroup| CgroupPath::new(&cgroup))
     }
 
     /// The selector clock this port can advance: frozen at the port's
@@ -393,7 +413,7 @@ impl ProviderLifecyclePort for PeerPort {
         let control_group = if reply == Reply::OtherCgroup {
             CgroupPath::new("/system.slice/other.service")?
         } else {
-            started.map_or_else(own_cgroup, Ok)?
+            started.map_or_else(|| self.peer_cgroup(), Ok)?
         };
         Ok(RecoverySlotObservation::new(
             challenge_of(reply, target.challenge()),
@@ -440,7 +460,7 @@ impl ProviderLifecyclePort for PeerPort {
         let control_group = if reply == Reply::OtherCgroup {
             CgroupPath::new("/system.slice/other.service")?
         } else {
-            own_cgroup()?
+            self.peer_cgroup()?
         };
         if let Ok(mut started) = self.started.lock() {
             *started = Some(control_group.clone());

@@ -39,6 +39,10 @@ const DIRECTORY_MODE: u32 = 0o700;
 pub(crate) type ExecutableDigest =
     fn(NonZeroU64, u64) -> Result<[u8; 32], crate::selector::SelectorBoundaryError>;
 
+/// The cgroup2 path `/proc/<pid>/cgroup` names for a process.
+pub(crate) type ProcessControlGroup =
+    fn(NonZeroU64) -> Result<String, crate::selector::SelectorBoundaryError>;
+
 /// The selector's clock. Production reads [`Instant::now`]; tests inject one
 /// so that every bound is asserted against it, not wall time (R12 I10).
 pub(crate) type RecoveryClock = Arc<dyn Fn() -> Instant + Send + Sync>;
@@ -50,6 +54,7 @@ pub(crate) struct RecoveryHost {
     cgroup_mount: PathBuf,
     cgroup2: fn(&File) -> bool,
     executable_digest: ExecutableDigest,
+    control_group: ProcessControlGroup,
     clock: RecoveryClock,
 }
 
@@ -63,7 +68,7 @@ pub(super) struct LeafIdentity {
 impl RecoveryHost {
     /// The production view: the retained fixed recovery directory, root
     /// peers, `/sys/fs/cgroup`, `/proc/<pid>/exe` through
-    /// `executable_digest`, and the monotonic clock.
+    /// `executable_digest`, `/proc/<pid>/cgroup`, and the monotonic clock.
     pub(crate) fn fixed(directory: Arc<File>, executable_digest: ExecutableDigest) -> Self {
         Self {
             directory,
@@ -71,6 +76,7 @@ impl RecoveryHost {
             cgroup_mount: PathBuf::from(CGROUP_MOUNT),
             cgroup2: is_cgroup2,
             executable_digest,
+            control_group: crate::selector::runtime_lifecycle::process_control_group,
             clock: Arc::new(Instant::now),
         }
     }
@@ -90,7 +96,19 @@ impl RecoveryHost {
             cgroup_mount,
             cgroup2,
             executable_digest,
+            control_group: crate::selector::runtime_lifecycle::process_control_group,
             clock,
+        }
+    }
+
+    /// The same view, reading each process's control group through
+    /// `control_group` instead of `/proc/<pid>/cgroup`.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn with_control_group(self, control_group: ProcessControlGroup) -> Self {
+        Self {
+            control_group,
+            ..self
         }
     }
 
@@ -272,9 +290,7 @@ impl RecoveryHost {
                 .and_then(|ticks| require(ticks == start_time_ticks, RecoveryError::PeerBinding))
         };
         same_process()
-            .and_then(|()| {
-                crate::selector::runtime_lifecycle::process_control_group(pid).map_err(peer_binding)
-            })
+            .and_then(|()| (self.control_group)(pid).map_err(peer_binding))
             .and_then(|cgroup| {
                 require(cgroup == control_group.as_str(), RecoveryError::PeerBinding)
             })
