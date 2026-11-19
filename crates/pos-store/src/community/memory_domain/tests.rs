@@ -39,6 +39,10 @@ use super::{
 };
 use crate::memory::MemoryStore;
 
+/// The composition-root seal the community owner is installed with.
+static OWNER_SEAL: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
+
 type Fallible<T> = Result<T, Box<dyn StdError>>;
 type TestResult = Fallible<()>;
 
@@ -203,7 +207,7 @@ fn installed(
     samples: &[u64],
 ) -> CommunityMetadataAuthorityV1 {
     CommunityMetadataAuthorityV1::new(
-        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        &OWNER_SEAL,
         CommunityMetadataAuthorityInputV1 {
             registry,
             principal,
