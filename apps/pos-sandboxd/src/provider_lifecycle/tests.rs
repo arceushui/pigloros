@@ -9,6 +9,9 @@ use std::{
     time::Duration,
 };
 
+use pos_reference::selector::recovery::{
+    PreviousRuntimeTarget, RecoveryPeerLaunch, RecoverySlotTarget, VerifiedProviderBinary,
+};
 use pos_reference::selector::runtime_lifecycle::{
     process_start_time_ticks, ObservationChallenge, ProviderLifecycleError, ProviderLifecyclePort,
     RuntimeSlotTarget,
@@ -116,6 +119,10 @@ struct State {
     lists: usize,
     fault: Fault,
     cgroups: PathBuf,
+    /// What the previous-runtime cleanup reports.
+    cleanup: Option<Result<Vec<[u8; 16]>, ProviderLifecycleError>>,
+    /// The previous-live sets the cleanup was asked to reconcile.
+    cleaned: Vec<Vec<[u8; 16]>>,
 }
 
 fn failed(error: impl std::fmt::Display) -> fdo::Error {
@@ -480,6 +487,7 @@ impl Harness {
         }))?;
         let transport = runtime.block_on(SystemdTransientUnitTransport::from_connection(client))?;
         let root = cgroups.path().to_owned();
+        let cleanup_state = Arc::clone(&state);
         let lifecycle = SystemdProviderLifecycle::from_parts(
             runtime,
             transport,
@@ -487,6 +495,19 @@ impl Harness {
                 File::open(&root)
                     .map(CgroupRoot::for_test)
                     .map_err(|_| AttemptCgroupError::RootOpen(rustix::io::Errno::NOENT))
+            }),
+            Box::new(move |_transport, previous_live, _deadline| {
+                let reported = cleanup_state
+                    .lock()
+                    .map_err(|_| ProviderLifecycleError::Unavailable)
+                    .and_then(|mut state| {
+                        state.cleaned.push(previous_live.to_vec());
+                        state
+                            .cleanup
+                            .clone()
+                            .unwrap_or_else(|| Ok(previous_live.to_vec()))
+                    });
+                Box::pin(std::future::ready(reported))
             }),
         );
         Ok(Self {
@@ -883,7 +904,7 @@ fn the_start_is_bounded_by_the_caller_deadline() -> TestResult {
 fn the_runtime_request_names_only_the_digest_object_path() {
     let digest = [0xa1; 32];
     let path = binary_path(digest);
-    assert!(ProviderRuntimeUnitRequest::new(&path, digest).is_ok());
+    assert!(ProviderUnitRequest::runtime(&path, digest).is_ok());
     for invalid in [
         binary_path([0xa2; 32]),
         path.to_uppercase(),
@@ -892,7 +913,7 @@ fn the_runtime_request_names_only_the_digest_object_path() {
         path[..path.len() - 1].to_owned(),
     ] {
         assert!(
-            ProviderRuntimeUnitRequest::new(&invalid, digest).is_err(),
+            ProviderUnitRequest::runtime(&invalid, digest).is_err(),
             "{invalid}"
         );
     }
@@ -1048,4 +1069,415 @@ fn manager_setup_failures_never_start_a_unit() -> TestResult {
     ));
     assert!(harness.calls()?.is_empty());
     Ok(())
+}
+
+// --- The recovery operations (ADR-069 R12 §7.1, §7.3, I17 fake-manager part) ---
+
+/// The previous runtime of scope `[1; 16]` and slot scope `[2; 16]`.
+fn terminate_previous(
+    harness: &Harness,
+    live: &[[u8; 16]],
+    within: Duration,
+) -> Result<PreviousRuntimeObservation, ProviderLifecycleError> {
+    harness.lifecycle.terminate_previous_runtime(
+        &PreviousRuntimeTarget::for_test(
+            ObservationChallenge::for_test([0x31; 16]),
+            "provider",
+            [[0x30; 16], [1; 16], [2; 16]],
+            live,
+        ),
+        std::time::Instant::now() + within,
+    )
+}
+
+fn reconcile_slot(
+    harness: &Harness,
+    scope: u8,
+) -> Result<RecoverySlotObservation, ProviderLifecycleError> {
+    harness.lifecycle.reconcile_recovery_slot(
+        &RecoverySlotTarget::for_test(ObservationChallenge::for_test([0x32; 16]), [scope; 16]),
+        std::time::Instant::now() + Duration::from_secs(5),
+    )
+}
+
+#[test]
+fn the_previous_runtime_unit_is_stopped_and_its_attempts_reconciled() -> TestResult {
+    let runtime = runtime_name(1);
+    let slot = recovery_name(2);
+    let harness = Harness::new(
+        vec![
+            loaded(
+                runtime.clone(),
+                "active",
+                &format!("/system.slice/{runtime}"),
+            ),
+            loaded(slot, "failed", ""),
+        ],
+        Fault::None,
+    )?;
+    let live = [[5; 16], [6; 16]];
+    harness.state.lock().map_err(|_| "poisoned fake")?.cleanup = Some(Ok(vec![[6; 16]]));
+    let observed = terminate_previous(&harness, &live, Duration::from_secs(10))?;
+    assert_eq!(
+        observed.challenge(),
+        ObservationChallenge::for_test([0x31; 16])
+    );
+    assert_eq!(observed.lifecycle_scope_id(), [1; 16]);
+    assert_eq!(
+        observed.control_group().as_str(),
+        format!("/system.slice/{runtime}")
+    );
+    assert_eq!(observed.reconciled_attempt_ids(), [[6; 16]]);
+    // Steps 1 and 2: the runtime unit is stopped and proven unloaded; the
+    // slot's own recovery unit may stay loaded. Then the cleanup ran over
+    // the previous-live set.
+    assert_eq!(
+        harness.calls()?,
+        vec![
+            listing(RUNTIME_PREFIX),
+            Call::Stop(runtime.clone(), "replace".to_owned()),
+            Call::Reset(runtime),
+            listing(RUNTIME_PREFIX),
+            listing(RECOVERY_PREFIX),
+        ]
+    );
+    assert_eq!(
+        harness.state.lock().map_err(|_| "poisoned fake")?.cleaned,
+        vec![live.to_vec()]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_foreign_provider_unit_stops_nothing_and_cleans_nothing() -> TestResult {
+    for units in [
+        vec![
+            loaded(runtime_name(1), "active", ""),
+            loaded(runtime_name(3), "failed", ""),
+        ],
+        vec![loaded(recovery_name(4), "failed", "")],
+    ] {
+        let harness = Harness::new(units, Fault::None)?;
+        assert_eq!(
+            terminate_previous(&harness, &[], Duration::from_secs(10)),
+            Err(ProviderLifecycleError::ForeignResource)
+        );
+        assert!(!harness
+            .calls()?
+            .iter()
+            .any(|call| matches!(call, Call::Stop(..))));
+        assert!(harness
+            .state
+            .lock()
+            .map_err(|_| "poisoned fake")?
+            .cleaned
+            .is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn previous_runtime_failures_close_the_termination() -> TestResult {
+    // The cleanup's own refusal.
+    let refused = Harness::new(Vec::new(), Fault::None)?;
+    refused.state.lock().map_err(|_| "poisoned fake")?.cleanup =
+        Some(Err(ProviderLifecycleError::ResidualResource));
+    assert_eq!(
+        terminate_previous(&refused, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::ResidualResource)
+    );
+    // A runtime unit that comes back is residual.
+    let returning = Harness::new(
+        vec![
+            loaded(runtime_name(1), "failed", ""),
+            FakeUnit {
+                loaded: false,
+                ..loaded(runtime_name(3), "active", "")
+            },
+        ],
+        Fault::LoadOnReset(1),
+    )?;
+    assert_eq!(
+        terminate_previous(&returning, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::ResidualResource)
+    );
+    // The unit stop is bounded by the caller's deadline.
+    let stuck = Harness::new(
+        vec![loaded(runtime_name(1), "failed", "")],
+        Fault::KeepLoaded,
+    )?;
+    assert_eq!(
+        terminate_previous(&stuck, &[], Duration::from_millis(200)),
+        Err(ProviderLifecycleError::DeadlineExceeded)
+    );
+    // A manager that cannot list, and an unlistable recovery family.
+    let denied = Harness::new(Vec::new(), Fault::List)?;
+    assert_eq!(
+        terminate_previous(&denied, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::Unavailable)
+    );
+    let late = Harness::new(Vec::new(), Fault::ListFailsFrom(3))?;
+    assert_eq!(
+        terminate_previous(&late, &[], Duration::from_secs(10)),
+        Err(ProviderLifecycleError::Unavailable)
+    );
+    // A zero scope names no unit.
+    let harness = Harness::new(Vec::new(), Fault::None)?;
+    for scopes in [
+        [[0x30; 16], [0; 16], [2; 16]],
+        [[0x30; 16], [1; 16], [0; 16]],
+    ] {
+        assert_eq!(
+            harness.lifecycle.terminate_previous_runtime(
+                &PreviousRuntimeTarget::for_test(
+                    ObservationChallenge::for_test([0x31; 16]),
+                    "provider",
+                    scopes,
+                    &[],
+                ),
+                std::time::Instant::now() + Duration::from_secs(10),
+            ),
+            Err(ProviderLifecycleError::Contradiction)
+        );
+    }
+    assert!(harness.calls()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_recovery_slot_is_reconciled_idempotently() -> TestResult {
+    let slot = recovery_name(2);
+    let harness = Harness::new(
+        vec![loaded(
+            slot.clone(),
+            "active",
+            &format!("/system.slice/{slot}"),
+        )],
+        Fault::None,
+    )?;
+    let observed = reconcile_slot(&harness, 2)?;
+    assert_eq!(
+        observed.challenge(),
+        ObservationChallenge::for_test([0x32; 16])
+    );
+    assert_eq!(observed.recovery_lifecycle_scope_id(), [2; 16]);
+    assert_eq!(
+        observed.control_group().as_str(),
+        format!("/system.slice/{slot}")
+    );
+    reconcile_slot(&harness, 2)?;
+    assert_eq!(
+        harness.calls()?,
+        vec![
+            listing(RECOVERY_PREFIX),
+            Call::Stop(slot.clone(), "replace".to_owned()),
+            Call::Reset(slot),
+            listing(RECOVERY_PREFIX),
+            listing(RECOVERY_PREFIX),
+            listing(RECOVERY_PREFIX),
+        ]
+    );
+    // Another recovery unit is foreign; a zero scope names none.
+    let foreign = Harness::new(vec![loaded(recovery_name(4), "failed", "")], Fault::None)?;
+    assert_eq!(
+        reconcile_slot(&foreign, 2),
+        Err(ProviderLifecycleError::ForeignResource)
+    );
+    assert_eq!(
+        reconcile_slot(&foreign, 0),
+        Err(ProviderLifecycleError::Contradiction)
+    );
+    let stuck = Harness::new(
+        vec![loaded(recovery_name(2), "failed", "")],
+        Fault::KeepLoaded,
+    )?;
+    assert_eq!(
+        stuck.lifecycle.reconcile_recovery_slot(
+            &RecoverySlotTarget::for_test(ObservationChallenge::for_test([0x32; 16]), [2; 16]),
+            std::time::Instant::now() + Duration::from_millis(200),
+        ),
+        Err(ProviderLifecycleError::DeadlineExceeded)
+    );
+    Ok(())
+}
+
+fn start_peer(
+    harness: &Harness,
+    path: &str,
+    within: Duration,
+) -> Result<RecoveryPeerObservation, ProviderLifecycleError> {
+    let binary = VerifiedProviderBinary::for_test(path.to_owned(), [0x44; 32]);
+    harness.lifecycle.start_recovery_peer(
+        &RecoveryPeerLaunch::for_test(
+            RecoverySlotTarget::for_test(ObservationChallenge::for_test([0x33; 16]), SCOPE),
+            [0xab; 16],
+            &binary,
+        ),
+        std::time::Instant::now() + within,
+    )
+}
+
+#[test]
+fn the_recovery_peer_unit_is_started_with_exactly_the_r12_properties() -> TestResult {
+    let pid = std::process::id();
+    let control_group = "/system.slice/peer.service";
+    let harness = starting(pid, control_group, Fault::None)?;
+    let path = binary_path([0x44; 32]);
+    let observed = start_peer(&harness, &path, Duration::from_secs(5))?;
+    assert_eq!(
+        observed.challenge(),
+        ObservationChallenge::for_test([0x33; 16])
+    );
+    assert_eq!(observed.recovery_lifecycle_scope_id(), SCOPE);
+    assert_eq!(observed.main_pid().get(), u64::from(pid));
+    assert_eq!(
+        observed.main_start_time_ticks(),
+        process_start_time_ticks(observed.main_pid())?
+    );
+    assert_eq!(observed.control_group().as_str(), control_group);
+    let calls = harness.calls()?;
+    let [Call::Start {
+        name,
+        mode,
+        properties,
+        auxiliary,
+    }] = calls.as_slice()
+    else {
+        return Err(format!("unexpected calls {calls:?}").into());
+    };
+    assert_eq!(
+        name,
+        &format!("pigloros-provider-recovery-{}.service", "5c".repeat(16))
+    );
+    assert_eq!(mode, "fail");
+    assert_eq!(*auxiliary, 0);
+    let expected = [
+        ("Type", "s", "notify"),
+        ("NotifyAccess", "s", "main"),
+        ("ExitType", "s", "main"),
+        ("KillMode", "s", "control-group"),
+        ("Restart", "s", "no"),
+        ("TimeoutStartUSec", "t", "5000000"),
+        ("CollectMode", "s", "inactive-or-failed"),
+        ("UMask", "u", "63"),
+        ("StandardInput", "s", "null"),
+        ("RuntimeMaxUSec", "t", "10100000"),
+    ];
+    assert_eq!(properties.len(), expected.len() + 1);
+    for ((name, signature, value), (expected_name, expected_signature, expected_value)) in
+        properties.iter().zip(expected)
+    {
+        assert_eq!(
+            (name.as_str(), signature.as_str(), value.as_str()),
+            (expected_name, expected_signature, expected_value)
+        );
+    }
+    let (exec_name, exec_signature, exec_value) = &properties[expected.len()];
+    assert_eq!(
+        (exec_name.as_str(), exec_signature.as_str()),
+        ("ExecStart", "a(sasb)")
+    );
+    assert_eq!(exec_value.matches(path.as_str()).count(), 2, "{exec_value}");
+    assert!(exec_value.contains("\"recovery-peer\""), "{exec_value}");
+    assert!(
+        exec_value.contains(&format!("\"{}\"", "ab".repeat(16))),
+        "{exec_value}"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_invalid_or_refused_peer_start_fails_closed() -> TestResult {
+    let pid = std::process::id();
+    let harness = starting(pid, "/system.slice/peer.service", Fault::None)?;
+    assert_eq!(
+        start_peer(&harness, &binary_path([0x45; 32]), Duration::from_secs(5)),
+        Err(ProviderLifecycleError::Contradiction)
+    );
+    assert!(harness.calls()?.is_empty());
+    let binary = VerifiedProviderBinary::for_test(binary_path([0x44; 32]), [0x44; 32]);
+    assert_eq!(
+        harness.lifecycle.start_recovery_peer(
+            &RecoveryPeerLaunch::for_test(
+                RecoverySlotTarget::for_test(ObservationChallenge::for_test([0x33; 16]), [0; 16]),
+                [0xab; 16],
+                &binary,
+            ),
+            std::time::Instant::now() + Duration::from_secs(5),
+        ),
+        Err(ProviderLifecycleError::Contradiction)
+    );
+    let refused = starting(
+        pid,
+        "/system.slice/peer.service",
+        Fault::StartResult("timeout"),
+    )?;
+    assert_eq!(
+        start_peer(&refused, &binary_path([0x44; 32]), Duration::from_secs(5)),
+        Err(ProviderLifecycleError::Unavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn only_previous_live_intents_are_owned_and_reconciliation_failures_are_classified() -> TestResult {
+    let live = [[1; 16], [2; 16]];
+    assert_eq!(
+        require_owned_intents([([1; 16], false), ([9; 16], true)].into_iter(), &live),
+        Ok(())
+    );
+    assert_eq!(
+        require_owned_intents([([9; 16], false)].into_iter(), &live),
+        Err(ProviderLifecycleError::ForeignResource)
+    );
+    assert_eq!(
+        reconciliation_failure(&RestartReconciliationError::DeadlineElapsed),
+        ProviderLifecycleError::DeadlineExceeded
+    );
+    assert_eq!(
+        reconciliation_failure(&RestartReconciliationError::SurvivingUnit(
+            TransientServiceUnitName::from_attempt_id([3; 16])?
+        )),
+        ProviderLifecycleError::ForeignResource
+    );
+    assert_eq!(
+        reconciliation_failure(&RestartReconciliationError::ProviderLoops(None)),
+        ProviderLifecycleError::ResidualResource
+    );
+    Ok(())
+}
+
+#[test]
+fn the_host_cleanup_needs_the_fixed_provider_installation() -> TestResult {
+    // This host has no SPI1 at its fixed path, so the cleanup refuses
+    // before it opens the registry.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let harness = Harness::new(Vec::new(), Fault::None)?;
+    let cleaned = runtime.block_on(host_cleanup(
+        &harness.lifecycle.transport,
+        &[],
+        Instant::now() + Duration::from_secs(1),
+        || NoNetwork,
+    ));
+    assert_eq!(cleaned, Err(ProviderLifecycleError::Unavailable));
+    Ok(())
+}
+
+/// An orphan sweep that the refused cleanup never reaches.
+struct NoNetwork;
+
+#[derive(Debug, thiserror::Error)]
+#[error("no network")]
+struct NoNetworkError;
+
+impl OrphanNetworkCleanup for NoNetwork {
+    type Error = NoNetworkError;
+
+    fn remove_orphans(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), NoNetworkError>> + Send {
+        std::future::ready(Err(NoNetworkError))
+    }
 }
