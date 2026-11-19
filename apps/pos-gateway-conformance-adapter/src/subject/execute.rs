@@ -287,28 +287,9 @@ fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
         }],
     };
     match composition {
-        CompositionV2::AuthorizedConsented => (
-            vec![
-                GatewayOperationV1::CREATE_TIMELINE,
-                GatewayOperationV1::READ_EVENTS,
-                GatewayOperationV1::READ_SESSION,
-                GatewayOperationV1::REVOKE_CONSENT,
-            ],
-            Some(consent(false)),
-            None,
-        ),
-        CompositionV2::AuthorizedRooms => (
-            vec![
-                GatewayOperationV1::CREATE_TIMELINE,
-                GatewayOperationV1::READ_SESSION,
-                GatewayOperationV1::REVOKE_CONSENT,
-                GatewayOperationV1::CREATE_SCENARIO_ROOM,
-                GatewayOperationV1::DERIVE_SCENARIO_ROOM,
-                GatewayOperationV1::READ_SCENARIO_ROOM,
-            ],
-            Some(consent(true)),
-            entity(GOVERNANCE_RECORD_ID),
-        ),
+        CompositionV2::AuthorizedConsented | CompositionV2::AuthorizedRooms => {
+            consented_document(composition == CompositionV2::AuthorizedRooms, &consent)
+        }
         CompositionV2::AuthorizedErasure
         | CompositionV2::AuthorizedErasureHeld
         | CompositionV2::AuthorizedErasureExpired
@@ -329,6 +310,39 @@ fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
             None,
             None,
         ),
+    }
+}
+
+/// The document of `authorized-rooms` if `rooms`, else of `authorized-consented`, with its
+/// one consent from `consent` given whether it permits export.
+fn consented_document(
+    rooms: bool,
+    consent: &dyn Fn(bool) -> LocalConsentDraftV1,
+) -> FixtureDocument {
+    if rooms {
+        (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::CREATE_SCENARIO_ROOM,
+                GatewayOperationV1::DERIVE_SCENARIO_ROOM,
+                GatewayOperationV1::READ_SCENARIO_ROOM,
+            ],
+            Some(consent(true)),
+            entity(GOVERNANCE_RECORD_ID),
+        )
+    } else {
+        (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+            ],
+            Some(consent(false)),
+            None,
+        )
     }
 }
 
@@ -472,20 +486,22 @@ impl Slots {
 
     /// Fill the slot `capture` names from the response `parsed`.
     fn capture(&mut self, capture: Option<CaptureV2>, parsed: Option<&Value>) {
-        let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+        if let Some(capture) = capture {
+            let (slot, pointer) = self.slot(capture);
+            *slot = parsed
+                .and_then(|value| value.pointer(pointer))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+
+    /// The slot `capture` fills and the JSON pointer of its value in the response.
+    fn slot(&mut self, capture: CaptureV2) -> (&mut Option<String>, &'static str) {
         match capture {
-            Some(CaptureV2::Timeline) => {
-                self.timeline = text(parsed.and_then(|value| value.get("id")));
-            }
-            Some(CaptureV2::Room) => self.room = text(parsed.and_then(|value| value.get("id"))),
-            Some(CaptureV2::Erasure) => {
-                self.erasure = text(parsed.and_then(|value| value.get("request_id")));
-            }
-            Some(CaptureV2::Consent) => {
-                self.consent =
-                    text(parsed.and_then(|value| value.pointer("/consents/0/consent_ref")));
-            }
-            None => {}
+            CaptureV2::Timeline => (&mut self.timeline, "/id"),
+            CaptureV2::Room => (&mut self.room, "/id"),
+            CaptureV2::Erasure => (&mut self.erasure, "/request_id"),
+            CaptureV2::Consent => (&mut self.consent, "/consents/0/consent_ref"),
         }
     }
 }
