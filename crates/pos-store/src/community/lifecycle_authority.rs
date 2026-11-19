@@ -447,6 +447,7 @@ impl CommunityLifecycleAuthorityV1 {
                     decision_bound: reservation.decision_bound().min(authenticated.expires_at()),
                     authenticated,
                     actor_entity_id,
+                    reservation_id: reservation.reservation_seq(),
                     at_time: reservation.sampled_at(),
                 })
             })
@@ -682,6 +683,7 @@ pub struct CommunityAuthorityCallV1 {
     request: CommunityAdministrativeRequestV1,
     authenticated: AuthenticatedPrincipalResultV1,
     actor_entity_id: EntityId,
+    reservation_id: u64,
     at_time: WallTime,
     decision_bound: WallTime,
 }
@@ -691,6 +693,13 @@ impl CommunityAuthorityCallV1 {
     #[must_use]
     pub const fn request(&self) -> &CommunityAdministrativeRequestV1 {
         &self.request
+    }
+
+    /// The positive sequence of this call's committed trusted-clock
+    /// reservation, the CAU1 `clock_bound` `reservation_id` (G1).
+    #[must_use]
+    pub const fn reservation_id(&self) -> u64 {
+        self.reservation_id
     }
 
     /// The trusted-clock reservation sample `t_r` of this call.

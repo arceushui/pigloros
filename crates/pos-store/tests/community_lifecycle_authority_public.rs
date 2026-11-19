@@ -734,6 +734,9 @@ fn an_authorized_initialize_binds_the_exact_request_and_refs() -> TestResult {
         .authority
         .authenticate(&credential, request, &mut world.domain)?;
     assert_eq!(call.request(), &request);
+    // The domain clock's first committed reservation.
+    assert_eq!(call.reservation_id(), 1);
+    assert_eq!(world.call(&initialize())?.reservation_id(), 2);
     assert_eq!(call.at_time(), WallTime::from_micros(NOW));
     assert_eq!(call.expires_at(), WallTime::from_micros(EXPIRES));
     // G1: D = t_r + 32 s is later than this 30 s credential's expiry.
