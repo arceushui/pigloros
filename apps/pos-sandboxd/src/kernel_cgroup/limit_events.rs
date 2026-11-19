@@ -150,6 +150,24 @@ pub struct AttemptLimitEventSnapshot {
 }
 
 impl AttemptLimitEventSnapshot {
+    /// The snapshot of the cgroup `identity` with the four sources `raw`,
+    /// captured at `observed` seconds and nanoseconds, for the terminal
+    /// records' tests. Its parsed counters are unused there and zero.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        identity: (u64, u64),
+        raw: [Vec<u8>; 4],
+        (monotonic_seconds, monotonic_nanoseconds): (i64, i64),
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self {
+            identity: super::BoundCgroupIdentity::for_test(identity)?,
+            raw,
+            counters: [0; COUNTER_SPECS.len()],
+            monotonic_seconds,
+            monotonic_nanoseconds,
+        })
+    }
+
     /// Return the exact deterministic unit name.
     #[must_use]
     pub const fn unit_name(&self) -> &crate::TransientServiceUnitName {
