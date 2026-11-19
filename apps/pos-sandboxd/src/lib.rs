@@ -389,8 +389,9 @@ pub use runtime_signer::{
 };
 #[cfg(target_os = "linux")]
 pub use staging::{
-    AdmittedEntry, ControlFloor, StagedInput, StagingCharge, StagingDirectory, StagingError,
-    StagingLedger, StagingLimits, StagingUsage, VerifiedStagedInput,
+    AdmittedEntry, ControlFloor, FailedInput, InputRefusal, IssuedGrant, StagedInput,
+    StagingCharge, StagingDirectory, StagingError, StagingLedger, StagingLimits, StagingUsage,
+    VerifiedStagedInput,
 };
 
 pub use hardening::{

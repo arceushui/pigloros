@@ -2,9 +2,11 @@
 //! the fixed path as root in the isolated container.
 
 use std::error::Error;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, File};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
@@ -15,10 +17,15 @@ use pos_reference::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
 };
 
-use super::{bind, required_slots, ProviderStartupError, RuntimeAuthority};
+use super::reconcile::{Reconcile, ReconcileError};
+use super::{
+    bind, reconcile_in_background, required_slots, start_reconciliation, AdmissionState,
+    ProviderStartupError, RuntimeAuthority,
+};
 use crate::{
-    issue_release, AdmittedRuntimeKey, ProviderInstallation, ProviderInstallationError,
-    RuntimeAttestationSigner,
+    issue_release, AdmittedRuntimeKey, AttemptLifecycle, ProviderInstallation,
+    ProviderInstallationError, ReconciledRestart, RuntimeAttestationSigner, StagingLedger,
+    StagingLimits, SystemdAttemptRegistry,
 };
 
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -275,4 +282,79 @@ fn startup_refusals_name_no_secret() {
     ] {
         assert_eq!(error.to_string(), text);
     }
+}
+
+/// A restart reconciliation whose outcome the test sends; a dropped sender
+/// fails it.
+pub(super) struct Scripted(pub(super) mpsc::Receiver<Result<AttemptLifecycle, ReconcileError>>);
+
+impl Reconcile for Scripted {
+    fn reconcile(self) -> Result<AttemptLifecycle, ReconcileError> {
+        self.0.recv().unwrap_or(Err(ReconcileError::Staging))
+    }
+}
+
+/// A lifecycle over an empty registry in a private temporary runtime tree,
+/// which must outlive it.
+pub(super) fn test_lifecycle() -> TestResult<(tempfile::TempDir, AttemptLifecycle)> {
+    let runtime = tempfile::tempdir()?;
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
+    for child in ["registry", "attempts"] {
+        fs::create_dir(runtime.path().join(child))?;
+        fs::set_permissions(
+            runtime.path().join(child),
+            fs::Permissions::from_mode(0o700),
+        )?;
+    }
+    let parent = File::open(runtime.path())?;
+    let registry =
+        SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 1 << 30,
+    });
+    let lifecycle = AttemptLifecycle::new(registry, ledger, &ReconciledRestart::for_test());
+    Ok((runtime, lifecycle))
+}
+
+/// The admission state once background reconciliation set it.
+pub(super) fn settled(admission: &OnceLock<AdmissionState>) -> TestResult<&AdmissionState> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(state) = admission.get() {
+            return Ok(state);
+        }
+        if Instant::now() > deadline {
+            return Err("restart reconciliation never ended".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn background_reconciliation_opens_or_closes_admission() -> TestResult {
+    let (runtime, lifecycle) = test_lifecycle()?;
+    // While reconciliation runs, the runtime is `Starting`.
+    let (sender, receiver) = mpsc::channel();
+    let admission = Arc::new(OnceLock::new());
+    reconcile_in_background(Scripted(receiver), Arc::clone(&admission));
+    assert!(admission.get().is_none());
+    sender.send(Ok(lifecycle))?;
+    assert!(matches!(settled(&admission)?, AdmissionState::Open { .. }));
+    // A failure is `ReconcileFailed`, with no retry.
+    let failed = Arc::new(OnceLock::new());
+    reconcile_in_background(Scripted(mpsc::channel().1), Arc::clone(&failed));
+    assert!(matches!(settled(&failed)?, AdmissionState::ReconcileFailed));
+    drop(runtime);
+    Ok(())
+}
+
+#[test]
+fn a_reconciliation_that_cannot_start_stays_starting() {
+    // The job is dropped unrun, so the state is never set: `Starting` for
+    // good, which answers as `ReconcileFailed` does.
+    let admission = Arc::new(OnceLock::new());
+    start_reconciliation(Scripted(mpsc::channel().1), Arc::clone(&admission), |_| {
+        Err(std::io::Error::other("injected spawn failure"))
+    });
+    assert!(admission.get().is_none());
 }
