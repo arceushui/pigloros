@@ -41,8 +41,10 @@ pub enum OwnerStoreInstallationV1 {
 /// explicit private test database directory (ADR-123 §3a).
 ///
 /// The caller is the operator's offline installation step. It asserts that no
-/// participant or ordinary process has the store open, and it holds the
-/// ADR-134 §8 sibling Gateway mode lock exclusively for the whole call.
+/// participant or ordinary process has the store open, and it must hold the
+/// ADR-134 §8 sibling Gateway mode lock exclusively for the whole call,
+/// refusing on contention. This function does not take or check that lock:
+/// it lives in the Gateway, whose installation command takes it.
 ///
 /// The directory must be absolute, euid-owned, exactly 0700 and not on NFS.
 /// The main file must be a singly linked regular/euid/0600 `SQLite` 3 database
@@ -120,8 +122,9 @@ fn wal_header(header: &[u8; 20]) -> bool {
 /// after the child and the child after its entries. Returns whether an entry
 /// was created; a newly created child always gets new entries.
 fn install_child(namespace: &CheckedNamespace) -> io::Result<bool> {
-    // A failed mkdirat leaves either no child, which the open refuses, or an
-    // existing child, which the open checks and then reuses.
+    // Every mkdirat error is deliberately ignored: the open is the authority.
+    // A failure leaves either no child, which the open refuses, or an existing
+    // entry, which the open checks and then reuses or refuses.
     fs::mkdirat(&namespace.directory, NAMESPACE, Mode::RWXU)
         .or(Ok(()))
         .and_then(|()| open_coordination_directory(&namespace.directory))

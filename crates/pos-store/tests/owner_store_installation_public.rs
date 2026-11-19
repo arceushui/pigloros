@@ -142,6 +142,22 @@ mod tests {
     }
 
     #[test]
+    fn a_rerun_leaves_existing_entries_untouched() -> TestResult {
+        let fixture = Fixture::new()?;
+        assert_eq!(fixture.install()?, OwnerStoreInstallationV1::Installed);
+        let entries = fixture.entries()?;
+        fs::write(&entries[1], b"kept")?;
+        let before = fs::metadata(&entries[1])?.ino();
+        assert_eq!(
+            fixture.install()?,
+            OwnerStoreInstallationV1::AlreadyInstalled
+        );
+        assert_eq!(fs::read(&entries[1])?, b"kept");
+        assert_eq!(fs::metadata(&entries[1])?.ino(), before);
+        Ok(())
+    }
+
+    #[test]
     fn an_unsafe_existing_child_is_refused_without_repair() -> TestResult {
         let fixture = Fixture::new()?;
         fixture.make_child()?;
@@ -161,6 +177,15 @@ mod tests {
         assert_eq!(fs::read_dir(elsewhere.path())?.count(), 0);
 
         let fixture = Fixture::new()?;
+        let dangling = fixture.path().join("absent");
+        symlink(&dangling, fixture.child())?;
+        refused(fixture.install());
+        assert!(!dangling.exists());
+        assert!(fs::symlink_metadata(fixture.child())?
+            .file_type()
+            .is_symlink());
+
+        let fixture = Fixture::new()?;
         create(fixture.path(), NAMESPACE, b"not a directory")?;
         refused(fixture.install());
         assert_eq!(fs::read(fixture.child())?, b"not a directory");
@@ -169,7 +194,7 @@ mod tests {
 
     #[test]
     fn an_unsafe_existing_entry_is_refused_without_repair() -> TestResult {
-        for kind in ["mode", "symlink", "directory", "hardlink"] {
+        for kind in ["mode", "symlink", "dangling", "directory", "hardlink"] {
             let fixture = Fixture::new()?;
             fixture.make_child()?;
             let [first, second, _] = fixture.entries()?;
@@ -180,6 +205,7 @@ mod tests {
                     fs::set_permissions(&second, fs::Permissions::from_mode(0o640))?;
                 }
                 "symlink" => symlink(fixture.path().join(MAIN), &second)?,
+                "dangling" => symlink(fixture.path().join("absent"), &second)?,
                 "directory" => fs::create_dir(&second)?,
                 _ => {
                     create(&fixture.child(), "kept", b"kept")?;
@@ -196,11 +222,12 @@ mod tests {
                     assert_eq!(metadata.mode() & 0o7777, 0o640);
                     assert_eq!(fs::read(&second)?, b"kept");
                 }
-                "symlink" => assert!(metadata.file_type().is_symlink()),
+                "symlink" | "dangling" => assert!(metadata.file_type().is_symlink()),
                 "directory" => assert!(metadata.is_dir()),
                 _ => assert_eq!(metadata.nlink(), 2),
             }
             assert_eq!(fs::read(fixture.path().join(MAIN))?, WAL_HEADER);
+            assert!(!fixture.path().join("absent").exists());
         }
         Ok(())
     }
@@ -248,15 +275,11 @@ mod tests {
         refused(fixture.install());
         assert!(!fixture.child().exists());
 
-        let working_directory = std::env::current_dir()?;
-        let directory = tempfile::tempdir_in(&working_directory)?;
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
-        create(directory.path(), MAIN, &WAL_HEADER)?;
         refused(install_owner_store_namespace_v1(
-            directory.path().strip_prefix(&working_directory)?,
+            Path::new("relative"),
             MAIN,
         ));
-        assert!(!directory.path().join(NAMESPACE).exists());
+        assert!(!Path::new("relative").exists());
 
         for (suffix, mode) in [("-journal", 0o600), ("-wal", 0o640), ("-shm", 0o640)] {
             let fixture = Fixture::new()?;
