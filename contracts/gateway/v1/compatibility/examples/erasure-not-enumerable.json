@@ -1,0 +1,26 @@
+{
+  "name": "erasure-not-enumerable",
+  "operation_id": "getErasure",
+  "request": {
+    "path": {
+      "erasure_id": "01JC0GATEWAYW90ERASVRE0001"
+    },
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 404,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
+      "title": "Not found or unavailable",
+      "status": 404,
+      "detail": "resource not found",
+      "instance": "/v1/me/erasures/{erasure_id}",
+      "code": "not-found-or-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}
