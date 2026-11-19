@@ -80,6 +80,10 @@ name = "owner_store_admission_public"
 required-features = ["test-support"]
 
 [[test]]
+name = "owner_store_installation_public"
+required-features = ["test-support"]
+
+[[test]]
 name = "owner_store_interlock_public"
 required-features = ["test-support"]
 
