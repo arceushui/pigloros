@@ -1277,3 +1277,55 @@ fn a_metadata_grant_outside_the_installed_registry_is_refused() -> TestResult {
     );
     Ok(())
 }
+
+/// The CAV1 authority row (ADR-129 §3, R6.7) read through the seam: the
+/// chain's current, re-stamped CPG1 bindings and the persisted CRF1s
+/// (owner decision on #560, 2026-11-19).
+#[test]
+fn authority_row_binds_the_current_chain_and_its_revocations() -> TestResult {
+    use super::super::store_domain::CommunityStoreDomainV1;
+    let mut world = World::new(&[LEAF, OTHER_LEAF])?;
+    world.revoke(1, 3, 1)?;
+    let pins = world.expected_request("inspect")?;
+    let row = world.domain.authority_row(LEAF, &pins)?;
+
+    let persisted = world.domain.store.load_authority(LEAF)?;
+    let current = persisted.chain().grants()[0].binding_digest()?;
+    // The sibling revocation re-stamped the untouched leaf.
+    assert_ne!(current, world.grants[0].binding_digest()?);
+    let revocations: Vec<Value> = persisted
+        .revocations()
+        .iter()
+        .map(|revocation| {
+            Ok(Value::Bytes(
+                blake3::hash(revocation.encode()?.as_slice())
+                    .as_bytes()
+                    .to_vec(),
+            ))
+        })
+        .collect::<Fallible<_>>()?;
+    assert_eq!(revocations.len(), 1);
+    let mut preimage = Vec::new();
+    ciborium::into_writer(
+        &Value::Array(vec![
+            Value::Array(vec![Value::Bytes(current.as_bytes().to_vec())]),
+            Value::Array(revocations),
+        ]),
+        &mut preimage,
+    )?;
+    assert_eq!(row.binding_digest, adr_h("AuthorityBindings", &preimage));
+    assert_eq!(row.authority_timeline, authority_timeline());
+    assert_eq!(row.head_seq, persisted.head_position().as_u64());
+    assert_eq!(row.revocation_epoch, 1);
+    assert_eq!(row.registry_digest, REGISTRY);
+    assert_eq!(row.capability_policy_revision, POLICY_REVISION);
+    assert_eq!(row.consent_policy_revision, CONSENT_REVISION);
+    assert_eq!(
+        world
+            .domain
+            .authority_row(Hash::from_bytes([0x77; 32]), &pins)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}

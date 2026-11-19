@@ -16,12 +16,19 @@
 //! still hold. [`MemoryCommunityDomainV1`] is its only implementation; the
 //! `SQLite` domain adds the second in Stack B (A5.6, R6.10 parity).
 
-use pos_core::community_lifecycle::CommunityLifecycleErrorV1 as Error;
+use pos_core::community_lifecycle::{
+    CommunityAuthorityViewRowV1, CommunityLifecycleErrorV1 as Error,
+};
 use pos_core::trusted_clock::{
     reserve_trusted_clock, GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
     WaitBudgetV1,
 };
-use pos_core::{AuthorityPersistencePortV1, Hash, PersistedAuthorityV1};
+use pos_core::{
+    AuthorityPersistencePortV1, AuthorizationRequestV1, CapabilityGrantV1, Hash,
+    PersistedAuthorityV1,
+};
+
+use super::private_hash::authority_bindings_digest;
 
 use super::memory_domain::MemoryCommunityDomainV1;
 
@@ -62,6 +69,60 @@ pub trait CommunityStoreDomainV1 {
     /// committed inventory effect, read into CAU1 and compared-and-swapped
     /// with CSI1 on commit.
     fn inventory_generation(&self) -> u64;
+
+    /// The CAV1 authority row of the chain `leaf_grant_id` names, read now
+    /// from this domain's own authority store (ADR-129 §3, R6.7).
+    ///
+    /// T is the leaf's authority Timeline; head and epoch are the
+    /// persisted ones read with the chain. The registry digest and policy
+    /// revisions are the CAP1-pinned values the evaluated request carried.
+    /// The binding digest covers the chain's current, re-stamped CPG1
+    /// binding digests, root to leaf, and the BLAKE3 of each persisted
+    /// canonical CRF1, in persisted order (owner decision on #560,
+    /// 2026-11-19).
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for an unloadable chain or record.
+    fn authority_row(
+        &self,
+        leaf_grant_id: Hash,
+        pins: &AuthorizationRequestV1,
+    ) -> Result<CommunityAuthorityViewRowV1, Error> {
+        self.load_authority(leaf_grant_id).and_then(|persisted| {
+            let grants = persisted.chain().grants();
+            grants
+                .iter()
+                .map(CapabilityGrantV1::binding_digest)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+                .zip(
+                    persisted
+                        .revocations()
+                        .iter()
+                        .map(|revocation| {
+                            revocation.encode().map(|bytes| {
+                                Hash::from_bytes(*blake3::hash(bytes.as_slice()).as_bytes())
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .ok(),
+                )
+                .and_then(|(grant_digests, revocation_digests)| {
+                    authority_bindings_digest(&grant_digests, &revocation_digests)
+                })
+                .zip(grants.last())
+                .map(|(binding_digest, leaf)| CommunityAuthorityViewRowV1 {
+                    authority_timeline: leaf.issuance_timeline(),
+                    head_seq: persisted.head_position().as_u64(),
+                    revocation_epoch: persisted.revocation_epoch(),
+                    registry_digest: pins.authority_registry_digest(),
+                    capability_policy_revision: pins.capability_policy_revision(),
+                    consent_policy_revision: pins.consent_policy_revision(),
+                    binding_digest,
+                })
+                .ok_or(Error::EvidenceUnavailable)
+        })
+    }
 }
 
 impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {

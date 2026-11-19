@@ -13,6 +13,7 @@
 //! `community` module. (`pub(crate)` here would only widen it, and Clippy's
 //! `redundant_pub_crate` refuses it inside this private module.)
 
+use ciborium::Value;
 use pos_core::community_lifecycle::CommunityArtifactKindV1;
 use pos_core::Hash;
 use zeroize::Zeroizing;
@@ -46,4 +47,24 @@ pub(super) fn plaintext_commitment(kind: CommunityArtifactKindV1, plaintext: &[u
 /// ADR-129 `ScopeSet` digest over the preferred array of exact scope rows.
 pub(super) fn scope_set_digest(canonical_rows: &[u8]) -> Hash {
     private_digest(b"PiglorOS.Community.ScopeSet.v1", &[canonical_rows])
+}
+
+/// ADR-129 §3 `H("AuthorityBindings", preferred [ordered_CPG1_binding_digests,
+/// ordered_CRF1_digests])`; `None` only if the CBOR writer fails.
+pub(super) fn authority_bindings_digest(grants: &[Hash], revocations: &[Hash]) -> Option<Hash> {
+    let list = |digests: &[Hash]| {
+        Value::Array(
+            digests
+                .iter()
+                .map(|digest| Value::Bytes(digest.as_bytes().to_vec()))
+                .collect(),
+        )
+    };
+    let mut preimage = Vec::new();
+    ciborium::into_writer(
+        &Value::Array(vec![list(grants), list(revocations)]),
+        &mut preimage,
+    )
+    .ok()
+    .map(|()| private_digest(b"PiglorOS.Community.AuthorityBindings.v1", &[&preimage]))
 }
