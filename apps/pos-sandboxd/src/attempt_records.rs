@@ -129,12 +129,22 @@ impl AttemptRecords {
     /// digest and the recomputed terminal code.
     fn successor(&self, transfer: TransferRecord) -> Result<Self, EvidenceFault> {
         let stored = self.termination.fields();
+        // A successor has a predecessor, so a first TME1 has no output
+        // transfer either (R9 §4.7).
         let reissuable = stored.previous_tme1_digest.is_none()
-            && stored.output_transfer.is_none()
             && self.classification.code().is_none()
             && !transfer.complete;
         if !reissuable {
             return Err(EvidenceFault::NotReissuable);
+        }
+        // The transfer carries the retained output and starts after the
+        // teardown the stored TME1 records.
+        let bound = stored
+            .output_capture
+            .is_some_and(|capture| capture.accepted_bytes == transfer.expected_bytes)
+            && transfer.start >= stored.cleanup.finished_at;
+        if !bound {
+            return Err(EvidenceFault::UnboundTransfer);
         }
         let mut fields = stored.clone();
         fields.output_transfer = Some(transfer);
@@ -188,6 +198,10 @@ pub enum EvidenceFault {
     /// only once that transfer is incomplete (R9 §4.7).
     #[error("the termination evidence has no output transfer to re-issue")]
     NotReissuable,
+    /// The output transfer does not carry the retained output, or started
+    /// before the cleanup finished.
+    #[error("the output transfer is not the retained output's")]
+    UnboundTransfer,
 }
 
 /// How a start that was requested is known (RQE1).

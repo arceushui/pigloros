@@ -314,6 +314,22 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
         first.successor(unordered, &signer(), admitted),
         Err(ResponseFault::Evidence(EvidenceFault::Record(_)))
     ));
+    // The transfer must carry the retained 70 bytes and start after the
+    // cleanup finished.
+    let shorter = TransferRecord {
+        expected_bytes: 69,
+        ..timed_out_transfer()
+    };
+    let early = TransferRecord {
+        start: CLEANED_AT - 1,
+        ..timed_out_transfer()
+    };
+    for transfer in [shorter, early] {
+        assert!(matches!(
+            first.successor(transfer, &signer(), admitted),
+            Err(ResponseFault::Evidence(EvidenceFault::UnboundTransfer))
+        ));
+    }
     Ok(())
 }
 

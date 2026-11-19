@@ -63,11 +63,11 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     let (_directory, lifecycle, _ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    // An ended attempt whose response is not signed yet is still active.
+    // An ended attempt whose response is not retained yet is pending.
     lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
     assert!(matches!(
         lifecycle.terminal_response(ATTEMPT, digest),
-        Err(AttemptLifecycleError::AttemptActive)
+        Err(AttemptLifecycleError::ResponsePending)
     ));
     assert!(matches!(
         lifecycle.terminal_response(ATTEMPT, AGR1),
@@ -191,5 +191,71 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
         lifecycle.terminal_response(ATTEMPT, digest),
         Err(AttemptLifecycleError::ResponseUnavailable)
     ));
+    Ok(())
+}
+
+/// A response for another AGR1 is refused and leaves the slot pending;
+/// reconciling a slot whose response never came clears it.
+#[test]
+fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let digest = signed_grant()?.grant.grant_digest();
+    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    let foreign = Released {
+        grant: Some(signed_grant()?),
+        ..Released::default()
+    }
+    .ended()?;
+    let other = Released::default().ended()?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    assert!(matches!(
+        lifecycle.retain_response(&other, &signer(), admitted),
+        Err(AttemptLifecycleError::GrantMismatch)
+    ));
+    assert!(ledger.reserve_storage(0).is_ok());
+    assert!(matches!(
+        lifecycle.terminal_response(ATTEMPT, digest),
+        Err(AttemptLifecycleError::ResponsePending)
+    ));
+    lifecycle.reconcile(&reconcile(digest))?;
+    assert!(matches!(
+        lifecycle.terminal_response(ATTEMPT, digest),
+        Err(AttemptLifecycleError::UnknownAttempt)
+    ));
+    assert!(matches!(
+        lifecycle.retain_response(&foreign, &signer(), admitted),
+        Err(AttemptLifecycleError::UnknownAttempt)
+    ));
+    Ok(())
+}
+
+/// A retained response whose classification quarantines closes admission:
+/// a D5 contradiction, and a code-2 missing service result (R9 §4.6.4 and
+/// §4.6.5).
+#[test]
+fn a_quarantining_classification_closes_admission() -> TestResult {
+    for (terminal_cgroup, service) in [((26, 9999), Some(("success", 1, 0))), ((26, 5678), None)] {
+        let (_directory, lifecycle, ledger) = lifecycle()?;
+        let grant = signed_grant()?;
+        let digest = grant.grant.grant_digest();
+        lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+        let ended = Released {
+            grant: Some(grant),
+            terminal_cgroup,
+            service,
+            ..Released::default()
+        }
+        .ended()?;
+        let public = signing_key().verifying_key();
+        let retained = lifecycle.retain_response(
+            &ended,
+            &signer(),
+            AdmittedRuntimeKey::new(KEY_ID, &public),
+        )?;
+        verified(&retained)?;
+        assert!(retained.records().classification().quarantined());
+        assert!(ledger.reserve_storage(0).is_err());
+    }
     Ok(())
 }

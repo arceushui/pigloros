@@ -1455,6 +1455,19 @@ mod cases {
         Ok(())
     }
 
+    /// A running attempt has no terminal response yet.
+    #[test]
+    fn a_running_attempt_has_no_terminal_response() -> TestResult {
+        let runtime = Runtime::new()?;
+        let owned = runtime.lifecycle.admit_input(FakeInput::new(3))?;
+        assert!(matches!(
+            runtime.lifecycle.terminal_response([3; 16], grant(3)),
+            Err(AttemptLifecycleError::AttemptActive)
+        ));
+        drop(owned);
+        Ok(())
+    }
+
     #[test]
     fn a_withdrawn_attempt_frees_its_place_under_the_cap() -> TestResult {
         let runtime = Runtime::new()?;

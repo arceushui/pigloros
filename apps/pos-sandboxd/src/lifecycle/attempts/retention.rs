@@ -39,10 +39,14 @@ impl<I> AttemptLifecycle<I> {
     /// Sign the terminal response of `ended`, which this lifecycle ended,
     /// and retain it until the attempt is reconciled (R9 §4.7 steps 7 to 9).
     /// A response already retained is returned as it is: it is signed once.
+    /// A response whose classification quarantines (a contradiction, any
+    /// code-2 candidate or the fail-closed fallback, R9 §4.6.4 and §4.6.5)
+    /// is retained and closes admission.
     ///
     /// # Errors
     /// [`AttemptLifecycleError::UnknownAttempt`] for an attempt that has not
-    /// ended here or was reconciled, and
+    /// ended here or was reconciled, [`AttemptLifecycleError::GrantMismatch`]
+    /// when `ended` names another AGR1 than the attempt's, and
     /// [`AttemptLifecycleError::Response`] when the response cannot be
     /// assembled or signed: the lifecycle is then quarantined and the
     /// attempt's response stays [`AttemptLifecycleError::ResponseUnavailable`].
@@ -56,8 +60,9 @@ impl<I> AttemptLifecycle<I> {
         S: RequestedConfiguration,
         R: RuntimeAttestationSigner,
     {
+        let grant = ended.admission().grant().digest();
         let response = ended.signed_response(signer, admitted).map(Arc::new);
-        self.store(ended.attempt_id(), None, response)
+        self.store((ended.attempt_id(), grant), None, response)
     }
 
     /// The retained terminal response of the attempt `agr1_digest` admitted:
@@ -67,7 +72,8 @@ impl<I> AttemptLifecycle<I> {
     /// [`AttemptLifecycleError::UnknownAttempt`] for an unknown or
     /// reconciled attempt, [`AttemptLifecycleError::GrantMismatch`] for
     /// another grant, [`AttemptLifecycleError::AttemptActive`] while the
-    /// attempt runs or its response is not yet signed, and
+    /// attempt runs, [`AttemptLifecycleError::ResponsePending`] once it ended
+    /// and before its response was retained, and
     /// [`AttemptLifecycleError::ResponseUnavailable`] after a provider fault.
     pub fn terminal_response(
         &self,
@@ -77,13 +83,11 @@ impl<I> AttemptLifecycle<I> {
         match lock(&self.attempts).get(&attempt_id) {
             None | Some(Slot::Reconciled { .. }) => Err(AttemptLifecycleError::UnknownAttempt),
             Some(slot) if slot.grant() != agr1_digest => Err(AttemptLifecycleError::GrantMismatch),
-            Some(
-                Slot::Running { .. }
-                | Slot::Ended {
-                    response: Retained::Pending,
-                    ..
-                },
-            ) => Err(AttemptLifecycleError::AttemptActive),
+            Some(Slot::Running { .. }) => Err(AttemptLifecycleError::AttemptActive),
+            Some(Slot::Ended {
+                response: Retained::Pending,
+                ..
+            }) => Err(AttemptLifecycleError::ResponsePending),
             Some(Slot::Ended {
                 response: Retained::Faulted,
                 ..
@@ -97,7 +101,13 @@ impl<I> AttemptLifecycle<I> {
 
     /// Re-issue the retained Completed response of the attempt after its
     /// output transfer timed out (R9 §4.7), and retain the successor in its
-    /// place.
+    /// place. `transfer` must carry the retained output and start after the
+    /// cleanup finished.
+    ///
+    /// A successor that cannot be signed is a provider fault (R9 §5): the
+    /// stored response is replaced by a fault and stays unavailable. Of two
+    /// concurrent re-issues, the first to store wins, and the other returns
+    /// the winner's successor.
     ///
     /// # Errors
     /// Those of [`AttemptLifecycle::terminal_response`];
@@ -117,41 +127,70 @@ impl<I> AttemptLifecycle<I> {
         let stored = self.terminal_response(attempt_id, agr1_digest)?;
         match stored.successor(transfer, signer, admitted) {
             Err(ResponseFault::Evidence(refused)) => Err(ResponseFault::Evidence(refused).into()),
-            successor => self.store(attempt_id, Some(&stored), successor.map(Arc::new)),
+            successor => self.store(
+                (attempt_id, agr1_digest),
+                Some(&stored),
+                successor.map(Arc::new),
+            ),
         }
     }
 
-    /// Retain `signed` for the ended attempt whose response is still
-    /// `expected` (pending when `None`), or record its fault and quarantine.
-    /// A response that changed meanwhile is returned instead.
+    /// Retain `signed` for the ended attempt of `grant` whose response is
+    /// still `expected` (pending when `None`), or record its fault. A
+    /// response that changed meanwhile is returned instead.
     fn store(
         &self,
-        attempt_id: [u8; 16],
+        (attempt_id, grant): ([u8; 16], [u8; 32]),
         expected: Option<&Arc<RetainedResponse>>,
         signed: Result<Arc<RetainedResponse>, ResponseFault>,
     ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
         let mut attempts = lock(&self.attempts);
-        let Some(Slot::Ended { response, .. }) = attempts.slots.get_mut(&attempt_id) else {
-            return Err(AttemptLifecycleError::UnknownAttempt);
+        let response = match attempts.slots.get_mut(&attempt_id) {
+            Some(Slot::Ended {
+                grant: admitted,
+                response,
+                ..
+            }) if *admitted == grant => response,
+            Some(Slot::Ended { .. }) => return Err(AttemptLifecycleError::GrantMismatch),
+            _ => return Err(AttemptLifecycleError::UnknownAttempt),
         };
-        let current = match (&*response, expected) {
-            (Retained::Pending, None) => None,
-            (Retained::Signed(current), Some(expected)) if Arc::ptr_eq(current, expected) => None,
-            (Retained::Signed(current), _) => Some(Ok(Arc::clone(current))),
-            (Retained::Faulted | Retained::Pending, _) => {
-                Some(Err(AttemptLifecycleError::ResponseUnavailable))
-            }
-        };
-        if let Some(current) = current {
+        if let Some(current) = superseded(response, expected) {
             return current;
         }
         *response = signed.as_ref().map_or(Retained::Faulted, |signed| {
             Retained::Signed(Arc::clone(signed))
         });
         drop(attempts);
-        signed.map_err(|fault| {
+        self.settle(signed)
+    }
+
+    /// Quarantine on a fault, or on a retained response whose
+    /// classification quarantines (R9 §4.6.1).
+    fn settle(
+        &self,
+        signed: Result<Arc<RetainedResponse>, ResponseFault>,
+    ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
+        if signed.as_ref().map_or(true, |signed| {
+            signed.records().classification().quarantined()
+        }) {
             self.quarantine();
-            fault.into()
-        })
+        }
+        signed.map_err(Into::into)
+    }
+}
+
+/// What a store finds instead of the `expected` response: `None` when it
+/// may store, else the response stored meanwhile or the closed refusal.
+fn superseded(
+    response: &Retained,
+    expected: Option<&Arc<RetainedResponse>>,
+) -> Option<Result<Arc<RetainedResponse>, AttemptLifecycleError>> {
+    match (response, expected) {
+        (Retained::Pending, None) => None,
+        (Retained::Signed(current), Some(expected)) if Arc::ptr_eq(current, expected) => None,
+        (Retained::Signed(current), _) => Some(Ok(Arc::clone(current))),
+        (Retained::Faulted | Retained::Pending, _) => {
+            Some(Err(AttemptLifecycleError::ResponseUnavailable))
+        }
     }
 }

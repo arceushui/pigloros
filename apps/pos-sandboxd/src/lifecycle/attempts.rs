@@ -153,6 +153,9 @@ pub enum AttemptLifecycleError {
     /// The attempt's terminal response could not be assembled or signed.
     #[error(transparent)]
     Response(#[from] ResponseFault),
+    /// The attempt ended and its terminal response is not retained yet.
+    #[error("the attempt's terminal response is not retained yet")]
+    ResponsePending,
     /// The attempt's terminal response was refused as a provider fault; the
     /// lifecycle is quarantined and restart reconciliation recovers.
     #[error("the attempt's terminal response is unavailable")]
