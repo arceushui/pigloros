@@ -74,6 +74,9 @@ use pos_core::{
     WallTime, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
     MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CONSENT_HISTORY_EVENTS,
 };
+use pos_local_erasure_loader::local_principal::{
+    derived_hash, derived_timeline, local_principal_authority_timeline, local_principal_grant_id,
+};
 use pos_runtime::ErasureExecutionHostV1;
 use serde::Deserialize;
 use thiserror::Error;
@@ -740,7 +743,7 @@ pub fn provision_local_principal_from_credentials(
     sqlite_path: &str,
     credential_directory: &Path,
 ) -> io::Result<()> {
-    crate::local_fork_authentication::read_single_credential(
+    pos_local_erasure_loader::credentials::read_single_credential(
         credential_directory,
         LOCAL_PRINCIPAL_CREDENTIAL_NAME,
         rustix::process::geteuid().as_raw(),
@@ -916,27 +919,6 @@ where
         Err(_) => Err(LocalPrincipalErrorV1::Corrupt),
         Ok(persisted) => Ok(Some(persisted)),
     }
-}
-
-/// The authority registry digest of the Local Principal root grant `store`
-/// records, or `None` when it records no Local Principal.
-///
-/// # Errors
-/// Returns the [`load_local_principal`] read errors.
-#[cfg(target_os = "linux")]
-pub(crate) fn recorded_registry_digest<S>(store: &S) -> Result<Option<Hash>, LocalPrincipalErrorV1>
-where
-    S: AuthorityPersistencePortV1 + ?Sized,
-{
-    load_chain(store, LocalGrantKindV1::Root).map(|chain| {
-        chain.and_then(|chain| {
-            chain
-                .chain()
-                .grants()
-                .last()
-                .map(CapabilityGrantV1::authority_registry_digest)
-        })
-    })
 }
 
 /// Compose the Local Principal recorded in the store of `host`.
@@ -1506,28 +1488,6 @@ fn framed(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(value);
 }
 
-fn derived_hash(context: &str) -> Hash {
-    Hash::from_bytes(blake3::derive_key(context, &[]))
-}
-
-/// The Timeline identity of the derivation `context`.
-fn derived_timeline(context: &str) -> TimelineId {
-    let digest = blake3::derive_key(context, &[]);
-    let mut identity = [0; 16];
-    identity.copy_from_slice(&digest[..16]);
-    TimelineId::from_ulid(Ulid::from_bytes(identity))
-}
-
-/// The one grant identity a store's Local Principal is recorded under.
-pub(crate) fn local_principal_grant_id() -> Hash {
-    derived_hash("pigloros gateway local principal grant v1")
-}
-
-/// The authority Timeline the Local Principal's grant is issued on.
-pub(crate) fn local_principal_authority_timeline() -> TimelineId {
-    derived_timeline("pigloros gateway local principal authority timeline v1")
-}
-
 /// The one consent Timeline of a store's Local Principal (#309): a root
 /// Timeline under this well-known identity, which no client can create.
 #[must_use]
@@ -1567,6 +1527,36 @@ fn sorted_set<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
     values.sort_unstable();
     values.dedup();
     values
+}
+
+/// Test-only: record an erasure store identity in the store at `path` and
+/// open its Erasure Host Timeline, as `provision-local-erasure` does.
+///
+/// Shared by these tests and the Fork-admission listener tests. It sits at
+/// module level so `pub(crate)` satisfies `clippy::redundant_pub_crate`.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn provision_erasure_host_timeline(
+    path: &str,
+) -> Result<pos_core::TimelineId, Box<dyn std::error::Error + Send + Sync>> {
+    let identity = Hash::from_bytes([0x5e; 32]);
+    pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
+        &mut pos_store::sqlite::SqliteStore::open(path)?,
+        identity,
+    )?;
+    let erasure_host = pos_core::local_erasure_host_timeline_v1(
+        pos_core::ErasureReferenceV1::from_digest(*identity.as_bytes()),
+    )?;
+    crate::startup::open_recovered_erasure_host(
+        pos_store::StoreConfig::Sqlite {
+            path: path.to_owned(),
+        },
+        crate::startup::GatewayHostStoreV1::Standard,
+        &pos_runtime::ErasureCoordinatorCompositionV1::closed(),
+    )?
+    .command_sender()?
+    .open_root_timeline(erasure_host, "erasure host")?;
+    Ok(erasure_host)
 }
 
 #[cfg(test)]
@@ -3663,23 +3653,6 @@ mod tests {
         gateway.shutdown().await?;
         drop(gateway);
         Ok(())
-    }
-
-    /// Record an erasure store identity in the store at `path` and open its
-    /// Erasure Host Timeline, as `provision-local-erasure` does.
-    fn provision_erasure_host_timeline(path: &str) -> TestResult<TimelineId> {
-        let identity = Hash::from_bytes([0x5e; 32]);
-        pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
-            &mut SqliteStore::open(path)?,
-            identity,
-        )?;
-        let erasure_host = pos_core::local_erasure_host_timeline_v1(
-            pos_core::ErasureReferenceV1::from_digest(*identity.as_bytes()),
-        )?;
-        sqlite_host(path)?
-            .command_sender()?
-            .open_root_timeline(erasure_host, "erasure host")?;
-        Ok(erasure_host)
     }
 
     /// ADR-136 §4a: no client seam reaches the Erasure Host Timeline or

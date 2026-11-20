@@ -1234,10 +1234,10 @@ dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
- "libc",
  "piglor-ledger",
  "pos-core",
  "pos-crypto",
+ "pos-local-erasure-loader",
  "pos-plugin-geo",
  "pos-plugin-ledger",
  "pos-plugin-society",
@@ -1264,6 +1264,7 @@ dependencies = [
  "ed25519-dalek",
  "pos-core",
  "pos-crypto",
+ "pos-local-erasure-loader",
  "pos-plugin-ledger",
  "pos-runtime",
  "pos-store",
@@ -1376,6 +1377,23 @@ dependencies = [
  "thiserror",
  "ulid",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "pos-local-erasure-loader"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "pos-core",
+ "pos-runtime",
+ "pos-store",
+ "rustix",
+ "serde",
+ "thiserror",
+ "toml",
+ "ulid",
  "zeroize",
 ]
 

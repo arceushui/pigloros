@@ -1,6 +1,6 @@
-//! The Gateway's deployment trust: the authenticated current TPS1 of the
-//! profile's trust state store (ADR-104, ADR-135; owner decision Q1 of
-//! 2026-11-17 on #1412).
+//! The deployment trust of every Local erasure root: the authenticated
+//! current TPS1 of the profile's trust state store (ADR-104, ADR-135; owner
+//! decision Q1 of 2026-11-17 on #1412).
 //!
 //! The release anchor is never read from the TPS1 it authenticates. The
 //! operator installs it as the systemd credential
@@ -20,16 +20,23 @@
 //! anchor and returns its current TPS1 through
 //! `DeploymentTrustPolicyRegistryV1::current_trust_policy`, so every
 //! consumer sees a TPS1 the operator key signed and the genesis chain
-//! reaches. `provision-local-erasure` is its first consumer; the serve
-//! composition of the Local erasure authority reuses it.
+//! reaches. The Gateway's `provision-local-erasure` and serve composition
+//! and every key-less root ([`crate::LocalErasureRecoveryV1`]) use it.
+//!
+//! The constants exist on every target; the trust state store, and so the
+//! loader, is Linux-only.
 
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
 use pos_store::trust_policy_registry::{
     CurrentTrustPolicyV1, DeploymentTrustPolicyRegistryV1, OperatorReleaseTrustV1,
     TrustPolicyRegistryErrorV1,
 };
+#[cfg(target_os = "linux")]
 use serde::Deserialize;
+#[cfg(target_os = "linux")]
 use thiserror::Error;
 
 /// The systemd credential that pins the deployment release anchor.
@@ -41,6 +48,7 @@ pub const MAX_RELEASE_TRUST_CREDENTIAL_BYTES: usize = 4_096;
 /// The fixed path of the deployment trust state store.
 pub const DEPLOYMENT_TRUST_STATE_PATH: &str = "/var/lib/pigloros/trust-state.db";
 
+#[cfg(target_os = "linux")]
 /// Closed deployment-trust failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum DeploymentTrustErrorV1 {
@@ -53,6 +61,7 @@ pub enum DeploymentTrustErrorV1 {
     TrustState(TrustPolicyRegistryErrorV1),
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReleaseTrustDocumentV1 {
@@ -61,6 +70,7 @@ struct ReleaseTrustDocumentV1 {
     genesis_digest: String,
 }
 
+#[cfg(target_os = "linux")]
 /// Decode the release-anchor credential.
 ///
 /// # Errors
@@ -87,6 +97,7 @@ pub fn release_trust_from_credential(
         .ok_or(DeploymentTrustErrorV1::ReleaseTrustInvalid)
 }
 
+#[cfg(target_os = "linux")]
 /// The current TPS1 of the trust state store at `state_path`,
 /// authenticated against `release`.
 ///
@@ -103,6 +114,7 @@ pub fn load_deployment_trust_v1(
         .map_err(DeploymentTrustErrorV1::TrustState)
 }
 
+#[cfg(target_os = "linux")]
 /// Decode exactly 64 lowercase hex characters.
 fn lower_hex_32(text: &str) -> Option<[u8; 32]> {
     let nibbles = text
@@ -117,6 +129,7 @@ fn lower_hex_32(text: &str) -> Option<[u8; 32]> {
         .then(|| std::array::from_fn(|index| nibbles[2 * index] * 16 + nibbles[2 * index + 1]))
 }
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {

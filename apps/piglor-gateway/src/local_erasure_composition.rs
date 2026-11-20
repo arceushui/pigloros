@@ -16,13 +16,18 @@
 //! The directory holds exactly these, plus the three Fork-admission
 //! credentials when the deployment also requires the Local Fork authority.
 //! Both serve modes load the installed TPS1 through the shared deployment
-//! trust loader ([`crate::deployment_trust`]); an Air-Gapped deployment seeds
-//! the same trust state store with its bundled TPS1 (D17).
+//! trust loader ([`pos_local_erasure_loader::deployment_trust`]); an
+//! Air-Gapped deployment seeds the same trust state store with its bundled
+//! TPS1 (D17).
 //!
 //! Composition runs under the store's shared mode lock, before the erasure
-//! host opens: it reads the Local Principal's registry digest from the raw
-//! store and calls [`ErasureCoordinatorCompositionV1::local`] with this
-//! binary's executor binding. Any credential, trust, store or bundle error
+//! host opens: the shared loader
+//! ([`pos_local_erasure_loader::composition::compose_local_erasure`]) reads
+//! the Local Principal's registry digest from the raw store and calls
+//! [`ErasureCoordinatorCompositionV1::local`] with this binary's executor
+//! binding; the key-less roots compose the same authority with none
+//! ([`pos_local_erasure_loader::LocalErasureRecoveryV1`]). Any credential,
+//! trust, store or bundle error
 //! refuses startup with a payload-free [`LocalErasureServeErrorV1`]; the
 //! Gateway never falls back to the closed composition when the flag is
 //! given (D9). Without the flag every serve composes
@@ -32,9 +37,9 @@
 //! runs the startup sweep ([`LocalErasureDriverV1::sweep`]) once; a skipped
 //! sweep never fails startup. [`LocalErasureDriverTaskV1`] then drives the
 //! lifecycle: once at startup, on every [`LOCAL_ERASURE_DRIVER_TICK`], and
-//! whenever [`LocalErasureTriggerV1::admitted`] reports a new admission (the
-//! erasure admission route of the next slice calls it; until then only the
-//! startup run and the tick wake the driver). Each wake submits one driver step per store
+//! whenever [`LocalErasureTriggerV1::admitted`] reports a new admission:
+//! the spawned task hands its trigger to the Gateway, whose
+//! `requestErasure` route calls it after every `202`. Each wake submits one driver step per store
 //! command until no request has a step due, so every other Gateway command
 //! interleaves between two steps, and reports on standard error how many
 //! requests had a step fail, whenever that count changes.
@@ -49,30 +54,27 @@ use std::{
     time::Duration,
 };
 
-use pos_core::{ErasureReferenceV1, LocalErasureBundleV1, OwnerIdV1};
+use pos_core::{LocalErasureBundleV1, OwnerIdV1};
 use pos_crypto::key_roles::SigningKeyMaterial;
+use pos_local_erasure_loader::composition::{
+    compose_local_erasure, LocalErasureLoadInputsV1, LocalErasureTrustCredentialsV1,
+};
+use pos_local_erasure_loader::credentials::{open_exact_credentials, ExactCredentialsV1};
+use pos_local_erasure_loader::deployment_trust::RELEASE_TRUST_CREDENTIAL_NAME;
+use pos_local_erasure_loader::{
+    LocalErasureLoadErrorV1, LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME,
+    LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME,
+};
 use pos_runtime::{
     local_erasure_execution_binding_v1, ErasureCoordinatorCompositionV1, ErasureExecutionHostV1,
-    LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1, LocalErasureDriverV1,
-    LocalErasureSignerV1, LocalErasureStepV1, LocalErasureSweepV1,
+    LocalErasureDriverV1, LocalErasureSignerV1, LocalErasureStepV1, LocalErasureSweepV1,
 };
-use pos_store::{sqlite::SqliteStore, trust_policy_registry::OperatorReleaseTrustV1};
+use pos_store::sqlite::SqliteStore;
 use thiserror::Error;
 use tokio::{sync::Notify, task::JoinHandle, time::MissedTickBehavior};
-use zeroize::Zeroizing;
 
-pub use crate::deployment_trust::DEPLOYMENT_TRUST_STATE_PATH;
-use crate::deployment_trust::{
-    load_deployment_trust_v1, release_trust_from_credential, DeploymentTrustErrorV1,
-    MAX_RELEASE_TRUST_CREDENTIAL_BYTES, RELEASE_TRUST_CREDENTIAL_NAME,
-};
 use crate::executor::{StoreExecutor, WeakStoreExecutor};
-use crate::local_erasure_provision::{
-    signer_material, unix_now, LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
-};
-use crate::local_principal::{
-    local_principal_authority_timeline, local_principal_grant_id, recorded_registry_digest,
-};
+use crate::local_erasure_provision::{signer_material, LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME};
 use crate::Gateway;
 
 /// Write one payload-free line to standard error; the stream's lock is
@@ -84,13 +86,6 @@ macro_rules! announce {
     };
 }
 
-/// The systemd credential holding the installed ELB1 bytes.
-pub const LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME: &str = "pigloros.local-erasure-bundle";
-
-/// The systemd credential holding the ELB1S bytes over the installed ELB1.
-pub const LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME: &str =
-    "pigloros.local-erasure-bundle-signature";
-
 /// The four credentials `serve --require-local-erasure` reads, sorted.
 pub const LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES: [&str; 4] = [
     LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME,
@@ -98,10 +93,6 @@ pub const LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES: [&str; 4] = [
     LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
     RELEASE_TRUST_CREDENTIAL_NAME,
 ];
-
-/// The largest bundle or bundle-signature credential accepted: the ELB1
-/// record bound, 64 KiB.
-pub const MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES: usize = 64 * 1024;
 
 /// The length of the signer credential, a 32-byte Ed25519 seed.
 const LOCAL_ERASURE_SIGNER_SEED_BYTES: usize = 32;
@@ -114,11 +105,11 @@ pub const LOCAL_ERASURE_DRIVER_TICK: Duration = Duration::from_secs(10);
 /// start.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum LocalErasureServeErrorV1 {
-    /// The credential directory is missing, is not protected, or does not
-    /// hold exactly the expected credentials, or one of them is unreadable
-    /// or over its bound.
-    #[error("the local erasure credentials are unavailable or invalid")]
-    Credentials,
+    /// The shared loader refuses the credential directory, a bundle or
+    /// release-anchor credential, the deployment trust, the store's Local
+    /// Principal or the installed bundle.
+    #[error(transparent)]
+    Load(LocalErasureLoadErrorV1),
     /// The signer credential is not a readable, protected 32-byte Ed25519
     /// seed; a longer credential is refused without reading it.
     #[error("the local erasure signer credential is not a 32-byte Ed25519 seed")]
@@ -126,20 +117,10 @@ pub enum LocalErasureServeErrorV1 {
     /// The signer credential is not the signer key the bundle pins.
     #[error("the local erasure signer credential is not the signer key the bundle pins")]
     SignerMismatch,
-    /// The release anchor or the trust state store is unavailable.
-    #[error(transparent)]
-    Trust(DeploymentTrustErrorV1),
-    /// The store records no Local Principal.
-    #[error("the store records no Local Principal; run provision-local-principal first")]
-    PrincipalMissing,
     /// The store does not exist (composition never creates it), cannot be
-    /// opened, is not bound to a compiled execution mode, or its Local
-    /// Principal record cannot be read.
+    /// opened or is not bound to a compiled execution mode.
     #[error("the local erasure store cannot be read")]
     StoreUnavailable,
-    /// The installed bundle keeps the Local erasure authority closed.
-    #[error(transparent)]
-    Composition(LocalErasureCompositionErrorV1),
 }
 
 /// The inputs of `serve --require-local-erasure`.
@@ -149,7 +130,8 @@ pub struct LocalErasureServeInputsV1<'a> {
     pub sqlite_path: &'a str,
     /// The serve unit's validated credential directory.
     pub credential_directory: &'a Path,
-    /// The deployment trust state store, [`DEPLOYMENT_TRUST_STATE_PATH`]
+    /// The deployment trust state store,
+    /// [`pos_local_erasure_loader::deployment_trust::DEPLOYMENT_TRUST_STATE_PATH`]
     /// in production.
     pub trust_state: &'a Path,
     /// Whether the directory also holds the three Fork-admission
@@ -157,74 +139,58 @@ pub struct LocalErasureServeInputsV1<'a> {
     pub with_fork_authority: bool,
 }
 
-/// The decoded erasure credentials of the serve unit.
-struct LocalErasureCredentialsV1 {
-    bundle: Zeroizing<Vec<u8>>,
-    bundle_signature: Zeroizing<Vec<u8>>,
-    signer: SigningKeyMaterial,
-    release: OperatorReleaseTrustV1,
+/// Open the serve unit's credential directory, which holds exactly the
+/// four erasure credentials and, when the deployment also requires the
+/// Local Fork authority, the three Fork-admission credentials; read the
+/// shared bundle and release-anchor credentials and the signer seed.
+fn serve_credentials(
+    inputs: &LocalErasureServeInputsV1<'_>,
+) -> Result<(LocalErasureTrustCredentialsV1, SigningKeyMaterial), LocalErasureServeErrorV1> {
+    open_exact_credentials(
+        inputs.credential_directory,
+        &serve_credential_names(inputs.with_fork_authority),
+        rustix::process::geteuid().as_raw(),
+    )
+    .ok()
+    .ok_or(LocalErasureServeErrorV1::Load(
+        LocalErasureLoadErrorV1::Credentials,
+    ))
+    .and_then(|credentials| {
+        LocalErasureTrustCredentialsV1::read(&credentials)
+            .map_err(LocalErasureServeErrorV1::Load)
+            .and_then(|trust| signer_seed(&credentials).map(|signer| (trust, signer)))
+    })
 }
 
-/// Read and decode the four erasure credentials of `directory`, which holds
-/// exactly them and `alongside`.
-fn credentials(
-    directory: &Path,
-    alongside: &[&str],
-) -> Result<LocalErasureCredentialsV1, LocalErasureServeErrorV1> {
-    let names = LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES
+/// The sorted credential names of the serve unit's directory.
+fn serve_credential_names(with_fork_authority: bool) -> Vec<&'static str> {
+    let alongside: &[&str] = if with_fork_authority {
+        &crate::local_fork_authentication::MANAGED_CREDENTIAL_NAMES
+    } else {
+        &[]
+    };
+    LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES
         .iter()
         .chain(alongside)
         .copied()
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .collect::<Vec<_>>();
-    crate::local_fork_authentication::open_exact_credentials(
-        directory,
-        &names,
-        rustix::process::geteuid().as_raw(),
-    )
-    .map_err(|_| LocalErasureServeErrorV1::Credentials)
-    .and_then(|credentials| {
-        let read = |name: &str, maximum: usize| {
-            credentials
-                .read(name, maximum)
-                .map_err(|_| LocalErasureServeErrorV1::Credentials)
-        };
-        let bundle_bytes = MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES;
-        read(LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, bundle_bytes)
-            .and_then(|bundle| {
-                read(LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME, bundle_bytes)
-                    .map(|signature| (bundle, signature))
-            })
-            .and_then(|bundles| {
-                read(
-                    RELEASE_TRUST_CREDENTIAL_NAME,
-                    MAX_RELEASE_TRUST_CREDENTIAL_BYTES,
-                )
-                .map(|release| (bundles, release))
-            })
-            .and_then(|(bundles, release)| {
-                credentials
-                    .read(
-                        LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
-                        LOCAL_ERASURE_SIGNER_SEED_BYTES,
-                    )
-                    .ok()
-                    .and_then(|seed| signer_material(&seed).ok())
-                    .ok_or(LocalErasureServeErrorV1::SignerCredentialInvalid)
-                    .map(|signer| (bundles, signer, release))
-            })
-    })
-    .and_then(|((bundle, bundle_signature), signer, release)| {
-        release_trust_from_credential(&release)
-            .map_err(LocalErasureServeErrorV1::Trust)
-            .map(|release| LocalErasureCredentialsV1 {
-                bundle,
-                bundle_signature,
-                signer,
-                release,
-            })
-    })
+        .collect()
+}
+
+/// The role-2 signer's 32-byte Ed25519 seed credential; a longer
+/// credential is refused without reading it.
+fn signer_seed(
+    credentials: &ExactCredentialsV1,
+) -> Result<SigningKeyMaterial, LocalErasureServeErrorV1> {
+    credentials
+        .read(
+            LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
+            LOCAL_ERASURE_SIGNER_SEED_BYTES,
+        )
+        .ok()
+        .and_then(|seed| signer_material(&seed).ok())
+        .ok_or(LocalErasureServeErrorV1::SignerCredentialInvalid)
 }
 
 /// The role-2 signer of `signer` under the identity the verified `bundle`
@@ -292,63 +258,32 @@ impl LocalErasureServeV1 {
         inputs.map_or_else(|| Ok(Self::closed()), Self::local)
     }
 
-    /// Compose the Local erasure authority over the store of `inputs`.
+    /// Compose the Local erasure authority over the store of `inputs` with
+    /// this binary's executor binding, then the driver of its signer.
     fn local(inputs: LocalErasureServeInputsV1<'_>) -> Result<Self, LocalErasureServeErrorV1> {
-        let alongside: &[&str] = if inputs.with_fork_authority {
-            &crate::local_fork_authentication::MANAGED_CREDENTIAL_NAMES
-        } else {
-            &[]
-        };
-        credentials(inputs.credential_directory, alongside).and_then(
-            |LocalErasureCredentialsV1 {
-                 bundle,
-                 bundle_signature,
-                 signer,
-                 release,
-             }| {
-                let operator_public_key = release.operator_public_key();
-                load_deployment_trust_v1(inputs.trust_state, release)
-                    .map_err(LocalErasureServeErrorV1::Trust)
-                    .and_then(|trust| {
-                        open_bound_store(inputs.sqlite_path).and_then(|mut store| {
-                            recorded_registry_digest(&store)
-                                .ok()
-                                .ok_or(LocalErasureServeErrorV1::StoreUnavailable)
-                                .and_then(|registry| {
-                                    registry.ok_or(LocalErasureServeErrorV1::PrincipalMissing)
-                                })
-                                .and_then(|registry| {
-                                    let binding = local_erasure_execution_binding_v1();
-                                    ErasureCoordinatorCompositionV1::local(
-                                        &LocalErasureCompositionInputsV1 {
-                                            bundle: &bundle,
-                                            bundle_signature: &bundle_signature,
-                                            trust: &trust,
-                                            operator_public_key,
-                                            authority_registry_digest:
-                                                ErasureReferenceV1::from_digest(
-                                                    *registry.as_bytes(),
-                                                ),
-                                            execution_binding: Some(&binding),
-                                            principal_grant: local_principal_grant_id(),
-                                            authority_timeline: local_principal_authority_timeline(
-                                            ),
-                                            clock: unix_now,
-                                        },
-                                        &mut store,
-                                    )
-                                    .map_err(LocalErasureServeErrorV1::Composition)
-                                })
-                        })
+        serve_credentials(&inputs).and_then(|(trust, signer)| {
+            open_bound_store(inputs.sqlite_path)
+                .and_then(|mut store| {
+                    let binding = local_erasure_execution_binding_v1();
+                    compose_local_erasure(
+                        &mut store,
+                        &LocalErasureLoadInputsV1 {
+                            bundle: &trust.bundle,
+                            bundle_signature: &trust.bundle_signature,
+                            trust_state: inputs.trust_state,
+                            execution_binding: Some(&binding),
+                        },
+                        trust.release,
+                    )
+                    .map_err(LocalErasureServeErrorV1::Load)
+                })
+                .and_then(|composition| {
+                    bundle_signer(&trust.bundle, signer).map(|signer| Self {
+                        composition,
+                        driver: Some(LocalErasureDriverV1::new(signer)),
                     })
-                    .and_then(|composition| {
-                        bundle_signer(&bundle, signer).map(|signer| Self {
-                            composition,
-                            driver: Some(LocalErasureDriverV1::new(signer)),
-                        })
-                    })
-            },
-        )
+                })
+        })
     }
 
     /// The composition the erasure host opens with.
@@ -414,7 +349,11 @@ impl LocalErasureDriverTaskV1 {
     }
 
     /// [`Self::spawn`] with the tick `every`.
-    fn spawn_every(gateway: &Gateway, started: LocalErasureStartV1, every: Duration) -> Self {
+    pub(crate) fn spawn_every(
+        gateway: &Gateway,
+        started: LocalErasureStartV1,
+        every: Duration,
+    ) -> Self {
         Self {
             running: started.started.map(|(driver, _)| {
                 let wake = Arc::new(Notify::new());
@@ -424,7 +363,9 @@ impl LocalErasureDriverTaskV1 {
                     Arc::clone(&wake),
                     every,
                 ));
-                (LocalErasureTriggerV1(wake), task)
+                let trigger = LocalErasureTriggerV1(wake);
+                gateway.bind_local_erasure_trigger(trigger.clone());
+                (trigger, task)
             }),
         }
     }
@@ -503,4 +444,4 @@ fn deferred_report(deferred: usize, previous: usize) -> Option<String> {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
+pub mod tests;

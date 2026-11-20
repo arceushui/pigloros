@@ -167,9 +167,10 @@ PLACEHOLDERS = {
     "<message>": "message",
     "<correlation>": "5f" * 16,
     "<hash>": "ab" * 32,
-    # A captured consent or room echoed by a later response.
+    # A captured consent, room or erasure echoed by a later response.
     "{consent}": SAMPLE_ULID,
     "{room}": SAMPLE_ULID,
+    "{erasure}": SAMPLE_ULID,
 }
 
 
@@ -1376,7 +1377,7 @@ def restore(value: object, key: str | None = None) -> object:
     if isinstance(value, list):
         return [restore(item) for item in value]
     if isinstance(value, str):
-        if key == "instance":
+        if key in ("instance", "operation_url"):
             return value.replace("<ulid>", SAMPLE_ULID)
         return PLACEHOLDERS.get(value, value)
     return value
@@ -1411,6 +1412,7 @@ def check_fixtures(
                     exchange["path"]
                     .replace("{timeline}", SAMPLE_ULID)
                     .replace("{room}", SAMPLE_ULID)
+                    .replace("{erasure}", SAMPLE_ULID)
                 )
                 template, operation = contract.operation_for(exchange["method"], concrete)
                 body = restore(expect["body"]["json"])

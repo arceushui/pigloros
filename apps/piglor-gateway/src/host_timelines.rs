@@ -15,11 +15,10 @@
 //! so the set cannot change while the Gateway serves.
 
 use pos_core::{ErasureHostErrorV1, TimelineId};
+use pos_local_erasure_loader::local_principal::local_principal_authority_timeline;
 use pos_runtime::ErasureExecutionHostV1;
 
-use crate::local_principal::{
-    local_principal_authority_timeline, local_principal_consent_timeline,
-};
+use crate::local_principal::local_principal_consent_timeline;
 
 /// The host Timelines of one store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

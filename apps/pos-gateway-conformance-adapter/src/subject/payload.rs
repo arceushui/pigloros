@@ -2,8 +2,8 @@
 //!
 //! The payload decodes into these exact records (no unknown member), then [`parse`] checks the
 //! schema string, the family, the counts and texts, every route, and that each `{timeline}`,
-//! each `{room}` and each `{consent}` follows its capture. A payload outside the grammar is `None`, which is
-//! `payload-invalid`.
+//! each `{room}`, each `{erasure}` and each `{consent}` follows its capture. A payload outside
+//! the grammar is `None`, which is `payload-invalid`.
 
 use piglor_gateway::mode_profile::GatewayModeProfileIdV1;
 use serde::Deserialize;
@@ -17,6 +17,8 @@ pub(super) const TIMELINE_SLOT: &str = "{timeline}";
 pub(super) const CONSENT_SLOT: &str = "{consent}";
 /// The literal a path names the captured Scenario Room by.
 pub(super) const ROOM_SLOT: &str = "{room}";
+/// The literal a path names the captured erasure by (#1449).
+pub(super) const ERASURE_SLOT: &str = "{erasure}";
 /// The route-table segment a path names a revision number by: a positive decimal integer
 /// without a leading zero.
 const REVISION_SEGMENT: &str = "{revision}";
@@ -62,6 +64,19 @@ pub(super) enum CompositionV2 {
     /// permitted (#303).
     #[serde(rename = "authorized-rooms")]
     AuthorizedRooms,
+    /// The Local composition whose fixture Local Principal may request and read its own
+    /// erasures, served by the Local erasure authority under a fixture bundle (#1449).
+    #[serde(rename = "authorized-erasure")]
+    AuthorizedErasure,
+    /// `authorized-erasure` whose fixture actor already has one erasure in progress.
+    #[serde(rename = "authorized-erasure-held")]
+    AuthorizedErasureHeld,
+    /// `authorized-erasure` under a fixture bundle that has expired.
+    #[serde(rename = "authorized-erasure-expired")]
+    AuthorizedErasureExpired,
+    /// The `authorized-erasure` Principal on a Gateway without a Local erasure authority.
+    #[serde(rename = "authorized-erasure-closed")]
+    AuthorizedErasureClosed,
 }
 
 impl CompositionV2 {
@@ -70,11 +85,30 @@ impl CompositionV2 {
     pub(super) const fn mode(self) -> Option<GatewayModeProfileIdV1> {
         match self {
             Self::Open => None,
-            Self::Authorized | Self::AuthorizedConsented | Self::AuthorizedRooms => {
-                Some(GatewayModeProfileIdV1::Local)
-            }
+            Self::Authorized
+            | Self::AuthorizedConsented
+            | Self::AuthorizedRooms
+            | Self::AuthorizedErasure
+            | Self::AuthorizedErasureHeld
+            | Self::AuthorizedErasureExpired
+            | Self::AuthorizedErasureClosed => Some(GatewayModeProfileIdV1::Local),
             Self::AuthorizedAirGapped => Some(GatewayModeProfileIdV1::AirGapped),
         }
+    }
+
+    /// The expiry of the fixture erasure bundle of a composition the Local erasure authority
+    /// serves (0: none; 1: long past), `None` for one served by the closed authority.
+    pub(super) const fn erasure_bundle_expiry(self) -> Option<u64> {
+        match self {
+            Self::AuthorizedErasure | Self::AuthorizedErasureHeld => Some(0),
+            Self::AuthorizedErasureExpired => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Whether the fixture actor's subject already holds an erasure in progress.
+    pub(super) const fn holds_erasure(self) -> bool {
+        matches!(self, Self::AuthorizedErasureHeld)
     }
 }
 
@@ -105,6 +139,8 @@ pub(super) enum CaptureV2 {
     Consent,
     /// The `id` of the response fills [`ROOM_SLOT`].
     Room,
+    /// The `request_id` of the response fills [`ERASURE_SLOT`].
+    Erasure,
 }
 
 /// One HTTP exchange and its expected observation.
@@ -164,7 +200,7 @@ pub(super) struct RouteV2 {
 }
 
 /// The route table of the requirements text, section 2, in its order.
-const ROUTES: [RouteV2; 11] = [
+const ROUTES: [RouteV2; 13] = [
     RouteV2 {
         path: "/health",
         capability: "gateway.health.read",
@@ -206,6 +242,16 @@ const ROUTES: [RouteV2; 11] = [
         events: 1,
     },
     RouteV2 {
+        path: "/v1/me/erasures",
+        capability: "erasure.request",
+        events: 0,
+    },
+    RouteV2 {
+        path: "/v1/me/erasures/{erasure}",
+        capability: "erasure.read",
+        events: 0,
+    },
+    RouteV2 {
         path: "/v1/scenario-rooms",
         capability: "scenario-room.create",
         events: 2,
@@ -234,8 +280,8 @@ impl RouteV2 {
     }
 
     /// Whether `base`, a path without its query, names this route: as many `/`-separated
-    /// segments, each the route's literal segment, any non-empty segment for a Timeline or
-    /// room slot, or a positive decimal for the revision segment.
+    /// segments, each the route's literal segment, any non-empty segment for a Timeline, room
+    /// or erasure slot, or a positive decimal for the revision segment.
     fn matches(self, base: &str) -> bool {
         terminated_segments(self.path)
             .zip(terminated_segments(base))
@@ -251,12 +297,12 @@ fn terminated_segments(path: &str) -> impl Iterator<Item = Option<&str>> {
 
 /// Whether a path segment names the route-table segment it pairs with.
 ///
-/// A Timeline or room slot takes any non-empty segment and the revision segment a positive
+/// A Timeline, room or erasure slot takes any non-empty segment and the revision segment a positive
 /// decimal; any other segment must be the literal itself, and the end of one path only pairs
 /// with the end of the other.
 fn segment_matches(pair: (Option<&str>, Option<&str>)) -> bool {
     match pair {
-        (Some(TIMELINE_SLOT | ROOM_SLOT), Some(segment)) => !segment.is_empty(),
+        (Some(TIMELINE_SLOT | ROOM_SLOT | ERASURE_SLOT), Some(segment)) => !segment.is_empty(),
         (Some(REVISION_SEGMENT), Some(segment)) => is_revision(segment),
         (template, segment) => template == segment,
     }
@@ -293,6 +339,7 @@ fn exchanges_are_valid(exchanges: &mut [ExchangeV2]) -> bool {
     let mut timeline = false;
     let mut consent = false;
     let mut room = false;
+    let mut erasure = false;
     (1..=128).contains(&exchanges.len())
         && exchanges.iter_mut().all(|exchange| {
             exchange.route = route_of(&exchange.path);
@@ -302,10 +349,12 @@ fn exchanges_are_valid(exchanges: &mut [ExchangeV2]) -> bool {
                 && exchange.actor != Some(false)
                 && (timeline || !exchange.path.contains(TIMELINE_SLOT))
                 && (room || !exchange.path.contains(ROOM_SLOT))
+                && (erasure || !exchange.path.contains(ERASURE_SLOT))
                 && (consent || !exchange.uses_consent());
             timeline |= matches!(exchange.capture, Some(CaptureV2::Timeline));
             consent |= matches!(exchange.capture, Some(CaptureV2::Consent));
             room |= matches!(exchange.capture, Some(CaptureV2::Room));
+            erasure |= matches!(exchange.capture, Some(CaptureV2::Erasure));
             valid
         })
 }
@@ -366,6 +415,7 @@ mod tests {
                 Some((
                     path.replace(":id", TIMELINE_SLOT)
                         .replace(":room", ROOM_SLOT)
+                        .replace(":erasure", ERASURE_SLOT)
                         .replace(":revision", REVISION_SEGMENT),
                     capability.to_owned(),
                 ))
@@ -411,8 +461,24 @@ mod tests {
         assert_eq!(generator_capabilities(), capabilities);
         assert_eq!(
             ROUTES.map(RouteV2::events),
-            [0, 0, 0, 0, 1, 1, 0, 1, 2, 2, 0]
+            [0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 2, 2, 0]
         );
+    }
+
+    /// An expired erasure bundle closes admissions with the closed authority's `503`, so the
+    /// wire alone cannot tell `authorized-erasure-expired` from `authorized-erasure-closed`:
+    /// each composition's bundle is pinned here.
+    #[test]
+    fn each_erasure_composition_names_its_bundle_expiry() {
+        for (composition, expiry) in [
+            (CompositionV2::AuthorizedErasure, Some(0)),
+            (CompositionV2::AuthorizedErasureHeld, Some(0)),
+            (CompositionV2::AuthorizedErasureExpired, Some(1)),
+            (CompositionV2::AuthorizedErasureClosed, None),
+            (CompositionV2::Authorized, None),
+        ] {
+            assert_eq!(composition.erasure_bundle_expiry(), expiry);
+        }
     }
 
     #[test]
@@ -422,9 +488,13 @@ mod tests {
                 .path
                 .replace(TIMELINE_SLOT, "t")
                 .replace(ROOM_SLOT, "r")
+                .replace(ERASURE_SLOT, "e")
                 .replace(REVISION_SEGMENT, "1");
+            // A path ending in a slot names that route for any segment, so
+            // its longer neighbour is a further segment.
+            let longer = if route.path.ends_with('}') { "/x" } else { "x" };
             for path in [
-                format!("{concrete}x"),
+                format!("{concrete}{longer}"),
                 format!("{concrete}/"),
                 format!("/x{concrete}"),
                 concrete.to_uppercase(),
@@ -438,6 +508,8 @@ mod tests {
             "/v1/timelines/t",
             "/v1/session/events",
             "/v1/scenario-rooms//revisions",
+            "/v1/me/erasures/",
+            "/v1/me/erasures/e/x",
             "/v1/scenario-rooms/r/revisions/0",
             "/v1/scenario-rooms/r/revisions/01",
             "/v1/scenario-rooms/r/revisions/",

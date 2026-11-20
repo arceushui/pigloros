@@ -532,9 +532,11 @@ fn managed_credentials(
     .map_err(io::Error::other)
 }
 
+// Public, like `local_erasure_composition::tests`, so its crate-only
+// managed-mode seams satisfy `clippy::redundant_pub_crate`.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+pub mod tests {
     use super::*;
     use pos_runtime::ErasureCoordinatorCompositionV1;
     use std::net::SocketAddr;
@@ -655,9 +657,9 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-    const BIND_OK: [u8; 10] = [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82];
+    pub(crate) const BIND_OK: [u8; 10] = [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82];
 
-    fn rejected(code: u8) -> Vec<u8> {
+    pub(crate) fn rejected(code: u8) -> Vec<u8> {
         vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, code, 0xf6]
     }
 
@@ -736,14 +738,14 @@ mod tests {
         install_profile(directory, profile)
     }
 
-    fn bind_payload(operation: u8) -> Vec<u8> {
+    pub(crate) fn bind_payload(operation: u8) -> Vec<u8> {
         [0x83, 0x64, b'F', b'A', b'L', b'1', 1, 0x82, 1, 0x58, 0x20]
             .into_iter()
             .chain([operation; 32])
             .collect()
     }
 
-    fn fork_payload(operation: u8, parent: TimelineId) -> io::Result<Vec<u8>> {
+    pub(crate) fn fork_payload(operation: u8, parent: TimelineId) -> io::Result<Vec<u8>> {
         let value = Value::Array(vec![
             Value::Text("FAL1".to_owned()),
             Value::Integer(1.into()),
@@ -769,7 +771,7 @@ mod tests {
         Ok([length.to_be_bytes().as_slice(), payload].concat())
     }
 
-    fn request(socket: &Path, payload: &[u8], fragmented: bool) -> io::Result<Vec<u8>> {
+    pub(crate) fn request(socket: &Path, payload: &[u8], fragmented: bool) -> io::Result<Vec<u8>> {
         let mut stream = UnixStream::connect(socket)?;
         let frame = frame(payload)?;
         if fragmented {
@@ -837,7 +839,7 @@ mod tests {
     }
 
     /// The child and admission digest of a successful FARL1 Fork result.
-    fn fork_result(response: &[u8]) -> io::Result<(TimelineId, [u8; 32])> {
+    pub(crate) fn fork_result(response: &[u8]) -> io::Result<(TimelineId, [u8; 32])> {
         let invalid =
             |message: &str| io::Error::new(io::ErrorKind::InvalidData, message.to_owned());
         let Value::Array(fields) = ciborium::from_reader(response).map_err(io::Error::other)?
@@ -872,6 +874,89 @@ mod tests {
             TimelineId::from_ulid(ulid::Ulid::from_bytes(child)),
             admission,
         ))
+    }
+
+    // -----------------------------------------------------------------
+    // The managed Local Fork admission serve mode of ADR-136 acceptance
+    // test 11, shared with the served erasure suite (#1471).
+    // -----------------------------------------------------------------
+
+    /// The three managed credentials by name, as `serve` loads them.
+    ///
+    /// FACR1 and FAHK1 are those of this process's service uid under the
+    /// fixture seeds, and FCP1 holds the row of the Fork descriptor `[7; 32]`.
+    pub(crate) fn managed_credentials_for_test() -> io::Result<Vec<(&'static str, Vec<u8>)>> {
+        let (auth, host) = test_credential_bytes_for_service(
+            rustix::process::geteuid().as_raw(),
+            [7; 32],
+            [8; 32],
+        )
+        .map_err(io::Error::other)?;
+        let profile = profile_bytes(&[7])?;
+        Ok(crate::local_fork_authentication::MANAGED_CREDENTIAL_NAMES
+            .into_iter()
+            .zip([auth, host, profile])
+            .collect())
+    }
+
+    /// Provision the current-peer FAH1 into the bound store at `sqlite_path`.
+    ///
+    /// It runs as the offline provisioner does, with the current-peer
+    /// credentials of the fixture seeds, so this process may call the
+    /// managed listener.
+    pub(crate) fn provision_current_peer_for_test(sqlite_path: &str) -> io::Result<()> {
+        provision_bound_store(sqlite_path, &current_peer_credentials()?)
+    }
+
+    /// The managed serve with `--require-local-erasure` of the store at
+    /// `sqlite_path`, up to its TCP bind, over a host recovered with
+    /// `limits`.
+    ///
+    /// It runs the steps of [`serve_managed_local_fork_admission`] and
+    /// `serve_started` in their order: the managed and Local erasure
+    /// credentials of `credential_directory`, the host, the Local mode
+    /// binding over the Fork-admission `socket`, the startup sweep, the
+    /// Gateway with its Fork-admission slot and the listener. The loaded
+    /// FACR1 registers no peer of this process, whose uid is its service
+    /// uid, so the listener runs the current-peer credentials of the same
+    /// seeds, whose FAH1 [`provision_current_peer_for_test`] provisioned.
+    pub(crate) fn start_managed_for_test(
+        sqlite_path: &str,
+        (credential_directory, trust_state): (&Path, &Path),
+        socket: &Path,
+        limits: pos_core::ErasureRecoveryLimitsV1,
+    ) -> io::Result<(Gateway, LocalForkAdmissionListenerV1, LocalErasureStartV1)> {
+        let deployment = ManagedLocalForkAdmissionV1 {
+            sqlite_path,
+            credential_directory,
+            profile: GatewayModeProfileIdV1::Local,
+            composition: fork_composition(socket),
+            owntracks_owner_key: None,
+            ledger: LedgerConfig::new(None, false),
+            local_erasure_trust_state: Some(trust_state),
+        };
+        let (managed, erasure) =
+            managed_credentials_and_erasure(&deployment).map_err(io::Error::other)?;
+        let mut host = ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Sqlite {
+                path: sqlite_path.to_owned(),
+            },
+            erasure.composition(),
+            limits,
+        )
+        .map_err(crate::startup::erasure_host_failure)?;
+        let mode = bind_gateway_mode_v1(deployment.profile, deployment.composition, &mut host)
+            .map_err(io::Error::other)?;
+        let erasure = erasure.start(&mut host);
+        drop(managed.credentials);
+        let (gateway, coordinator) = open_with_credentials(
+            host,
+            (current_peer_credentials()?, managed.profile),
+            None,
+            &mode,
+        )?;
+        let listener = start_listener(coordinator, socket)?;
+        Ok((gateway, listener, erasure))
     }
 
     // -----------------------------------------------------------------
@@ -1646,6 +1731,32 @@ mod tests {
         assert_eq!(health(&gateway).await?, StatusCode::OK);
         // The deleted Pending tuple answers the retry again, never Busy.
         assert_eq!(request(&world.socket, &payload, false)?, rejected(5));
+        stop(&world, gateway, listener).await?;
+        Ok(())
+    }
+
+    /// ADR-136 §4a and acceptance test 2 at the socket: a Fork naming the
+    /// recorded Erasure Host Timeline as its parent is answered code 4, the
+    /// answer of a parent the store does not hold, before any FAC1 runs. It
+    /// writes nothing, and its retry answers the same bytes.
+    #[tokio::test]
+    async fn listener_refuses_the_erasure_host_timeline_as_a_fork_parent() -> TestResult {
+        let (world, _) = provisioned_world(&[])?;
+        let erasure_host = crate::local_principal::provision_erasure_host_timeline(world.path()?)?;
+        let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
+        assert_eq!(
+            gateway.host_timelines(),
+            crate::host_timelines::HostTimelinesV1::new(Some(erasure_host))
+        );
+        assert_eq!(
+            &request(&world.socket, &bind_payload(40), false)?[..10],
+            &BIND_OK
+        );
+        let before = graph_rows(&world)?;
+        let payload = fork_payload(41, erasure_host)?;
+        assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
+        assert_eq!(graph_rows(&world)?, before);
+        assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
         stop(&world, gateway, listener).await?;
         Ok(())
     }
@@ -2634,8 +2745,9 @@ mod tests {
 
     /// #1448: with `--require-local-erasure` the unit's one directory holds
     /// the Fork-admission and the four Local erasure credentials. A
-    /// directory without the erasure credentials, and an invalid erasure
-    /// credential, both refuse startup before the database opens.
+    /// directory without the erasure credentials, and invalid erasure
+    /// credentials, both refuse startup before the database opens. The
+    /// loader checks the release trust credential before the signer.
     #[tokio::test]
     async fn serve_with_local_erasure_reads_both_credential_sets_before_database_open() -> TestResult
     {
@@ -2662,10 +2774,10 @@ mod tests {
         let refused = serve_with_local_erasure_for_test(&world, &both, &trust_state)
             .await
             .err()
-            .ok_or("served with an invalid erasure signer")?;
+            .ok_or("served with invalid erasure credentials")?;
         assert_eq!(
             refused.to_string(),
-            "the local erasure signer credential is not a 32-byte Ed25519 seed"
+            "the release trust credential is invalid"
         );
         assert!(!world.database.exists());
         Ok(())

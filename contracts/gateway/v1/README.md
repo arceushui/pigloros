@@ -52,7 +52,7 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   Session, revoking a consent or the network capability. A consent the acting entity is not a
   party to (its subject or grantee) is `404 not-found-or-unavailable`, and the Session lists only
   the consents the acting entity is a party to. Revocation stops future protected work and deletes nothing;
-  erasure is a separate operation.
+  erasure is a separate operation (see [Erasure](#erasure)).
 - Open identifiers and server invariants. Frozen with Session, `ExecutionProfileId`,
   `GatewayModeProfileId`, `mode`, `execution_profile.reason` and `network_grants` are bounded,
   pattern-checked strings rather than enumerations, so a later v1 revision can add a profile,
@@ -177,6 +177,49 @@ Principal's grant must cover, and the operations need the grants `preference.cre
   mode_profile_digest, binding_epoch, digest]`: text, ULIDs and lower-case hex digests, and an
   unsigned `binding_epoch`. The golden examples carry recomputed values.
 
+## Erasure
+
+`POST /v1/me/erasures` (`requestErasure`) and `GET /v1/me/erasures/{erasure_id}` (`getErasure`)
+are served by a Gateway composed with the single-host Local erasure authority (#309, ADR-136).
+Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.read` (resource
+`erasure.status`), and both are consent-exempt: a revoked consent never refuses them.
+
+- **Subject and scope.** The subject is the Local Principal acting as `x-piglor-actor-entity`.
+  Its data is the root Timelines that actor created and their Forks; Events by the actor in
+  other Timelines, imported Timelines and host Timelines are out of scope. A request names one
+  `scope` class. `private-subject-data` and `consented-shared-data` are destroyed; the other
+  three are always retained, and a request for one is `400 erasure-scope-retained`, answered
+  after the authority decision. A subject whose closure exceeds `erasure_closure_targets` is
+  `400 erasure-scope-too-large`.
+- **Admission.** A malformed body, a body whose `impact_acknowledged` is not `true` and a
+  missing `Idempotency-Key` are `400 invalid-request` before the decision. The `erasure_id` is
+  derived from the Principal, the actor and the key, so the `202` admission receipt's
+  `request_id` and `operation_id` are that id, and `idempotency_key_digest` is BLAKE3 of the key
+  bytes. `bound_inputs` binds the `policy`, the `trust` bundle and the `mode_profile` digest of
+  the submission. An exact retry answers the same receipt bytes, also after a restart, a
+  bundle rotation or a mode migration; the same key with another scope is
+  `409 idempotency-conflict`. A subject has one active erasure at a time: another request
+  while one has not reached its first receipt or has an active attempt is a retryable
+  `429 resource-limit-exceeded` without `Retry-After`. Each actor may submit at most
+  `floor((4096 - 512) / A)` erasures over the store's life, where `A` is the number of actors
+  of the Local Principal (`erasure_store_requests`); the next is `409 erasure-quota-exhausted`,
+  which a retry never clears. A Gateway without a Local erasure composition, or whose trust
+  admission has expired, answers a non-retryable `503 temporarily-unavailable`.
+- **Projection.** An `Erasure` is answered only to its subject: an unknown id, another
+  subject's id, a refused decision (also one past the denial-record bound, which only a refused
+  caller reaches) and a Gateway without a Local erasure composition all answer the same
+  `404 not-found-or-unavailable`. A saturated store executor is the one
+  `429 resource-limit-exceeded` it answers, retryable without `Retry-After`. `state` is the
+  ADR-060 lifecycle of the verified ERS1 head, `provenance.digest` the raw ERS1 state digest
+  (`host-derived`), and `mode_profile` the binding the erasure was submitted under.
+  `generation` is the head's ERS1 ordinal times 2^16 plus the acknowledgements committed in the
+  active attempt; every attempt closes with a new ERS1 state, so it never decreases.
+  `acknowledgements` counts the frozen obligations and the positive acknowledgements, in total
+  and per acknowledgement class (`classes`, an open pattern string). A Local deployment cannot
+  prove that no backup or plaintext Event payload survives, so a Local erasure ends in
+  `partial-failure` with those classes negative. Nothing an erasure answer carries names a
+  Timeline, Fork, selector, target, owner or bundle content.
+
 ## Problems
 
 Every failure body has `type` (`urn:pigloros:gateway:v1:problem:<code>`), `title`, `status`,
@@ -219,7 +262,8 @@ a denial is `503 temporarily-unavailable` instead.
 
 A mutation that is retry-safe carries an `Idempotency-Key` header of 1 to 128 visible ASCII
 characters (schema `idempotency-key`); every Draft mutation requires one, and of the served
-routes `POST /v1/timelines/{timeline_id}/actions` and `POST /v1/me/consent-revocations` do. A
+routes `POST /v1/timelines/{timeline_id}/actions`, `POST /v1/me/consent-revocations` and
+`POST /v1/me/erasures` do. A
 consent revocation is monotonic: revoking a revoked consent returns its original revocation
 (`200`) whatever its key, and the revocation Event records the key (with the Principal and the
 acting entity), so reusing it for another consent is `409 idempotency-conflict`, also after a
