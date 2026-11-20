@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        threads: [parallel, single]
+        threads: [four, single]
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-07-01
       CARGO_TERM_COLOR: never
@@ -30,18 +30,19 @@ jobs:
         with:
           toolchain: nightly-2026-07-01
       - name: Build
-        run: cargo test -p pos-reference --lib --locked --no-run
+        run: cargo test -p pos-reference --lib --all-features --locked --no-run
       - name: Repeat
         run: |
           args=()
-          if [ "${{ matrix.threads }}" = single ]; then args=(--test-threads=1); fi
+          args=(-Zunstable-options --include-ignored --test-threads=4)
+          if [ "${{ matrix.threads }}" = single ]; then args=(-Zunstable-options --include-ignored --test-threads=1); fi
           fails=0
           for i in $(seq 1 12); do
-            if ! cargo test -p pos-reference --lib --locked -- "${args[@]}" > "run-$i.log" 2>&1; then
+            if ! cargo test -p pos-reference --lib --all-features --locked -- "${args[@]}" > "run-$i.log" 2>&1; then
               fails=$((fails + 1))
               echo "=== run $i failed"
               grep -E "FAILED|panicked|left:|right:|Script" "run-$i.log" | head -30
             fi
-            grep -E "^test result" "run-$i.log" | head -1
+            grep -E "^test result" "run-$i.log"
           done
           echo "failed runs: $fails / 12"
