@@ -1,6 +1,7 @@
-//! The Local erasure composition every root shares: the installed bundle
-//! credentials, the deployment trust and the recorded Local Principal,
-//! passed to [`ErasureCoordinatorCompositionV1::local`].
+//! The Local erasure composition every root shares.
+//!
+//! It passes the installed bundle credentials, the deployment trust and the
+//! recorded Local Principal to [`ErasureCoordinatorCompositionV1::local`].
 //!
 //! The Gateway passes its executor's binding and composes the authority
 //! its signer and driver serve; a key-less root passes none
@@ -92,9 +93,11 @@ pub struct LocalErasureLoadInputsV1<'a> {
     pub execution_binding: Option<&'a LocalErasureExecutionBindingV1>,
 }
 
-/// Compose the Local erasure authority over `store` under the TPS1 the
-/// trust state store holds for `release`, bound to the Local Principal the
-/// store records, with the Unix clock ([`crate::unix_now`]).
+/// Compose the Local erasure authority over `store`.
+///
+/// It runs under the TPS1 the trust state store holds for `release`, bound
+/// to the Local Principal the store records, with the Unix clock
+/// ([`crate::unix_now`]).
 ///
 /// # Errors
 /// Returns [`LocalErasureLoadErrorV1::Trust`] when the trust state store

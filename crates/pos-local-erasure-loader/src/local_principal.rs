@@ -1,7 +1,8 @@
 //! The store-recorded identity of the Local Principal (#1361) that every
-//! Local erasure root binds: its well-known grant and authority Timeline
-//! derivations, and the authority registry digest of the root grant a store
-//! records.
+//! Local erasure root binds.
+//!
+//! It holds the well-known grant and authority Timeline derivations, and the
+//! authority registry digest of the root grant a store records.
 //!
 //! The Gateway provisions the Principal; every root that composes the Local
 //! erasure authority reads it through this module, so the derivation

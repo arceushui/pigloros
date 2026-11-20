@@ -181,9 +181,11 @@ impl LocalErasureTrustSourceV1 {
 pub struct LocalErasureRecoveryV1;
 
 impl LocalErasureRecoveryV1 {
-    /// The erasure authority a key-less root opens `store` with: the closed
-    /// composition when the store records no erasure store identity, else
-    /// the Local erasure authority with no executor, from `source`.
+    /// The erasure authority a key-less root opens `store` with.
+    ///
+    /// That is the closed composition when the store records no erasure
+    /// store identity, else the Local erasure authority with no executor,
+    /// from `source`.
     ///
     /// # Errors
     /// Returns the [`LocalErasureLoadErrorV1`] that refuses a store with an
