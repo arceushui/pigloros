@@ -1,5 +1,6 @@
-//! Test-only key-less root store fixture (#1450, ADR-136 acceptance test
-//! 11): a Gateway `SQLite` store provisioned the way an operator provisions
+//! Test-only key-less root store fixture (#1450, ADR-136 acceptance test 11).
+//!
+//! It is a Gateway `SQLite` store provisioned the way an operator provisions
 //! one, holding one Local erasure request, and the credential directories a
 //! key-less root reads.
 //!

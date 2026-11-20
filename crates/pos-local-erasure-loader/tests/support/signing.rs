@@ -1,7 +1,9 @@
-//! Test-only Local erasure signing fixtures shared by the loader's own
-//! tests, the Gateway's provisioning and serve-composition tests and the
-//! key-less root store fixture (`apps/piglor-gateway/tests/support/`
-//! `keyless_store.rs`), each including this file by `#[path]` (#1450).
+//! Test-only Local erasure signing fixtures (#1450).
+//!
+//! The loader's own tests, the Gateway's provisioning and serve-composition
+//! tests and the key-less root store fixture
+//! (`apps/piglor-gateway/tests/support/keyless_store.rs`) each include this
+//! file by `#[path]`.
 //!
 //! A [`Deployment`] is a deployment trust state store whose genesis TPS1,
 //! signed by the fixture operator key, has the fixture `erasure-bundle/`
