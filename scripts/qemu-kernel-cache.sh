@@ -11,8 +11,9 @@
 #   import ARCH DIR  copy every kernel output from DIR into the store
 #   fetch ARCH DIR   download ARCH's published cache into DIR; print hit=true,
 #                    or hit=false when nothing is published for this kernel
-#   publish ARCH DIR (main only) upload DIR as ARCH's release asset, then
-#                    delete ARCH's assets for other kernel derivations
+#   publish ARCH DIR (main only) upload DIR as ARCH's release asset
+#   prune ARCH       (main only) delete ARCH's assets for other kernel
+#                    derivations once they are a week old
 #   selftest DIR     (pull requests; needs jq, which the hosted Ubuntu runners
 #                    ship) run the same signing, verifying and import
 #                    code on a throwaway input-addressed path with a throwaway
@@ -33,7 +34,9 @@
 # not evicted; the Actions cache, always near its 10 GB limit, evicted the
 # kernel within hours of saving it. Fetching needs only read access; only the
 # main-only kernel cache job publishes. Where the files live is not part of
-# the trust: every path must still carry the main-only signature.
+# the trust: every path must still carry the main-only signature. The release
+# must stay mutable: the repository's immutable-releases setting is off
+# (2026-11-20), and turning it on would stop publish and prune.
 #
 # Trust: the Nix daemon keeps require-sigs = true (scripts/install-pinned-nix.sh).
 # export signs every path it writes with the secret key in
@@ -60,7 +63,7 @@ release_tag=qemu-kernel-cache
 asset_limit=$((2 * 1024 * 1024 * 1024))
 
 usage() {
-  printf 'usage: %s key ARCH | build ARCH | export ARCH DIR | verify ARCH DIR | import ARCH DIR | fetch ARCH DIR | publish ARCH DIR | selftest DIR\n' "$0" >&2
+  printf 'usage: %s key ARCH | build ARCH | prune ARCH | export ARCH DIR | verify ARCH DIR | import ARCH DIR | fetch ARCH DIR | publish ARCH DIR | selftest DIR\n' "$0" >&2
   exit 2
 }
 
@@ -215,19 +218,34 @@ import_cache() {
   import_paths "$2" "${paths[@]}"
 }
 
-# The names of the release's assets, one per line; nothing when the release
-# does not exist yet.
+# The release's fully uploaded assets, one "NAME<TAB>CREATED" line each;
+# nothing when the release does not exist yet. An upload that never finished
+# is not listed, so the next main run replaces it.
 release_assets() {
-  local listing status=0
-  listing="$(gh release view "${release_tag}" --json assets --jq '.assets[].name' 2>&1)" || status=$?
+  local listing errors status=0
+  errors="$(mktemp)"
+  listing="$(gh release view "${release_tag}" --json assets \
+    --jq '.assets[] | select(.state == "uploaded") | [.name, .createdAt] | @tsv' 2>"${errors}")" || status=$?
   if ((status != 0)); then
-    if [[ ${listing} == 'release not found' ]]; then
+    if [[ $(<"${errors}") == 'release not found' ]]; then
+      rm -f -- "${errors}"
       return 0
     fi
-    printf '%s\n' "${listing}" >&2
+    cat -- "${errors}" >&2
+    rm -f -- "${errors}"
     exit "${status}"
   fi
+  rm -f -- "${errors}"
   printf '%s\n' "${listing}"
+}
+
+asset_names() {
+  local name created
+  while IFS=$'\t' read -r name created; do
+    if [[ -n ${name} ]]; then
+      printf '%s\n' "${name}"
+    fi
+  done <<<"$1"
 }
 
 # The archive holds only the binary cache's regular files and directories,
@@ -255,14 +273,24 @@ fetch_cache() {
   name="$(cache_key "$1").tar"
   # Assigned first: a failure inside an argument's $(...) would not stop the script.
   assets="$(release_assets)"
+  assets="$(asset_names "${assets}")"
   if ! in_list "${name}" "${assets}"; then
     printf 'no published kernel cache %s\n' "${name}" >&2
     printf 'hit=false\n'
     return 0
   fi
   downloads="$(mktemp -d)"
-  gh release download "${release_tag}" --pattern "${name}" --dir "${downloads}"
+  # A download that fails is a miss: main then rebuilds and replaces the
+  # asset. An archive that downloads but is malformed, or fails the
+  # signature check afterwards, is an error.
+  if ! gh release download "${release_tag}" --pattern "${name}" --dir "${downloads}"; then
+    rm -rf -- "${downloads}"
+    printf 'the kernel cache %s could not be downloaded\n' "${name}" >&2
+    printf 'hit=false\n'
+    return 0
+  fi
   require_cache_archive "${downloads}/${name}"
+  rm -rf -- "$2"
   mkdir -p -- "$2"
   tar -xf "${downloads}/${name}" -C "$2" --no-same-owner --no-same-permissions
   rm -rf -- "${downloads}"
@@ -270,12 +298,13 @@ fetch_cache() {
 }
 
 publish_cache() {
-  local name archive asset assets uploads size
+  local name archive uploads size
   name="$(cache_key "$1").tar"
   uploads="$(mktemp -d)"
   archive="${uploads}/${name}"
   tar -cf "${archive}" -C "$2" .
   size="$(stat -c %s -- "${archive}")"
+  printf 'kernel cache archive %s: %s bytes\n' "${name}" "${size}"
   if ((size >= asset_limit)); then
     printf 'the kernel cache archive %s is 2 GiB or larger\n' "${name}" >&2
     exit 1
@@ -288,12 +317,23 @@ publish_cache() {
       --notes 'Signed Nix binary caches of the QEMU evidence guest kernel, one asset per kernel derivation (scripts/qemu-kernel-cache.sh).' ||
       gh release view "${release_tag}" >/dev/null
   fi
-  gh release upload "${release_tag}" "${archive}"
+  # --clobber replaces an asset whose earlier upload never finished.
+  gh release upload "${release_tag}" "${archive}" --clobber
   rm -rf -- "${uploads}"
+}
+
+# Runs on every main run, so a failed deletion is retried. Assets of every
+# key name are pruned, including a rotated one. Only assets older than a
+# week go: a re-run of an older main commit cannot delete the kernel that
+# newer pull requests fetch.
+prune() {
+  local name current assets created cutoff
+  current="$(cache_key "$1").tar"
+  cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
   assets="$(release_assets)"
-  while IFS= read -r asset; do
-    if [[ ${asset} == "qemu-kernel-${signing_key_name}-$1-"*.tar && ${asset} != "${name}" ]]; then
-      gh release delete-asset "${release_tag}" "${asset}" --yes
+  while IFS=$'\t' read -r name created; do
+    if [[ ${name} == qemu-kernel-*-"$1"-*.tar && ${name} != "${current}" && ${created} < "${cutoff}" ]]; then
+      gh release delete-asset "${release_tag}" "${name}" --yes
     fi
   done <<<"${assets}"
 }
@@ -364,7 +404,7 @@ selftest() {
 }
 
 case "${1:-}" in
-key | build)
+key | build | prune)
   (($# == 2)) || usage
   require_architecture "$2"
   "$1" "$2"

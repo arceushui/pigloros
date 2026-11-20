@@ -250,3 +250,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: bash scripts/qemu-kernel-cache.sh publish "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"
+      # Every run, so a failed deletion is retried on the next one.
+      - name: Prune week-old kernel assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/qemu-kernel-cache.sh prune "${EVIDENCE_ARCHITECTURE}"

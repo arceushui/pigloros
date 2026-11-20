@@ -103,6 +103,8 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
             lambda w: kernel(w)["steps"].remove(step(kernel(w), "Verify the published kernel")),
             lambda w: step(kernel(w), "Verify the published kernel").update(**{"continue-on-error": True}),
             lambda w: step(kernel(w), "Publish the signed kernel").update(**{"if": "${{ always() }}"}),
+            lambda w: step(kernel(w), "Prune week-old kernel assets").update(**{"continue-on-error": True}),
+            lambda w: evidence(w)["steps"].append(copy.deepcopy(step(kernel(w), "Prune week-old kernel assets"))),
             lambda w: w["concurrency"].update(**{"cancel-in-progress": True}),
             lambda w: w[True]["push"].update(branches=["**"]),
             lambda w: w[True]["push"]["paths"].pop(),

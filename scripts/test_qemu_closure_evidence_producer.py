@@ -726,14 +726,19 @@ esac
 
     ASSET = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxya.tar"
     OLD_ASSET = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxyz.tar"
+    ROTATED = "qemu-kernel-piglor-qemu-kernel-0-x86_64-0123456789abcdfghijklmnpqrsvwxyz.tar"
     OTHER_ARCH = "qemu-kernel-piglor-qemu-kernel-1-aarch64-0123456789abcdfghijklmnpqrsvwxyz.tar"
+    OLD = "2026-01-01T00:00:00Z"
+    LISTING = "gh release view qemu-kernel-cache --json assets --jq .assets[] | select(.state == \"uploaded\") | [.name, .createdAt] | @tsv"
 
-    def stub_gh(self, assets: tuple[str, ...] = (), release: str = "present", create_status: int = 0,
+    def stub_gh(self, assets: tuple[tuple[str, str], ...] = (), release: str = "present",
+                create_status: int = 0, download_status: int = 0, upload_status: int = 0,
                 archive: pathlib.Path | None = None) -> None:
-        # Logs each call as "gh ARGS". `release view` lists the assets, reports
-        # a missing release as gh does, or fails with another error; `upload`
-        # logs the archive's member names.
-        listing = " ".join(f"'{asset}'" for asset in assets)
+        # Logs each call as "gh ARGS". `release view --json` lists the
+        # uploaded assets as gh's --jq would, reports a missing release as gh
+        # does, or fails with another error; `upload` logs the archive's
+        # member names.
+        listing = " ".join(f"'{name}\t{created}'" for name, created in assets)
         listing = f"printf '%s\\n' {listing}" if assets else ":"
         (self.bin / "gh").write_text(f"""#!/bin/bash
 printf 'gh %s\\n' "$*" >>"{self.log}"
@@ -743,24 +748,30 @@ case "$1 $2" in
   missing) printf 'release not found\\n' >&2; exit 1 ;;
   broken) printf 'HTTP 502: Bad Gateway\\n' >&2; exit 4 ;;
   esac
+  printf 'A new release of gh is available\\n' >&2
   if [[ $* == *--json* ]]; then {listing}; fi ;;
 "release create") exit {create_status} ;;
 "release download")
+  if (({download_status} != 0)); then exit {download_status}; fi
   cp -- "{archive}" "$7/$5" ;;
 "release upload")
-  printf 'upload-listing %s\\n' "$(tar -tf "$4" | sort | tr '\\n' ' ')" >>"{self.log}" ;;
+  printf 'upload-listing %s\\n' "$(tar -tf "$4" | sort | tr '\\n' ' ')" >>"{self.log}"
+  exit {upload_status} ;;
 esac
 """)
         (self.bin / "gh").chmod(0o755)
 
     def archive(self, *members: tuple[str, str]) -> pathlib.Path:
         source = self.base / "source"
+        shutil.rmtree(source, ignore_errors=True)
         source.mkdir()
         for name, kind in members:
             path = source / name
             path.parent.mkdir(parents=True, exist_ok=True)
             if kind == "link":
                 path.symlink_to("/etc/passwd")
+            elif kind == "hardlink":
+                os.link(source / "nix-cache-info", path)
             else:
                 path.write_text(name)
         archive = self.base / "archive.tar"
@@ -770,27 +781,43 @@ esac
     def gh_calls(self) -> list[str]:
         return [call for call in self.calls() if call.startswith(("gh ", "upload-listing "))]
 
+    def published(self) -> None:
+        self.cache.mkdir(exist_ok=True)
+        (self.cache / "nix-cache-info").write_text("StoreDir: /nix/store\n")
+
     def test_fetch_unpacks_the_asset_named_by_the_kernel_derivation(self):
         archive = self.archive(("nix-cache-info", "file"), ("nar/a.nar.zst", "file"))
-        self.stub_gh(assets=(self.OTHER_ARCH, self.ASSET), archive=archive)
+        self.stub_gh(assets=((self.OTHER_ARCH, self.OLD), (self.ASSET, self.OLD)), archive=archive)
+        self.cache.mkdir()
+        (self.cache / "stale").write_text("left by an earlier fetch")
         result = self.run_cache("fetch", "x86_64", str(self.cache))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "hit=true\n")
         self.assertEqual((self.cache / "nar" / "a.nar.zst").read_text(), "nar/a.nar.zst")
-        download = next(call for call in self.gh_calls() if call.startswith("gh release download"))
-        self.assertRegex(download, rf"^gh release download qemu-kernel-cache --pattern {re.escape(self.ASSET)} --dir /")
+        self.assertFalse((self.cache / "stale").exists())
+        calls = self.gh_calls()
+        self.assertEqual(calls[0], self.LISTING)
+        self.assertRegex(calls[1], rf"^gh release download qemu-kernel-cache --pattern {re.escape(self.ASSET)} --dir /")
 
     def test_fetch_misses_without_the_asset_or_the_release(self):
-        for stub in ({"assets": (self.OLD_ASSET, self.OTHER_ARCH)}, {"release": "missing"}):
+        for stub in ({"assets": ((self.OLD_ASSET, self.OLD), (self.OTHER_ARCH, self.OLD))},
+                     {"release": "missing"}):
             with self.subTest(stub=stub):
                 self.log.unlink(missing_ok=True)
                 self.stub_gh(**stub)
                 result = self.run_cache("fetch", "x86_64", str(self.cache))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "hit=false\n")
-                self.assertEqual(self.gh_calls(),
-                                 ["gh release view qemu-kernel-cache --json assets --jq .assets[].name"])
+                self.assertEqual(self.gh_calls(), [self.LISTING])
                 self.assertFalse(self.cache.exists())
+
+    def test_fetch_misses_when_the_download_fails(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD),), download_status=1)
+        result = self.run_cache("fetch", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "hit=false\n")
+        self.assertIn("could not be downloaded", result.stderr)
+        self.assertFalse(self.cache.exists())
 
     def test_fetch_fails_when_the_release_cannot_be_listed(self):
         self.stub_gh(release="broken")
@@ -799,43 +826,65 @@ esac
         self.assertEqual(result.stdout, "")
         self.assertIn("HTTP 502", result.stderr)
 
-    def test_fetch_refuses_links_and_paths_outside_the_cache(self):
+    def test_fetch_refuses_links_and_unexpected_names(self):
         for members in ((("nix-cache-info", "file"), ("nar/link", "link")),
+                        (("nix-cache-info", "file"), ("nar/hard", "hardlink")),
                         (("nix-cache-info", "file"), ("nar/a b", "file"))):
             with self.subTest(members=members):
-                shutil.rmtree(self.base / "source", ignore_errors=True)
-                self.stub_gh(assets=(self.ASSET,), archive=self.archive(*members))
+                self.stub_gh(assets=((self.ASSET, self.OLD),), archive=self.archive(*members))
                 result = self.run_cache("fetch", "x86_64", str(self.cache))
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")
                 self.assertFalse(self.cache.exists())
-        traversal = self.base / "traversal.tar"
-        subprocess.run(["tar", "-cf", str(traversal), "-C", str(self.base), "--transform", "s,^,../,",
-                        "nix.log"], check=True)
-        self.stub_gh(assets=(self.ASSET,), archive=traversal)
-        result = self.run_cache("fetch", "x86_64", str(self.cache))
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("unexpected kernel cache archive entry: ../nix.log", result.stderr)
-        self.assertFalse(self.cache.exists())
 
-    def test_publish_uploads_the_cache_and_drops_this_architectures_older_assets(self):
-        self.cache.mkdir()
-        (self.cache / "nix-cache-info").write_text("StoreDir: /nix/store\n")
-        self.stub_gh(assets=(self.OLD_ASSET, self.OTHER_ARCH, self.ASSET))
+    def test_fetch_refuses_traversal_and_absolute_names(self):
+        (self.base / "payload").write_text("outside the cache")
+        for transform, shown in (("s,^,../,", "../payload"), ("s,^,/abs/,", "/abs/payload")):
+            with self.subTest(transform=transform):
+                archive = self.base / "outside.tar"
+                subprocess.run(["tar", "-cf", str(archive), "-P", "-C", str(self.base), "--transform", transform,
+                                "payload"], check=True)
+                self.stub_gh(assets=((self.ASSET, self.OLD),), archive=archive)
+                result = self.run_cache("fetch", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"unexpected kernel cache archive entry: {shown}", result.stderr)
+                self.assertFalse(self.cache.exists())
+
+    def test_publish_uploads_the_cache_replacing_an_unfinished_asset(self):
+        self.published()
+        self.stub_gh(assets=((self.OTHER_ARCH, self.OLD),))
         result = self.run_cache("publish", "x86_64", str(self.cache))
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, rf"^kernel cache archive {re.escape(self.ASSET)}: [0-9]+ bytes\n$")
         calls = self.gh_calls()
         self.assertEqual(calls[0], "gh release view qemu-kernel-cache")
-        self.assertRegex(calls[1], rf"^gh release upload qemu-kernel-cache /.*/{re.escape(self.ASSET)}$")
-        self.assertEqual(calls[2:], [
-            "upload-listing ./ ./nix-cache-info ",
-            "gh release view qemu-kernel-cache --json assets --jq .assets[].name",
-            f"gh release delete-asset qemu-kernel-cache {self.OLD_ASSET} --yes",
-        ])
+        self.assertRegex(calls[1], rf"^gh release upload qemu-kernel-cache /.*/{re.escape(self.ASSET)} --clobber$")
+        self.assertEqual(calls[2:], ["upload-listing ./ ./nix-cache-info "])
+
+    def test_publish_fails_when_the_upload_fails(self):
+        self.published()
+        self.stub_gh(upload_status=3)
+        result = self.run_cache("publish", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 3)
+
+    def test_publish_refuses_an_archive_at_the_asset_limit(self):
+        # A copy of the script with a 1 KiB limit, so the test needs no 2 GiB file.
+        script = self.base / "scripts" / "qemu-kernel-cache.sh"
+        script.parent.mkdir()
+        text = KERNEL_CACHE.read_text()
+        limit = "asset_limit=$((2 * 1024 * 1024 * 1024))"
+        self.assertIn(limit, text)
+        script.write_text(text.replace(limit, "asset_limit=1024"))
+        self.published()
+        self.stub_gh()
+        result = subprocess.run(["bash", str(script), "publish", "x86_64", str(self.cache)],
+                                env=self.environment(None), capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is 2 GiB or larger", result.stderr)
+        self.assertEqual(self.gh_calls(), [])
 
     def test_publish_creates_the_release_or_finds_the_one_another_job_created(self):
-        self.cache.mkdir()
-        (self.cache / "nix-cache-info").write_text("StoreDir: /nix/store\n")
+        self.published()
         for create_status, status in ((0, 0), (1, 1)):
             with self.subTest(create_status=create_status):
                 self.log.unlink(missing_ok=True)
@@ -850,6 +899,25 @@ esac
                     self.assertEqual(calls[2:], ["gh release view qemu-kernel-cache"])
                 else:
                     self.assertTrue(calls[2].startswith("gh release upload qemu-kernel-cache "))
+
+    def test_prune_deletes_only_this_architectures_week_old_other_kernels(self):
+        recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        recent_other = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxy0.tar"
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD),
+                             (recent_other, recent), (self.OTHER_ARCH, self.OLD)))
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gh_calls(), [
+            self.LISTING,
+            f"gh release delete-asset qemu-kernel-cache {self.OLD_ASSET} --yes",
+            f"gh release delete-asset qemu-kernel-cache {self.ROTATED} --yes",
+        ])
+
+    def test_prune_without_a_release_does_nothing(self):
+        self.stub_gh(release="missing")
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gh_calls(), [self.LISTING])
 
     def selftest(self, **stub) -> subprocess.CompletedProcess:
         self.stub_nix(**{"verify_status": 1, "import_status": 1, **stub})
