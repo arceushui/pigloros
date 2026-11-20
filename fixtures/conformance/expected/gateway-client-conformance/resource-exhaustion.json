@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "88160d66ef17ad42188f7cf5ed0f9cf112c0881ee1584f6628ededbd9ee2fbd5",
+  "input_blake3_digest": "2c942f98020dfc4eaebd134610e35784272566dcb3dd4c62c2987a9fa9111ae8",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",

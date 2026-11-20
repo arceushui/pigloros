@@ -12,6 +12,7 @@ use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
 use pos_reference::evaluator_protocol::SubjectAdapterKind;
 use pos_reference::profile::{NamespacedFailure, ProviderKey};
 
+mod erasure_fixture;
 mod execute;
 mod payload;
 mod schema_digests;
@@ -32,8 +33,10 @@ pub const ABI_MINOR: u16 = 0;
 pub const SCHEMA_ID: &str = "pigloros.gateway-client-conformance.case.v2";
 
 /// The route capabilities the adapter implements, sorted.
-pub const CAPABILITY_IDS: [&str; 11] = [
+pub const CAPABILITY_IDS: [&str; 13] = [
     "consent.revoke",
+    "erasure.read",
+    "erasure.request",
     "gateway.health.read",
     "gateway.ledger.read",
     "scenario-room.create",

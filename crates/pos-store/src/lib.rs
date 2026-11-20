@@ -102,6 +102,8 @@ pub mod memory;
 #[cfg(any(test, feature = "test-support"))]
 pub mod owner_store_admission;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod owner_store_installation;
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod owner_store_interlock;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
@@ -282,6 +284,19 @@ fn ensure_plaintext_preference_allowed(
     });
     if subject {
         Err(CoreError::SubjectPlaintextPreferenceRefused)
+    } else {
+        Ok(())
+    }
+}
+
+/// At most one category's obligations may name `ELXR1` targets (ADR-138 §5);
+/// both erasure authority snapshot adapters refuse more as
+/// [`pos_core::ErasureErrorV1::ScopeInvalid`].
+pub(crate) const fn export_targets_admitted(
+    export_targets: &[ErasureReferenceV1],
+) -> Result<(), pos_core::ErasureErrorV1> {
+    if export_targets.len() > pos_core::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
+        Err(pos_core::ErasureErrorV1::ScopeInvalid)
     } else {
         Ok(())
     }

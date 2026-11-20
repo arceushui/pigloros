@@ -27,6 +27,8 @@ mod recipient_owner;
 #[cfg(not(target_os = "linux"))]
 #[path = "sqlite/recipient_owner_unsupported.rs"]
 mod recipient_owner;
+#[cfg(target_os = "linux")]
+pub use recipient_owner::RecipientCustodyAttachErrorV1;
 pub use recipient_owner::RecipientKeyOwnerV1;
 mod recipient_decryption;
 pub use recipient_decryption::RecipientExportDecryptionErrorV1;
@@ -318,6 +320,10 @@ pub struct SqliteStore {
     /// every registry call fails with `StorePoisoned` until the store is dropped and reopened.
     #[cfg(target_os = "linux")]
     plugin_trust_poisoned: Cell<bool>,
+    /// Recipient custody attached once at composition (ADR-138 §4): one
+    /// claim-verified handle per grantee, `None` until attached.
+    #[cfg(target_os = "linux")]
+    recipient_custody: Option<Vec<RecipientKeyOwnerV1>>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -2249,6 +2255,8 @@ impl SqliteStore {
             composition_fallback_poisoned: Cell::new(false),
             #[cfg(target_os = "linux")]
             plugin_trust_poisoned: Cell::new(false),
+            #[cfg(target_os = "linux")]
+            recipient_custody: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
             mode_binding_epoch: None,
@@ -10167,8 +10175,9 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn erasure_authority_snapshot_with_limits(
         &mut self,
         limits: ErasureRecoveryLimitsV1,
+        export_targets: &[ErasureReferenceV1],
     ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
-        self.local_erasure_authority_snapshot(limits)
+        self.local_erasure_authority_snapshot(limits, export_targets)
     }
 
     fn retain_erasure_object(
@@ -10217,6 +10226,48 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         max: usize,
     ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
         self.local_erasure_recipient_export_publications(timelines, max)
+    }
+
+    fn begin_recipient_export_withdrawal(
+        &mut self,
+        export_id: [u8; 16],
+        grantee_owner: &pos_core::OwnerIdV1,
+    ) -> Result<pos_core::RecipientExportWithdrawalStateV1, ErasureErrorV1> {
+        #[cfg(target_os = "linux")]
+        {
+            self.retract_recipient_export(export_id, grantee_owner)
+        }
+        // ADR-138 T1 without Linux custody: no publication can exist, so every
+        // `export_id` is unknown (ADR-138 §6).
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (export_id, grantee_owner);
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    fn delete_recipient_export_ciphertext(
+        &mut self,
+        export_id: [u8; 16],
+    ) -> Result<pos_core::RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
+        #[cfg(target_os = "linux")]
+        {
+            self.delete_captured_recipient_export(export_id)
+        }
+        // ADR-138 owner step without Linux custody: nothing was ever captured.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = export_id;
+            Err(ErasureErrorV1::ArtifactDeletionFailed)
+        }
+    }
+
+    fn recipient_export_by_target(
+        &mut self,
+        target: ErasureReferenceV1,
+        timelines: &[TimelineId],
+    ) -> Result<Option<([u8; 16], pos_core::OwnerIdV1)>, ErasureErrorV1> {
+        self.local_erasure_recipient_export_by_target(target, timelines)
     }
 
     fn begin_protected_effect_interval(

@@ -37,10 +37,21 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   consent, records the
   fixture governance record and binds one export-permitted consent; an exchange that captures
   `room` fills the `{room}` slot of later paths with the room `id`.
-- Observations are normalized as the profile text states: a value equal to the captured consent
-  or room becomes `{consent}` or `{room}`, and ULID `id`, `consent_ref`, `timeline_id` and
-  `event_id` members, cursors, error messages, a room's correlation ID and descriptor hash, and
-  a room revision's provenance digest become placeholders.
+- The `authorized-erasure` compositions (#1449) grant only `erasure.request` and
+  `erasure.read`. Three of them serve the Local erasure authority: a fixture deployment trust
+  state, a bundle the production `provision_local_erasure` builds and a fixture
+  `erasure-bundle/` root signs, and a fixture role-2 signer, composed by the Gateway's own
+  `serve --require-local-erasure` loader from a protected credential directory. No driver runs.
+  `authorized-erasure-held` admits one erasure of the fixture actor before serving,
+  `authorized-erasure-expired` signs a bundle that expired at Unix second 1, and
+  `authorized-erasure-closed` serves the closed authority. An exchange that captures `erasure`
+  fills the `{erasure}` slot of later paths with the receipt's `request_id`.
+- Observations are normalized as the profile text states: a value equal to the captured
+  consent, room or erasure becomes `{consent}`, `{room}` or `{erasure}`, and ULID `id`,
+  `consent_ref`, `timeline_id`, `event_id`, `request_id`, `operation_id` and `operation_url`
+  members, cursors, error messages, a room's correlation ID and descriptor hash, a room
+  revision's or an erasure's provenance digest and an admission receipt's `trust` input become
+  placeholders.
 - Usage: one execution step per sent exchange, the response bytes as output bytes, one Event per
   `201` signal, action or consent revocation response and two per `201` room creation or
   derivation response (its request claim and revision); the other counters are 0.

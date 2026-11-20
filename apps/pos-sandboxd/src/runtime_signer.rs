@@ -50,7 +50,7 @@ impl<'a> AdmittedRuntimeKey<'a> {
         self.key_id
     }
 
-    /// The admitted public key.
+    /// The admitted public key every emitted signature verifies under.
     #[must_use]
     pub(crate) const fn key(&self) -> &'a VerifyingKey {
         self.key
