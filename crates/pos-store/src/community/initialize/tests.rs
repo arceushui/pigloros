@@ -303,8 +303,9 @@ fn the_writer_compares_and_swaps_the_inventory_and_selection() -> TestResult {
     Ok(())
 }
 
-/// G7: a batch whose rows are already catalogued is a `Conflict` that
-/// leaves the domain's inventory unchanged.
+/// G7: a batch whose rows are already catalogued, by registration address
+/// or by artifact identity, is a `Conflict` that leaves the domain's
+/// inventory unchanged.
 #[test]
 fn a_catalogued_row_refuses_the_commit() -> TestResult {
     let roster = Roster::release_one()?;
@@ -314,6 +315,16 @@ fn a_catalogued_row_refuses_the_commit() -> TestResult {
     let first = staged(case.prepare(&profile, OPERATION)?)?;
     let domain = &mut case.domain.world.domain;
     domain.store.commit_community_artifact_batch(&first.batch)?;
+    assert_eq!(
+        domain
+            .store
+            .commit_community_artifact_batch(&first.batch)
+            .err(),
+        Some(Error::Conflict)
+    );
+    // A catalogued artifact identity refuses on its own, even when its
+    // registration address is not catalogued.
+    domain.store.forget_artifact_registration_addresses();
     assert_eq!(
         domain
             .store

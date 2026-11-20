@@ -77,3 +77,13 @@ impl MemoryStore {
             })
     }
 }
+
+#[cfg(test)]
+impl MemoryStore {
+    /// Drop the address index only, keeping the identity index, so a test
+    /// can show that an already catalogued artifact identity alone refuses a
+    /// batch.
+    pub(crate) fn forget_artifact_registration_addresses(&mut self) {
+        self.artifact_registrations.clear();
+    }
+}
