@@ -3,14 +3,20 @@
 #
 #   key ARCH         print the cache key: the signing key name and the kernel
 #                    derivation's store hash
-#   build ARCH       (main only) build the kernel and its dev output
-#   export ARCH DIR  (main only) sign the built kernel and its dev output into
-#                    a file binary cache in DIR, then verify DIR
-#   verify ARCH DIR  require DIR to hold both closures, intact and signed by a
-#                    key in trusted-public-keys
-#   import ARCH DIR  copy the kernel and its dev output from DIR into the store
+#   build ARCH       (main only) build every kernel output
+#   export ARCH DIR  (main only) sign every built kernel output into a file
+#                    binary cache in DIR, then verify DIR
+#   verify ARCH DIR  require DIR to hold every output's closure, intact and
+#                    signed by a key in trusted-public-keys
+#   import ARCH DIR  copy every kernel output from DIR into the store
 #   selftest DIR     (pull requests) run the same signing, verifying and import
-#                    code on a throwaway store path with a throwaway key
+#                    code on a throwaway input-addressed path with a throwaway
+#                    key. It proves the committed public key is trusted, not
+#                    that the environment's secret matches it; export checks
+#                    that on main.
+#
+# Every output the kernel derivation declares is cached (nixpkgs declares out,
+# dev and modules); a missing output would make Nix rebuild the derivation.
 #
 # The guest kernel is rebuilt from source with the dev/test certificate, which
 # took about 86 of the 105 minutes of every evidence run. Its derivation
@@ -51,23 +57,20 @@ kernel_attribute() {
   printf '%s#nixosConfigurations.qemu-evidence-%s.config.boot.kernelPackages.kernel' "${flake}" "$1"
 }
 
-# The concrete output paths, evaluated against the local store. Passing them
-# instead of flake installables keeps `nix copy` from evaluating the flake
-# against the file binary cache, and keeps export from building anything.
+# The concrete path of every kernel output, evaluated against the local
+# store. Passing them instead of flake installables keeps `nix copy` from
+# evaluating the flake against the file binary cache, and keeps export from
+# building anything.
 kernel_paths() {
-  local kernel
-  kernel="$(kernel_attribute "$1")"
-  nix eval --raw --no-update-lock-file "${kernel}.outPath"
-  printf '\n'
-  nix eval --raw --no-update-lock-file "${kernel}.dev.outPath"
-  printf '\n'
+  nix eval --raw --no-update-lock-file "$(kernel_attribute "$1")" --apply \
+    'kernel: builtins.concatStringsSep "\n" (map (output: (builtins.getAttr output kernel).outPath) kernel.outputs) + "\n"'
 }
 
 read_kernel_paths() {
   mapfile -t paths < <(kernel_paths "$1")
   local path
-  if ((${#paths[@]} != 2)); then
-    printf 'expected two kernel output paths, got %d\n' "${#paths[@]}" >&2
+  if ((${#paths[@]} == 0)); then
+    printf 'the kernel has no output paths\n' >&2
     exit 1
   fi
   for path in "${paths[@]}"; do
@@ -93,7 +96,7 @@ key() {
 build() {
   local kernel
   kernel="$(kernel_attribute "$1")"
-  nix build --no-update-lock-file --no-link --print-build-logs "${kernel}" "${kernel}.dev"
+  nix build --no-update-lock-file --no-link --print-build-logs "${kernel}^*"
 }
 
 remove_key_file() {
@@ -162,13 +165,40 @@ export_cache() {
   verify_cache "$1" "$2"
 }
 
+# import_paths DIR PATH...: the daemon checks every signature.
+import_paths() {
+  local dir=$1
+  shift
+  nix copy --from "file://${dir}" "$@"
+}
+
 import_cache() {
   read_kernel_paths "$1"
-  nix copy --from "file://$2" "${paths[@]}"
+  import_paths "$2" "${paths[@]}"
+}
+
+# A path the store did not build or substitute from a trusted cache: built
+# locally from an input-addressed derivation with a unique name, so it has no
+# signature. A content-addressed path (nix store add-file, builtins.toFile)
+# needs no signature at all and would prove nothing.
+selftest_sample() {
+  local nonce path
+  nonce="$(date +%s%N)"
+  path="$(nix build --impure --no-link --print-out-paths --expr "derivation {
+    name = \"qemu-kernel-cache-selftest-${nonce}\";
+    system = builtins.currentSystem;
+    builder = \"/bin/sh\";
+    args = [ \"-c\" \"echo ${nonce} > \$out\" ];
+  }")"
+  if ! nix path-info --json "${path}" | jq -e '[.[]] | length == 1 and all(.ca == null)' >/dev/null; then
+    printf 'the self-test sample %s is content-addressed\n' "${path}" >&2
+    exit 1
+  fi
+  printf '%s\n' "${path}"
 }
 
 selftest() {
-  local dir=$1 secret public sample path entry found=false refused
+  local dir=$1 secret public path entry found=false refused
   for entry in $(trusted_public_keys); do
     if [[ ${entry} =~ ^${signing_key_name}:[A-Za-z0-9+/]{43}=$ ]]; then
       found=true
@@ -184,18 +214,19 @@ selftest() {
     printf 'the throwaway key %s is unexpectedly trusted\n' "${public}" >&2
     exit 1
   fi
-  sample="$(mktemp)"
-  printf 'qemu-kernel-cache self-test %s\n' "$(date +%s%N)" >"${sample}"
-  path="$(nix store add-file --name qemu-kernel-cache-selftest "${sample}")"
-  rm -f -- "${sample}"
+  path="$(selftest_sample)"
   sign_into "${secret}" "${dir}" "${path}"
   NIX_CONFIG="trusted-public-keys = ${public}" verify_paths "${dir}" "${path}"
-  if verify_paths "${dir}" "${path}" 2>/dev/null; then
+  if refused="$(verify_paths "${dir}" "${path}" 2>&1)"; then
     printf 'a path signed by an untrusted key passed verification\n' >&2
     exit 1
   fi
+  if [[ ${refused} != *untrusted* ]]; then
+    printf 'verification failed for a reason other than trust:\n%s\n' "${refused}" >&2
+    exit 1
+  fi
   nix store delete "${path}"
-  if refused="$(nix copy --from "file://${dir}" "${path}" 2>&1)"; then
+  if refused="$(import_paths "${dir}" "${path}" 2>&1)"; then
     printf 'the daemon imported a path signed by an untrusted key\n' >&2
     exit 1
   fi

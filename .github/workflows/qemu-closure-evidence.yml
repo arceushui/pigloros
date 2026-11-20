@@ -134,6 +134,9 @@ jobs:
         with:
           path: ${{ runner.temp }}/qemu-kernel-cache
           key: ${{ steps.kernel-key.outputs.key }}
+      - name: Note a kernel cache miss
+        if: ${{ steps.kernel-cache.outputs.cache-hit != 'true' }}
+        run: echo 'qemu-kernel-cache miss, so the kernel is built from source.' >>"${GITHUB_STEP_SUMMARY}"
       # The daemon still checks every signature. An entry it refuses leaves
       # the store unchanged, and the next step builds the kernel from source.
       - name: Import the signed kernel
