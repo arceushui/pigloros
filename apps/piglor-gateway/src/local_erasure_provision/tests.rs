@@ -222,7 +222,10 @@ impl Fixture {
 
     fn holds_timeline(&self, timeline: TimelineId) -> TestResult<bool> {
         Ok(SqliteStore::open(&self.path)?
-            .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())?
+            .erasure_authority_snapshot_with_limits(
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+                &[],
+            )?
             .timeline(timeline)
             .is_some())
     }
@@ -1050,7 +1053,10 @@ impl Fixture {
 
     fn request_count(&self) -> TestResult<usize> {
         Ok(SqliteStore::open(&self.path)?
-            .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())?
+            .erasure_authority_snapshot_with_limits(
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+                &[],
+            )?
             .inventory()
             .request_heads()
             .len())

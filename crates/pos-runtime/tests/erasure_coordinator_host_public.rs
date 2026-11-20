@@ -4726,7 +4726,9 @@ fn authority_calls_read_the_current_store_snapshot() -> Result<(), Box<dyn std::
     let read = |peer: &mut pos_store::sqlite::SqliteStore| -> Result<_, ErasureErrorV1> {
         Ok((
             pos_core::ErasureInventoryPersistencePortV1::erasure_authority_snapshot_with_limits(
-                peer, limits,
+                peer,
+                limits,
+                &[],
             )?,
             pos_core::ErasureInventoryPersistencePortV1::complete_erasure_inventory_snapshot_with_limits(
                 peer, limits,
