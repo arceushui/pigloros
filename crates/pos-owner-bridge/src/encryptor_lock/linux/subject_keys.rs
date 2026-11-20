@@ -295,6 +295,10 @@ impl SubjectEncryptorLock {
     /// [`SubjectKeyArtifactContent::NonRegular`], which D2 treats as
     /// unrecognized. Nothing is parsed, written, removed or repaired.
     ///
+    /// A listed regular file is not checked for owner, mode, link count or
+    /// lock, so being listed does not mean the file is private. The private
+    /// 0700 directory is the only access boundary here.
+    ///
     /// # Errors
     /// Returns `Unavailable(InterfaceUnavailable)` for an unsafe directory,
     /// more than 4,096 entries, an entry that changes while being read, or any
