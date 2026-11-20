@@ -86,7 +86,7 @@ where
 
 /// An authority read error as a recorded digest: no chain for the absent
 /// leaf grant (`Conflict`) means no Local Principal.
-fn absent_authority<T>(
+const fn absent_authority<T>(
     error: AuthorityPersistenceErrorV1,
 ) -> Result<Option<T>, LocalPrincipalReadErrorV1> {
     match error {
