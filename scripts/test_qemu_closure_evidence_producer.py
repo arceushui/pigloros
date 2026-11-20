@@ -900,18 +900,56 @@ esac
                 else:
                     self.assertTrue(calls[2].startswith("gh release upload qemu-kernel-cache "))
 
-    def test_prune_deletes_only_this_architectures_week_old_other_kernels(self):
+    def test_prune_deletes_only_this_architectures_week_old_other_kernels_but_the_newest(self):
         recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         recent_other = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxy0.tar"
-        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD),
+        older = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxy1.tar"
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, "2026-02-01T00:00:00Z"),
+                             (self.ROTATED, "2026-01-02T00:00:00Z"), (older, "2026-01-01T00:00:00Z"),
                              (recent_other, recent), (self.OTHER_ARCH, self.OLD)))
         result = self.run_cache("prune", "x86_64")
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The current asset is never a candidate. recent_other is the newest of
+        # the others, so it stays; every older one goes, newest first.
         self.assertEqual(self.gh_calls(), [
             self.LISTING,
             f"gh release delete-asset qemu-kernel-cache {self.OLD_ASSET} --yes",
             f"gh release delete-asset qemu-kernel-cache {self.ROTATED} --yes",
+            f"gh release delete-asset qemu-kernel-cache {older} --yes",
         ])
+
+    def test_prune_keeps_the_live_kernel_when_an_older_commit_is_rerun(self):
+        # A rerun published ASSET (the newest) while the live kernel is the
+        # older OLD_ASSET: it is the newest other asset, so it stays.
+        self.stub_gh(assets=((self.ASSET, "2026-03-01T00:00:00Z"), (self.OLD_ASSET, "2026-02-01T00:00:00Z"),
+                             (self.ROTATED, "2026-01-02T00:00:00Z")))
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gh_calls(), [
+            self.LISTING,
+            f"gh release delete-asset qemu-kernel-cache {self.ROTATED} --yes",
+        ])
+
+    def test_the_asset_listing_filter_keeps_only_finished_uploads(self):
+        script = KERNEL_CACHE.read_text()
+        match = re.search(r"--jq '([^']*select\(\.state == \"uploaded\"\)[^']*)'", script)
+        self.assertIsNotNone(match)
+        listing = json.dumps({"assets": [
+            {"name": "done.tar", "createdAt": "2026-01-01T00:00:00Z", "state": "uploaded"},
+            {"name": "partial.tar", "createdAt": "2026-01-02T00:00:00Z", "state": "starter"},
+        ]})
+        result = subprocess.run(["jq", "-r", match.group(1)], input=listing, capture_output=True, text=True,
+                                check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "done.tar\t2026-01-01T00:00:00Z\n")
+
+    def test_fetch_refuses_a_shallow_target_directory(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD),), archive=self.archive(("nix-cache-info", "file")))
+        for directory in ("/", "/tmp", "relative"):
+            with self.subTest(directory=directory):
+                result = self.run_cache("fetch", "x86_64", directory)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("must be an absolute path two levels deep", result.stderr)
 
     def test_prune_without_a_release_does_nothing(self):
         self.stub_gh(release="missing")

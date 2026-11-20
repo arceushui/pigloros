@@ -13,7 +13,8 @@
 #                    or hit=false when nothing is published for this kernel
 #   publish ARCH DIR (main only) upload DIR as ARCH's release asset
 #   prune ARCH       (main only) delete ARCH's assets for other kernel
-#                    derivations once they are a week old
+#                    derivations once they are a week old, keeping the newest
+#                    of them
 #   selftest DIR     (pull requests; needs jq, which the hosted Ubuntu runners
 #                    ship) run the same signing, verifying and import
 #                    code on a throwaway input-addressed path with a throwaway
@@ -290,6 +291,11 @@ fetch_cache() {
     return 0
   fi
   require_cache_archive "${downloads}/${name}"
+  # The caller's directory is emptied first: refuse a shallow path.
+  if [[ $2 != /*/* ]]; then
+    printf 'the kernel cache directory %s must be an absolute path two levels deep\n' "$2" >&2
+    exit 2
+  fi
   rm -rf -- "$2"
   mkdir -p -- "$2"
   tar -xf "${downloads}/${name}" -C "$2" --no-same-owner --no-same-permissions
@@ -323,19 +329,31 @@ publish_cache() {
 }
 
 # Runs on every main run, so a failed deletion is retried. Assets of every
-# key name are pruned, including a rotated one. Only assets older than a
-# week go: a re-run of an older main commit cannot delete the kernel that
-# newer pull requests fetch.
+# key name are pruned, including a rotated one. An asset goes only when it is
+# more than a week old and is not the newest asset besides the current one: a
+# rerun of an older main commit publishes its own kernel, and the kernel that
+# pull requests fetch is then that newest other asset.
 prune() {
-  local name current assets created cutoff
+  local name current assets created cutoff others
   current="$(cache_key "$1").tar"
   cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
   assets="$(release_assets)"
+  others=""
   while IFS=$'\t' read -r name created; do
-    if [[ ${name} == qemu-kernel-*-"$1"-*.tar && ${name} != "${current}" && ${created} < "${cutoff}" ]]; then
-      gh release delete-asset "${release_tag}" "${name}" --yes
+    if [[ ${name} == qemu-kernel-*-"$1"-*.tar && ${name} != "${current}" ]]; then
+      others+="${name}"$'\t'"${created}"$'\n'
     fi
   done <<<"${assets}"
+  if [[ -z ${others} ]]; then
+    return 0
+  fi
+  others="$(printf '%s' "${others}" | sort -t $'\t' -k2,2r)"
+  # The first line is the newest other asset, which is kept.
+  while IFS=$'\t' read -r name created; do
+    if [[ ${created} < "${cutoff}" ]]; then
+      gh release delete-asset "${release_tag}" "${name}" --yes
+    fi
+  done < <(printf '%s\n' "${others}" | tail -n +2)
 }
 
 # A path the store did not build or substitute from a trusted cache: built
