@@ -657,9 +657,9 @@ pub mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-    const BIND_OK: [u8; 10] = [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82];
+    pub(crate) const BIND_OK: [u8; 10] = [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82];
 
-    fn rejected(code: u8) -> Vec<u8> {
+    pub(crate) fn rejected(code: u8) -> Vec<u8> {
         vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, code, 0xf6]
     }
 
@@ -738,14 +738,14 @@ pub mod tests {
         install_profile(directory, profile)
     }
 
-    fn bind_payload(operation: u8) -> Vec<u8> {
+    pub(crate) fn bind_payload(operation: u8) -> Vec<u8> {
         [0x83, 0x64, b'F', b'A', b'L', b'1', 1, 0x82, 1, 0x58, 0x20]
             .into_iter()
             .chain([operation; 32])
             .collect()
     }
 
-    fn fork_payload(operation: u8, parent: TimelineId) -> io::Result<Vec<u8>> {
+    pub(crate) fn fork_payload(operation: u8, parent: TimelineId) -> io::Result<Vec<u8>> {
         let value = Value::Array(vec![
             Value::Text("FAL1".to_owned()),
             Value::Integer(1.into()),
@@ -771,7 +771,7 @@ pub mod tests {
         Ok([length.to_be_bytes().as_slice(), payload].concat())
     }
 
-    fn request(socket: &Path, payload: &[u8], fragmented: bool) -> io::Result<Vec<u8>> {
+    pub(crate) fn request(socket: &Path, payload: &[u8], fragmented: bool) -> io::Result<Vec<u8>> {
         let mut stream = UnixStream::connect(socket)?;
         let frame = frame(payload)?;
         if fragmented {
@@ -839,7 +839,7 @@ pub mod tests {
     }
 
     /// The child and admission digest of a successful FARL1 Fork result.
-    fn fork_result(response: &[u8]) -> io::Result<(TimelineId, [u8; 32])> {
+    pub(crate) fn fork_result(response: &[u8]) -> io::Result<(TimelineId, [u8; 32])> {
         let invalid =
             |message: &str| io::Error::new(io::ErrorKind::InvalidData, message.to_owned());
         let Value::Array(fields) = ciborium::from_reader(response).map_err(io::Error::other)?

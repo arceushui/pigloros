@@ -6,6 +6,7 @@
 //! test. Each test serves a `SQLite` world, as the Gateway serves only
 //! `SQLite` with the Local erasure authority.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use pos_core::store::{import_timeline_with_id, TimelineExport};
@@ -15,6 +16,9 @@ use pos_store::memory::MemoryStore;
 
 use super::*;
 use crate::local_erasure_signing_fixture::SIGNER_OWNER;
+use crate::local_fork_service::tests::{
+    bind_payload, fork_payload, fork_result, rejected, request, BIND_OK,
+};
 use crate::local_principal::{LocalConsentDraftV1, LocalConsentGrantDraftV1};
 
 /// The Timelines seeded into a served store before the Gateway opens it.
@@ -500,3 +504,55 @@ in_every_serve_mode!(
     every_actors_used_quota_holds_across_a_restart,
     a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines,
 );
+
+/// The FAL1 Fork of `parent` with the operation byte `operation`, sent to
+/// the managed listener at `socket`: the FARL1 answer.
+fn fork(socket: &Path, operation: u8, parent: &str) -> TestResult<Vec<u8>> {
+    let parent = TimelineId::from_ulid(Ulid::from_string(parent)?);
+    Ok(request(socket, &fork_payload(operation, parent)?, false)?)
+}
+
+/// Acceptance tests 2 and 11 through the Fork admission service of the
+/// managed mode.
+///
+/// A Fork the service admits of the actor's root, for the service's own
+/// principal, is a descendant of that root, so the actor's erasure freezes
+/// it with the root: two `timeline-payload` targets. After the freeze the
+/// service refuses a Fork of the frozen root with code 5, the ADR-106
+/// containment answer for a parent an active request covers, and still
+/// admits a Fork of another actor's root, which stays readable.
+#[tokio::test]
+async fn the_fork_admission_service_forks_into_and_beside_an_erasure() -> TestResult {
+    let mode = ServeMode::ManagedLocalForkAdmission;
+    let (served, driver) = Served::serve(mode, &SERVED, compiled())?;
+    let (actor, other) = (actor()?, other_actor()?);
+    let owned = served.create(actor, "owned").await?;
+    let others = served.create(other, "others").await?;
+    let socket = socket_of(&served.world)?;
+    assert_eq!(&request(&socket, &bind_payload(60), false)?[..10], &BIND_OK);
+    let descendant = fork_result(&fork(&socket, 61, &owned)?)?.0.to_string();
+    assert_eq!(served.events(actor, &descendant).await?.0, StatusCode::OK);
+    let admitted = served
+        .request(actor, "erasure-1", "private-subject-data")
+        .await?;
+    assert_eq!(admitted.status, StatusCode::ACCEPTED);
+    let observed = served
+        .receipted(actor, &erasure_id(actor, "erasure-1")?.to_string())
+        .await?;
+    assert_monotonic(&observed)?;
+    let last = observed.last().ok_or("no projection")?;
+    assert_eq!(last["state"], "partial-failure");
+    assert_eq!(payload_class(last)?["required"], 2);
+    for frozen in [&owned, &descendant] {
+        assert_eq!(
+            served.events(actor, frozen).await?,
+            (StatusCode::FORBIDDEN, json!("deleted")),
+            "{frozen}"
+        );
+    }
+    assert_eq!(fork(&socket, 62, &owned)?, rejected(5));
+    let beside = fork_result(&fork(&socket, 63, &others)?)?.0.to_string();
+    assert_eq!(served.events(other, &beside).await?.0, StatusCode::OK);
+    served.stop(driver).await?;
+    Ok(())
+}
