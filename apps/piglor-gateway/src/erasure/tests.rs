@@ -292,7 +292,10 @@ impl Served {
             }
             None => Body::empty(),
         };
-        let response = self.app.clone().oneshot(request.body(body)?).await?;
+        // Each `?` runs in its own statement, before any later await, so no
+        // non-`Send` error is held across an await (`future_not_send`).
+        let request = request.body(body)?;
+        let response = self.app.clone().oneshot(request).await?;
         let status = response.status();
         let headers = response.headers().clone();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
@@ -515,9 +518,8 @@ async fn each_erasure_operation_needs_its_own_grant(mode: ServeMode) -> TestResu
             (unknown.status, &unknown.bytes)
         );
     }
-    let ungranted = requester
-        .read(actor, &erasure_id(actor, "erasure-1")?.to_string())
-        .await?;
+    let id = erasure_id(actor, "erasure-1")?.to_string();
+    let ungranted = requester.read(actor, &id).await?;
     assert_eq!(
         (ungranted.status, &ungranted.bytes),
         (unknown.status, &unknown.bytes)
@@ -749,9 +751,8 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
                 .status,
             StatusCode::ACCEPTED
         );
-        let observed = served
-            .receipted(actor, &erasure_id(actor, key)?.to_string())
-            .await?;
+        let id = erasure_id(actor, key)?.to_string();
+        let observed = served.receipted(actor, &id).await?;
         let generations = observed
             .iter()
             .map(|body| body["generation"].as_u64().unwrap_or_default())
@@ -820,9 +821,8 @@ async fn a_subject_past_its_quota_is_refused_for_good(mode: ServeMode) -> TestRe
             .status,
         StatusCode::ACCEPTED
     );
-    served
-        .receipted(actor, &erasure_id(actor, "erasure-1")?.to_string())
-        .await?;
+    let id = erasure_id(actor, "erasure-1")?.to_string();
+    served.receipted(actor, &id).await?;
     let exhausted = served
         .request(actor, "erasure-2", "private-subject-data")
         .await?;
@@ -1015,7 +1015,9 @@ async fn status_of(app: &Router, method: &str, uri: &str, key: bool) -> TestResu
     } else {
         Body::empty()
     };
-    Ok(app.clone().oneshot(request.body(body)?).await?.status())
+    let request = request.body(body)?;
+    let response = app.clone().oneshot(request).await?;
+    Ok(response.status())
 }
 
 /// A Gateway that protects nothing decides no subject, so it serves no
