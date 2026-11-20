@@ -14,13 +14,16 @@
 //!
 //! [`RetainedResponse`] keeps the exact bytes: AGR1, the chain, SPR1, SPY1
 //! and the `ReleaseV1` sent, with the RQE1, KOE1 and TME1 they bind. The
-//! output bytes stay fenced in the attempt's capture.
+//! output bytes stay fenced in the attempt's capture. When the output
+//! transfer of a Completed response times out,
+//! [`RetainedResponse::successor`] re-issues it once (R9 §4.7): a successor
+//! TME1, SAU1 event 10 appended to the chain, and a new SPR1 and SPY1.
 
 use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AttemptResponse, ExecutionRelease, PayloadDescriptor, ReceiptAuthority,
     RuntimeSigned, SandboxAuditRecord, SandboxAuditRecordFields, SandboxProviderProtocolError,
     SandboxProviderReceipt, SandboxProviderReceiptFields, SandboxProviderResult,
-    SandboxProviderResultFields, SandboxTerminalOutcome, SelfDigested, Verified,
+    SandboxProviderResultFields, SandboxTerminalOutcome, SelfDigested, TransferRecord, Verified,
 };
 
 use super::{AttemptRecords, EvidenceFault};
@@ -40,10 +43,9 @@ const EXECUTION_RELEASE_DENIED: u8 = 13;
 pub struct RetainedResponse {
     grant: IssuedGrant,
     records: AttemptRecords,
-    audit: Vec<Vec<u8>>,
-    receipt: Vec<u8>,
-    result: Vec<u8>,
-    release: Option<Vec<u8>>,
+    sent: Sent,
+    chain: Vec<SandboxAuditRecord>,
+    encoded: Encoded,
 }
 
 impl RetainedResponse {
@@ -63,13 +65,41 @@ impl RetainedResponse {
     /// The exact AGR1, SAU1 chain, SPR1, SPY1 and `ReleaseV1` bytes.
     #[must_use]
     pub fn response(&self) -> AttemptResponse<'_> {
+        let (audit, receipt, result, release) = &self.encoded;
         AttemptResponse {
             grant: self.grant.bytes(),
-            audit: &self.audit,
-            receipt: &self.receipt,
-            result: &self.result,
-            release: self.release.as_deref(),
+            audit,
+            receipt,
+            result,
+            release: release.as_deref(),
         }
+    }
+
+    /// Re-issue this Completed response once its output transfer timed out
+    /// (R9 §4.7): the successor TME1 records `transfer`, which is
+    /// incomplete, and SAU1 event 10, SPR1 and SPY1 follow it. The earlier
+    /// records stay in the chain.
+    ///
+    /// # Errors
+    /// [`ResponseFault::Evidence`] when this response cannot be re-issued
+    /// ([`EvidenceFault::NotReissuable`]) or the successor is refused, and
+    /// [`ResponseFault::Sign`] when a record is refused or a signature does
+    /// not verify under `admitted`.
+    pub fn successor<R: RuntimeAttestationSigner>(
+        &self,
+        transfer: TransferRecord,
+        signer: &R,
+        admitted: AdmittedRuntimeKey<'_>,
+    ) -> Result<Self, ResponseFault> {
+        let records = self.records.successor(transfer)?;
+        Ok(assemble(
+            signer,
+            admitted,
+            &self.grant,
+            records,
+            self.sent.clone(),
+            self.chain.clone(),
+        )?)
     }
 }
 
@@ -90,19 +120,19 @@ pub enum ResponseFault {
 }
 
 /// What the attempt sent that the signed records name.
-#[derive(Default)]
-struct Sent<'a> {
-    release: Option<&'a ExecutionRelease>,
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Sent {
+    release: Option<ExecutionRelease>,
     transcripts: Vec<[u8; 32]>,
     output: Option<PayloadDescriptor>,
 }
 
-impl<'a> Sent<'a> {
+impl Sent {
     /// The `ReleaseV1` sent, the network transcripts and the output
     /// descriptor of an executed attempt. No other attempt sent anything a
     /// signed response names: one that failed after its `ReleaseV1` has no
     /// records, so it is never signed (owner decision 2026-11-19, Q2).
-    fn of<S>(progress: &'a AttemptProgress<S>) -> Self {
+    fn of<S>(progress: &AttemptProgress<S>) -> Self {
         match progress {
             AttemptProgress::Executed {
                 evidence,
@@ -110,12 +140,16 @@ impl<'a> Sent<'a> {
                 adapter,
                 ..
             } => Self {
-                release: evidence.release().release(),
+                release: evidence.release().release().cloned(),
                 transcripts: network.transcript_digests(),
                 output: Some(adapter.output().descriptor()),
             },
             _ => Self::default(),
         }
+    }
+
+    fn release_digest(&self) -> Option<[u8; 32]> {
+        self.release.as_ref().map(ExecutionRelease::digest)
     }
 }
 
@@ -181,13 +215,25 @@ fn events(
             );
             [(LAUNCHER_READY, vec![agr1, ready, koe1]), released]
         });
-    let terminal = records.classification().code().map(|code| {
+    lifecycle
+        .into_iter()
+        .flatten()
+        .chain(terminal_event(records, grant))
+        .collect()
+}
+
+/// The terminal SAU1 event `[agr1, elm1, tme1]`, unless TME1 Completed.
+fn terminal_event(records: &AttemptRecords, grant: &AdmissionGrant) -> Option<Event> {
+    records.classification().code().map(|code| {
         (
             code.code(),
-            vec![agr1, grant.elm1_digest, records.termination().digest()],
+            vec![
+                grant.grant_digest(),
+                grant.elm1_digest,
+                records.termination().digest(),
+            ],
         )
-    });
-    lifecycle.into_iter().flatten().chain(terminal).collect()
+    })
 }
 
 /// Where the next SAU1 record links: its sequence and the digest of the
@@ -199,11 +245,19 @@ struct Link {
 }
 
 impl Link {
-    /// The start of a chain.
-    const FIRST: Self = Self {
-        sequence: 0,
-        previous: None,
-    };
+    /// The link after the last record of `prefix`, or the start of a chain.
+    fn after(prefix: &[SandboxAuditRecord]) -> Self {
+        prefix.last().map_or(
+            Self {
+                sequence: 0,
+                previous: None,
+            },
+            |last| Self {
+                sequence: last.sequence + 1,
+                previous: Some(last.record_digest),
+            },
+        )
+    }
 }
 
 /// Sign one SAU1 event at `link`.
@@ -282,7 +336,7 @@ fn receipt_fields(
     grant: &AdmissionGrant,
     issued: &IssuedGrant,
     records: &AttemptRecords,
-    sent: &Sent<'_>,
+    sent: &Sent,
     sau1_digest: [u8; 32],
 ) -> SandboxProviderReceiptFields {
     SandboxProviderReceiptFields {
@@ -295,7 +349,7 @@ fn receipt_fields(
         elm1_digest: grant.elm1_digest,
         network_transcript_digests: sent.transcripts.clone(),
         ready1_digest: records.observed().fields().status.ready1_digest(),
-        release1_digest: sent.release.map(ExecutionRelease::digest),
+        release1_digest: sent.release_digest(),
         requested_configuration_evidence: records.requested().digest(),
         kernel_observation_evidence: records.observed().digest(),
         negative_probe_evidence: issued.negative_probe_evidence(),
@@ -356,6 +410,21 @@ fn encoded(
         })
 }
 
+/// The SAU1 events after `prefix`: a first response's lifecycle and
+/// terminal events, or only the terminal event of a successor.
+fn events_after(
+    prefix: &[SandboxAuditRecord],
+    records: &AttemptRecords,
+    grant: &AdmissionGrant,
+    sent: &Sent,
+) -> Vec<Event> {
+    if prefix.is_empty() {
+        events(records, grant, sent.release_digest())
+    } else {
+        terminal_event(records, grant).into_iter().collect()
+    }
+}
+
 /// Sign SPR1 over the chain whose last record is `sau1`.
 fn sign_receipt<R: RuntimeAttestationSigner>(
     signer: &R,
@@ -363,7 +432,7 @@ fn sign_receipt<R: RuntimeAttestationSigner>(
     grant: &AdmissionGrant,
     issued: &IssuedGrant,
     records: &AttemptRecords,
-    sent: &Sent<'_>,
+    sent: &Sent,
     sau1: [u8; 32],
 ) -> Result<SandboxProviderReceipt, RuntimeSignerError> {
     signed(
@@ -380,7 +449,7 @@ fn sign_result<R: RuntimeAttestationSigner>(
     admitted: AdmittedRuntimeKey<'_>,
     grant: &AdmissionGrant,
     records: &AttemptRecords,
-    sent: &Sent<'_>,
+    sent: &Sent,
     (receipt, chain): (&SandboxProviderReceipt, &[SandboxAuditRecord]),
 ) -> Result<SandboxProviderResult, RuntimeSignerError> {
     let fields = result_fields(grant, records, sent.output.clone(), receipt, chain);
@@ -392,23 +461,25 @@ fn sign_result<R: RuntimeAttestationSigner>(
     )
 }
 
-/// Sign the chain, then SPR1 over its last record, then SPY1 over SPR1, and
-/// encode them. An attempt with no event to sign is refused.
-fn sign_response<R: RuntimeAttestationSigner>(
+/// The signed records after `prefix`: the SAU1 chain, then SPR1 over its
+/// last record, then SPY1 over SPR1. A response with no event to sign is
+/// refused.
+fn sign_records<R: RuntimeAttestationSigner>(
     signer: &R,
     admitted: AdmittedRuntimeKey<'_>,
-    grant: &AdmissionGrant,
-    issued: &IssuedGrant,
+    (grant, issued): (&AdmissionGrant, &IssuedGrant),
     records: &AttemptRecords,
-    sent: &Sent<'_>,
-) -> Result<Encoded, RuntimeSignerError> {
-    let release = sent.release.map(ExecutionRelease::digest);
-    Events::new(events(records, grant, release))
+    sent: &Sent,
+    prefix: Vec<SandboxAuditRecord>,
+) -> Result<Signed, RuntimeSignerError> {
+    let link = Link::after(&prefix);
+    Events::new(events_after(&prefix, records, grant, sent))
         .ok_or(RuntimeSignerError::Protocol(
             SandboxProviderProtocolError::InconsistentFields,
         ))
-        .and_then(|events| chain(signer, admitted, grant.attempt_id, Link::FIRST, events))
-        .and_then(|(chain, sau1)| {
+        .and_then(|events| chain(signer, admitted, grant.attempt_id, link, events))
+        .and_then(|(appended, sau1)| {
+            let chain = [prefix, appended].concat();
             sign_receipt(signer, admitted, grant, issued, records, sent, sau1)
                 .map(|receipt| (chain, receipt))
         })
@@ -416,9 +487,37 @@ fn sign_response<R: RuntimeAttestationSigner>(
             sign_result(signer, admitted, grant, records, sent, (&receipt, &chain))
                 .map(|result| (chain, receipt, result))
         })
-        .and_then(|(chain, receipt, result)| {
-            encoded(&chain, &receipt, &result, sent.release).map_err(Into::into)
+}
+
+/// The signed SAU1 chain, SPR1 and SPY1 of one response.
+type Signed = (
+    Vec<SandboxAuditRecord>,
+    SandboxProviderReceipt,
+    SandboxProviderResult,
+);
+
+/// Sign the events after `prefix`, then SPR1 and SPY1, and retain them with
+/// what they bind.
+fn assemble<R: RuntimeAttestationSigner>(
+    signer: &R,
+    admitted: AdmittedRuntimeKey<'_>,
+    issued: &IssuedGrant,
+    records: AttemptRecords,
+    sent: Sent,
+    prefix: Vec<SandboxAuditRecord>,
+) -> Result<RetainedResponse, RuntimeSignerError> {
+    let grant = AdmissionGrant::from_canonical_cbor(issued.bytes())?;
+    let (chain, receipt, result) =
+        sign_records(signer, admitted, (&grant, issued), &records, &sent, prefix)?;
+    encoded(&chain, &receipt, &result, sent.release.as_ref())
+        .map(|encoded| RetainedResponse {
+            grant: issued.clone(),
+            records,
+            sent,
+            chain,
+            encoded,
         })
+        .map_err(Into::into)
 }
 
 impl<S: RequestedConfiguration> EndedAttempt<S> {
@@ -436,19 +535,14 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
         admitted: AdmittedRuntimeKey<'_>,
     ) -> Result<RetainedResponse, ResponseFault> {
         let records = self.records()?;
-        let issued = self.admission().grant();
-        let sent = Sent::of(self.progress());
-        let (audit, receipt, result, release) = AdmissionGrant::from_canonical_cbor(issued.bytes())
-            .map_err(RuntimeSignerError::from)
-            .and_then(|grant| sign_response(signer, admitted, &grant, issued, &records, &sent))?;
-        Ok(RetainedResponse {
-            grant: issued.clone(),
+        Ok(assemble(
+            signer,
+            admitted,
+            self.admission().grant(),
             records,
-            audit,
-            receipt,
-            result,
-            release,
-        })
+            Sent::of(self.progress()),
+            Vec::new(),
+        )?)
     }
 }
 

@@ -122,6 +122,57 @@ impl AttemptRecords {
     pub const fn classification(&self) -> &TerminalClassification {
         &self.classification
     }
+
+    /// The records with the successor of this first, Completed TME1 after
+    /// its output transfer timed out (R9 §4.7): every field is copied except
+    /// `output-transfer`, now the incomplete `transfer`, the predecessor's
+    /// digest and the recomputed terminal code.
+    fn successor(&self, transfer: TransferRecord) -> Result<Self, EvidenceFault> {
+        let stored = self.termination.fields();
+        // The stored TME1 must be a first one (no predecessor): R9 §4.7
+        // then gives it no output transfer.
+        let reissuable = stored.previous_tme1_digest.is_none()
+            && self.classification.code().is_none()
+            && !transfer.complete;
+        if !reissuable {
+            return Err(EvidenceFault::NotReissuable);
+        }
+        // The transfer carries the retained output and starts after the
+        // teardown the stored TME1 records.
+        let bound = stored
+            .output_capture
+            .is_some_and(|capture| capture.accepted_bytes == transfer.expected_bytes)
+            && transfer.start >= stored.cleanup.finished_at;
+        if !bound {
+            return Err(EvidenceFault::UnboundTransfer);
+        }
+        let mut fields = stored.clone();
+        fields.output_transfer = Some(transfer);
+        fields.previous_tme1_digest = Some(self.termination.digest());
+        classified(self.requested.clone(), self.observed.clone(), fields)
+    }
+}
+
+/// Classify the TME1 of `fields` from the records themselves, and record
+/// its contradiction and terminal code (R9 §6 rule 7).
+fn classified(
+    requested: RequestedConfigurationEvidence,
+    observed: KernelObservationEvidence,
+    mut fields: TerminationEvidenceFields,
+) -> Result<AttemptRecords, EvidenceFault> {
+    TerminationEvidence::new(&fields)
+        .map(|draft| draft.facts(&requested, &observed).classify())
+        .and_then(|classification| {
+            fields.contradiction = classification.contradiction();
+            fields.terminal_code = classification.code();
+            TerminationEvidence::new(&fields).map(|termination| AttemptRecords {
+                requested,
+                observed,
+                termination,
+                classification,
+            })
+        })
+        .map_err(EvidenceFault::from)
 }
 
 /// Why no terminal records exist for an ended attempt.
@@ -143,6 +194,14 @@ pub enum EvidenceFault {
     /// The record encoders refused the facts.
     #[error(transparent)]
     Record(#[from] SandboxProviderProtocolError),
+    /// The re-issue was refused: the stored TME1 is already a successor or
+    /// not Completed, or the output transfer completed (R9 §4.7).
+    #[error("the termination evidence cannot be re-issued")]
+    NotReissuable,
+    /// The output transfer does not carry the retained output, or started
+    /// before the cleanup finished.
+    #[error("the output transfer is not the retained output's")]
+    UnboundTransfer,
 }
 
 /// How a start that was requested is known (RQE1).
@@ -433,29 +492,10 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
             agr1_digest,
             requested.digest(),
         )
-        .and_then(|observed| self.terminate(&reached, requested, observed))
-    }
-
-    /// Seal the TME1 that binds `observed` and classify it.
-    fn terminate(
-        &self,
-        reached: &Reached<'_, S>,
-        requested: RequestedConfigurationEvidence,
-        observed: KernelObservationEvidence,
-    ) -> Result<AttemptRecords, EvidenceFault> {
-        let mut fields = self.termination_fields(reached, observed.digest())?;
-        let draft = TerminationEvidence::new(&fields)?;
-        let classification = draft.facts(&requested, &observed).classify();
-        fields.contradiction = classification.contradiction();
-        fields.terminal_code = classification.code();
-        TerminationEvidence::new(&fields)
-            .map(|termination| AttemptRecords {
-                requested,
-                observed,
-                termination,
-                classification,
-            })
-            .map_err(EvidenceFault::from)
+        .and_then(|observed| {
+            let fields = self.termination_fields(&reached, observed.digest())?;
+            classified(requested, observed, fields)
+        })
     }
 
     /// The TME1 fields before classification.

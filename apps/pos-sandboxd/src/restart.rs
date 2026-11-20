@@ -1,6 +1,6 @@
 //! Restart reconciliation of the previous runtime's attempts (ADR-087 §3).
 //!
-//! [`reconcile_restart`] runs while admission stays closed: the exclusive
+//! [`reconcile_cleanup`] runs while admission stays closed: the exclusive
 //! [`SystemdAttemptRecovery`] keeps the registry lock, so no attempt can be
 //! committed until it returns. Within one deadline it:
 //!
@@ -29,13 +29,8 @@
 //!    end, host nftables table and recorded forwarding change through
 //!    [`OrphanNetworkCleanup`] (ADR-069 §8), by the overall deadline, so it
 //!    cannot use up the detach budget;
-//! 5. proves the Local egress property through [`EgressPropertyProbe`]
-//!    (ADR-069 §1: an absent or ineffective property closes admission), on
-//!    the network the sweep left clean, by the overall deadline. The probe
-//!    runs only after the sweep, which removes whatever an earlier,
-//!    interrupted probe left;
-//! 6. proves every PAI3 root's recorded loop/dm generations absent now;
-//! 7. waits until no `MountImage` request of the previous runtime can still
+//! 5. proves every PAI3 root's recorded loop/dm generations absent now;
+//! 6. waits until no `MountImage` request of the previous runtime can still
 //!    attach a loop device (owner decision D2). The registry's activation
 //!    marker records the boot and `CLOCK_MONOTONIC` time of the last request,
 //!    written durably before it was sent. mountfsd may still complete a
@@ -50,7 +45,7 @@
 //!    70 s old needs no wait. A missing marker while a directory stage is
 //!    recorded, which only an altered registry can show, a malformed marker,
 //!    or an unreadable boot ID or clock fails closed;
-//! 8. proves no loop device is backed by a provider image, swept once after
+//! 7. proves no loop device is backed by a provider image, swept once after
 //!    that wait. An activation that reached mountfsd but crashed before its
 //!    PAI3 record left no recorded generations, so this sweep is what proves
 //!    its devices absent.
@@ -65,11 +60,23 @@
 //! root. An unknown unit or mount, an unknown directory, a contradiction or
 //! the deadline keeps admission closed. Stopping and detaching act only on
 //! resources positively identified as the previous runtime's, and nothing is
-//! removed from the registry unless every step succeeded.
+//! removed from the registry unless every unit, network and device step
+//! succeeded.
+//!
+//! [`reconcile_restart`] is the runtime's own restart: [`reconcile_cleanup`],
+//! then the Local egress property proved through [`EgressPropertyProbe`]
+//! (ADR-069 §1: an absent or ineffective property closes admission), on the
+//! network the sweep left clean, by the overall deadline. The egress probe
+//! follows intent removal (ADR-069 R12 §7.1 step 5): a probe failure keeps
+//! admission closed and leaves a clean registry, and the next restart sweeps
+//! and probes again. The root selector's termination of a previous runtime
+//! runs only [`reconcile_cleanup`]: the egress property proves the network
+//! fit for new admission, which is not termination evidence.
 
 use std::error::Error;
 use std::future::Future;
 use std::io;
+use std::time::Duration;
 
 use futures_util::future::join_all;
 use tokio::time::{sleep, timeout_at, Instant};
@@ -112,10 +119,11 @@ pub trait EgressPropertyProbe {
 
 /// The previous runtime's attempts, every one reconciled to absent.
 ///
-/// Only [`reconcile_restart`] creates it, after the directories and intents
-/// were removed. It is the exact identity handoff for sealed recovery (#349):
-/// the committed planned intents, in canonical `AttemptId` order. It grants no
-/// admission by itself; current control-floor checks still apply.
+/// Only [`reconcile_cleanup`] creates it, after the directories and intents
+/// were removed. It is the exact identity handoff of root-owned recovery
+/// (ADR-069 R12 §10): the committed planned intents, in canonical `AttemptId`
+/// order. It grants no admission by itself; current control-floor checks
+/// still apply.
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReconciledRestart {
     attempts: Vec<PlannedAttemptIntent>,
@@ -214,19 +222,22 @@ pub enum RestartReconciliationError {
 
 type Reconciled<T> = Result<T, RestartReconciliationError>;
 
-/// Reconcile every previous-runtime attempt within `deadline`.
+/// The runtime's own restart: [`reconcile_cleanup`], then the egress probe.
+///
+/// Every previous-runtime attempt is reconciled within `deadline`, then the
+/// Local egress property is proved on the network the sweep left clean.
 ///
 /// `cleanup` bounds the work on surviving resources: a surviving unit's
 /// process shutdown phases and unit absence, then the release of a
 /// still-mounted root. Its phases should end before `deadline`, which bounds
 /// every step; ADR-069 targets 2 s of cleanup within a 10 s restart.
-/// `network` removes orphaned network state, then `egress` proves the egress
-/// property on the clean network.
+/// `network` removes orphaned network state, and `egress` proves the egress
+/// property once the intents are removed.
 ///
 /// # Errors
 /// Returns the first [`RestartReconciliationError`]. Nothing is removed from
-/// the registry unless every unit, network, egress and device step succeeded
-/// first.
+/// the registry unless every unit, network and device step succeeded first;
+/// an egress failure leaves the registry reconciled and admission closed.
 pub async fn reconcile_restart<N, P>(
     transport: &SystemdTransientUnitTransport,
     recovery: SystemdAttemptRecovery,
@@ -238,15 +249,55 @@ where
     N: OrphanNetworkCleanup + Sync,
     P: EgressPropertyProbe + Sync,
 {
-    reconcile_with(
+    let cleaned = host_cleanup(transport, recovery, network, (cleanup, deadline)).await;
+    then_prove_egress(cleaned, egress).await
+}
+
+/// The cleanup part of restart reconciliation (ADR-069 R12 §7.1 step 5):
+/// every step of [`reconcile_restart`] but the egress probe.
+///
+/// The root selector runs it to terminate a previous runtime. It never runs
+/// the egress probe, which proves the network fit for new admission rather
+/// than proving termination. The registry lock is released when it returns.
+/// Also returns the #1200 D2 recent-activation wait it applied beyond
+/// `deadline`: zero without a recent activation.
+///
+/// # Errors
+/// Returns the first [`RestartReconciliationError`]. Nothing is removed from
+/// the registry unless every unit, network and device step succeeded first.
+pub async fn reconcile_cleanup<N>(
+    transport: &SystemdTransientUnitTransport,
+    recovery: SystemdAttemptRecovery,
+    network: &N,
+    cleanup: AttemptCleanupDeadlines,
+    deadline: Instant,
+) -> Reconciled<(ReconciledRestart, Duration)>
+where
+    N: OrphanNetworkCleanup + Sync,
+{
+    host_cleanup(transport, recovery, network, (cleanup, deadline))
+        .await
+        .map(|(reconciled, extended)| (reconciled, extended.saturating_duration_since(deadline)))
+}
+
+/// The cleanup on this host's manager and kernel. Returns the reconciled
+/// attempts and the deadline the egress probe keeps: `deadline`, extended
+/// by any #1200 D2 recent-activation wait.
+async fn host_cleanup<N: OrphanNetworkCleanup + Sync>(
+    transport: &SystemdTransientUnitTransport,
+    recovery: SystemdAttemptRecovery,
+    network: &N,
+    deadlines: (AttemptCleanupDeadlines, Instant),
+) -> Reconciled<(ReconciledRestart, Instant)> {
+    cleanup_with(
         transport,
         recovery,
-        (network, egress),
+        network,
         &Host {
             transport,
             detach: crate::RootResourceIdentity::detach_recovered,
         },
-        (cleanup, deadline),
+        deadlines,
         (
             crate::RootResourceIdentity::recorded_generations_absent,
             crate::RootResourceIdentity::provider_loops_absent,
@@ -254,6 +305,19 @@ where
         ),
     )
     .await
+}
+
+/// Prove the egress property after a successful cleanup, by the deadline
+/// the cleanup left: the overall deadline plus any recent-activation wait,
+/// so a wait never uses up the probe's time.
+async fn then_prove_egress<E: EgressPropertyProbe + Sync>(
+    cleaned: Reconciled<(ReconciledRestart, Instant)>,
+    egress: &E,
+) -> Reconciled<ReconciledRestart> {
+    match cleaned {
+        Ok((reconciled, deadline)) => prove_egress(egress, deadline).await.map(|()| reconciled),
+        Err(error) => Err(error),
+    }
 }
 
 /// The previous runtime's surviving units and mounted roots, behind a port
@@ -308,20 +372,20 @@ where
 /// The recorded loop/dm generations of one root, mapper first.
 type Generations = [((u32, u32), u64); 2];
 
-/// `network` is the orphan sweep and the egress probe; `deadlines` are the
-/// surviving-resource cleanup and the overall deadline; `probes` are the
-/// recorded-generation probe, the provider loop sweep and the boot clock.
-async fn reconcile_with<N, E, S, P, F, L, G, C>(
+/// `network` is the orphan sweep; `deadlines` are the surviving-resource
+/// cleanup and the overall deadline; `probes` are the recorded-generation
+/// probe, the provider loop sweep and the boot clock. Also returns the
+/// overall deadline extended by the recent-activation wait.
+async fn cleanup_with<N, S, P, F, L, G, C>(
     transport: &SystemdTransientUnitTransport,
     recovery: SystemdAttemptRecovery,
-    network: (&N, &E),
+    network: &N,
     survivors: &S,
     (cleanup, deadline): (AttemptCleanupDeadlines, Instant),
     probes: (P, L, C),
-) -> Reconciled<ReconciledRestart>
+) -> Reconciled<(ReconciledRestart, Instant)>
 where
     N: OrphanNetworkCleanup + Sync,
-    E: EgressPropertyProbe + Sync,
     S: Survivors,
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
@@ -335,7 +399,7 @@ where
         Err(error) => Err(error),
     };
     let cleaned = match absent {
-        Ok(absent) => release_survivors(&recovery, network, survivors, cleanup, deadline)
+        Ok(absent) => release_resources(&recovery, network, survivors, cleanup, deadline)
             .await
             .map(|()| absent),
         Err(error) => Err(error),
@@ -346,12 +410,37 @@ where
             .map(|roots| (absent, roots)),
         Err(error) => Err(error),
     };
-    released.and_then(|(absent, roots)| {
+    released.and_then(|(absent, (roots, extended))| {
         recovery
             .remove_reconciled(&absent, &roots)
-            .map(|attempts| ReconciledRestart { attempts })
+            .map(|attempts| (ReconciledRestart { attempts }, extended))
             .map_err(RestartReconciliationError::from)
     })
+}
+
+/// [`reconcile_restart`] over faked survivors and probes: the cleanup, then
+/// the egress probe.
+#[cfg(test)]
+async fn reconcile_with<N, E, S, P, F, L, G, C>(
+    transport: &SystemdTransientUnitTransport,
+    recovery: SystemdAttemptRecovery,
+    (network, egress): (&N, &E),
+    survivors: &S,
+    deadlines: (AttemptCleanupDeadlines, Instant),
+    probes: (P, L, C),
+) -> Reconciled<ReconciledRestart>
+where
+    N: OrphanNetworkCleanup + Sync,
+    E: EgressPropertyProbe + Sync,
+    S: Survivors,
+    P: Fn(Generations) -> F,
+    F: Future<Output = Result<bool, ImageActivationError>>,
+    L: FnOnce() -> G,
+    G: Future<Output = Result<bool, ImageActivationError>>,
+    C: FnOnce() -> io::Result<BootInstant>,
+{
+    let cleaned = cleanup_with(transport, recovery, network, survivors, deadlines, probes).await;
+    then_prove_egress(cleaned, egress).await
 }
 
 /// Stop every listed unit, each only when a committed intent records it.
@@ -397,27 +486,6 @@ fn committed(recovery: &SystemdAttemptRecovery, attempt_id: [u8; 16]) -> bool {
         .entries()
         .iter()
         .any(|entry| !entry.is_temporary() && entry.attempt_id() == attempt_id)
-}
-
-/// Release every surviving resource, then prove the egress property by the
-/// overall deadline. The probe runs only once the orphan network state is
-/// gone, so it cannot observe a previous runtime's rules.
-async fn release_survivors<N, E, S>(
-    recovery: &SystemdAttemptRecovery,
-    (network, egress): (&N, &E),
-    survivors: &S,
-    cleanup: AttemptCleanupDeadlines,
-    deadline: Instant,
-) -> Reconciled<()>
-where
-    N: OrphanNetworkCleanup + Sync,
-    E: EgressPropertyProbe + Sync,
-    S: Survivors,
-{
-    match release_resources(recovery, network, survivors, cleanup, deadline).await {
-        Ok(()) => prove_egress(egress, deadline).await,
-        Err(error) => Err(error),
-    }
 }
 
 /// Detach every still-mounted root by the cleanup's release deadline, then
@@ -502,12 +570,12 @@ async fn prove_egress<E: EgressPropertyProbe + Sync>(
 
 /// Mint the released-root evidence only once no loop device is backed by a
 /// provider image, and none can still be attached by a previous-runtime
-/// `MountImage` request.
+/// `MountImage` request. Also returns `deadline` extended by that wait.
 async fn roots_released<P, F, L, G, C>(
     recovery: &SystemdAttemptRecovery,
     (probe, sweep, now): (P, L, C),
     deadline: Instant,
-) -> Reconciled<RootsReleased>
+) -> Reconciled<(RootsReleased, Instant)>
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
@@ -529,7 +597,7 @@ where
     timeout_at(swept_by, sweep_loops(sweep))
         .await
         .unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
-        .map(|()| RootsReleased(released))
+        .map(|()| (RootsReleased(released), swept_by))
 }
 
 /// Prove that no loop device is backed by a provider image.

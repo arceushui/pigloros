@@ -393,8 +393,9 @@ fn each_export_grantee_is_one_negative_export_recipient_obligation() -> TestResu
     // Every custody directory stays alive until the drive ends.
     let mut custody = Vec::new();
     for grantee in grantees {
-        let (export_id, directory) = publish_export(&store, memory_owned_timeline(), grantee)?;
-        custody.push(directory);
+        let export = publish_export(&store, memory_owned_timeline(), grantee)?;
+        let export_id = export.export_id;
+        custody.push(export);
         let owner = pos_core::recipient_owner_id_from_grantee(grantee).map_err(fail)?;
         expected.push(pos_core::local_erasure_export_recipient_v1(
             export_id, &owner,
