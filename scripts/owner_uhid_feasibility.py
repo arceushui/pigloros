@@ -14,11 +14,11 @@ from __future__ import annotations
 import os
 import select
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-UHID_DESTROY = 1
 UHID_CREATE2 = 11
 BUS_USB = 0x03
 EVENT_SIZE = 4 + 128 + 64 + 64 + 2 + 2 + 4 * 4 + 4096
@@ -59,10 +59,6 @@ def create2_event(descriptor: bytes, name: bytes = NAME) -> bytes:
     return event + descriptor.ljust(4096, b"\0")
 
 
-def destroy_event() -> bytes:
-    return struct.pack("<I", UHID_DESTROY).ljust(EVENT_SIZE, b"\0")
-
-
 def usage_pages(descriptor: bytes) -> list[int]:
     """Every Usage Page (global item tag 0) value in a short-item descriptor."""
     pages: list[int] = []
@@ -70,7 +66,9 @@ def usage_pages(descriptor: bytes) -> list[int]:
     while index < len(descriptor):
         prefix = descriptor[index]
         if prefix == 0xFE:  # long item: size byte, tag byte, data
-            if index + 1 >= len(descriptor):
+            if index + 2 >= len(descriptor) or index + 3 + descriptor[index + 1] > len(
+                descriptor
+            ):
                 raise ValueError("truncated long item")
             index += 3 + descriptor[index + 1]
             continue
@@ -108,17 +106,31 @@ def open_as(uid: int, gid: int, node: str) -> int:
     """Fork, drop to `uid`/`gid`, open `node` read-write; return the exit code."""
     pid = os.fork()
     if pid == 0:
+        code = 1
         try:
             os.setgroups([])
             os.setgid(gid)
             os.setuid(uid)
             descriptor = os.open(node, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
             os.close(descriptor)
-            os._exit(0)
-        except OSError as error:
+            code = 0
+        except BaseException as error:  # the child must never return into main
             print(f"UG1 open as uid {uid} failed: {error}", file=sys.stderr)
-            os._exit(1)
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(code)
     return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+
+
+def show_access(path: str) -> None:
+    """Print the node's owner, mode and ACL as evidence."""
+    metadata = os.stat(path)
+    mode = metadata.st_mode & 0o7777
+    print(f"UG1 {path} uid {metadata.st_uid} gid {metadata.st_gid} mode {mode:04o}")
+    acl = subprocess.run(["getfacl", "-p", path], capture_output=True, text=True, check=False)
+    for line in (acl.stdout or acl.stderr).splitlines():
+        print(f"UG1 acl {line}")
 
 
 def main() -> int:
@@ -146,19 +158,25 @@ def main() -> int:
             return 1
         print(f"UG1 {node} report_descriptor has usage page 0xF1D0")
         path = f"/dev/{node}"
-        deadline = time.monotonic() + 10
-        while not os.path.exists(path) and time.monotonic() < deadline:
-            time.sleep(0.1)
+        # Let udev finish its rules for the new node before reading or
+        # changing its access.
+        subprocess.run(["udevadm", "settle", "--timeout=10"], check=False)
+        if not os.path.exists(path):
+            print(f"UG1 {path} did not appear", file=sys.stderr)
+            return 1
+        show_access(path)
+        default = "opened" if open_as(uid, gid, path) == 0 else "refused"
+        print(f"UG1 uid {uid} {default} {path} with the default access (no seat, so no uaccess)")
         os.chown(path, uid, gid)
         os.chmod(path, 0o600)
-        print(f"UG1 {path} handed to uid {uid} with mode 0600")
-        code = open_as(uid, gid, path)
-        if code != 0:
+        show_access(path)
+        if open_as(uid, gid, path) != 0:
             return 1
-        print(f"UG1 uid {uid} opened {path} read-write")
+        print(f"UG1 uid {uid} opened {path} read-write after the sudo hand-over")
         return 0
     finally:
-        os.write(uhid, destroy_event())
+        # Closing /dev/uhid destroys the device; an explicit DESTROY could
+        # fail after a refused CREATE2 and hide the real error.
         os.close(uhid)
 
 

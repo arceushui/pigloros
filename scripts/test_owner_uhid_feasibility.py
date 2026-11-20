@@ -35,11 +35,6 @@ class EventEncoding(unittest.TestCase):
         with self.assertRaises(ValueError):
             ug1.create2_event(b"", bytes(128))
 
-    def test_destroy_is_one_full_event(self) -> None:
-        event = ug1.destroy_event()
-        self.assertEqual(len(event), ug1.EVENT_SIZE)
-        self.assertEqual(struct.unpack_from("<I", event, 0)[0], ug1.UHID_DESTROY)
-
 
 class DescriptorParsing(unittest.TestCase):
     def test_the_fido_descriptor_is_recognised(self) -> None:
@@ -54,7 +49,11 @@ class DescriptorParsing(unittest.TestCase):
         self.assertFalse(ug1.is_fido_descriptor(bytes.fromhex("fe")))
 
     def test_long_items_are_skipped(self) -> None:
-        self.assertEqual(ug1.usage_pages(bytes.fromhex("fe0201aabb") + bytes.fromhex("06d0f1")), [0xF1D0])
+        long_item = bytes.fromhex("fe0201aabb")
+        self.assertEqual(ug1.usage_pages(long_item + bytes.fromhex("06d0f1")), [0xF1D0])
+        for truncated in ("fe02", "fe0201", "fe0201aa"):
+            with self.assertRaises(ValueError):
+                ug1.usage_pages(bytes.fromhex(truncated))
 
     def test_find_skips_existing_unreadable_and_other_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as root:
