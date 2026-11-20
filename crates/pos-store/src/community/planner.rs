@@ -85,9 +85,9 @@ pub struct CommunityInitializationInstallationV1<'a> {
     pub installation_id: [u8; 16],
     /// Each roster row's CNT1 effective State limit in bytes, in roster
     /// order: the CSC1 term of the CBQ1 byte maximum. The composition root
-    /// takes it from the row's actual CNT1, and the initialize entry
-    /// (2c-3, pos-runtime) checks it against the row's CNT1 digest; this
-    /// planner cannot see a CNT1.
+    /// derives it from the rows' actual CNT1s with pos-runtime's
+    /// `community_state_limits_v1`, which checks each CNT1 against its row's
+    /// CNT1 digest; this planner cannot see a CNT1.
     pub state_limit_bytes: &'a [u64],
 }
 
