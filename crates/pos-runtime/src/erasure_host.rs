@@ -4,7 +4,12 @@
 mod local_lifecycle;
 #[cfg(target_os = "linux")]
 mod local_owner;
+#[cfg(target_os = "linux")]
+mod local_projection;
 mod world_replay_read;
+
+#[cfg(target_os = "linux")]
+pub use local_projection::{LocalErasureClassCountV1, LocalErasureProjectionV1};
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -52,8 +57,9 @@ use pos_core::{
 use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
     local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureRequestInputV1,
-    ErasureScopeV1, LocalErasureAuthorizationV1, LocalErasureIdempotencyV1, LocalErasureSelectorV1,
-    PrincipalRefV1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    ErasureScopeV1, LocalErasureAdmissionV1, LocalErasureAuthorizationV1,
+    LocalErasureIdempotencyV1, LocalErasureSelectorV1, PrincipalRefV1,
+    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 #[cfg(target_os = "linux")]
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
@@ -730,6 +736,12 @@ pub struct LocalErasureSubmissionBindingV1 {
     pub(crate) policy: ErasureReferenceV1,
     pub(crate) store_request_reserve: u64,
     pub(crate) preparation: Arc<dyn LocalErasurePreparationV1>,
+    /// `CA(ELB1)` of the verified bundle, the trust a submission binds.
+    pub(crate) trust: ErasureReferenceV1,
+    /// The verified bundle's owner rows, which name the acknowledgement
+    /// class of each obligation.
+    #[cfg(target_os = "linux")]
+    pub(crate) owners: Vec<pos_core::LocalErasureOwnerRowV1>,
 }
 
 /// What the Local authority prepares for one freeze: the `CA(ERFA1-AUTH)`
@@ -871,6 +883,25 @@ pub struct LocalErasureSubmissionV1 {
     pub scope: ErasureScopeV1,
     /// The digest of the request's Idempotency-Key.
     pub idempotency_key_digest: ErasureReferenceV1,
+    /// The digest of the Gateway execution-mode profile of the binding
+    /// the request is submitted under.
+    pub mode_profile: ErasureReferenceV1,
+    /// The store binding epoch of that binding, at least 1.
+    pub binding_epoch: u64,
+}
+
+/// One admitted Local erasure request: a fresh submission or the exact
+/// replay of an installed one (ADR-136 §7).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalErasureAdmittedV1 {
+    /// The request's `erasure_id`.
+    pub erasure_id: ulid::Ulid,
+    /// The request's current ERS1 state.
+    pub state: ErasureStateV1,
+    /// `CA(ELP1)`, the policy its ERQ1 pins.
+    pub policy: ErasureReferenceV1,
+    /// The ELADM1 retained at its submission; a replay answers the same.
+    pub admission: LocalErasureAdmissionV1,
 }
 
 /// The typed refusals of [`ErasureCommandSenderV1::submit_local_erasure`].
@@ -884,6 +915,12 @@ pub enum LocalErasureSubmitErrorV1 {
     /// The closure on the submission snapshot exceeds 4,096 targets
     /// (ADR-136 Q10); no request was written.
     ScopeTooLarge,
+    /// New admissions are closed because the installed TPS1 or the bundle
+    /// has expired (owner decision D3 of 2026-11-18 on #1413); only the
+    /// exact replay of an installed request is still answered.
+    AdmissionsClosed,
+    /// The host has no Local erasure composition (D9).
+    Unserved,
     /// The host refused or failed the submission.
     Host(ErasureHostErrorV1),
 }
@@ -905,6 +942,8 @@ impl From<LocalSubjectRefusalV1> for LocalErasureSubmitErrorV1 {
 
 /// The records the host builds for one Local submission.
 struct LocalSubmissionRecordsV1 {
+    /// The `erasure_id` the request derives from.
+    erasure_id: ulid::Ulid,
     request: ErasureRequestV1,
     /// ERAZ1, ELSEL1 and ELIDEM1, retained before the submission.
     objects: [Vec<u8>; 3],
@@ -925,11 +964,14 @@ impl LocalSubmissionRecordsV1 {
         let actor = submission.actor;
         local_principal_reference(&submission.principal).and_then(|principal_ref| {
             local_erasure_id_v1(principal_ref, actor, submission.idempotency_key_digest)
-                .and_then(local_erasure_request_v1)
-                .and_then(|request| {
+                .and_then(|erasure_id| {
+                    local_erasure_request_v1(erasure_id).map(|request| (erasure_id, request))
+                })
+                .and_then(|(erasure_id, request)| {
                     local_erasure_subject_v1(principal_ref, actor).and_then(|subject| {
                         local_erasure_body_digest_v1(submission.scope).map(|body_digest| {
                             (
+                                erasure_id,
                                 LocalErasureAuthorizationV1 {
                                     principal_ref,
                                     actor_entity: actor,
@@ -949,7 +991,7 @@ impl LocalSubmissionRecordsV1 {
                         })
                     })
                 })
-                .and_then(|(authorization, selector, idempotency)| {
+                .and_then(|(erasure_id, authorization, selector, idempotency)| {
                     Self::encode(
                         submission,
                         binding,
@@ -958,8 +1000,10 @@ impl LocalSubmissionRecordsV1 {
                         &selector,
                         &idempotency,
                     )
+                    .map(|encoded| (erasure_id, encoded))
                 })
-                .map(|(request, objects)| Self {
+                .map(|(erasure_id, (request, objects))| Self {
+                    erasure_id,
                     request,
                     objects,
                     principal_ref,
@@ -1024,6 +1068,10 @@ impl LocalSubmissionRecordsV1 {
 
 /// The Gateway operation an ERAZ1 authorizes (ADR-136 §3).
 pub(crate) const LOCAL_ERASURE_REQUEST_OPERATION: &str = "erasure.request";
+
+/// The retained-object tag of ELADM1, the submission binding of one
+/// request (owner decision D5 on #1413).
+const LOCAL_ERASURE_ADMISSION_TAG: &str = "ELADM1";
 
 /// `principal_ref`: the ADR-099 digest of the Local Principal (owner
 /// decision Q1 of 2026-11-16 on #1403).
@@ -4522,42 +4570,47 @@ impl ErasureCommandSenderV1<'_> {
     /// the Idempotency-Key digest. The authority first authenticates the
     /// Principal and actor against the root grant at the current chain
     /// head, so a caller it would not admit learns nothing of any request
-    /// or subject. A request with that id already installed then returns
-    /// its state when its ELIDEM1 binds the same body, and is a conflict
-    /// otherwise; this exact replay is answered even once new admissions
-    /// have closed, since expiry closes new admissions only. A fresh
-    /// request needs new admissions open, must pass the per-subject checks
-    /// against the installed inventory, and the authority must find the
-    /// closure within its bound; only then does the host retain its ERAZ1,
-    /// ELSEL1 and ELIDEM1, build ERQ1 and submit it, and the authority
-    /// re-checks all of it from its view. A refused submission retains
-    /// nothing.
+    /// or subject. A request with that id already installed then answers
+    /// its state and its retained ELADM1 when its ELIDEM1 binds the same
+    /// body, and is a conflict otherwise; this exact replay is answered even
+    /// once new admissions have closed, since expiry closes new admissions
+    /// only. A fresh request needs new admissions open, must pass the
+    /// per-subject checks against the installed inventory, and the
+    /// authority must find the closure within its bound; only then does the
+    /// host retain its ERAZ1, ELSEL1, ELIDEM1 and ELADM1, build ERQ1 and
+    /// submit it, and the authority re-checks all of it from its view. The
+    /// ELADM1 binds the active bundle and the submission's execution-mode
+    /// binding (owner decision D5 of 2026-11-18 on #1413); one a crash left
+    /// before the ERQ1 committed is reused, so an `erasure_id` has one. A
+    /// refused submission retains nothing.
     ///
     /// # Errors
-    /// Returns [`LocalErasureSubmitErrorV1::Concurrent`] while another
+    /// Returns [`LocalErasureSubmitErrorV1::Unserved`] on a host without a
+    /// Local composition, [`LocalErasureSubmitErrorV1::AdmissionsClosed`]
+    /// for a fresh request once the installed TPS1 or the bundle has
+    /// expired, [`LocalErasureSubmitErrorV1::Concurrent`] while another
     /// request of the subject is pre-terminal or has an active attempt,
     /// unless that attempt, or the freeze of a request without one, pins a
     /// revoked bundle,
     /// [`LocalErasureSubmitErrorV1::QuotaExhausted`] once the subject's
     /// quota is used, [`LocalErasureSubmitErrorV1::ScopeTooLarge`] for a
     /// closure over its bound, and otherwise a payload-free host error: a
-    /// host with no Local composition or Local Principal record, and a
-    /// Principal, actor or root grant the authority does not authorize at
-    /// the chain head, refuse with
-    /// [`ErasureHostErrorV1::AuthorizationDenied`]; a fresh request once
-    /// the installed TPS1 or the bundle has expired is
-    /// [`ErasureHostErrorV1::RecoveryUnavailable`]; and an Idempotency-Key
-    /// reused for another body, or a retained-only scope, is a
-    /// [`ErasureHostErrorV1::Conflict`].
+    /// host without a Local Principal record, and a Principal, actor or
+    /// root grant the authority does not authorize at the chain head,
+    /// refuse with [`ErasureHostErrorV1::AuthorizationDenied`]; an
+    /// Idempotency-Key reused for another body, a retained-only scope, or a
+    /// binding epoch of zero is a [`ErasureHostErrorV1::Conflict`]; and an
+    /// installed request without its ELADM1 is
+    /// [`ErasureHostErrorV1::RecoveryUnavailable`].
     pub fn submit_local_erasure(
         &mut self,
         submission: &LocalErasureSubmissionV1,
-    ) -> Result<ErasureStateV1, LocalErasureSubmitErrorV1> {
+    ) -> Result<LocalErasureAdmittedV1, LocalErasureSubmitErrorV1> {
         let binding = self
             .host
             .local_submission
             .clone()
-            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+            .ok_or(LocalErasureSubmitErrorV1::Unserved)?;
         let (installed, records) = self
             .host
             .ensure_generation(self.generation)
@@ -4581,8 +4634,9 @@ impl ErasureCommandSenderV1<'_> {
         );
         let preparation = &binding.preparation;
         let request = &records.request;
-        // `Some` is the answer to an exact replay; `None` admits a fresh
-        // request whose records may now be retained.
+        // `Some` is the answer to an exact replay, with the policy its
+        // installed ERQ1 pins; `None` admits a fresh request whose records
+        // may now be retained.
         let replayed = self
             .with_local_view(Arc::clone(&installed), |view| {
                 preparation.authenticate_submission(
@@ -4595,12 +4649,14 @@ impl ErasureCommandSenderV1<'_> {
                     .find(|state| state.request().reference() == request.reference())
                 {
                     return Ok((state.request().provenance() == request.provenance())
-                        .then(|| Some(state.state().clone()))
+                        .then(|| Some((state.state().clone(), state.request().policy())))
                         .ok_or(LocalErasureSubmitErrorV1::Host(
                             ErasureHostErrorV1::Conflict,
                         )));
                 }
-                preparation.submissions_open()?;
+                if preparation.submissions_open().is_err() {
+                    return Ok(Err(LocalErasureSubmitErrorV1::AdmissionsClosed));
+                }
                 if let Err(refusal) = local_subject_admission(
                     view.verified_requests().into_iter(),
                     request.subject(),
@@ -4618,12 +4674,44 @@ impl ErasureCommandSenderV1<'_> {
             })
             .map_err(LocalErasureSubmitErrorV1::from)
             .and_then(std::convert::identity)?;
-        if let Some(state) = replayed {
-            return Ok(state);
+        let retained = self.local_admission(request.reference())?;
+        if let Some((state, policy)) = replayed {
+            return retained
+                .ok_or(LocalErasureSubmitErrorV1::Host(
+                    ErasureHostErrorV1::RecoveryUnavailable,
+                ))
+                .map(|admission| LocalErasureAdmittedV1 {
+                    erasure_id: records.erasure_id,
+                    state,
+                    policy,
+                    admission,
+                });
         }
+        self.submit_fresh_local(submission, binding.trust, records, retained)
+    }
+
+    /// Retain the records of a fresh Local submission, with `retained`, the
+    /// ELADM1 a crash left for it, or else a new one, and submit its ERQ1.
+    fn submit_fresh_local(
+        &mut self,
+        submission: &LocalErasureSubmissionV1,
+        trust: ErasureReferenceV1,
+        records: LocalSubmissionRecordsV1,
+        retained: Option<LocalErasureAdmissionV1>,
+    ) -> Result<LocalErasureAdmittedV1, LocalErasureSubmitErrorV1> {
+        let admission = retained.unwrap_or_else(|| LocalErasureAdmissionV1 {
+            request: records.request.reference(),
+            trust,
+            mode_profile: submission.mode_profile,
+            binding_epoch: submission.binding_epoch,
+        });
+        let eladm1 = admission
+            .to_canonical_cbor()
+            .map_err(|error| LocalErasureSubmitErrorV1::Host(map_erasure_error(error)))?;
         records
             .objects
             .iter()
+            .chain(std::iter::once(&eladm1))
             .try_for_each(|object| {
                 self.host
                     .store
@@ -4632,9 +4720,53 @@ impl ErasureCommandSenderV1<'_> {
                     .map(drop)
             })
             .map_err(|error| LocalErasureSubmitErrorV1::Host(map_erasure_error(error)))?;
+        let policy = records.request.policy();
         let provenance = records.request.provenance();
         self.submit_erasure_request(records.request, provenance)
             .map_err(LocalErasureSubmitErrorV1::Host)
+            .map(|state| LocalErasureAdmittedV1 {
+                erasure_id: records.erasure_id,
+                state,
+                policy,
+                admission,
+            })
+    }
+
+    /// The ELADM1 retained for `request`, if any. Only the host retains
+    /// ELADM1 records, at most one per `erasure_id`, so the scan is bounded
+    /// by the request-head limit. Every retained ELADM1 must decode: a
+    /// record that does not may be this request's, so the read fails closed
+    /// rather than treat it as absent and retain a second one. A corrupt
+    /// ELADM1 is store corruption only the host can cause, and it closes
+    /// every submission and every `getErasure` projection of the host until
+    /// the store is repaired; recovery and the driver never read ELADM1.
+    ///
+    /// # Errors
+    /// The payload-free error of a failed or over-limit read, and
+    /// [`ErasureHostErrorV1::RecoveryUnavailable`] for a retained ELADM1
+    /// that does not decode.
+    pub(crate) fn local_admission(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<LocalErasureAdmissionV1>, ErasureHostErrorV1> {
+        let maximum = self.host.recovery_limits.maximum_requests();
+        self.host
+            .store
+            .host_store()
+            .retained_erasure_objects(LOCAL_ERASURE_ADMISSION_TAG, maximum)
+            .map_err(map_erasure_error)
+            .and_then(|objects| {
+                objects
+                    .iter()
+                    .map(|bytes| LocalErasureAdmissionV1::from_canonical_cbor(bytes))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)
+            })
+            .map(|admissions| {
+                admissions
+                    .into_iter()
+                    .find(|admission| admission.request == request)
+            })
     }
 
     /// Prepare the access freeze of one Local erasure request (ADR-136 §5;

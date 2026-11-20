@@ -123,6 +123,8 @@ ROUTE_CAPABILITY = {
     "actions": "world.action.v1.submit",
     "session": "session.read",
     "revoke": "consent.revoke",
+    "erasures": "erasure.request",
+    "erasure": "erasure.read",
     "rooms": "scenario-room.create",
     "revisions": "scenario-room.derive",
     "revision": "scenario-room.read",
@@ -143,12 +145,15 @@ def route_of(path: str) -> str | None:
         "/v1/timelines": "create",
         "/v1/session": "session",
         "/v1/me/consent-revocations": "revoke",
+        "/v1/me/erasures": "erasures",
     }
     if base in fixed:
         return fixed[base]
     match = re.fullmatch(r"/v1/timelines/([^/]+)/(events|signals|actions)", base)
     if match:
         return match.group(2)
+    if re.fullmatch(r"/v1/me/erasures/[^/]+", base):
+        return "erasure"
     if re.fullmatch(r"/v1/scenario-rooms/[^/]+/revisions", base):
         return "revisions"
     if re.fullmatch(r"/v1/scenario-rooms/[^/]+/revisions/[1-9][0-9]*", base):
@@ -206,8 +211,8 @@ class Exchange:
     actor: bool = False
     body: object = None
     has_body: bool = False
-    # The slot this exchange's response fills: `timeline` or `room` (its `id`) or `consent`
-    # (the `consent_ref` of its first consent).
+    # The slot this exchange's response fills: `timeline` or `room` (its `id`), `consent`
+    # (the `consent_ref` of its first consent) or `erasure` (its `request_id`).
     capture: str | None = None
 
     def payload(self) -> dict:
@@ -681,6 +686,108 @@ def action(
     )
 
 
+ERASURES_PATH = "/v1/me/erasures"
+ERASURE_PATH = f"{ERASURES_PATH}/{{erasure}}"
+# The problem `instance` of the getErasure route: its route template.
+ERASURE_INSTANCE = f"{ERASURES_PATH}/{{erasure_id}}"
+# An erasure ID no fixture Gateway holds.
+UNKNOWN_ERASURE = "01JC0GATEWAYW90ERASVRE0001"
+# The compiled Local erasure policy (ELP1) every Local erasure request pins (ADR-136 §4): the
+# digest pos-runtime pins as LOCAL_ERASURE_POLICY_REFERENCE_V1 and recomputes in its tests.
+LOCAL_ERASURE_POLICY = "e12e33dfd34dade0faf2ce530a187226eaae154bf195c3ad9e30404f86b0b83d"
+RETAINED_CLASSES = ["public-record", "aggregate", "structural-audit-metadata"]
+
+
+def erasure_request(scope: str, impact: bool = True) -> dict:
+    return {"scope": scope, "impact_acknowledged": impact}
+
+
+def request_erasure(
+    expect: dict, scope: str = "private-subject-data", impact: bool = True, actor: bool = True,
+    capture: bool = False,
+) -> Exchange:
+    """`requestErasure` as the fixture actor; every request carries the sub-case ID as its
+    Idempotency-Key."""
+    return Exchange(
+        "loopback",
+        "POST",
+        ERASURES_PATH,
+        expect,
+        actor=actor,
+        body=erasure_request(scope, impact),
+        has_body=True,
+        capture="erasure" if capture else None,
+    )
+
+
+def read_erasure(expect: dict, path: str = ERASURE_PATH) -> Exchange:
+    return Exchange("loopback", "GET", path, expect, actor=True)
+
+
+def admission_receipt(key: str) -> dict:
+    """The `202` admission receipt of the captured erasure under the Idempotency-Key `key`:
+    BLAKE3 of the key, the pinned policy, the Local mode profile, and the bundle digest that
+    covers the store's own erasure identity, normalized away (ADR-136 §7)."""
+    return {
+        "bound_inputs": {
+            "mode_profile": MODE_PROFILE_DIGESTS["gateway-mode-local-v1"],
+            "policy": LOCAL_ERASURE_POLICY,
+            "trust": "<hash>",
+        },
+        "idempotency_key_digest": golden.blake3(key.encode("ascii")).hex(),
+        "operation_id": "{erasure}",
+        "operation_url": f"{ERASURES_PATH}/<ulid>",
+        "request_id": "{erasure}",
+        "schema_id": "urn:pigloros:gateway:v1:schema:admission-receipt",
+        "state": "admitted",
+    }
+
+
+def submitted_erasure() -> dict:
+    """The `Erasure` of a submitted private-subject-data request no driver advanced: generation
+    0, no obligation yet, the exact claim, and the ERS1 state digest normalized away."""
+    return {
+        "acknowledgements": {"classes": [], "positive": 0, "required": 0},
+        "availability": {"state": "available", "withheld": []},
+        "execution_profile": {
+            "profile_kind": "epf1",
+            "reason": "not-installed",
+            "state": "unavailable",
+        },
+        "external_copies": "not-covered",
+        "generation": 0,
+        "id": "{erasure}",
+        "mode_profile": {
+            "binding_epoch": 1,
+            "mode": "local",
+            "mode_profile_digest": MODE_PROFILE_DIGESTS["gateway-mode-local-v1"],
+            "mode_profile_id": "gateway-mode-local-v1",
+            "profile_kind": "gateway-mode-v1",
+        },
+        "provenance": {"digest": "<hash>", "origin": "host-derived"},
+        "replay_claim": "exact",
+        "retained_classes": RETAINED_CLASSES,
+        "schema_id": "urn:pigloros:gateway:v1:schema:erasure",
+        "scope": "private-subject-data",
+        "state": "submitted",
+    }
+
+
+def erasure_exchanges() -> list[Exchange]:
+    """#1449: a request is admitted (`202`), an exact retry answers the same receipt, the same
+    key for another scope is the `409` `idempotency-conflict` problem, and the erasure reads
+    back as submitted."""
+    receipt = observed(202, json_body(admission_receipt("pos.10")))
+    return [
+        request_erasure(receipt, capture=True),
+        request_erasure(receipt),
+        request_erasure(
+            problem(409, "idempotency-conflict", ERASURES_PATH), scope="consented-shared-data"
+        ),
+        read_erasure(observed(200, json_body(submitted_erasure()))),
+    ]
+
+
 # --- Sub-cases, one list per family ---
 
 
@@ -749,6 +856,12 @@ def positive_subcases() -> list[SubCase]:
             "a reused key and a stale parent conflict, and a repeated derive answers the head",
             "authorized-rooms",
             room_conflict_exchanges(),
+        ),
+        SubCase(
+            "pos.10",
+            "an erasure is admitted, replayed, refused for another scope and read as submitted",
+            "authorized-erasure",
+            erasure_exchanges(),
         ),
     ]
 
@@ -851,6 +964,37 @@ def denied_subcases() -> list[SubCase]:
                 create_room(routed_problem(403, "unauthorized", ROOMS_PATH), persona=BODY),
             ],
         ),
+        SubCase(
+            "den.10",
+            "without the erasure grants a request is unauthorized and a read finds nothing",
+            "authorized",
+            [
+                request_erasure(problem(403, "unauthorized", ERASURES_PATH)),
+                read_erasure(
+                    problem(404, "not-found-or-unavailable", ERASURE_INSTANCE),
+                    path=f"{ERASURES_PATH}/{UNKNOWN_ERASURE}",
+                ),
+                request_erasure(problem(401, "unauthenticated", ERASURES_PATH), actor=False),
+            ],
+        ),
+        SubCase(
+            "den.11",
+            "a Gateway without the Local erasure authority serves no erasure",
+            "authorized-erasure-closed",
+            [
+                request_erasure(problem(503, "temporarily-unavailable", ERASURES_PATH)),
+                read_erasure(
+                    problem(404, "not-found-or-unavailable", ERASURE_INSTANCE),
+                    path=f"{ERASURES_PATH}/{UNKNOWN_ERASURE}",
+                ),
+            ],
+        ),
+        SubCase(
+            "den.12",
+            "an expired erasure bundle closes new erasure admissions",
+            "authorized-erasure-expired",
+            [request_erasure(problem(503, "temporarily-unavailable", ERASURES_PATH))],
+        ),
     ]
 
 
@@ -908,6 +1052,21 @@ def malformed_subcases() -> list[SubCase]:
                 ),
             ],
         ),
+        SubCase(
+            "mal.6",
+            "an unacknowledged impact, a retained-only scope and a malformed erasure ID",
+            "authorized-erasure",
+            [
+                request_erasure(problem(400, "invalid-request", ERASURES_PATH), impact=False),
+                request_erasure(
+                    problem(400, "erasure-scope-retained", ERASURES_PATH), scope="public-record"
+                ),
+                read_erasure(
+                    problem(400, "invalid-request", ERASURE_INSTANCE),
+                    path=f"{ERASURES_PATH}/not-an-erasure",
+                ),
+            ],
+        ),
     ]
 
 
@@ -924,7 +1083,17 @@ def resource_subcases() -> list[SubCase]:
             "the 65th root Timeline exceeds the Timeline bound",
             "open",
             creates + [over],
-        )
+        ),
+        SubCase(
+            "res.2",
+            "a subject with an erasure in progress is refused another until it settles",
+            "authorized-erasure-held",
+            [
+                request_erasure(
+                    problem(429, "resource-limit-exceeded", ERASURES_PATH, retryable=True)
+                )
+            ],
+        ),
     ]
 
 
@@ -1161,7 +1330,7 @@ def family_schema(family: str) -> dict:
             "path": {"type": "string", "pattern": "^/[!-~]{0,255}$"},
             "actor": {"const": True},
             "body": {},
-            "capture": {"enum": ["timeline", "consent", "room"]},
+            "capture": {"enum": ["timeline", "consent", "room", "erasure"]},
             "expect": {"$ref": "#/$defs/observation"},
         },
     }
@@ -1179,6 +1348,10 @@ def family_schema(family: str) -> dict:
                     "authorized-air-gapped",
                     "authorized-consented",
                     "authorized-rooms",
+                    "authorized-erasure",
+                    "authorized-erasure-held",
+                    "authorized-erasure-expired",
+                    "authorized-erasure-closed",
                 ]
             },
             "exchanges": {
@@ -1336,7 +1509,25 @@ def check_signal_payloads() -> None:
 
 
 # The members whose ULID segments are permitted nondeterministic operational fields.
-ULID_KEYS = ("id", "instance", "consent_ref", "timeline_id", "event_id")
+ULID_KEYS = (
+    "id",
+    "instance",
+    "consent_ref",
+    "timeline_id",
+    "event_id",
+    "request_id",
+    "operation_id",
+    "operation_url",
+)
+# The `(schema_id, member, field)` digests a placeholder replaces in an object of that schema:
+# a room revision's provenance covers its run-local descriptor hash and Event ID, and an
+# erasure's ERS1 state digest and an admission receipt's bundle digest cover the store's own
+# erasure identity (#1449).
+MASKED_DIGESTS = (
+    (ROOM_REVISION_SCHEMA, "provenance", "digest"),
+    ("urn:pigloros:gateway:v1:schema:erasure", "provenance", "digest"),
+    ("urn:pigloros:gateway:v1:schema:admission-receipt", "bound_inputs", "trust"),
+)
 # `n` lowercase hex digits, not all zero (the contract's hash and correlation ID patterns).
 NONZERO_HEX = "(?!0+$)[0-9a-f]{{{}}}"
 
@@ -1357,14 +1548,15 @@ def normalize(value: object, key: str | None = None) -> object:
     """The normalization of the requirements text, on a parsed JSON response value."""
     if isinstance(value, dict):
         members = {name: normalize(item, name) for name, item in value.items()}
-        provenance = members.get("provenance")
-        if (
-            members.get("schema_id") == ROOM_REVISION_SCHEMA
-            and isinstance(provenance, dict)
-            and isinstance(provenance.get("digest"), str)
-            and re.fullmatch(NONZERO_HEX.format(64), provenance["digest"])
-        ):
-            members["provenance"] = {**provenance, "digest": "<hash>"}
+        for schema, member, field_name in MASKED_DIGESTS:
+            masked = members.get(member)
+            if (
+                members.get("schema_id") == schema
+                and isinstance(masked, dict)
+                and isinstance(masked.get(field_name), str)
+                and re.fullmatch(NONZERO_HEX.format(64), masked[field_name])
+            ):
+                members[member] = {**masked, field_name: "<hash>"}
         return members
     if isinstance(value, list):
         return [normalize(item) for item in value]
@@ -1450,11 +1642,45 @@ def check_normalization() -> None:
     ):
         if normalize(substitute(kept, captured)) != kept:
             raise SystemExit(f"the room normalization changes {kept}")
-    for constant in (ACTOR, BODY, ENTITY, ulid_text(PRINCIPAL_BYTES)):
+    check_erasure_normalization(ulid)
+    for constant in (ACTOR, BODY, ENTITY, ulid_text(PRINCIPAL_BYTES), UNKNOWN_ERASURE):
         if not re.fullmatch(ULID_PATTERN, constant):
             raise SystemExit(f"{constant} is not a ULID")
     if ulid_text(bytes(15) + bytes([33])) != "0" * 24 + "11":
         raise SystemExit("the ULID text encoding is broken")
+
+
+def check_erasure_normalization(ulid: str) -> None:
+    """A captured erasure is pinned, its operation URL and an uncaptured request ID lose their
+    ULID, and only an erasure's provenance digest and a receipt's `trust` input are masked."""
+    receipt = {
+        "schema_id": "urn:pigloros:gateway:v1:schema:admission-receipt",
+        "request_id": ulid,
+        "operation_id": ulid,
+        "operation_url": f"/v1/me/erasures/{ulid}",
+        "bound_inputs": {"policy": "ab" * 32, "trust": "cd" * 32, "mode_profile": "ef" * 32},
+    }
+    if normalize(substitute(receipt, {"{erasure}": ulid})) != {
+        **receipt,
+        "request_id": "{erasure}",
+        "operation_id": "{erasure}",
+        "operation_url": "/v1/me/erasures/<ulid>",
+        "bound_inputs": {"policy": "ab" * 32, "trust": "<hash>", "mode_profile": "ef" * 32},
+    }:
+        raise SystemExit("the admission receipt normalization rules are broken")
+    erasure = {
+        "schema_id": "urn:pigloros:gateway:v1:schema:erasure",
+        "provenance": {"digest": "cd" * 32, "origin": "host-derived"},
+    }
+    if normalize(erasure)["provenance"]["digest"] != "<hash>":
+        raise SystemExit("the erasure provenance normalization is broken")
+    for kept in (
+        {"bound_inputs": {"trust": "cd" * 32}},
+        {"schema_id": "urn:pigloros:gateway:v1:schema:erasure", "bound_inputs": {"trust": "cd" * 32}},
+        {"schema_id": "urn:pigloros:gateway:v1:schema:admission-receipt", "provenance": {"digest": "cd" * 32}},
+    ):
+        if normalize(kept) != kept:
+            raise SystemExit(f"the erasure normalization changes {kept}")
 
 
 def check_room_hashes() -> None:
@@ -1506,7 +1732,7 @@ def check_routes_and_usage() -> None:
         needed: set[str] = set()
         steps = events = 0
         for sub in SUBCASES[family]():
-            captured = consent_captured = room_captured = False
+            captured = consent_captured = room_captured = erasure_captured = False
             for exchange in sub.exchanges:
                 route = route_of(exchange.path)
                 if route is None:
@@ -1517,6 +1743,9 @@ def check_routes_and_usage() -> None:
                     raise SystemExit(f"{sub.id}: a consent is used before it is captured")
                 if "{room}" in exchange.path and not room_captured:
                     raise SystemExit(f"{sub.id}: a room is used before it is captured")
+                if "{erasure}" in exchange.path and not erasure_captured:
+                    raise SystemExit(f"{sub.id}: an erasure is used before it is captured")
+                erasure_captured = erasure_captured or exchange.capture == "erasure"
                 captured = captured or exchange.capture == "timeline"
                 room_captured = room_captured or exchange.capture == "room"
                 consent_captured = consent_captured or exchange.capture == "consent"

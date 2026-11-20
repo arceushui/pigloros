@@ -1,24 +1,23 @@
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
 
 use ed25519_dalek::{Signer as _, SigningKey};
-use pos_conformance::{TrustPolicyRootV1, TrustPolicySnapshotV1};
 use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_host_timeline_v1,
     local_erasure_signer_key_id_v1, ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, EventStore, GatewayModeBindingErrorV1, KeyIdentityV1, KeyRoleV1,
     LocalErasureBundleSignatureV1, LocalErasureBundleV1, OwnerIdV1, TimelineId,
 };
-use pos_crypto::key_roles::SigningKeyMaterial;
+use pos_local_erasure_loader::deployment_trust::RELEASE_TRUST_CREDENTIAL_NAME;
+use pos_local_erasure_loader::local_principal::{
+    local_principal_authority_timeline, local_principal_grant_id, recorded_registry_digest,
+};
 use pos_runtime::{
     local_erasure_execution_binding_v1, ErasureCoordinatorCompositionV1,
     LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1, LocalErasureRotationRefusalV1,
     LocalErasureSignerRotationV1, LOCAL_ERASURE_POLICY_REFERENCE_V1,
 };
 use pos_store::sqlite::SqliteStore;
-use pos_store::trust_policy_registry::{
-    CurrentTrustPolicyV1, DeploymentTrustPolicyRegistryV1, OperatorReleaseTrustV1,
-};
 use pos_store::StoreConfig;
 
 use super::{
@@ -26,119 +25,25 @@ use super::{
     LocalErasureProvisionErrorV1, LocalErasureProvisionRequestV1,
     LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
 };
-use crate::deployment_trust::{
-    load_deployment_trust_v1, release_trust_from_credential, RELEASE_TRUST_CREDENTIAL_NAME,
+use crate::local_erasure_signing_fixture::{
+    bundle_root, credential_directory, operator, signer, Deployment, TestResult, BUNDLE_ROOT,
+    ROTATED_SEED, SIGNER_OWNER, SIGNER_SEED, UNPREFIXED_ROOT,
 };
 use crate::local_principal::{
-    local_principal_authority_timeline, local_principal_consent_timeline, local_principal_grant_id,
-    provision_on_host, recorded_registry_digest, LocalPrincipalProvisionV1,
+    local_principal_consent_timeline, provision_on_host, LocalPrincipalProvisionV1,
 };
 use crate::mode_profile::{
     bind_test_store, GatewayModeErrorV1, GatewayModeProfileIdV1, GatewayModeStoreLockV1,
 };
 use crate::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
 
-pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-pub(crate) const BUNDLE_ROOT: &str = "erasure-bundle/local";
-const UNPREFIXED_ROOT: &str = "local-root";
-const SIGNER_OWNER: &str = "pigloros.local-erasure-signer";
-pub(crate) const SIGNER_SEED: [u8; 32] = [0x64; 32];
-pub(crate) const ROTATED_SEED: [u8; 32] = [0x65; 32];
 pub(crate) const PRINCIPAL: &str = "principal_id = \"01JC0GATEWAYQ0CA1PR1NC1PA1\"\n\
     trust_domain = \"local\"\n\
     actor_entity_ids = [\"01JC0GATEWAYQ0CA1ACT0R0000\"]\n\
     operations = [\"timeline.create\"]\n";
 
-pub(crate) fn operator() -> SigningKey {
-    SigningKey::from_bytes(&[0x61; 32])
-}
-
-pub(crate) fn bundle_root() -> SigningKey {
-    SigningKey::from_bytes(&[0x62; 32])
-}
-
-fn unprefixed_root() -> SigningKey {
-    SigningKey::from_bytes(&[0x63; 32])
-}
-
-pub(crate) fn signer(seed: [u8; 32]) -> SigningKeyMaterial {
-    SigningKeyMaterial::new(SigningKey::from_bytes(&seed))
-}
-
 fn signer_key_id(seed: [u8; 32]) -> String {
     local_erasure_signer_key_id_v1(&SigningKey::from_bytes(&seed).verifying_key().to_bytes())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .flat_map(|byte| {
-            [byte >> 4, byte & 0x0f]
-                .map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap_or_default())
-        })
-        .collect()
-}
-
-fn root(key_id: &str, key: &SigningKey) -> TrustPolicyRootV1 {
-    TrustPolicyRootV1 {
-        key_id: key_id.to_owned(),
-        root_version: 1,
-        algorithm: "Ed25519".to_owned(),
-        public_key: key.verifying_key().to_bytes(),
-    }
-}
-
-/// A provisioned deployment trust state store and its release anchor
-/// credential.
-pub(crate) struct Deployment {
-    _directory: tempfile::TempDir,
-    pub(crate) state: PathBuf,
-    pub(crate) release: String,
-}
-
-impl Deployment {
-    /// A genesis TPS1 whose roots are an `erasure-bundle/` root and an
-    /// unprefixed root and which revokes `revoked` (sorted).
-    pub(crate) fn new(revoked: &[&str]) -> TestResult<Self> {
-        Self::valid_through(revoked, "9999-12-31T23:59:59Z")
-    }
-
-    /// [`Self::new`] with the TPS1 `offline_valid_through` `valid_through`.
-    pub(crate) fn valid_through(revoked: &[&str], valid_through: &str) -> TestResult<Self> {
-        let draft = pos_conformance::draft_trust_policy_snapshot_bytes_v1()?;
-        let mut snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&draft)?;
-        snapshot.trust_roots = vec![
-            root(BUNDLE_ROOT, &bundle_root()),
-            root(UNPREFIXED_ROOT, &unprefixed_root()),
-        ];
-        snapshot.revoked_key_ids = revoked.iter().map(|id| (*id).to_owned()).collect();
-        valid_through.clone_into(&mut snapshot.offline_valid_through);
-        let message = snapshot.operator_signature_message_v1()?;
-        snapshot.operator_signature = operator().sign(&message).to_bytes();
-        let genesis = snapshot.to_canonical_cbor()?;
-        let digest = *blake3::hash(&genesis).as_bytes();
-        let operator_key = operator().verifying_key().to_bytes();
-        let release = OperatorReleaseTrustV1::new(snapshot.policy_id.clone(), operator_key, digest);
-        let directory = tempfile::tempdir()?;
-        let state = directory.path().join("trust-state.db");
-        DeploymentTrustPolicyRegistryV1::provision_explicit(&state, &release, &genesis)?;
-        Ok(Self {
-            release: format!(
-                "policy_id = \"{}\"\noperator_public_key = \"{}\"\ngenesis_digest = \"{}\"\n",
-                snapshot.policy_id,
-                hex(&operator_key),
-                hex(&digest)
-            ),
-            state,
-            _directory: directory,
-        })
-    }
-
-    pub(crate) fn trust(&self) -> TestResult<CurrentTrustPolicyV1> {
-        let release = release_trust_from_credential(self.release.as_bytes())?;
-        Ok(load_deployment_trust_v1(&self.state, release)?)
-    }
 }
 
 /// A Gateway store bound to the Local mode, with or without its Local
@@ -191,15 +96,7 @@ impl Fixture {
         directory: &str,
         credentials: &[(&str, &[u8])],
     ) -> TestResult<PathBuf> {
-        let directory = self.directory.path().join(directory);
-        std::fs::create_dir(&directory)?;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
-        for (name, bytes) in credentials {
-            let credential = directory.join(name);
-            std::fs::write(&credential, bytes)?;
-            std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o400))?;
-        }
-        Ok(directory)
+        credential_directory(&self.directory.path().join(directory), credentials)
     }
 
     fn store_identity(&self) -> TestResult<Option<pos_core::Hash>> {

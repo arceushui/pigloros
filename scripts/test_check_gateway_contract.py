@@ -255,9 +255,9 @@ class CheckGatewayContractTest(unittest.TestCase):
         examples = [
             (name, item)
             for name, item in checker.load_examples()
-            if item["operation_id"] != "getErasure"
+            if item["operation_id"] != "getExport"
         ]
-        with self.assertRaisesRegex(checker.ContractError, "getErasure has no golden example"):
+        with self.assertRaisesRegex(checker.ContractError, "getExport has no golden example"):
             checker.check_examples(contract(), examples)
 
     def test_a_draft_family_without_a_fail_closed_example_is_rejected(self) -> None:
@@ -367,18 +367,23 @@ class CheckGatewayContractTest(unittest.TestCase):
     def test_every_draft_array_string_and_map_is_bounded(self) -> None:
         document = copy.deepcopy(DOCUMENT)
         schemas = document["components"]["schemas"]
-        del schemas["Erasure"]["properties"]["retained_classes"]["maxItems"]
+        del schemas["Export"]["properties"]["members"]["maxItems"]
+        del document["x-pigloros-limits"]["page_items"]["enforced_by"]["schema"][4]
         with self.assertRaisesRegex(checker.ContractError, "unbounded array"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
         schemas = document["components"]["schemas"]
-        del schemas["AdmissionReceipt"]["properties"]["operation_url"]["maxLength"]
+        del schemas["PreviewEvidence"]["properties"]["plugins"]["items"]["properties"]["version"][
+            "maxLength"
+        ]
         with self.assertRaisesRegex(checker.ContractError, "unbounded string"):
             checker.check_description(contract(document=document))
         document = copy.deepcopy(DOCUMENT)
         schemas = document["components"]["schemas"]
-        del schemas["AdmissionReceipt"]["properties"]["bound_inputs"]["maxProperties"]
-        del document["x-pigloros-limits"]["admission_bound_inputs"]
+        schemas["Export"]["properties"]["labels"] = {
+            "type": "object",
+            "additionalProperties": {"const": 1},
+        }
         with self.assertRaisesRegex(checker.ContractError, "unbounded map"):
             checker.check_description(contract(document=document))
 

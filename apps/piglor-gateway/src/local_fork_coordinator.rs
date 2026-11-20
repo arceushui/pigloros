@@ -1945,7 +1945,7 @@ mod tests {
         assert_eq!(response_code(&fixture.submit(bind_request(80), 80)?), 0);
         let host_timelines = [
             crate::local_principal::local_principal_consent_timeline(),
-            crate::local_principal::local_principal_authority_timeline(),
+            pos_local_erasure_loader::local_principal::local_principal_authority_timeline(),
             test_erasure_host(),
         ];
         for parent in host_timelines {
