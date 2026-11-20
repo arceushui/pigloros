@@ -1,9 +1,12 @@
-//! The RQE1 of one verified start (ADR-069 R9 §4.3, status 0).
+//! The RQE1 of one requested start (ADR-069 R9 §4.3): status 0 for a
+//! verified start, 2 for a readback the verifier rejected and 3 for one that
+//! could not be obtained.
 //!
 //! The values come only from the typed request and its typed readback: the
 //! requested properties as submitted (descriptor names only), and the
-//! readback the verifier compared plus the manager-only `RootImagePolicy`.
-//! Both lists are sorted by the canonical encoding of their names.
+//! readback the verifier compared plus, once verified, the manager-only
+//! `RootImagePolicy`. Both lists are sorted by the canonical encoding of
+//! their names.
 
 use pos_reference::sandbox_provider_protocol::{
     DbusProperty, DbusValue, RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields,
@@ -40,15 +43,7 @@ pub fn verified_requested_configuration(
     readback: &[SystemdTransientUnitReadback],
     manager: &SystemdManagerReadback,
 ) -> Result<RequestedConfigurationEvidence, SandboxProviderProtocolError> {
-    let requested = sorted(
-        requested
-            .iter()
-            .map(|property| DbusProperty {
-                name: property.name().to_owned(),
-                value: requested_value(property.value()),
-            })
-            .collect(),
-    );
+    let requested = requested_properties(requested);
     let readback = sorted(
         readback
             .iter()
@@ -71,6 +66,53 @@ pub fn verified_requested_configuration(
     })
 }
 
+/// The status-2 or status-3 RQE1 of a start that was requested and not
+/// verified: `readback` is the complete readback the verifier rejected, or
+/// `None` when it could not be obtained.
+///
+/// # Errors
+/// Any R9 rule the record fails.
+pub fn unverified_requested_configuration(
+    attempt_id: [u8; 16],
+    agr1_digest: [u8; 32],
+    requested: &[RequestedConfigurationProperty],
+    readback: Option<&[SystemdTransientUnitReadback]>,
+) -> Result<RequestedConfigurationEvidence, SandboxProviderProtocolError> {
+    let status = readback.map_or(RequestedConfigurationStatus::ReadbackUnavailable, |_| {
+        RequestedConfigurationStatus::Mismatch
+    });
+    RequestedConfigurationEvidence::new(&RequestedConfigurationEvidenceFields {
+        attempt_id,
+        agr1_digest,
+        status,
+        requested: Some(requested_properties(requested)),
+        readback: readback.map(|readback| {
+            sorted(
+                readback
+                    .iter()
+                    .map(|property| DbusProperty {
+                        name: property.name().to_owned(),
+                        value: readback_value(property.value()),
+                    })
+                    .collect(),
+            )
+        }),
+    })
+}
+
+/// The requested properties as RQE1 records them, sorted.
+fn requested_properties(requested: &[RequestedConfigurationProperty]) -> Vec<DbusProperty> {
+    sorted(
+        requested
+            .iter()
+            .map(|property| DbusProperty {
+                name: property.name().to_owned(),
+                value: requested_value(property.value()),
+            })
+            .collect(),
+    )
+}
+
 /// Sorted as RQE1 requires: by the canonical CBOR encoding of the name,
 /// which orders text by length first.
 fn sorted(mut properties: Vec<DbusProperty>) -> Vec<DbusProperty> {
@@ -82,9 +124,18 @@ fn sorted(mut properties: Vec<DbusProperty>) -> Vec<DbusProperty> {
 fn requested_value(value: &RequestedConfigurationValue) -> DbusValue {
     match value {
         RequestedConfigurationValue::Typed(value) => readback_value(value),
+        descriptors => descriptor_value(descriptors),
+    }
+}
+
+/// The descriptor array's names, or a standard descriptor of which nothing
+/// is recorded.
+fn descriptor_value(value: &RequestedConfigurationValue) -> DbusValue {
+    match value {
         RequestedConfigurationValue::DescriptorNames(names) => {
             DbusValue::DescriptorNames(names.clone())
         }
+        _ => DbusValue::Descriptor,
     }
 }
 

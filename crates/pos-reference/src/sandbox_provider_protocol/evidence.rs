@@ -531,16 +531,27 @@ impl AttemptEvidence {
         let released = termination.progress == AttemptProgressCode::Released;
         let local = mode == SandboxExecutionMode::Local;
         let network = termination.local_network.is_some();
-        let work_expected = work_limit != 0
-            && (released
-                || (termination.progress == AttemptProgressCode::StartedNotReleased
-                    && termination.unit.is_some()));
-        work_expected == termination.work_after.is_some()
+        self.work_after_shaped(work_limit)
             && if released {
                 local == network
             } else {
                 local || !network
             }
+    }
+
+    /// `work-after` may be present only when ELM1 limit 9 is nonzero and
+    /// KOE1 has status 0: `/work` is read only through the handle that
+    /// observation opened. Any null `work-after` passes this shape check;
+    /// whether one was required is left to the classifier, which selects a
+    /// null after a status-0 KOE1 with `/work` as missing evidence (code 2).
+    /// After a failed KOE1 (status 1 or 2) a null one is valid (owner
+    /// decision 2026-11-19, R9 amendment review).
+    const fn work_after_shaped(&self, work_limit: u64) -> bool {
+        let observed = matches!(
+            self.observed.fields().status,
+            KernelObservationStatus::Observed { .. }
+        );
+        self.termination.fields().work_after.is_none() || (work_limit != 0 && observed)
     }
 
     /// Rule 9: the admission ledger is within ELM1 IDs 13 and 14, and the

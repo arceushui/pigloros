@@ -2,8 +2,10 @@
 
 mod durability;
 mod pending_recovery;
+mod recovery_key;
 
 pub use durability::CommittedInstallationUpdate;
+pub use recovery_key::PendingRecoveryRuntimeKey;
 use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;

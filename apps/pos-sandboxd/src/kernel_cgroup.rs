@@ -255,6 +255,23 @@ struct BoundCgroupIdentity {
     inode: u64,
 }
 
+#[cfg(test)]
+impl BoundCgroupIdentity {
+    /// The cgroup `(device, inode)` of a fixed test unit.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn for_test(
+        (device, inode): (u64, u64),
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self {
+            unit_name: TransientServiceUnitName::from_attempt_id([1; 16])?,
+            unit_path: OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/attempt")?,
+            control_group: "/system.slice/attempt.service".to_owned(),
+            device,
+            inode,
+        })
+    }
+}
+
 enum BoundCgroupPath {
     Present,
     Missing { retained_unlinked: bool },
@@ -269,6 +286,7 @@ pub struct BoundAttemptCgroup {
     directory: File,
     events: File,
     identity: BoundCgroupIdentity,
+    invocation: Option<[u8; 16]>,
 }
 
 impl BoundAttemptCgroup {
@@ -312,6 +330,7 @@ impl BoundAttemptCgroup {
             root,
             directory,
             events,
+            invocation: None,
             identity: BoundCgroupIdentity {
                 unit_name,
                 unit_path,
@@ -329,6 +348,20 @@ impl BoundAttemptCgroup {
     #[must_use]
     pub fn control_group(&self) -> &str {
         &self.identity.control_group
+    }
+
+    /// Record the unit's `InvocationID`, read once the cgroup was bound.
+    #[must_use]
+    pub(crate) const fn invoked(mut self, invocation: [u8; 16]) -> Self {
+        self.invocation = Some(invocation);
+        self
+    }
+
+    /// The `InvocationID` of the unit whose cgroup this is (TME1 `unit`,
+    /// ADR-069 R9 §4.6.3); `None` until the transport recorded it.
+    #[must_use]
+    pub const fn invocation_id(&self) -> Option<[u8; 16]> {
+        self.invocation
     }
 
     fn inspect_path_with_metadata(

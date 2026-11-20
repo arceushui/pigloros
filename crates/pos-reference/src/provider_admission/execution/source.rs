@@ -29,8 +29,9 @@ use crate::{
 use super::super::{HeldImageAdmission, ProviderImageSnapshot};
 use super::{
     AdmittedProviderExecution, Clock, ConnectionIdentity, ExecutionSource, FailedInput, GrantState,
-    InputRefusal, IssuedGrant, PreparedProviderExecution, ProviderExecutionPolicy, RetainedCase,
-    StagingCharge, StagingError, StagingLedger, TransferWindow,
+    GrantedFacts, InputRefusal, IssuedGrant, OutputReservationRefused, PreparedProviderExecution,
+    ProviderExecutionPolicy, RetainedCase, StagingCharge, StagingError, StagingLedger,
+    TransferWindow,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -473,6 +474,13 @@ impl PreparedProviderExecution {
                 &self.policy().commitment,
             )
             .map_err(|_| StagingError::InvalidSignature)?;
+        let facts = Arc::new(GrantedFacts {
+            limits: self.policy().effective_limits().to_vec(),
+            limits_digest: self.policy().effective_limits_digest(),
+            mode: snapshot.launch_policy().execution_mode,
+            provider_binary_digest: admitted.manifest().binary_digest,
+            negative_probe_evidence: admitted.host_profile().negative_probe_evidence,
+        });
         let length = u32::try_from(grant.len()).map_err(invalid)?;
         // A supplied signer may block while installation or the floor changes.
         snapshot
@@ -506,6 +514,7 @@ impl PreparedProviderExecution {
                                 incomplete_inputs: usage.queued_inputs,
                             },
                             issued_at: (self.clock)().ok(),
+                            admitted: facts,
                         });
                     })
             })
@@ -707,12 +716,14 @@ impl AdmittedProviderExecution {
         self.verified_input.read_exact_at(bytes, offset)
     }
 
-    /// Keep this attempt counted while staging one bounded terminal output.
+    /// Reserve this attempt's one output of exactly ELM1\[8\] bytes, keeping
+    /// the attempt counted while the charge lives (ADR-069 R10 §4.7).
     ///
-    /// # Errors
-    /// Refuses a second output, ID-8 violation or aggregate byte overflow.
-    pub fn reserve_output(&self, bytes: u64) -> Result<StagingCharge, StagingError> {
-        self.slot.output(self.policy(), bytes)
+    /// `None` once the reservation was made: an attempt has one output.
+    /// Otherwise the reservation, or why the ledger refused it.
+    #[must_use = "a dropped reservation releases its bytes at once"]
+    pub fn reserve_output(&self) -> Option<Result<StagingCharge, OutputReservationRefused>> {
+        self.slot.output(self.policy())
     }
 }
 
@@ -1538,6 +1549,30 @@ mod tests {
         Ok(())
     }
 
+    /// The admitted facts the terminal records need are retained with the
+    /// grant: ELM1 under the digest AGR1 names, the mode, and SPR1's
+    /// provider binary and negative-probe digests (Redmine #443 journal
+    /// 22723).
+    fn assert_granted_facts(entry: &super::super::AdmittedEntry<'_>, elm1_digest: [u8; 32]) {
+        let issued = entry.grant();
+        assert_eq!(issued.effective_limits(), entry.policy().effective_limits());
+        assert_eq!(issued.effective_limits_digest(), elm1_digest);
+        let snapshot = entry.admission().snapshot();
+        assert_eq!(
+            issued.execution_mode(),
+            snapshot.launch_policy().execution_mode
+        );
+        let provider = snapshot.admitted.provider();
+        assert_eq!(
+            issued.provider_binary_digest(),
+            provider.manifest().binary_digest
+        );
+        assert_eq!(
+            issued.negative_probe_evidence(),
+            provider.host_profile().negative_probe_evidence
+        );
+    }
+
     #[test]
     fn admitted_input_preserves_bytes_policy_and_the_live_floor() -> TestResult {
         use super::super::staging::StagingDirectory;
@@ -1592,6 +1627,7 @@ mod tests {
         );
         let issued_at = issued.issued_at().ok_or("no issue time")?;
         assert!(transfer.start <= issued_at && issued_at <= transfer.finish);
+        assert_granted_facts(&verified.entry(), sent_grant.elm1_digest);
         assert!(transfer.finish <= transfer.deadline);
         assert_eq!(
             verified.entry().policy().request_digest(),
@@ -1602,6 +1638,20 @@ mod tests {
         verified.read_exact_at(&mut readback, 0)?;
         assert_eq!(readback, staged.input());
         let execution = verified.entry().retain();
+        // The attempt's one output: exactly ELM1[8] bytes, reserved once
+        // through either handle and released with its charge.
+        let before = ledger.usage().reserved_bytes;
+        let output = verified
+            .reserve_output()
+            .ok_or("the first output reservation was refused")??;
+        assert_eq!(
+            ledger.usage().reserved_bytes - before,
+            verified.entry().policy().effective_limits()[8].value
+        );
+        assert!(execution.reserve_output().is_none());
+        assert!(verified.reserve_output().is_none());
+        drop(output);
+        assert_eq!(ledger.usage().reserved_bytes, before);
         let length = verified.len();
         execution.read_exact_at(&mut [], length)?;
         let mut last = [0xff];

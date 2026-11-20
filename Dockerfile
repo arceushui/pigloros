@@ -4,6 +4,9 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY rust-toolchain.toml rustfmt.toml ./
+# The workspace SQLite build flags (ADR-123 G1, Redmine #1451): without them the
+# image would build a bundled SQLite that lacks `sqlite_filestat`.
+COPY .cargo/config.toml .cargo/config.toml
 COPY crates/ crates/
 COPY plugins/ plugins/
 COPY apps/ apps/

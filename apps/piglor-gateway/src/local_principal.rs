@@ -2195,7 +2195,7 @@ mod tests {
     async fn an_unprovisioned_host_answers_every_protected_route_401() -> TestResult {
         let (gateway, app) = served(None)?;
         let actor = actor()?;
-        let timeline = gateway.create_timeline("unprovisioned").await?.id();
+        let timeline = gateway.create_timeline("unprovisioned", None).await?.id();
         for (method, uri, body) in [
             (
                 "POST",
@@ -2750,7 +2750,7 @@ mod tests {
                         Ok(()) | Err(()) => {}
                     }
                     drop(release_rx.await);
-                    gateway.create_timeline("admitted").await
+                    gateway.create_timeline("admitted", None).await
                 },
             ),
         );
@@ -2941,7 +2941,7 @@ mod tests {
                         Ok(()) | Err(()) => {}
                     }
                     drop(release_rx.await);
-                    gateway.create_timeline("before-shutdown").await
+                    gateway.create_timeline("before-shutdown", None).await
                 })
                 .await
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })
@@ -3662,6 +3662,118 @@ mod tests {
         );
         gateway.shutdown().await?;
         drop(gateway);
+        Ok(())
+    }
+
+    /// Record an erasure store identity in the store at `path` and open its
+    /// Erasure Host Timeline, as `provision-local-erasure` does.
+    fn provision_erasure_host_timeline(path: &str) -> TestResult<TimelineId> {
+        let identity = Hash::from_bytes([0x5e; 32]);
+        pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
+            &mut SqliteStore::open(path)?,
+            identity,
+        )?;
+        let erasure_host = pos_core::local_erasure_host_timeline_v1(
+            pos_core::ErasureReferenceV1::from_digest(*identity.as_bytes()),
+        )?;
+        sqlite_host(path)?
+            .command_sender()?
+            .open_root_timeline(erasure_host, "erasure host")?;
+        Ok(erasure_host)
+    }
+
+    /// ADR-136 §4a: no client seam reaches the Erasure Host Timeline or
+    /// the authority Timeline, exactly as for the consent Timeline; with
+    /// the consent Timeline and the Erasure Host Timeline recorded, a
+    /// client still creates exactly the root-Timeline ceiling of roots.
+    #[tokio::test]
+    async fn host_timelines_are_hidden_from_clients_and_outside_the_ceiling() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let erasure_host = provision_erasure_host_timeline(&path)?;
+        let actor = actor()?;
+        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        assert_eq!(
+            gateway.host_timelines(),
+            crate::host_timelines::HostTimelinesV1::new(Some(erasure_host))
+        );
+        for hidden in [erasure_host, local_principal_authority_timeline()] {
+            for (method, uri, body) in [
+                ("GET", format!("/v1/timelines/{hidden}/events"), None),
+                (
+                    "POST",
+                    format!("/v1/timelines/{hidden}/signals"),
+                    Some(signal(actor)),
+                ),
+                (
+                    "POST",
+                    format!("/v1/timelines/{hidden}/actions"),
+                    Some(action(actor)),
+                ),
+            ] {
+                let (status, problem) = send(&app, method, &uri, Some(actor), body).await?;
+                assert_eq!(
+                    (status, problem["code"].clone()),
+                    (StatusCode::NOT_FOUND, json!("not-found-or-unavailable")),
+                    "{uri}"
+                );
+            }
+        }
+        // Both host roots are recorded, and neither is counted.
+        for host_root in [local_principal_consent_timeline(), erasure_host] {
+            assert!(gateway
+                .store
+                .timeline(host_root)
+                .await
+                .map_err(GatewayError::from)?
+                .is_some());
+        }
+        for _ in 0..crate::MAX_TIMELINES {
+            assert_eq!(create(&app, Some(actor)).await?.0, StatusCode::CREATED);
+        }
+        let (status, problem) = create(&app, Some(actor)).await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!("resource-limit-exceeded")
+            )
+        );
+        gateway.shutdown().await?;
+        drop(gateway);
+        Ok(())
+    }
+
+    /// ADR-136 §1: `POST /v1/timelines` records the actor its decision
+    /// admitted as the owner of the new root; an unprotected composition
+    /// creates an unowned root.
+    #[tokio::test]
+    async fn a_created_root_is_owned_by_its_admitted_actor() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let actor = actor()?;
+        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        let cases = [
+            (gateway, app, Some(actor)),
+            Gateway::unprotected_for_harness(memory_host()?)
+                .map(|unprotected| (unprotected.clone(), app_of(unprotected), None))?,
+        ];
+        for (gateway, app, owner) in cases {
+            let (status, created) = create(&app, Some(actor)).await?;
+            assert_eq!(status, StatusCode::CREATED);
+            let id = created["id"].as_str().ok_or("a created root has an id")?;
+            let timeline = gateway
+                .store
+                .timeline(TimelineId::from_ulid(Ulid::from_string(id)?))
+                .await
+                .map_err(GatewayError::from)?
+                .ok_or("the created root is recorded")?;
+            assert_eq!(timeline.meta.owner, owner);
+            assert!(timeline.meta.fork_point.is_none());
+            gateway.shutdown().await?;
+        }
         Ok(())
     }
 

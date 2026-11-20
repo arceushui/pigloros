@@ -22,23 +22,40 @@
 //! The authority never changes afterwards (R11 D9): no step is repeated.
 //!
 //! The `provider-runtime` mode, `serve_provider_runtime`, runs these
-//! steps before any socket exists. The selector started this runtime as
-//! its runtime unit (#1399, R11 §5.0), so the mode then binds both SIC1
-//! endpoints, execute then control (`endpoint`, R11 §6), sends `READY=1`
-//! (`notify`) and serves both in state `Starting` (`serving`, R11 §7).
-//! Restart reconciliation, which opens admission, is not composed yet
-//! (R11 §15 slice 4): until it is, the runtime stays `Starting`.
+//! steps and step 7 (`reconcile`: the system bus, the exclusive attempt
+//! recovery and the staging directory) before any socket exists. The
+//! selector started this runtime as its runtime unit (#1399, R11 §5.0), so
+//! the mode then binds both SIC1 endpoints, execute then control
+//! (`endpoint`, R11 §6), sends `READY=1` (`notify`) and serves both in state
+//! `Starting` (`serving`, R11 §7). Restart reconciliation runs on its own
+//! thread meanwhile (steps 9 to 11): its success opens admission (`Open`),
+//! and its failure leaves `ReconcileFailed` for the life of the process,
+//! with no retry. If that thread cannot be spawned, the runtime stays
+//! `Starting` for the life of the process, which answers exactly as
+//! `ReconcileFailed` does: admission never opens.
+//!
+//! The `recovery-peer` mode (`recovery_peer`, ADR-069 R12 §5) answers one
+//! RCC1/RCU1 exchange of a pending SIR1 with the same revocation responder,
+//! and then exits.
 
 mod endpoint;
 mod notify;
+mod reconcile;
+// `pub` only so its `pub(crate)` items pass Clippy's `redundant_pub_crate`;
+// nothing in it is public.
+pub mod recovery_peer;
+mod revocation;
 mod serving;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
 use std::ffi::OsStr;
+use std::future::Future;
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use pos_reference::selector::installation::authority::{
@@ -47,7 +64,15 @@ use pos_reference::selector::installation::authority::{
 use pos_reference::selector::installation::{InstallationObjectKind, InstalledSelectorState};
 use pos_reference::selector::SelectorBoundaryError;
 
-use crate::{KeyFileRuntimeSigner, ProviderInstallation, ProviderInstallationError, RuntimeKey};
+use crate::{
+    AttemptLifecycle, KeyFileRuntimeSigner, ProviderInstallation, ProviderInstallationError,
+    RuntimeKey,
+};
+use reconcile::Reconcile;
+pub use revocation::{
+    AttemptCleanupState, AttemptStateSource, ExchangeObserver, ExchangeOutcome,
+    RevocationUpdateResponder,
+};
 
 /// The process's own executable, followed through its magic link.
 const SELF_EXECUTABLE: &str = "/proc/self/exe";
@@ -90,6 +115,63 @@ pub(crate) enum ProviderRuntimeError {
     /// A listener could not be bound or polled.
     #[error("a provider endpoint is unavailable")]
     EndpointUnavailable,
+    /// R11 §5.1 step 7: the system bus, the exclusive attempt recovery or
+    /// the staging directory is unavailable, before any socket existed.
+    #[error("the system bus, the attempt registry or the staging directory is unavailable")]
+    HostUnavailable,
+}
+
+/// The execute socket's admission state once restart reconciliation ended
+/// (R11 §7.1). Before it is set, the runtime is `Starting`.
+#[derive(Debug)]
+enum AdmissionState {
+    /// Reconciliation succeeded. The lifecycle holds the registry lock and
+    /// the ledger for the life of the process; the revocation responder
+    /// fences it.
+    Open { lifecycle: AttemptLifecycle },
+    /// Reconciliation failed: admission stays closed for the life of the
+    /// process, with no retry (R11 §5.1 step 11).
+    ReconcileFailed,
+}
+
+/// The live runtime's attempt state for the revocation responder (R11
+/// §8.1): once `Open`, the lifecycle's permanent fence and snapshot, read
+/// through [`crate::LiveAttemptIdentity::cleanup_proved`]. Before that no
+/// attempt can exist in this runtime, so the view is empty.
+#[derive(Debug)]
+struct LiveAttempts<'a>(&'a OnceLock<AdmissionState>);
+
+impl AttemptStateSource for LiveAttempts<'_> {
+    fn attempt_states(&self) -> impl Future<Output = Option<Vec<AttemptCleanupState>>> + Send {
+        let lifecycle = match self.0.get() {
+            Some(AdmissionState::Open { lifecycle }) => Some(lifecycle),
+            _ => None,
+        };
+        async move {
+            let Some(lifecycle) = lifecycle else {
+                return Some(Vec::new());
+            };
+            fenced_attempt_states(lifecycle).await
+        }
+    }
+}
+
+/// Fence `lifecycle` for good and read each live attempt of its one
+/// snapshot as the responder does; `None` once it was fenced before or a
+/// live attempt's record is unreadable.
+pub(crate) async fn fenced_attempt_states<I>(
+    lifecycle: &AttemptLifecycle<I>,
+) -> Option<Vec<AttemptCleanupState>> {
+    lifecycle.fence_and_snapshot().await.ok().map(|snapshot| {
+        snapshot
+            .attempts()
+            .iter()
+            .map(|attempt| AttemptCleanupState {
+                attempt_id: attempt.attempt_id(),
+                cleanup_proved: attempt.cleanup_proved(),
+            })
+            .collect()
+    })
 }
 
 fn unsafe_endpoint<T>(_: T) -> ProviderRuntimeError {
@@ -107,32 +189,98 @@ fn unavailable<T>(_: T) -> ProviderRuntimeError {
 pub(crate) fn serve_provider_runtime() -> ProviderRuntimeError {
     serve_with(
         start_runtime_authority,
-        std::env::var_os("NOTIFY_SOCKET").as_deref(),
+        reconcile::prepare_host,
+        notify_socket().as_deref(),
     )
 }
 
-/// The mode against the startup authority that `start` binds, notifying
-/// `notify_socket`.
-fn serve_with(
+/// The service manager's notification socket, the one environment variable
+/// a provider mode reads (R11 §9).
+fn notify_socket() -> Option<std::ffi::OsString> {
+    std::env::var_os("NOTIFY_SOCKET")
+}
+
+/// The mode against the startup authority that `start` binds, with the
+/// restart reconciliation `prepare` binds before any socket exists,
+/// notifying `notify_socket`.
+fn serve_with<R: Reconcile>(
     start: impl FnOnce() -> Result<RuntimeAuthority, ProviderStartupError>,
+    prepare: impl FnOnce(&RuntimeAuthority) -> Result<R, ProviderRuntimeError>,
     notify_socket: Option<&OsStr>,
 ) -> ProviderRuntimeError {
-    start().map_or_else(ProviderRuntimeError::from, |(admitted, _, signer)| {
-        let (execute, control) = admitted
-            .bootstrap()
-            .installed()
-            .manifest()
-            .provider_sockets();
-        endpoint::bind_endpoints(execute, control).map_or_else(
+    start()
+        .map_err(ProviderRuntimeError::from)
+        .and_then(|authority| prepare(&authority).map(|reconcile| (authority, reconcile)))
+        .and_then(|((admitted, _, signer), reconcile)| {
+            let (execute, control) = admitted
+                .bootstrap()
+                .installed()
+                .manifest()
+                .provider_sockets();
+            endpoint::bind_endpoints(execute, control)
+                .map(|endpoints| (admitted, signer, reconcile, endpoints))
+        })
+        .map_or_else(
             |error| error,
-            |(execute, control)| {
+            |(admitted, signer, reconcile, (execute, control))| {
                 notify::notify_ready(notify_socket);
+                let admission = Arc::new(OnceLock::new());
+                reconcile_in_background(reconcile, Arc::clone(&admission));
                 let pool = usize::try_from(required_slots(admitted.provider().broker_hard_caps()))
                     .unwrap_or(1);
-                serving::Responder::new(&admitted, &signer).serve(&execute, &control, pool)
+                serving::Responder::new(&admitted, &signer, &admission)
+                    .serve(&execute, &control, pool)
             },
         )
-    })
+}
+
+/// Run restart reconciliation on its own thread and record the admission
+/// state it ends in (R11 §5.1 steps 9 to 11).
+fn reconcile_in_background(
+    reconciliation: impl Reconcile,
+    admission: Arc<OnceLock<AdmissionState>>,
+) {
+    start_reconciliation(reconciliation, admission, |job| {
+        std::thread::Builder::new()
+            .name("reconcile".to_owned())
+            .spawn(job)
+            .map(drop)
+    });
+}
+
+/// Start `reconciliation` through `spawn`, recording the state it ends in.
+/// A failure is reported in one line on standard error.
+///
+/// If `spawn` fails, `admission` is never set: the runtime stays
+/// `Starting` for the life of the process, which answers exactly as
+/// `ReconcileFailed` does, and admission never opens. That is reported in
+/// one line on standard error too.
+fn start_reconciliation(
+    reconciliation: impl Reconcile,
+    admission: Arc<OnceLock<AdmissionState>>,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    spawn(Box::new(move || {
+        let state = reconciliation.reconcile().map_or_else(
+            |error| {
+                writeln!(
+                    std::io::stderr(),
+                    "pos-sandboxd: restart reconciliation failed: {error}"
+                )
+                .ok();
+                AdmissionState::ReconcileFailed
+            },
+            |lifecycle| AdmissionState::Open { lifecycle },
+        );
+        admission.set(state).ok();
+    }))
+    .unwrap_or_else(|error| {
+        writeln!(
+            std::io::stderr(),
+            "pos-sandboxd: restart reconciliation could not start: {error}"
+        )
+        .ok();
+    });
 }
 
 /// The admitted provider, its SPI1 values and its runtime-attestation

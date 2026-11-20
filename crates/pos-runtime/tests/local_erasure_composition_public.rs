@@ -26,8 +26,9 @@ use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
     compiled_local_erasure_policy_v1, ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, LocalErasureCompositionErrorV1,
-    LocalErasureCompositionInputsV1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
-    LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_POLICY_REFERENCE_V1,
+    LocalErasureCompositionInputsV1, LocalFreezePreparationV1,
+    LOCAL_ERASURE_CLASSIFICATION_COUNT_V1, LOCAL_ERASURE_CLASSIFICATION_V1,
+    LOCAL_ERASURE_POLICY_REFERENCE_V1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -219,7 +220,7 @@ impl Case {
         store: &mut S,
     ) -> Result<ErasureCoordinatorCompositionV1, LocalErasureCompositionErrorV1>
     where
-        S: ErasureInventoryPersistencePortV1 + EventStore,
+        S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + EventStore,
     {
         ErasureCoordinatorCompositionV1::local(
             &LocalErasureCompositionInputsV1 {
@@ -239,7 +240,7 @@ impl Case {
 
     fn refusal<S>(&self, store: &mut S) -> Option<LocalErasureCompositionErrorV1>
     where
-        S: ErasureInventoryPersistencePortV1 + EventStore,
+        S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + EventStore,
     {
         self.compose(store).err()
     }
@@ -1135,8 +1136,8 @@ impl GrantShape {
 
 /// An authority-persistence host over the registry of the first of
 /// `grants` that attests all of them, bound to `store`.
-fn bound_authority_host(
-    store: &mut SqliteStore,
+fn bound_authority_host<S: AuthorityPersistencePortV1>(
+    store: &mut S,
     grants: &[&CapabilityGrantV1],
 ) -> TestResult<AuthorityPersistenceHostV1> {
     let mut bindings = Vec::with_capacity(grants.len());
@@ -2580,7 +2581,15 @@ fn prepared(
         .map_err(fail)?;
     let request = request_of(key)?;
     sender.authorize_erasure_request(request, authorization(key, store.head)?.reference()?)?;
-    Ok(sender.prepare_local_freeze(request)?)
+    signed_body(sender.prepare_local_freeze(request)?)
+}
+
+/// The body a prepared freeze needs signed.
+fn signed_body(preparation: LocalFreezePreparationV1) -> TestResult<ErasureReferenceV1> {
+    match preparation {
+        LocalFreezePreparationV1::Sign(body) => Ok(body),
+        LocalFreezePreparationV1::CommitsRejection => Err("the freeze commits a rejection".into()),
+    }
 }
 
 fn lifecycle(
@@ -2654,7 +2663,7 @@ fn signed_freeze(
         assert_eq!(
             host.command_sender()?
                 .prepare_local_freeze(request_of(key)?)?,
-            digest
+            LocalFreezePreparationV1::Sign(digest)
         );
         digest
     };
@@ -3141,8 +3150,8 @@ fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestR
         ErasureLifecycleV1::AccessFrozen
     );
     drop(host);
-    // After a routine bundle rotation, recovery verifies the old freeze
-    // against the bundle it pinned, retained at prepare.
+    // A routine bundle rotation is refused while the frozen request pins
+    // the old bundle (owner decision Q12 on #1431).
     let rotated_key = rotated_signer().verifying_key().to_bytes();
     let material = SigningKeyMaterial::new(rotated_signer());
     owned.store.register(KeyRegistrationV1::new(
@@ -3154,9 +3163,18 @@ fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestR
     rotated.signer_identity.epoch = 2;
     rotated.signer_public_key = rotated_key;
     rotated.signer_key_id = local_erasure_signer_key_id_v1(&rotated_key);
-    let mut host = owned
-        .store
-        .host(&Case::signed(&rotated, &bundle_root(), &[])?, 4_096)?;
+    assert_eq!(
+        Case::signed(&rotated, &bundle_root(), &[])?.refusal(&mut owned.store.sqlite()?),
+        Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+    // After a compromise that revokes the old signer, the rotation is
+    // accepted, and recovery verifies the old freeze against the bundle it
+    // pinned, retained at prepare.
+    let old_signer = bundle().signer_key_id;
+    let mut host = owned.store.host(
+        &Case::signed(&rotated, &bundle_root(), &[old_signer.as_str()])?,
+        4_096,
+    )?;
     assert_frozen(&mut host, &[owned.owned, child], owned.other)
 }
 
@@ -3282,12 +3300,12 @@ fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
     let mut sender = host.command_sender()?;
     sender.fork_timeline(roots[0], Seq::ZERO, "growth")?;
     assert_eq!(
-        sender.prepare_local_freeze(request).map(drop),
-        Err(ErasureHostErrorV1::Conflict)
+        sender.prepare_local_freeze(request)?,
+        LocalFreezePreparationV1::CommitsRejection
     );
     assert_eq!(
         sender
-            .freeze_access(request, &freeze(reference(0x78)))?
+            .freeze_access(request, &freeze(authorization(1, store.head)?.reference()?))?
             .lifecycle(),
         ErasureLifecycleV1::Rejected
     );
@@ -4022,12 +4040,24 @@ impl Attempted {
             Hash::from_bytes([0x81; 32]),
             None,
         ))?;
+        Self::frozen(store, owned, Vec::new(), bundle)
+    }
+
+    /// Request 1 of `store`, whose actor owns `owned`, frozen under
+    /// `bundle` with the store, payload and subject-key cells and `extra`.
+    fn frozen(
+        store: LocalStore,
+        owned: TimelineId,
+        extra: Vec<Cell>,
+        bundle: LocalErasureBundleV1,
+    ) -> TestResult<Self> {
         let case = Case::signed(&bundle, &bundle_root(), &[])?;
         Self::freeze(&store, &case)?;
         let request = request_of(1)?;
         let mut cells = store_cells()?;
         cells.push(payload_cell(owned)?);
         cells.extend(subject_key_cells()?);
+        cells.extend(extra);
         let mut obligations = Vec::new();
         for (target, category, ack_class) in cells {
             obligations.push(ErasureObligationV1::new(ErasureObligationInputV1 {
@@ -5813,6 +5843,2073 @@ fn a_retry_recovers_on_its_retained_frozen_bundle_after_a_rotation() -> TestResu
     assert_eq!(
         attempted.lifecycle_after_rotation(&[])?,
         ErasureLifecycleV1::Complete
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-136 §4a: `LocalErasureExecutorV1`, `destroy_key_for_erasure` and the
+// dispatch outbox, with MemoryStore/SQLite parity, and the Q18 subject-fence
+// exemption (#1430).
+// ---------------------------------------------------------------------------
+
+use pos_core::{
+    ErasureAuthorityExecutionV1, ErasureOwnerCommandV1, ErasureOwnerResultV1,
+    ErasureRecordedScopeReadV1, LocalErasureArtifactDispositionV1, LocalErasureCacheGenerationV1,
+    LocalErasureNegativeResultV1, LocalErasureRedactionV1, LocalErasureReplicaPurgeV1,
+    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1,
+};
+use pos_runtime::LocalErasureExecutorV1;
+
+/// The Erasure Host Timeline of these stores: the unowned root Timeline at
+/// `ELHT1` of the fixture store identity, which the host derives and fences
+/// key destruction on.
+fn erasure_host_timeline() -> TestResult<TimelineId> {
+    Ok(pos_core::local_erasure_host_timeline_v1(
+        ErasureReferenceV1::from_digest(STORE_IDENTITY),
+    )?)
+}
+
+/// The actor's owned root Timeline of the Memory store, at a fixed
+/// identity, so that two builds of that store are equal.
+const fn memory_owned_timeline() -> TimelineId {
+    TimelineId::from_ulid(Ulid::from_bytes([0x8e; 16]))
+}
+
+const fn executor() -> LocalErasureExecutorV1 {
+    LocalErasureExecutorV1
+}
+
+fn host_timeline_meta() -> TestResult<TimelineMeta> {
+    Ok(TimelineMeta {
+        id: erasure_host_timeline()?,
+        ..TimelineMeta::root("erasure-host")
+    })
+}
+
+/// The bundle naming every owner and listing the Erasure Host Timeline.
+fn executor_bundle() -> TestResult<LocalErasureBundleV1> {
+    let mut bundle = owned_bundle(&ALL_CLASSES)?;
+    bundle.host_timelines = vec![erasure_host_timeline()?];
+    Ok(bundle)
+}
+
+/// Request 1 of `owned`, frozen under the executor bundle with `extra`
+/// cells, after the store's Erasure Host Timeline is opened.
+fn executor_attempted(owned: OwnedStore, extra: Vec<Cell>) -> TestResult<Attempted> {
+    owned
+        .store
+        .sqlite()?
+        .create_timeline_with_meta(host_timeline_meta()?)?;
+    Attempted::frozen(owned.store, owned.owned, extra, executor_bundle()?)
+}
+
+/// The acknowledgement class whose ELOWN1 owner is `owner`.
+fn class_of(owner: ErasureReferenceV1) -> TestResult<&'static str> {
+    let store = ErasureReferenceV1::from_digest(STORE_IDENTITY);
+    for (category, ack_class) in ALL_CLASSES {
+        if pos_core::local_erasure_owner_ref_v1(store, category, ack_class)? == owner {
+            return Ok(ack_class);
+        }
+    }
+    Err("no acknowledgement class owns the command".into())
+}
+
+/// Each owner result as its class and outcome, in class order.
+fn outcomes(
+    results: &[ErasureOwnerResultV1],
+) -> TestResult<Vec<(&'static str, Option<ErasureErrorV1>)>> {
+    let mut outcomes = Vec::new();
+    for result in results {
+        outcomes.push((
+            class_of(result.command().destruction.owner)?,
+            result.error(),
+        ));
+    }
+    outcomes.sort_unstable_by_key(|(ack_class, _)| *ack_class);
+    Ok(outcomes)
+}
+
+/// The outcomes of the store, payload and subject-key owners, with the
+/// local replica's `replica` outcome.
+const fn expected_outcomes(
+    replica: Option<ErasureErrorV1>,
+) -> [(&'static str, Option<ErasureErrorV1>); 5] {
+    [
+        ("client-cache-signal", None),
+        ("key-registry", None),
+        (
+            "local-backup-inventory",
+            Some(ErasureErrorV1::BackupInventoryIncomplete),
+        ),
+        ("local-replica", replica),
+        (
+            "timeline-payload",
+            Some(ErasureErrorV1::ArtifactDeletionFailed),
+        ),
+    ]
+}
+
+/// The dispatched command of `category` in `request`'s outbox.
+fn command_of(
+    host: &mut ErasureExecutionHostV1,
+    request: ErasureReferenceV1,
+    category: ErasureInventoryCategoryV1,
+) -> TestResult<ErasureOwnerCommandV1> {
+    Ok(host
+        .command_sender()?
+        .dispatched_owner_commands(request)?
+        .into_iter()
+        .find(|command| command.destruction.category == category)
+        .ok_or("no dispatched command of the category")?)
+}
+
+/// The destruction of the actor's subject key under `authorization`.
+fn subject_key_destruction(authorization: Hash) -> TestResult<KeyDestructionRequestV1> {
+    Ok(KeyDestructionRequestV1::new(
+        subject_key(1)?,
+        Hash::from_bytes([0x81; 32]),
+        authorization,
+    ))
+}
+
+impl LocalStore {
+    /// The ELO1 `result` names, read back from the store.
+    fn elo1(&self, result: &ErasureOwnerResultV1) -> TestResult<LocalErasureOwnerResultV1> {
+        Ok(LocalErasureOwnerResultV1::from_canonical_cbor(
+            &ErasurePersistencePortV1::read_object(&self.sqlite()?, result.owner_result())?,
+        )?)
+    }
+
+    /// The effect record `elo1` binds, read back by its digest.
+    fn effect(&self, elo1: &LocalErasureOwnerResultV1) -> TestResult<Vec<u8>> {
+        Ok(ErasurePersistencePortV1::read_object(
+            &self.sqlite()?,
+            elo1.effect_digest,
+        )?)
+    }
+}
+
+impl Attempted {
+    /// A host over this store on which attempt 0 is dispatched.
+    fn dispatched(&self) -> TestResult<ErasureExecutionHostV1> {
+        let mut host = self.host()?;
+        host.command_sender()?
+            .dispatch_erasure_destruction(self.request, &self.attempt)?;
+        Ok(host)
+    }
+
+    /// Assert that the committed ELO1 of `result` binds its command and
+    /// outcome, and that its effect digest names the effect its class
+    /// commits: an ELNEG1 for a negative outcome, else the class's record or
+    /// the subject key's tombstone receipt.
+    fn assert_effect(&self, result: &ErasureOwnerResultV1) -> TestResult {
+        let destruction = result.command().destruction;
+        let elo1 = self.store.elo1(result)?;
+        assert_eq!(
+            elo1,
+            LocalErasureOwnerResultV1 {
+                request: self.request,
+                attempt: self.attempt.reference(),
+                obligation: destruction.obligation,
+                command: destruction.command,
+                owner_ref: destruction.owner,
+                error: result.error(),
+                effect_digest: elo1.effect_digest,
+            }
+        );
+        if let Some(error) = result.error() {
+            let negative = LocalErasureNegativeResultV1 {
+                command: destruction.command,
+                owner_ref: destruction.owner,
+                error,
+            };
+            assert_eq!(elo1.effect_digest, negative.reference()?);
+            assert_eq!(self.store.effect(&elo1)?, negative.to_canonical_cbor()?);
+            return Ok(());
+        }
+        match class_of(destruction.owner)? {
+            "key-registry" => {
+                let receipt = deletion_receipt(&subject_key_destruction(Hash::from_bytes(
+                    destruction.command.digest(),
+                ))?);
+                assert_eq!(
+                    elo1.effect_digest,
+                    ErasureReferenceV1::from_digest(*receipt.as_bytes())
+                );
+                let registry = self
+                    .store
+                    .sqlite()?
+                    .load_key_registry()?
+                    .ok_or("no key registry")?;
+                assert_eq!(
+                    registry
+                        .tombstone(subject_key(1)?)
+                        .map(|tombstone| tombstone.deletion_receipt),
+                    Some(receipt)
+                );
+            }
+            "client-cache-signal" => {
+                let (scope, _) = self
+                    .store
+                    .sqlite()?
+                    .recorded_scope(self.request)?
+                    .ok_or("no committed scope")?;
+                // Q8: the generation is the attempt's admitted position.
+                let record = LocalErasureCacheGenerationV1 {
+                    request: self.request,
+                    scope_commitment: scope.reference(),
+                    generation: 2,
+                };
+                assert_eq!(self.attempt.admitted_position(), 2);
+                assert_eq!(elo1.effect_digest, record.reference()?);
+                assert_eq!(self.store.effect(&elo1)?, record.to_canonical_cbor()?);
+            }
+            "local-replica" => {
+                let record = LocalErasureReplicaPurgeV1 {
+                    request: self.request,
+                    command: destruction.command,
+                    replica_id: destruction.target.replica_id,
+                };
+                assert_eq!(elo1.effect_digest, record.reference()?);
+                assert_eq!(self.store.effect(&elo1)?, record.to_canonical_cbor()?);
+            }
+            _ => {
+                let record = LocalErasureArtifactDispositionV1 {
+                    request: self.request,
+                    artifact_class: destruction.target.artifact_class,
+                    artifact_digest: destruction.target.artifact_digest,
+                    redaction: LocalErasureRedactionV1::Redacted,
+                    replay_claim_to: ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                };
+                assert_eq!(elo1.effect_digest, record.reference()?);
+                assert_eq!(self.store.effect(&elo1)?, record.to_canonical_cbor()?);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn every_owner_class_commits_its_effect_and_elo1_at_the_host_seam() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let request = attempted.request;
+    {
+        // No attempt is active yet, and an unknown request has no manifest:
+        // both outboxes are empty.
+        let mut host = attempted.host()?;
+        let mut sender = host.command_sender()?;
+        assert!(sender.dispatched_owner_commands(request)?.is_empty());
+        assert!(sender
+            .dispatched_owner_commands(reference(0x42))?
+            .is_empty());
+    }
+    let mut host = attempted.dispatched()?;
+    // The outbox is every obligation of attempt 0, keys first and the local
+    // replica last, otherwise in the attempt's order.
+    let mut expected = Vec::new();
+    for obligation in &attempted.obligations {
+        expected.push(ErasureOwnerCommandV1 {
+            request,
+            destruction: ErasureDestructionCommandV1::from_obligation(
+                obligation,
+                attempted.attempt.reference(),
+            ),
+        });
+    }
+    expected.sort_by_key(|command| match command.destruction.category {
+        ErasureInventoryCategoryV1::Key => 0,
+        ErasureInventoryCategoryV1::Artifact => 1,
+        ErasureInventoryCategoryV1::Backup => 2,
+        ErasureInventoryCategoryV1::Replica => 3,
+    });
+    assert_eq!(
+        host.command_sender()?.dispatched_owner_commands(request)?,
+        expected
+    );
+    let results = LocalErasureExecutorV1::replay(&mut host, request).map_err(fail)?;
+    // Keys first, the local replica after every other owner.
+    assert_eq!(
+        results
+            .first()
+            .map(|result| result.command().destruction.category),
+        Some(ErasureInventoryCategoryV1::Key)
+    );
+    assert_eq!(
+        results
+            .last()
+            .map(|result| result.command().destruction.category),
+        Some(ErasureInventoryCategoryV1::Replica)
+    );
+    assert_eq!(outcomes(&results)?, expected_outcomes(None));
+    // A replay is idempotent: every owner returns the same owner result.
+    assert_eq!(
+        LocalErasureExecutorV1::replay(&mut host, request).map_err(fail)?,
+        results
+    );
+    // No owner outcome poisoned the host.
+    assert_eq!(
+        lifecycle(&mut host, request)?,
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+    drop(host);
+    for result in &results {
+        attempted.assert_effect(result)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn the_outbox_replays_only_unacknowledged_commands() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let request = attempted.request;
+    let backup = {
+        let mut host = attempted.dispatched()?;
+        let results = LocalErasureExecutorV1::replay(&mut host, request).map_err(fail)?;
+        *results
+            .iter()
+            .find(|result| {
+                result.command().destruction.category == ErasureInventoryCategoryV1::Backup
+            })
+            .ok_or("no backup owner result")?
+    };
+    // The signer's part: a purpose-1 ELS1 over the backup ELO1.
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::OwnerResult,
+        backup.owner_result(),
+        &erasure_signer(),
+        1,
+    )?;
+    attempted.store.retain(std::slice::from_ref(&signed))?;
+    let obligation = attempted.obligation_of(ErasureInventoryCategoryV1::Backup)?;
+    let mut host = attempted.host()?;
+    host.command_sender()?.acknowledge_erasure(
+        request,
+        acknowledgement(
+            &obligation,
+            signature_address(&signed)?,
+            ErasureAcknowledgementOutcomeV1::Negative,
+        ),
+    )?;
+    let outbox = host.command_sender()?.dispatched_owner_commands(request)?;
+    assert_eq!(outbox.len(), attempted.obligations.len() - 1);
+    assert!(outbox
+        .iter()
+        .all(|command| command.destruction.obligation != obligation.reference()));
+    assert_eq!(
+        LocalErasureExecutorV1::replay(&mut host, request)
+            .map_err(fail)?
+            .len(),
+        outbox.len()
+    );
+    Ok(())
+}
+
+/// A Memory store with the content the `SQLite` executor fixture holds before
+/// its freeze, at fixed identities, plus `retained`; and its root-grant
+/// chain head.
+fn memory_store(retained: &[Vec<u8>]) -> TestResult<(MemoryStore, u64)> {
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    store.init_erasure_store_identity(Hash::from_bytes(STORE_IDENTITY))?;
+    register_signer(&mut store, &erasure_signer(), 1)?;
+    let grant = GrantShape::standard().root_grant()?;
+    let authority = bound_authority_host(&mut store, &[&grant])?;
+    let permit = authority.authorize_grant(&grant).map_err(fail)?;
+    store.issue_capability_grant(permit, &grant).map_err(fail)?;
+    let head = store
+        .load_authority(grant_id())
+        .map_err(fail)?
+        .head_position()
+        .as_u64();
+    store.create_timeline_with_meta(TimelineMeta {
+        id: memory_owned_timeline(),
+        ..TimelineMeta::root_owned("owned-0", actor())
+    })?;
+    store.create_timeline_with_meta(host_timeline_meta()?)?;
+    let mut registry = store.load_key_registry()?.ok_or("no key registry")?;
+    registry
+        .register_key(KeyRegistrationV1::new(
+            subject_key(1)?,
+            Hash::from_bytes([0x81; 32]),
+            None,
+        ))
+        .map_err(fail)?;
+    store.save_key_registry(&registry)?;
+    for object in retained {
+        store.retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
+    }
+    Ok((store, head))
+}
+
+/// A Memory host over `store` composed under `case`.
+fn memory_host(mut store: MemoryStore, case: &Case) -> TestResult<ErasureExecutionHostV1> {
+    let composition = case.compose(&mut store).map_err(fail)?;
+    Ok(
+        ErasureExecutionHostV1::recover_memory_fixture_with_authority(
+            store,
+            &composition,
+            ErasureRecoveryLimitsV1::from_maximum_requests(4_096)?,
+        )?,
+    )
+}
+
+/// Submit and authorize request 1 on `host` at chain head `head`, and
+/// prepare its freeze.
+fn memory_prepared(host: &mut ErasureExecutionHostV1, head: u64) -> TestResult<ErasureReferenceV1> {
+    let mut sender = host.command_sender()?;
+    sender
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    let request = request_of(1)?;
+    sender.authorize_erasure_request(request, authorization(1, head)?.reference()?)?;
+    signed_body(sender.prepare_local_freeze(request)?)
+}
+
+#[test]
+fn a_memory_store_runs_every_owner_class_as_sqlite_does() -> TestResult {
+    let bundle = executor_bundle()?;
+    let case = Case::signed(&bundle, &bundle_root(), &[])?;
+    // The freeze body is a pure function of the store, so a second build of
+    // the Memory store, holding the ELS1 over it, freezes to the same body.
+    let digest = {
+        let (store, head) = memory_store(&[])?;
+        memory_prepared(&mut memory_host(store, &case)?, head)?
+    };
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::FreezeAuthorization,
+        digest,
+        &erasure_signer(),
+        1,
+    )?;
+    let (store, head) = memory_store(std::slice::from_ref(&signed))?;
+    let mut host = memory_host(store, &case)?;
+    assert_eq!(memory_prepared(&mut host, head)?, digest);
+    let request = request_of(1)?;
+    let mut cells = store_cells()?;
+    cells.push(payload_cell(memory_owned_timeline())?);
+    cells.extend(subject_key_cells()?);
+    let obligations = expected_obligations(request, &cells)?;
+    let attempt = ErasureRetryAdmissionV1::new(Attempted::attempt_input(
+        head,
+        bundle.reference()?,
+        &obligations,
+        None,
+    )?)?;
+    {
+        let mut sender = host.command_sender()?;
+        assert_eq!(
+            sender
+                .freeze_access(request, &freeze(signature_address(&signed)?))?
+                .lifecycle(),
+            ErasureLifecycleV1::AccessFrozen
+        );
+        sender.dispatch_erasure_destruction(request, &attempt)?;
+    }
+    let results = LocalErasureExecutorV1::replay(&mut host, request).map_err(fail)?;
+    // A Memory store has no file a purge could prove clean, so its local
+    // replica is the permanent negative; every other class answers as on
+    // SQLite.
+    assert_eq!(
+        outcomes(&results)?,
+        expected_outcomes(Some(ErasureErrorV1::ReplicaNegativeAcknowledgement))
+    );
+    assert_eq!(
+        LocalErasureExecutorV1::replay(&mut host, request).map_err(fail)?,
+        results
+    );
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let sqlite = LocalErasureExecutorV1::replay(&mut attempted.dispatched()?, attempted.request)
+        .map_err(fail)?;
+    assert_eq!(outcomes(&sqlite)?, expected_outcomes(None));
+    Ok(())
+}
+
+#[test]
+fn the_local_replica_runs_last_and_a_held_store_is_a_transient_negative() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let mut host = attempted.dispatched()?;
+    let outbox = host
+        .command_sender()?
+        .dispatched_owner_commands(attempted.request)?;
+    let (replica, others) = outbox.split_last().ok_or("the outbox is empty")?;
+    assert_eq!(
+        replica.destruction.category,
+        ErasureInventoryCategoryV1::Replica
+    );
+    // F1: the purge waits for every other owner of the attempt.
+    for (index, other) in others.iter().enumerate() {
+        assert_eq!(
+            executor().execute(replica, &mut host),
+            Err(ErasureErrorV1::PolicyConflict),
+            "before owner {index}"
+        );
+        executor().execute(other, &mut host).map_err(fail)?;
+    }
+    let reader = rusqlite::Connection::open(&attempted.store.path)?;
+    reader.execute_batch("BEGIN")?;
+    let timelines: i64 =
+        reader.query_row("SELECT count(*) FROM timelines", [], |row| row.get(0))?;
+    assert!(timelines > 0);
+    // The purge runs outside every fence; a held store is the one
+    // transient code.
+    let held = executor().execute(replica, &mut host).map_err(fail)?;
+    assert_eq!(held.error(), Some(ErasureErrorV1::ReplicaTimeout));
+    reader.execute_batch("COMMIT")?;
+    drop(reader);
+    let purged = executor().execute(replica, &mut host).map_err(fail)?;
+    assert_eq!(purged.error(), None);
+    drop(host);
+    attempted.assert_effect(&held)?;
+    attempted.assert_effect(&purged)
+}
+
+#[test]
+fn a_replica_check_that_cannot_read_the_store_is_a_host_error() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let mut host = attempted.dispatched()?;
+    let outbox = host
+        .command_sender()?
+        .dispatched_owner_commands(attempted.request)?;
+    let (replica, others) = outbox.split_last().ok_or("the outbox is empty")?;
+    let mut key = None;
+    for other in others {
+        let result = executor().execute(other, &mut host).map_err(fail)?;
+        if other.destruction.category == ErasureInventoryCategoryV1::Key {
+            key = Some(result.owner_result());
+        }
+    }
+    let digest = key.ok_or("no key owner result")?.digest();
+    let peer = rusqlite::Connection::open(&attempted.store.path)?;
+    let saved: Vec<u8> = peer.query_row(
+        "SELECT object_cbor FROM erasure_evidence WHERE reference_digest = ?1",
+        [digest.as_slice()],
+        |row| row.get(0),
+    )?;
+    // An owner result the store cannot read is a host error, never a
+    // refusal of the replica.
+    peer.execute(
+        "UPDATE erasure_evidence SET object_cbor = 7 WHERE reference_digest = ?1",
+        [digest.as_slice()],
+    )?;
+    assert_eq!(
+        executor().execute(replica, &mut host),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    peer.execute(
+        "UPDATE erasure_evidence SET object_cbor = ?2 WHERE reference_digest = ?1",
+        rusqlite::params![digest.as_slice(), saved],
+    )?;
+    // So is a key registry it cannot read.
+    let registry: Vec<u8> = peer.query_row(
+        "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    assert_eq!(
+        executor().execute(replica, &mut host),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = ?1 WHERE singleton = 1",
+        rusqlite::params![registry],
+    )?;
+    drop(peer);
+    // Readable again, the replica runs.
+    assert_eq!(
+        executor()
+            .execute(replica, &mut host)
+            .map_err(fail)?
+            .error(),
+        None
+    );
+    Ok(())
+}
+
+/// The ELO1 a negative `error` of `command` would commit.
+fn negative_owner_result(
+    command: &ErasureOwnerCommandV1,
+    error: ErasureErrorV1,
+) -> TestResult<ErasureReferenceV1> {
+    let destruction = command.destruction;
+    let prepared = PreparedLocalOwnerEffectV1::new(
+        LocalOwnerEffectV1::Negative(
+            LocalErasureNegativeResultV1 {
+                command: destruction.command,
+                owner_ref: destruction.owner,
+                error,
+            }
+            .to_canonical_cbor()?,
+        ),
+        LocalOwnerResultBindingV1 {
+            request: command.request,
+            attempt: destruction.provenance,
+            obligation: destruction.obligation,
+            command: destruction.command,
+            owner_ref: destruction.owner,
+            error: Some(error),
+        },
+    )?;
+    Ok(prepared.owner_result().reference())
+}
+
+#[test]
+fn an_unreadable_key_registry_commits_no_owner_result() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let mut host = attempted.dispatched()?;
+    let key = command_of(
+        &mut host,
+        attempted.request,
+        ErasureInventoryCategoryV1::Key,
+    )?;
+    let peer = rusqlite::Connection::open(&attempted.store.path)?;
+    let saved: Vec<u8> = peer.query_row(
+        "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    // A store failure is a host error, never a durable negative.
+    assert_eq!(
+        executor().execute(&key, &mut host),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        host.command_sender()?
+            .destroy_key_for_erasure(&key, subject_key(1)?)
+            .map(drop),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+    assert_eq!(
+        LocalErasureExecutorV1::replay(&mut host, attempted.request).map(drop),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+    peer.execute(
+        "UPDATE key_registry SET state_cbor = ?1 WHERE singleton = 1",
+        rusqlite::params![saved],
+    )?;
+    drop(peer);
+    drop(host);
+    assert_eq!(
+        ErasurePersistencePortV1::read_object(
+            &attempted.store.sqlite()?,
+            negative_owner_result(&key, ErasureErrorV1::KeyDestructionFailed)?
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    // Once the registry reads again, the same command destroys the key.
+    let mut host = attempted.host()?;
+    let destroyed = executor().execute(&key, &mut host).map_err(fail)?;
+    assert_eq!(destroyed.error(), None);
+    drop(host);
+    attempted.assert_effect(&destroyed)
+}
+
+#[test]
+fn a_host_without_an_authority_has_no_outbox() -> TestResult {
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    assert_eq!(
+        host.command_sender()?
+            .dispatched_owner_commands(reference(0x42))
+            .map(drop),
+        Err(ErasureHostErrorV1::AuthorizationDenied)
+    );
+    assert_eq!(
+        LocalErasureExecutorV1::replay(&mut host, reference(0x42)).map(drop),
+        Err(ErasureHostErrorV1::AuthorizationDenied)
+    );
+    Ok(())
+}
+
+#[test]
+fn key_destruction_completes_a_pending_phase_left_by_a_crash() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let mut host = attempted.dispatched()?;
+    let key = command_of(
+        &mut host,
+        attempted.request,
+        ErasureInventoryCategoryV1::Key,
+    )?;
+    // The crash: the pending phase of the command's destruction committed,
+    // its tombstone did not.
+    host.command_sender()?.begin_key_registry_destruction(
+        erasure_host_timeline()?,
+        subject_key_destruction(Hash::from_bytes(key.destruction.command.digest()))?,
+    )?;
+    let completed = executor().execute(&key, &mut host).map_err(fail)?;
+    assert_eq!(completed.error(), None);
+    // A repeat is the same owner result, bound to the same tombstone.
+    assert_eq!(
+        executor().execute(&key, &mut host).map_err(fail)?,
+        completed
+    );
+    drop(host);
+    attempted.assert_effect(&completed)
+}
+
+#[test]
+fn a_key_destroyed_under_another_authorization_binds_its_existing_receipt() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let mut host = attempted.dispatched()?;
+    let key = command_of(
+        &mut host,
+        attempted.request,
+        ErasureInventoryCategoryV1::Key,
+    )?;
+    let foreign = subject_key_destruction(Hash::from_bytes([0x99; 32]))?;
+    host.command_sender()?
+        .begin_key_registry_destruction(erasure_host_timeline()?, foreign)?;
+    // Pending under another authorization: the permanent negative.
+    let refused = executor().execute(&key, &mut host).map_err(fail)?;
+    assert_eq!(refused.error(), Some(ErasureErrorV1::KeyDestructionFailed));
+    let receipt = deletion_receipt(&foreign);
+    host.command_sender()?.complete_key_registry_destruction(
+        erasure_host_timeline()?,
+        foreign,
+        receipt,
+    )?;
+    // Tombstoned under that authorization: positive, bound to its receipt.
+    let destroyed = executor().execute(&key, &mut host).map_err(fail)?;
+    assert_eq!(destroyed.error(), None);
+    assert_eq!(
+        executor().execute(&key, &mut host).map_err(fail)?,
+        destroyed
+    );
+    drop(host);
+    attempted.assert_effect(&refused)?;
+    assert_eq!(
+        attempted.store.elo1(&destroyed)?.effect_digest,
+        ErasureReferenceV1::from_digest(*receipt.as_bytes())
+    );
+    Ok(())
+}
+
+#[test]
+fn only_a_dispatched_key_command_destroys_and_only_under_an_open_fence() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let request = attempted.request;
+    let attempt = attempted.attempt.reference();
+    let command_for = |category| -> TestResult<ErasureOwnerCommandV1> {
+        Ok(ErasureOwnerCommandV1 {
+            request,
+            destruction: ErasureDestructionCommandV1::from_obligation(
+                &attempted.obligation_of(category)?,
+                attempt,
+            ),
+        })
+    };
+    let key = command_for(ErasureInventoryCategoryV1::Key)?;
+    let mut host = attempted.host()?;
+    // Before dispatch no attempt is active: nothing runs.
+    assert_eq!(
+        executor().execute(&key, &mut host),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        host.command_sender()?
+            .destroy_key_for_erasure(&key, subject_key(1)?)
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    host.command_sender()?
+        .dispatch_erasure_destruction(request, &attempted.attempt)?;
+    let mut sender = host.command_sender()?;
+    let backup = command_for(ErasureInventoryCategoryV1::Backup)?;
+    let other_attempt = ErasureOwnerCommandV1 {
+        request,
+        destruction: ErasureDestructionCommandV1 {
+            provenance: reference(0x43),
+            ..key.destruction
+        },
+    };
+    // Another key than the target, a backup command of the same target,
+    // and a command of another attempt destroy nothing.
+    for (command, identity) in [
+        (&key, signer_identity(1)),
+        (&backup, subject_key(1)?),
+        (&other_attempt, subject_key(1)?),
+    ] {
+        assert_eq!(
+            sender.destroy_key_for_erasure(command, identity).map(drop),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+    }
+    let destroyed = sender.destroy_key_for_erasure(&key, subject_key(1)?)?;
+    assert_eq!(destroyed.error(), None);
+    drop(host);
+    attempted.assert_effect(&destroyed)
+}
+
+#[test]
+fn a_consistent_command_outside_the_attempt_is_not_dispatched() -> TestResult {
+    let attempted = executor_attempted(OwnedStore::new()?, Vec::new())?;
+    let request = attempted.request;
+    // A `local-backup-inventory` obligation of the store target: every
+    // field derives correctly, but the frozen closure has no Backup cell
+    // for that target, so the attempt never dispatched it.
+    let target = store_target()?;
+    let category = ErasureInventoryCategoryV1::Backup;
+    let outside = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category,
+        target,
+        owner: pos_core::local_erasure_owner_ref_v1(
+            ErasureReferenceV1::from_digest(STORE_IDENTITY),
+            u64::from(category),
+            "local-backup-inventory",
+        )?,
+        command_identity: destruction_command_reference(request, target),
+    })?;
+    assert!(!attempted.obligations.contains(&outside));
+    let command = ErasureOwnerCommandV1 {
+        request,
+        destruction: ErasureDestructionCommandV1::from_obligation(
+            &outside,
+            attempted.attempt.reference(),
+        ),
+    };
+    let mut host = attempted.dispatched()?;
+    // The attempt has other unresolved obligations, none of them this one.
+    assert!(!host
+        .command_sender()?
+        .dispatched_owner_commands(request)?
+        .is_empty());
+    assert_eq!(
+        executor().execute(&command, &mut host),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+/// The actor's role-7 community key the bound ARD1 recording depends on.
+fn community_key() -> KeyIdentityV1 {
+    KeyIdentityV1::new("community:x", KeyRoleV1::CommunityArtifactEncryption, 1)
+}
+
+#[test]
+fn an_artifact_is_redacted_only_once_every_key_it_depends_on_is_tombstoned() -> TestResult {
+    for registered in [false, true] {
+        let owned = ard1_store()?;
+        if registered {
+            owned.store.register(KeyRegistrationV1::new(
+                community_key(),
+                Hash::from_bytes([0x91; 32]),
+                None,
+            ))?;
+        }
+        let extra = ard1_cells(
+            &owned.store,
+            owned.owned,
+            ArtifactDataClassV1::PrivateSubjectData,
+        )?;
+        let keyed = extra
+            .iter()
+            .find(|(_, category, _)| *category == ErasureInventoryCategoryV1::Key)
+            .map(|(target, _, _)| target.artifact_digest)
+            .ok_or("no keyed recording")?;
+        let attempted = executor_attempted(owned, extra)?;
+        let results =
+            LocalErasureExecutorV1::replay(&mut attempted.dispatched()?, attempted.request)
+                .map_err(fail)?;
+        let community = pos_core::local_erasure_key_digest_v1(&community_key())?;
+        let mut artifacts = 0;
+        for result in &results {
+            let destruction = result.command().destruction;
+            let expected = match class_of(destruction.owner)? {
+                // An unregistered key cannot be destroyed.
+                "key-registry" if destruction.target.key_digest == community => {
+                    (!registered).then_some(ErasureErrorV1::KeyDestructionFailed)
+                }
+                // Q7: only the recording whose one key the attempt destroyed
+                // is redacted; a recording without a key never is.
+                "artifact-store" => {
+                    artifacts += 1;
+                    (!(registered && destruction.target.artifact_digest == keyed))
+                        .then_some(ErasureErrorV1::ArtifactDeletionFailed)
+                }
+                _ => continue,
+            };
+            assert_eq!(result.error(), expected);
+            // A positive community-key result binds that key's own
+            // tombstone, which `assert_effect` does not model.
+            if destruction.target.key_digest != community || expected.is_some() {
+                attempted.assert_effect(result)?;
+            }
+        }
+        assert_eq!(artifacts, 2);
+        assert_signer_rechecks_q7(&attempted, &results, keyed, registered)?;
+    }
+    Ok(())
+}
+
+/// The signer signs every artifact owner result the executor committed, and
+/// a positive ELAD1 only while Q7 holds: the keyed recording's fabricated
+/// positive ELAD1 is refused while its key is not tombstoned.
+fn assert_signer_rechecks_q7(
+    attempted: &Attempted,
+    results: &[ErasureOwnerResultV1],
+    keyed: ErasureReferenceV1,
+    registered: bool,
+) -> TestResult {
+    let signer = signer_of(erasure_signer(), 1);
+    let mut host = attempted.host()?;
+    for result in results {
+        let destruction = result.command().destruction;
+        if class_of(destruction.owner)? != "artifact-store" {
+            continue;
+        }
+        let sign = |host: &mut ErasureExecutionHostV1, owner_result| {
+            signer.sign(
+                host,
+                LocalErasureSigningRequestV1::OwnerResult { owner_result },
+            )
+        };
+        assert!(sign(&mut host, result.owner_result()).is_ok());
+        if registered || destruction.target.artifact_digest != keyed {
+            continue;
+        }
+        let prepared = PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::ArtifactDisposition(
+                LocalErasureArtifactDispositionV1 {
+                    request: attempted.request,
+                    artifact_class: destruction.target.artifact_class,
+                    artifact_digest: destruction.target.artifact_digest,
+                    redaction: LocalErasureRedactionV1::Redacted,
+                    replay_claim_to: ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                }
+                .to_canonical_cbor()?,
+            ),
+            LocalOwnerResultBindingV1 {
+                request: attempted.request,
+                attempt: destruction.provenance,
+                obligation: destruction.obligation,
+                command: destruction.command,
+                owner_ref: destruction.owner,
+                error: None,
+            },
+        )?;
+        let effect = prepared.effect_object().ok_or("no effect record")?;
+        attempted.store.retain(&[
+            effect.canonical_cbor().to_vec(),
+            prepared.owner_result().canonical_cbor().to_vec(),
+        ])?;
+        assert_eq!(
+            sign(&mut host, prepared.owner_result().reference()),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> TestResult {
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    // Frozen, with no attempt yet, the request holds its subject.
+    assert_eq!(
+        attempted
+            .host()?
+            .command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+            .map(drop),
+        Err(LocalErasureSubmitErrorV1::Concurrent)
+    );
+    // Compromise: the installed TPS1 revokes its signer and a new bundle
+    // is installed. The frozen bundle can never sign again (Q18).
+    let revoked = attempted.bundle.signer_key_id.clone();
+    let mut new = rotated_bundle(&attempted.store)?;
+    new.issued_by = OTHER_ROOT.to_owned();
+    let case = Case::signed(&new, &other_root(), &[revoked.as_str()])?;
+    let mut host = attempted.store.host(&case, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?
+            .lifecycle(),
+        ErasureLifecycleV1::Submitted
+    );
+    // It stays contained.
+    assert_eq!(
+        lifecycle(&mut host, attempted.request)?,
+        ErasureLifecycleV1::AccessFrozen
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-136 §5/§6: `LocalErasureSignerV1` and `LocalErasureDriverV1`, the
+// rotation rule and the startup sweep (#1431; acceptance tests 1, 4, 7 and
+// the signer parts of 6).
+// ---------------------------------------------------------------------------
+
+use pos_runtime::{
+    LocalErasureDriverV1, LocalErasureSignerV1, LocalErasureSigningRequestV1, LocalErasureStepV1,
+    LocalErasureSweepV1,
+};
+
+/// A signer of `key`, registered as the fixture signer at `epoch`.
+fn signer_of(key: SigningKey, epoch: u64) -> LocalErasureSignerV1 {
+    LocalErasureSignerV1::new(
+        SigningKeyMaterial::new(key),
+        OwnerIdV1::from_static(SIGNER_OWNER),
+        epoch,
+    )
+}
+
+/// The driver of the fixture signer.
+fn driver() -> LocalErasureDriverV1 {
+    LocalErasureDriverV1::new(signer_of(erasure_signer(), 1))
+}
+
+/// The case of the bundle naming every owner and the derived Erasure Host
+/// Timeline.
+fn driver_case() -> TestResult<Case> {
+    Case::signed(&owned_bundle(&ALL_CLASSES)?, &bundle_root(), &[])
+}
+
+/// A `SQLite` store with the Memory fixture's content at the same fixed
+/// identities: the actor's owned root Timeline, the fixed unowned root,
+/// the derived Erasure Host Timeline and the actor's role-0 subject key.
+fn driver_store() -> TestResult<LocalStore> {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    {
+        let mut sqlite = store.sqlite()?;
+        sqlite.create_timeline_with_meta(TimelineMeta {
+            id: memory_owned_timeline(),
+            ..TimelineMeta::root_owned("owned-0", actor())
+        })?;
+        sqlite.create_timeline_with_meta(host_timeline_meta()?)?;
+    }
+    store.register(KeyRegistrationV1::new(
+        subject_key(1)?,
+        Hash::from_bytes([0x81; 32]),
+        None,
+    ))?;
+    Ok(store)
+}
+
+/// A Memory host with the same content, composed under `case`.
+fn driver_memory_host(case: &Case) -> TestResult<ErasureExecutionHostV1> {
+    let (store, _) = memory_store(&[])?;
+    memory_host(store, case)
+}
+
+/// Submit request `key` for `scope` on `host`.
+fn submitted(host: &mut ErasureExecutionHostV1, key: u8, scope: ErasureScopeV1) -> TestResult {
+    host.command_sender()?
+        .submit_local_erasure(&submission(key, scope)?)
+        .map_err(fail)?;
+    Ok(())
+}
+
+/// The receipt a finalize step committed.
+fn finalized(step: LocalErasureStepV1) -> TestResult<ErasureReceiptV1> {
+    match step {
+        LocalErasureStepV1::Finalized(receipt) => Ok(*receipt),
+        other => Err(format!("expected a receipt, got {other:?}").into()),
+    }
+}
+
+/// The ERS1 digests of `request`'s history, newest first.
+fn history(
+    host: &mut ErasureExecutionHostV1,
+    request: ErasureReferenceV1,
+) -> TestResult<Vec<ErasureReferenceV1>> {
+    Ok(host
+        .read_sender()?
+        .erasure_state_history(request)?
+        .ok_or("request missing")?
+        .iter()
+        .map(pos_core::ErasureStateV1::state_digest)
+        .collect())
+}
+
+/// Drive request 1 of `store` for private subject data on one host, and
+/// return its receipt and ERS1 history.
+fn straight_run(store: &LocalStore) -> TestResult<(ErasureReceiptV1, Vec<ErasureReferenceV1>)> {
+    let request = request_of(1)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let receipt = finalized(driver().drive(&mut host, request)?)?;
+    Ok((receipt, history(&mut host, request)?))
+}
+
+/// The steps, the receipt and the ERS1 history of one reopened run.
+type ReopenedRun = (
+    Vec<LocalErasureStepV1>,
+    ErasureReceiptV1,
+    Vec<ErasureReferenceV1>,
+);
+
+/// Step request 1 of `store` on a host reopened before every step, after
+/// `interrupt` ran once on a fresh host before the first step, and return
+/// the steps, the receipt and the ERS1 history.
+fn reopened_run(
+    store: &LocalStore,
+    interrupt: impl FnOnce(&mut ErasureExecutionHostV1) -> TestResult,
+) -> TestResult<ReopenedRun> {
+    let request = request_of(1)?;
+    let case = driver_case()?;
+    interrupt(&mut store.host(&case, 4_096)?)?;
+    let mut steps = Vec::new();
+    let driver = driver();
+    loop {
+        let mut host = store.host(&case, 4_096)?;
+        match driver.step(&mut host, request)? {
+            LocalErasureStepV1::Idle => break,
+            step => steps.push(step),
+        }
+    }
+    let receipt = finalized(steps.last().cloned().ok_or("no step")?)?;
+    let mut host = store.host(&case, 4_096)?;
+    Ok((steps, receipt, history(&mut host, request)?))
+}
+
+/// The class of each acknowledged owner result in `steps`, in order.
+fn acknowledged_classes(steps: &[LocalErasureStepV1]) -> TestResult<Vec<&'static str>> {
+    let mut classes = Vec::new();
+    for step in steps {
+        if let LocalErasureStepV1::Acknowledged(result) = step {
+            classes.push(class_of(result.command().destruction.owner)?);
+        }
+    }
+    Ok(classes)
+}
+
+/// Assert every inventory row of `receipt` carries the replay claim the
+/// #185 `ReplayClaimEvaluatorV1` derives for its class and outcome, and
+/// `CA(ELD1)` only on backup and timeline-payload rows (ADR-136 §7).
+fn assert_evaluated_rows(receipt: &ErasureReceiptV1) -> TestResult {
+    let rows = receipt.inventories();
+    let positives = receipt
+        .acknowledgements()
+        .iter()
+        .filter(|acknowledgement| {
+            acknowledgement.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged
+        })
+        .map(|acknowledgement| (acknowledgement.target, acknowledgement.owner))
+        .collect::<Vec<_>>();
+    let mut weakest = ErasureReplayClaimV1::Exact;
+    for row in rows
+        .artifacts
+        .iter()
+        .chain(&rows.keys)
+        .chain(&rows.replicas)
+        .chain(&rows.backups)
+    {
+        let class = class_of(row.transition.owner)?;
+        let positive = positives.contains(&(row.target, row.transition.owner));
+        let expected = match (class, positive) {
+            ("key-registry", true) => ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+            ("client-cache-signal" | "artifact-store" | "managed-report", true) => {
+                ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+            }
+            _ => ErasureReplayClaimV1::Exact,
+        };
+        assert_eq!(row.transition.from, ErasureReplayClaimV1::Exact, "{class}");
+        assert_eq!(row.transition.to, expected, "{class}");
+        weakest = weakest.weakened_to(expected);
+        let disclosure = if matches!(class, "local-backup-inventory" | "timeline-payload") {
+            pos_core::LocalErasureDisclosureV1 {
+                ack_class: class.to_owned(),
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            }
+            .reference()?
+        } else {
+            reference(0)
+        };
+        assert_eq!(row.retained_disclosure, disclosure, "{class}");
+    }
+    assert_eq!(receipt.replay_claim(), weakest);
+    Ok(())
+}
+
+/// Acceptance test 1 (Q16): a full lifecycle on `SQLite`, closed and
+/// reopened before every step, commits exactly the ERS1 and ERC1 bytes of
+/// an uninterrupted run.
+#[test]
+fn a_driven_lifecycle_has_identical_bytes_across_close_and_reopen() -> TestResult {
+    let (receipt, states) = straight_run(&driver_store()?)?;
+    let store = driver_store()?;
+    let (steps, reopened, reopened_states) = reopened_run(&store, |host| {
+        submitted(host, 1, ErasureScopeV1::PrivateSubjectData)
+    })?;
+    assert_eq!(reopened.to_canonical_cbor()?, receipt.to_canonical_cbor()?);
+    assert_eq!(reopened_states, states);
+    // One durable transition per step: authorize, freeze, dispatch, one
+    // acknowledgement per owner (keys first, the local replica last), and
+    // the receipt.
+    assert_eq!(steps[0], LocalErasureStepV1::Authorized);
+    assert_eq!(steps[1], LocalErasureStepV1::Frozen);
+    assert!(matches!(steps[2], LocalErasureStepV1::Dispatched(_)));
+    let mut classes = acknowledged_classes(&steps)?;
+    assert_eq!(classes.len(), 5);
+    assert_eq!(classes[0], "key-registry");
+    assert_eq!(classes[3..], ["local-backup-inventory", "local-replica"]);
+    classes[1..3].sort_unstable();
+    assert_eq!(classes[1..3], ["client-cache-signal", "timeline-payload"]);
+    assert_eq!(steps.len(), 9);
+    // `timeline-payload` and the backup are permanent negatives, so the
+    // request ends in a partial failure at its attempt's deadline, and is
+    // never retried automatically.
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    assert_eq!(receipt.issue_position(), LOCAL_ERASURE_ATTEMPT_WINDOW_V1);
+    // The destroyed key leaves its evidence missing.
+    assert_evaluated_rows(&receipt)?;
+    assert_eq!(
+        receipt.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    assert_eq!(
+        driver().step(&mut host, request_of(1)?)?,
+        LocalErasureStepV1::Idle
+    );
+    // The key was destroyed during the request's own access freeze.
+    let registry = store.sqlite()?.load_key_registry()?.ok_or("no registry")?;
+    assert!(registry.tombstone(subject_key(1)?).is_some());
+    Ok(())
+}
+
+/// Acceptance test 1 across adapters (Q16): Memory and `SQLite` commit the
+/// same receipt except the local-replica row. A Memory store has no file a
+/// purge could prove clean, so its replica is the permanent negative.
+#[test]
+fn memory_and_sqlite_differ_only_in_the_local_replica_row() -> TestResult {
+    let (sqlite, _) = straight_run(&driver_store()?)?;
+    let mut host = driver_memory_host(&driver_case()?)?;
+    let request = request_of(1)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let memory = finalized(driver().drive(&mut host, request)?)?;
+    assert_eq!(driver().step(&mut host, request)?, LocalErasureStepV1::Idle);
+    for receipt in [&memory, &sqlite] {
+        assert_evaluated_rows(receipt)?;
+        assert_eq!(
+            receipt.replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
+        assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+        assert_eq!(receipt.issue_position(), LOCAL_ERASURE_ATTEMPT_WINDOW_V1);
+        assert_eq!(receipt.inventories().replicas.len(), 1);
+    }
+    assert_eq!(memory.frozen_targets(), sqlite.frozen_targets());
+    assert_eq!(memory.trust(), sqlite.trust());
+    assert_eq!(memory.policy(), sqlite.policy());
+    let (memory_rows, sqlite_rows) = (memory.inventories(), sqlite.inventories());
+    assert_eq!(memory_rows.artifacts, sqlite_rows.artifacts);
+    assert_eq!(memory_rows.keys, sqlite_rows.keys);
+    assert_eq!(memory_rows.backups, sqlite_rows.backups);
+    // The replica rows differ exactly in the acknowledgement evidence.
+    let (memory_replica, sqlite_replica) = (memory_rows.replicas[0], sqlite_rows.replicas[0]);
+    assert_ne!(
+        memory_replica.transition.acknowledgements,
+        sqlite_replica.transition.acknowledgements
+    );
+    assert_eq!(
+        ErasureInventoryResultV1 {
+            transition: ErasureArtifactTransitionV1 {
+                acknowledgements: sqlite_replica.transition.acknowledgements,
+                ..memory_replica.transition
+            },
+            ..memory_replica
+        },
+        sqlite_replica
+    );
+    // So do the acknowledgements: every other one is the same; the replica
+    // is negative on Memory and positive on `SQLite`.
+    let replica_owner = sqlite_replica.transition.owner;
+    let others = |receipt: &ErasureReceiptV1| {
+        receipt
+            .acknowledgements()
+            .iter()
+            .filter(|acknowledgement| acknowledgement.owner != replica_owner)
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(others(&memory), others(&sqlite));
+    let replica_outcome = |receipt: &ErasureReceiptV1| {
+        receipt
+            .acknowledgements()
+            .iter()
+            .find(|acknowledgement| acknowledgement.owner == replica_owner)
+            .map(|acknowledgement| acknowledgement.outcome)
+    };
+    assert_eq!(
+        replica_outcome(&memory),
+        Some(ErasureAcknowledgementOutcomeV1::Negative)
+    );
+    assert_eq!(
+        replica_outcome(&sqlite),
+        Some(ErasureAcknowledgementOutcomeV1::Acknowledged)
+    );
+    Ok(())
+}
+
+/// The ADR-136 §5 positions and pins of `admission`, attempt `ordinal`
+/// after `source`.
+fn assert_attempt(
+    step: &LocalErasureStepV1,
+    ordinal: u64,
+    source: Option<&ErasureReceiptV1>,
+    head: u64,
+) -> TestResult {
+    let LocalErasureStepV1::Dispatched(admission) = step else {
+        return Err(format!("expected a dispatch, got {step:?}").into());
+    };
+    let (admitted, deadline) = source.map_or((2, LOCAL_ERASURE_ATTEMPT_WINDOW_V1), |receipt| {
+        let admitted = receipt.issue_position() + 1;
+        (admitted, admitted + LOCAL_ERASURE_ATTEMPT_WINDOW_V1)
+    });
+    assert_eq!(admission.attempt_ordinal(), ordinal);
+    assert_eq!(
+        admission.source_receipt(),
+        source.map(ErasureReceiptV1::receipt_digest)
+    );
+    assert_eq!(
+        (admission.admitted_position(), admission.deadline_position()),
+        (admitted, deadline)
+    );
+    assert_eq!(admission.policy(), LOCAL_ERASURE_POLICY_REFERENCE_V1);
+    assert_eq!(admission.trust(), owned_bundle(&ALL_CLASSES)?.reference()?);
+    assert_eq!(
+        admission.authorization_provenance(),
+        authorization(1, head)?.reference()?
+    );
+    Ok(())
+}
+
+/// Drive request 1 to its first receipt with every step recorded.
+fn driven_steps(
+    host: &mut ErasureExecutionHostV1,
+    until: impl Fn(&LocalErasureStepV1) -> bool,
+) -> TestResult<Vec<LocalErasureStepV1>> {
+    let request = request_of(1)?;
+    let mut steps = Vec::new();
+    loop {
+        let step = driver().step(host, request)?;
+        if step == LocalErasureStepV1::Idle {
+            return Ok(steps);
+        }
+        let done = until(&step);
+        steps.push(step);
+        if done {
+            return Ok(steps);
+        }
+    }
+}
+
+/// A held reader keeps the `SQLite` checkpoint busy: the local replica's
+/// purge is then the one transient negative.
+fn held_reader(store: &LocalStore) -> TestResult<rusqlite::Connection> {
+    let reader = rusqlite::Connection::open(&store.path)?;
+    reader.execute_batch("BEGIN")?;
+    let timelines: i64 =
+        reader.query_row("SELECT count(*) FROM timelines", [], |row| row.get(0))?;
+    assert!(timelines > 0);
+    Ok(reader)
+}
+
+/// Acceptance test 4 (Q10): a transient negative is retried automatically,
+/// each retry at its §6 positions, every partial failure issues exactly at
+/// its deadline, and a retry that succeeds completes the request at its
+/// reached position. The cap of three retries is the unit-tested
+/// `attempt_due` rule; here two real timeouts keep the run short.
+#[test]
+fn a_transient_negative_is_retried_until_it_succeeds() -> TestResult {
+    let is_receipt = |step: &LocalErasureStepV1| matches!(step, LocalErasureStepV1::Finalized(_));
+    let store = driver_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::ConsentedSharedData)?;
+    let mut receipts = Vec::new();
+    {
+        // Held for attempt 0 and retry 1: both purges time out.
+        let reader = held_reader(&store)?;
+        for ordinal in 0..2 {
+            let steps = driven_steps(&mut host, is_receipt)?;
+            let dispatch = steps
+                .iter()
+                .find(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))
+                .ok_or("no dispatch")?;
+            assert_attempt(dispatch, ordinal, receipts.last(), store.head)?;
+            let LocalErasureStepV1::Dispatched(admission) = dispatch else {
+                return Err("no dispatch".into());
+            };
+            let receipt = finalized(steps.last().cloned().ok_or("no step")?)?;
+            assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+            assert_eq!(receipt.issue_position(), admission.deadline_position());
+            receipts.push(receipt);
+        }
+        reader.execute_batch("COMMIT")?;
+    }
+    // Released: retry 2 purges the replica and completes the consented
+    // request at its one executed obligation past admission.
+    let steps = driven_steps(&mut host, |_| false)?;
+    assert_attempt(&steps[0], 2, receipts.last(), store.head)?;
+    assert_eq!(acknowledged_classes(&steps)?, ["local-replica"]);
+    let complete = finalized(steps.last().cloned().ok_or("no step")?)?;
+    assert_eq!(complete.lifecycle(), ErasureLifecycleV1::Complete);
+    let last = receipts.last().ok_or("no receipt")?;
+    assert_eq!(complete.issue_position(), last.issue_position() + 1 + 1);
+    assert_eq!(driver().run(&mut host)?, 0);
+    drop(host);
+    // Every receipt of the three-receipt chain survives the startup sweep.
+    assert_sweep_keeps_committed_evidence(&store)
+}
+
+/// Acceptance test 4: a consented request whose two owners both succeed on
+/// `SQLite` completes in attempt 0 at its reached position.
+#[test]
+fn a_request_whose_every_owner_succeeds_completes() -> TestResult {
+    let store = driver_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::ConsentedSharedData)?;
+    let receipt = finalized(driver().drive(&mut host, request_of(1)?)?)?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(receipt.issue_position(), 2 + 2);
+    // The cache generation redacts the views; no row discloses an ELD1.
+    assert_evaluated_rows(&receipt)?;
+    assert_eq!(
+        receipt.replay_claim(),
+        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+    );
+    Ok(())
+}
+
+/// The sweep keeps every committed reference and deletes only the
+/// unreferenced objects retained beside them.
+fn assert_sweep_keeps_committed_evidence(store: &LocalStore) -> TestResult {
+    let purpose = LocalErasureSignaturePurposeV1::FreezeAuthorization;
+    let stray_result = LocalErasureOwnerResultV1 {
+        request: reference(0x33),
+        attempt: reference(0x34),
+        obligation: reference(0x35),
+        command: reference(0x36),
+        owner_ref: reference(0x37),
+        error: None,
+        effect_digest: reference(0x38),
+    };
+    let stray = vec![
+        signature_record(purpose, reference(0x31), &erasure_signer(), 1)?,
+        signature_record(
+            LocalErasureSignaturePurposeV1::ReceiptBody,
+            reference(0x32),
+            &erasure_signer(),
+            1,
+        )?,
+        stray_result.to_canonical_cbor()?,
+        signature_record(
+            LocalErasureSignaturePurposeV1::OwnerResult,
+            stray_result.reference()?,
+            &erasure_signer(),
+            1,
+        )?,
+        LocalErasureNegativeResultV1 {
+            command: reference(0x39),
+            owner_ref: reference(0x3a),
+            error: ErasureErrorV1::ArtifactDeletionFailed,
+        }
+        .to_canonical_cbor()?,
+    ];
+    store.retain(&stray)?;
+    let before = {
+        let mut host = store.host(&driver_case()?, 4_096)?;
+        history(&mut host, request_of(1)?)?
+    };
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    // The retained purpose-0 ELS1 of the committed freeze goes too: the
+    // freeze carries its bytes inside ERFA1 and references no ELS1 object.
+    assert_eq!(
+        LocalErasureDriverV1::sweep(&mut host),
+        LocalErasureSweepV1::Swept(stray.len() + 1)
+    );
+    assert_eq!(
+        LocalErasureDriverV1::sweep(&mut host),
+        LocalErasureSweepV1::Swept(0)
+    );
+    drop(host);
+    let sqlite = store.sqlite()?;
+    for object in &stray {
+        let address =
+            pos_core::ErasureRetainedObjectV1::new(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
+        assert!(ErasurePersistencePortV1::read_object(&sqlite, address.reference()).is_err());
+    }
+    drop(sqlite);
+    // Recovery re-verifies every attempt, acknowledgement and receipt, so
+    // none of their evidence was swept.
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    assert_eq!(history(&mut host, request_of(1)?)?, before);
+    Ok(())
+}
+
+/// The fixed acceptance store, driven to `until` on one host.
+fn driven_until(
+    until: impl Fn(&LocalErasureStepV1) -> bool,
+) -> TestResult<(LocalStore, Vec<LocalErasureStepV1>)> {
+    let store = driver_store()?;
+    let steps = {
+        let mut host = store.host(&driver_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+        driven_steps(&mut host, until)?
+    };
+    Ok((store, steps))
+}
+
+/// Acceptance test 6, signer part: the signer signs a freeze only of an
+/// authorized request and only over the body its snapshot admits, and only
+/// with the key the registry holds for its identity.
+#[test]
+fn the_signer_signs_a_freeze_only_of_an_authorized_request_and_its_body() -> TestResult {
+    let request = request_of(1)?;
+    let signer = signer_of(erasure_signer(), 1);
+    let fabricated = reference(0x77);
+    let refused = Err(ErasureHostErrorV1::AuthorizationDenied);
+    // Authorized, not yet frozen: only the body the snapshot admits signs.
+    let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    let freeze_of = |body| LocalErasureSigningRequestV1::FreezeAuthorization { request, body };
+    assert_eq!(signer.sign(&mut host, freeze_of(fabricated)), refused);
+    let LocalFreezePreparationV1::Sign(body) =
+        host.command_sender()?.prepare_local_freeze(request)?
+    else {
+        return Err("the freeze commits a rejection".into());
+    };
+    assert!(signer.sign(&mut host, freeze_of(body)).is_ok());
+    // A signer whose key the registry does not hold for its identity
+    // signs nothing.
+    assert_eq!(
+        signer_of(rotated_signer(), 1).sign(&mut host, freeze_of(body)),
+        refused
+    );
+    // Once frozen, the request is no longer authorized: even its own body
+    // signs no second freeze.
+    assert_eq!(
+        driver().step(&mut host, request)?,
+        LocalErasureStepV1::Frozen
+    );
+    assert_eq!(signer.sign(&mut host, freeze_of(body)), refused);
+    Ok(())
+}
+
+/// Acceptance test 6, signer part: an owner result signs only when its
+/// ELO1 binds an effect the dispatched command's own class commits, and
+/// that effect is committed.
+#[test]
+fn the_signer_signs_an_owner_result_only_over_its_class_committed_effect() -> TestResult {
+    let request = request_of(1)?;
+    let signer = signer_of(erasure_signer(), 1);
+    let refused = Err(ErasureHostErrorV1::AuthorizationDenied);
+    // Dispatched: each owner result is checked against its committed
+    // effect.
+    let (store, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    let backup = command_of(&mut host, request, ErasureInventoryCategoryV1::Backup)?;
+    let destruction = backup.destruction;
+    let error = ErasureErrorV1::BackupInventoryIncomplete;
+    let negative = LocalErasureNegativeResultV1 {
+        command: destruction.command,
+        owner_ref: destruction.owner,
+        error,
+    }
+    .to_canonical_cbor()?;
+    let prepared = PreparedLocalOwnerEffectV1::new(
+        LocalOwnerEffectV1::Negative(negative.clone()),
+        LocalOwnerResultBindingV1 {
+            request,
+            attempt: destruction.provenance,
+            obligation: destruction.obligation,
+            command: destruction.command,
+            owner_ref: destruction.owner,
+            error: Some(error),
+        },
+    )?;
+    let elo1 = prepared.owner_result();
+    // The same owner result naming another effect digest.
+    let mut forged = LocalErasureOwnerResultV1::from_canonical_cbor(elo1.canonical_cbor())?;
+    forged.effect_digest = reference(0x99);
+    store.retain(&[elo1.canonical_cbor().to_vec(), forged.to_canonical_cbor()?])?;
+    let owner_result = |owner_result| LocalErasureSigningRequestV1::OwnerResult { owner_result };
+    for unsigned in [reference(0x55), elo1.reference(), forged.reference()?] {
+        assert_eq!(signer.sign(&mut host, owner_result(unsigned)), refused);
+    }
+    // An effect the backup owner never commits is refused even when it is
+    // retained: a negative code of another class, and another class's
+    // positive record.
+    let binding = |error| LocalOwnerResultBindingV1 {
+        request,
+        attempt: destruction.provenance,
+        obligation: destruction.obligation,
+        command: destruction.command,
+        owner_ref: destruction.owner,
+        error,
+    };
+    let foreign_code = ErasureErrorV1::ArtifactDeletionFailed;
+    let cross_class = [
+        PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::Negative(
+                LocalErasureNegativeResultV1 {
+                    command: destruction.command,
+                    owner_ref: destruction.owner,
+                    error: foreign_code,
+                }
+                .to_canonical_cbor()?,
+            ),
+            binding(Some(foreign_code)),
+        )?,
+        PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::ReplicaPurge(
+                LocalErasureReplicaPurgeV1 {
+                    request,
+                    command: destruction.command,
+                    replica_id: destruction.target.replica_id,
+                }
+                .to_canonical_cbor()?,
+            ),
+            binding(None),
+        )?,
+    ];
+    for prepared in &cross_class {
+        let effect = prepared.effect_object().ok_or("no effect record")?;
+        store.retain(&[
+            effect.canonical_cbor().to_vec(),
+            prepared.owner_result().canonical_cbor().to_vec(),
+        ])?;
+        assert_eq!(
+            signer.sign(&mut host, owner_result(prepared.owner_result().reference())),
+            refused
+        );
+    }
+    // Once its ELNEG1 is committed, the backup owner's own ELO1 signs.
+    store.retain(&[negative])?;
+    assert!(signer
+        .sign(&mut host, owner_result(elo1.reference()))
+        .is_ok());
+    Ok(())
+}
+
+/// Acceptance test 6, signer part: only the ERCB1 of the committed record
+/// signs, and an owner result of a closed attempt is not dispatched.
+#[test]
+fn the_signer_signs_only_the_committed_receipt_body() -> TestResult {
+    let request = request_of(1)?;
+    let signer = signer_of(erasure_signer(), 1);
+    let fabricated = reference(0x77);
+    let refused = Err(ErasureHostErrorV1::AuthorizationDenied);
+    let owner_result = |owner_result| LocalErasureSigningRequestV1::OwnerResult { owner_result };
+    // Every command acknowledged: only the ERCB1 of the committed record
+    // signs.
+    let (store, steps) = driven_until(|step| {
+        matches!(step, LocalErasureStepV1::Acknowledged(result)
+            if result.command().destruction.category == ErasureInventoryCategoryV1::Replica)
+    })?;
+    assert_eq!(steps.len(), 8);
+    let LocalErasureStepV1::Acknowledged(replica) = &steps[7] else {
+        return Err("no replica acknowledgement".into());
+    };
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    let receipt_of = |body| LocalErasureSigningRequestV1::ReceiptBody { request, body };
+    assert_eq!(signer.sign(&mut host, receipt_of(fabricated)), refused);
+    // An owner result of the closed attempt is no longer dispatched.
+    let finalized_receipt = finalized(driver().step(&mut host, request)?)?;
+    assert_eq!(
+        signer.sign(&mut host, owner_result(replica.owner_result())),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(
+        finalized_receipt.lifecycle(),
+        ErasureLifecycleV1::PartialFailure
+    );
+    Ok(())
+}
+
+/// The driver refuses to advance a request it cannot sign for: a refused
+/// signature is prepared again at most `max_reprepare` times and then
+/// defers the step, committing nothing.
+#[test]
+fn a_refused_signature_defers_the_step() -> TestResult {
+    let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
+    assert_eq!(
+        foreign.drive(&mut host, request_of(1)?),
+        Err(ErasureHostErrorV1::AuthorizationDenied)
+    );
+    assert_eq!(foreign.run(&mut host)?, 1);
+    assert_eq!(
+        lifecycle(&mut host, request_of(1)?)?,
+        ErasureLifecycleV1::Authorized
+    );
+    // The deployment's own signer then freezes it.
+    assert_eq!(
+        driver().step(&mut host, request_of(1)?)?,
+        LocalErasureStepV1::Frozen
+    );
+    Ok(())
+}
+
+/// Acceptance test 5 through the driver: a submitted request whose ERAZ1
+/// no longer verifies is rejected under a retained ELREJ1, and an expired
+/// TPS1 defers authorization without committing anything.
+#[test]
+fn the_driver_rejects_an_unverifiable_authorization_and_defers_an_expired_one() -> TestResult {
+    let store = driver_store()?;
+    submitted(
+        &mut store.host(&driver_case()?, 4_096)?,
+        1,
+        ErasureScopeV1::PrivateSubjectData,
+    )?;
+    let request = request_of(1)?;
+    // An expired TPS1 closes new admissions: the step fails and the
+    // request stays submitted.
+    let mut expired = driver_case()?;
+    expired.clock = after_trust_expiry;
+    let mut host = store.host(&expired, 4_096)?;
+    assert_eq!(
+        driver().step(&mut host, request),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(
+        lifecycle(&mut host, request)?,
+        ErasureLifecycleV1::Submitted
+    );
+    drop(host);
+    // A composition whose root grant is another one cannot verify the
+    // request's ERAZ1, so the driver rejects it at the authorize stage.
+    let mut regranted = driver_case()?;
+    regranted.principal_grant = Hash::from_bytes([0x7e; 32]);
+    let mut host = store.host(&regranted, 4_096)?;
+    assert_eq!(
+        driver().drive(&mut host, request)?,
+        LocalErasureStepV1::Rejected
+    );
+    assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Rejected);
+    drop(host);
+    let rejection = LocalErasureRejectionV1 {
+        request,
+        error: ErasureErrorV1::Unauthorized,
+    };
+    assert!(
+        ErasurePersistencePortV1::read_object(&store.sqlite()?, rejection.reference()?).is_ok()
+    );
+    Ok(())
+}
+
+/// Q11 through the driver: a closure that outgrew its bound after
+/// submission commits its freeze rejection under the request's ERAZ1.
+#[test]
+fn the_driver_commits_a_freeze_rejection_without_a_signature() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let roots = store.owned_roots(actor(), 4_095)?;
+    store
+        .sqlite()?
+        .create_timeline_with_meta(host_timeline_meta()?)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let request = request_of(1)?;
+    assert_eq!(
+        driver().step(&mut host, request)?,
+        LocalErasureStepV1::Authorized
+    );
+    host.command_sender()?
+        .fork_timeline(roots[0], Seq::ZERO, "growth")?;
+    assert_eq!(
+        driver().drive(&mut host, request)?,
+        LocalErasureStepV1::FreezeRejected
+    );
+    assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Rejected);
+    Ok(())
+}
+
+/// Acceptance test 7: a crash after the ERQ1 CAS, between an ELS1 and its
+/// lifecycle command, between the pending key-destruction phase and the
+/// tombstone, and between an owner effect with its ELO1 and the
+/// acknowledgement each resume to exactly the bytes of an uninterrupted
+/// run, and so does a duplicated acknowledgement (acceptance test 4).
+#[test]
+fn every_crash_window_resumes_to_identical_bytes() -> TestResult {
+    let (receipt, states) = straight_run(&driver_store()?)?;
+    let request = request_of(1)?;
+    let signer = signer_of(erasure_signer(), 1);
+    // Between a purpose-0 ELS1 and the freeze.
+    let interrupted = |crash: &dyn Fn(&mut ErasureExecutionHostV1) -> TestResult| {
+        let store = driver_store()?;
+        let (_, resumed, resumed_states) = reopened_run(&store, |host| {
+            submitted(host, 1, ErasureScopeV1::PrivateSubjectData)?;
+            crash(host)
+        })?;
+        assert_eq!(resumed.to_canonical_cbor()?, receipt.to_canonical_cbor()?);
+        assert_eq!(resumed_states, states);
+        TestResult::Ok(())
+    };
+    interrupted(&|host: &mut ErasureExecutionHostV1| {
+        driver().step(host, request)?;
+        let LocalFreezePreparationV1::Sign(body) =
+            host.command_sender()?.prepare_local_freeze(request)?
+        else {
+            return Err("the freeze commits a rejection".into());
+        };
+        signer.sign(
+            host,
+            LocalErasureSigningRequestV1::FreezeAuthorization { request, body },
+        )?;
+        Ok(())
+    })?;
+    // Between the pending key-destruction phase and its tombstone.
+    interrupted(&|host: &mut ErasureExecutionHostV1| {
+        for _ in 0..3 {
+            driver().step(host, request)?;
+        }
+        let key = command_of(host, request, ErasureInventoryCategoryV1::Key)?;
+        host.command_sender()?.begin_key_registry_destruction(
+            erasure_host_timeline()?,
+            subject_key_destruction(Hash::from_bytes(key.destruction.command.digest()))?,
+        )?;
+        Ok(())
+    })?;
+    // Between an owner effect with its ELO1 and the acknowledgement, and
+    // between a purpose-1 ELS1 and the acknowledgement.
+    interrupted(&|host: &mut ErasureExecutionHostV1| {
+        for _ in 0..3 {
+            driver().step(host, request)?;
+        }
+        let key = command_of(host, request, ErasureInventoryCategoryV1::Key)?;
+        let executed = LocalErasureExecutorV1.execute(&key, host).map_err(fail)?;
+        signer.sign(
+            host,
+            LocalErasureSigningRequestV1::OwnerResult {
+                owner_result: executed.owner_result(),
+            },
+        )?;
+        Ok(())
+    })?;
+    // A duplicated acknowledgement commits nothing new.
+    interrupted(&|host: &mut ErasureExecutionHostV1| {
+        let mut acknowledged = None;
+        for _ in 0..4 {
+            if let LocalErasureStepV1::Acknowledged(result) = driver().step(host, request)? {
+                acknowledged = Some(*result);
+            }
+        }
+        let key = acknowledged.ok_or("no acknowledgement")?;
+        let evidence = signer.sign(
+            host,
+            LocalErasureSigningRequestV1::OwnerResult {
+                owner_result: key.owner_result(),
+            },
+        )?;
+        let destruction = key.command().destruction;
+        host.command_sender()?.acknowledge_erasure(
+            request,
+            ErasureAcknowledgementV1 {
+                obligation: destruction.obligation,
+                target: destruction.target,
+                owner: destruction.owner,
+                evidence,
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            },
+        )?;
+        Ok(())
+    })
+}
+
+/// ADR-136 §5 rotation rule (Q12): a routine rotation is refused while a
+/// request's active attempt pins the old bundle, a compromise is accepted,
+/// and once the attempt closed the routine rotation is accepted too.
+#[test]
+fn a_routine_rotation_waits_for_every_pin_and_a_compromise_does_not() -> TestResult {
+    let (store, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))?;
+    let rotated = rotated_bundle(&store)?;
+    let routine = Case::signed(&rotated, &bundle_root(), &[])?;
+    assert_eq!(
+        routine.refusal(&mut store.sqlite()?),
+        Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+    let old_signer = owned_bundle(&ALL_CLASSES)?.signer_key_id;
+    let compromise = Case::signed(&rotated, &bundle_root(), &[old_signer.as_str()])?;
+    assert!(compromise.compose(&mut store.sqlite()?).is_ok());
+    // A request whose attempt closed under the old bundle pins nothing, and
+    // the routine rotation composes. Registering the rotated signer makes it
+    // the registry's active role-2 key, so the old signer can sign no more:
+    // the attempt closes before the rotation is registered.
+    let (closed, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Finalized(_)))?;
+    let mut host = closed.host(&driver_case()?, 4_096)?;
+    assert_eq!(
+        lifecycle(&mut host, request_of(1)?)?,
+        ErasureLifecycleV1::PartialFailure
+    );
+    drop(host);
+    let rotated = rotated_bundle(&closed)?;
+    assert!(Case::signed(&rotated, &bundle_root(), &[])?
+        .compose(&mut closed.sqlite()?)
+        .is_ok());
+    Ok(())
+}
+
+/// Q13: a startup sweep that would read more than 4,096 objects of one tag
+/// is skipped, and startup goes on.
+#[test]
+fn an_overflowing_sweep_is_skipped() -> TestResult {
+    let mut stray = Vec::with_capacity(4_097);
+    for index in 0..4_097_u32 {
+        let mut digest = [0xd0; 32];
+        digest[..4].copy_from_slice(&index.to_be_bytes());
+        stray.push(
+            LocalErasureSignatureV1 {
+                purpose: LocalErasureSignaturePurposeV1::ReceiptBody,
+                signed_digest: ErasureReferenceV1::from_digest(digest),
+                signer_identity: LocalErasureSignerIdentityV1 {
+                    owner_id: SIGNER_OWNER.as_bytes().to_vec(),
+                    epoch: 1,
+                },
+                signature: [0; 64],
+            }
+            .to_canonical_cbor()?,
+        );
+    }
+    let (store, _) = memory_store(&stray)?;
+    let mut host = memory_host(store, &driver_case()?)?;
+    assert_eq!(
+        LocalErasureDriverV1::sweep(&mut host),
+        LocalErasureSweepV1::Skipped
+    );
+    assert_eq!(driver().run(&mut host)?, 0);
+    Ok(())
+}
+
+use pos_runtime::{
+    local_erasure_signer_rotation_v1, LocalErasureRotationRefusalV1, LocalErasureSignerRotationV1,
+};
+
+/// Whether `store` may register `key` as a role-2 key of the fixture
+/// signer owner under `rotation` and the revoked key ids `revoked`.
+fn signer_rotation(
+    store: &mut SqliteStore,
+    key: [u8; 32],
+    rotation: LocalErasureSignerRotationV1,
+    revoked: &[String],
+) -> Result<(), LocalErasureRotationRefusalV1> {
+    local_erasure_signer_rotation_v1(
+        store,
+        OwnerIdV1::from_static(SIGNER_OWNER),
+        key,
+        rotation,
+        revoked,
+    )
+}
+
+/// Owner decision of 2026-11-18 on #1431: a new role-2 signer key is
+/// registered only while no request pins a bundle, or as a compromise the
+/// installed TPS1 reflects; the registered key itself is an exact re-run.
+#[test]
+fn a_new_signer_key_waits_for_every_pin_unless_the_tps1_revokes_it() -> TestResult {
+    let new_key = rotated_signer().verifying_key().to_bytes();
+    let old_key = erasure_signer().verifying_key().to_bytes();
+    let revoked = [local_erasure_signer_key_id_v1(&old_key)];
+    let routine = LocalErasureSignerRotationV1::Routine;
+    let compromise = LocalErasureSignerRotationV1::Compromise;
+    let (pinned, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))?;
+    let mut store = pinned.sqlite()?;
+    assert_eq!(
+        signer_rotation(&mut store, new_key, routine, &[]),
+        Err(LocalErasureRotationRefusalV1::Pinned)
+    );
+    assert_eq!(
+        signer_rotation(&mut store, new_key, compromise, &[]),
+        Err(LocalErasureRotationRefusalV1::NotRevoked)
+    );
+    assert_eq!(
+        signer_rotation(&mut store, new_key, compromise, &revoked),
+        Ok(())
+    );
+    assert_eq!(signer_rotation(&mut store, old_key, routine, &[]), Ok(()));
+    assert_eq!(
+        LocalErasureRotationRefusalV1::Pinned.to_string(),
+        "an erasure request pins the current signer's bundle"
+    );
+    assert_eq!(
+        LocalErasureRotationRefusalV1::NotRevoked.to_string(),
+        "the installed TPS1 does not revoke the old signer's bundle"
+    );
+    // Once the attempt closed, nothing pins a bundle; a compromise still
+    // needs the TPS1 to revoke the old signer.
+    let (closed, _) = driven_until(|step| matches!(step, LocalErasureStepV1::Finalized(_)))?;
+    assert_eq!(
+        signer_rotation(&mut closed.sqlite()?, new_key, routine, &[]),
+        Ok(())
+    );
+    assert_eq!(
+        signer_rotation(&mut closed.sqlite()?, new_key, compromise, &[]),
+        Err(LocalErasureRotationRefusalV1::NotRevoked)
+    );
+    // Only the owner's role-2 keys name its current signer: a later
+    // encryption key of the owner, which has no public key, leaves the old
+    // signer current.
+    closed.register(KeyRegistrationV1::new(
+        KeyIdentityV1::new(SIGNER_OWNER, KeyRoleV1::ExportRecipientEncryption, 9),
+        Hash::from_bytes([0x9a; 32]),
+        None,
+    ))?;
+    assert_eq!(
+        signer_rotation(&mut closed.sqlite()?, old_key, routine, &[]),
+        Ok(())
+    );
+    Ok(())
+}
+
+/// The rotation rule fails closed: pins that cannot be read refuse both a
+/// routine rotation and a compromise, and composition refuses the rotated
+/// bundle; a key registry that cannot be read leaves the old signer
+/// unknown and refuses every new key.
+#[test]
+fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
+    let new_key = rotated_signer().verifying_key().to_bytes();
+    let old_key = erasure_signer().verifying_key().to_bytes();
+    let revoked = [local_erasure_signer_key_id_v1(&old_key)];
+    let (pinned, steps) = driven_until(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))?;
+    let Some(LocalErasureStepV1::Dispatched(admission)) = steps.last() else {
+        return Err("no dispatch".into());
+    };
+    overwrite_object(&pinned, admission.reference(), &[0])?;
+    for (rotation, revoked) in [
+        (LocalErasureSignerRotationV1::Routine, &[][..]),
+        (LocalErasureSignerRotationV1::Compromise, &revoked[..]),
+    ] {
+        assert_eq!(
+            signer_rotation(&mut pinned.sqlite()?, new_key, rotation, revoked),
+            Err(LocalErasureRotationRefusalV1::Pinned)
+        );
+    }
+    let rotated = rotated_bundle(&pinned)?;
+    assert_eq!(
+        Case::signed(&rotated, &bundle_root(), &[revoked[0].as_str()])?
+            .refusal(&mut pinned.sqlite()?),
+        Some(LocalErasureCompositionErrorV1::BundleMismatch)
+    );
+
+    let unread = driver_store()?;
+    rusqlite::Connection::open(&unread.path)?.execute(
+        "UPDATE key_registry SET state_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    for rotation in [
+        LocalErasureSignerRotationV1::Routine,
+        LocalErasureSignerRotationV1::Compromise,
+    ] {
+        assert_eq!(
+            signer_rotation(&mut unread.sqlite()?, new_key, rotation, &revoked),
+            Err(LocalErasureRotationRefusalV1::SignerUnknown)
+        );
+    }
+    assert_eq!(
+        LocalErasureRotationRefusalV1::SignerUnknown.to_string(),
+        "the key registry or its current signer's public key cannot be read"
     );
     Ok(())
 }

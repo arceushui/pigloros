@@ -440,6 +440,7 @@ impl Gateway {
                 .and_then(crate::GatewayAuthorization::governance_record),
             max_events: self.limits.max_events_per_timeline,
             max_timelines: self.limits.max_timelines,
+            host_timelines: self.host_timelines(),
         }
     }
 

@@ -340,15 +340,16 @@ fn verified_input_retains_policy_and_one_attempt_until_output_is_dropped() -> Te
     assert_eq!(policy.effective_limits().len(), 17);
     assert_ne!(policy.effective_limits_digest(), [0; 32]);
     assert_ne!(policy.expected_readback_digest(), [0; 32]);
-    assert!(matches!(
-        input.reserve_output(u64::MAX),
-        Err(StagingError::OutputTooLarge)
-    ));
-    let output = input.reserve_output(1)?;
-    assert!(matches!(
-        input.reserve_output(0),
-        Err(StagingError::OutputAlreadyReserved)
-    ));
+    let before = ledger.usage().reserved_bytes;
+    let output = input
+        .reserve_output()
+        .ok_or("the first output reservation was refused")??;
+    // Exactly ELM1[8] bytes, once: a second reservation is not expressible.
+    assert_eq!(
+        ledger.usage().reserved_bytes - before,
+        policy.effective_limits()[8].value
+    );
+    assert!(input.reserve_output().is_none());
     assert_eq!(ledger.usage().queued_inputs, 0);
     assert_eq!(ledger.usage().attempts, 1);
     drop(input);

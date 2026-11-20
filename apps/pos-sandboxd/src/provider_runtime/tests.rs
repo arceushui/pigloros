@@ -2,23 +2,32 @@
 //! the fixed path as root in the isolated container.
 
 use std::error::Error;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, File};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_reference::sandbox_provider_protocol::{ExecutionReleaseFields, SandboxLimit};
+use pos_reference::sandbox_provider_protocol::{
+    ExecutionReleaseFields, RecoveryCancellationContext, RevocationUpdateRequest, SandboxLimit,
+};
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use pos_reference::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
 };
 
-use super::{bind, required_slots, ProviderStartupError, RuntimeAuthority};
+use super::reconcile::{Reconcile, ReconcileError};
+use super::{
+    bind, reconcile_in_background, required_slots, start_reconciliation, AdmissionState,
+    ProviderStartupError, RuntimeAuthority,
+};
 use crate::{
-    issue_release, AdmittedRuntimeKey, ProviderInstallation, ProviderInstallationError,
-    RuntimeAttestationSigner,
+    issue_release, AdmittedRuntimeKey, AttemptLifecycle, ProviderInstallation,
+    ProviderInstallationError, ReconciledRestart, RuntimeAttestationSigner, StagingLedger,
+    StagingLimits, SystemdAttemptRegistry,
 };
 
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -80,7 +89,7 @@ pub(super) fn install_spi1(document: &[u8], seed: &[u8; 32]) -> TestResult {
 }
 
 /// Remove the SPI1 file and its key directory again.
-fn remove_spi1() -> TestResult {
+pub(super) fn remove_spi1() -> TestResult {
     let root = Path::new(SANDBOX_ARTIFACT_ROOT);
     fs::remove_file(root.join("provider-installation.cbor"))?;
     fs::remove_dir_all(root.join("provider-keys"))?;
@@ -275,4 +284,182 @@ fn startup_refusals_name_no_secret() {
     ] {
         assert_eq!(error.to_string(), text);
     }
+}
+
+/// A restart reconciliation whose outcome the test sends; a dropped sender
+/// fails it.
+pub(super) struct Scripted(pub(super) mpsc::Receiver<Result<AttemptLifecycle, ReconcileError>>);
+
+impl Reconcile for Scripted {
+    fn reconcile(self) -> Result<AttemptLifecycle, ReconcileError> {
+        self.0.recv().unwrap_or(Err(ReconcileError::Staging))
+    }
+}
+
+/// A lifecycle over an empty registry in a private temporary runtime tree,
+/// which must outlive it.
+pub(super) fn test_lifecycle() -> TestResult<(tempfile::TempDir, AttemptLifecycle)> {
+    let runtime = tempfile::tempdir()?;
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
+    for child in ["registry", "attempts"] {
+        fs::create_dir(runtime.path().join(child))?;
+        fs::set_permissions(
+            runtime.path().join(child),
+            fs::Permissions::from_mode(0o700),
+        )?;
+    }
+    let parent = File::open(runtime.path())?;
+    let registry =
+        SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 1 << 30,
+    });
+    let lifecycle = AttemptLifecycle::new(registry, ledger, &ReconciledRestart::for_test());
+    Ok((runtime, lifecycle))
+}
+
+/// The admission state once background reconciliation set it.
+pub(super) fn settled(admission: &OnceLock<AdmissionState>) -> TestResult<&AdmissionState> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(state) = admission.get() {
+            return Ok(state);
+        }
+        if Instant::now() > deadline {
+            return Err("restart reconciliation never ended".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn background_reconciliation_opens_or_closes_admission() -> TestResult {
+    let (runtime, lifecycle) = test_lifecycle()?;
+    // While reconciliation runs, the runtime is `Starting`.
+    let (sender, receiver) = mpsc::channel();
+    let admission = Arc::new(OnceLock::new());
+    reconcile_in_background(Scripted(receiver), Arc::clone(&admission));
+    assert!(admission.get().is_none());
+    sender.send(Ok(lifecycle))?;
+    assert!(matches!(settled(&admission)?, AdmissionState::Open { .. }));
+    // A failure is `ReconcileFailed`, with no retry.
+    let failed = Arc::new(OnceLock::new());
+    reconcile_in_background(Scripted(mpsc::channel().1), Arc::clone(&failed));
+    assert!(matches!(settled(&failed)?, AdmissionState::ReconcileFailed));
+    drop(runtime);
+    Ok(())
+}
+
+#[test]
+fn a_reconciliation_that_cannot_start_stays_starting() {
+    // The job is dropped unrun, so the state is never set: `Starting` for
+    // good, which answers as `ReconcileFailed` does.
+    let admission = Arc::new(OnceLock::new());
+    start_reconciliation(Scripted(mpsc::channel().1), Arc::clone(&admission), |_| {
+        Err(std::io::Error::other("injected spawn failure"))
+    });
+    assert!(admission.get().is_none());
+}
+
+/// The fixture's administrator-policy signer, which signs RVS1 and RCU1.
+const POLICY_SEED: [u8; 32] = [2; 32];
+
+/// A record signed by the policy key: `[unsigned, digest, signature]`, and
+/// its self-digest.
+fn policy_signed(magic: &str, unsigned: Value) -> TestResult<(Vec<u8>, [u8; 32])> {
+    let mut preimage = format!("PiglorOS.{magic}.v1\0").into_bytes();
+    preimage.extend(encode(&unsigned)?);
+    let digest = *blake3::hash(&preimage).as_bytes();
+    let mut message = format!("PiglorOS.{magic}.Signature.v1\0").into_bytes();
+    message.extend(digest);
+    let signature = SigningKey::from_bytes(&POLICY_SEED)
+        .sign(&message)
+        .to_bytes();
+    let bytes = encode(&Value::Array(vec![
+        unsigned,
+        Value::Bytes(digest.to_vec()),
+        Value::Bytes(signature.to_vec()),
+    ]))?;
+    Ok((bytes, digest))
+}
+
+/// An RCU1 of the staged installation to the next RVS1 epoch, revoking the
+/// sorted `providers`, with the nonce `update_nonce` derives from `seed`;
+/// and that next RVS1's digest.
+pub(super) fn revocation_update(
+    admitted: &AdmittedSelectorProvider,
+    providers: &[[u8; 32]],
+    seed: u8,
+) -> TestResult<(Vec<u8>, [u8; 32])> {
+    key_and_provider_revocation_update(admitted, &[], providers, seed)
+}
+
+/// As `revocation_update`, also revoking the sorted key IDs `keys`.
+pub(super) fn key_and_provider_revocation_update(
+    admitted: &AdmittedSelectorProvider,
+    keys: &[&str],
+    providers: &[[u8; 32]],
+    seed: u8,
+) -> TestResult<(Vec<u8>, [u8; 32])> {
+    let bootstrap = admitted.bootstrap();
+    let text = |value: &str| Value::Text(value.to_owned());
+    let (next, next_digest) = policy_signed(
+        "RVS1",
+        Value::Array(vec![
+            text("RVS1"),
+            Value::Integer(1.into()),
+            Value::Bytes(bootstrap.trust().snapshot_digest().to_vec()),
+            Value::Integer((bootstrap.revocation().revocation_epoch() + 1).into()),
+            Value::Array(keys.iter().copied().map(text).collect()),
+            Value::Array(
+                providers
+                    .iter()
+                    .map(|digest| Value::Bytes(digest.to_vec()))
+                    .collect(),
+            ),
+            Value::Array(Vec::new()),
+            text("policy"),
+        ]),
+    )?;
+    let (rcu1, _) = policy_signed(
+        "RCU1",
+        Value::Array(vec![
+            text("RCU1"),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![70; 16]),
+            Value::Bytes(bootstrap.revocation().snapshot_digest().to_vec()),
+            Value::Bytes(next),
+            Value::Bytes(next_digest.to_vec()),
+            Value::Bytes(update_nonce(seed).to_vec()),
+            text("policy"),
+        ]),
+    )?;
+    Ok((rcu1, next_digest))
+}
+
+/// A distinct RCU1 nonce for each `seed`, derived through a labelled hash.
+fn update_nonce(seed: u8) -> [u8; 16] {
+    let digest = blake3::Hasher::new()
+        .update(b"PiglorOS.SandboxdRevocationUpdateFixtureNonce.v1\0")
+        .update(&[seed])
+        .finalize();
+    std::array::from_fn(|index| digest.as_bytes()[index])
+}
+
+/// The RCC1 of a committed update to `rcu1`, with the `live` and
+/// `required` attempt sets.
+pub(super) fn cancellation_context(
+    admitted: &AdmittedSelectorProvider,
+    rcu1: &[u8],
+    live: Vec<[u8; 16]>,
+    required: Vec<[u8; 16]>,
+) -> TestResult<RecoveryCancellationContext> {
+    let request = RevocationUpdateRequest::authenticate(
+        rcu1,
+        admitted.bootstrap().trust(),
+        admitted.bootstrap().revocation(),
+    )?;
+    Ok(RecoveryCancellationContext::for_committed_recovery(
+        [11; 32], [12; 32], &request, live, required,
+    )?)
 }

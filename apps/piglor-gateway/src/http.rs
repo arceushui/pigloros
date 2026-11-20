@@ -78,7 +78,10 @@ mod coverage_tests {
     #[tokio::test]
     async fn bounded_response_rejects_geographic_event() {
         let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok());
-        let timeline = gateway.create_timeline("coverage-geo").await.test_ok();
+        let timeline = gateway
+            .create_timeline("coverage-geo", None)
+            .await
+            .test_ok();
         let mut event = gateway
             .append_action(
                 &timeline.id().to_string(),
@@ -295,8 +298,8 @@ async fn create_timeline(
 ) -> Result<impl IntoResponse, GatewayError> {
     let name = body.name;
     let tl = authority
-        .run(&state.gateway, None, move |gateway| async move {
-            gateway.create_timeline(&name).await
+        .run_as_actor(&state.gateway, None, move |gateway, owner| async move {
+            gateway.create_timeline(&name, owner).await
         })
         .await?;
     Ok((
@@ -1212,7 +1215,7 @@ mod tests {
         )
         .test_ok();
         let gateway = Gateway::unprotected_for_harness(host).test_ok();
-        let timeline = gateway.create_timeline(name).await.test_ok();
+        let timeline = gateway.create_timeline(name, None).await.test_ok();
         let app = router(AppState {
             gateway: gateway.clone(),
             ledger_view: LedgerView::default(),
@@ -2499,7 +2502,10 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::OK);
         assert_eq!(second["events"][0]["seq"], 2);
 
-        let other = gateway.create_timeline("cursor-other").await.test_ok();
+        let other = gateway
+            .create_timeline("cursor-other", None)
+            .await
+            .test_ok();
         assert!(gateway
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
             .await
@@ -2582,7 +2588,7 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(second.events[0].seq.as_u64(), 2);
 
         let other = gateway
-            .create_timeline("public-cursor-other")
+            .create_timeline("public-cursor-other", None)
             .await
             .test_ok();
         assert!(matches!(

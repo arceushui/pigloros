@@ -1,6 +1,6 @@
-//! ADR-069 R11 §5.1 step 8 and §7 in state `Starting`, against the signed
-//! test installation staged as root in the isolated container (invariants
-//! 9 to 12, 16 and 17).
+//! ADR-069 R11 §5.1 steps 7 and 8 and §7 in the states `Starting`, `Open`
+//! and `ReconcileFailed`, against the signed test installation staged as
+//! root in the isolated container (invariants 9 to 13, 15 to 17).
 
 use std::ffi::OsStr;
 use std::fs;
@@ -9,23 +9,36 @@ use std::os::linux::net::SocketAddrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener, UnixStream};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{mpsc, OnceLock};
+use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
 use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_reference::sandbox_provider_protocol::{
-    SandboxCancelRequest, SandboxDescribeRequest, SandboxDescribeResponse, SandboxExecuteRequest,
-    SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
+    RevocationUpdateRequest, SandboxCancelRequest, SandboxDescribeRequest, SandboxDescribeResponse,
+    SandboxExecuteRequest, SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
 };
+use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use rustix::event::PollFlags;
 
-use super::{accepting, missed, readiness, trusted_peer, Admission, Deadlined, Responder};
-use crate::provider_runtime::endpoint::bind_endpoints;
-use crate::provider_runtime::tests::{
-    bind_as_provider, encode, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
+use super::{
+    accepting, exchange_deadline, missed, readiness, trusted_peer, Admission, ControlState,
+    Deadlined, Responder, EXECUTE_CLOSED, FENCED, LIVE, REVOKED,
 };
-use crate::provider_runtime::{serve_with, ProviderRuntimeError, ProviderStartupError};
+use crate::provider_runtime::endpoint::bind_endpoints;
+use crate::provider_runtime::reconcile::ReconcileError;
+use crate::provider_runtime::tests::{
+    bind_as_provider, cancellation_context, encode, in_isolated_root, install_spi1,
+    key_and_provider_revocation_update, revocation_update, spi1, test_lifecycle, Scripted,
+    TestResult, RUNTIME_SEED,
+};
+use crate::provider_runtime::ExchangeObserver;
+use crate::provider_runtime::{
+    serve_with, AdmissionState, ProviderRuntimeError, ProviderStartupError, RuntimeAuthority,
+};
+use crate::AttemptLifecycle;
 
 const RUNTIME: &str = "/run/pigloros";
 const EXECUTE: &str = "/run/pigloros/provider-execute.sock";
@@ -401,10 +414,13 @@ fn reads_a_record_above_one_mebibyte(key: &VerifyingKey) -> TestResult {
     )
 }
 
-/// Cancel and reconcile pass step 6 and get SPE1 11 (invariant 12).
-fn refuses_attempt_operations_while_starting(
+/// Cancel and reconcile pass step 6 and get SPE1 `code`: 11 while the
+/// runtime is `Starting` or `ReconcileFailed` (invariants 12 and 13), 15 once
+/// it is `Open` with no execute port (invariant 15).
+fn answers_attempt_operations(
     key: &VerifyingKey,
     authority: Authority,
+    code: SandboxProviderErrorCode,
 ) -> TestResult {
     let cancel = attempt_request("SCQ1", authority)?;
     let decoded = SandboxCancelRequest::from_canonical_cbor(&cancel)?;
@@ -412,7 +428,7 @@ fn refuses_attempt_operations_while_starting(
         &exchange(&[&cancel])?,
         key,
         (2, [8; 16], decoded.request_digest, Some([9; 16])),
-        SandboxProviderErrorCode::SandboxUnavailable,
+        code,
     )?;
     let reconcile = attempt_request("SRQ1", authority)?;
     let decoded = SandboxReconcileRequest::from_canonical_cbor(&reconcile)?;
@@ -420,8 +436,122 @@ fn refuses_attempt_operations_while_starting(
         &exchange(&[&reconcile])?,
         key,
         (3, [8; 16], decoded.request_digest, Some([9; 16])),
-        SandboxProviderErrorCode::SandboxUnavailable,
+        code,
     )
+}
+
+/// Send cancel requests until one gets SPE1 `15`: restart reconciliation
+/// opened admission.
+fn await_open(key: &VerifyingKey, authority: Authority) -> TestResult {
+    let deadline = Instant::now() + CLIENT_TIMEOUT;
+    let cancel = attempt_request("SCQ1", authority)?;
+    while refusal(&exchange(&[&cancel])?, key)?.code != SandboxProviderErrorCode::UnknownAttempt {
+        if Instant::now() > deadline {
+            return Err("admission never opened".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+/// Step 7 with a restart reconciliation that fails as soon as it runs.
+fn never_reconciled() -> impl FnOnce(&RuntimeAuthority) -> Result<Scripted, ProviderRuntimeError> {
+    |_| Ok(Scripted(mpsc::channel().1))
+}
+
+/// Assert that `manager` received no datagram: nothing sent `READY=1`.
+fn assert_not_notified(manager: &UnixDatagram) -> TestResult {
+    manager.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let mut datagram = [0; 16];
+    assert!(manager.recv(&mut datagram).is_err(), "READY=1 was sent");
+    manager.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    Ok(())
+}
+
+/// Assert that neither endpoint has a node.
+fn assert_unbound() {
+    assert!(!Path::new(EXECUTE).exists() && !Path::new(CONTROL).exists());
+}
+
+/// A startup refusal, a step 7 refusal and a pre-existing node at an
+/// endpoint each bind nothing and send no READY=1.
+fn binds_nothing_on_a_refusal(manager: &UnixDatagram) -> TestResult {
+    assert_eq!(
+        serve_with(
+            || Err(ProviderStartupError::SlotCount),
+            // Were step 7 to run first, its refusal would be returned.
+            |_| Err::<Scripted, _>(ProviderRuntimeError::HostUnavailable),
+            Some(OsStr::new(NOTIFY))
+        ),
+        ProviderRuntimeError::Startup(ProviderStartupError::SlotCount)
+    );
+    assert_unbound();
+    assert_not_notified(manager)?;
+    // Step 7 runs before any socket exists.
+    let authority = bind_as_provider()??;
+    assert_eq!(
+        serve_with(
+            move || Ok(authority),
+            |_| {
+                assert_unbound();
+                Err::<Scripted, _>(ProviderRuntimeError::HostUnavailable)
+            },
+            Some(OsStr::new(NOTIFY))
+        ),
+        ProviderRuntimeError::HostUnavailable
+    );
+    assert_unbound();
+    assert_not_notified(manager)?;
+    fs::write(EXECUTE, b"")?;
+    let authority = bind_as_provider()??;
+    assert_eq!(
+        serve_with(
+            move || Ok(authority),
+            |authority| {
+                assert!(!Path::new(CONTROL).exists());
+                never_reconciled()(authority)
+            },
+            Some(OsStr::new(NOTIFY))
+        ),
+        ProviderRuntimeError::UnsafeEndpoint
+    );
+    assert!(fs::symlink_metadata(EXECUTE)?.is_file());
+    assert!(!Path::new(CONTROL).exists());
+    assert_not_notified(manager)?;
+    fs::remove_file(EXECUTE)?;
+    Ok(())
+}
+
+/// Reconciliation opens admission. With no execute port, execute is still
+/// refused with 11, cancel and reconcile name an unknown attempt
+/// (invariant 15), and describe still answers. The returned runtime tree
+/// must outlive the lifecycle.
+fn serves_open_without_an_execute_port(
+    key: &VerifyingKey,
+    retained: Authority,
+    staged: &StagedInstallation,
+    reconciled: &mpsc::Sender<Result<AttemptLifecycle, ReconcileError>>,
+) -> TestResult<tempfile::TempDir> {
+    let (runtime, lifecycle) = test_lifecycle()?;
+    reconciled.send(Ok(lifecycle))?;
+    await_open(key, retained)?;
+    answers_attempt_operations(key, retained, SandboxProviderErrorCode::UnknownAttempt)?;
+    let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+    assert_refused(
+        &exchange(&[staged.evaluation(), staged.request()])?,
+        key,
+        (
+            1,
+            execute.request.request_id,
+            execute.request_digest,
+            Some(execute.attempt_id),
+        ),
+        SandboxProviderErrorCode::SandboxUnavailable,
+    )?;
+    let bytes = describe([4; 16], retained)?;
+    SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
+        .verify_signature(key)?;
+    Ok(runtime)
 }
 
 /// EVR1 then SPX1: the precedence of each, step 6, then SPE1 11.
@@ -523,23 +653,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     let staged = stage()?;
     let manager = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(&NOTIFY[1..])?)?;
     manager.set_read_timeout(Some(CLIENT_TIMEOUT))?;
-    // A startup refusal binds nothing.
-    assert_eq!(
-        serve_with(
-            || Err(ProviderStartupError::SlotCount),
-            Some(OsStr::new(NOTIFY))
-        ),
-        ProviderRuntimeError::Startup(ProviderStartupError::SlotCount)
-    );
-    // A pre-existing node at an endpoint: no bind and no READY=1.
-    fs::write(EXECUTE, b"")?;
-    let authority = bind_as_provider()??;
-    assert_eq!(
-        serve_with(move || Ok(authority), Some(OsStr::new(NOTIFY))),
-        ProviderRuntimeError::UnsafeEndpoint
-    );
-    fs::remove_file(EXECUTE)?;
-    assert!(!Path::new(CONTROL).exists());
+    binds_nothing_on_a_refusal(&manager)?;
     let authority = bind_as_provider()??;
     let (admitted, _, _) = &authority;
     let key = *admitted.provider().runtime_attestation_key();
@@ -549,8 +663,15 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
-    let served =
-        std::thread::spawn(move || serve_with(move || Ok(authority), Some(OsStr::new(NOTIFY))));
+    // Restart reconciliation runs until the test sends its outcome.
+    let (reconciled, reconciling) = mpsc::channel();
+    let served = std::thread::spawn(move || {
+        serve_with(
+            move || Ok(authority),
+            move |_| Ok(Scripted(reconciling)),
+            Some(OsStr::new(NOTIFY)),
+        )
+    });
     // The first datagram is READY=1, sent after both leaves are owner-only
     // (invariant 9).
     let mut ready = [0; 16];
@@ -584,7 +705,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     );
     refuses_by_precedence(&key, retained)?;
     reads_a_record_above_one_mebibyte(&key)?;
-    refuses_attempt_operations_while_starting(&key, retained)?;
+    answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
     refuses_execute_while_starting(&key, &staged)?;
     // A root control connection is closed with zero bytes.
     assert_silent(CONTROL, b"\0\0\0\x01x")?;
@@ -606,6 +727,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     // gets the SDY1 and a clean EOF.
     let trailing = exchange(&[&describe([3; 16], retained)?, b"trailing"])?;
     SandboxDescribeResponse::from_canonical_cbor(unframe(&trailing)?)?.verify_signature(&key)?;
+    let runtime = serves_open_without_an_execute_port(&key, retained, &staged, &reconciled)?;
     let (replacement, woken) = replace_execute_leaf()?;
     let replaced = fs::symlink_metadata(EXECUTE)?.ino();
     assert_eq!(
@@ -617,6 +739,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     assert_eq!(fs::symlink_metadata(EXECUTE)?.ino(), replaced);
     assert!(!Path::new(CONTROL).exists());
     drop(replacement);
+    drop(runtime);
     drop(staged);
     Ok(())
 }
@@ -658,9 +781,9 @@ fn assert_expired(stream: &mut UnixStream, key: &VerifyingKey) -> TestResult {
 }
 
 #[test]
-fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
+fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     if !in_isolated_root(
-        "provider_runtime::serving::tests::connections_beyond_the_pool_are_refused_as_busy",
+        "provider_runtime::serving::tests::full_pools_and_a_failed_reconcile_refuse",
     )? {
         return Ok(());
     }
@@ -671,8 +794,28 @@ fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
-    drops_an_untrusted_peer(&admitted, &signer, retained)?;
-    let responder = Responder::new(&admitted, &signer);
+    // A failed reconciliation keeps cancel and reconcile refused with 11
+    // for the life of the process (invariant 13).
+    let failed = OnceLock::from(AdmissionState::ReconcileFailed);
+    let responder = Responder::new(&admitted, &signer, &failed);
+    while_serving(&responder, 4, || {
+        answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
+        let bytes = describe([6; 16], retained)?;
+        SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
+            .verify_signature(&key)?;
+        let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+        assert_refused(
+            &exchange(&[staged.evaluation(), staged.request()])?,
+            &key,
+            (
+                1,
+                execute.request.request_id,
+                execute.request_digest,
+                Some(execute.attempt_id),
+            ),
+            SandboxProviderErrorCode::SandboxUnavailable,
+        )
+    })?;
     // A full pool of one: the next connection is accepted and refused with
     // SPE1 12 at once (journal 22582).
     while_serving(&responder, 1, || {
@@ -694,6 +837,20 @@ fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
         assert_busy(&mut waiting, &key, 5, retained)
     })?;
     drop(staged);
+    Ok(())
+}
+
+#[test]
+fn a_deadlined_stream_has_nothing_to_flush() -> TestResult {
+    // A Unix stream has no buffered output: flushing writes nothing.
+    let (local, mut peer) = UnixStream::pair()?;
+    Deadlined::new(&local, Duration::from_secs(1)).flush()?;
+    peer.set_nonblocking(true)?;
+    let mut byte = [0; 1];
+    assert_eq!(
+        peer.read(&mut byte).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock)
+    );
     Ok(())
 }
 
@@ -724,35 +881,161 @@ fn assert_dropped_unread(server: &UnixStream, peer: &mut UnixStream, sent: &[u8]
     Ok(())
 }
 
-/// A peer of another UID gets zero bytes on the execute socket: its request
-/// is not read (R11 §6 step 6).
+/// A peer of another UID gets zero bytes on either socket: neither the
+/// revocation responder nor the execute answer reads its request, and the
+/// control state stays `Live` (R11 §6 step 6).
 fn drops_an_untrusted_peer(
-    admitted: &pos_reference::selector::installation::authority::AdmittedSelectorProvider,
+    admitted: &AdmittedSelectorProvider,
     signer: &crate::KeyFileRuntimeSigner,
     retained: Authority,
 ) -> TestResult {
+    let starting = OnceLock::new();
     let untrusted = Responder {
         peer_uid: rustix::process::geteuid().as_raw() + 1,
-        ..Responder::new(admitted, signer)
+        ..Responder::new(admitted, signer, &starting)
     };
+    let (update, _) = revocation_update(admitted, &[], 4)?;
+    let context = cancellation_context(admitted, &update, Vec::new(), Vec::new())?;
+    let sent = framed(&[&context.to_canonical_cbor()?, &update])?;
+    let (server, mut peer) = UnixStream::pair()?;
+    peer.write_all(&sent)?;
+    untrusted.exchange(&server, Instant::now());
+    assert_dropped_unread(&server, &mut peer, &sent)?;
+    assert_eq!(
+        untrusted.revocation.observer().state.load(Ordering::SeqCst),
+        LIVE
+    );
     let sent = framed(&[&describe([4; 16], retained)?])?;
     let (server, mut peer) = UnixStream::pair()?;
     peer.write_all(&sent)?;
     untrusted.answer(&server, Admission::Answered);
-    assert_dropped_unread(&server, &mut peer, &sent)
+    assert_dropped_unread(&server, &mut peer, &sent)?;
+    assert_eq!(
+        untrusted.revocation.observer().state.load(Ordering::SeqCst),
+        LIVE
+    );
+    Ok(())
 }
 
 #[test]
-fn a_deadlined_stream_has_nothing_to_flush() -> TestResult {
-    // A Unix stream has no buffered output: flushing writes nothing.
-    let (local, mut peer) = UnixStream::pair()?;
-    Deadlined::new(&local, Duration::from_secs(1)).flush()?;
-    peer.set_nonblocking(true)?;
-    let mut byte = [0; 1];
+fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> TestResult {
+    if !in_isolated_root(
+        "provider_runtime::serving::tests::the_control_socket_acknowledges_and_a_self_revocation_closes_execute",
+    )? {
+        return Ok(());
+    }
+    let staged = stage()?;
+    let (admitted, _, signer) = bind_as_provider()??;
+    let key = *admitted.provider().runtime_attestation_key();
+    let retained = Authority {
+        apt1: admitted.bootstrap().policy().policy_digest(),
+        epoch: admitted.bootstrap().policy().policy_epoch(),
+    };
+    the_control_state_only_advances(&admitted)?;
+    drops_an_untrusted_peer(&admitted, &signer, retained)?;
+    let starting = OnceLock::new();
+    // An acknowledged update fences the runtime for good; describe still
+    // answers and execute is refused with 11 (invariant 24).
+    let fenced = Responder::new(&admitted, &signer, &starting);
+    while_serving(&fenced, 4, || {
+        let (update, _) = revocation_update(&admitted, &[], 1)?;
+        let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
+            .to_canonical_cbor()?;
+        assert!(!exchange_at(CONTROL, &framed(&[&context_bytes, &update])?)?.is_empty());
+        let bytes = describe([1; 16], retained)?;
+        SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
+            .verify_signature(&key)?;
+        let refused = exchange(&[staged.evaluation(), staged.request()])?;
+        assert_eq!(
+            refusal(&refused, &key)?.code,
+            SandboxProviderErrorCode::SandboxUnavailable
+        );
+        Ok(())
+    })?;
+    // A self-revoking update is acknowledged. Afterwards every execute
+    // connection gets zero bytes, and only the retained RCA1 is resent
+    // (invariant 25).
+    let revoked = Responder::new(&admitted, &signer, &starting);
+    while_serving(&revoked, 4, || {
+        let manifest = admitted.provider().manifest().manifest_digest;
+        let (update, _) = revocation_update(&admitted, &[manifest], 2)?;
+        let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
+            .to_canonical_cbor()?;
+        let exchange_bytes = framed(&[&context_bytes, &update])?;
+        let rca1 = exchange_at(CONTROL, &exchange_bytes)?;
+        assert!(!rca1.is_empty());
+        assert_silent(EXECUTE, &framed(&[&describe([2; 16], retained)?])?)?;
+        assert_eq!(exchange_at(CONTROL, &exchange_bytes)?, rca1);
+        let (other, _) = revocation_update(&admitted, &[], 3)?;
+        let context =
+            cancellation_context(&admitted, &other, Vec::new(), Vec::new())?.to_canonical_cbor()?;
+        assert!(exchange_at(CONTROL, &framed(&[&context, &other])?)?.is_empty());
+        Ok(())
+    })?;
+    drop(staged);
+    Ok(())
+}
+
+#[test]
+fn a_control_exchange_ends_100_ms_after_its_accept() {
+    let accepted = Instant::now();
     assert_eq!(
-        peer.read(&mut byte).map_err(|error| error.kind()),
-        Err(std::io::ErrorKind::WouldBlock)
+        exchange_deadline(accepted),
+        accepted + Duration::from_millis(100)
     );
+}
+
+/// The live control state only advances: the fence and an acknowledgement
+/// that does not revoke this runtime leave it `Fenced`; one that revokes
+/// its SPM1, its binary or its runtime-attestation key, each alone, makes it
+/// `Revoked` (R11 §7.1).
+fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestResult {
+    let bootstrap = admitted.bootstrap();
+    let next_revoking = |keys: &[&str], providers: &[[u8; 32]], nonce| -> TestResult<_> {
+        let (update, _) = key_and_provider_revocation_update(admitted, keys, providers, nonce)?;
+        Ok(RevocationUpdateRequest::authenticate(
+            &update,
+            bootstrap.trust(),
+            bootstrap.revocation(),
+        )?
+        .next_revocation)
+    };
+    let next = |providers: &[[u8; 32]], nonce| next_revoking(&[], providers, nonce);
+    let manifest = admitted.provider().manifest();
+    for (keys, providers, nonce) in [
+        (Vec::new(), vec![manifest.binary_digest], 10),
+        (
+            vec![manifest.runtime_attestation_key_id.as_str()],
+            Vec::new(),
+            11,
+        ),
+    ] {
+        let control = ControlState {
+            state: AtomicU8::new(FENCED),
+            admitted,
+        };
+        control.acknowledging(bootstrap.trust(), &next_revoking(&keys, &providers, nonce)?);
+        assert!(control.revoked());
+    }
+    let control = ControlState {
+        state: AtomicU8::new(LIVE),
+        admitted,
+    };
+    let state = || control.state.load(Ordering::SeqCst);
+    control.advance(EXECUTE_CLOSED);
+    assert_eq!(state(), EXECUTE_CLOSED);
+    control.fencing();
+    assert_eq!(state(), FENCED);
+    control.advance(EXECUTE_CLOSED);
+    assert_eq!(state(), FENCED);
+    control.acknowledging(bootstrap.trust(), &next(&[], 7)?);
+    assert!(!control.revoked());
+    control.acknowledging(bootstrap.trust(), &next(&[manifest.manifest_digest], 8)?);
+    assert!(control.revoked());
+    assert_eq!(state(), REVOKED);
+    // A later acknowledgement that revokes nothing cannot undo it.
+    control.acknowledging(bootstrap.trust(), &next(&[], 9)?);
+    assert_eq!(state(), REVOKED);
     Ok(())
 }
 

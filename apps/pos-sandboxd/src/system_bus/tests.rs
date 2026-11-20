@@ -33,7 +33,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 50] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -67,6 +67,9 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
     ("UMask", "u"),
     ("KillMode", "s"),
     ("SendSIGKILL", "b"),
+    ("StandardInput", "s"),
+    ("StandardOutput", "s"),
+    ("StandardError", "s"),
     ("MemoryMax", "t"),
     ("MemorySwapMax", "t"),
     ("TasksMax", "t"),
@@ -78,6 +81,9 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
     ("ExtraFileDescriptors", "a(hs)"),
     ("TemporaryFileSystem", "a(ss)"),
     ("ExecStart", "a(sasb)"),
+    ("StandardInputFileDescriptor", "h"),
+    ("StandardOutputFileDescriptor", "h"),
+    ("StandardErrorFileDescriptor", "h"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -462,6 +468,10 @@ struct RecordingService {
     fail_root_directory: bool,
     fail_root_image_policy: bool,
     fail_memory_max: bool,
+    /// `StandardInput`, `StandardOutput` and `StandardError`.
+    standard_streams: [&'static str; 3],
+    /// The three `Standard*FileDescriptorName` values, in the same order.
+    standard_descriptor_names: [&'static str; 3],
 }
 
 #[derive(Clone, Default)]
@@ -494,6 +504,8 @@ impl RecordingService {
             fail_root_directory: false,
             fail_root_image_policy: false,
             fail_memory_max: false,
+            standard_streams: ["null"; 3],
+            standard_descriptor_names: [""; 3],
         }
     }
 
@@ -713,6 +725,36 @@ impl RecordingService {
         self.fixed(true)
     }
 
+    #[zbus(property, name = "StandardInput")]
+    fn standard_input(&self) -> &'static str {
+        self.fixed(self.standard_streams[0])
+    }
+
+    #[zbus(property, name = "StandardOutput")]
+    fn standard_output(&self) -> &'static str {
+        self.fixed(self.standard_streams[1])
+    }
+
+    #[zbus(property, name = "StandardError")]
+    fn standard_error(&self) -> &'static str {
+        self.fixed(self.standard_streams[2])
+    }
+
+    #[zbus(property, name = "StandardInputFileDescriptorName")]
+    fn standard_input_file_descriptor_name(&self) -> &'static str {
+        self.fixed(self.standard_descriptor_names[0])
+    }
+
+    #[zbus(property, name = "StandardOutputFileDescriptorName")]
+    fn standard_output_file_descriptor_name(&self) -> &'static str {
+        self.fixed(self.standard_descriptor_names[1])
+    }
+
+    #[zbus(property, name = "StandardErrorFileDescriptorName")]
+    fn standard_error_file_descriptor_name(&self) -> &'static str {
+        self.fixed(self.standard_descriptor_names[2])
+    }
+
     #[zbus(property, name = "MemoryMax")]
     fn memory_max(&self) -> fdo::Result<u64> {
         self.record_read();
@@ -874,12 +916,24 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 44);
+    assert_eq!(verified.requested_readback().len(), 50);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
-        verified.requested_readback()[41].name(),
+        verified.requested_readback()[44].name(),
         "ExtraFileDescriptors"
     );
+    // The descriptor names are read back under the descriptors' own names.
+    for (index, name) in [
+        (47, "StandardInputFileDescriptor"),
+        (48, "StandardOutputFileDescriptor"),
+        (49, "StandardErrorFileDescriptor"),
+    ] {
+        assert_eq!(verified.requested_readback()[index].name(), name);
+        assert_eq!(
+            verified.requested_readback()[index].value(),
+            &crate::SystemdTransientUnitReadbackValue::String(String::new())
+        );
+    }
     assert_eq!(
         verified.manager_readback().property(),
         SystemdManagerReadbackOnlyProperty::RootImagePolicy
@@ -927,6 +981,12 @@ async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Err
         .await;
     let error = result.err().ok_or("manager rejection was accepted")?;
     assert!(error.to_string().contains("systemd rejected"));
+    // No start-job result was observed (owner reading G1, Redmine #443
+    // journal 22723).
+    assert_eq!(
+        <SystemdTransientUnitTransport as crate::UnitHost>::start_failure(&error),
+        crate::StartFailure::default()
+    );
     let SystemdTransientUnitTransportError::ManagerCall(_) = error else {
         return Err("manager rejection had the wrong error class".into());
     };
@@ -971,23 +1031,51 @@ async fn completed_unit_lookup_failure_is_classified() -> Result<(), Box<dyn Err
         error,
         SystemdTransientUnitTransportError::UnitLookup(_)
     ));
+    // The lookup followed the job's `done` result.
+    assert_eq!(
+        <SystemdTransientUnitTransport as crate::UnitHost>::start_failure(&error).job,
+        Some(StartJobResult::Done)
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn every_non_successful_job_result_fails_closed() -> Result<(), Box<dyn Error>> {
+    // Each result is its TME1 `start-job-result`; one R9 does not name is
+    // none (owner reading G1, Redmine #443 journal 22723).
     let cases = [
-        ("canceled", SystemdJobFailure::Canceled),
-        ("timeout", SystemdJobFailure::Timeout),
-        ("failed", SystemdJobFailure::Failed),
-        ("dependency", SystemdJobFailure::Dependency),
-        ("skipped", SystemdJobFailure::Skipped),
+        (
+            "canceled",
+            SystemdJobFailure::Canceled,
+            Some(StartJobResult::Canceled),
+        ),
+        (
+            "timeout",
+            SystemdJobFailure::Timeout,
+            Some(StartJobResult::Timeout),
+        ),
+        (
+            "failed",
+            SystemdJobFailure::Failed,
+            Some(StartJobResult::Failed),
+        ),
+        (
+            "dependency",
+            SystemdJobFailure::Dependency,
+            Some(StartJobResult::Dependency),
+        ),
+        (
+            "skipped",
+            SystemdJobFailure::Skipped,
+            Some(StartJobResult::Skipped),
+        ),
         (
             "future-result",
             SystemdJobFailure::Unknown("future-result".to_owned()),
+            None,
         ),
     ];
-    for (result, expected) in cases {
+    for (result, expected, job) in cases {
         let behavior = ManagerBehavior {
             result: result.to_owned(),
             ..ManagerBehavior::default()
@@ -1003,6 +1091,13 @@ async fn every_non_successful_job_result_fails_closed() -> Result<(), Box<dyn Er
             .await
             .err()
             .ok_or("failed job result was accepted")?;
+        assert_eq!(
+            <SystemdTransientUnitTransport as crate::UnitHost>::start_failure(&error),
+            crate::StartFailure {
+                job,
+                readback: None,
+            }
+        );
         let SystemdTransientUnitTransportError::JobFailed(actual) = error else {
             return Err("failed job result had the wrong error class".into());
         };
@@ -1060,8 +1155,75 @@ async fn unequal_typed_property_readback_fails_closed() -> Result<(), Box<dyn Er
         .ok_or("unequal property readback was accepted")?;
     assert!(matches!(
         error,
-        SystemdTransientUnitTransportError::Readback(TransientUnitRequestError::ReadbackMismatch)
+        SystemdTransientUnitTransportError::Readback {
+            source: TransientUnitRequestError::ReadbackMismatch,
+            ..
+        }
     ));
+    // The job was done, and the rejected readback is RQE1 status 2.
+    let observed = <SystemdTransientUnitTransport as crate::UnitHost>::start_failure(&error);
+    assert_eq!(observed.job, Some(StartJobResult::Done));
+    let readback = observed.readback.ok_or("no rejected readback")?;
+    assert!(!readback.is_empty());
+    let requested = request(LaunchMode::Local {
+        host_service: descriptor()?,
+    })?
+    .requested_configuration();
+    let evidence = crate::unverified_requested_configuration(
+        [0x04; 16],
+        [0x05; 32],
+        &requested,
+        Some(&readback),
+    )?;
+    assert_eq!(
+        evidence.fields().status,
+        pos_reference::sandbox_provider_protocol::RequestedConfigurationStatus::Mismatch
+    );
+    assert_eq!(
+        evidence.fields().readback.as_ref().map(Vec::len),
+        Some(readback.len())
+    );
+    Ok(())
+}
+
+/// Each standard stream and each descriptor name is read from its own
+/// property: one substituted value alone fails the readback.
+#[tokio::test]
+async fn each_standard_stream_is_read_back_from_its_own_property() -> Result<(), Box<dyn Error>> {
+    for (index, attempt) in (0..6).zip(0x40_u8..) {
+        let mut service = RecordingService::exact(expected_system_call_filter()?);
+        if index < 3 {
+            service.standard_streams[index] = "tty";
+        } else {
+            service.standard_descriptor_names[index - 3] = "substituted";
+        }
+        let (transport, _server) = transport(
+            Arc::new(Mutex::new(None)),
+            ManagerBehavior::default(),
+            service,
+        )
+        .await?;
+        let error = transport
+            .start(
+                TransientServiceUnitName::from_attempt_id([attempt; 16])?,
+                request(LaunchMode::Local {
+                    host_service: descriptor()?,
+                })?,
+            )
+            .await
+            .err()
+            .ok_or("a substituted standard stream was accepted")?;
+        assert!(
+            matches!(
+                error,
+                SystemdTransientUnitTransportError::Readback {
+                    source: TransientUnitRequestError::ReadbackMismatch,
+                    ..
+                }
+            ),
+            "{index}: {error:?}"
+        );
+    }
     Ok(())
 }
 
@@ -1085,6 +1247,14 @@ async fn typed_property_read_failure_is_classified() -> Result<(), Box<dyn Error
         .await
         .err()
         .ok_or("failed property read was accepted")?;
+    // The job was done; the readback could not be obtained (RQE1 status 3).
+    assert_eq!(
+        <SystemdTransientUnitTransport as crate::UnitHost>::start_failure(&error),
+        crate::StartFailure {
+            job: Some(StartJobResult::Done),
+            readback: None,
+        }
+    );
     let SystemdTransientUnitTransportError::PropertyReadback { property, .. } = error else {
         return Err("failed property read had the wrong error class".into());
     };
@@ -1112,7 +1282,10 @@ async fn substituted_typed_service_limit_fails_closed() -> Result<(), Box<dyn Er
         .ok_or("substituted service limit was accepted")?;
     assert!(matches!(
         error,
-        SystemdTransientUnitTransportError::Readback(TransientUnitRequestError::ReadbackMismatch)
+        SystemdTransientUnitTransportError::Readback {
+            source: TransientUnitRequestError::ReadbackMismatch,
+            ..
+        }
     ));
     Ok(())
 }
@@ -1195,18 +1368,41 @@ async fn stop_job_ignores_canceled_start_and_matches_stop() -> Result<(), Box<dy
 
 #[tokio::test]
 async fn stop_job_rejects_every_non_done_result() -> Result<(), Box<dyn Error>> {
+    // Each result is its TME1 `start-job-result`; one R9 does not name is
+    // none (owner reading G1, Redmine #443 journal 22723).
     let cases = [
-        ("canceled", SystemdJobFailure::Canceled),
-        ("timeout", SystemdJobFailure::Timeout),
-        ("failed", SystemdJobFailure::Failed),
-        ("dependency", SystemdJobFailure::Dependency),
-        ("skipped", SystemdJobFailure::Skipped),
+        (
+            "canceled",
+            SystemdJobFailure::Canceled,
+            Some(StartJobResult::Canceled),
+        ),
+        (
+            "timeout",
+            SystemdJobFailure::Timeout,
+            Some(StartJobResult::Timeout),
+        ),
+        (
+            "failed",
+            SystemdJobFailure::Failed,
+            Some(StartJobResult::Failed),
+        ),
+        (
+            "dependency",
+            SystemdJobFailure::Dependency,
+            Some(StartJobResult::Dependency),
+        ),
+        (
+            "skipped",
+            SystemdJobFailure::Skipped,
+            Some(StartJobResult::Skipped),
+        ),
         (
             "future-result",
             SystemdJobFailure::Unknown("future-result".to_owned()),
+            None,
         ),
     ];
-    for (result, expected) in cases {
+    for (result, expected, job) in cases {
         let behavior = ManagerBehavior {
             result: result.to_owned(),
             ..ManagerBehavior::default()
@@ -1218,6 +1414,10 @@ async fn stop_job_rejects_every_non_done_result() -> Result<(), Box<dyn Error>> 
             .await
             .err()
             .ok_or("non-done stop result was accepted")?;
+        assert_eq!(
+            <SystemdTransientUnitTransport as crate::UnitHost>::start_failure(&error).job,
+            job
+        );
         let SystemdTransientUnitTransportError::JobFailed(actual) = error else {
             return Err("stop result had the wrong error class".into());
         };
@@ -1462,12 +1662,14 @@ async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<
         started_cgroup_transport(behavior, service).await?;
     let reads_before_binding = reads.load(Ordering::SeqCst);
     let mut bound = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
         .await?;
     assert_eq!(reads.load(Ordering::SeqCst), reads_before_binding + 2);
+    // TME1 `unit` names the invocation whose cgroup was bound.
+    assert_eq!(bound.invocation_id(), Some([0x11; 16]));
     assert_eq!(bound.control_group(), CONTROL_GROUP_PATH);
     assert_eq!(
         lookups
@@ -1484,6 +1686,30 @@ async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<
         observed.raw_events(),
         Some(b"populated 0\nfrozen 0\n".as_slice())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bind_whose_invocation_is_unreadable_is_refused() -> Result<(), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    service.failing_identity = vec!["InvocationID"];
+    let (transport, _server, verified, temporary) =
+        started_cgroup_transport(ManagerBehavior::default(), service).await?;
+    let error = transport
+        .bind_invoked_cgroup(
+            &verified,
+            CgroupRoot::for_test(File::open(temporary.path())?),
+        )
+        .await
+        .err()
+        .ok_or("a bind without its invocation was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::PropertyReadback {
+            property: "InvocationID",
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -1531,7 +1757,7 @@ async fn cgroup_binding_rejects_lost_unit_lookup() -> Result<(), Box<dyn Error>>
     let (transport, _server, verified, temporary) =
         started_cgroup_transport(behavior, service).await?;
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1560,7 +1786,7 @@ async fn cgroup_binding_rechecks_unit_name_after_open() -> Result<(), Box<dyn Er
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(behavior, service).await?;
         let error = transport
-            .bind_cgroup_with_root(
+            .bind_invoked_cgroup(
                 &verified,
                 CgroupRoot::for_test(File::open(temporary.path())?),
             )
@@ -1587,7 +1813,7 @@ async fn cgroup_binding_rejects_unit_substitution_before_property_read(
     let reads_before_binding = reads.load(Ordering::SeqCst);
     verified.unit_path = OwnedObjectPath::try_from(UNRELATED_UNIT_PATH)?;
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1619,7 +1845,7 @@ async fn cgroup_binding_rejects_reverse_lookup_failure_and_substitution(
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(behavior, service).await?;
         let error = transport
-            .bind_cgroup_with_root(
+            .bind_invoked_cgroup(
                 &verified,
                 CgroupRoot::for_test(File::open(temporary.path())?),
             )
@@ -1642,7 +1868,7 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
     let (transport, _server, verified, temporary) =
         started_cgroup_transport(ManagerBehavior::default(), service).await?;
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1663,7 +1889,7 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
     let reads_before_binding = reads.load(Ordering::SeqCst);
     threshold.store(reads_before_binding + 1, Ordering::SeqCst);
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1685,7 +1911,7 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
     let reads_before_binding = reads.load(Ordering::SeqCst);
     threshold.store(reads_before_binding + 1, Ordering::SeqCst);
     let error = transport
-        .bind_cgroup_with_root(
+        .bind_invoked_cgroup(
             &verified,
             CgroupRoot::for_test(File::open(temporary.path())?),
         )
@@ -1708,7 +1934,7 @@ async fn cgroup_binding_rejects_invalid_and_missing_kernel_paths() -> Result<(),
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(ManagerBehavior::default(), service).await?;
         let error = transport
-            .bind_cgroup_with_root(
+            .bind_invoked_cgroup(
                 &verified,
                 CgroupRoot::for_test(File::open(temporary.path())?),
             )
@@ -1814,6 +2040,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         mode,
         descriptor()?,
         crate::test_fixtures::invocation()?,
+        crate::UnitStdio::for_test()?,
     );
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
     Ok(TransientUnitRequest::compile(inputs, filter, &limits))
@@ -1845,6 +2072,31 @@ fn value() -> SystemdTransientUnitValue {
     SystemdTransientUnitValue::Numeric(
         crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(1),
     )
+}
+
+/// A standard descriptor is sent once: a property whose descriptor was
+/// already moved into a submission cannot be encoded again.
+#[test]
+fn a_standard_descriptor_is_encoded_once() -> Result<(), Box<dyn Error>> {
+    let encoded = encode_property_with(
+        "StandardInputFileDescriptor",
+        SystemdTransientUnitValue::StandardDescriptor(Some(descriptor()?)),
+        OwnedVariant::try_from,
+    )?;
+    assert_eq!(encoded.0, "StandardInputFileDescriptor");
+    assert_eq!(encoded.1.value_signature().to_string(), "h");
+    let error = encode_property_with(
+        "StandardInputFileDescriptor",
+        SystemdTransientUnitValue::StandardDescriptor(None),
+        OwnedVariant::try_from,
+    );
+    assert!(matches!(
+        error,
+        Err(SystemdTransientUnitTransportError::Serialization(
+            zbus::Error::IncorrectType
+        ))
+    ));
+    Ok(())
 }
 
 #[test]

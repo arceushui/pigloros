@@ -1,5 +1,5 @@
-//! Serving both bound endpoints while the runtime is `Starting` (ADR-069 R11
-//! §6 steps 5 to 7, §7.1, §7.2 and §7.4).
+//! Serving both bound endpoints while the runtime is `Starting`, `Open` or
+//! `ReconcileFailed` (ADR-069 R11 §6 steps 5 to 7, §7.1, §7.2 and §7.4).
 //!
 //! One acceptor polls both listeners. Before every accept it checks both
 //! endpoints, and after it the accepted one; a failed check closes both
@@ -19,16 +19,27 @@
 //! steps 1 to 6 under the initial control deadline (BHC1 limit 16), each
 //! failure with that step's SPE1 code. An expired deadline is a step 1
 //! failure (journal 22582). Then `describe` gets the SDY1 of the startup
-//! authority, and every other operation SPE1 `11 SandboxUnavailable`:
-//! restart reconciliation has not opened admission. Whatever the request
+//! authority in every state. Execute gets SPE1 `11 SandboxUnavailable` in
+//! every state: no execute port is composed yet (R11 §7.3, #443). Cancel and
+//! reconcile get SPE1 `11` while the runtime is `Starting` or
+//! `ReconcileFailed`, and SPE1 `15 UnknownAttempt` once it is `Open`:
+//! without an execute port no attempt can enter this runtime, so every
+//! attempt is unknown (R11 §10 invariant 15). Whatever the request
 //! left unread is read first, so the peer sees the answer and a clean EOF.
 //! Each record is signed by the runtime key, verified before emission,
 //! written under its own short deadline and followed by server write EOF.
 //!
-//! The control socket's RCC1/RCU1 responder is not composed yet (R11 §15
-//! slice 5): a root control connection is closed with zero bytes read and
-//! written, which is the responder's own answer to every exchange it does
-//! not acknowledge (R11 §8.4).
+//! A root control connection is answered by the one
+//! [`super::RevocationUpdateResponder`] (R11 §8), on the acceptor itself:
+//! every exchange ends 100 ms after its accept, its fence included, so the
+//! acceptor waits at most that long. Its live attempt state is the
+//! lifecycle once the runtime is `Open`. Before that no attempt can exist,
+//! so the view is empty. Any exchange closes execute admission for the life
+//! of the process (`ExecuteClosed` before the fence, `Fenced` after it,
+//! R11 D9). An acknowledged RVS1 that revokes this runtime's key, SPM1 or
+//! binary makes it `Revoked`: execute-socket connections are then closed
+//! after the peer check with zero bytes written, and the responder signs
+//! nothing more but may resend its retained RCA1.
 //!
 //! There is no SIGTERM handler (journal 22582): the leaves of a killed
 //! runtime are removed by the selector (R11 §5.0 step 3), and the endpoints
@@ -36,6 +47,8 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
@@ -47,11 +60,19 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxProviderErrorCode, SandboxProviderErrorFields, SandboxProviderProtocolError,
     SandboxReconcileRequest,
 };
-use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
+use pos_reference::sandbox_provider_protocol::{
+    SandboxRevocationSnapshot, SandboxTrustRole, SandboxTrustSnapshot,
+};
+use pos_reference::selector::installation::authority::{
+    AdmittedSelectorProvider, AuthorityResolution,
+};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use super::endpoint::ProviderEndpoint;
-use super::{unavailable, ProviderRuntimeError};
+use super::{
+    unavailable, AdmissionState, ExchangeObserver, ExchangeOutcome, LiveAttempts,
+    ProviderRuntimeError, RevocationUpdateResponder,
+};
 use crate::{sign_verified, AdmittedRuntimeKey, KeyFileRuntimeSigner, RuntimeSignerError};
 
 /// The framing bound of every provider record (ADR-069 §4).
@@ -72,6 +93,62 @@ const RECHECK: Timespec = Timespec {
 
 /// The only UID whose connections either socket answers (R11 §6 step 6).
 const ROOT_UID: u32 = 0;
+
+/// The control-socket exchange bound from accept (R11 §8.3 step 1).
+const CONTROL_EXCHANGE: Duration = Duration::from_millis(100);
+
+/// The control states, in the only order they advance (R11 §7.1, §8.4).
+const LIVE: u8 = 0;
+const EXECUTE_CLOSED: u8 = 1;
+const FENCED: u8 = 2;
+const REVOKED: u8 = 3;
+
+/// The end of a control exchange `accepted` at that instant.
+pub(super) fn exchange_deadline(accepted: Instant) -> Instant {
+    accepted + CONTROL_EXCHANGE
+}
+
+/// The live runtime's control state (R11 §7.1, §8.4). It only advances:
+/// `Live`, `ExecuteClosed` once an exchange began, `Fenced` once one
+/// reached the fence, and `Revoked` once an acknowledged RVS1 revokes this
+/// runtime's key, SPM1 or binary. Execute admission may open only while it
+/// is `Live`; no execute port is composed yet, so only `Revoked` changes an
+/// answer here.
+#[derive(Debug)]
+struct ControlState<'a> {
+    state: AtomicU8,
+    admitted: &'a AdmittedSelectorProvider,
+}
+
+impl ControlState<'_> {
+    fn advance(&self, state: u8) {
+        self.state.fetch_max(state, Ordering::AcqRel);
+    }
+
+    fn revoked(&self) -> bool {
+        self.state.load(Ordering::Acquire) == REVOKED
+    }
+}
+
+impl ExchangeObserver for ControlState<'_> {
+    fn fencing(&self) {
+        self.advance(FENCED);
+    }
+
+    fn acknowledging(&self, trust: &SandboxTrustSnapshot, next: &SandboxRevocationSnapshot) {
+        let manifest = self.admitted.provider().manifest();
+        let revoked = next.provider_revoked(&manifest.manifest_digest)
+            || next.provider_revoked(&manifest.binary_digest)
+            || next
+                .active_key(
+                    trust,
+                    &manifest.runtime_attestation_key_id,
+                    SandboxTrustRole::ProviderRuntimeAttestation,
+                )
+                .is_err();
+        self.advance(if revoked { REVOKED } else { FENCED });
+    }
+}
 
 /// The SPE1 operation codes.
 const DESCRIBE: u8 = 0;
@@ -178,11 +255,16 @@ struct Workers<'scope> {
     refusing: Vec<ScopedJoinHandle<'scope, ()>>,
 }
 
-/// The startup authority that answers requests, its one signer, and the
-/// one peer UID it answers.
+/// The startup authority that answers requests, its one signer, the
+/// admission state restart reconciliation sets (unset while `Starting`),
+/// the revocation responder and the control state it leaves, and the one
+/// peer UID both sockets answer.
 pub(super) struct Responder<'a> {
     admitted: &'a AdmittedSelectorProvider,
     signer: &'a KeyFileRuntimeSigner,
+    admission: &'a OnceLock<AdmissionState>,
+    revocation:
+        RevocationUpdateResponder<'a, KeyFileRuntimeSigner, LiveAttempts<'a>, ControlState<'a>>,
     peer_uid: u32,
 }
 
@@ -190,10 +272,28 @@ impl<'a> Responder<'a> {
     pub(super) const fn new(
         admitted: &'a AdmittedSelectorProvider,
         signer: &'a KeyFileRuntimeSigner,
+        admission: &'a OnceLock<AdmissionState>,
     ) -> Self {
+        let provider = admitted.provider();
         Self {
             admitted,
             signer,
+            admission,
+            revocation: RevocationUpdateResponder::new(
+                signer,
+                AdmittedRuntimeKey::new(
+                    provider.manifest().runtime_attestation_key_id.as_str(),
+                    provider.runtime_attestation_key(),
+                ),
+                AuthorityResolution::Live {
+                    retained_revocation_digest: admitted.bootstrap().revocation().snapshot_digest(),
+                },
+                LiveAttempts(admission),
+                ControlState {
+                    state: AtomicU8::new(LIVE),
+                    admitted,
+                },
+            ),
             peer_uid: ROOT_UID,
         }
     }
@@ -251,13 +351,18 @@ impl<'a> Responder<'a> {
                     .map(|()| readiness)
             })
             .and_then(|(control_ready, execute_ready)| {
-                // A control connection is dropped unread and unanswered
-                // (module docs).
+                // A control connection is answered on the acceptor, within
+                // its exchange deadline (module docs).
                 control_ready
                     .then(|| control.accept())
                     .transpose()
                     .map(|control_accepted| {
-                        control_accepted.is_some_and(|accepted| accepted.is_none())
+                        control_accepted.is_some_and(|accepted| {
+                            accepted
+                                .as_ref()
+                                .map(|stream| self.exchange(stream, Instant::now()))
+                                .is_none()
+                        })
                     })
                     .and_then(|control_missed| {
                         execute_ready
@@ -288,11 +393,41 @@ impl<'a> Responder<'a> {
     }
 
     /// Answer one execute-socket connection, then send server write EOF. A
-    /// peer that is not root is dropped with zero bytes read and written.
+    /// peer that is not root is dropped with zero bytes read and written; so
+    /// is every peer once the runtime is `Revoked`, after the peer check.
     fn answer(&self, stream: &UnixStream, admission: Admission) {
-        if trusted_peer(stream, self.peer_uid) {
+        if self.answers(stream) {
             self.answer_root(stream, admission);
         }
+    }
+
+    /// Whether an execute-socket peer gets an answer: it is root, checked
+    /// first, and the runtime is not `Revoked`.
+    fn answers(&self, stream: &UnixStream) -> bool {
+        trusted_peer(stream, self.peer_uid) && !self.revocation.observer().revoked()
+    }
+
+    /// Answer one control-socket connection, `accepted` at that instant,
+    /// then send server write EOF once an RCA1 was written. A peer that is
+    /// not root is dropped with zero bytes read and written.
+    fn exchange(&self, stream: &UnixStream, accepted: Instant) {
+        if trusted_peer(stream, self.peer_uid) && self.respond(stream, accepted) {
+            stream.shutdown(std::net::Shutdown::Write).ok();
+        }
+    }
+
+    /// Answer a root peer's control connection through the revocation
+    /// responder: whether it acknowledged or resent an RCA1. The exchange
+    /// closes execute admission before anything is read; the responder
+    /// reports the fence and the acknowledgement before each has an effect.
+    fn respond(&self, stream: &UnixStream, accepted: Instant) -> bool {
+        self.revocation.observer().advance(EXECUTE_CLOSED);
+        let deadline = exchange_deadline(accepted);
+        matches!(
+            self.revocation
+                .respond(&mut Deadlined::until(stream, deadline), deadline),
+            ExchangeOutcome::Acknowledged | ExchangeOutcome::Resent
+        )
     }
 
     /// Answer a root peer's connection: read it under the initial control
@@ -313,7 +448,7 @@ impl<'a> Responder<'a> {
             }
             (Ok(identity), Admission::Answered) => self.refuse(Refusal::Authenticated {
                 identity,
-                code: SandboxProviderErrorCode::SandboxUnavailable,
+                code: self.closed(identity.operation),
             }),
             (Err(refusal), _) => self.refuse(refusal),
         };
@@ -461,6 +596,17 @@ impl<'a> Responder<'a> {
         }
     }
 
+    /// The SPE1 code of an authenticated execute, cancel or reconcile
+    /// request (module docs, R11 §7.1).
+    fn closed(&self, operation: u8) -> SandboxProviderErrorCode {
+        match (self.admission.get(), operation) {
+            (Some(AdmissionState::Open { .. }), CANCEL | RECONCILE) => {
+                SandboxProviderErrorCode::UnknownAttempt
+            }
+            _ => SandboxProviderErrorCode::SandboxUnavailable,
+        }
+    }
+
     fn key(&self) -> AdmittedRuntimeKey<'_> {
         AdmittedRuntimeKey::new(
             &self
@@ -595,12 +741,17 @@ fn record_operation(bytes: &[u8]) -> Option<u8> {
 }
 
 /// A stream whose every read and write ends at `until`.
-struct Deadlined<'a> {
+pub(super) struct Deadlined<'a> {
     stream: &'a UnixStream,
     until: Instant,
 }
 
 impl<'a> Deadlined<'a> {
+    /// `stream`, ending at `until`.
+    pub(super) const fn until(stream: &'a UnixStream, until: Instant) -> Self {
+        Self { stream, until }
+    }
+
     /// `stream`, ending `duration` from now. A duration too long for the
     /// clock ends at once.
     fn new(stream: &'a UnixStream, duration: Duration) -> Self {
