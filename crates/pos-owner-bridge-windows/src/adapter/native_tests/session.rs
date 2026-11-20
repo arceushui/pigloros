@@ -12,8 +12,10 @@ use crate::{NativeFactory, NativeOperations, NativePulse, NativeResult};
 
 /// How long a dropped fixture waits for its browser to exit. The exit normally
 /// arrives within seconds of the controller close. A browser that never exits
-/// used to keep the test, and the shared native lock, until the 65-minute step
-/// timeout, and the test's own error was never reported (#1468).
+/// used to keep the test, and the shared native lock, silent until the
+/// 65-minute step timeout (#1468). Past this bound the session prints the
+/// stalled browser and aborts the test process, so the step fails within
+/// minutes. Under libtest that also ends the other tests in the binary.
 const RETIREMENT_BOUND: Duration = Duration::from_secs(120);
 
 /// A raw SDK fixture still owns a real environment on its creating STA when
