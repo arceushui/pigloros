@@ -41,6 +41,10 @@ pub struct CredentialDirectoryV1 {
     service_uid: u32,
 }
 
+/// The flags a credential directory opens with: a path descriptor that
+/// never follows a symlink and closes on exec.
+const DIRECTORY_OPEN_FLAGS: i32 = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
 impl CredentialDirectoryV1 {
     /// Open the credential directory `directory` (never a symlink) owned by
     /// `service_uid` and validate it by descriptor.
@@ -55,7 +59,7 @@ impl CredentialDirectoryV1 {
         }
         OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(DIRECTORY_OPEN_FLAGS)
             .open(directory)
             .and_then(|directory| directory.metadata().map(|metadata| (directory, metadata)))
             .map_err(|_| CredentialErrorV1::Unavailable)
