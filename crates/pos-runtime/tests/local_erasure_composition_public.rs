@@ -82,8 +82,10 @@ fn trust(revoked: &[&str]) -> TestResult<CurrentTrustPolicyV1> {
     trust_under(&operator(), revoked)
 }
 
-/// As [`trust`], under the deployment operator key `operator`.
-fn trust_under(operator: &SigningKey, revoked: &[&str]) -> TestResult<CurrentTrustPolicyV1> {
+/// The TPS1 whose roots are the two `erasure-bundle/` roots and which
+/// revokes `revoked` (sorted), signed by the deployment operator key
+/// `operator`.
+fn signed_snapshot(operator: &SigningKey, revoked: &[&str]) -> TestResult<TrustPolicySnapshotV1> {
     let draft = pos_conformance::draft_trust_policy_snapshot_bytes_v1()?;
     let mut snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&draft)?;
     snapshot.trust_roots = vec![
@@ -94,6 +96,12 @@ fn trust_under(operator: &SigningKey, revoked: &[&str]) -> TestResult<CurrentTru
     "9999-12-31T23:59:59Z".clone_into(&mut snapshot.offline_valid_through);
     let message = snapshot.operator_signature_message_v1()?;
     snapshot.operator_signature = operator.sign(&message).to_bytes();
+    Ok(snapshot)
+}
+
+/// As [`trust`], under the deployment operator key `operator`.
+fn trust_under(operator: &SigningKey, revoked: &[&str]) -> TestResult<CurrentTrustPolicyV1> {
+    let snapshot = signed_snapshot(operator, revoked)?;
     let genesis = snapshot.to_canonical_cbor()?;
     let release = || {
         OperatorReleaseTrustV1::new(
@@ -2461,13 +2469,7 @@ impl LocalStore {
 
     /// Create `count` root Timelines owned by `owner`.
     fn owned_roots(&self, owner: EntityId, count: usize) -> TestResult<Vec<TimelineId>> {
-        let mut store = self.sqlite()?;
-        let mut roots = Vec::with_capacity(count);
-        for index in 0..count {
-            let meta = TimelineMeta::root_owned(format!("owned-{index}"), owner);
-            roots.push(store.create_timeline_with_meta(meta)?.id());
-        }
-        Ok(roots)
+        owned_roots_on(&mut self.sqlite()?, owner, count)
     }
 
     /// Add `registration` to the store's key registry.
@@ -2480,9 +2482,28 @@ impl LocalStore {
     }
 }
 
+/// Create `count` root Timelines owned by `owner` on `store`.
+fn owned_roots_on(
+    store: &mut dyn EventStore,
+    owner: EntityId,
+    count: usize,
+) -> TestResult<Vec<TimelineId>> {
+    let mut roots = Vec::with_capacity(count);
+    for index in 0..count {
+        let meta = TimelineMeta::root_owned(format!("owned-{index}"), owner);
+        roots.push(store.create_timeline_with_meta(meta)?.id());
+    }
+    Ok(roots)
+}
+
 /// The actor's ADR-091 role-0 subject key at `epoch`.
 fn subject_key(epoch: u64) -> TestResult<KeyIdentityV1> {
-    let owner = pos_crypto::subject_key::subject_owner_id(actor()).map_err(fail)?;
+    subject_key_of(actor(), epoch)
+}
+
+/// The ADR-091 role-0 subject key of `subject` at `epoch`.
+fn subject_key_of(subject: EntityId, epoch: u64) -> TestResult<KeyIdentityV1> {
+    let owner = pos_crypto::subject_key::subject_owner_id(subject).map_err(fail)?;
     Ok(KeyIdentityV1::from_parts(
         OwnerIdV1::new(owner).map_err(fail)?,
         KeyRoleV1::SubjectDataEncryption,
@@ -3180,6 +3201,18 @@ fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestR
     assert_frozen(&mut host, &[owned.owned, child], owned.other)
 }
 
+/// A fresh recipient-key custody directory of mode 0700 inside a temporary
+/// directory, which the caller keeps for as long as it needs the keys.
+fn custody_directory() -> TestResult<(tempfile::TempDir, std::path::PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir()?;
+    let private = directory.path().join("recipient-private");
+    std::fs::create_dir(&private)?;
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))?;
+    Ok((directory, private))
+}
+
 /// Publish one recipient export of the actor's `timeline` to `grantee`
 /// under the actor's export consent, and return its export id.
 fn publish_export(
@@ -3187,12 +3220,21 @@ fn publish_export(
     timeline: TimelineId,
     grantee: EntityId,
 ) -> TestResult<[u8; 16]> {
-    use std::os::unix::fs::PermissionsExt;
+    let (_directory, private) = custody_directory()?;
+    let owner = pos_store::sqlite::RecipientKeyOwnerV1::open(&private, grantee)?;
+    Ok(publish_export_as(store, timeline, actor(), grantee, &owner)?.0)
+}
 
-    let directory = tempfile::tempdir()?;
-    let private = directory.path().join("recipient-private");
-    std::fs::create_dir(&private)?;
-    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))?;
+/// Publish one recipient export of `subject`'s `timeline` to `grantee`,
+/// whose recipient keys `owner` holds, under `subject`'s export consent;
+/// return its export id and the grantee's enrolled recipient key.
+fn publish_export_as(
+    store: &LocalStore,
+    timeline: TimelineId,
+    subject: EntityId,
+    grantee: EntityId,
+    owner: &pos_store::sqlite::RecipientKeyOwnerV1,
+) -> TestResult<([u8; 16], pos_core::RecipientKeyDescriptorV1)> {
     let mut sqlite = store.sqlite()?;
     sqlite.append(
         timeline,
@@ -3207,7 +3249,7 @@ fn publish_export(
     let token = consent.record_grant_on_timeline(
         timeline,
         &pos_core::ConsentGrantedV1 {
-            subject_id: actor(),
+            subject_id: subject,
             grantee_id: grantee,
             purpose: "local-erasure-export".to_owned(),
             modalities: pos_core::MODALITY_EXPORT,
@@ -3219,8 +3261,7 @@ fn publish_export(
             grant_seq: 1,
         },
     );
-    let owner = pos_store::sqlite::RecipientKeyOwnerV1::open(&private, grantee)?;
-    let recipient = sqlite.enroll_recipient_key(&owner)?;
+    let recipient = sqlite.enroll_recipient_key(owner)?;
     let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
         &[pos_core::ArtifactClaimInputV1 {
@@ -3240,7 +3281,7 @@ fn publish_export(
     .map_err(fail)?;
     let publication = sqlite.publish_recipient_export(
         &consent,
-        &owner,
+        owner,
         &pos_store::sqlite::RecipientExportRequestV1 {
             timeline_id: timeline,
             recipient,
@@ -3250,7 +3291,7 @@ fn publish_export(
             now_secs: 1,
         },
     )?;
-    Ok(publication.export_id)
+    Ok((publication.export_id, recipient))
 }
 
 #[test]
@@ -7225,6 +7266,37 @@ fn held_reader(store: &LocalStore) -> TestResult<rusqlite::Connection> {
     Ok(reader)
 }
 
+/// Drive `count` attempts of request 1 while a reader holds the store, so
+/// every one's replica purge times out: each attempt runs at its §6
+/// positions and ends in a partial failure exactly at its deadline.
+fn held_attempts(
+    store: &LocalStore,
+    host: &mut ErasureExecutionHostV1,
+    count: u64,
+) -> TestResult<Vec<ErasureReceiptV1>> {
+    let is_receipt = |step: &LocalErasureStepV1| matches!(step, LocalErasureStepV1::Finalized(_));
+    let reader = held_reader(store)?;
+    let mut receipts = Vec::new();
+    for ordinal in 0..count {
+        let steps = driven_steps(host, is_receipt)?;
+        let dispatch = steps
+            .iter()
+            .find(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))
+            .ok_or("no dispatch")?;
+        assert_attempt(dispatch, ordinal, receipts.last(), store.head)?;
+        let LocalErasureStepV1::Dispatched(admission) = dispatch else {
+            return Err("no dispatch".into());
+        };
+        let receipt = finalized(steps.last().cloned().ok_or("no step")?)?;
+        assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+        assert_eq!(receipt.issue_position(), admission.deadline_position());
+        receipts.push(receipt);
+    }
+    reader.execute_batch("COMMIT")?;
+    drop(reader);
+    Ok(receipts)
+}
+
 /// Acceptance test 4 (Q10): a transient negative is retried automatically,
 /// each retry at its §6 positions, every partial failure issues exactly at
 /// its deadline, and a retry that succeeds completes the request at its
@@ -7232,31 +7304,11 @@ fn held_reader(store: &LocalStore) -> TestResult<rusqlite::Connection> {
 /// `attempt_due` rule; here two real timeouts keep the run short.
 #[test]
 fn a_transient_negative_is_retried_until_it_succeeds() -> TestResult {
-    let is_receipt = |step: &LocalErasureStepV1| matches!(step, LocalErasureStepV1::Finalized(_));
     let store = driver_store()?;
     let mut host = store.host(&driver_case()?, 4_096)?;
     submitted(&mut host, 1, ErasureScopeV1::ConsentedSharedData)?;
-    let mut receipts = Vec::new();
-    {
-        // Held for attempt 0 and retry 1: both purges time out.
-        let reader = held_reader(&store)?;
-        for ordinal in 0..2 {
-            let steps = driven_steps(&mut host, is_receipt)?;
-            let dispatch = steps
-                .iter()
-                .find(|step| matches!(step, LocalErasureStepV1::Dispatched(_)))
-                .ok_or("no dispatch")?;
-            assert_attempt(dispatch, ordinal, receipts.last(), store.head)?;
-            let LocalErasureStepV1::Dispatched(admission) = dispatch else {
-                return Err("no dispatch".into());
-            };
-            let receipt = finalized(steps.last().cloned().ok_or("no step")?)?;
-            assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
-            assert_eq!(receipt.issue_position(), admission.deadline_position());
-            receipts.push(receipt);
-        }
-        reader.execute_batch("COMMIT")?;
-    }
+    // Held for attempt 0 and retry 1: both purges time out.
+    let receipts = held_attempts(&store, &mut host, 2)?;
     // Released: retry 2 purges the replica and completes the consented
     // request at its one executed obligation past admission.
     let steps = driven_steps(&mut host, |_| false)?;
