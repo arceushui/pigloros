@@ -967,3 +967,6 @@ async fn a_request_without_its_admission_is_unavailable() -> TestResult {
     served.gateway.shutdown().await?;
     Ok(())
 }
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod acceptance;
