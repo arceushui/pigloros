@@ -275,6 +275,56 @@ away once it is signed, and override `ExecStart` in a drop-in to name another ro
 > its own. The unit's fixed `--out` also makes every re-run fail with `--out must name a new file`
 > until the previous bundle is moved away.
 
+#### Serving with the Local erasure authority
+
+`serve --require-local-erasure` composes the Local erasure authority over the `SQLite` store; it
+needs the store path and runs only under the serve unit, whose credential directory
+`/run/credentials/piglor-gateway.service` then holds exactly four more credentials (beside the
+three Fork-admission credentials when `--require-local-fork-authority` is also given):
+
+| Credential | Content |
+|---|---|
+| `pigloros.local-erasure-bundle` | the ELB1 bytes `provision-local-erasure` wrote |
+| `pigloros.local-erasure-bundle-signature` | the ELB1S bytes the `erasure-bundle/` root signed |
+| `pigloros.local-erasure-signer` | the role-2 signer's 32-byte Ed25519 seed, the key the bundle pins |
+| `pigloros.release-trust` | the deployment release anchor (the TOML document above) |
+
+Both serve modes read the installed TPS1 from the trust state store at
+`/var/lib/pigloros/trust-state.db` through the same loader as `provision-local-erasure`; an
+Air-Gapped deployment seeds that store with its bundled TPS1. Under the store lock and before the
+erasure host opens, the Gateway checks the bundle against the TPS1, this binary's policy and
+executor, the store's Local Principal and erasure identity and the key registry. Any credential,
+trust, store or bundle error refuses startup with a payload-free reason; the Gateway never falls
+back to the closed erasure authority when the flag is given. Without the flag (and on a Memory
+store, which the flag refuses, or a non-Linux build) the Gateway composes the closed erasure
+authority, which admits no Local erasure and refuses a store that holds erasure requests.
+
+Once the host is recovered, a startup sweep deletes unreferenced erasure evidence objects once and
+logs only its count (`Swept(n)` or `Skipped`); a skipped sweep never fails startup. The erasure
+driver then runs once at startup and every 10 seconds (the compiled `LOCAL_ERASURE_DRIVER_TICK`).
+Its admission trigger, which runs it at once after an erasure admission, is wired by the erasure
+routes of the next ADR-136 slice (C5c) and is not active yet. Each run submits one driver step per
+store command until no request has a step due, so other Gateway requests interleave between steps,
+and logs how many request steps failed and were deferred to a later run, when any were. Composition
+opens only an existing store bound to a compiled execution mode; it never creates a database. **The step that purges the local replica runs `VACUUM` inside its one
+store command and holds every other Gateway request for its duration**, which grows with the store.
+
+**Rollout.** On a store bound by a first `serve`:
+
+1. `provision-local-principal` (the Local Principal);
+2. `provision-local-fork-authority`, when the deployment admits Local Forks;
+3. `provision-local-erasure`, then sign the emitted ELB1 into ELB1S with the `erasure-bundle/`
+   root, offline;
+4. install the four credentials above as encrypted credentials of the serve unit and add
+   `--require-local-erasure` to its `ExecStart` with a drop-in.
+
+The provisioning commands keep the closed erasure authority, so they must all run before the first
+erasure request: a store that holds one refuses them. The shipped
+[serve unit](../../deploy/systemd/piglor-gateway.service) does not pass the flag: nothing provisions
+the trust state store until #448, and a serve that requires the Local erasure authority without it
+refuses to start. Rolling back means removing the drop-in; a store that holds erasure requests then
+refuses the closed composition until the flag is restored.
+
 ### Separate deterministic experiment host
 
 The Gateway remains an ingress/store façade; it does not run simulation drivers. A store a Gateway
