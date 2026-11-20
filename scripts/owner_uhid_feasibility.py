@@ -110,7 +110,8 @@ def open_as(uid: int, gid: int, path: str, flags: int) -> int:
 
     Returns 0 when the open succeeds, the errno when it fails with an
     `OSError`, and 255 for any other failure. Root drops every supplementary
-    group, so the result is what `uid`/`gid` alone may open.
+    group, so the result is what `uid`/`gid` alone may open; a non-root
+    caller keeps its groups.
     """
     # Flush first so the child does not repeat the parent's buffered lines.
     sys.stdout.flush()
@@ -168,7 +169,7 @@ def main() -> int:
         print("UG1 must run as root through sudo", file=sys.stderr)
         return 2
     if "SUDO_UID" not in os.environ or "SUDO_GID" not in os.environ:
-        print("UG1 must run through sudo so SUDO_UID and SUDO_GID name the runner", file=sys.stderr)
+        print("UG1 must run through sudo, which sets SUDO_UID and SUDO_GID", file=sys.stderr)
         return 2
     uid = int(os.environ["SUDO_UID"])
     gid = int(os.environ["SUDO_GID"])

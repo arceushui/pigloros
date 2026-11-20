@@ -97,5 +97,11 @@ class OpenAs(unittest.TestCase):
         self.assertEqual(ug1.run_tool([sys.executable, "-c", "pass"]).returncode, 0)
 
 
+class Main(unittest.TestCase):
+    @unittest.skipIf(os.geteuid() == 0, "the refusal is for non-root callers")
+    def test_a_non_root_run_is_refused_before_touching_uhid(self) -> None:
+        self.assertEqual(ug1.main(), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
