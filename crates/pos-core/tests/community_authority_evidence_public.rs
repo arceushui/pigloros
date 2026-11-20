@@ -7,6 +7,7 @@
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
+    community_authority_bindings_digest_v1, community_recipient_identity_digest_v1,
     CommunityArtifactOperationV1 as Operation, CommunityAuthorityEvidenceInputV1 as EvidenceInput,
     CommunityAuthorityEvidenceV1 as Evidence, CommunityAuthorityViewRowV1 as AuthorityRow,
     CommunityClockBoundV1 as ClockBound, CommunityClockLatchV1 as ClockLatch,
@@ -1332,6 +1333,50 @@ fn cav1_rejects_unknown_codes_and_noncanonical_framing() -> TestResult {
     assert_eq!(
         View::from_canonical_cbor(&encode(&latch)?).err(),
         Some(Error::InvalidEncoding)
+    );
+    Ok(())
+}
+
+/// G6 (#560, 2026-11-19): the recipient digest hashes the canonical CBOR
+/// text item, not the raw UTF-8.
+#[test]
+fn the_recipient_digest_hashes_the_cbor_text_item() -> TestResult {
+    for recipient in ["community-recipient", &"r".repeat(128)] {
+        let item = encode(&text(recipient))?;
+        assert_eq!(
+            community_recipient_identity_digest_v1(recipient),
+            domain_digest("RecipientIdentity", &item)
+        );
+        assert_ne!(
+            community_recipient_identity_digest_v1(recipient),
+            domain_digest("RecipientIdentity", recipient.as_bytes())
+        );
+    }
+    Ok(())
+}
+
+/// ADR-129 §3: `H("AuthorityBindings", [CPG1 bindings, CRF1 digests])` over
+/// the preferred CBOR of both ordered lists, including wide array heads.
+#[test]
+fn the_authority_bindings_digest_hashes_both_ordered_lists() -> TestResult {
+    let grants = [hash(1), hash(2)];
+    let revocations: Vec<Hash> = (0..300).map(counted).collect();
+    for (grants, revocations) in [
+        (&grants[..], &revocations[..0]),
+        (&grants[..1], &revocations[..25]),
+        (&grants[..], &revocations[..]),
+    ] {
+        let list =
+            |digests: &[Hash]| Value::Array(digests.iter().copied().map(hash_value).collect());
+        let preimage = encode(&Value::Array(vec![list(grants), list(revocations)]))?;
+        assert_eq!(
+            community_authority_bindings_digest_v1(grants, revocations),
+            domain_digest("AuthorityBindings", &preimage)
+        );
+    }
+    assert_ne!(
+        community_authority_bindings_digest_v1(&grants, &[]),
+        community_authority_bindings_digest_v1(&[], &grants)
     );
     Ok(())
 }
