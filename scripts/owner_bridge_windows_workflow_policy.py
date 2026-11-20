@@ -350,7 +350,7 @@ EXPECTED_NATIVE["jobs"]["readiness-soak"] = {
     ],
 }
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '193e8ec259bb2d9ab4c1882717a470091e8da18d320daf3534ff14e371d65825',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '1f4f410e25d8d19488cac406659b730993e60b05fd01117a5eb182a403955c71',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 

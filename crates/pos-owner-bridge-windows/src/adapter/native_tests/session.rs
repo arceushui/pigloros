@@ -16,7 +16,7 @@ use crate::{NativeFactory, NativeOperations, NativePulse, NativeResult};
 /// 65-minute step timeout (#1468). Past this bound the session prints the
 /// stalled browser and aborts the test process, so the step fails within
 /// minutes. Under libtest that also ends the other tests in the binary.
-const RETIREMENT_BOUND: Duration = Duration::from_secs(120);
+const RETIREMENT_BOUND: Duration = Duration::from_mins(2);
 
 /// A raw SDK fixture still owns a real environment on its creating STA when
 /// an assertion unwinds. Keep that apartment borrowed until retirement, just
