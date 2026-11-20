@@ -14,7 +14,9 @@
 #   publish ARCH DIR (main only) upload DIR as ARCH's release asset
 #   prune ARCH       (main only) delete ARCH's assets for other kernel
 #                    derivations once they are a week old, keeping the newest
-#                    of them
+#                    of them (so one stale asset per architecture stays until
+#                    a newer kernel replaces it); does nothing unless this run
+#                    is main's tip
 #   selftest DIR     (pull requests; needs jq, which the hosted Ubuntu runners
 #                    ship) run the same signing, verifying and import
 #                    code on a throwaway input-addressed path with a throwaway
@@ -271,6 +273,12 @@ require_cache_archive() {
 
 fetch_cache() {
   local name assets downloads
+  # The directory is emptied before unpacking, so refuse anything but a plain
+  # absolute path at least two levels deep, even when nothing is fetched.
+  if ! [[ $2 =~ ^(/[A-Za-z0-9._+-]+){2,}$ ]] || [[ /$2/ == */../* || /$2/ == */./* ]]; then
+    printf 'the kernel cache directory %s must be a plain absolute path two levels deep\n' "$2" >&2
+    exit 2
+  fi
   name="$(cache_key "$1").tar"
   # Assigned first: a failure inside an argument's $(...) would not stop the script.
   assets="$(release_assets)"
@@ -291,11 +299,6 @@ fetch_cache() {
     return 0
   fi
   require_cache_archive "${downloads}/${name}"
-  # The caller's directory is emptied first: refuse a shallow path.
-  if [[ $2 != /*/* ]]; then
-    printf 'the kernel cache directory %s must be an absolute path two levels deep\n' "$2" >&2
-    exit 2
-  fi
   rm -rf -- "$2"
   mkdir -p -- "$2"
   tar -xf "${downloads}/${name}" -C "$2" --no-same-owner --no-same-permissions
@@ -334,7 +337,14 @@ publish_cache() {
 # rerun of an older main commit publishes its own kernel, and the kernel that
 # pull requests fetch is then that newest other asset.
 prune() {
-  local name current assets created cutoff others
+  local name current assets created cutoff others tip
+  # A rerun of an older main commit must not prune: the kernel pull requests
+  # fetch belongs to main's tip.
+  tip="$(gh api "repos/${GH_REPO}/commits/main" --jq .sha)"
+  if [[ ${tip} != "${GITHUB_SHA}" ]]; then
+    printf 'not pruning: %s is not main'"'"'s tip %s\n' "${GITHUB_SHA}" "${tip}"
+    return 0
+  fi
   current="$(cache_key "$1").tar"
   cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
   assets="$(release_assets)"

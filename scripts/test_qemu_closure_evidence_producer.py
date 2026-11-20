@@ -560,7 +560,8 @@ esac
         (self.bin / "nix").chmod(0o755)
 
     def environment(self, secret: str | None) -> dict[str, str]:
-        environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}")
+        environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", GITHUB_SHA=self.TIP,
+                           GH_REPO="owner/repo")
         environment.pop("QEMU_KERNEL_CACHE_SIGNING_KEY", None)
         if secret is not None:
             environment["QEMU_KERNEL_CACHE_SIGNING_KEY"] = secret
@@ -729,11 +730,13 @@ esac
     ROTATED = "qemu-kernel-piglor-qemu-kernel-0-x86_64-0123456789abcdfghijklmnpqrsvwxyz.tar"
     OTHER_ARCH = "qemu-kernel-piglor-qemu-kernel-1-aarch64-0123456789abcdfghijklmnpqrsvwxyz.tar"
     OLD = "2026-01-01T00:00:00Z"
+    TIP = "0123456789abcdef0123456789abcdef01234567"
+    TIP_CALL = "gh api repos/owner/repo/commits/main --jq .sha"
     LISTING = "gh release view qemu-kernel-cache --json assets --jq .assets[] | select(.state == \"uploaded\") | [.name, .createdAt] | @tsv"
 
     def stub_gh(self, assets: tuple[tuple[str, str], ...] = (), release: str = "present",
                 create_status: int = 0, download_status: int = 0, upload_status: int = 0,
-                archive: pathlib.Path | None = None) -> None:
+                archive: pathlib.Path | None = None, tip: str = TIP) -> None:
         # Logs each call as "gh ARGS". `release view --json` lists the
         # uploaded assets as gh's --jq would, reports a missing release as gh
         # does, or fails with another error; `upload` logs the archive's
@@ -750,6 +753,7 @@ case "$1 $2" in
   esac
   printf 'A new release of gh is available\\n' >&2
   if [[ $* == *--json* ]]; then {listing}; fi ;;
+"api repos/owner/repo/commits/main") printf '%s\\n' '{tip}' ;;
 "release create") exit {create_status} ;;
 "release download")
   if (({download_status} != 0)); then exit {download_status}; fi
@@ -912,6 +916,7 @@ esac
         # The current asset is never a candidate. recent_other is the newest of
         # the others, so it stays; every older one goes, newest first.
         self.assertEqual(self.gh_calls(), [
+            self.TIP_CALL,
             self.LISTING,
             f"gh release delete-asset qemu-kernel-cache {self.OLD_ASSET} --yes",
             f"gh release delete-asset qemu-kernel-cache {self.ROTATED} --yes",
@@ -926,6 +931,7 @@ esac
         result = self.run_cache("prune", "x86_64")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.gh_calls(), [
+            self.TIP_CALL,
             self.LISTING,
             f"gh release delete-asset qemu-kernel-cache {self.ROTATED} --yes",
         ])
@@ -945,17 +951,26 @@ esac
 
     def test_fetch_refuses_a_shallow_target_directory(self):
         self.stub_gh(assets=((self.ASSET, self.OLD),), archive=self.archive(("nix-cache-info", "file")))
-        for directory in ("/", "/tmp", "relative"):
+        for directory in ("/", "//", "/tmp", "/tmp/", "/tmp/..", "/tmp/.", "/tmp/a/../b", "relative", "/tmp/a b"):
             with self.subTest(directory=directory):
                 result = self.run_cache("fetch", "x86_64", directory)
                 self.assertEqual(result.returncode, 2)
-                self.assertIn("must be an absolute path two levels deep", result.stderr)
+                self.assertIn("must be a plain absolute path two levels deep", result.stderr)
+                self.assertEqual(self.gh_calls(), [])
 
     def test_prune_without_a_release_does_nothing(self):
         self.stub_gh(release="missing")
         result = self.run_cache("prune", "x86_64")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.gh_calls(), [self.LISTING])
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL, self.LISTING])
+
+    def test_prune_does_nothing_for_a_rerun_of_an_older_commit(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD)),
+                     tip="f" * 40)
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not pruning", result.stdout)
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL])
 
     def selftest(self, **stub) -> subprocess.CompletedProcess:
         self.stub_nix(**{"verify_status": 1, "import_status": 1, **stub})
