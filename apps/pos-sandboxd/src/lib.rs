@@ -30,6 +30,8 @@ mod attempt_classification;
 #[cfg(target_os = "linux")]
 mod attempt_evidence;
 #[cfg(target_os = "linux")]
+mod attempt_records;
+#[cfg(target_os = "linux")]
 mod attempt_registry;
 #[cfg(target_os = "linux")]
 mod execute;
@@ -308,13 +310,16 @@ pub use adapter_stdio::{AdapterIo, FencedOutput, ReleasedOutput, StdioChannelErr
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
 pub use attempt_evidence::{
-    ReleaseOutcome, ReleaseResources, ResourceEvidence, TerminalResources, TerminalServiceError,
+    BoundUnit, ReleaseOutcome, ReleaseResources, ResourceEvidence, TerminalResources,
+    TerminalServiceError,
 };
+#[cfg(target_os = "linux")]
+pub use attempt_records::{AttemptAdmission, AttemptRecords, EvidenceFault};
 #[cfg(target_os = "linux")]
 pub use execute::{
     execute, AttemptCancel, AttemptEnding, AttemptExecution, CancelSignal, ExecuteError,
     ExecuteFailure, ExecuteJob, LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest,
-    UnitCgroup, UnitHost, UnitKiller, UnitState,
+    StartFailure, UnitCgroup, UnitHost, UnitKiller, UnitState, UnverifiedStart,
 };
 #[cfg(target_os = "linux")]
 pub use kernel_observation::observation_evidence;
@@ -425,8 +430,8 @@ pub use system_bus::{
 #[cfg(target_os = "linux")]
 pub use system_bus::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 pub use transient_unit::{
-    verified_requested_configuration, RequestedConfiguration, RequestedConfigurationProperty,
-    RequestedConfigurationValue,
+    unverified_requested_configuration, verified_requested_configuration, RequestedConfiguration,
+    RequestedConfigurationProperty, RequestedConfigurationValue,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,
@@ -643,39 +648,108 @@ impl SystemCallFilter {
 
 /// Run the binary for `arguments` (without the program name).
 ///
-/// The modes are `launch-barrier <lpv1-hex>` and `provider-runtime`; neither
-/// returns success. A released adapter replaces the launcher's process image,
-/// and the provider runtime serves until a listener invariant fails. Any
-/// other argument vector exits with status 2; a failure of either mode ends
-/// with a nonzero exit code and one fixed diagnostic on standard error.
+/// The modes are `launch-barrier <lpv1-hex>`, `provider-runtime` and
+/// `recovery-peer <endpoint-id-hex>`. A released adapter replaces the
+/// launcher's process image, and the provider runtime serves until a
+/// listener invariant fails, so neither returns success. The recovery peer
+/// exits with status 0 after it acknowledged its one exchange (ADR-069 R12
+/// §5). Any other argument vector exits with status 2; a failure of any mode
+/// ends with status 1 and one fixed diagnostic on standard error.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
     let arguments: Vec<_> = arguments.into_iter().collect();
-    let Some(diagnostic) = run_mode(&arguments) else {
-        report("usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime");
-        return std::process::ExitCode::from(2);
-    };
-    report(&diagnostic);
-    std::process::ExitCode::FAILURE
+    MODES
+        .iter()
+        .find_map(|mode| mode(&arguments))
+        .unwrap_or(ModeOutcome::Usage)
+        .exit()
 }
 
-/// Run the mode `arguments` name and return the diagnostic for its failure,
-/// or `None` when they name no mode.
+/// How one run of the binary ended.
 #[cfg(target_os = "linux")]
-fn run_mode(arguments: &[std::ffi::OsString]) -> Option<String> {
-    match arguments {
-        [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => {
-            let error = provider_runtime::serve_provider_runtime();
-            Some(format!("pos-sandboxd: {error}"))
+enum ModeOutcome {
+    /// The arguments name no mode: exit status 2.
+    Usage,
+    /// The recovery peer acknowledged its one exchange: exit status 0.
+    Succeeded,
+    /// A mode failed with this diagnostic: exit status 1.
+    Failed(String),
+}
+
+#[cfg(target_os = "linux")]
+impl ModeOutcome {
+    /// A failure of a mode, with its one fixed diagnostic.
+    fn failed(error: impl std::fmt::Display) -> Self {
+        Self::Failed(format!("pos-sandboxd: {error}"))
+    }
+
+    /// Report the outcome on standard error and give the exit status.
+    fn exit(self) -> std::process::ExitCode {
+        match self {
+            Self::Usage => {
+                report(
+                    "usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime \
+                     | recovery-peer <endpoint-id-hex>",
+                );
+                std::process::ExitCode::from(2)
+            }
+            Self::Succeeded => std::process::ExitCode::SUCCESS,
+            Self::Failed(diagnostic) => {
+                report(&diagnostic);
+                std::process::ExitCode::FAILURE
+            }
         }
+    }
+}
+
+/// One mode: its outcome when `arguments` name it, or `None`.
+#[cfg(target_os = "linux")]
+type Mode = fn(&[std::ffi::OsString]) -> Option<ModeOutcome>;
+
+/// Every mode the binary has, tried in order.
+#[cfg(target_os = "linux")]
+const MODES: [Mode; 3] = [
+    provider_runtime_mode,
+    recovery_peer_mode,
+    launch_barrier_mode,
+];
+
+/// `provider-runtime`: serve until a listener invariant fails.
+#[cfg(target_os = "linux")]
+fn provider_runtime_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
+    match arguments {
+        [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => Some(
+            ModeOutcome::failed(provider_runtime::serve_provider_runtime()),
+        ),
+        _ => None,
+    }
+}
+
+/// `recovery-peer <endpoint-id-hex>`: answer one exchange (ADR-069 R12 §5).
+#[cfg(target_os = "linux")]
+fn recovery_peer_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
+    match arguments {
+        [mode, endpoint_id] if mode == provider_runtime::recovery_peer::RECOVERY_PEER_ARGUMENT => {
+            Some(
+                provider_runtime::recovery_peer::serve_recovery_peer(endpoint_id)
+                    .map_or_else(ModeOutcome::failed, |()| ModeOutcome::Succeeded),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// `launch-barrier <lpv1-hex>`: a released adapter replaces this process
+/// image, so only a failure returns.
+#[cfg(target_os = "linux")]
+fn launch_barrier_mode(arguments: &[std::ffi::OsString]) -> Option<ModeOutcome> {
+    match arguments {
         [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
-            let error = lpv1
-                .to_str()
-                .map_or(launcher::LauncherError::Parameters, |hex| {
-                    launcher::run_launch_barrier(hex)
-                });
-            Some(format!("pos-sandboxd: {error}"))
+            Some(ModeOutcome::failed(lpv1.to_str().map_or(
+                launcher::LauncherError::Parameters,
+                launcher::run_launch_barrier,
+            )))
         }
         _ => None,
     }

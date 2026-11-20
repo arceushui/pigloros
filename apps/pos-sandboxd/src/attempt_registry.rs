@@ -174,6 +174,12 @@ impl RegistryDirectory {
             owner,
         })
     }
+
+    /// The recovery view (R12 §5.1): nothing but the activation marker, which
+    /// no attempt owns; a committed intent or a temporary record is refused.
+    fn require_no_attempt_record(&self) -> Result<(), SystemdAttemptRegistryError> {
+        require_only(&self.file, Some(activation::MARKER_NAME)).map(drop)
+    }
 }
 
 /// The fixed root-owned registry at `/run/pigloros/sandbox/registry`.
@@ -219,6 +225,20 @@ impl RegistryState {
 }
 
 impl SystemdAttemptRegistry {
+    /// The recovery peer's view of the fixed registry (ADR-069 R12 §5.1).
+    ///
+    /// It opens the registry read-only and takes the same exclusive,
+    /// non-blocking `flock` as every registry owner, so a busy lock refuses.
+    /// Under the lock the registry must hold no committed intent and no
+    /// temporary record: nothing but the activation marker, if present. The
+    /// lock is released before this returns.
+    ///
+    /// # Errors
+    /// A busy lock, an unsafe or missing registry, and any other record.
+    pub(crate) fn require_no_attempt_record() -> Result<(), SystemdAttemptRegistryError> {
+        RegistryDirectory::open().and_then(|directory| directory.require_no_attempt_record())
+    }
+
     /// Open the fixed registry through held, root-owned directory descriptors.
     ///
     /// # Errors
@@ -1026,6 +1046,58 @@ mod tests {
         drop(committed);
         assert!(matches!(
             SystemdAttemptRegistry::from_runtime_directory(&parent, owner),
+            Err(SystemdAttemptRegistryError::ReconciliationRequired)
+        ));
+        Ok(())
+    }
+
+    /// The recovery peer's view (ADR-069 R12 §5.1): only an empty registry,
+    /// or one holding just the activation marker, under a free lock, which
+    /// the view releases again.
+    #[test]
+    fn the_recovery_view_requires_a_free_lock_and_no_attempt_record() -> TestResult {
+        if !in_lock_test_process(
+            "attempt_registry::tests::the_recovery_view_requires_a_free_lock_and_no_attempt_record",
+        )? {
+            return Ok(());
+        }
+        let view = |parent: &File, owner: u32| {
+            RegistryDirectory::from_runtime_directory(parent, owner)
+                .and_then(|directory| directory.require_no_attempt_record())
+        };
+        let (directory, parent, owner) = fixture()?;
+        // Empty, twice: the first view released its lock.
+        view(&parent, owner)?;
+        view(&parent, owner)?;
+        // A live owner holds the lock: the view is refused.
+        let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+        assert!(view(&parent, owner).is_err());
+        drop(registry);
+        // The activation marker the owner created is no attempt record.
+        assert!(directory
+            .path()
+            .join(REGISTRY_NAME)
+            .join(activation::MARKER_NAME)
+            .exists());
+        view(&parent, owner)?;
+        // A committed intent, and a temporary record, are refused.
+        let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+        drop(registry.commit_planned(&PlannedAttemptIntent::new([1; 16], [2; 32])?)?);
+        drop(registry);
+        assert!(matches!(
+            view(&parent, owner),
+            Err(SystemdAttemptRegistryError::ReconciliationRequired)
+        ));
+        let (directory, parent, owner) = fixture()?;
+        fs::write(
+            directory
+                .path()
+                .join(REGISTRY_NAME)
+                .join(".planned-interrupted"),
+            b"partial",
+        )?;
+        assert!(matches!(
+            view(&parent, owner),
             Err(SystemdAttemptRegistryError::ReconciliationRequired)
         ));
         Ok(())

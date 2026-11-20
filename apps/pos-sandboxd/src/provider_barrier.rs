@@ -577,6 +577,7 @@ pub struct ProviderReleaseBarrier<S, I, R, O> {
     sent: Option<ExecutionRelease>,
     ready: Option<[u8; 32]>,
     frozen: Option<Frozen>,
+    failure: Option<BarrierFailure>,
     attempted: bool,
 }
 
@@ -630,6 +631,7 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
                     sent: None,
                     ready: None,
                     frozen: None,
+                    failure: None,
                     attempted: false,
                 })
         })
@@ -988,16 +990,24 @@ where
             })
     }
 
-    fn release(
+    async fn release(
         &mut self,
         attempt: &ActiveAttempt,
         cgroup: CgroupView<'_>,
-    ) -> impl Future<Output = Result<(), BarrierError>> + Send {
-        self.release_inner(attempt, cgroup)
+    ) -> Result<(), BarrierError> {
+        let released = self.release_inner(attempt, cgroup).await;
+        // TME1 `barrier-failure` (ADR-069 R9 §4.6.1), kept typed for the
+        // terminal records (Redmine #443 journal 22723).
+        self.failure = released
+            .as_ref()
+            .err()
+            .and_then(BarrierError::barrier_failure);
+        released
     }
 
     fn evidence(&mut self) -> ReleaseOutcome {
         ReleaseOutcome::new(self.ready.take(), self.frozen.take(), self.sent.take())
+            .refused(self.failure.take())
     }
 }
 

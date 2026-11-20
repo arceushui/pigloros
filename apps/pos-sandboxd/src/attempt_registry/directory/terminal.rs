@@ -45,6 +45,19 @@ pub struct CompletedAttemptCleanup {
 }
 
 impl CompletedAttemptCleanup {
+    /// A cleanup of `intent` that proved the cgroup empty by `empty_basis`,
+    /// for the terminal records' tests.
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        intent: PlannedAttemptIntent,
+        empty_basis: Option<AttemptCgroupEmptyBasis>,
+    ) -> Self {
+        Self {
+            intent,
+            empty_basis,
+        }
+    }
+
     /// The exact planned ownership whose resources and intent were removed.
     #[must_use]
     pub const fn intent(&self) -> &PlannedAttemptIntent {

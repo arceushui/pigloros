@@ -117,6 +117,10 @@ mod cases {
         fn grant_digest(&self) -> [u8; 32] {
             grant(self.0)
         }
+
+        fn admission(&self) -> AttemptAdmission {
+            crate::test_fixtures::attempt_admission(grant(self.0))
+        }
     }
 
     /// A fixture root, released through the controller's root port.
@@ -146,6 +150,10 @@ mod cases {
 
         fn grant_digest(&self) -> [u8; 32] {
             grant(self.id)
+        }
+
+        fn admission(&self) -> AttemptAdmission {
+            crate::test_fixtures::attempt_admission(grant(self.id))
         }
 
         fn prepare(
@@ -2034,9 +2042,10 @@ mod cases {
         }
 
         #[tokio::test]
-        async fn a_unit_that_failed_after_its_release_is_read_by_its_observed_invocation(
-        ) -> TestResult {
-            let fixture = manager(1).await?;
+        async fn a_unit_that_failed_after_its_release_is_read_by_its_bound_invocation() -> TestResult
+        {
+            let mut fixture = manager(1).await?;
+            fixture.bound = fixture.bound.invoked([7; 16]);
             let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
             let started = SystemdVerifiedStart::for_test(
                 unit.clone(),
@@ -2073,6 +2082,11 @@ mod cases {
                 terminal.service(),
                 Err(TerminalServiceError::Read(_))
             ));
+            // TME1 `unit` is the bound invocation and cgroup.
+            assert_eq!(
+                evidence.unit(),
+                Some(([7; 16], crate::UnitCgroup::identity(&fixture.bound)))
+            );
             Ok(())
         }
 
@@ -2087,13 +2101,17 @@ mod cases {
                 )
             };
             let mut evidence = unreleased();
-            evidence.conclude(terminal(Ok(())));
-            evidence.conclude(terminal(Err(
-                crate::SystemdTransientUnitTransportError::ActivationUnset,
-            )));
+            evidence.conclude(Some(([5; 16], (1, 2))), terminal(Ok(())));
+            evidence.conclude(
+                None,
+                terminal(Err(
+                    crate::SystemdTransientUnitTransportError::ActivationUnset,
+                )),
+            );
             assert!(evidence
                 .terminal()
                 .is_some_and(|terminal| terminal.unpinned().is_ok()));
+            assert_eq!(evidence.unit(), Some(([5; 16], (1, 2))));
         }
 
         /// An unpinned unit: no cgroup was bound, so `RefUnit` never ran and

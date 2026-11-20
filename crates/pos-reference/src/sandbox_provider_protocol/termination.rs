@@ -678,7 +678,8 @@ impl TerminationFacts {
     /// The KOE1 observation disagrees with the unit or `work-after`.
     ///
     /// The `/work` mount and capacity are compared only when `work-after` is
-    /// present. Free space is never compared.
+    /// present; a null one is missing evidence, never a contradiction (owner
+    /// decision 2026-11-19). Free space is never compared.
     fn observation_disagrees(&self) -> bool {
         match self.observed {
             KernelObservationFacts::Observed {
@@ -724,8 +725,9 @@ impl TerminationFacts {
     /// Required evidence is absent (R9 O6).
     ///
     /// That is unit evidence out of step with the unit, a field §4.6.3 or
-    /// R10 §4.8 requires at this progress, or one of KOE1 `work` and
-    /// `work-after` without the other.
+    /// R10 §4.8 requires at this progress, a start job whose result was not
+    /// observed (owner reading G1, Redmine #443 journal 22723), or one of
+    /// KOE1 `work` and `work-after` without the other.
     const fn missing_evidence(&self) -> bool {
         self.unit_evidence_missing()
             || self.released_evidence_missing()
@@ -763,7 +765,9 @@ impl TerminationFacts {
     }
 
     /// KOE1 recorded `/work` and `work-after` did not, or the reverse: both
-    /// follow ELM1 limit 9, so one of them is missing.
+    /// follow ELM1 limit 9, so one of them is missing. Only a status-0 KOE1
+    /// opens `/work`, so after a failed one nothing is missing (owner
+    /// decision 2026-11-19, R9 amendment review).
     const fn work_presence_differs(&self) -> bool {
         match self.observed {
             KernelObservationFacts::Observed { work, .. } => {
