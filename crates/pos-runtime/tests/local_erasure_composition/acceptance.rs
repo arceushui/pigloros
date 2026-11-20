@@ -596,7 +596,8 @@ fn reordered_receipt(
                 .acknowledge_erasure(request, acknowledgement)?;
         }
     }
-    finalized(driver().drive(host, request)?)
+    let driven = driver().drive(host, request)?;
+    finalized(driven)
 }
 
 /// Acceptance test 4, on both adapters: reordered or duplicated
