@@ -1657,8 +1657,7 @@ mod tests {
     #[tokio::test]
     async fn listener_refuses_the_erasure_host_timeline_as_a_fork_parent() -> TestResult {
         let (world, _) = provisioned_world(&[])?;
-        let erasure_host =
-            crate::local_principal::tests::provision_erasure_host_timeline(world.path()?)?;
+        let erasure_host = crate::local_principal::provision_erasure_host_timeline(world.path()?)?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         assert_eq!(
             gateway.host_timelines(),
