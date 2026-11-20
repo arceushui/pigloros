@@ -106,12 +106,33 @@ impl UpdateFixture {
         crate::selector::installation::authority::CommittedInstallationUpdate,
         Vec<u8>,
     )> {
+        self.commit_pending_update_of(
+            (100, 200),
+            previous_live_attempt_ids,
+            required_cancelled_attempt_ids,
+            revocation,
+        )
+    }
+
+    /// [`Self::commit_pending_update`] for a runtime whose main process had
+    /// this PID and these start ticks.
+    pub(crate) fn commit_pending_update_of(
+        &self,
+        (main_pid, main_start_time_ticks): (u64, u64),
+        previous_live_attempt_ids: Vec<[u8; 16]>,
+        required_cancelled_attempt_ids: Vec<[u8; 16]>,
+        revocation: SuccessorRevocation,
+    ) -> TestResult<(
+        crate::selector::installation::authority::CommittedInstallationUpdate,
+        Vec<u8>,
+    )> {
         let admitted = self.admitted()?;
         let challenge = admitted.bootstrap().issue_update_challenge()?;
         let request =
             self.request_with_revocation(&challenge.to_canonical_cbor()?, None, revocation)?;
         let update = admitted.bootstrap().validate_update(challenge, &request)?;
-        let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+        let runtime = ProviderRuntimeSlot::allocate(&admitted)?
+            .bind_observed_process(main_pid, main_start_time_ticks)?;
         let snapshot = InstallationRecoverySnapshot::seal(
             &admitted,
             &runtime,
