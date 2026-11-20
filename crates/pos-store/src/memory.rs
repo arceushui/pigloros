@@ -3377,8 +3377,15 @@ impl MemoryStore {
         if head.as_u64() != cut {
             return Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary);
         }
-        let meta = TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name);
-        let child = Timeline::new(meta);
+        // ADR-136 §1: the admitted child inherits the parent's owner.
+        let owner = self
+            .timelines
+            .get(&parent_id)
+            .and_then(|state| state.timeline.meta.owner);
+        let child = Timeline::new(TimelineMeta {
+            owner,
+            ..TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name)
+        });
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent_id, Seq::from_u64(cut))
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)?;

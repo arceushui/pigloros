@@ -12953,6 +12953,23 @@ impl SqliteStore {
             })
     }
 
+    /// ADR-136 §1: create the admitted child with the parent's owner (none
+    /// for an unowned parent), read inside the commit's write transaction.
+    fn create_admitted_fork_child(
+        &self,
+        parent: TimelineId,
+        cut: u64,
+        name: String,
+    ) -> Result<Timeline, CoreError> {
+        Self::timeline_owner_in_transaction(&self.conn, parent).and_then(|owner| {
+            let meta = TimelineMeta {
+                owner,
+                ..TimelineMeta::forked_from(parent, Seq::from_u64(cut), name)
+            };
+            Self::create_timeline_with_meta_in_transaction(&self.conn, self.hasher.as_ref(), &meta)
+        })
+    }
+
     fn insert_fork_operation(
         &self,
         command: SqliteForkAdmissionOperation,
@@ -12986,30 +13003,29 @@ impl SqliteStore {
                     Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary)
                 }
             })?;
-        let meta = TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name);
         // Verified FCC1 facts and the fresh child ID satisfy every FAR1
         // invariant; any construction failure still fails closed.
-        let admission =
-            Self::create_timeline_with_meta_in_transaction(&self.conn, self.hasher.as_ref(), &meta)
-                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
-                .and_then(|child| {
-                    ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
-                        operation_id,
-                        principal_owner_binding_digest: binding.digest(),
-                        creator: binding.input().owner,
-                        parent_timeline_id: parent_id,
-                        child_timeline_id: child.id(),
-                        room_revision_descriptor_hash: descriptor_hash,
-                        parent_logical_head: cut,
-                        parent_chain_head_hash: chain_head,
-                        completed_fold_cursor: cut,
-                        post_fold_tick_boundary: cut,
-                        plugin_composition_hash: composition_hash,
-                        attribution_required,
-                        origin: ForkAttributionOriginV1::Local,
-                    })
-                    .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-                })?;
+        let admission = self
+            .create_admitted_fork_child(parent_id, cut, child_name)
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+            .and_then(|child| {
+                ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+                    operation_id,
+                    principal_owner_binding_digest: binding.digest(),
+                    creator: binding.input().owner,
+                    parent_timeline_id: parent_id,
+                    child_timeline_id: child.id(),
+                    room_revision_descriptor_hash: descriptor_hash,
+                    parent_logical_head: cut,
+                    parent_chain_head_hash: chain_head,
+                    completed_fold_cursor: cut,
+                    post_fold_tick_boundary: cut,
+                    plugin_composition_hash: composition_hash,
+                    attribution_required,
+                    origin: ForkAttributionOriginV1::Local,
+                })
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+            })?;
         let receipt = ForkAdmissionReceiptV1 {
             child_id: admission.input().child_timeline_id,
             admission_digest: admission.digest(),
