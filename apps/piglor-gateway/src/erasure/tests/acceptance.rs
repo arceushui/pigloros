@@ -307,17 +307,18 @@ async fn the_served_partition_freezes_only_the_actors_lineage(mode: ServeMode) -
     for body in &observed {
         disclosure.check_body(body);
     }
-    for answer in [
-        served
-            .request(actor, "erasure-1", "private-subject-data")
-            .await?,
-        served
-            .request(actor, "erasure-1", "consented-shared-data")
-            .await?,
-        served.read(actor, &id).await?,
-        served.read(other, &id).await?,
-        served.read(actor, &Ulid::nil().to_string()).await?,
-    ] {
+    // Each answer is bound before the next await, so no `?` result is
+    // held across one (`future_not_send`).
+    let retried = served
+        .request(actor, "erasure-1", "private-subject-data")
+        .await?;
+    let conflict = served
+        .request(actor, "erasure-1", "consented-shared-data")
+        .await?;
+    let own = served.read(actor, &id).await?;
+    let foreign = served.read(other, &id).await?;
+    let unknown = served.read(actor, &Ulid::nil().to_string()).await?;
+    for answer in [retried, conflict, own, foreign, unknown] {
         disclosure.check(&answer)?;
     }
     served.stop(driver).await?;
@@ -340,9 +341,8 @@ async fn every_actors_used_quota_holds_across_a_restart(mode: ServeMode) -> Test
             .request(subject, "erasure-1", "private-subject-data")
             .await?;
         assert_eq!(admitted.status, StatusCode::ACCEPTED);
-        served
-            .receipted(subject, &erasure_id(subject, "erasure-1")?.to_string())
-            .await?;
+        let id = erasure_id(subject, "erasure-1")?.to_string();
+        served.receipted(subject, &id).await?;
         receipts.push(admitted.bytes);
     }
     let world = served.stop(driver).await?;
@@ -350,9 +350,8 @@ async fn every_actors_used_quota_holds_across_a_restart(mode: ServeMode) -> Test
     // Each recovered request reads at its first receipt again, and the
     // driver is then stopped, so nothing advances under the requests below.
     for subject in subjects {
-        served
-            .receipted(subject, &erasure_id(subject, "erasure-1")?.to_string())
-            .await?;
+        let id = erasure_id(subject, "erasure-1")?.to_string();
+        served.receipted(subject, &id).await?;
     }
     driver.stop().await;
     // Why `409` and never `429`: `local_subject_admission` answers
@@ -480,9 +479,8 @@ async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timeline
         .request(actor, "erasure-1", "private-subject-data")
         .await?;
     assert_eq!(admitted.status, StatusCode::ACCEPTED);
-    let observed = served
-        .receipted(actor, &erasure_id(actor, "erasure-1")?.to_string())
-        .await?;
+    let id = erasure_id(actor, "erasure-1")?.to_string();
+    let observed = served.receipted(actor, &id).await?;
     assert_monotonic(&observed)?;
     let last = observed.last().ok_or("no projection")?;
     assert_eq!(last["acknowledgements"]["required"], 3);
