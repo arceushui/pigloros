@@ -1,0 +1,47 @@
+name: diag-349-recovery-flake
+
+# Diagnostic only, never merged: measure whether the pos-reference lib tests
+# flake when they share one process under plain `cargo test`, as the
+# mutation baseline runs them.
+
+on:
+  push:
+    branches: [diag/349-recovery-flake]
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        threads: [parallel, single]
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-07-01
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-07-01
+      - name: Build
+        run: cargo test -p pos-reference --lib --locked --no-run
+      - name: Repeat
+        run: |
+          args=()
+          if [ "${{ matrix.threads }}" = single ]; then args=(--test-threads=1); fi
+          fails=0
+          for i in $(seq 1 12); do
+            if ! cargo test -p pos-reference --lib --locked -- "${args[@]}" > "run-$i.log" 2>&1; then
+              fails=$((fails + 1))
+              echo "=== run $i failed"
+              grep -E "FAILED|panicked|left:|right:|Script" "run-$i.log" | head -30
+            fi
+            grep -E "^test result" "run-$i.log" | head -1
+          done
+          echo "failed runs: $fails / 12"
