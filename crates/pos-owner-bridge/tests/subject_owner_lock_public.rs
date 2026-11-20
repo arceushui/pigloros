@@ -88,6 +88,25 @@ fn two_subjects_of_one_human_have_independent_locks() -> TestResult {
 }
 
 #[test]
+fn releasing_one_owner_shared_lock_leaves_another_owner_held() -> TestResult {
+    let root = Sandbox::new()?;
+    let lock = SubjectEncryptorLock::acquire(&root.0)?;
+    let decrypting = lock.try_lock_subject_owner_shared(OWNER)?;
+    let unlocking = lock.try_lock_subject_owner_shared(OTHER_OWNER)?;
+    drop(unlocking);
+    assert_eq!(
+        lock.try_lock_subject_owner_exclusive(OWNER).err(),
+        Some(UNAVAILABLE)
+    );
+    let enrolling = lock.try_lock_subject_owner_exclusive(OTHER_OWNER)?;
+    assert_eq!(
+        (decrypting.owner_id(), enrolling.owner_id()),
+        (OWNER, OTHER_OWNER)
+    );
+    Ok(())
+}
+
+#[test]
 fn a_shared_hold_on_one_thread_refuses_the_exclusive_lock_on_another() -> TestResult {
     let root = Sandbox::new()?;
     let lock = SubjectEncryptorLock::acquire(&root.0)?;
