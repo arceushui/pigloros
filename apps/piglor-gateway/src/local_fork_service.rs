@@ -17,7 +17,7 @@ use std::{
 
 use piglor_ledger::LedgerView;
 use pos_core::ForkAdmissionHostRecordV1;
-use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_runtime::ErasureExecutionHostV1;
 use pos_store::{
     sqlite::SqliteStore, ForkAdmissionAuthoritySessionV1, ForkEventAuthorityErrorV1,
     ForkEventPermitIssuerV1, StoreConfig,
@@ -25,6 +25,10 @@ use pos_store::{
 
 use crate::{
     executor::ForkAdmissionSlotV1,
+    local_erasure_composition::{
+        LocalErasureDriverTaskV1, LocalErasureServeInputsV1, LocalErasureServeV1,
+        LocalErasureStartV1, LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES,
+    },
     local_fork_authentication::{
         LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1,
     },
@@ -58,8 +62,9 @@ struct LocalForkAdmissionCredentialsV1 {
 /// credential directory (ADR-107 r6 startup step 1).
 fn load_local_fork_admission_credentials(
     credential_directory: &Path,
+    alongside: &[&str],
 ) -> io::Result<LocalForkAdmissionCredentialsV1> {
-    managed_credentials(credential_directory).map(|(credentials, profile)| {
+    managed_credentials(credential_directory, alongside).map(|(credentials, profile)| {
         LocalForkAdmissionCredentialsV1 {
             credentials,
             profile,
@@ -68,11 +73,12 @@ fn load_local_fork_admission_credentials(
 }
 
 /// One local Fork-admission deployment ready to serve: the recovered erasure
-/// host of its store, already bound to its execution mode, and the decoded
-/// managed credentials.
+/// host of its store, already bound to its execution mode, the decoded
+/// managed credentials, and its started erasure authority.
 struct LocalForkAdmissionStartV1 {
     host: ErasureExecutionHostV1,
     credentials: LocalForkAdmissionCredentialsV1,
+    erasure: LocalErasureStartV1,
 }
 
 /// One managed local Fork-admission deployment of `serve`.
@@ -93,22 +99,53 @@ pub struct ManagedLocalForkAdmissionV1<'a> {
     pub owntracks_owner_key: Option<&'a OwnTracksOwnerKey>,
     /// The curated ledger source.
     pub ledger: LedgerConfig,
+    /// The deployment trust state store of `--require-local-erasure`, whose
+    /// credentials share the validated directory; `None` composes the
+    /// closed erasure authority.
+    pub local_erasure_trust_state: Option<&'a Path>,
+}
+
+/// The decoded managed credentials of `deployment`, read with the Local
+/// erasure credentials alongside under `--require-local-erasure`, and its
+/// erasure composition: the Local one then, else the closed one.
+fn managed_credentials_and_erasure(
+    deployment: &ManagedLocalForkAdmissionV1<'_>,
+) -> Result<(LocalForkAdmissionCredentialsV1, LocalErasureServeV1), ServeError> {
+    let alongside: &[&str] = if deployment.local_erasure_trust_state.is_some() {
+        &LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES
+    } else {
+        &[]
+    };
+    let credentials =
+        load_local_fork_admission_credentials(deployment.credential_directory, alongside)?;
+    let erasure =
+        LocalErasureServeV1::for_serve(deployment.local_erasure_trust_state.map(|trust_state| {
+            LocalErasureServeInputsV1 {
+                sqlite_path: deployment.sqlite_path,
+                credential_directory: deployment.credential_directory,
+                trust_state,
+                with_fork_authority: true,
+            }
+        }))?;
+    Ok((credentials, erasure))
 }
 
 /// Serve a managed local Fork-admission deployment.
 ///
 /// ADR-134 §4 order after the lock: decode the managed credentials before
-/// the database opens (ADR-107 r6), recover the host with the closed
-/// composition and bind it to its execution mode, load the ledger, then
-/// serve.
+/// the database opens (ADR-107 r6), compose the erasure authority (the
+/// Local one with `--require-local-erasure`, else the closed one), recover
+/// the host with it and bind it to its execution mode, run the Local
+/// startup sweep, load the ledger, then serve.
 ///
 /// # Errors
-/// Returns the first credential, store, binding, ledger or serve error.
+/// Returns the first credential, erasure composition, store, binding,
+/// ledger or serve error.
 pub async fn serve_managed_local_fork_admission(
     deployment: ManagedLocalForkAdmissionV1<'_>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError> {
-    let credentials = load_local_fork_admission_credentials(deployment.credential_directory)?;
+    let (credentials, erasure) = managed_credentials_and_erasure(&deployment)?;
     let store = if deployment.owntracks_owner_key.is_some() {
         GatewayHostStoreV1::OwnTracks
     } else {
@@ -119,12 +156,17 @@ pub async fn serve_managed_local_fork_admission(
             path: deployment.sqlite_path.to_owned(),
         },
         store,
-        &ErasureCoordinatorCompositionV1::closed(),
+        erasure.composition(),
     )?;
     let mode = bind_gateway_mode_v1(deployment.profile, deployment.composition, &mut host)?;
+    let erasure = erasure.start(&mut host);
     let ledger = deployment.ledger.load(&piglor_ledger::today_utc())?;
     serve_local_fork_admission(
-        LocalForkAdmissionStartV1 { host, credentials },
+        LocalForkAdmissionStartV1 {
+            host,
+            credentials,
+            erasure,
+        },
         &mode,
         deployment.owntracks_owner_key,
         shutdown,
@@ -267,7 +309,7 @@ fn provision_with_credentials(
 /// last step: the caller decodes the three managed credentials (FACR1, FAHK1,
 /// and the FCP1 classifier profile) with
 /// [`load_local_fork_admission_credentials`] before the database opens, then
-/// recovers the host with the closed composition and binds it to its
+/// recovers the host with its erasure composition and binds it to its
 /// execution mode ([`crate::mode_profile::bind_gateway_mode_v1`], ADR-134
 /// §4); this function runs the read-only FCP1 preflight and then the FAO1
 /// open proof on the host's own adapter, reconciles the journal there, moves
@@ -294,7 +336,7 @@ async fn serve_local_fork_admission(
         owntracks_owner_key,
         mode,
     )?;
-    serve_started(started, mode, shutdown, ledger).await
+    serve_started(started, mode, shutdown, ledger, start.erasure).await
 }
 
 /// Startup steps 2a to 5 on the recovered host: preflight the FCP1 profile
@@ -388,6 +430,9 @@ const fn preflight_error(error: ForkEventAuthorityErrorV1) -> LocalForkAuthentic
 
 /// Startup step 6 and the shutdown order of Decision 1 item 8.
 ///
+/// The Local erasure driver of `erasure` starts once both listeners are
+/// bound and stops before the listener and the executor.
+///
 /// The shutdown order (TCP, listener, executor) is this function's linear
 /// sequence of awaits; no test seam observes its interleaving inside
 /// `axum::serve`. The load-bearing property, that the listener finishes an
@@ -398,6 +443,7 @@ async fn serve_started(
     mode: &GatewayModeBindingV1,
     shutdown: impl Future<Output = ()> + Send + 'static,
     (ledger_view, ledger_write): (LedgerView, LedgerWriteMode),
+    erasure: LocalErasureStartV1,
 ) -> Result<(), ServeError> {
     let addr = mode.tcp_addr();
     let app = bound_router(
@@ -422,10 +468,12 @@ async fn serve_started(
         Ok(listener) => listener,
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
+    let driver = LocalErasureDriverTaskV1::spawn(&gateway, erasure);
     announce_listening(addr);
     let serve_result = axum::serve(tcp, app)
         .with_graceful_shutdown(shutdown_or_stale(shutdown, mode))
         .await;
+    driver.stop().await;
     let stop_result = listener.stop().await;
     let shutdown_result = gateway.shutdown().await.map_err(ServeError::from);
     serve_result
@@ -471,6 +519,7 @@ fn credentials(directory: &Path) -> io::Result<LocalForkAuthenticationCredential
 /// ADR-107 r6 startup step 1: exactly FACR1, FAHK1, and the FCP1 profile.
 fn managed_credentials(
     directory: &Path,
+    alongside: &[&str],
 ) -> io::Result<(
     LocalForkAuthenticationCredentialsV1,
     ForkClassifierProfileV1,
@@ -478,6 +527,7 @@ fn managed_credentials(
     LocalForkAuthenticationCredentialsV1::load_managed(
         directory,
         rustix::process::geteuid().as_raw(),
+        alongside,
     )
     .map_err(io::Error::other)
 }
@@ -486,6 +536,7 @@ fn managed_credentials(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pos_runtime::ErasureCoordinatorCompositionV1;
     use std::net::SocketAddr;
 
     /// Open the recovered host of `path` and run startup steps 2a to 5.
@@ -2113,6 +2164,7 @@ mod tests {
                 composition: fork_composition(&world.socket),
                 owntracks_owner_key: None,
                 ledger: LedgerConfig::new(None, false),
+                local_erasure_trust_state: None,
             },
             shutdown,
         )
@@ -2231,6 +2283,7 @@ mod tests {
             &mode,
             std::future::pending(),
             (LedgerView::default(), LedgerWriteMode::Disabled),
+            LocalErasureStartV1::default(),
         );
         tokio::pin!(serve);
         let response = tokio::select! {
@@ -2275,9 +2328,15 @@ mod tests {
         occupied_tcp.tcp_addr = occupied.local_addr()?;
         let mode =
             crate::mode_profile::test_binding_of(GatewayModeProfileIdV1::Local, occupied_tcp);
-        assert!(serve_started(started, &mode, async {}, ledger)
-            .await
-            .is_err());
+        assert!(serve_started(
+            started,
+            &mode,
+            async {},
+            ledger,
+            LocalErasureStartV1::default()
+        )
+        .await
+        .is_err());
         assert!(!gateway.is_ready());
         drop(gateway);
         assert!(!world.socket.exists());
@@ -2291,9 +2350,15 @@ mod tests {
         )?;
         let gateway = started.0.clone();
         let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        assert!(serve_started(started, &test_mode(), async {}, ledger)
-            .await
-            .is_err());
+        assert!(serve_started(
+            started,
+            &test_mode(),
+            async {},
+            ledger,
+            LocalErasureStartV1::default(),
+        )
+        .await
+        .is_err());
         assert!(!gateway.is_ready());
         drop(gateway);
         assert!(!world.socket.exists());
@@ -2311,9 +2376,15 @@ mod tests {
             GatewayModeProfileIdV1::Local,
             fork_composition(&world.socket),
         );
-        assert!(serve_started(started, &mode, async {}, ledger)
-            .await
-            .is_err());
+        assert!(serve_started(
+            started,
+            &mode,
+            async {},
+            ledger,
+            LocalErasureStartV1::default()
+        )
+        .await
+        .is_err());
         assert!(!gateway.is_ready());
         drop(gateway);
         assert!(!world.socket.exists());
@@ -2537,6 +2608,67 @@ mod tests {
         ] {
             assert_eq!(preflight_error(error), expected);
         }
+    }
+
+    /// The managed serve sequence of `main` with `--require-local-erasure`,
+    /// on the test world's paths.
+    async fn serve_with_local_erasure_for_test(
+        world: &World,
+        credentials: &Path,
+        trust_state: &Path,
+    ) -> Result<(), ServeError> {
+        serve_managed_local_fork_admission(
+            ManagedLocalForkAdmissionV1 {
+                sqlite_path: world.path()?,
+                credential_directory: credentials,
+                profile: GatewayModeProfileIdV1::Local,
+                composition: fork_composition(&world.socket),
+                owntracks_owner_key: None,
+                ledger: LedgerConfig::new(None, false),
+                local_erasure_trust_state: Some(trust_state),
+            },
+            async {},
+        )
+        .await
+    }
+
+    /// #1448: with `--require-local-erasure` the unit's one directory holds
+    /// the Fork-admission and the four Local erasure credentials. A
+    /// directory without the erasure credentials, and an invalid erasure
+    /// credential, both refuse startup before the database opens.
+    #[tokio::test]
+    async fn serve_with_local_erasure_reads_both_credential_sets_before_database_open() -> TestResult
+    {
+        let world = unprovisioned_world()?;
+        let profile = profile_bytes(&[7])?;
+        let trust_state = world.runtime.path().join("trust-state.db");
+        let fork_only = world.runtime.path().join("fork-only");
+        fs::create_dir(&fork_only)?;
+        fs::set_permissions(&fork_only, fs::Permissions::from_mode(0o700))?;
+        managed_credentials(&fork_only, ([7; 32], [8; 32]), &profile)?;
+        let refused = serve_with_local_erasure_for_test(&world, &fork_only, &trust_state)
+            .await
+            .err()
+            .ok_or("served without the erasure credentials")?;
+        assert_eq!(refused.to_string(), "fork admission credential invalid");
+
+        let both = world.runtime.path().join("both");
+        fs::create_dir(&both)?;
+        fs::set_permissions(&both, fs::Permissions::from_mode(0o700))?;
+        managed_credentials(&both, ([7; 32], [8; 32]), &profile)?;
+        for name in LOCAL_ERASURE_SERVE_CREDENTIAL_NAMES {
+            protected_credential_file(&both, name, b"not a credential")?;
+        }
+        let refused = serve_with_local_erasure_for_test(&world, &both, &trust_state)
+            .await
+            .err()
+            .ok_or("served with an invalid erasure signer")?;
+        assert_eq!(
+            refused.to_string(),
+            "the local erasure signer credential is not a 32-byte Ed25519 seed"
+        );
+        assert!(!world.database.exists());
+        Ok(())
     }
 
     /// One named managed-credential fixture writer.

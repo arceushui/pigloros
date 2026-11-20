@@ -25,6 +25,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ".github/workflows/qemu-closure-evidence.yml"
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 UPLOAD = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+CACHE_RESTORE = "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+CACHE_SAVE = "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+KERNEL_CACHE = "${{ runner.temp }}/qemu-kernel-cache"
+KERNEL_KEY = "${{ steps.kernel-key.outputs.key }}"
 EVIDENCE = '"${RUNNER_TEMP}/qemu-closure-evidence"'
 # github.sha is the merge commit that the pull_request run actually tests.
 ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
@@ -35,8 +39,9 @@ PRODUCER_SHA256 = {
     "scripts/check_asan_ci_policy.py": "d8f34a83538f034127fd2ee0e0e9e89aa9843741fa3228f3c30d164a5d17d2ed",
     "scripts/ci_stage_policy.py": "1ff0e611958501bfef1bfb54ea4016c129ed717d01de23a51cf8f7bf2cfd373e",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
-    "scripts/install-pinned-nix.sh": "d87e1b027174070441483c29bc0526cfbbf8d0fcbd73d034a44479361c822711",
+    "scripts/install-pinned-nix.sh": "6ceb5c5e07c875e421beed6d58da4a157c67b7476c9ac799c5284c93f2f94f8d",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
+    "scripts/qemu-kernel-cache.sh": "2b5ca03c3b2bf53fdef051b20478980f0a82a0c79e9b812e3d704ef87407b3f0",
     "scripts/qemu-closure-evidence.sh": "7f9dc68a4fb67e20e21f8bd40cf36b4c0c0335fa4e0c6d69416194941f73c091",
     "scripts/check_qemu_closure_evidence.py": "77a82f944d01c5514f16dfd180899e32a83243005f7dee96f063abf3d12700ac",
     "deploy/nixos/flake.nix": "cfd9e71e22b18412dab4e3bc4d8a10ff702dcab3284f41c542a83947bce85e69",
@@ -51,6 +56,14 @@ PRODUCER_SHA256 = {
     "deploy/nixos/dev-trust/root-hash-untrusted-dev-test.key": "c1dd51e8357097ba31db0a1cc8c125cc3c7b95235c23ae49b82f74a76db61271",
 }
 CHECKOUT_STEP = {"uses": CHECKOUT, "with": {"persist-credentials": False}}
+INSTALL_NIX_STEP = {"name": "Install the hash-pinned Nix release",
+                    "run": "bash scripts/install-pinned-nix.sh"}
+KERNEL_KEY_STEP = {"name": "Name the kernel cache entry", "id": "kernel-key",
+                   "run": 'bash scripts/qemu-kernel-cache.sh key "${EVIDENCE_ARCHITECTURE}" >>"${GITHUB_OUTPUT}"'}
+ARCHITECTURES = {"fail-fast": False, "matrix": {"include": [
+    {"architecture": "x86_64", "runner": "ubuntu-24.04"},
+    {"architecture": "aarch64", "runner": "ubuntu-24.04-arm"},
+]}}
 EXPECTED = {
     "name": "qemu-closure-evidence",
     True: {
@@ -73,10 +86,18 @@ EXPECTED = {
             "scripts/qemu-closure-evidence.sh",
             "scripts/qemu_qmp_query_kvm.py",
             "scripts/test_qemu_closure_evidence_producer.py",
+            "scripts/qemu-kernel-cache.sh",
         ]},
+        "push": {"branches": ["main"], "paths": [
+            WORKFLOW,
+            "deploy/nixos/**",
+            "scripts/install-pinned-nix.sh",
+            "scripts/qemu-kernel-cache.sh",
+        ]},
+        "schedule": [{"cron": "23 4 * * *"}],
     },
     "permissions": {"contents": "read"},
-    "concurrency": {"group": "qemu-closure-evidence-${{ github.ref }}", "cancel-in-progress": True},
+    "concurrency": {"group": "qemu-closure-evidence-${{ github.ref }}", "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"},
     "jobs": {
         "policy": {
             "runs-on": "ubuntu-24.04", "timeout-minutes": 5,
@@ -95,10 +116,8 @@ EXPECTED = {
         "evidence": {
             "name": "evidence (${{ matrix.architecture }})",
             "needs": "policy",
-            "strategy": {"fail-fast": False, "matrix": {"include": [
-                {"architecture": "x86_64", "runner": "ubuntu-24.04"},
-                {"architecture": "aarch64", "runner": "ubuntu-24.04-arm"},
-            ]}},
+            "if": "${{ github.event_name == 'pull_request' }}",
+            "strategy": ARCHITECTURES,
             "runs-on": "${{ matrix.runner }}",
             "timeout-minutes": 345,
             "env": {"EVIDENCE_ARCHITECTURE": "${{ matrix.architecture }}",
@@ -106,8 +125,22 @@ EXPECTED = {
             "steps": [
                 CHECKOUT_STEP,
                 EXPECTED_SDK_HEADROOM_STEP,
-                {"name": "Install the hash-pinned Nix release",
-                 "run": "bash scripts/install-pinned-nix.sh"},
+                INSTALL_NIX_STEP,
+                KERNEL_KEY_STEP,
+                {"name": "Restore the signed kernel built on main", "id": "kernel-cache",
+                 "uses": CACHE_RESTORE, "with": {"path": KERNEL_CACHE, "key": KERNEL_KEY}},
+                {"name": "Note a kernel cache miss",
+                 "if": "${{ steps.kernel-cache.outputs.cache-hit != 'true' }}",
+                 "run": "echo 'qemu-kernel-cache miss, so the kernel is built from source.'"
+                        ' >>"${GITHUB_STEP_SUMMARY}"'},
+                {"name": "Import the signed kernel",
+                 "if": "${{ steps.kernel-cache.outputs.cache-hit == 'true' }}",
+                 "run": 'if ! bash scripts/qemu-kernel-cache.sh import "${EVIDENCE_ARCHITECTURE}"'
+                        ' "${RUNNER_TEMP}/qemu-kernel-cache"; then\n'
+                        "  echo '::warning::qemu-kernel-cache refused: building the kernel from source.'\n"
+                        "  echo 'qemu-kernel-cache refused: the kernel was built from source.'"
+                        ' >>"${GITHUB_STEP_SUMMARY}"\n'
+                        "fi\n"},
                 {"name": "Build the pinned guest and record its store identities",
                  "run": f'bash scripts/qemu-closure-evidence.sh build "${{EVIDENCE_ARCHITECTURE}}" {EVIDENCE}'},
                 {"name": "Boot the guest under QEMU TCG without network",
@@ -133,6 +166,52 @@ EXPECTED = {
                      "path": "${{ runner.temp }}/qemu-closure-evidence/",
                      "if-no-files-found": "ignore", "retention-days": 7,
                  }},
+            ],
+        },
+        "kernel-cache-selftest": {
+            "name": "kernel cache self-test",
+            "needs": "policy",
+            "if": "${{ github.event_name == 'pull_request' }}",
+            "runs-on": "ubuntu-24.04",
+            "timeout-minutes": 20,
+            "steps": [
+                CHECKOUT_STEP,
+                INSTALL_NIX_STEP,
+                {"name": "Sign, verify and import a throwaway path",
+                 "run": 'bash scripts/qemu-kernel-cache.sh selftest "${RUNNER_TEMP}/qemu-kernel-cache-selftest"'},
+            ],
+        },
+        "kernel-cache": {
+            "name": "kernel cache",
+            "needs": "policy",
+            "if": "${{ github.event_name != 'pull_request' }}",
+            "environment": "qemu-kernel-cache",
+            "strategy": ARCHITECTURES,
+            "runs-on": "${{ matrix.runner }}",
+            "timeout-minutes": 345,
+            "env": {"EVIDENCE_ARCHITECTURE": "${{ matrix.architecture }}"},
+            "steps": [
+                CHECKOUT_STEP,
+                EXPECTED_SDK_HEADROOM_STEP,
+                INSTALL_NIX_STEP,
+                KERNEL_KEY_STEP,
+                {"name": "Restore the kernel cache entry", "id": "kernel-restore", "uses": CACHE_RESTORE,
+                 "with": {"path": KERNEL_CACHE, "key": KERNEL_KEY}},
+                {"name": "Verify the cached kernel",
+                 "if": "${{ steps.kernel-restore.outputs.cache-hit == 'true' }}",
+                 "run": 'bash scripts/qemu-kernel-cache.sh verify "${EVIDENCE_ARCHITECTURE}"'
+                        ' "${RUNNER_TEMP}/qemu-kernel-cache"'},
+                {"name": "Build the kernel",
+                 "if": "${{ steps.kernel-restore.outputs.cache-hit != 'true' }}",
+                 "run": 'bash scripts/qemu-kernel-cache.sh build "${EVIDENCE_ARCHITECTURE}"'},
+                {"name": "Sign the kernel",
+                 "if": "${{ steps.kernel-restore.outputs.cache-hit != 'true' }}",
+                 "env": {"QEMU_KERNEL_CACHE_SIGNING_KEY": "${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"},
+                 "run": 'bash scripts/qemu-kernel-cache.sh export "${EVIDENCE_ARCHITECTURE}"'
+                        ' "${RUNNER_TEMP}/qemu-kernel-cache"'},
+                {"name": "Save the signed kernel",
+                 "if": "${{ steps.kernel-restore.outputs.cache-hit != 'true' }}",
+                 "uses": CACHE_SAVE, "with": {"path": KERNEL_CACHE, "key": KERNEL_KEY}},
             ],
         },
     },

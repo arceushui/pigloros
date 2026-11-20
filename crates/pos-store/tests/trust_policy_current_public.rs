@@ -126,6 +126,12 @@ fn retained_tps1_is_checked_against_the_pinned_operator_key() -> TestResult {
     let genesis = signed(genesis_snapshot("9999-12-31T23:59:59Z")?)?;
     let operator_key = operator().verifying_key().to_bytes();
     assert!(tps1_signed_by_operator_v1(&genesis, &operator_key));
+    // The release pins exactly this key.
+    let snapshot = genesis_snapshot("9999-12-31T23:59:59Z")?;
+    assert_eq!(
+        release(&snapshot, &genesis).operator_public_key(),
+        operator_key
+    );
     // Another operator key, a forged signature or bytes that are not a
     // canonical TPS1 are refused.
     let other_key = SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes();
