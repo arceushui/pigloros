@@ -9,95 +9,8 @@
 
 use super::*;
 
-use pos_core::store::{import_timeline, TimelineExport};
+use pos_core::store::{import_timeline_with_id, TimelineExport};
 use pos_runtime::LOCAL_ERASURE_AUTO_RETRY_MAX_V1;
-
-/// The store adapter a test runs over.
-#[derive(Clone, Copy, Debug)]
-enum Adapter {
-    Memory,
-    Sqlite,
-}
-
-/// Both adapters, Memory first.
-const ADAPTERS: [Adapter; 2] = [Adapter::Memory, Adapter::Sqlite];
-
-/// One acceptance host over the driver fixture's content: the actor's owned
-/// root, the Erasure Host Timeline and the actor's role-0 subject key.
-struct Fixture {
-    host: ErasureExecutionHostV1,
-    /// The `SQLite` store, which outlives its host and reopens it; `None`
-    /// on Memory, whose store the host owns.
-    sqlite: Option<LocalStore>,
-    /// The root-grant chain head every ERAZ1 binds.
-    head: u64,
-}
-
-impl Fixture {
-    /// The driver fixture on `adapter`, after `seed` ran on its store and
-    /// before the host opened over it.
-    fn new<T>(
-        adapter: Adapter,
-        seed: impl FnOnce(&mut dyn EventStore) -> TestResult<T>,
-    ) -> TestResult<(Self, T)> {
-        let case = driver_case()?;
-        match adapter {
-            Adapter::Memory => {
-                let (mut store, head) = memory_store(&[])?;
-                let seeded = seed(&mut store)?;
-                let host = memory_host(store, &case)?;
-                Ok((
-                    Self {
-                        host,
-                        sqlite: None,
-                        head,
-                    },
-                    seeded,
-                ))
-            }
-            Adapter::Sqlite => {
-                let store = driver_store()?;
-                let seeded = seed(&mut store.sqlite()?)?;
-                let host = store.host(&case, 4_096)?;
-                let head = store.head;
-                Ok((
-                    Self {
-                        host,
-                        sqlite: Some(store),
-                        head,
-                    },
-                    seeded,
-                ))
-            }
-        }
-    }
-
-    /// The driver fixture on `adapter`, unseeded.
-    fn plain(adapter: Adapter) -> TestResult<Self> {
-        Ok(Self::new(adapter, |_| Ok(()))?.0)
-    }
-
-    /// The fixture after a restart: a `SQLite` host is closed and recovered
-    /// from its store. A Memory store lives only inside its host, so it has
-    /// no close and reopen and keeps its host.
-    fn restarted(self) -> TestResult<Self> {
-        let Self { host, sqlite, head } = self;
-        let Some(store) = sqlite else {
-            return Ok(Self {
-                host,
-                sqlite: None,
-                head,
-            });
-        };
-        drop(host);
-        let host = store.host(&driver_case()?, 4_096)?;
-        Ok(Self {
-            host,
-            sqlite: Some(store),
-            head,
-        })
-    }
-}
 
 /// The committed head of `request`.
 fn head_state(
@@ -130,8 +43,17 @@ struct Seeded {
     other: TimelineId,
     /// An unowned root.
     unowned: TimelineId,
-    /// An imported copy of a Timeline the actor owns on another store.
-    imported: TimelineId,
+    /// Imports of a Timeline the actor owns, of one the other actor owns
+    /// and of an unowned one, each from another store, keeping its
+    /// identity and owner.
+    imported: Imported,
+}
+
+/// The identity-preserving imports of a partition seed.
+struct Imported {
+    own: TimelineId,
+    other: TimelineId,
+    unowned: TimelineId,
 }
 
 /// The host-made Timelines of the partition.
@@ -155,14 +77,16 @@ fn actor_event() -> pos_core::EventDraft {
     )
 }
 
-/// The export of a Timeline the actor owns on another store, holding one
-/// Event of the actor.
-fn actor_export() -> TestResult<TimelineExport> {
+/// The identity-preserving export of a root Timeline that `owner` owns on
+/// another store, holding one Event of the actor.
+fn export_of(owner: Option<EntityId>) -> TestResult<TimelineExport> {
     let mut source = MemoryStore::new();
     source.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    let timeline = source
-        .create_timeline_with_meta(TimelineMeta::root_owned("exported", actor()))?
-        .id();
+    let meta = TimelineMeta {
+        owner,
+        ..TimelineMeta::root("exported")
+    };
+    let timeline = source.create_timeline_with_meta(meta)?.id();
     source.append(timeline, &[actor_event()])?;
     Ok(TimelineExport {
         timeline: source
@@ -173,19 +97,30 @@ fn actor_export() -> TestResult<TimelineExport> {
     })
 }
 
-/// Seed the other actor's root with an Event of the actor, an unowned
-/// root, an imported Timeline, the other actor's role-0 key and a role-7
-/// key under the actor's own subject owner.
-fn seed_partition(store: &mut dyn EventStore) -> TestResult<Seeded> {
+/// Import the export of a Timeline `owner` owns, keeping its identity and
+/// owner (owner decision of 2026-11-20: ownership follows the data).
+fn import_owned_by(store: &mut dyn SeedStore, owner: Option<EntityId>) -> TestResult<TimelineId> {
+    let timeline = import_timeline_with_id(&mut *store, export_of(owner)?)?;
+    assert_eq!(timeline.meta.owner, owner);
+    Ok(timeline.id())
+}
+
+/// Seed the partition beside the driver fixture's content.
+///
+/// It adds the other actor's root with an Event of the actor, an unowned
+/// root, the three imports, the other actor's role-0 key and a role-7 key
+/// under the actor's own subject owner.
+fn seed_partition(store: &mut dyn SeedStore) -> TestResult<Seeded> {
     let other = owned_roots_on(store, other_actor(), 1)?[0];
     store.append(other, &[actor_event()])?;
     let unowned = store
         .create_timeline_with_meta(TimelineMeta::root("unowned"))?
         .id();
-    let imported = import_timeline(store, actor_export()?)?;
-    // The generic import creates a fresh root: the exported owner does not
-    // travel with it.
-    assert_eq!(imported.meta.owner, None);
+    let imported = Imported {
+        own: import_owned_by(store, Some(actor()))?,
+        other: import_owned_by(store, Some(other_actor()))?,
+        unowned: import_owned_by(store, None)?,
+    };
     let mut registry = store.load_key_registry()?.ok_or("no key registry")?;
     let own_role_7 = KeyIdentityV1::from_parts(
         subject_key(1)?.owner_id,
@@ -208,7 +143,7 @@ fn seed_partition(store: &mut dyn EventStore) -> TestResult<Seeded> {
     Ok(Seeded {
         other,
         unowned,
-        imported: imported.id(),
+        imported,
     })
 }
 
@@ -232,10 +167,12 @@ fn forked(host: &mut ErasureExecutionHostV1, seeded: &Seeded) -> TestResult<Fork
     })
 }
 
-/// Request 1 is frozen over exactly the actor's root and its Fork, and
-/// its closure is the store target, their two payloads and the actor's own
-/// role-0 key: neither the other subject's key nor the role-7 key. Every
-/// other Timeline stays readable.
+/// Request 1 is frozen over exactly the actor's lineage.
+///
+/// That is the actor's root, its Fork and the import the actor owns. The
+/// closure is the store target, their payloads and the actor's own role-0
+/// key: neither the other subject's key nor the role-7 key. Every other
+/// Timeline stays readable.
 fn assert_partition(
     host: &mut ErasureExecutionHostV1,
     seeded: &Seeded,
@@ -247,21 +184,20 @@ fn assert_partition(
         .ok_or("request missing")?;
     assert_eq!(verified.lifecycle(), ErasureLifecycleV1::AccessFrozen);
     let scope = verified.scope().ok_or("no committed scope")?;
-    let mut affected = vec![memory_owned_timeline(), forks.of_owned];
+    let mut affected = vec![memory_owned_timeline(), forks.of_owned, seeded.imported.own];
     affected.sort_unstable();
     assert_eq!(scope.scope_timeline_ids(), affected.as_slice());
-    let mut targets = vec![
-        store_target()?,
-        payload_cell(memory_owned_timeline())?.0,
-        payload_cell(forks.of_owned)?.0,
-        subject_key_cells()?[0].0,
-    ];
+    let mut targets = vec![store_target()?, subject_key_cells()?[0].0];
+    for timeline in &affected {
+        targets.push(payload_cell(*timeline)?.0);
+    }
     targets.sort_unstable();
     assert_eq!(scope.target_closure(), target_closure_digest(&targets));
     let open = [
         seeded.other,
         seeded.unowned,
-        seeded.imported,
+        seeded.imported.other,
+        seeded.imported.unowned,
         forks.of_other,
         forks.consent,
         erasure_host_timeline()?,
@@ -301,16 +237,19 @@ fn assert_actor_event_kept(host: &mut ErasureExecutionHostV1, other: TimelineId)
     Ok(())
 }
 
-/// Acceptance test 2 (C1′), on both adapters. Of an actor-owned root, a
-/// Fork of it made on the host for another actor, another actor's root,
-/// the actor's Fork of that root, an unowned root, an imported Timeline
-/// and a host-owned root, the freeze selects exactly the actor's lineage.
+/// Acceptance test 2 (C1′), on both adapters: the freeze selects exactly
+/// the actor's lineage.
 ///
-/// The positive proof holds after a restart (`SQLite`; a Memory store has
-/// no close and reopen). A root the actor creates after the freeze, and its
-/// Fork, stay unaffected for the request. The actor's Event in the other
-/// actor's Timeline stays out of scope, and the receipt discloses the
-/// retained Timeline payloads (ELD1 of `timeline-payload`).
+/// Affected: the actor's root, a Fork of it made on the host for another
+/// actor, and an imported Timeline the actor owns (owner decision of
+/// 2026-11-20: ownership follows the data). Unaffected: another actor's
+/// root and the actor's Fork of it, an unowned root, imports of another
+/// owner's and of an unowned Timeline, and a host-owned root. The positive
+/// proof holds after a restart (`SQLite`; a Memory store has no close and
+/// reopen). A root the actor creates after the freeze, and its Fork, stay
+/// unaffected for the request. The actor's Event in the other actor's
+/// Timeline stays out of scope, and the receipt discloses the retained
+/// Timeline payloads (ELD1 of `timeline-payload`).
 #[test]
 fn the_c1_partition_freezes_exactly_the_actors_lineage() -> TestResult {
     for adapter in ADAPTERS {
@@ -332,7 +271,7 @@ fn the_c1_partition_freezes_exactly_the_actors_lineage() -> TestResult {
                 .iter()
                 .filter(|row| class_of(row.transition.owner).ok() == Some("timeline-payload"))
                 .count(),
-            2
+            3
         );
         assert_actor_event_kept(&mut fixture.host, seeded.other)?;
         let mut reads = fixture.host.read_sender()?;
@@ -343,12 +282,14 @@ fn the_c1_partition_freezes_exactly_the_actors_lineage() -> TestResult {
     Ok(())
 }
 
-/// Acceptance test 2, on both adapters: a Fork the runtime host admits
-/// between the freeze and the request's first ERSE1 joins the frozen scope
-/// through that first ERSE1, which still verifies after a restart
-/// (`SQLite`). The Gateway's Fork admission service is C6b.
+/// Acceptance test 2, on both adapters: a Fork admitted after the freeze
+/// is the first ERSE1 of the frozen scope.
+///
+/// The runtime host admits it while the scope has no extension yet; the
+/// extension still verifies after a restart (`SQLite`). The Gateway's Fork
+/// admission service is C6b.
 #[test]
-fn a_fork_admitted_before_the_first_extension_joins_the_frozen_scope() -> TestResult {
+fn a_fork_admitted_after_freeze_is_the_first_extension_of_the_frozen_scope() -> TestResult {
     for adapter in ADAPTERS {
         let mut fixture = Fixture::plain(adapter)?;
         let request = request_of(1)?;
@@ -391,14 +332,21 @@ fn a_fork_admitted_before_the_first_extension_joins_the_frozen_scope() -> TestRe
 // Memory has no recipient-export catalog).
 // ---------------------------------------------------------------------------
 
-/// Acceptance test 3 (`SQLite` only: Memory has no recipient-export
-/// catalog): the actor's erasure destroys its role-0 subject key and no
-/// other; the actor's own role-4 recipient key survives, and the actor
-/// still decrypts an export another subject granted it.
+/// Acceptance test 3 (`SQLite` only: the recipient-export catalog): the
+/// actor's erasure destroys its own role-0 subject key and no other.
+///
+/// Another subject's role-0 key and the actor's own role-4 recipient key
+/// survive, and the actor still decrypts an export another subject granted
+/// it.
 #[test]
 fn the_actors_recipient_key_survives_its_erasure_and_still_decrypts_a_grant() -> TestResult {
     let store = driver_store()?;
     let other = store.owned_roots(other_actor(), 1)?[0];
+    store.register(KeyRegistrationV1::new(
+        subject_key_of(other_actor(), 1)?,
+        Hash::from_bytes([0x82; 32]),
+        None,
+    ))?;
     let (_custody, private) = custody_directory()?;
     let owner = pos_store::sqlite::RecipientKeyOwnerV1::open(&private, actor())?;
     let (export_id, recipient) = publish_export_as(&store, other, other_actor(), actor(), &owner)?;
@@ -417,6 +365,9 @@ fn the_actors_recipient_key_survives_its_erasure_and_still_decrypts_a_grant() ->
     let sqlite = store.sqlite()?;
     let registry = sqlite.load_key_registry()?.ok_or("no key registry")?;
     assert!(registry.tombstone(subject_key(1)?).is_some());
+    assert!(registry
+        .tombstone(subject_key_of(other_actor(), 1)?)
+        .is_none());
     let encoded = sqlite
         .read_recipient_export(&owner, export_id)
         .map_err(fail)?;
@@ -427,9 +378,10 @@ fn the_actors_recipient_key_survives_its_erasure_and_still_decrypts_a_grant() ->
     Ok(())
 }
 
-/// Acceptance test 3 (`SQLite` only: Memory has no recipient-export
-/// catalog): each recipient-export publication of an affected Timeline is
-/// one `export-recipient` obligation per grantee, and each one is negative.
+/// Acceptance test 3: one negative `export-recipient` obligation per
+/// grantee of an affected Timeline's exports.
+///
+/// `SQLite` only: Memory has no recipient-export catalog.
 #[test]
 fn each_export_grantee_is_one_negative_export_recipient_obligation() -> TestResult {
     let store = driver_store()?;
@@ -477,11 +429,13 @@ fn each_export_grantee_is_one_negative_export_recipient_obligation() -> TestResu
 // rejection and the exact retry.
 // ---------------------------------------------------------------------------
 
-/// Acceptance tests 3b and 5, on both adapters: a closure of exactly 4,096
-/// targets at freeze needs a signature; one that grew past the bound after
-/// submission commits `Rejected` whose ERS1 provenance is the freeze
-/// failure `ScopeInvalid` under the request's ERAZ1. An exact retry of the
-/// freeze reproduces it, and it survives a restart (`SQLite`).
+/// Acceptance tests 3b and 5, on both adapters: a closure that outgrows
+/// its bound after submission commits `Rejected(ScopeInvalid)` at freeze.
+///
+/// At exactly 4,096 targets the freeze needs a signature. Past the bound
+/// the ERS1 provenance is the freeze failure `ScopeInvalid` under the
+/// request's ERAZ1. An exact retry of the freeze reproduces it, and it
+/// survives a restart (`SQLite`).
 #[test]
 fn a_closure_that_outgrows_its_bound_commits_scope_invalid_at_freeze() -> TestResult {
     for adapter in ADAPTERS {
@@ -543,11 +497,13 @@ fn a_closure_that_outgrows_its_bound_commits_scope_invalid_at_freeze() -> TestRe
 // Acceptance test 4: the retry cap and reordered acknowledgements.
 // ---------------------------------------------------------------------------
 
-/// Acceptance test 4 (`SQLite` only: the held reader is the one transient
-/// negative, and a Memory replica is the permanent one): when attempt 0
-/// and all `auto_retry_max` retries time out, the request ends in
-/// `partial-failure`, and no further attempt is due, even once the store
-/// is free again and after a restart.
+/// Acceptance test 4: the retry cap ends a transient failure in
+/// `partial-failure`.
+///
+/// `SQLite` only: the held reader is the one transient negative, and a
+/// Memory replica is the permanent one. When attempt 0 and all
+/// `auto_retry_max` retries time out, no further attempt is due, even once
+/// the store is free again and after a restart.
 #[test]
 fn the_retry_cap_ends_a_transient_failure_in_partial_failure() -> TestResult {
     let store = driver_store()?;
@@ -575,13 +531,15 @@ fn the_retry_cap_ends_a_transient_failure_in_partial_failure() -> TestResult {
     Ok(())
 }
 
-/// Drive request 1 through its dispatch and its first acknowledgement, the
-/// key's; run and acknowledge its two Artifact commands in obligation order,
-/// or `reversed`, through the Local executor, signer and authority; then
-/// drive it to its receipt.
+/// The receipt of request 1 with its Artifact acknowledgements reordered.
+///
+/// Drive it through its dispatch and the key's acknowledgement, then run
+/// and acknowledge its two Artifact commands against the driver's
+/// obligation order, through the Local executor, signer and authority,
+/// each twice when `duplicated`; then drive it to its receipt.
 fn reordered_receipt(
     host: &mut ErasureExecutionHostV1,
-    reversed: bool,
+    duplicated: bool,
 ) -> TestResult<ErasureReceiptV1> {
     let request = request_of(1)?;
     let steps = driven_steps(host, |step| {
@@ -598,11 +556,10 @@ fn reordered_receipt(
         .filter(|command| command.destruction.category == ErasureInventoryCategoryV1::Artifact)
         .collect::<Vec<_>>();
     assert_eq!(artifacts.len(), 2);
-    artifacts.sort_unstable_by_key(|command| command.destruction.obligation);
-    if reversed {
-        artifacts.reverse();
-    }
+    // The driver runs them in increasing obligation order.
+    artifacts.sort_unstable_by_key(|command| std::cmp::Reverse(command.destruction.obligation));
     let signer = signer_of(erasure_signer(), 1);
+    let mut acknowledgements = Vec::new();
     for command in &artifacts {
         let result = executor().execute(command, host).map_err(fail)?;
         let evidence = signer.sign(
@@ -617,39 +574,40 @@ fn reordered_receipt(
             ErasureAcknowledgementOutcomeV1::Acknowledged
         };
         let destruction = command.destruction;
-        host.command_sender()?.acknowledge_erasure(
-            request,
-            ErasureAcknowledgementV1 {
-                obligation: destruction.obligation,
-                target: destruction.target,
-                owner: destruction.owner,
-                evidence,
-                outcome,
-            },
-        )?;
+        let acknowledgement = ErasureAcknowledgementV1 {
+            obligation: destruction.obligation,
+            target: destruction.target,
+            owner: destruction.owner,
+            evidence,
+            outcome,
+        };
+        host.command_sender()?
+            .acknowledge_erasure(request, acknowledgement)?;
+        acknowledgements.push(acknowledgement);
+    }
+    if duplicated {
+        for acknowledgement in acknowledgements {
+            host.command_sender()?
+                .acknowledge_erasure(request, acknowledgement)?;
+        }
     }
     finalized(driver().drive(host, request)?)
 }
 
-/// Acceptance test 4, on both adapters: acknowledgements the Local
-/// authority admits in either order give the receipt bytes of the
-/// driver's own run.
+/// Acceptance test 4, on both adapters: reordered or duplicated
+/// acknowledgements give the receipt bytes of the driver's own run.
 #[test]
-fn reordered_acknowledgements_give_identical_receipt_bytes() -> TestResult {
+fn reordered_or_duplicated_acknowledgements_give_identical_receipt_bytes() -> TestResult {
     for adapter in ADAPTERS {
-        let straight = {
+        let (straight, _) = straight_fixture_run(adapter)?;
+        for duplicated in [false, true] {
             let mut fixture = Fixture::plain(adapter)?;
             submitted(&mut fixture.host, 1, ErasureScopeV1::PrivateSubjectData)?;
-            finalized(driver().drive(&mut fixture.host, request_of(1)?)?)?
-        };
-        for reversed in [false, true] {
-            let mut fixture = Fixture::plain(adapter)?;
-            submitted(&mut fixture.host, 1, ErasureScopeV1::PrivateSubjectData)?;
-            let reordered = reordered_receipt(&mut fixture.host, reversed)?;
+            let reordered = reordered_receipt(&mut fixture.host, duplicated)?;
             assert_eq!(
                 reordered.to_canonical_cbor()?,
                 straight.to_canonical_cbor()?,
-                "{adapter:?} reversed={reversed}"
+                "{adapter:?} duplicated={duplicated}"
             );
         }
     }
@@ -660,10 +618,10 @@ fn reordered_acknowledgements_give_identical_receipt_bytes() -> TestResult {
 // Acceptance test 6: an expired TPS1, and the TPS1 key-id codec.
 // ---------------------------------------------------------------------------
 
-/// Acceptance test 6 (`SQLite` only: a new clock needs a close and
-/// reopen): under an expired TPS1 an authorized request is refused its
-/// freeze, while a request frozen before the expiry still verifies, is
-/// projected, and completes its attempt 0.
+/// Acceptance test 6: an expired TPS1 refuses a freeze, while a request
+/// frozen before the expiry still verifies, is projected and completes.
+///
+/// `SQLite` only: a new clock needs a close and reopen.
 #[test]
 fn an_expired_tps1_refuses_a_freeze_but_a_frozen_request_still_completes() -> TestResult {
     let mut expired = driver_case()?;
@@ -671,7 +629,10 @@ fn an_expired_tps1_refuses_a_freeze_but_a_frozen_request_still_completes() -> Te
     let request = request_of(1)?;
     let (authorized, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
     let mut host = authorized.host(&expired, 4_096)?;
-    assert!(driver().step(&mut host, request).is_err());
+    assert_eq!(
+        driver().step(&mut host, request),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
     let projected = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
     assert_eq!(projected.state.lifecycle(), ErasureLifecycleV1::Authorized);
     drop(host);
@@ -701,9 +662,11 @@ fn respelled(bytes: &[u8], from: &str, to: &str) -> TestResult<Vec<u8>> {
     Ok(respelled)
 }
 
-/// Acceptance test 6: the TPS1 key ids of an `erasure-bundle/` root and of
-/// an `erasure-signer/<64 hex>` revocation round-trip through the TPS1
-/// codec, and their colon forms are refused on encode and on decode.
+/// Acceptance test 6: the erasure key ids round-trip through the TPS1
+/// codec.
+///
+/// They are an `erasure-bundle/` root and an `erasure-signer/<64 hex>`
+/// revocation. Their colon forms are refused on encode and on decode.
 #[test]
 fn erasure_key_ids_round_trip_through_the_tps1_codec() -> TestResult {
     use pos_conformance::TrustPolicySnapshotContractErrorV1::FieldOutOfBounds;

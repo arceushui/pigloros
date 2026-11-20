@@ -1171,6 +1171,32 @@ fn bound_authority_host<S: AuthorityPersistencePortV1>(
     Ok(host)
 }
 
+/// Provision `store` as every Local fixture store is, and return its
+/// recorded chain head.
+///
+/// It gets an open test gate, the fixture store identity and signer key,
+/// and the root grant of `shape` followed by each of `later`.
+fn provisioned<S>(store: &mut S, shape: &GrantShape, later: &[CapabilityGrantV1]) -> TestResult<u64>
+where
+    S: EventStore + ErasureInventoryPersistencePortV1 + AuthorityPersistencePortV1,
+{
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    store.init_erasure_store_identity(Hash::from_bytes(STORE_IDENTITY))?;
+    register_signer(store, &erasure_signer(), 1)?;
+    let grant = shape.root_grant()?;
+    let grants = std::iter::once(&grant).chain(later).collect::<Vec<_>>();
+    let host = bound_authority_host(store, &grants)?;
+    for grant in grants {
+        let permit = host.authorize_grant(grant).map_err(fail)?;
+        store.issue_capability_grant(permit, grant).map_err(fail)?;
+    }
+    Ok(store
+        .load_authority(grant_id())
+        .map_err(fail)?
+        .head_position()
+        .as_u64())
+}
+
 /// A provisioned `SQLite` store that records the root grant of `shape`.
 struct LocalStore {
     _directory: tempfile::TempDir,
@@ -1194,22 +1220,7 @@ impl LocalStore {
             .to_str()
             .ok_or("temporary database path is not UTF-8")?
             .to_owned();
-        let mut store = SqliteStore::open(&path)?;
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-        store.init_erasure_store_identity(Hash::from_bytes(STORE_IDENTITY))?;
-        register_signer(&mut store, &erasure_signer(), 1)?;
-        let grant = shape.root_grant()?;
-        let grants = std::iter::once(&grant).chain(later).collect::<Vec<_>>();
-        let host = bound_authority_host(&mut store, &grants)?;
-        for grant in grants {
-            let permit = host.authorize_grant(grant).map_err(fail)?;
-            store.issue_capability_grant(permit, grant).map_err(fail)?;
-        }
-        let head = store
-            .load_authority(grant_id())
-            .map_err(fail)?
-            .head_position()
-            .as_u64();
+        let head = provisioned(&mut SqliteStore::open(&path)?, shape, later)?;
         Ok(Self {
             _directory: directory,
             path,
@@ -1318,11 +1329,7 @@ fn rejection(key: u8) -> TestResult<LocalErasureRejectionV1> {
 }
 
 fn rejected(store: &LocalStore, keys: &[u8]) -> TestResult {
-    let mut objects = Vec::new();
-    for key in keys {
-        objects.push(rejection(*key)?.to_canonical_cbor()?);
-    }
-    store.retain(&objects)
+    retain_rejections(&mut store.sqlite()?, keys)
 }
 
 fn local_case() -> TestResult<Case> {
@@ -1331,81 +1338,91 @@ fn local_case() -> TestResult<Case> {
 
 #[test]
 fn a_local_submission_is_derived_idempotent_and_bound_to_its_body() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    let mut host = store.host(&local_case()?, 4_096)?;
-    let mut sender = host.command_sender()?;
-    let state = sender
-        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
-        .map_err(fail)?;
-    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
-    // An exact retry returns the original state.
-    assert_eq!(
-        sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
-        Ok(state)
-    );
-    // The same key with another body, or a retained-only scope, conflicts.
-    assert_eq!(
-        sender.submit_local_erasure(&submission(1, ErasureScopeV1::ConsentedSharedData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::Conflict
-        ))
-    );
-    assert_eq!(
-        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PublicRecord)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::Conflict
-        ))
-    );
-    // A Timeline created while the request is submitted stays unaffected,
-    // and the store recovers with the request after a restart.
-    let _created = sender.create_timeline("after-submission")?;
-    drop(host);
-    let host = store.host(&local_case()?, 4_096)?;
-    assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
+    for adapter in ADAPTERS {
+        let (mut fixture, ()) =
+            Fixture::local(adapter, &GrantShape::standard(), 4_096, |_| Ok(()))?;
+        let mut sender = fixture.host.command_sender()?;
+        let state = sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
+        // An exact retry returns the original state.
+        assert_eq!(
+            sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+            Ok(state)
+        );
+        // The same key with another body, or a retained-only scope, conflicts.
+        for (key, scope) in [
+            (1, ErasureScopeV1::ConsentedSharedData),
+            (2, ErasureScopeV1::PublicRecord),
+        ] {
+            assert_eq!(
+                sender.submit_local_erasure(&submission(key, scope)?),
+                Err(LocalErasureSubmitErrorV1::Host(
+                    ErasureHostErrorV1::Conflict
+                ))
+            );
+        }
+        // A Timeline created while the request is submitted stays
+        // unaffected, and the store recovers with the request after a
+        // restart (`SQLite`; a Memory store has no close and reopen).
+        let _created = sender.create_timeline("after-submission")?;
+        let fixture = fixture.restarted()?;
+        assert_eq!(
+            fixture.host.status(),
+            pos_runtime::ErasureHostStatusV1::Ready
+        );
+    }
     Ok(())
 }
 
 #[test]
 fn a_subject_has_one_pre_terminal_request() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    let mut host = store.host(&local_case()?, 4_096)?;
-    let mut sender = host.command_sender()?;
-    sender
-        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
-        .map_err(fail)?;
-    assert_eq!(
-        sender.submit_local_erasure(&submission(2, ErasureScopeV1::ConsentedSharedData)?),
-        Err(LocalErasureSubmitErrorV1::Concurrent)
-    );
-    let authorized = sender
-        .authorize_erasure_request(request_of(1)?, authorization(1, store.head)?.reference()?)?;
-    assert_eq!(authorized.lifecycle(), ErasureLifecycleV1::Authorized);
-    assert_eq!(
-        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Concurrent)
-    );
+    for adapter in ADAPTERS {
+        let (mut fixture, ()) =
+            Fixture::local(adapter, &GrantShape::standard(), 4_096, |_| Ok(()))?;
+        let head = fixture.head;
+        let mut sender = fixture.host.command_sender()?;
+        sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        assert_eq!(
+            sender.submit_local_erasure(&submission(2, ErasureScopeV1::ConsentedSharedData)?),
+            Err(LocalErasureSubmitErrorV1::Concurrent)
+        );
+        let authorized = sender
+            .authorize_erasure_request(request_of(1)?, authorization(1, head)?.reference()?)?;
+        assert_eq!(authorized.lifecycle(), ErasureLifecycleV1::Authorized);
+        assert_eq!(
+            sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::Concurrent)
+        );
+    }
     Ok(())
 }
 
 #[test]
 fn the_subject_quota_admits_exactly_its_share() -> TestResult {
     // One actor and 514 request heads: q_subject = (514 - 512) / 1 = 2.
-    let store = LocalStore::new(&GrantShape::standard())?;
-    rejected(&store, &[1, 2])?;
-    let mut host = store.host(&local_case()?, RESERVE + 2)?;
-    let mut sender = host.command_sender()?;
-    for key in [1, 2] {
-        sender
-            .submit_local_erasure(&submission(key, ErasureScopeV1::PrivateSubjectData)?)
-            .map_err(fail)?;
-        let state =
-            sender.reject_erasure_request(request_of(key)?, rejection(key)?.reference()?)?;
-        assert_eq!(state.lifecycle(), ErasureLifecycleV1::Rejected);
+    for adapter in ADAPTERS {
+        let (mut fixture, ()) =
+            Fixture::local(adapter, &GrantShape::standard(), RESERVE + 2, |store| {
+                retain_rejections(store, &[1, 2])
+            })?;
+        let mut sender = fixture.host.command_sender()?;
+        for key in [1, 2] {
+            sender
+                .submit_local_erasure(&submission(key, ErasureScopeV1::PrivateSubjectData)?)
+                .map_err(fail)?;
+            let state =
+                sender.reject_erasure_request(request_of(key)?, rejection(key)?.reference()?)?;
+            assert_eq!(state.lifecycle(), ErasureLifecycleV1::Rejected);
+        }
+        assert_eq!(
+            sender.submit_local_erasure(&submission(3, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::QuotaExhausted)
+        );
     }
-    assert_eq!(
-        sender.submit_local_erasure(&submission(3, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::QuotaExhausted)
-    );
     Ok(())
 }
 
@@ -1415,50 +1432,53 @@ fn the_quota_is_shared_by_the_principals_actors() -> TestResult {
     let mut shape = GrantShape::standard();
     shape.actors = [actor(), other_actor()].into_iter().collect();
     shape.actors.sort_unstable();
-    let store = LocalStore::new(&shape)?;
-    rejected(&store, &[1])?;
-    let mut host = store.host(&local_case()?, RESERVE + 2)?;
-    let mut sender = host.command_sender()?;
-    sender
-        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
-        .map_err(fail)?;
-    sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
-    assert_eq!(
-        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::QuotaExhausted)
-    );
+    for adapter in ADAPTERS {
+        let (mut fixture, ()) = Fixture::local(adapter, &shape, RESERVE + 2, |store| {
+            retain_rejections(store, &[1])
+        })?;
+        let mut sender = fixture.host.command_sender()?;
+        sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+        assert_eq!(
+            sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::QuotaExhausted)
+        );
+    }
     Ok(())
 }
 
 #[test]
 fn authorization_names_the_requests_own_evidence() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    // An ELREJ1 of another request is retained, not one of request 1.
-    rejected(&store, &[2])?;
-    let mut host = store.host(&local_case()?, 4_096)?;
-    let mut sender = host.command_sender()?;
-    sender
-        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
-        .map_err(fail)?;
-    let request = request_of(1)?;
-    assert_eq!(
-        sender.authorize_erasure_request(request, reference(0x99)),
-        Err(ErasureHostErrorV1::Conflict)
-    );
-    assert_eq!(
-        sender.reject_erasure_request(request, reference(0x99)),
-        Err(ErasureHostErrorV1::Conflict)
-    );
-    assert_eq!(
-        sender.reject_erasure_request(request, rejection(2)?.reference()?),
-        Err(ErasureHostErrorV1::Conflict)
-    );
-    assert_eq!(
+    for adapter in ADAPTERS {
+        // An ELREJ1 of another request is retained, not one of request 1.
+        let (mut fixture, ()) = Fixture::local(adapter, &GrantShape::standard(), 4_096, |store| {
+            retain_rejections(store, &[2])
+        })?;
+        let head = fixture.head;
+        let mut sender = fixture.host.command_sender()?;
         sender
-            .authorize_erasure_request(request, authorization(1, store.head)?.reference()?)?
-            .lifecycle(),
-        ErasureLifecycleV1::Authorized
-    );
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        let request = request_of(1)?;
+        assert_eq!(
+            sender.authorize_erasure_request(request, reference(0x99)),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        for provenance in [reference(0x99), rejection(2)?.reference()?] {
+            assert_eq!(
+                sender.reject_erasure_request(request, provenance),
+                Err(ErasureHostErrorV1::Conflict)
+            );
+        }
+        assert_eq!(
+            sender
+                .authorize_erasure_request(request, authorization(1, head)?.reference()?)?
+                .lifecycle(),
+            ErasureLifecycleV1::Authorized
+        );
+    }
     Ok(())
 }
 
@@ -1647,14 +1667,16 @@ fn a_root_grant_admits_the_last_position_of_its_window() -> TestResult {
     // `valid_until` refuses (`the_root_grant_must_match_...`).
     let mut shape = GrantShape::standard();
     shape.valid = (1, 2);
-    let store = LocalStore::new(&shape)?;
-    assert_eq!(store.head + 1, 2);
-    let mut host = store.host(&local_case()?, 4_096)?;
-    let state = host
-        .command_sender()?
-        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
-        .map_err(fail)?;
-    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
+    for adapter in ADAPTERS {
+        let (mut fixture, ()) = Fixture::local(adapter, &shape, 4_096, |_| Ok(()))?;
+        assert_eq!(fixture.head + 1, 2);
+        let state = fixture
+            .host
+            .command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
+    }
     Ok(())
 }
 
@@ -2484,7 +2506,7 @@ impl LocalStore {
 
 /// Create `count` root Timelines owned by `owner` on `store`.
 fn owned_roots_on(
-    store: &mut dyn EventStore,
+    store: &mut (impl EventStore + ?Sized),
     owner: EntityId,
     count: usize,
 ) -> TestResult<Vec<TimelineId>> {
@@ -3225,9 +3247,11 @@ fn publish_export(
     Ok(publish_export_as(store, timeline, actor(), grantee, &owner)?.0)
 }
 
-/// Publish one recipient export of `subject`'s `timeline` to `grantee`,
-/// whose recipient keys `owner` holds, under `subject`'s export consent;
-/// return its export id and the grantee's enrolled recipient key.
+/// Publish one recipient export of `subject`'s `timeline` to `grantee`.
+///
+/// The grantee's recipient keys are `owner`'s, and the export is under
+/// `subject`'s export consent. Return its export id and the grantee's
+/// enrolled recipient key.
 fn publish_export_as(
     store: &LocalStore,
     timeline: TimelineId,
@@ -3329,49 +3353,70 @@ fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestR
     )
 }
 
+/// Acceptance test 3b on both adapters: the bound is 4,096 targets per
+/// category, and the store target counts toward it (owner decision of
+/// 2026-11-20).
+///
+/// 4,095 affected Timelines and the store target are admitted; growth to
+/// 4,096 after submission commits `Rejected` at freeze, and a new request
+/// over 4,096 affected Timelines is refused at submit.
 #[test]
 fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    // 4,095 `timeline-payload` targets and the store target: exactly the
-    // 4,096-target bound.
-    let roots = store.owned_roots(actor(), 4_095)?;
-    let mut host = store.host(&local_case()?, 4_096)?;
-    prepared(&store, &mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
-    let request = request_of(1)?;
-    // Growth after submission: a Fork of an affected Timeline is one more
-    // target, so the freeze commits `Rejected` without a signature.
-    let mut sender = host.command_sender()?;
-    sender.fork_timeline(roots[0], Seq::ZERO, "growth")?;
-    assert_eq!(
-        sender.prepare_local_freeze(request)?,
-        LocalFreezePreparationV1::CommitsRejection
-    );
-    assert_eq!(
+    for adapter in ADAPTERS {
+        let (mut fixture, roots) =
+            Fixture::local(adapter, &GrantShape::standard(), 4_096, |store| {
+                owned_roots_on(store, actor(), 4_095)
+            })?;
+        let request = request_of(1)?;
+        let eraz1 = authorization(1, fixture.head)?.reference()?;
+        let mut sender = fixture.host.command_sender()?;
         sender
-            .freeze_access(request, &freeze(authorization(1, store.head)?.reference()?))?
-            .lifecycle(),
-        ErasureLifecycleV1::Rejected
-    );
-    // A new request over the bound is refused before any ERQ1 exists; a
-    // consented one, whose closure holds no Timeline payload, fits.
-    assert_eq!(
-        sender
-            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
-            .map(drop),
-        Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
-    );
-    assert_eq!(
-        sender
-            .submit_local_erasure(&submission(3, ErasureScopeV1::ConsentedSharedData)?)
-            .map_err(fail)?
-            .state
-            .lifecycle(),
-        ErasureLifecycleV1::Submitted
-    );
-    assert!(host.read_sender()?.erasure_state(request_of(2)?)?.is_none());
-    drop(host);
-    let mut host = store.host(&local_case()?, 4_096)?;
-    assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Rejected);
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        sender.authorize_erasure_request(request, eraz1)?;
+        assert!(matches!(
+            sender.prepare_local_freeze(request)?,
+            LocalFreezePreparationV1::Sign(_)
+        ));
+        // Growth after submission: a Fork of an affected Timeline is one
+        // more target, so the freeze commits `Rejected` without a
+        // signature.
+        sender.fork_timeline(roots[0], Seq::ZERO, "growth")?;
+        assert_eq!(
+            sender.prepare_local_freeze(request)?,
+            LocalFreezePreparationV1::CommitsRejection
+        );
+        assert_eq!(
+            sender.freeze_access(request, &freeze(eraz1))?.lifecycle(),
+            ErasureLifecycleV1::Rejected
+        );
+        // A new request over the bound is refused before any ERQ1 exists;
+        // a consented one, whose closure holds no Timeline payload, fits.
+        assert_eq!(
+            sender
+                .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+                .map(drop),
+            Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
+        );
+        assert_eq!(
+            sender
+                .submit_local_erasure(&submission(3, ErasureScopeV1::ConsentedSharedData)?)
+                .map_err(fail)?
+                .state
+                .lifecycle(),
+            ErasureLifecycleV1::Submitted
+        );
+        assert!(fixture
+            .host
+            .read_sender()?
+            .erasure_state(request_of(2)?)?
+            .is_none());
+        let mut fixture = fixture.restarted()?;
+        assert_eq!(
+            lifecycle(&mut fixture.host, request)?,
+            ErasureLifecycleV1::Rejected
+        );
+    }
     Ok(())
 }
 
@@ -3738,106 +3783,98 @@ fn bound_ard1_rows_of_the_consented_class_are_targets() -> TestResult {
 impl LocalStore {
     /// Register the actor's role-0 subject keys of epochs `epochs`.
     fn register_subject_keys(&self, epochs: std::ops::RangeInclusive<u64>) -> TestResult {
-        self.register_subject_owner_keys(KeyRoleV1::SubjectDataEncryption, epochs)
+        register_subject_owner_keys_on(
+            &mut self.sqlite()?,
+            KeyRoleV1::SubjectDataEncryption,
+            epochs,
+        )
     }
+}
 
-    /// Register keys of `role` and `epochs` under the actor's ADR-091
-    /// subject owner.
-    fn register_subject_owner_keys(
-        &self,
-        role: KeyRoleV1,
-        epochs: std::ops::RangeInclusive<u64>,
-    ) -> TestResult {
-        let mut sqlite = self.sqlite()?;
-        let mut registry = sqlite.load_key_registry()?.ok_or("no key registry")?;
-        let owner = subject_key(1)?.owner_id;
-        for epoch in epochs {
-            let mut material = [0x80; 32];
-            material[..8].copy_from_slice(&epoch.to_be_bytes());
-            material[8] = role.code();
-            registry
-                .register_key(KeyRegistrationV1::new(
-                    KeyIdentityV1::from_parts(owner, role, epoch),
-                    Hash::from_bytes(material),
-                    None,
-                ))
-                .map_err(fail)?;
-        }
-        sqlite.save_key_registry(&registry)?;
-        Ok(())
+/// Register keys of `role` and `epochs` under the actor's ADR-091 subject
+/// owner on `store`.
+fn register_subject_owner_keys_on(
+    store: &mut (impl EventStore + ?Sized),
+    role: KeyRoleV1,
+    epochs: std::ops::RangeInclusive<u64>,
+) -> TestResult {
+    let mut registry = store.load_key_registry()?.ok_or("no key registry")?;
+    let owner = subject_key(1)?.owner_id;
+    for epoch in epochs {
+        let mut material = [0x80; 32];
+        material[..8].copy_from_slice(&epoch.to_be_bytes());
+        material[8] = role.code();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::from_parts(owner, role, epoch),
+                Hash::from_bytes(material),
+                None,
+            ))
+            .map_err(fail)?;
     }
+    store.save_key_registry(&registry)?;
+    Ok(())
+}
+
+/// The lifecycle of the private submission of request 1 on a local
+/// fixture of `adapter` whose actor's subject owner holds `keys`, or its
+/// refusal.
+fn submission_with_keys(
+    adapter: Adapter,
+    keys: &[(KeyRoleV1, std::ops::RangeInclusive<u64>)],
+) -> TestResult<Result<ErasureLifecycleV1, LocalErasureSubmitErrorV1>> {
+    let (mut fixture, ()) = Fixture::local(adapter, &GrantShape::standard(), 4_096, |store| {
+        for (role, epochs) in keys {
+            register_subject_owner_keys_on(store, *role, epochs.clone())?;
+        }
+        Ok(())
+    })?;
+    Ok(fixture
+        .host
+        .command_sender()?
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map(|admitted| admitted.state.lifecycle()))
 }
 
 #[test]
 fn the_key_and_backup_bound_is_exact_at_submit() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    rejected(&store, &[1])?;
     // No owned Timeline: the store target and one key target per role-0
     // key, each with a Key and a Backup cell. 4,095 keys fill the 4,096
-    // targets.
-    store.register_subject_keys(1..=4_095)?;
-    {
-        let mut host = store.host(&local_case()?, 4_096)?;
-        let mut sender = host.command_sender()?;
+    // targets; a 4,096th key is a 4,097th target, and 4,097 identities are
+    // also over the key list's own bound.
+    let role_0 = KeyRoleV1::SubjectDataEncryption;
+    for adapter in ADAPTERS {
         assert_eq!(
-            sender
-                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
-                .map_err(fail)?
-                .state
-                .lifecycle(),
-            ErasureLifecycleV1::Submitted
+            submission_with_keys(adapter, &[(role_0, 1..=4_095)])?,
+            Ok(ErasureLifecycleV1::Submitted)
         );
-        sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+        for last in [4_096, 4_097] {
+            assert_eq!(
+                submission_with_keys(adapter, &[(role_0, 1..=last)])?,
+                Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
+            );
+        }
     }
-    // A 4,096th key is a 4,097th target.
-    store.register_subject_keys(4_096..=4_096)?;
-    let over = |store: &LocalStore, key| -> TestResult {
-        let mut host = store.host(&local_case()?, 4_096)?;
-        assert_eq!(
-            host.command_sender()?
-                .submit_local_erasure(&submission(key, ErasureScopeV1::PrivateSubjectData)?)
-                .map(drop),
-            Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
-        );
-        Ok(())
-    };
-    over(&store, 2)?;
-    // 4,097 identities are over the key list's own bound.
-    store.register_subject_keys(4_097..=4_097)?;
-    over(&store, 3)
+    Ok(())
 }
 
 #[test]
 fn the_key_list_is_bounded_on_its_own() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    rejected(&store, &[1])?;
     // One role-0 key and 4,095 role-7 keys of the subject owner: 4,096
-    // identities, a closure of two targets.
-    store.register_subject_keys(1..=1)?;
-    store.register_subject_owner_keys(KeyRoleV1::CommunityArtifactEncryption, 1..=4_095)?;
-    {
-        let mut host = store.host(&local_case()?, 4_096)?;
-        let mut sender = host.command_sender()?;
+    // identities, a closure of two targets. A 4,097th identity is over the
+    // list's bound, though the closure would still hold two targets.
+    let role_0 = (KeyRoleV1::SubjectDataEncryption, 1..=1);
+    let role_7 = KeyRoleV1::CommunityArtifactEncryption;
+    for adapter in ADAPTERS {
         assert_eq!(
-            sender
-                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
-                .map_err(fail)?
-                .state
-                .lifecycle(),
-            ErasureLifecycleV1::Submitted
+            submission_with_keys(adapter, &[role_0.clone(), (role_7, 1..=4_095)])?,
+            Ok(ErasureLifecycleV1::Submitted)
         );
-        sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+        assert_eq!(
+            submission_with_keys(adapter, &[role_0.clone(), (role_7, 1..=4_096)])?,
+            Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
+        );
     }
-    // A 4,097th identity is over the list's bound, though the closure would
-    // still hold two targets.
-    store.register_subject_owner_keys(KeyRoleV1::CommunityArtifactEncryption, 4_096..=4_096)?;
-    let mut host = store.host(&local_case()?, 4_096)?;
-    assert_eq!(
-        host.command_sender()?
-            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
-            .map(drop),
-        Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
-    );
     Ok(())
 }
 
@@ -6258,18 +6295,18 @@ fn the_outbox_replays_only_unacknowledged_commands() -> TestResult {
 /// chain head.
 fn memory_store(retained: &[Vec<u8>]) -> TestResult<(MemoryStore, u64)> {
     let mut store = MemoryStore::new();
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    store.init_erasure_store_identity(Hash::from_bytes(STORE_IDENTITY))?;
-    register_signer(&mut store, &erasure_signer(), 1)?;
-    let grant = GrantShape::standard().root_grant()?;
-    let authority = bound_authority_host(&mut store, &[&grant])?;
-    let permit = authority.authorize_grant(&grant).map_err(fail)?;
-    store.issue_capability_grant(permit, &grant).map_err(fail)?;
-    let head = store
-        .load_authority(grant_id())
-        .map_err(fail)?
-        .head_position()
-        .as_u64();
+    let head = provisioned(&mut store, &GrantShape::standard(), &[])?;
+    driver_content(&mut store)?;
+    for object in retained {
+        store.retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
+    }
+    Ok((store, head))
+}
+
+/// The content of the driver fixture, at fixed identities: the actor's
+/// owned root Timeline, the Erasure Host Timeline and the actor's role-0
+/// subject key.
+fn driver_content(store: &mut (impl EventStore + ?Sized)) -> TestResult {
     store.create_timeline_with_meta(TimelineMeta {
         id: memory_owned_timeline(),
         ..TimelineMeta::root_owned("owned-0", actor())
@@ -6284,10 +6321,7 @@ fn memory_store(retained: &[Vec<u8>]) -> TestResult<(MemoryStore, u64)> {
         ))
         .map_err(fail)?;
     store.save_key_registry(&registry)?;
-    for object in retained {
-        store.retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
-    }
-    Ok((store, head))
+    Ok(())
 }
 
 /// A Memory host over `store` composed under `case`.
@@ -6929,19 +6963,7 @@ fn driver_case() -> TestResult<Case> {
 /// the derived Erasure Host Timeline and the actor's role-0 subject key.
 fn driver_store() -> TestResult<LocalStore> {
     let store = LocalStore::new(&GrantShape::standard())?;
-    {
-        let mut sqlite = store.sqlite()?;
-        sqlite.create_timeline_with_meta(TimelineMeta {
-            id: memory_owned_timeline(),
-            ..TimelineMeta::root_owned("owned-0", actor())
-        })?;
-        sqlite.create_timeline_with_meta(host_timeline_meta()?)?;
-    }
-    store.register(KeyRegistrationV1::new(
-        subject_key(1)?,
-        Hash::from_bytes([0x81; 32]),
-        None,
-    ))?;
+    driver_content(&mut store.sqlite()?)?;
     Ok(store)
 }
 
@@ -6949,6 +6971,187 @@ fn driver_store() -> TestResult<LocalStore> {
 fn driver_memory_host(case: &Case) -> TestResult<ErasureExecutionHostV1> {
     let (store, _) = memory_store(&[])?;
     memory_host(store, case)
+}
+
+/// A store a fixture seeds before its host opens over it.
+trait SeedStore: EventStore + ErasureInventoryPersistencePortV1 {}
+
+impl<T: EventStore + ErasureInventoryPersistencePortV1> SeedStore for T {}
+
+/// The store adapter a test runs over.
+#[derive(Clone, Copy, Debug)]
+enum Adapter {
+    Memory,
+    Sqlite,
+}
+
+/// Both adapters, Memory first.
+///
+/// A test runs over both unless its doc names why it cannot: the Q16
+/// replica row, a `SQLite` close and reopen, the recipient-export catalog,
+/// or a write into the store behind its host.
+const ADAPTERS: [Adapter; 2] = [Adapter::Memory, Adapter::Sqlite];
+
+/// One host over a provisioned store on either adapter.
+struct Fixture {
+    host: ErasureExecutionHostV1,
+    /// The `SQLite` store, which outlives its host and reopens it; `None`
+    /// on Memory, whose store the host owns.
+    sqlite: Option<LocalStore>,
+    case: Case,
+    maximum_requests: usize,
+    /// The root-grant chain head every ERAZ1 binds.
+    head: u64,
+}
+
+impl Fixture {
+    /// The store of `shape` on `adapter`, after `seed` ran on it, under a
+    /// host composed of `case` with `maximum_requests` request heads.
+    fn open<T>(
+        adapter: Adapter,
+        shape: &GrantShape,
+        (case, maximum_requests): (Case, usize),
+        seed: impl FnOnce(&mut dyn SeedStore) -> TestResult<T>,
+    ) -> TestResult<(Self, T)> {
+        let (host, sqlite, head, seeded) = match adapter {
+            Adapter::Memory => {
+                let mut store = MemoryStore::new();
+                let head = provisioned(&mut store, shape, &[])?;
+                let seeded = seed(&mut store)?;
+                let composition = case.compose(&mut store).map_err(fail)?;
+                let host = ErasureExecutionHostV1::recover_memory_fixture_with_authority(
+                    store,
+                    &composition,
+                    ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?,
+                )?;
+                (host, None, head, seeded)
+            }
+            Adapter::Sqlite => {
+                let store = LocalStore::new(shape)?;
+                let seeded = seed(&mut store.sqlite()?)?;
+                let host = store.host(&case, maximum_requests)?;
+                let head = store.head;
+                (host, Some(store), head, seeded)
+            }
+        };
+        let fixture = Self {
+            host,
+            sqlite,
+            case,
+            maximum_requests,
+            head,
+        };
+        Ok((fixture, seeded))
+    }
+
+    /// The store of `shape` under the bundle without owners and
+    /// `maximum_requests` request heads, after `seed`.
+    fn local<T>(
+        adapter: Adapter,
+        shape: &GrantShape,
+        maximum_requests: usize,
+        seed: impl FnOnce(&mut dyn SeedStore) -> TestResult<T>,
+    ) -> TestResult<(Self, T)> {
+        Self::open(adapter, shape, (local_case()?, maximum_requests), seed)
+    }
+
+    /// The driver fixture on `adapter`: the driver content and then `seed`,
+    /// under the bundle naming every owner.
+    fn new<T>(
+        adapter: Adapter,
+        seed: impl FnOnce(&mut dyn SeedStore) -> TestResult<T>,
+    ) -> TestResult<(Self, T)> {
+        Self::open(
+            adapter,
+            &GrantShape::standard(),
+            (driver_case()?, 4_096),
+            |store| {
+                driver_content(&mut *store)?;
+                seed(store)
+            },
+        )
+    }
+
+    /// The driver fixture on `adapter`, unseeded.
+    fn plain(adapter: Adapter) -> TestResult<Self> {
+        Ok(Self::new(adapter, |_| Ok(()))?.0)
+    }
+
+    /// The fixture after a restart: a `SQLite` host is closed and recovered
+    /// from its store.
+    ///
+    /// A Memory store lives only inside its host, so it has no close and
+    /// reopen and keeps its host.
+    fn restarted(self) -> TestResult<Self> {
+        let Self {
+            host,
+            sqlite,
+            case,
+            maximum_requests,
+            head,
+        } = self;
+        let host = match &sqlite {
+            Some(store) => {
+                drop(host);
+                store.host(&case, maximum_requests)?
+            }
+            None => host,
+        };
+        Ok(Self {
+            host,
+            sqlite,
+            case,
+            maximum_requests,
+            head,
+        })
+    }
+}
+
+/// The driver fixture on `adapter` with request 1 submitted for private
+/// subject data and driven on its host until `until`; and the steps.
+fn driven_fixture(
+    adapter: Adapter,
+    until: impl Fn(&LocalErasureStepV1) -> bool,
+) -> TestResult<(Fixture, Vec<LocalErasureStepV1>)> {
+    let mut fixture = Fixture::plain(adapter)?;
+    submitted(&mut fixture.host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let steps = driven_steps(&mut fixture.host, until)?;
+    Ok((fixture, steps))
+}
+
+/// The host of [`driven_fixture`], with the `SQLite` store it needs kept
+/// alive, and the steps.
+fn driven_host(
+    adapter: Adapter,
+    until: impl Fn(&LocalErasureStepV1) -> bool,
+) -> TestResult<(
+    ErasureExecutionHostV1,
+    Option<LocalStore>,
+    Vec<LocalErasureStepV1>,
+)> {
+    let (fixture, steps) = driven_fixture(adapter, until)?;
+    Ok((fixture.host, fixture.sqlite, steps))
+}
+
+/// Drive request 1 of the driver fixture on `adapter` for private subject
+/// data on one host, and return its receipt and ERS1 history.
+fn straight_fixture_run(
+    adapter: Adapter,
+) -> TestResult<(ErasureReceiptV1, Vec<ErasureReferenceV1>)> {
+    let request = request_of(1)?;
+    let mut fixture = Fixture::plain(adapter)?;
+    submitted(&mut fixture.host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let receipt = finalized(driver().drive(&mut fixture.host, request)?)?;
+    Ok((receipt, history(&mut fixture.host, request)?))
+}
+
+/// Retain the ELREJ1 of each request of `keys` on `store`.
+fn retain_rejections(store: &mut dyn SeedStore, keys: &[u8]) -> TestResult {
+    for key in keys {
+        let record = rejection(*key)?.to_canonical_cbor()?;
+        store.retain_erasure_object(&record, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
+    }
+    Ok(())
 }
 
 /// Submit request `key` for `scope` on `host`.
@@ -7427,34 +7630,36 @@ fn driven_until(
 /// with the key the registry holds for its identity.
 #[test]
 fn the_signer_signs_a_freeze_only_of_an_authorized_request_and_its_body() -> TestResult {
-    let request = request_of(1)?;
-    let signer = signer_of(erasure_signer(), 1);
-    let fabricated = reference(0x77);
-    let refused = Err(ErasureHostErrorV1::AuthorizationDenied);
-    // Authorized, not yet frozen: only the body the snapshot admits signs.
-    let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
-    let mut host = store.host(&driver_case()?, 4_096)?;
-    let freeze_of = |body| LocalErasureSigningRequestV1::FreezeAuthorization { request, body };
-    assert_eq!(signer.sign(&mut host, freeze_of(fabricated)), refused);
-    let LocalFreezePreparationV1::Sign(body) =
-        host.command_sender()?.prepare_local_freeze(request)?
-    else {
-        return Err("the freeze commits a rejection".into());
-    };
-    assert!(signer.sign(&mut host, freeze_of(body)).is_ok());
-    // A signer whose key the registry does not hold for its identity
-    // signs nothing.
-    assert_eq!(
-        signer_of(rotated_signer(), 1).sign(&mut host, freeze_of(body)),
-        refused
-    );
-    // Once frozen, the request is no longer authorized: even its own body
-    // signs no second freeze.
-    assert_eq!(
-        driver().step(&mut host, request)?,
-        LocalErasureStepV1::Frozen
-    );
-    assert_eq!(signer.sign(&mut host, freeze_of(body)), refused);
+    for adapter in ADAPTERS {
+        let request = request_of(1)?;
+        let signer = signer_of(erasure_signer(), 1);
+        let fabricated = reference(0x77);
+        let refused = Err(ErasureHostErrorV1::AuthorizationDenied);
+        // Authorized, not yet frozen: only the body the snapshot admits signs.
+        let (mut host, _store, _) =
+            driven_host(adapter, |step| *step == LocalErasureStepV1::Authorized)?;
+        let freeze_of = |body| LocalErasureSigningRequestV1::FreezeAuthorization { request, body };
+        assert_eq!(signer.sign(&mut host, freeze_of(fabricated)), refused);
+        let LocalFreezePreparationV1::Sign(body) =
+            host.command_sender()?.prepare_local_freeze(request)?
+        else {
+            return Err("the freeze commits a rejection".into());
+        };
+        assert!(signer.sign(&mut host, freeze_of(body)).is_ok());
+        // A signer whose key the registry does not hold for its identity
+        // signs nothing.
+        assert_eq!(
+            signer_of(rotated_signer(), 1).sign(&mut host, freeze_of(body)),
+            refused
+        );
+        // Once frozen, the request is no longer authorized: even its own body
+        // signs no second freeze.
+        assert_eq!(
+            driver().step(&mut host, request)?,
+            LocalErasureStepV1::Frozen
+        );
+        assert_eq!(signer.sign(&mut host, freeze_of(body)), refused);
+    }
     Ok(())
 }
 
@@ -7558,34 +7763,36 @@ fn the_signer_signs_an_owner_result_only_over_its_class_committed_effect() -> Te
 /// signs, and an owner result of a closed attempt is not dispatched.
 #[test]
 fn the_signer_signs_only_the_committed_receipt_body() -> TestResult {
-    let request = request_of(1)?;
-    let signer = signer_of(erasure_signer(), 1);
-    let fabricated = reference(0x77);
-    let refused = Err(ErasureHostErrorV1::AuthorizationDenied);
-    let owner_result = |owner_result| LocalErasureSigningRequestV1::OwnerResult { owner_result };
-    // Every command acknowledged: only the ERCB1 of the committed record
-    // signs.
-    let (store, steps) = driven_until(|step| {
-        matches!(step, LocalErasureStepV1::Acknowledged(result)
-            if result.command().destruction.category == ErasureInventoryCategoryV1::Replica)
-    })?;
-    assert_eq!(steps.len(), 8);
-    let LocalErasureStepV1::Acknowledged(replica) = &steps[7] else {
-        return Err("no replica acknowledgement".into());
-    };
-    let mut host = store.host(&driver_case()?, 4_096)?;
-    let receipt_of = |body| LocalErasureSigningRequestV1::ReceiptBody { request, body };
-    assert_eq!(signer.sign(&mut host, receipt_of(fabricated)), refused);
-    // An owner result of the closed attempt is no longer dispatched.
-    let finalized_receipt = finalized(driver().step(&mut host, request)?)?;
-    assert_eq!(
-        signer.sign(&mut host, owner_result(replica.owner_result())),
-        Err(ErasureHostErrorV1::Conflict)
-    );
-    assert_eq!(
-        finalized_receipt.lifecycle(),
-        ErasureLifecycleV1::PartialFailure
-    );
+    for adapter in ADAPTERS {
+        let request = request_of(1)?;
+        let signer = signer_of(erasure_signer(), 1);
+        let fabricated = reference(0x77);
+        let refused = Err(ErasureHostErrorV1::AuthorizationDenied);
+        let owner_result =
+            |owner_result| LocalErasureSigningRequestV1::OwnerResult { owner_result };
+        // Every command acknowledged: only the ERCB1 of the committed record
+        // signs.
+        let (mut host, _store, steps) = driven_host(adapter, |step| {
+            matches!(step, LocalErasureStepV1::Acknowledged(result)
+                if result.command().destruction.category == ErasureInventoryCategoryV1::Replica)
+        })?;
+        assert_eq!(steps.len(), 8);
+        let LocalErasureStepV1::Acknowledged(replica) = &steps[7] else {
+            return Err("no replica acknowledgement".into());
+        };
+        let receipt_of = |body| LocalErasureSigningRequestV1::ReceiptBody { request, body };
+        assert_eq!(signer.sign(&mut host, receipt_of(fabricated)), refused);
+        // An owner result of the closed attempt is no longer dispatched.
+        let finalized_receipt = finalized(driver().step(&mut host, request)?)?;
+        assert_eq!(
+            signer.sign(&mut host, owner_result(replica.owner_result())),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert_eq!(
+            finalized_receipt.lifecycle(),
+            ErasureLifecycleV1::PartialFailure
+        );
+    }
     Ok(())
 }
 
@@ -7594,23 +7801,25 @@ fn the_signer_signs_only_the_committed_receipt_body() -> TestResult {
 /// defers the step, committing nothing.
 #[test]
 fn a_refused_signature_defers_the_step() -> TestResult {
-    let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
-    let mut host = store.host(&driver_case()?, 4_096)?;
-    let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
-    assert_eq!(
-        foreign.drive(&mut host, request_of(1)?),
-        Err(ErasureHostErrorV1::AuthorizationDenied)
-    );
-    assert_eq!(foreign.run(&mut host)?, 1);
-    assert_eq!(
-        lifecycle(&mut host, request_of(1)?)?,
-        ErasureLifecycleV1::Authorized
-    );
-    // The deployment's own signer then freezes it.
-    assert_eq!(
-        driver().step(&mut host, request_of(1)?)?,
-        LocalErasureStepV1::Frozen
-    );
+    for adapter in ADAPTERS {
+        let (mut host, _store, _) =
+            driven_host(adapter, |step| *step == LocalErasureStepV1::Authorized)?;
+        let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
+        assert_eq!(
+            foreign.drive(&mut host, request_of(1)?),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(foreign.run(&mut host)?, 1);
+        assert_eq!(
+            lifecycle(&mut host, request_of(1)?)?,
+            ErasureLifecycleV1::Authorized
+        );
+        // The deployment's own signer then freezes it.
+        assert_eq!(
+            driver().step(&mut host, request_of(1)?)?,
+            LocalErasureStepV1::Frozen
+        );
+    }
     Ok(())
 }
 
@@ -7618,31 +7827,36 @@ fn a_refused_signature_defers_the_step() -> TestResult {
 /// and answers `Idle` once nothing is due (owner decision D7 on #1413).
 #[test]
 fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
-    let (receipt, states) = straight_run(&driver_store()?)?;
-    let store = driver_store()?;
-    let mut host = store.host(&driver_case()?, 4_096)?;
-    assert_eq!(
-        driver().advance(&mut host)?,
-        LocalErasureAdvanceV1 {
-            step: LocalErasureStepV1::Idle,
-            deferred: Vec::new()
+    for adapter in ADAPTERS {
+        let (receipt, states) = straight_fixture_run(adapter)?;
+        let Fixture {
+            mut host,
+            sqlite: _store,
+            ..
+        } = Fixture::plain(adapter)?;
+        assert_eq!(
+            driver().advance(&mut host)?,
+            LocalErasureAdvanceV1 {
+                step: LocalErasureStepV1::Idle,
+                deferred: Vec::new()
+            }
+        );
+        submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+        let mut steps = Vec::new();
+        loop {
+            let advanced = driver().advance(&mut host)?;
+            assert!(advanced.deferred.is_empty());
+            match advanced.step {
+                LocalErasureStepV1::Idle => break,
+                step => steps.push(step),
+            }
         }
-    );
-    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
-    let mut steps = Vec::new();
-    loop {
-        let advanced = driver().advance(&mut host)?;
-        assert!(advanced.deferred.is_empty());
-        match advanced.step {
-            LocalErasureStepV1::Idle => break,
-            step => steps.push(step),
-        }
+        assert_eq!(steps[0], LocalErasureStepV1::Authorized);
+        assert_eq!(steps[1], LocalErasureStepV1::Frozen);
+        let advanced = finalized(steps.last().cloned().ok_or("no step")?)?;
+        assert_eq!(advanced.to_canonical_cbor()?, receipt.to_canonical_cbor()?);
+        assert_eq!(history(&mut host, request_of(1)?)?, states);
     }
-    assert_eq!(steps[0], LocalErasureStepV1::Authorized);
-    assert_eq!(steps[1], LocalErasureStepV1::Frozen);
-    let advanced = finalized(steps.last().cloned().ok_or("no step")?)?;
-    assert_eq!(advanced.to_canonical_cbor()?, receipt.to_canonical_cbor()?);
-    assert_eq!(history(&mut host, request_of(1)?)?, states);
     Ok(())
 }
 
@@ -7650,27 +7864,29 @@ fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
 /// for it; a later call with the deployment's signer resumes it.
 #[test]
 fn advance_passes_over_a_request_it_cannot_step() -> TestResult {
-    let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
-    let mut host = store.host(&driver_case()?, 4_096)?;
-    let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
-    assert_eq!(
-        foreign.advance(&mut host)?,
-        LocalErasureAdvanceV1 {
-            step: LocalErasureStepV1::Idle,
-            deferred: vec![request_of(1)?]
-        }
-    );
-    assert_eq!(
-        lifecycle(&mut host, request_of(1)?)?,
-        ErasureLifecycleV1::Authorized
-    );
-    assert_eq!(
-        driver().advance(&mut host)?,
-        LocalErasureAdvanceV1 {
-            step: LocalErasureStepV1::Frozen,
-            deferred: Vec::new()
-        }
-    );
+    for adapter in ADAPTERS {
+        let (mut host, _store, _) =
+            driven_host(adapter, |step| *step == LocalErasureStepV1::Authorized)?;
+        let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
+        assert_eq!(
+            foreign.advance(&mut host)?,
+            LocalErasureAdvanceV1 {
+                step: LocalErasureStepV1::Idle,
+                deferred: vec![request_of(1)?]
+            }
+        );
+        assert_eq!(
+            lifecycle(&mut host, request_of(1)?)?,
+            ErasureLifecycleV1::Authorized
+        );
+        assert_eq!(
+            driver().advance(&mut host)?,
+            LocalErasureAdvanceV1 {
+                step: LocalErasureStepV1::Frozen,
+                deferred: Vec::new()
+            }
+        );
+    }
     Ok(())
 }
 
@@ -8214,21 +8430,23 @@ fn the_projection_never_tells_an_unknown_id_from_another_subjects() -> TestResul
     let mut shape = GrantShape::standard();
     shape.actors = vec![actor(), other_actor()];
     shape.actors.sort_unstable();
-    let store = LocalStore::new(&shape)?;
-    let mut host = store.host(&local_case()?, 4_096)?;
-    assert_eq!(projection(&mut host, actor(), 1)?, None);
-    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
-    assert!(projection(&mut host, actor(), 1)?.is_some());
-    assert_eq!(projection(&mut host, actor(), 2)?, None);
-    // The other actor names the same `erasure_id`: another subject.
-    assert_eq!(
-        host.command_sender()?.local_erasure_projection(
-            &principal()?,
-            other_actor(),
-            erasure_id_of(1)?
-        )?,
-        None
-    );
+    for adapter in ADAPTERS {
+        let (mut fixture, ()) = Fixture::local(adapter, &shape, 4_096, |_| Ok(()))?;
+        let host = &mut fixture.host;
+        assert_eq!(projection(host, actor(), 1)?, None);
+        submitted(host, 1, ErasureScopeV1::PrivateSubjectData)?;
+        assert!(projection(host, actor(), 1)?.is_some());
+        assert_eq!(projection(host, actor(), 2)?, None);
+        // The other actor names the same `erasure_id`: another subject.
+        assert_eq!(
+            host.command_sender()?.local_erasure_projection(
+                &principal()?,
+                other_actor(),
+                erasure_id_of(1)?
+            )?,
+            None
+        );
+    }
     Ok(())
 }
 
