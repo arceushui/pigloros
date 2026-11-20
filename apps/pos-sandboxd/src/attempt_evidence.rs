@@ -19,7 +19,9 @@
 
 use std::fs::File;
 
-use pos_reference::sandbox_provider_protocol::{ExecutionRelease, KernelObservationEvidence};
+use pos_reference::sandbox_provider_protocol::{
+    BarrierFailure, ExecutionRelease, KernelObservationEvidence,
+};
 
 use crate::{
     AttemptCgroupError, AttemptLimitEventSnapshot, EffectiveCgroupLimits, KernelObservation,
@@ -74,6 +76,7 @@ pub struct ReleaseOutcome {
     ready1_digest: Option<[u8; 32]>,
     observed: Option<(ObservedUnit, KernelObservationEvidence)>,
     release: Option<ExecutionRelease>,
+    failure: Option<BarrierFailure>,
 }
 
 impl ReleaseOutcome {
@@ -86,7 +89,22 @@ impl ReleaseOutcome {
             ready1_digest,
             observed,
             release,
+            failure: None,
         }
+    }
+
+    /// This outcome, refused for `failure`.
+    #[must_use]
+    pub(crate) const fn refused(mut self, failure: Option<BarrierFailure>) -> Self {
+        self.failure = failure;
+        self
+    }
+
+    /// TME1 `barrier-failure`: why the barrier refused the release, when it
+    /// names one (ADR-069 R9 §4.6.1).
+    #[must_use]
+    pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
+        self.failure
     }
 
     /// The digest of the accepted `ReadyV1`; `None` when none was accepted.
@@ -131,7 +149,7 @@ impl ReleaseOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalServiceError {
     /// The execution failed before a verified start reached the lifecycle,
-    /// or no kernel observation recorded the attempt's `InvocationID`, so no
+    /// or no `InvocationID` was recorded when its cgroup was bound, so no
     /// exact unit invocation is known to read.
     #[error("no verified start is known for the unit")]
     Unstarted,
@@ -203,16 +221,29 @@ pub struct ResourceEvidence(Box<Phases>);
 struct Phases {
     resources: Option<ReleaseResources>,
     release: ReleaseOutcome,
+    unit: Option<BoundUnit>,
     terminal: Option<TerminalResources>,
 }
+
+/// The unit whose cgroup was bound: its `InvocationID` and the cgroup
+/// directory's `st_dev` and inode (TME1 `unit`, ADR-069 R9 §4.6.3).
+pub type BoundUnit = ([u8; 16], (u64, u64));
 
 impl ResourceEvidence {
     pub(crate) fn new(resources: Option<ReleaseResources>, release: ReleaseOutcome) -> Self {
         Self(Box::new(Phases {
             resources,
             release,
+            unit: None,
             terminal: None,
         }))
+    }
+
+    /// The unit whose cgroup the execution bound; `None` when none was
+    /// bound.
+    #[must_use]
+    pub const fn unit(&self) -> Option<BoundUnit> {
+        self.0.unit
     }
 
     /// The pre-release evidence; `None` when the execution failed before it
@@ -235,10 +266,12 @@ impl ResourceEvidence {
         self.0.terminal.as_ref()
     }
 
-    /// Record the terminal evidence before teardown. It is read once: a
-    /// later record is dropped and never replaces the first.
-    pub(crate) fn conclude(&mut self, terminal: TerminalResources) {
+    /// Record the bound `unit` and the terminal evidence before teardown.
+    /// They are read once: a later record is dropped and never replaces the
+    /// first.
+    pub(crate) fn conclude(&mut self, unit: Option<BoundUnit>, terminal: TerminalResources) {
         if self.0.terminal.is_none() {
+            self.0.unit = unit;
             self.0.terminal = Some(terminal);
         }
     }

@@ -87,6 +87,21 @@ impl DeviceNumber {
     pub const fn minor(self) -> u32 {
         self.minor
     }
+
+    /// The R9 `cgroup-identity` of a cgroup directory's `st_dev` and inode
+    /// (ADR-069 R9 §4.1: a device is always `[major, minor]`); `None` for a
+    /// device outside the kernel's bounds.
+    pub(crate) fn cgroup_evidence(
+        (device, inode): (u64, u64),
+    ) -> Option<pos_reference::sandbox_provider_protocol::CgroupIdentity> {
+        Self::new(major(device), minor(device)).map(|device| {
+            pos_reference::sandbox_provider_protocol::CgroupIdentity {
+                major: device.major,
+                minor: device.minor,
+                inode,
+            }
+        })
+    }
 }
 
 /// A device and inode: the identity of a cgroup directory or a namespace.
@@ -299,6 +314,19 @@ pub struct WorkUsage {
 }
 
 impl WorkUsage {
+    /// `/work` as mount `mount_id` of `capacity_bytes` with
+    /// `available_bytes` free, for the terminal records' tests.
+    #[cfg(test)]
+    pub(crate) const fn for_test(mount_id: u64, capacity_bytes: u64, available_bytes: u64) -> Self {
+        Self {
+            mount: WorkMount {
+                mount_id,
+                capacity_bytes,
+            },
+            available_bytes,
+        }
+    }
+
     /// Observe the retained `/work` handle again, before teardown.
     ///
     /// # Errors
@@ -463,6 +491,18 @@ impl KernelObservation {
             crate::test_fixtures::RQE1_DIGEST,
             self,
         )
+    }
+
+    /// The same observation with the `/work` mount `mount_id` of
+    /// `capacity_bytes`.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) const fn with_work_for_test(mut self, mount_id: u64, capacity_bytes: u64) -> Self {
+        self.work = Some(WorkMount {
+            mount_id,
+            capacity_bytes,
+        });
+        self
     }
 
     /// The same observation of another `MainPID`.

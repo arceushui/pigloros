@@ -21,6 +21,7 @@ use crate::{
     TransientUnitRequest, TransientUnitRequestError,
 };
 use crate::{SystemdDynamicPropertyKind, SystemdOperatingLimitProperty};
+use pos_reference::sandbox_provider_protocol::{LaunchFailure, StartJobResult};
 
 const START_JOB_MODE: &str = "fail";
 // A stop must displace a conflicting queued start job for the same attempt unit.
@@ -149,6 +150,18 @@ pub enum SystemdJobFailure {
 }
 
 impl SystemdJobFailure {
+    /// TME1 `start-job-result`; `None` for a result R9 does not name.
+    const fn start_job_result(&self) -> Option<StartJobResult> {
+        match self {
+            Self::Canceled => Some(StartJobResult::Canceled),
+            Self::Timeout => Some(StartJobResult::Timeout),
+            Self::Failed => Some(StartJobResult::Failed),
+            Self::Dependency => Some(StartJobResult::Dependency),
+            Self::Skipped => Some(StartJobResult::Skipped),
+            Self::Unknown(_) => None,
+        }
+    }
+
     fn from_result(result: String) -> Option<Self> {
         match result.as_str() {
             "done" => None,
@@ -419,7 +432,50 @@ pub enum SystemdTransientUnitTransportError {
     },
     /// The complete typed property readback differed from the compiled request.
     #[error("systemd transient-unit requested-state verification failed")]
-    Readback(#[source] TransientUnitRequestError),
+    Readback {
+        /// Why the verifier rejected it.
+        #[source]
+        source: TransientUnitRequestError,
+        /// The readback it rejected: RQE1 status 2 (ADR-069 R9 §4.3).
+        readback: Vec<SystemdTransientUnitReadback>,
+    },
+}
+
+impl SystemdTransientUnitTransportError {
+    /// What a failed start observed (ADR-069 R9 §4.3 and §4.6.1).
+    ///
+    /// A failed start job names its result; one that systemd named outside
+    /// R9's closed set names none (owner reading G1, Redmine #443 journal
+    /// 22723). Every error after the job's `JobRemoved` was matched, a unit
+    /// lookup, the service proxy, a property read or the verification, means
+    /// the job was `done`; a rejected readback is kept. Any other error came
+    /// before a result was observed.
+    const fn start_failure(
+        &self,
+    ) -> (
+        Option<StartJobResult>,
+        Option<&[SystemdTransientUnitReadback]>,
+    ) {
+        match self {
+            Self::JobFailed(failure) => (failure.start_job_result(), None),
+            Self::Readback { readback, .. } => {
+                (Some(StartJobResult::Done), Some(readback.as_slice()))
+            }
+            Self::UnitLookup(_) | Self::ServiceProxy(_) | Self::PropertyReadback { .. } => {
+                (Some(StartJobResult::Done), None)
+            }
+            _ => (None, None),
+        }
+    }
+
+    /// TME1 `launch-failure` 2 when systemd refused the unit's pin (ADR-069
+    /// R9 §4.6.7).
+    pub(crate) const fn unit_ref_failure(&self) -> Option<LaunchFailure> {
+        match self {
+            Self::UnitRef(_) => Some(LaunchFailure::UnitRefFailed),
+            _ => None,
+        }
+    }
 }
 
 /// A generated, typed systemd Manager transport over one D-Bus connection.
@@ -553,16 +609,22 @@ impl SystemdTransientUnitTransport {
         root: Result<CgroupRoot, AttemptCgroupError>,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
         let root = root?;
-        self.bind_cgroup_with_root(verified, root).await
+        self.bind_invoked_cgroup(verified, root).await
     }
 
-    async fn bind_cgroup_with_root(
+    /// Bind the verified unit's cgroup and name the invocation it was bound
+    /// for: TME1 `unit` (ADR-069 R9 §4.6.3), whether or not a kernel
+    /// observation follows.
+    async fn bind_invoked_cgroup(
         &self,
         verified: &SystemdVerifiedStart,
         root: CgroupRoot,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
-        self.bind_unit_cgroup(&verified.unit_name, &verified.unit_path, root)
-            .await
+        let bound = self
+            .bind_unit_cgroup(&verified.unit_name, &verified.unit_path, root)
+            .await?;
+        let invocation = self.read_invocation_id(&verified.unit_name).await?;
+        Ok(bound.invoked(invocation))
     }
 
     /// Bind the cgroup of the unit `unit_name` loaded at `unit_path`, checking
@@ -757,6 +819,14 @@ impl crate::UnitHost for SystemdTransientUnitTransport {
         self.clone()
     }
 
+    fn start_failure(error: &SystemdTransientUnitTransportError) -> crate::StartFailure {
+        let (job, readback) = error.start_failure();
+        crate::StartFailure {
+            job,
+            readback: readback.map(<[SystemdTransientUnitReadback]>::to_vec),
+        }
+    }
+
     fn start(
         &self,
         unit_name: TransientServiceUnitName,
@@ -921,9 +991,12 @@ async fn verify_service(
 ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
     let service = service.map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
     let requested_readback = read_requested_properties(&service, request).await?;
-    request
-        .verify_readback(&requested_readback)
-        .map_err(SystemdTransientUnitTransportError::Readback)?;
+    if let Err(source) = request.verify_readback(&requested_readback) {
+        return Err(SystemdTransientUnitTransportError::Readback {
+            source,
+            readback: requested_readback,
+        });
+    }
     let root_image_policy = service.root_image_policy().await.map_err(|source| {
         SystemdTransientUnitTransportError::PropertyReadback {
             property: SystemdManagerReadbackOnlyProperty::RootImagePolicy.name(),

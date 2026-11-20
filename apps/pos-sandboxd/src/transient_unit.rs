@@ -1153,7 +1153,9 @@ impl TransientUnitRequest {
 
 mod evidence;
 
-pub use evidence::{verified_requested_configuration, RequestedConfiguration};
+pub use evidence::{
+    unverified_requested_configuration, verified_requested_configuration, RequestedConfiguration,
+};
 
 #[cfg(test)]
 fn is_normalized_absolute_path(path: &str) -> bool {
