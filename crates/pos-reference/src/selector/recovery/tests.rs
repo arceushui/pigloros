@@ -479,13 +479,11 @@ impl ProviderLifecyclePort for PeerPort {
             .join(format!("{}.sock", hex(&launch.recovery_endpoint_id())));
         let listener = bind_leaf(&leaf)?;
         if reply == Reply::Panic {
-            refuse(&listener);
-            drop(listener);
+            close(listener);
             std::panic::resume_unwind(Box::new("injected unwinding after the peer start"));
         }
         if self.script.peer == Peer::NotListening {
-            refuse(&listener);
-            drop(listener);
+            close(listener);
         } else {
             let behaviour = self.script.peer;
             let clock = Arc::clone(&self.clock);
@@ -543,9 +541,16 @@ fn bind_leaf(leaf: &Path) -> Result<UnixListener, ProviderLifecycleError> {
 /// Stop `listener` accepting before it is dropped. A child process that a
 /// concurrent test spawns inherits the descriptor until its `exec`, which
 /// would keep the leaf listening past the drop and make the host's refused
-/// probe fail; a shut-down listener refuses connections whoever holds it.
+/// probe fail; on Linux a shut-down listener refuses connections whoever
+/// still holds it.
 fn refuse(listener: &UnixListener) {
     let _shut = rustix::net::shutdown(listener, rustix::net::Shutdown::Both);
+}
+
+/// Shut `listener` down, then drop it, so its leaf refuses at once.
+fn close(listener: UnixListener) {
+    refuse(&listener);
+    drop(listener);
 }
 
 /// The peer's one connection: RCC1, RCU1 and client EOF, then the reply
@@ -977,7 +982,7 @@ fn only_the_exact_refusing_leaf_is_removed() -> TestResult {
     std::os::unix::fs::symlink("elsewhere", &leaf)?;
     assert_eq!(host.remove_stale_leaf(endpoint), Err(RecoveryError::Leaf));
     std::fs::remove_file(&leaf)?;
-    drop(UnixListener::bind(&leaf)?);
+    close(UnixListener::bind(&leaf)?);
     std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o644))?;
     assert_eq!(host.remove_stale_leaf(endpoint), Err(RecoveryError::Leaf));
     assert!(leaf.exists());
@@ -987,7 +992,7 @@ fn only_the_exact_refusing_leaf_is_removed() -> TestResult {
     assert_eq!(host.remove_stale_leaf(endpoint), Err(RecoveryError::Leaf));
     assert!(leaf.exists());
     // The exact refusing socket is removed.
-    drop(listening);
+    close(listening);
     host.remove_stale_leaf(endpoint)?;
     assert!(std::fs::symlink_metadata(&leaf).is_err());
     // A recovery directory with another mode refuses every leaf.
@@ -1541,7 +1546,7 @@ fn a_leaf_replaced_after_readiness_or_its_probe_is_refused_and_kept() -> TestRes
     // I8: another inode between readiness and connect. A second hard link
     // keeps the first inode allocated, so the replacement cannot reuse its
     // number (a freed socket inode may be reused at once).
-    drop(first);
+    close(first);
     let kept = operation.recovery.path().join("kept-first-inode");
     std::fs::hard_link(&leaf, &kept)?;
     std::fs::remove_file(&leaf)?;
@@ -1552,7 +1557,7 @@ fn a_leaf_replaced_after_readiness_or_its_probe_is_refused_and_kept() -> TestRes
         Err(RecoveryError::Leaf)
     );
     // A refusing leaf whose (dev, ino) changed since it was probed is kept.
-    drop(second);
+    close(second);
     assert_eq!(
         host.remove_refusing_leaf(&host::leaf_name(endpoint), ready),
         Err(RecoveryError::Leaf)
@@ -1679,7 +1684,7 @@ fn every_crash_row_recovers_from_its_durable_state() -> TestResult {
             .join(format!("{}.sock", hex(&target.endpoint_id())));
         match row {
             Row::Committed => {}
-            Row::PeerLeaf => drop(bind_leaf(&leaf)?),
+            Row::PeerLeaf => close(bind_leaf(&leaf)?),
             Row::FailedExchange => {
                 let (failed, _port) = recover(
                     &operation,
