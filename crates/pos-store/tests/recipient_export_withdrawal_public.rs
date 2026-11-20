@@ -19,9 +19,10 @@ use pos_core::{
     ErasureReplayClaimV1, EventDraft, EventStore, Hash, Kind, LocalErasureOwnerResultV1,
     LocalErasureRecipientExportWithdrawalV1, LocalOwnerEffectV1, LocalOwnerResultBindingV1,
     OwnerIdV1, PreparedLocalOwnerEffectV1, RecipientExportPublicationRowV1,
-    RecipientExportWithdrawalRowV1, RecipientExportWithdrawalStateV1, RecipientKeyDescriptorV1,
-    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, TimelineId,
-    TimelineMeta, ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
+    RecipientExportWithdrawalBindingV1, RecipientExportWithdrawalRowV1,
+    RecipientExportWithdrawalStateV1, RecipientKeyDescriptorV1, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, TimelineId, TimelineMeta,
+    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
 };
 use pos_store::{
     memory::MemoryStore,
@@ -405,11 +406,23 @@ fn t3_withdraws_once_and_every_replay_is_byte_identical() -> TestResult {
     fixture
         .store
         .begin_recipient_export_withdrawal(export_id, &grantee)?;
-    fixture
+    let deleted = fixture
         .store
         .delete_recipient_export_ciphertext(export_id)?;
     // T3, then a crash after T3: the same ELXW1 and ELO1 commit again.
     let record = elxw1(&database, export_id, timeline, 5)?;
+    // The owner step returns exactly the binding the recorded row's ELXW1
+    // carries, and a repeat before T3 returns it again.
+    assert_eq!(
+        deleted,
+        RecipientExportWithdrawalBindingV1::from(
+            &LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor(&record)?
+        )
+    );
+    assert_eq!(
+        fixture.store.delete_recipient_export_ciphertext(export_id),
+        Ok(deleted)
+    );
     let elo1 = fixture
         .store
         .commit_local_owner_effect(prepared(record.clone(), 5)?)?;
@@ -1052,7 +1065,7 @@ fn assert_target_bound(store: &mut impl ErasureInventoryPersistencePortV1) -> Te
 /// unknown export, and the ELO1 and ELXW1 objects retained afterwards.
 type UnknownAnswers = (
     Result<RecipientExportWithdrawalStateV1, ErasureErrorV1>,
-    Result<(), ErasureErrorV1>,
+    Result<RecipientExportWithdrawalBindingV1, ErasureErrorV1>,
     Result<ErasureReferenceV1, ErasureErrorV1>,
     Option<([u8; 16], OwnerIdV1)>,
     usize,
