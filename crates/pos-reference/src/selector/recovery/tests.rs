@@ -576,8 +576,6 @@ fn serve_peer(listener: &UnixListener, behaviour: Peer, clock: &AtomicU64) {
     drop(stream.shutdown(std::net::Shutdown::Write));
 }
 
-/// The digest of the recovery peer's executable: the fixture's provider
-/// binary, for this test process only.
 /// The fixture's previous provider binary.
 const PROVIDER_BINARY: &[u8] = b"exact provider binary";
 
