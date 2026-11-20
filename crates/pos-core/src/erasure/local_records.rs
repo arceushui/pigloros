@@ -8,8 +8,9 @@
 //!
 //! The owner-effect records ELAD1, ELCG1 and ELNEG1 are ADR-136 §4a's; ELRP1,
 //! the positive local-replica purge, is a NEW tag by owner decision Q3 on
-//! #1412. An ELO1 owner result binds exactly one of them, or a key
-//! tombstone's deletion receipt, as its `effect_digest`.
+//! #1412, and ELXW1, the recipient-export withdrawal, is ADR-138's. An ELO1
+//! owner result binds exactly one of them, or a key tombstone's deletion
+//! receipt, as its `effect_digest`.
 
 use ciborium::value::Value;
 
@@ -1461,6 +1462,77 @@ impl LocalRecordV1 for LocalErasureReplicaPurgeV1 {
 }
 
 local_record_api!(LocalErasureReplicaPurgeV1);
+
+/// ELXW1, the durable disposition of one recipient-export withdrawal
+/// (ADR-138 §5).
+///
+/// `["ELXW1", 1, request, command, export_id, timeline_id, grantee_owner,
+/// ciphertext_digest, ciphertext_length, directory_identity,
+/// final_identity]`, at most 1 KiB. It binds the withdrawn publication, its
+/// source Timeline and grantee, the catalog's ciphertext length and digest,
+/// the custody directory's `(device, inode)` and the deleted final object's
+/// `(device, inode, uid)`, each captured before the deletion. A staging
+/// object's identity is never bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalErasureRecipientExportWithdrawalV1 {
+    /// The ERQ1 request.
+    pub request: ErasureReferenceV1,
+    /// The destruction command that first withdrew the publication.
+    pub command: ErasureReferenceV1,
+    /// The 16-byte export identity.
+    pub export_id: [u8; 16],
+    /// The Timeline the export was published from.
+    pub timeline_id: TimelineId,
+    /// The recipient owner of the grantee the export was encrypted for.
+    pub grantee_owner: crate::OwnerIdV1,
+    /// The BLAKE3 digest of the complete stored ciphertext.
+    pub ciphertext_digest: crate::Hash,
+    /// The stored ciphertext length in bytes.
+    pub ciphertext_length: u64,
+    /// The custody directory's big-endian `(device, inode)`.
+    pub directory_identity: [u8; 16],
+    /// The deleted final object's big-endian `(device, inode, uid)`.
+    pub final_identity: [u8; 20],
+}
+
+impl LocalRecordV1 for LocalErasureRecipientExportWithdrawalV1 {
+    const TAG: &'static str = "ELXW1";
+    const MAX_BYTES: usize = KIB;
+
+    fn fields(&self) -> Vec<Value> {
+        vec![
+            digest(self.request),
+            digest(self.command),
+            bytes_value(&self.export_id),
+            bytes_value(&self.timeline_id.inner().to_bytes()),
+            text(self.grantee_owner.as_str()),
+            bytes_value(self.ciphertext_digest.as_bytes()),
+            uint(self.ciphertext_length),
+            bytes_value(&self.directory_identity),
+            bytes_value(&self.final_identity),
+        ]
+    }
+
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, request, command, export_id, timeline, grantee_owner, ciphertext_digest, ciphertext_length, directory_identity, final_identity] =
+            open::<11>(record, Self::TAG)?;
+        Ok(Self {
+            request: bytes32(request)?,
+            command: bytes32(command)?,
+            export_id: fixed(export_id)?,
+            timeline_id: timeline_id(timeline)?,
+            grantee_owner: string(grantee_owner).and_then(|owner| {
+                crate::OwnerIdV1::new(owner).map_err(|_| ErasureErrorV1::InvalidEncoding)
+            })?,
+            ciphertext_digest: fixed(ciphertext_digest).map(crate::Hash::from_bytes)?,
+            ciphertext_length: unsigned(ciphertext_length)?,
+            directory_identity: fixed(directory_identity)?,
+            final_identity: fixed(final_identity)?,
+        })
+    }
+}
+
+local_record_api!(LocalErasureRecipientExportWithdrawalV1);
 
 /// What an ELS1 signature attests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
