@@ -111,6 +111,8 @@ TEST_ONLY_EXCLUSIONS = (
     "src/erasure/tests.rs",
     "src/mode_profile/tests.rs",
     "src/community/memory_domain/tests.rs",
+    # The attempt records' test-only submodules.
+    "src/attempt_records/tests/**",
     # The Windows owner bridge's #[cfg(test)] native harness; its fixtures
     # (for example Fixture::consuming_step) see run-dependent native coverage.
     "src/adapter/native_tests.rs",
