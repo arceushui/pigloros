@@ -2814,20 +2814,25 @@ pub trait ErasureInventoryPersistencePortV1 {
     }
 
     /// Read the complete erasure inventory, the owner and Fork relation of
-    /// every Timeline in its topology, and the erasure store identity in one
-    /// adapter snapshot (ADR-136 §2.5).
+    /// every Timeline in its topology, the erasure store identity and the
+    /// recipient-export withdrawal rows of `export_targets` in one adapter
+    /// snapshot (ADR-136 §2.5, ADR-138 §5).
     ///
     /// The read is evidence for the erasure authority's read view, never a
     /// trust root. Unlike the inventory snapshot it does not rebind the
-    /// adapter's installed inventory generation.
+    /// adapter's installed inventory generation. Only the signer supplies
+    /// `export_targets`, the `ELXR1` targets of the active attempt's
+    /// `export-recipient` obligations; every other caller passes `&[]`.
     ///
     /// # Errors
-    /// Returns a closed adapter, validation or admission error; a Timeline
-    /// row set that does not match the topology is
-    /// [`ErasureErrorV1::ProvenanceMissing`].
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] for more than
+    /// [`ERASURE_MAX_OBLIGATIONS_PER_CATEGORY`] `export_targets`, or a closed
+    /// adapter, validation or admission error; a Timeline row set that does
+    /// not match the topology is [`ErasureErrorV1::ProvenanceMissing`].
     fn erasure_authority_snapshot_with_limits(
         &mut self,
         limits: ErasureRecoveryLimitsV1,
+        export_targets: &[ErasureReferenceV1],
     ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1>;
 
     /// Retain one canonical record in the shared content-addressed erasure
@@ -2859,7 +2864,11 @@ pub trait ErasureInventoryPersistencePortV1 {
     /// [`ErasureErrorV1::KeyDestructionFailed`]: a missing key registry, a
     /// registry refusal, and, on an adapter whose durable state another
     /// connection can change, an inventory changed since the adapter
-    /// installed it. Nothing is committed on error.
+    /// installed it. A recipient-export withdrawal (ADR-138 §5, T3) is
+    /// [`ErasureErrorV1::ProvenanceMissing`] unless its withdrawal row is
+    /// captured, deleted and equal to the ELXW1, or already withdrawn with
+    /// exactly this ELXW1, and [`ErasureErrorV1::ReceiptCommitFailed`] when
+    /// its durable commit is refused. Nothing is committed on error.
     fn commit_local_owner_effect(
         &mut self,
         prepared: PreparedLocalOwnerEffectV1,
@@ -2939,6 +2948,57 @@ pub trait ErasureInventoryPersistencePortV1 {
         timelines: &[TimelineId],
         max: usize,
     ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
+
+    /// Retract one recipient-export publication of `grantee_owner` and
+    /// capture its stored objects (ADR-138 §5, T1).
+    ///
+    /// The first call records the withdrawal row, after which no serving read
+    /// returns the publication and its `export_id` is never reserved again.
+    /// A retracted row whose capture failed is captured again; a captured or
+    /// withdrawn row is returned unchanged.
+    ///
+    /// An adapter with no recipient-export publication path answers
+    /// [`ErasureErrorV1::ProvenanceMissing`] for every `export_id`, exactly
+    /// as an adapter that can publish answers an unknown one.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when neither a catalog
+    /// row nor a withdrawal row of `grantee_owner` names `export_id`, and
+    /// [`ErasureErrorV1::ReceiptCommitFailed`] when the durable commit is
+    /// refused or fails. Nothing is committed on error.
+    fn begin_recipient_export_withdrawal(
+        &mut self,
+        export_id: [u8; 16],
+        grantee_owner: &crate::OwnerIdV1,
+    ) -> Result<RecipientExportWithdrawalStateV1, ErasureErrorV1>;
+
+    /// Delete the captured objects of one retracted publication, sync their
+    /// directory and record the deletion (ADR-138 §5, owner step and T2).
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ArtifactDeletionFailed`] for every refusal
+    /// or failure: no retracted, captured row; no custody bound to the
+    /// captured directory; a captured name now holding another object; or a
+    /// failed unlink, sync or commit.
+    fn delete_recipient_export_ciphertext(
+        &mut self,
+        export_id: [u8; 16],
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Resolve one `ELXR1` target to its publication's export identity and
+    /// grantee owner (ADR-138 §5): first through the withdrawal row with
+    /// that target, else through the catalog rows of `timelines` only.
+    ///
+    /// `Ok(None)` means the target names no publication of `timelines`.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] for a malformed row, or
+    /// a closed persistence error.
+    fn recipient_export_by_target(
+        &mut self,
+        target: ErasureReferenceV1,
+        timelines: &[TimelineId],
+    ) -> Result<Option<([u8; 16], crate::OwnerIdV1)>, ErasureErrorV1>;
 }
 
 /// One visible recipient-export publication: its export identity, its source
@@ -2951,6 +3011,27 @@ pub struct RecipientExportPublicationRowV1 {
     pub timeline: TimelineId,
     /// The recipient owner of the grantee the export was encrypted for.
     pub grantee_owner: crate::OwnerIdV1,
+}
+
+/// The state of one recipient-export withdrawal after its T1 (ADR-138 §1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecipientExportWithdrawalStateV1 {
+    /// The publication is no longer served; its objects are not yet
+    /// recorded as withdrawn.
+    Retracted {
+        /// `0` captured, `1` no custody, `2` final object missing, `3` final
+        /// or staging object unsafe or digest-mismatched.
+        capture_status: u8,
+        /// Whether the captured objects' deletion is committed.
+        objects_deleted: bool,
+    },
+    /// The catalog row is deleted and the disposition is recorded.
+    Withdrawn {
+        /// `CA(ELXW1)`.
+        disposition: ErasureReferenceV1,
+        /// The canonical ELXW1 bytes.
+        elxw1: Vec<u8>,
+    },
 }
 
 /// Adapter capability for the single atomic `ERSE1` and child-Fork commit.
@@ -3958,6 +4039,7 @@ mod local_records;
 pub use authority_snapshot::{
     ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureRetainedObjectV1,
     LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1,
+    RecipientExportWithdrawalBindingV1, RecipientExportWithdrawalRowV1,
     ERASURE_RECORD_TAG_MAX_BYTES_V1, ERASURE_RECORD_TAG_MIN_BYTES_V1,
     ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
     LOCAL_OWNER_RESULT_MAX_BYTES_V1,
@@ -3977,10 +4059,10 @@ pub use local_records::{
     LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
     LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureNegativeResultV1,
     LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
-    LocalErasureRedactionV1, LocalErasureRejectionV1, LocalErasureReplicaPurgeV1,
-    LocalErasureSelectorV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1,
-    LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1,
-    ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    LocalErasureRecipientExportWithdrawalV1, LocalErasureRedactionV1, LocalErasureRejectionV1,
+    LocalErasureReplicaPurgeV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
+    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
+    ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
     LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
 /// The committed ERSC1 and ERSE1 chain of one request, read through its
@@ -7924,6 +8006,7 @@ mod coverage_paths {
         fn erasure_authority_snapshot_with_limits(
             &mut self,
             _limits: ErasureRecoveryLimitsV1,
+            _export_targets: &[ErasureReferenceV1],
         ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
             Err(ErasureErrorV1::ProvenanceMissing)
         }
@@ -7977,6 +8060,29 @@ mod coverage_paths {
             _max: usize,
         ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
             Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn begin_recipient_export_withdrawal(
+            &mut self,
+            _export_id: [u8; 16],
+            _grantee_owner: &crate::OwnerIdV1,
+        ) -> Result<RecipientExportWithdrawalStateV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn delete_recipient_export_ciphertext(
+            &mut self,
+            _export_id: [u8; 16],
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::ArtifactDeletionFailed)
+        }
+
+        fn recipient_export_by_target(
+            &mut self,
+            _target: ErasureReferenceV1,
+            _timelines: &[TimelineId],
+        ) -> Result<Option<([u8; 16], crate::OwnerIdV1)>, ErasureErrorV1> {
+            Ok(None)
         }
     }
 

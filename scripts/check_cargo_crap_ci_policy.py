@@ -106,6 +106,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/scenario_room/tests.rs",
     "src/executor/scenario_room/tests.rs",
     "src/local_erasure_provision/tests.rs",
+    "src/local_erasure_composition/tests.rs",
     "src/mode_profile/tests.rs",
     "src/community/memory_domain/tests.rs",
     # The attempt records' test-only submodules.
