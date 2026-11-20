@@ -109,7 +109,8 @@ def open_as(uid: int, gid: int, path: str, flags: int) -> int:
     """Fork, drop to `uid`/`gid` and open `path` with `flags`.
 
     Returns 0 when the open succeeds, the errno when it fails with an
-    `OSError`, and 255 for any other failure. Only root drops groups.
+    `OSError`, and 255 for any other failure. Root drops every supplementary
+    group, so the result is what `uid`/`gid` alone may open.
     """
     # Flush first so the child does not repeat the parent's buffered lines.
     sys.stdout.flush()
@@ -126,10 +127,11 @@ def open_as(uid: int, gid: int, path: str, flags: int) -> int:
                 os.close(os.open(path, flags | os.O_NONBLOCK | os.O_CLOEXEC))
                 code = 0
             except OSError as error:
+                # `OSError.errno` may be None; keep the 255 failure sentinel.
                 code = error.errno or 255
-            except BaseException:  # the child must never return into main
-                code = 255
         finally:
+            # Any other exception still ends here: the child never returns
+            # into main.
             os._exit(code)
     return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
 
@@ -164,6 +166,9 @@ def show_access(path: str) -> None:
 def main() -> int:
     if os.geteuid() != 0:
         print("UG1 must run as root through sudo", file=sys.stderr)
+        return 2
+    if "SUDO_UID" not in os.environ or "SUDO_GID" not in os.environ:
+        print("UG1 must run through sudo so SUDO_UID and SUDO_GID name the runner", file=sys.stderr)
         return 2
     uid = int(os.environ["SUDO_UID"])
     gid = int(os.environ["SUDO_GID"])
