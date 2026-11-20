@@ -42,8 +42,13 @@ pub struct CredentialDirectoryV1 {
 }
 
 /// The flags a credential directory opens with: a path descriptor that
-/// never follows a symlink and closes on exec.
-const DIRECTORY_OPEN_FLAGS: i32 = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+/// never follows a symlink and closes on exec. Built with `union`, so no
+/// equivalent `|` to `^` mutant exists for disjoint flag bits.
+const DIRECTORY_OPEN_FLAGS: i32 = OFlags::PATH
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC)
+    .bits()
+    .cast_signed();
 
 impl CredentialDirectoryV1 {
     /// Open the credential directory `directory` (never a symlink) owned by
@@ -169,7 +174,9 @@ fn sorted_credential_names(directory: &File) -> Result<Vec<String>, CredentialEr
     openat(
         directory,
         ".",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        OFlags::RDONLY
+            .union(OFlags::DIRECTORY)
+            .union(OFlags::CLOEXEC),
         Mode::empty(),
     )
     .and_then(Dir::new)
@@ -204,7 +211,10 @@ fn read_bounded_credential(
     openat(
         directory,
         name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        OFlags::RDONLY
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::NONBLOCK)
+            .union(OFlags::CLOEXEC),
         Mode::empty(),
     )
     .map(File::from)

@@ -21,7 +21,6 @@ zeroize = { workspace = true }
 # The systemd credential directory and the deployment trust state store are
 # Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = { workspace = true }
 rustix = { workspace = true, features = ["fs", "process", "std"] }
 
 [dev-dependencies]
