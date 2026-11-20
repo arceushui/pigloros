@@ -1657,23 +1657,8 @@ mod tests {
     #[tokio::test]
     async fn listener_refuses_the_erasure_host_timeline_as_a_fork_parent() -> TestResult {
         let (world, _) = provisioned_world(&[])?;
-        let identity = pos_core::Hash::from_bytes([0x5e; 32]);
-        pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
-            &mut SqliteStore::open(world.path()?)?,
-            identity,
-        )?;
-        let erasure_host = pos_core::local_erasure_host_timeline_v1(
-            ErasureReferenceV1::from_digest(*identity.as_bytes()),
-        )?;
-        open_recovered_erasure_host(
-            StoreConfig::Sqlite {
-                path: world.path()?.to_owned(),
-            },
-            GatewayHostStoreV1::Standard,
-            &ErasureCoordinatorCompositionV1::closed(),
-        )?
-        .command_sender()?
-        .open_root_timeline(erasure_host, "erasure host")?;
+        let erasure_host =
+            crate::local_principal::tests::provision_erasure_host_timeline(world.path()?)?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         assert_eq!(
             gateway.host_timelines(),
