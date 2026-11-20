@@ -145,7 +145,8 @@ other `LEC` test.
   has no field-level output, and the Gateway has no subject-export route.
   Test 10 is therefore covered at artifact level through the runtime seam.
 - **The service refuses a Fork of an affected parent after the freeze (tests
-  2 and 11, ADR errata, owner 2026-11-20):** the ADR says "Forks of affected Timelines are always in
+  2 and 11, ADR errata, owner 2026-11-20):** the ADR says "Forks of
+  affected Timelines are always in
   scope through ELLR1, including Forks admitted by the Fork admission
   service". The service admits a Fork only of a parent that every active
   request proves unaffected (ADR-106 r3,
