@@ -628,6 +628,40 @@ impl GatewayProducedUnderV1 {
     }
 }
 
+/// The store's current binding as the 32 bytes of its compiled GMP1 digest
+/// and its epoch, the binding an erasure submission records in its ELADM1
+/// (owner decision D5 of 2026-11-18 on #1413); `None` for an unbound store
+/// or a profile this binary does not compile.
+pub(crate) fn current_binding_v1(
+    port: &dyn pos_core::GatewayModeBindingPortV1,
+) -> Option<([u8; 32], NonZeroU64)> {
+    port.load_mode_binding().ok().flatten().and_then(|record| {
+        compiled_profile_of(record.profile())
+            .ok()
+            .map(|(_, profile)| (profile.profile_digest(), record.binding_epoch()))
+    })
+}
+
+/// The binding an ELADM1 records, from its GMP1 digest and binding epoch;
+/// `None` for an epoch of zero or a digest of no compiled profile.
+pub(crate) fn produced_under_digest_v1(
+    digest: [u8; 32],
+    binding_epoch: u64,
+) -> Option<GatewayProducedUnderV1> {
+    NonZeroU64::new(binding_epoch).and_then(|binding_epoch| {
+        GatewayModeProfileIdV1::ALL.into_iter().find_map(|id| {
+            installed_gateway_mode_profile_v1(id)
+                .ok()
+                .filter(|profile| profile.digest.store_bytes() == digest)
+                .map(|profile| GatewayProducedUnderV1 {
+                    id: profile.id,
+                    digest_hex: profile.digest.to_hex(),
+                    binding_epoch,
+                })
+        })
+    })
+}
+
 /// The binding the commit of segment-local sequence `seq` of `timeline` was
 /// produced under, or with no commit the binding the next commit would be
 /// produced under: the epoch its commit evidence records (the store's
