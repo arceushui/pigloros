@@ -87,6 +87,8 @@ pub(crate) struct RoomAdmissionV1 {
     pub(crate) max_events: u64,
     /// The root-Timeline ceiling of the host.
     pub(crate) max_timelines: usize,
+    /// The host Timelines, which the root-Timeline ceiling leaves out.
+    pub(crate) host_timelines: crate::host_timelines::HostTimelinesV1,
 }
 
 /// One stored revision and where it committed.
@@ -681,9 +683,16 @@ fn find_root(host: &mut ErasureExecutionHostV1, name: &str) -> RoomResult<Option
     })
 }
 
+/// The client root Timelines of the host, at most one past its ceiling; the
+/// host Timelines are not counted.
 fn root_count(host: &mut ErasureExecutionHostV1, admission: &RoomAdmissionV1) -> RoomResult<usize> {
     host.read_sender()
-        .and_then(|mut sender| sender.root_timeline_count_bounded(admission.max_timelines))
+        .and_then(|mut sender| {
+            sender.client_root_timeline_count_bounded(
+                admission.max_timelines,
+                &admission.host_timelines.roots(),
+            )
+        })
         .map_err(RoomStoreErrorV1::from)
 }
 

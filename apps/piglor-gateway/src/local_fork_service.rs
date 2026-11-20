@@ -344,6 +344,7 @@ fn open_with_credentials(
         session_identity,
         Box::new(submitter),
         mode.stale_signal(),
+        gateway.host_timelines(),
     );
     Ok((gateway, coordinator))
 }
