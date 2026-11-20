@@ -360,8 +360,8 @@ pub use namespace_network::{
 };
 #[cfg(target_os = "linux")]
 pub use restart::{
-    reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup, ReconciledRestart,
-    RestartReconciliationError, RootsReleased,
+    reconcile_cleanup, reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup,
+    ReconciledRestart, RestartReconciliationError, RootsReleased,
 };
 
 #[cfg(target_os = "linux")]

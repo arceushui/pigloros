@@ -4016,7 +4016,7 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
     fn delete_recipient_export_ciphertext(
         &mut self,
         _export_id: [u8; 16],
-    ) -> Result<(), ErasureErrorV1> {
+    ) -> Result<pos_core::RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
         Err(ErasureErrorV1::ArtifactDeletionFailed)
     }
 
