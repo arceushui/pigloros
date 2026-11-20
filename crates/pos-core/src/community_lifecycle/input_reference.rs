@@ -9,8 +9,8 @@ use super::member_progress::{
     encode_factual_node, node_bytes, read_factual_node, valid_factual_node,
 };
 use super::{
-    bounded_bytes, canonical_end, encode_coordinates, fixed_bytes, head_len, read_coordinates,
-    read_hash, read_head, validate_coordinates, CommunityFactualNodeReferenceV1,
+    bounded_bytes, canonical_end, digest, encode_coordinates, fixed_bytes, head_len,
+    read_coordinates, read_hash, read_head, validate_coordinates, CommunityFactualNodeReferenceV1,
     CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1, Result,
 };
 use crate::{
@@ -326,6 +326,15 @@ pub enum CommunityTypedInputRefV1<'a> {
 }
 
 impl CommunityTypedInputRefV1<'_> {
+    /// `H("TypedInputRef", canonical_typed_input_ref)`, the CSB1
+    /// coverage-row key of this reference (ADR-129 §3).
+    #[must_use]
+    pub fn digest(self) -> Hash {
+        let mut out = Zeroizing::new(Vec::with_capacity(self.encoded_len()));
+        self.encode(&mut out);
+        digest(b"PiglorOS.Community.TypedInputRef.v1\0", &out)
+    }
+
     fn validate(self) -> Result<()> {
         match self {
             Self::Native(reference) => reference.validate(),

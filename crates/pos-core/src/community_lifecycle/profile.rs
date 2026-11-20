@@ -29,6 +29,10 @@ const GRAPH: [u64; 10] = [
     2048,
     2048,
 ];
+/// The CDP1 `limits_bytes` shared per-record maxima `[nodes, edges, bytes]`
+/// that every operation's CBQ1 quote must fit (ADR-129 §2, §5).
+pub const COMMUNITY_SHARED_RECORD_LIMITS_V1: [u64; 3] = [LIMITS[4], LIMITS[5], LIMITS[6]];
+
 const LIMITS: [u64; 15] = [
     64,
     256,

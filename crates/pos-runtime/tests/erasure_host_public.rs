@@ -114,3 +114,116 @@ fn a_root_timeline_opens_once_under_its_identity() -> Result<(), Box<dyn Error +
     }
     Ok(())
 }
+
+/// ADR-136 §1: a root created for an owner records that owner at
+/// creation, and an unowned root records none, on both adapters.
+#[test]
+fn an_owned_root_records_its_owner_at_creation() -> Result<(), Box<dyn Error + Send + Sync>> {
+    for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let owner = EntityId::new();
+        let mut commands = host.command_sender()?;
+        let owned_root = commands.create_owned_timeline("owned-root", owner)?;
+        let unowned_root = commands.create_timeline("unowned-root")?;
+        assert_eq!(owned_root.meta.owner, Some(owner));
+        assert_eq!(owned_root.meta.name.as_deref(), Some("owned-root"));
+        assert!(owned_root.meta.fork_point.is_none());
+        assert_eq!(unowned_root.meta.owner, None);
+        assert!(commands.records_timeline(owned_root.id())?);
+        let mut reads = host.read_sender()?;
+        assert_eq!(reads.timeline(owned_root.id())?, Some(owned_root));
+        assert_eq!(reads.timeline(unowned_root.id())?, Some(unowned_root));
+    }
+    Ok(())
+}
+
+/// ADR-136 §4a: host-owned roots are outside a client root count, which
+/// still stops after `maximum + 1` client roots; an identity the store
+/// does not record changes nothing.
+#[test]
+fn a_client_root_count_leaves_out_recorded_host_roots() -> Result<(), Box<dyn Error + Send + Sync>>
+{
+    for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let consent = pos_core::TimelineId::new();
+        let erasure_host = pos_core::TimelineId::new();
+        let absent = pos_core::TimelineId::new();
+        let host_roots = [consent, erasure_host, absent];
+        {
+            let mut commands = host.command_sender()?;
+            commands.open_root_timeline(consent, "consent")?;
+            commands.open_root_timeline(erasure_host, "erasure-host")?;
+        }
+        // Every recorded host root is a visible root the plain count sees,
+        // so leaving it out never lets the client count drop below the
+        // client roots.
+        {
+            let mut reads = host.read_sender()?;
+            assert_eq!(reads.root_timeline_count_bounded(64)?, 2);
+            assert_eq!(
+                reads.client_root_timeline_count_bounded(64, &host_roots)?,
+                0
+            );
+        }
+        {
+            let mut commands = host.command_sender()?;
+            commands.create_timeline("client-1")?;
+            commands.create_timeline("client-2")?;
+        }
+        let mut reads = host.read_sender()?;
+        assert_eq!(reads.root_timeline_count_bounded(64)?, 4);
+        assert_eq!(
+            reads.client_root_timeline_count_bounded(64, &host_roots)?,
+            2
+        );
+        assert_eq!(reads.client_root_timeline_count_bounded(64, &[])?, 4);
+        // The bound still stops after `maximum + 1` client roots.
+        assert_eq!(reads.client_root_timeline_count_bounded(0, &host_roots)?, 1);
+        assert_eq!(reads.client_root_timeline_count_bounded(1, &host_roots)?, 2);
+    }
+    Ok(())
+}
+
+/// The Erasure Host Timeline read is `None` before the store records an
+/// erasure store identity and the ELHT1 derivation of it afterwards.
+#[test]
+fn the_erasure_host_timeline_follows_the_store_identity() -> Result<(), Box<dyn Error + Send + Sync>>
+{
+    for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        assert_eq!(host.read_sender()?.local_erasure_host_timeline()?, None);
+    }
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("identity.db")
+        .to_str()
+        .ok_or("temporary path is not UTF-8")?
+        .to_owned();
+    let identity = pos_core::Hash::from_bytes([0x5a; 32]);
+    pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
+        &mut pos_store::sqlite::SqliteStore::open(&path)?,
+        identity,
+    )?;
+    let mut host = ErasureExecutionHostV1::open_with_authority(
+        StoreConfig::Sqlite { path },
+        &pos_runtime::ErasureCoordinatorCompositionV1::closed(),
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    assert_eq!(
+        host.read_sender()?.local_erasure_host_timeline()?,
+        Some(pos_core::local_erasure_host_timeline_v1(
+            pos_core::ErasureReferenceV1::from_digest([0x5a; 32])
+        )?)
+    );
+    Ok(())
+}
