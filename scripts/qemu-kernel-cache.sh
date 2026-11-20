@@ -9,6 +9,14 @@
 #   verify ARCH DIR  require DIR to hold every output's closure, intact and
 #                    signed by a key in trusted-public-keys
 #   import ARCH DIR  copy every kernel output from DIR into the store
+#   fetch ARCH DIR   download ARCH's published cache into DIR; print hit=true,
+#                    or hit=false when nothing is published for this kernel
+#   publish ARCH DIR (main only) upload DIR as ARCH's release asset
+#   prune ARCH       (main only) delete ARCH's assets for other kernel
+#                    derivations once they are a week old, keeping the newest
+#                    of them (so one stale asset per architecture stays until
+#                    a newer kernel replaces it); does nothing unless this run
+#                    is main's tip
 #   selftest DIR     (pull requests; needs jq, which the hosted Ubuntu runners
 #                    ship) run the same signing, verifying and import
 #                    code on a throwaway input-addressed path with a throwaway
@@ -24,6 +32,15 @@
 # depends only on deploy/nixos and the pinned nixpkgs, so the same derivation
 # hash names the same build.
 #
+# Storage: one asset per kernel derivation on the qemu-kernel-cache release
+# (a prerelease, never "latest"), named after the cache key. Release assets are
+# not evicted; the Actions cache, always near its 10 GB limit, evicted the
+# kernel within hours of saving it. Fetching needs only read access; only the
+# main-only kernel cache job publishes. Where the files live is not part of
+# the trust: every path must still carry the main-only signature. The release
+# must stay mutable: the repository's immutable-releases setting is off
+# (2026-11-20), and turning it on would stop publish and prune.
+#
 # Trust: the Nix daemon keeps require-sigs = true (scripts/install-pinned-nix.sh).
 # export signs every path it writes with the secret key in
 # QEMU_KERNEL_CACHE_SIGNING_KEY and refuses a key whose public half is not in
@@ -32,9 +49,9 @@
 # the qemu-kernel-cache GitHub environment, whose deployment policy allows only
 # main. That policy is a repository setting, which the workflow policy oracle
 # cannot read. import never disables signature checks, so the daemon refuses an
-# unsigned or foreign path. Only main runs save the cache; pull requests
-# restore it by the exact key. The key name is part of the cache key, so a
-# rotated key never restores entries signed by the old one.
+# unsigned or foreign path. Only main publishes; pull requests fetch the
+# asset named by the exact key. The key name is part of that key, so a
+# rotated key never fetches entries signed by the old one.
 # Needs bash 4.4 or later (inherit_errexit); the hosted Ubuntu runners ship 5.x.
 set -euo pipefail
 # A failure inside $(...) stops the script too, as it does outside.
@@ -44,9 +61,12 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flake="${root}/deploy/nixos"
 key_file=""
 signing_key_name=piglor-qemu-kernel-1
+release_tag=qemu-kernel-cache
+# GitHub refuses release assets of 2 GiB or more.
+asset_limit=$((2 * 1024 * 1024 * 1024))
 
 usage() {
-  printf 'usage: %s key ARCH | build ARCH | export ARCH DIR | verify ARCH DIR | import ARCH DIR | selftest DIR\n' "$0" >&2
+  printf 'usage: %s key ARCH | build ARCH | prune ARCH | export ARCH DIR | verify ARCH DIR | import ARCH DIR | fetch ARCH DIR | publish ARCH DIR | selftest DIR\n' "$0" >&2
   exit 2
 }
 
@@ -85,7 +105,7 @@ read_kernel_paths() {
   done
 }
 
-key() {
+cache_key() {
   local drv hash
   drv="$(nix eval --raw --no-update-lock-file "$(kernel_attribute "$1").drvPath")"
   hash="$(basename -- "${drv}")"
@@ -94,7 +114,13 @@ key() {
     printf 'unexpected kernel derivation path: %s\n' "${drv}" >&2
     exit 1
   fi
-  printf 'key=qemu-kernel-%s-%s-%s\n' "${signing_key_name}" "$1" "${hash}"
+  printf 'qemu-kernel-%s-%s-%s\n' "${signing_key_name}" "$1" "${hash}"
+}
+
+key() {
+  local name
+  name="$(cache_key "$1")"
+  printf 'key=%s\n' "${name}"
 }
 
 build() {
@@ -144,8 +170,8 @@ sign_into() {
   trap 'exit 130' INT
   key_file="$(umask 077 && mktemp)"
   printf '%s' "${secret}" >"${key_file}"
-  # The Actions cache compresses the directory, so the NARs stay uncompressed.
-  nix copy --to "file://${dir}?compression=none&secret-key=${key_file}" "$@"
+  # Compressed NARs keep each architecture's asset under GitHub's 2 GiB limit.
+  nix copy --to "file://${dir}?compression=zstd&secret-key=${key_file}" "$@"
   remove_key_file
 }
 
@@ -193,6 +219,154 @@ import_paths() {
 import_cache() {
   read_kernel_paths "$1"
   import_paths "$2" "${paths[@]}"
+}
+
+# The release's fully uploaded assets, one "NAME<TAB>CREATED" line each;
+# nothing when the release does not exist yet. An upload that never finished
+# is not listed, so the next main run replaces it.
+release_assets() {
+  local listing errors status=0
+  errors="$(mktemp)"
+  listing="$(gh release view "${release_tag}" --json assets \
+    --jq '.assets[] | select(.state == "uploaded") | [.name, .createdAt] | @tsv' 2>"${errors}")" || status=$?
+  if ((status != 0)); then
+    if [[ $(<"${errors}") == 'release not found' ]]; then
+      rm -f -- "${errors}"
+      return 0
+    fi
+    cat -- "${errors}" >&2
+    rm -f -- "${errors}"
+    exit "${status}"
+  fi
+  rm -f -- "${errors}"
+  printf '%s\n' "${listing}"
+}
+
+asset_names() {
+  local name created
+  while IFS=$'\t' read -r name created; do
+    if [[ -n ${name} ]]; then
+      printf '%s\n' "${name}"
+    fi
+  done <<<"$1"
+}
+
+# The archive holds only the binary cache's regular files and directories,
+# at relative paths.
+require_cache_archive() {
+  local entry verbose names
+  verbose="$(tar -tvf "$1")"
+  names="$(tar -tf "$1")"
+  while IFS= read -r entry; do
+    if [[ ${entry} != [-d]* ]]; then
+      printf 'the kernel cache archive holds a non-regular entry: %s\n' "${entry}" >&2
+      exit 1
+    fi
+  done <<<"${verbose}"
+  while IFS= read -r entry; do
+    if ! [[ ${entry} =~ ^(\./)?([A-Za-z0-9+_.-]+/)*[A-Za-z0-9+_.-]*$ ]] || [[ /${entry}/ == */../* ]]; then
+      printf 'unexpected kernel cache archive entry: %s\n' "${entry}" >&2
+      exit 1
+    fi
+  done <<<"${names}"
+}
+
+fetch_cache() {
+  local name assets downloads
+  # The directory is emptied before unpacking, so refuse anything but a plain
+  # absolute path at least two levels deep, even when nothing is fetched.
+  if ! [[ $2 =~ ^(/[A-Za-z0-9._+-]+){2,}$ ]] || [[ /$2/ == */../* || /$2/ == */./* ]]; then
+    printf 'the kernel cache directory %s must be a plain absolute path two levels deep\n' "$2" >&2
+    exit 2
+  fi
+  name="$(cache_key "$1").tar"
+  # Assigned first: a failure inside an argument's $(...) would not stop the script.
+  assets="$(release_assets)"
+  assets="$(asset_names "${assets}")"
+  if ! in_list "${name}" "${assets}"; then
+    printf 'no published kernel cache %s\n' "${name}" >&2
+    printf 'hit=false\n'
+    return 0
+  fi
+  downloads="$(mktemp -d)"
+  # A download that fails is a miss: main then rebuilds and replaces the
+  # asset. An archive that downloads but is malformed, or fails the
+  # signature check afterwards, is an error.
+  if ! gh release download "${release_tag}" --pattern "${name}" --dir "${downloads}"; then
+    rm -rf -- "${downloads}"
+    printf 'the kernel cache %s could not be downloaded\n' "${name}" >&2
+    printf 'hit=false\n'
+    return 0
+  fi
+  require_cache_archive "${downloads}/${name}"
+  rm -rf -- "$2"
+  mkdir -p -- "$2"
+  tar -xf "${downloads}/${name}" -C "$2" --no-same-owner --no-same-permissions
+  rm -rf -- "${downloads}"
+  printf 'hit=true\n'
+}
+
+publish_cache() {
+  local name archive uploads size
+  name="$(cache_key "$1").tar"
+  uploads="$(mktemp -d)"
+  archive="${uploads}/${name}"
+  tar -cf "${archive}" -C "$2" .
+  size="$(stat -c %s -- "${archive}")"
+  printf 'kernel cache archive %s: %s bytes\n' "${name}" "${size}"
+  if ((size >= asset_limit)); then
+    printf 'the kernel cache archive %s is 2 GiB or larger\n' "${name}" >&2
+    exit 1
+  fi
+  # The two architectures publish at once: whichever creates the release
+  # first wins, and the other must then find it.
+  if ! gh release view "${release_tag}" >/dev/null 2>&1; then
+    gh release create "${release_tag}" --prerelease --latest=false \
+      --title 'QEMU evidence kernel cache' \
+      --notes 'Signed Nix binary caches of the QEMU evidence guest kernel, one asset per kernel derivation (scripts/qemu-kernel-cache.sh).' ||
+      gh release view "${release_tag}" >/dev/null
+  fi
+  # --clobber replaces an asset whose earlier upload never finished.
+  gh release upload "${release_tag}" "${archive}" --clobber
+  rm -rf -- "${uploads}"
+}
+
+# Runs on every main run, so a failed deletion is retried. Assets of every
+# key name are pruned, including a rotated one. A run that is not main's tip
+# prunes nothing, so a rerun of an older commit cannot delete the kernel that
+# pull requests fetch. When a push that touches none of the workflow's paths
+# lands after a kernel-touching one, the earlier run is no longer the tip and
+# pruning waits for the next kernel-touching push. An asset goes only when it
+# is more than a week old and is not the newest asset besides the current one;
+# that guards a push landing between the tip check and the listing.
+prune() {
+  local name current assets created cutoff others tip
+  # A rerun of an older main commit must not prune: the kernel pull requests
+  # fetch belongs to main's tip.
+  tip="$(gh api "repos/${GH_REPO}/commits/main" --jq .sha)"
+  if [[ ${tip} != "${GITHUB_SHA}" ]]; then
+    printf 'not pruning: %s is not main'"'"'s tip %s\n' "${GITHUB_SHA}" "${tip}"
+    return 0
+  fi
+  current="$(cache_key "$1").tar"
+  cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+  assets="$(release_assets)"
+  others=""
+  while IFS=$'\t' read -r name created; do
+    if [[ ${name} == qemu-kernel-*-"$1"-*.tar && ${name} != "${current}" ]]; then
+      others+="${name}"$'\t'"${created}"$'\n'
+    fi
+  done <<<"${assets}"
+  if [[ -z ${others} ]]; then
+    return 0
+  fi
+  others="$(printf '%s' "${others}" | sort -t $'\t' -k2,2r)"
+  # The first line is the newest other asset, which is kept.
+  while IFS=$'\t' read -r name created; do
+    if [[ ${created} < "${cutoff}" ]]; then
+      gh release delete-asset "${release_tag}" "${name}" --yes
+    fi
+  done < <(printf '%s\n' "${others}" | tail -n +2)
 }
 
 # A path the store did not build or substitute from a trusted cache: built
@@ -261,12 +435,12 @@ selftest() {
 }
 
 case "${1:-}" in
-key | build)
+key | build | prune)
   (($# == 2)) || usage
   require_architecture "$2"
   "$1" "$2"
   ;;
-export | verify | import)
+export | verify | import | fetch | publish)
   (($# == 3)) || usage
   require_architecture "$2"
   "$1_cache" "$2" "$3"
