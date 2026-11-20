@@ -4,9 +4,10 @@
 //! SIC1 state and binds the fixed administrative listener before anything
 //! else. Without a pending SIR1 it admits the provider runtime, binds the
 //! evaluator listener, and keeps both pathname identities under one admission
-//! lifetime. With a pending SIR1 it stays closed: it binds no evaluator
-//! listener and serves only that transaction's mode-1 challenge (ADR-069 R12
-//! §8).
+//! lifetime. With a pending SIR1 it binds no evaluator listener and runs one
+//! root-owned recovery operation (ADR-069 R12 §6, §8). Only its durable
+//! completion leads to a normal open from the next SIC1; a failure leaves the
+//! selector closed, serving only that transaction's mode-1 challenge.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -49,7 +50,10 @@ use crate::selector::installation::authority::{
 use crate::selector::installation::{
     open_directory_chain, FixedInstallation, InstallationObjectKind, InstalledSelectorState,
 };
-use crate::selector::recovery::{require_absent_evaluator_endpoint, PendingRecoveryTarget};
+use crate::selector::recovery::{
+    require_absent_evaluator_endpoint, PendingRecoveryTarget, ProviderTerminationAuthority,
+    RecoveryHost,
+};
 use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
 use crate::selector::SelectorBoundaryError;
 
@@ -105,8 +109,58 @@ struct RootSelectorComposition {
     live_update_timeout: Duration,
     /// The one lifecycle port. It started the current runtime and replaces it
     /// after every timely live update (ADR-069 R11 §8.6).
-    lifecycle: Box<dyn ProviderLifecyclePort + Send + Sync>,
+    lifecycle: SelectorPort,
     executable_digest: runtime_start::ExecutableDigest,
+}
+
+/// The one lifecycle port, shared by normal open and the termination
+/// authority.
+type SelectorPort = Arc<dyn ProviderLifecyclePort + Send + Sync>;
+
+/// Builds the kernel view of a recovery operation from the retained
+/// recovery directory and the executable digest. Production uses
+/// [`RecoveryHost::fixed`].
+type RecoveryHostFactory = fn(Arc<File>, runtime_start::ExecutableDigest) -> RecoveryHost;
+
+/// What a normal open needs besides the authenticated state: the retained
+/// recovery directory, the one lifecycle port and the executable digest,
+/// and how the termination authority views the kernel.
+#[derive(Clone)]
+struct NormalOpen {
+    recovery_directory: Arc<File>,
+    port: SelectorPort,
+    executable_digest: runtime_start::ExecutableDigest,
+    recovery_host: RecoveryHostFactory,
+}
+
+impl NormalOpen {
+    /// Normal open from `bootstrap` (R12 §8): start and admit the runtime,
+    /// then bind the evaluator listener once the administrative one is
+    /// verified.
+    fn open(
+        &self,
+        administrator: &OwnedAdministratorListener,
+        bootstrap: AuthenticatedSelectorBootstrap,
+    ) -> Result<SelectorMode, SelectorBoundaryError> {
+        RootSelectorComposition::open(bootstrap, self.clone()).and_then(|composition| {
+            administrator
+                .verify()
+                .and_then(|()| OwnedSelectorListener::bind())
+                .map(|evaluator| SelectorMode::Admitting {
+                    composition,
+                    evaluator,
+                })
+        })
+    }
+
+    /// The root-owned termination authority over the same port, checking
+    /// against the fixed recovery directory and kernel views.
+    fn authority(&self) -> ProviderTerminationAuthority<dyn ProviderLifecyclePort + Send + Sync> {
+        ProviderTerminationAuthority::new(
+            Arc::clone(&self.port),
+            (self.recovery_host)(Arc::clone(&self.recovery_directory), self.executable_digest),
+        )
+    }
 }
 
 struct ReceivedInstallationUpdate {
@@ -252,7 +306,11 @@ impl SelectorMode {
                 composition,
                 evaluator,
             } => serve_admitting(administrator, composition, evaluator),
-            Self::RecoveryPending(recovery) => recovery.serve(&administrator),
+            Self::RecoveryPending(recovery) => recovery
+                .serve(&administrator)
+                .and_then(|bootstrap| recovery.open(&administrator, bootstrap))
+                .and_then(|mode| mode.set_nonblocking().map(|()| mode))
+                .and_then(|mode| mode.serve(administrator)),
         }
     }
 
@@ -471,8 +529,10 @@ impl RootSelectorRuntime {
     ///
     /// The runtime is started only after the selector allocated its slot and
     /// the port proved every stale runtime and recovery unit gone (ADR-069 R11
-    /// §5.0). With a pending SIR1 the selector instead loads it, starts and
-    /// stops nothing, and exposes only the administrative listener (R12 §8).
+    /// §5.0). With a pending SIR1 the selector instead loads it and runs one
+    /// root-owned recovery operation before any normal open (R12 §8): only
+    /// its durable completion opens normally from the next SIC1. After a
+    /// failed operation it exposes only the administrative listener.
     /// `apps/pos-root-selector` is the only production caller.
     ///
     /// # Errors
@@ -480,48 +540,56 @@ impl RootSelectorRuntime {
     /// every selector check, provider synchronization succeeds, the
     /// administrative listener is valid first, and the evaluator listener can
     /// then be bound without replacing any existing node. With a pending SIR1,
-    /// returns one unless that SIR1 is authenticated.
+    /// returns one unless that SIR1 is authenticated and no evaluator node
+    /// exists, or when the normal open after a completed recovery fails.
     pub fn activate<P>(port: P) -> Result<Self, SelectorBoundaryError>
     where
         P: ProviderLifecyclePort + Send + Sync + 'static,
     {
-        Self::activate_with(Box::new(port), runtime_start::proc_executable_digest)
+        Self::activate_with(
+            Arc::new(port),
+            runtime_start::proc_executable_digest,
+            RecoveryHost::fixed,
+        )
     }
 
     fn activate_with(
-        port: Box<dyn ProviderLifecyclePort + Send + Sync>,
+        port: SelectorPort,
         executable_digest: runtime_start::ExecutableDigest,
+        recovery_host: RecoveryHostFactory,
     ) -> Result<Self, SelectorBoundaryError> {
         let administrator = OwnedAdministratorListener::bind()?;
         open_recovery_directory()
             .and_then(|recovery_directory| {
-                InstalledSelectorState::open_fixed()
-                    .map(|installed| (recovery_directory, installed))
+                InstalledSelectorState::open_fixed().map(|installed| {
+                    (
+                        NormalOpen {
+                            recovery_directory: Arc::new(recovery_directory),
+                            port,
+                            executable_digest,
+                            recovery_host,
+                        },
+                        installed,
+                    )
+                })
             })
-            .and_then(|(recovery_directory, installed)| match installed {
-                FixedInstallation::Admissible(installed) => RootSelectorComposition::open(
-                    installed,
-                    recovery_directory,
-                    port,
-                    executable_digest,
-                )
-                .and_then(|composition| {
-                    administrator
-                        .verify()
-                        .and_then(|()| OwnedSelectorListener::bind())
-                        .map(|evaluator| SelectorMode::Admitting {
-                            composition,
-                            evaluator,
-                        })
-                }),
+            .and_then(|(opening, installed)| match installed {
+                FixedInstallation::Admissible(installed) => installed
+                    .authenticate_bootstrap()
+                    .and_then(|bootstrap| opening.open(&administrator, bootstrap)),
                 FixedInstallation::RecoveryPending(installed) => require_absent_evaluator_endpoint(
                     Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET),
                 )
                 .and_then(|()| PendingRecoveryTarget::load(&installed))
-                .map(|target| {
-                    SelectorMode::RecoveryPending(recovery_pending::PendingRecovery::fixed(target))
-                })
-                .map_err(SelectorBoundaryError::from),
+                .map_err(SelectorBoundaryError::from)
+                .and_then(|target| {
+                    let recovery = recovery_pending::PendingRecovery::fixed(target, opening);
+                    let operation = recovery.begin_recovery_operation();
+                    match operation {
+                        Ok(completed) => recovery.open(&administrator, completed.bootstrap),
+                        Err(_) => Ok(SelectorMode::RecoveryPending(recovery)),
+                    }
+                }),
             })
             .and_then(|mode| {
                 administrator
@@ -749,11 +817,12 @@ fn remove_matching_socket(
 }
 
 impl RootSelectorComposition {
-    /// Authenticates the admissible fixed installation, then starts and
-    /// admits the selected provider's runtime.
+    /// Admits the provider of an authenticated state, then starts and admits
+    /// its runtime.
     ///
-    /// Only an installation without a pending SIR1 reaches this point, so no
-    /// stale unit is stopped and no runtime is started while recovery is
+    /// Only a state without a pending SIR1 reaches this point: the admissible
+    /// installation, or the next state after a durable recovery completion.
+    /// No stale unit is stopped and no runtime is started while recovery is
     /// pending (ADR-069 R12 §8).
     ///
     /// # Errors
@@ -761,33 +830,34 @@ impl RootSelectorComposition {
     /// Returns a closed boundary error for invalid or unavailable
     /// installation/provider state.
     fn open(
-        installed: InstalledSelectorState,
-        recovery_directory: File,
-        port: Box<dyn ProviderLifecyclePort + Send + Sync>,
-        executable_digest: runtime_start::ExecutableDigest,
+        bootstrap: AuthenticatedSelectorBootstrap,
+        opening: NormalOpen,
     ) -> Result<Self, SelectorBoundaryError> {
-        installed
-            .authenticate_bootstrap()
-            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|admitted| {
-                runtime_start::start_provider_runtime(&*port, &admitted, executable_digest).map(
-                    |(transport, runtime)| Self {
-                        service: RootSelectorService {
-                            admission_time: SystemTime::now,
-                            admission: SelectorAdmission::new(admitted, runtime),
-                            transport: SelectedProviderTransport::new(transport),
-                            peer_uid: ROOT_UID,
-                            evaluation_namespaces: EvaluationNamespaceBindings::default(),
-                            recovery_directory: Arc::new(recovery_directory),
-                            recovery_owner: ROOT_UID,
-                        },
-                        updates: Mutex::new(()),
-                        live_update_timeout: LIVE_UPDATE_TIMEOUT,
-                        lifecycle: port,
-                        executable_digest,
+        let NormalOpen {
+            recovery_directory,
+            port,
+            executable_digest,
+            ..
+        } = opening;
+        bootstrap.admit_provider().and_then(|admitted| {
+            runtime_start::start_provider_runtime(&*port, &admitted, executable_digest).map(
+                |(transport, runtime)| Self {
+                    service: RootSelectorService {
+                        admission_time: SystemTime::now,
+                        admission: SelectorAdmission::new(admitted, runtime),
+                        transport: SelectedProviderTransport::new(transport),
+                        peer_uid: ROOT_UID,
+                        evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                        recovery_directory,
+                        recovery_owner: ROOT_UID,
                     },
-                )
-            })
+                    updates: Mutex::new(()),
+                    live_update_timeout: LIVE_UPDATE_TIMEOUT,
+                    lifecycle: port,
+                    executable_digest,
+                },
+            )
+        })
     }
 
     /// Evaluates one already-accepted root peer without binding any socket.
@@ -2796,6 +2866,10 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::selector::recovery::{
+        PreviousRuntimeObservation, PreviousRuntimeTarget, RecoveryPeerLaunch,
+        RecoveryPeerObservation, RecoverySlotObservation, RecoverySlotTarget,
+    };
     use crate::selector::runtime_lifecycle::{
         CgroupPath, ObservationChallenge, ProviderLifecycleError, RuntimeSlotTarget,
         StaleUnitsObservation, StartedRuntimeObservation,
@@ -2839,7 +2913,7 @@ mod tests {
         let pid = std::num::NonZeroU64::new(u64::from(std::process::id()))
             .ok_or(ProviderLifecycleError::Contradiction)?;
         let ticks = crate::selector::runtime_lifecycle::process_start_time_ticks(pid)?;
-        let cgroup = runtime_start::process_control_group(pid)
+        let cgroup = crate::selector::runtime_lifecycle::process_control_group(pid)
             .map_err(|_| ProviderLifecycleError::Contradiction)?;
         Ok(StartedRuntimeObservation::new(
             slot.challenge(),
@@ -2861,6 +2935,9 @@ mod tests {
         starts: Mutex<VecDeque<RuntimeStart>>,
         running: Mutex<Vec<ProviderThread>>,
         outcomes: Mutex<Vec<Result<(), String>>>,
+        /// The recovery operations, when this port runs a recovery peer in
+        /// this process; otherwise every recovery operation is refused.
+        recovery: Option<crate::selector::recovery::tests::PeerPort>,
     }
 
     impl InProcessProviderPort {
@@ -2869,6 +2946,7 @@ mod tests {
                 starts: Mutex::new(VecDeque::new()),
                 running: Mutex::new(Vec::new()),
                 outcomes: Mutex::new(Vec::new()),
+                recovery: None,
             }
         }
 
@@ -2964,6 +3042,39 @@ mod tests {
                 .extend(threads);
             own_runtime_observation(slot)
         }
+
+        fn terminate_previous_runtime(
+            &self,
+            target: &PreviousRuntimeTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<PreviousRuntimeObservation, ProviderLifecycleError> {
+            self.recovery
+                .as_ref()
+                .ok_or(ProviderLifecycleError::Unavailable)
+                .and_then(|recovery| recovery.terminate_previous_runtime(target, deadline))
+        }
+
+        fn reconcile_recovery_slot(
+            &self,
+            target: &RecoverySlotTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<RecoverySlotObservation, ProviderLifecycleError> {
+            self.recovery
+                .as_ref()
+                .ok_or(ProviderLifecycleError::Unavailable)
+                .and_then(|recovery| recovery.reconcile_recovery_slot(target, deadline))
+        }
+
+        fn start_recovery_peer(
+            &self,
+            launch: &RecoveryPeerLaunch<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<RecoveryPeerObservation, ProviderLifecycleError> {
+            self.recovery
+                .as_ref()
+                .ok_or(ProviderLifecycleError::Unavailable)
+                .and_then(|recovery| recovery.start_recovery_peer(launch, deadline))
+        }
     }
 
     /// The narrowest test seam of the runtime checks (ADR-069 R11 §5.0 step
@@ -2993,7 +3104,11 @@ mod tests {
     fn activate_in_process(
         port: Arc<InProcessProviderPort>,
     ) -> Result<RootSelectorRuntime, SelectorBoundaryError> {
-        RootSelectorRuntime::activate_with(Box::new(SharedPort(port)), test_executable_digest)
+        RootSelectorRuntime::activate_with(
+            Arc::new(SharedPort(port)),
+            test_executable_digest,
+            RecoveryHost::fixed,
+        )
     }
 
     /// Lets a test keep its port after the composition took ownership.
@@ -3014,6 +3129,29 @@ mod tests {
             deadline: std::time::Instant,
         ) -> Result<StartedRuntimeObservation, ProviderLifecycleError> {
             self.0.start_provider_runtime(slot, deadline)
+        }
+        fn terminate_previous_runtime(
+            &self,
+            target: &PreviousRuntimeTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<PreviousRuntimeObservation, ProviderLifecycleError> {
+            self.0.terminate_previous_runtime(target, deadline)
+        }
+
+        fn reconcile_recovery_slot(
+            &self,
+            target: &RecoverySlotTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<RecoverySlotObservation, ProviderLifecycleError> {
+            self.0.reconcile_recovery_slot(target, deadline)
+        }
+
+        fn start_recovery_peer(
+            &self,
+            launch: &RecoveryPeerLaunch<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<RecoveryPeerObservation, ProviderLifecycleError> {
+            self.0.start_recovery_peer(launch, deadline)
         }
     }
 
@@ -4141,6 +4279,183 @@ mod tests {
         Ok(())
     }
 
+    /// The cgroup2 stand-in of the isolated recovery tests: an empty
+    /// directory, so every control group the in-process port reports is
+    /// absent once its peer thread has ended.
+    #[cfg(target_os = "linux")]
+    const ISOLATED_CGROUPS: &str = "/run/pigloros/test-cgroup2";
+
+    /// The named control group the isolated recovery peer runs in. The
+    /// container's private cgroup namespace puts this process at its root
+    /// `/`, which no cleanup can prove absent, so the port and the host both
+    /// read the peer's control group as this unit's.
+    #[cfg(target_os = "linux")]
+    const ISOLATED_PEER_CGROUP: &str = "/system.slice/pigloros-recovery-peer.service";
+
+    /// A live process's control group, read as [`ISOLATED_PEER_CGROUP`]: the
+    /// process must still have a readable `/proc/<pid>/cgroup`.
+    #[cfg(target_os = "linux")]
+    fn isolated_peer_cgroup(pid: std::num::NonZeroU64) -> Result<String, SelectorBoundaryError> {
+        crate::selector::runtime_lifecycle::process_control_group(pid)
+            .map(|_| ISOLATED_PEER_CGROUP.to_owned())
+    }
+
+    /// The fixed recovery directory with the root owner, the cgroup2
+    /// stand-in, the peer's named control group and the monotonic clock. The
+    /// peer is a thread of this process; its control group is absent from
+    /// the empty stand-in once the peer has ended.
+    #[cfg(target_os = "linux")]
+    fn isolated_recovery_host(
+        directory: Arc<File>,
+        executable_digest: runtime_start::ExecutableDigest,
+    ) -> RecoveryHost {
+        RecoveryHost::for_test(
+            directory,
+            ROOT_UID,
+            (PathBuf::from(ISOLATED_CGROUPS), |_| true),
+            executable_digest,
+            Arc::new(std::time::Instant::now),
+        )
+        .with_control_group(isolated_peer_cgroup)
+    }
+
+    /// A port whose recovery peer is a thread of this process, and whose one
+    /// runtime start answers the next state's `describe`.
+    #[cfg(target_os = "linux")]
+    fn recovering_port(refused_terminations: usize) -> TestResult<Arc<InProcessProviderPort>> {
+        Ok(Arc::new(InProcessProviderPort {
+            recovery: Some(
+                crate::selector::recovery::tests::PeerPort::new(
+                    &Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE),
+                    crate::selector::recovery::tests::Script {
+                        refused_terminations,
+                        ..crate::selector::recovery::tests::Script::default()
+                    },
+                )
+                .with_control_group(isolated_peer_cgroup),
+            ),
+            ..InProcessProviderPort::starting(vec![replacement_runtime()?])
+        }))
+    }
+
+    /// One fixed installation with a pending SIR1; returns its exact SIU1.
+    #[cfg(target_os = "linux")]
+    fn pending_fixed_installation() -> TestResult<Vec<u8>> {
+        let root = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT);
+        drop(crate::selector::installation::tests::materialize_root_selector_state(root)?);
+        let (_committed, pending_update) =
+            crate::selector::installation::tests::updates::UpdateFixture::at(root)?
+                .commit_pending_update(
+                    vec![[41; 16]],
+                    vec![[41; 16]],
+                    crate::selector::installation::tests::updates::SuccessorRevocation::Nothing,
+                )?;
+        fs::create_dir_all(ISOLATED_CGROUPS)?;
+        Ok(pending_update)
+    }
+
+    /// ADR-069 R12 §8 and I12 row 2: activation with a pending SIR1 runs one
+    /// recovery operation, and only its durable completion leads to a normal
+    /// open from the next SIC1.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_recovery_activation_completes_before_a_normal_open() -> TestResult {
+        if matches!(
+            isolated_role(
+                "root_selector::tests::pending_recovery_activation_completes_before_a_normal_open"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+
+        let _paths = FixedCompositionFixture::create()?;
+        pending_fixed_installation()?;
+        let port = recovering_port(0)?;
+        let runtime = RootSelectorRuntime::activate_with(
+            Arc::new(SharedPort(Arc::clone(&port))),
+            test_executable_digest,
+            isolated_recovery_host,
+        )?;
+        assert!(matches!(runtime.mode, SelectorMode::Admitting { .. }));
+        assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        let root = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT);
+        assert!(!root.join("installation-update.cbor").exists());
+        let calls = port
+            .recovery
+            .as_ref()
+            .map(crate::selector::recovery::tests::PeerPort::calls)
+            .unwrap_or_default();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        drop(runtime);
+        port.finish()?;
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        Ok(())
+    }
+
+    /// ADR-069 R12 §8 and I13: after a failed operation the selector stays in
+    /// `RecoveryPending` with no evaluator pathname; the byte-identical SIU1
+    /// runs one new operation, receives the exact RCA1 only after SIR1 is
+    /// unlinked, and the selector then opens normally.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pending_update_retry_completes_recovery_and_opens_normally() -> TestResult {
+        if matches!(
+            isolated_role(
+                "root_selector::tests::a_pending_update_retry_completes_recovery_and_opens_normally"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+
+        let _paths = FixedCompositionFixture::create()?;
+        let pending_update = pending_fixed_installation()?;
+        let port = recovering_port(1)?;
+        let runtime = RootSelectorRuntime::activate_with(
+            Arc::new(SharedPort(Arc::clone(&port))),
+            test_executable_digest,
+            isolated_recovery_host,
+        )?;
+        let evaluator = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
+        let administrator = Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET);
+        let recovery_record = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)
+            .join("installation-update.cbor");
+        assert!(matches!(runtime.mode, SelectorMode::RecoveryPending(_)));
+        assert!(!evaluator.exists());
+        assert!(recovery_record.exists());
+        let runtime = std::thread::spawn(move || runtime.serve());
+
+        let mut connection = UnixStream::connect(administrator)?;
+        connection.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
+        let challenge = crate::evaluator_protocol::decode_canonical(&read_frame(&mut connection)?)?;
+        let challenge = crate::evaluator_protocol::array(&challenge, 5)?;
+        assert_eq!(crate::evaluator_protocol::uint(&challenge[4])?, 1);
+        write_frame(&mut connection, &pending_update)?;
+        connection.shutdown(std::net::Shutdown::Write)?;
+        let acknowledgement = read_frame(&mut connection)?;
+        // SIR1 is gone before the RCA1 is sent.
+        assert!(!recovery_record.exists());
+        assert!(!acknowledgement.is_empty());
+        let mut rest = Vec::new();
+        connection.read_to_end(&mut rest)?;
+        assert!(rest.is_empty());
+
+        let opened = std::time::Instant::now();
+        while !evaluator.exists() && opened.elapsed() < CLIENT_IO_TIMEOUT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(evaluator.exists());
+        fs::remove_file(administrator)?;
+        assert!(runtime
+            .join()
+            .map_err(|_| "root selector runtime panicked")?
+            .is_err());
+        port.finish()?;
+        assert!(!evaluator.exists());
+        Ok(())
+    }
+
     fn bind_provider_endpoint(path: &str) -> TestResult<UnixListener> {
         let listener = UnixListener::bind(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))?;
@@ -5025,6 +5340,29 @@ mod tests {
                 started.control_group().clone(),
             ))
         }
+        fn terminate_previous_runtime(
+            &self,
+            target: &PreviousRuntimeTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<PreviousRuntimeObservation, ProviderLifecycleError> {
+            self.inner.terminate_previous_runtime(target, deadline)
+        }
+
+        fn reconcile_recovery_slot(
+            &self,
+            target: &RecoverySlotTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<RecoverySlotObservation, ProviderLifecycleError> {
+            self.inner.reconcile_recovery_slot(target, deadline)
+        }
+
+        fn start_recovery_peer(
+            &self,
+            launch: &RecoveryPeerLaunch<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<RecoveryPeerObservation, ProviderLifecycleError> {
+            self.inner.start_recovery_peer(launch, deadline)
+        }
     }
 
     fn replacement_start(fault: ReplacementFault) -> TestResult<RuntimeStart> {
@@ -5097,7 +5435,7 @@ mod tests {
                 },
                 updates: Mutex::new(()),
                 live_update_timeout: LIVE_UPDATE_TIMEOUT,
-                lifecycle: Box::new(FaultyPort {
+                lifecycle: Arc::new(FaultyPort {
                     inner: Arc::clone(&inner),
                     fault,
                     stale_calls: Arc::clone(&stale_calls),
@@ -5169,7 +5507,7 @@ mod tests {
             },
             updates: Mutex::new(()),
             live_update_timeout: LIVE_UPDATE_TIMEOUT,
-            lifecycle: Box::new(InProcessProviderPort::refusing()),
+            lifecycle: Arc::new(InProcessProviderPort::refusing()),
             executable_digest: test_executable_digest,
         };
         let before = composition.service.transport.current()?;
@@ -5212,7 +5550,7 @@ mod tests {
             },
             updates: Mutex::new(()),
             live_update_timeout: LIVE_UPDATE_TIMEOUT,
-            lifecycle: Box::new(InProcessProviderPort::refusing()),
+            lifecycle: Arc::new(InProcessProviderPort::refusing()),
             executable_digest: test_executable_digest,
         });
         let administrator_fixture = ListenerTestDirectory::create()?;
