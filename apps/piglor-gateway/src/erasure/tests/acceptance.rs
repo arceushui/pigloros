@@ -1,5 +1,6 @@
-//! ADR-136 acceptance matrix, slice C6b (#1470): the Gateway parts of
-//! acceptance tests 2, 8 and 9 through the served router.
+//! ADR-136 acceptance matrix, slices C6b (#1470) and C6c (#1471): the
+//! Gateway parts of acceptance tests 2, 8 and 9 through the served router,
+//! in every serve mode of acceptance test 11.
 //!
 //! `docs/erasure/adr-136-acceptance-matrix.md` maps every bullet to its
 //! test. Each test serves a `SQLite` world, as the Gateway serves only
@@ -13,11 +14,8 @@ use pos_local_erasure_loader::local_principal::local_principal_authority_timelin
 use pos_store::memory::MemoryStore;
 
 use super::*;
-use crate::local_erasure_composition::tests::erasure_world_provisioned;
 use crate::local_erasure_signing_fixture::SIGNER_OWNER;
-use crate::local_principal::{
-    LocalConsentDraftV1, LocalConsentGrantDraftV1, LocalPrincipalProvisionV1,
-};
+use crate::local_principal::{LocalConsentDraftV1, LocalConsentGrantDraftV1};
 
 /// The Timelines seeded into a served store before the Gateway opens it.
 struct Seeded {
@@ -261,11 +259,10 @@ fn payload_class(projection: &Value) -> TestResult<Value> {
 /// readable through the served router. Every erasure answer discloses only
 /// its declared digests and ids, and the projection's generation only rises
 /// while its claim only weakens.
-#[tokio::test]
-async fn the_served_partition_freezes_only_the_actors_lineage() -> TestResult {
-    let world = erasure_world_granting(&SERVED)?;
+async fn the_served_partition_freezes_only_the_actors_lineage(mode: ServeMode) -> TestResult {
+    let world = mode.world(&SERVED)?;
     let seeded = seed(&world.fixture.path)?;
-    let (served, driver) = Served::over(world, compiled())?;
+    let (served, driver) = Served::over(world, mode, compiled())?;
     let (actor, other) = (actor()?, other_actor()?);
     let owned = served.create(actor, "owned").await?;
     let others = served.create(other, "others").await?;
@@ -329,10 +326,9 @@ async fn the_served_partition_freezes_only_the_actors_lineage() -> TestResult {
 /// exact retry still answers its original receipt bytes and each actor's
 /// next request is `409 erasure-quota-exhausted`, so the store holds
 /// exactly `maximum_requests - reserve = 2` requests.
-#[tokio::test]
-async fn every_actors_used_quota_holds_across_a_restart() -> TestResult {
+async fn every_actors_used_quota_holds_across_a_restart(mode: ServeMode) -> TestResult {
     let limits = ErasureRecoveryLimitsV1::from_maximum_requests(514)?;
-    let (served, driver) = Served::local(&SERVED, limits)?;
+    let (served, driver) = Served::serve(mode, &SERVED, limits)?;
     let subjects = [actor()?, other_actor()?];
     let mut receipts = Vec::new();
     for subject in subjects {
@@ -346,7 +342,7 @@ async fn every_actors_used_quota_holds_across_a_restart() -> TestResult {
         receipts.push(admitted.bytes);
     }
     let world = served.stop(driver).await?;
-    let (served, driver) = Served::over(world, limits)?;
+    let (served, driver) = Served::over(world, mode, limits)?;
     // Each recovered request reads at its first receipt again, and the
     // driver is then stopped, so nothing advances under the requests below.
     for subject in subjects {
@@ -399,10 +395,10 @@ const CONSENTED: [GatewayOperationV1; 6] = [
     GatewayOperationV1::READ_ERASURE,
 ];
 
-/// A Local erasure world whose Principal binds one consent of the actor,
-/// governing Timeline creation.
-fn consented_world() -> TestResult<World> {
-    erasure_world_provisioned(&LocalPrincipalProvisionV1::try_new_with_consent(
+/// A Local erasure world for `mode` whose Principal binds one consent of
+/// the actor, governing Timeline creation.
+fn consented_world(mode: ServeMode) -> TestResult<World> {
+    mode.provisioned(&LocalPrincipalProvisionV1::try_new_with_consent(
         &principal()?,
         [actor()?, other_actor()?],
         CONSENTED,
@@ -444,9 +440,10 @@ async fn revoke(
 /// closure holds only the actor's root, the Session still reads the
 /// revoked consent and the revocation's exact retry still answers its
 /// original bytes.
-#[tokio::test]
-async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines() -> TestResult {
-    let (served, driver) = Served::over(consented_world()?, compiled())?;
+async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines(
+    mode: ServeMode,
+) -> TestResult {
+    let (served, driver) = Served::over(consented_world(mode)?, mode, compiled())?;
     let actor = actor()?;
     served.create(actor, "owned").await?;
     let session = served
@@ -497,3 +494,9 @@ async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timeline
     served.stop(driver).await?;
     Ok(())
 }
+
+in_every_serve_mode!(
+    the_served_partition_freezes_only_the_actors_lineage,
+    every_actors_used_quota_holds_across_a_restart,
+    a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines,
+);

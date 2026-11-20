@@ -532,9 +532,11 @@ fn managed_credentials(
     .map_err(io::Error::other)
 }
 
+// Public, like `local_erasure_composition::tests`, so its crate-only
+// managed-mode seams satisfy `clippy::redundant_pub_crate`.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+pub mod tests {
     use super::*;
     use pos_runtime::ErasureCoordinatorCompositionV1;
     use std::net::SocketAddr;
@@ -872,6 +874,89 @@ mod tests {
             TimelineId::from_ulid(ulid::Ulid::from_bytes(child)),
             admission,
         ))
+    }
+
+    // -----------------------------------------------------------------
+    // The managed Local Fork admission serve mode of ADR-136 acceptance
+    // test 11, shared with the served erasure suite (#1471).
+    // -----------------------------------------------------------------
+
+    /// The three managed credentials by name, as `serve` loads them.
+    ///
+    /// FACR1 and FAHK1 are those of this process's service uid under the
+    /// fixture seeds, and FCP1 holds the row of the Fork descriptor `[7; 32]`.
+    pub(crate) fn managed_credentials_for_test() -> io::Result<Vec<(&'static str, Vec<u8>)>> {
+        let (auth, host) = test_credential_bytes_for_service(
+            rustix::process::geteuid().as_raw(),
+            [7; 32],
+            [8; 32],
+        )
+        .map_err(io::Error::other)?;
+        let profile = profile_bytes(&[7])?;
+        Ok(crate::local_fork_authentication::MANAGED_CREDENTIAL_NAMES
+            .into_iter()
+            .zip([auth, host, profile])
+            .collect())
+    }
+
+    /// Provision the current-peer FAH1 into the bound store at `sqlite_path`.
+    ///
+    /// It runs as the offline provisioner does, with the current-peer
+    /// credentials of the fixture seeds, so this process may call the
+    /// managed listener.
+    pub(crate) fn provision_current_peer_for_test(sqlite_path: &str) -> io::Result<()> {
+        provision_bound_store(sqlite_path, &current_peer_credentials()?)
+    }
+
+    /// The managed serve with `--require-local-erasure` of the store at
+    /// `sqlite_path`, up to its TCP bind, over a host recovered with
+    /// `limits`.
+    ///
+    /// It runs the steps of [`serve_managed_local_fork_admission`] and
+    /// `serve_started` in their order: the managed and Local erasure
+    /// credentials of `credential_directory`, the host, the Local mode
+    /// binding over the Fork-admission `socket`, the startup sweep, the
+    /// Gateway with its Fork-admission slot and the listener. The loaded
+    /// FACR1 registers no peer of this process, whose uid is its service
+    /// uid, so the listener runs the current-peer credentials of the same
+    /// seeds, whose FAH1 [`provision_current_peer_for_test`] provisioned.
+    pub(crate) fn start_managed_for_test(
+        sqlite_path: &str,
+        (credential_directory, trust_state): (&Path, &Path),
+        socket: &Path,
+        limits: pos_core::ErasureRecoveryLimitsV1,
+    ) -> io::Result<(Gateway, LocalForkAdmissionListenerV1, LocalErasureStartV1)> {
+        let deployment = ManagedLocalForkAdmissionV1 {
+            sqlite_path,
+            credential_directory,
+            profile: GatewayModeProfileIdV1::Local,
+            composition: fork_composition(socket),
+            owntracks_owner_key: None,
+            ledger: LedgerConfig::new(None, false),
+            local_erasure_trust_state: Some(trust_state),
+        };
+        let (managed, erasure) =
+            managed_credentials_and_erasure(&deployment).map_err(io::Error::other)?;
+        let mut host = ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Sqlite {
+                path: sqlite_path.to_owned(),
+            },
+            erasure.composition(),
+            limits,
+        )
+        .map_err(crate::startup::erasure_host_failure)?;
+        let mode = bind_gateway_mode_v1(deployment.profile, deployment.composition, &mut host)
+            .map_err(io::Error::other)?;
+        let erasure = erasure.start(&mut host);
+        drop(managed.credentials);
+        let (gateway, coordinator) = open_with_credentials(
+            host,
+            (current_peer_credentials()?, managed.profile),
+            None,
+            &mode,
+        )?;
+        let listener = start_listener(coordinator, socket)?;
+        Ok((gateway, listener, erasure))
     }
 
     // -----------------------------------------------------------------
