@@ -43,6 +43,9 @@ fn enrollment_runs_e1_to_e5_with_a_fresh_unlock_assertion_before_the_binding_com
     );
     assert!(port.seal_prf.is_some());
     assert_eq!(port.seal_prf, port.confirm_prf);
+    let (credential, _, sealed_context) = port.sealed_over.clone().ok_or("nothing was sealed")?;
+    assert_eq!(credential, CREDENTIAL_ID);
+    assert_eq!(sealed_context, context());
     assert_eq!(port.at_calls, [(1, 1), (2, 2)]);
     let committed = port.committed.ok_or("nothing was committed")?;
     let binding = committed.binding().boxed()?;
@@ -453,6 +456,8 @@ fn each_ceremony_draws_its_random_block_in_the_documented_layout() -> TestResult
         (get_id, get_challenge, prf_input)
     );
     assert_eq!(second.3, None);
+    let (_, sealed_input, _) = port.sealed_over.ok_or("nothing was sealed")?;
+    assert_eq!(sealed_input.as_bytes().as_slice(), prf_input);
     Ok(())
 }
 

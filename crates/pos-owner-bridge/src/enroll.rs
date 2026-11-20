@@ -1,8 +1,8 @@
 //! Enrollment with confirmation (ADR-110 §8, D2): the port trait and its types.
 
 use pos_owner_bridge_codec::{
-    CoseEs256PublicKey, OwnerBridgeCodecError, OwnerUserHandle, SubjectCredentialBindingInputV1,
-    SubjectCredentialBindingV1, SubjectId, TransportCodes,
+    CoseEs256PublicKey, OwnerBridgeCodecError, OwnerUserHandle, PrfInput,
+    SubjectCredentialBindingInputV1, SubjectCredentialBindingV1, SubjectId, TransportCodes,
 };
 
 use crate::ceremony::plan::{Assertion, Registration};
@@ -51,6 +51,51 @@ pub struct EnrollmentContext {
     pub epoch: u64,
     /// The owning application window handle, when one exists.
     pub owner_window: Option<u64>,
+}
+
+/// What the bridge hands [`EnrollmentPort::seal_candidate`].
+///
+/// It carries the enrollment context, the new credential's ID and the PRF
+/// input that the source and confirmation assertions evaluate. The ADR-091
+/// wrap binds all three (its HKDF info and AAD), so only the bridge builds
+/// this value (ADR-110 §10 refinement, Redmine #1481).
+#[derive(Clone, Copy, Debug)]
+pub struct SealInputs<'a> {
+    context: &'a EnrollmentContext,
+    credential_id: &'a [u8],
+    prf_input: PrfInput,
+}
+
+impl<'a> SealInputs<'a> {
+    pub(crate) const fn new(
+        context: &'a EnrollmentContext,
+        credential_id: &'a [u8],
+        prf_input: PrfInput,
+    ) -> Self {
+        Self {
+            context,
+            credential_id,
+            prf_input,
+        }
+    }
+
+    /// The owner, subject and epoch the new binding belongs to.
+    #[must_use]
+    pub const fn context(&self) -> &'a EnrollmentContext {
+        self.context
+    }
+
+    /// The credential ID of the verified registration.
+    #[must_use]
+    pub const fn credential_id(&self) -> &'a [u8] {
+        self.credential_id
+    }
+
+    /// The PRF input every assertion of this enrollment evaluates.
+    #[must_use]
+    pub const fn prf_input(&self) -> PrfInput {
+        self.prf_input
+    }
 }
 
 /// A credential binding that only the bridge can construct, after D2 confirmation succeeded.
@@ -128,7 +173,7 @@ pub trait EnrollmentPort {
     /// Returns the adapter failure.
     fn credential_unbound(&mut self, credential_id: &[u8]) -> Result<bool, OwnerError>;
 
-    /// Generate the root, build the wrap in memory, and return its fingerprint.
+    /// Generate the root, build the wrap in memory over `inputs`, and return its fingerprint.
     ///
     /// # Errors
     ///
@@ -136,7 +181,7 @@ pub trait EnrollmentPort {
     fn seal_candidate(
         &mut self,
         prf: PrfOutput<'_>,
-        context: &EnrollmentContext,
+        inputs: SealInputs<'_>,
     ) -> Result<(Self::Candidate, RootFingerprint), OwnerError>;
 
     /// Return `Ok` only after an authenticated AES-GCM open under the PRF-derived key; the
