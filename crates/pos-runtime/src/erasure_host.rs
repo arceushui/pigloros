@@ -4192,8 +4192,32 @@ impl ErasureCommandSenderV1<'_> {
     /// Returns a payload-free host error. If persistence succeeds but successor
     /// publication fails, the host is poisoned and no further sender is issued.
     pub fn create_timeline(&mut self, name: &str) -> Result<Timeline, ErasureHostErrorV1> {
+        self.create_root(TimelineMeta::root(name))
+    }
+
+    /// Create a root Timeline owned by `owner` and publish its successor
+    /// inventory generation, exactly as [`Self::create_timeline`] does.
+    ///
+    /// The owner is recorded at creation (ADR-136 §1): a Local erasure of
+    /// `owner` selects the root and every Fork of it that inherits the
+    /// owner, while the root stays unaffected for a request frozen before it
+    /// existed.
+    ///
+    /// # Errors
+    /// Returns the payload-free host errors of [`Self::create_timeline`].
+    pub fn create_owned_timeline(
+        &mut self,
+        name: &str,
+        owner: EntityId,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.create_root(TimelineMeta::root_owned(name, owner))
+    }
+
+    /// Create the fresh root `meta` through the positively checked root
+    /// topology transition.
+    fn create_root(&mut self, meta: TimelineMeta) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let candidate = Timeline::new(TimelineMeta::root(name));
+        let candidate = Timeline::new(meta);
         let (timeline, generation) =
             self.host
                 .apply_root_topology_change(candidate, |permit, store, candidate| {
@@ -4235,8 +4259,9 @@ impl ErasureCommandSenderV1<'_> {
     /// [`Self::create_timeline`] publishes it.
     ///
     /// A host-owned record keeps a well-known identity this way: a client
-    /// creates root Timelines only through [`Self::create_timeline`], whose
-    /// identities are fresh, so it can never claim `id` first.
+    /// creates root Timelines only through [`Self::create_timeline`] and
+    /// [`Self::create_owned_timeline`], whose identities are fresh, so it can
+    /// never claim `id` first.
     ///
     /// # Errors
     /// Returns a payload-free host error. If persistence succeeds but successor
@@ -5817,6 +5842,71 @@ impl ErasureReadSenderV1<'_> {
             .host_store()
             .root_timeline_count_bounded(maximum)
             .map_store_error()
+    }
+
+    /// Count the visible root Timelines other than the host-owned roots
+    /// `host_roots`, without exceeding `maximum + 1`.
+    ///
+    /// `host_roots` names distinct root identities that only the host
+    /// creates and that hold no geographic evidence, such as a consent
+    /// Timeline or the Erasure Host Timeline; each the installed inventory
+    /// records is left out of the count, and one it does not record changes
+    /// nothing. A client root ceiling therefore never counts them.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn client_root_timeline_count_bounded(
+        &mut self,
+        maximum: usize,
+        host_roots: &[TimelineId],
+    ) -> Result<usize, ErasureHostErrorV1> {
+        self.host
+            .ensure_generation_with_inventory(self.generation)
+            .map(|inventory| {
+                host_roots
+                    .iter()
+                    .filter(|&&root| inventory.records_timeline(root))
+                    .count()
+            })
+            .and_then(|recorded| {
+                self.host
+                    .store
+                    .host_store()
+                    .root_timeline_count_bounded(maximum.saturating_add(recorded))
+                    .map_store_error()
+                    .map(|count| count.saturating_sub(recorded))
+            })
+    }
+
+    /// The Erasure Host Timeline of this store
+    /// ([`pos_core::local_erasure_host_timeline_v1`] of its erasure store
+    /// identity), or `None` while the store records no identity.
+    ///
+    /// The identity is write-once, so a recorded Erasure Host Timeline never
+    /// changes. The read reveals only the derived Timeline identity.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error for a stale sender or an
+    /// unreadable identity.
+    pub fn local_erasure_host_timeline(
+        &mut self,
+    ) -> Result<Option<TimelineId>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation).and_then(|()| {
+            self.host
+                .store
+                .host_store()
+                .erasure_store_identity()
+                .and_then(|identity| {
+                    identity
+                        .map(|identity| {
+                            pos_core::local_erasure_host_timeline_v1(
+                                ErasureReferenceV1::from_digest(*identity.as_bytes()),
+                            )
+                        })
+                        .transpose()
+                })
+                .map_err(map_erasure_error)
+        })
     }
 
     /// Return the logical head of one inventory-classified Timeline.

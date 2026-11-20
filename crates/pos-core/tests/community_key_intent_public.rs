@@ -4,11 +4,11 @@ use ciborium::value::Value;
 use pos_core::community_lifecycle::{
     CommunityArtifactKindV1 as Kind, CommunityArtifactOperationV1 as Operation,
     CommunityArtifactPurposeV1 as Purpose, CommunityKeyIntentInputV1 as Input,
-    CommunityKeyIntentV1 as Intent, CommunityKeyUseV1 as KeyUse,
+    CommunityKeyIntentV1 as Intent, CommunityKeyStateV1 as KeyState, CommunityKeyUseV1 as KeyUse,
     CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1 as Slots, CommunityPassKeyV1,
     CommunityRecordKindsV1 as Kinds, MAX_COMMUNITY_KEY_ENCRYPTION_ORDINAL_V1,
 };
-use pos_core::{Hash, TimelineId};
+use pos_core::{Hash, KeyRoleV1, TimelineId};
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
@@ -358,5 +358,26 @@ fn credit_counter_is_bound_to_its_exact_intent_and_epoch() -> TestResult {
         KeyUse::from_canonical_cbor(&trailing, &intent).err(),
         Some(Error::InvalidEncoding)
     );
+    Ok(())
+}
+
+/// Decision 3 (#560, 2026-11-19): a key the operation reads or creates is a
+/// CAV1 key row of its role7 owner, epoch 1, fingerprint and intent digest.
+#[test]
+fn an_intent_is_its_own_cav1_key_row() -> TestResult {
+    let intent = intent()?;
+    let expected = encode(&control_value())?;
+    for state in [KeyState::Available, KeyState::Tombstoned] {
+        let row = intent.key_view_row(state);
+        assert_eq!(row.owner, intent.key_owner_text());
+        assert_eq!(row.role, KeyRoleV1::CommunityArtifactEncryption);
+        assert_eq!(row.epoch, 1);
+        assert_eq!(row.material_fingerprint, hash(5));
+        assert!(row.state == state);
+        assert_eq!(
+            row.key_intent_digest,
+            oracle(b"PiglorOS.Community.CKP1.v1\0", &expected)
+        );
+    }
     Ok(())
 }
