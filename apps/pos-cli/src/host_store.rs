@@ -7,22 +7,28 @@ struct HostedCliStore {
 }
 
 impl HostedCliStore {
-    fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
-        Self::open_with_authority(config, &composition)
+    /// Open `config` under the erasure authority the shared loader composes
+    /// from this process's deployment trust source.
+    fn open(
+        config: pos_store::StoreConfig,
+    ) -> Result<Self, pos_local_erasure_loader::LocalErasureOpenErrorV1> {
+        Self::open_with_trust(
+            config,
+            &pos_local_erasure_loader::LocalErasureTrustSourceV1::from_environment(),
+        )
     }
 
-    fn open_with_authority(
+    /// Open `config` under the erasure authority composed from `source`:
+    /// closed for a store without an erasure store identity, else the Local
+    /// erasure authority with no executor, or a typed refusal.
+    fn open_with_trust(
         config: pos_store::StoreConfig,
-        composition: &pos_runtime::ErasureCoordinatorCompositionV1,
-    ) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        pos_runtime::ErasureExecutionHostV1::open_with_authority(
-            config,
-            composition,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .map(|host| Self {
-            host: std::sync::Mutex::new(host),
+        source: &pos_local_erasure_loader::LocalErasureTrustSourceV1,
+    ) -> Result<Self, pos_local_erasure_loader::LocalErasureOpenErrorV1> {
+        pos_local_erasure_loader::LocalErasureRecoveryV1::open_host(config, source).map(|host| {
+            Self {
+                host: std::sync::Mutex::new(host),
+            }
         })
     }
 
@@ -131,6 +137,21 @@ impl pos_core::store::EventStore for HostedCliStore {
             host.read_sender()
                 .and_then(|mut sender| sender.logical_head(timeline))
         })
+    }
+}
+
+/// The store error of a refused open: a refused composition is a storage
+/// error naming its typed refusal.
+fn hosted_cli_open_error(
+    error: pos_local_erasure_loader::LocalErasureOpenErrorV1,
+) -> pos_core::CoreError {
+    match error {
+        pos_local_erasure_loader::LocalErasureOpenErrorV1::Load(error) => {
+            pos_core::CoreError::Storage(error.to_string())
+        }
+        pos_local_erasure_loader::LocalErasureOpenErrorV1::Host(error) => {
+            hosted_cli_store_error(error)
+        }
     }
 }
 
@@ -259,6 +280,105 @@ mod hosted_cli_store_tests {
                 hosted_cli_store_error(error),
                 pos_core::CoreError::Storage(_)
             ));
+        }
+        Ok(())
+    }
+}
+
+/// ADR-136 acceptance test 11 for the CLI root (#1450): its store open
+/// composes the closed authority for a store without an erasure store
+/// identity, recovers a store that holds a Local erasure request from valid
+/// credentials, and refuses missing or invalid ones.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod keyless_erasure_tests {
+    use pos_core::store::EventStore;
+    use pos_local_erasure_loader::{
+        LocalErasureLoadErrorV1, LocalErasureOpenErrorV1, LocalErasureTrustSourceV1,
+    };
+    use pos_runtime::LocalErasureCompositionErrorV1;
+
+    use super::{hosted_cli_open_error, HostedCliStore, StoreConfig};
+    use crate::keyless_store::KeylessStore;
+    use crate::signing::TestResult;
+
+    #[test]
+    fn a_store_without_an_identity_opens_and_works() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let config = StoreConfig::Sqlite {
+            path: directory
+                .path()
+                .join("cli.db")
+                .to_str()
+                .ok_or("temporary path is not UTF-8")?
+                .to_owned(),
+        };
+        let source = LocalErasureTrustSourceV1 {
+            credential_directory: None,
+            trust_state: directory.path().join("absent-trust.db"),
+        };
+        let mut store = HostedCliStore::open_with_trust(config.clone(), &source)?;
+        let timeline = store.create_timeline("cli")?;
+        drop(store);
+        let reopened = HostedCliStore::open_with_trust(config, &source)?;
+        assert_eq!(
+            reopened
+                .get_timeline(timeline.id())?
+                .map(|found| found.id()),
+            Some(timeline.id())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_credentials_recover_a_store_that_holds_a_request() -> TestResult {
+        let store = KeylessStore::new()?;
+        let source = store.valid_source("valid")?;
+        let recovered = HostedCliStore::open_with_trust(store.config(), &source)?;
+        assert!(!recovered.list_timelines()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_credentials_are_a_typed_refusal() -> TestResult {
+        let store = KeylessStore::new()?;
+        let refusal = HostedCliStore::open_with_trust(store.config(), &store.missing_source())
+            .err()
+            .ok_or("an identified store without credentials is refused")?;
+        assert_eq!(
+            refusal,
+            LocalErasureOpenErrorV1::Load(LocalErasureLoadErrorV1::CredentialsMissing)
+        );
+        assert!(matches!(
+            hosted_cli_open_error(refusal),
+            pos_core::CoreError::Storage(message)
+                if message == LocalErasureLoadErrorV1::CredentialsMissing.to_string()
+        ));
+        assert!(matches!(
+            hosted_cli_open_error(LocalErasureOpenErrorV1::Host(
+                pos_core::ErasureHostErrorV1::AccessFrozen
+            )),
+            pos_core::CoreError::ErasureAccessFrozen
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_bundle_or_signature_is_a_typed_refusal() -> TestResult {
+        let store = KeylessStore::new()?;
+        for source in [
+            store.invalid_bundle_source("invalid-bundle")?,
+            store.forged_signature_source("forged-signature")?,
+        ] {
+            assert_eq!(
+                HostedCliStore::open_with_trust(store.config(), &source).err(),
+                Some(LocalErasureOpenErrorV1::Load(
+                    LocalErasureLoadErrorV1::Composition(
+                        LocalErasureCompositionErrorV1::BundleInvalid
+                    )
+                ))
+            );
         }
         Ok(())
     }
