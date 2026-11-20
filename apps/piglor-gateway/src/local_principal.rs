@@ -74,6 +74,9 @@ use pos_core::{
     WallTime, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
     MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CONSENT_HISTORY_EVENTS,
 };
+use pos_local_erasure_loader::local_principal::{
+    derived_hash, derived_timeline, local_principal_authority_timeline, local_principal_grant_id,
+};
 use pos_runtime::ErasureExecutionHostV1;
 use serde::Deserialize;
 use thiserror::Error;
@@ -740,7 +743,7 @@ pub fn provision_local_principal_from_credentials(
     sqlite_path: &str,
     credential_directory: &Path,
 ) -> io::Result<()> {
-    crate::local_fork_authentication::read_single_credential(
+    pos_local_erasure_loader::credentials::read_single_credential(
         credential_directory,
         LOCAL_PRINCIPAL_CREDENTIAL_NAME,
         rustix::process::geteuid().as_raw(),
@@ -916,27 +919,6 @@ where
         Err(_) => Err(LocalPrincipalErrorV1::Corrupt),
         Ok(persisted) => Ok(Some(persisted)),
     }
-}
-
-/// The authority registry digest of the Local Principal root grant `store`
-/// records, or `None` when it records no Local Principal.
-///
-/// # Errors
-/// Returns the [`load_local_principal`] read errors.
-#[cfg(target_os = "linux")]
-pub(crate) fn recorded_registry_digest<S>(store: &S) -> Result<Option<Hash>, LocalPrincipalErrorV1>
-where
-    S: AuthorityPersistencePortV1 + ?Sized,
-{
-    load_chain(store, LocalGrantKindV1::Root).map(|chain| {
-        chain.and_then(|chain| {
-            chain
-                .chain()
-                .grants()
-                .last()
-                .map(CapabilityGrantV1::authority_registry_digest)
-        })
-    })
 }
 
 /// Compose the Local Principal recorded in the store of `host`.
@@ -1504,28 +1486,6 @@ fn framed_consent(hasher: &mut blake3::Hasher, consent: Option<&LocalConsentDraf
 fn framed(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value);
-}
-
-fn derived_hash(context: &str) -> Hash {
-    Hash::from_bytes(blake3::derive_key(context, &[]))
-}
-
-/// The Timeline identity of the derivation `context`.
-fn derived_timeline(context: &str) -> TimelineId {
-    let digest = blake3::derive_key(context, &[]);
-    let mut identity = [0; 16];
-    identity.copy_from_slice(&digest[..16]);
-    TimelineId::from_ulid(Ulid::from_bytes(identity))
-}
-
-/// The one grant identity a store's Local Principal is recorded under.
-pub(crate) fn local_principal_grant_id() -> Hash {
-    derived_hash("pigloros gateway local principal grant v1")
-}
-
-/// The authority Timeline the Local Principal's grant is issued on.
-pub(crate) fn local_principal_authority_timeline() -> TimelineId {
-    derived_timeline("pigloros gateway local principal authority timeline v1")
 }
 
 /// The one consent Timeline of a store's Local Principal (#309): a root

@@ -7,7 +7,7 @@
 //! binding, never binding it. The unit's credential directory holds exactly
 //! two credentials: [`LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME`], the role-2
 //! signer's 32-byte Ed25519 seed, and the deployment release anchor
-//! [`crate::deployment_trust::RELEASE_TRUST_CREDENTIAL_NAME`], which
+//! [`pos_local_erasure_loader::deployment_trust::RELEASE_TRUST_CREDENTIAL_NAME`], which
 //! authenticates the installed TPS1 of the trust state store.
 //!
 //! ```text
@@ -104,12 +104,16 @@ use rand::RngExt as _;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::deployment_trust::{
-    load_deployment_trust_v1, release_trust_from_credential, RELEASE_TRUST_CREDENTIAL_NAME,
+use pos_local_erasure_loader::deployment_trust::{
+    load_deployment_trust_v1, release_trust_from_credential, MAX_RELEASE_TRUST_CREDENTIAL_BYTES,
+    RELEASE_TRUST_CREDENTIAL_NAME,
 };
-use crate::local_principal::{
-    local_principal_authority_timeline, local_principal_consent_timeline, recorded_registry_digest,
+use pos_local_erasure_loader::local_principal::{
+    local_principal_authority_timeline, recorded_registry_digest,
 };
+use pos_local_erasure_loader::unix_now;
+
+use crate::local_principal::local_principal_consent_timeline;
 
 /// The systemd credential holding the role-2 erasure signer's Ed25519 seed.
 pub const LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME: &str = "pigloros.local-erasure-signer";
@@ -118,7 +122,7 @@ pub const LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME: &str = "pigloros.local-erasure-s
 pub const LOCAL_ERASURE_HOST_TIMELINE_NAME: &str = "pigloros.local-erasure.host";
 
 /// The largest credential the unit reads.
-const MAX_CREDENTIAL_BYTES: usize = crate::deployment_trust::MAX_RELEASE_TRUST_CREDENTIAL_BYTES;
+const MAX_CREDENTIAL_BYTES: usize = MAX_RELEASE_TRUST_CREDENTIAL_BYTES;
 
 /// The command's flags, each given at most once.
 const FLAGS: [&str; 6] = [
@@ -317,7 +321,7 @@ fn credentialed_bundle(
     credential_directory: &Path,
     trust_state: &Path,
 ) -> io::Result<Vec<u8>> {
-    crate::local_fork_authentication::open_exact_credentials(
+    pos_local_erasure_loader::credentials::open_exact_credentials(
         credential_directory,
         &[
             LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
@@ -347,14 +351,6 @@ fn credentialed_bundle(
                     })
             })
     })
-}
-
-/// The current Unix second (UTC); a clock before the epoch reads as the
-/// largest second, so it fails closed against every TPS1 expiry.
-pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(u64::MAX, |elapsed| elapsed.as_secs())
 }
 
 /// The signing key of a 32-byte Ed25519 seed credential.

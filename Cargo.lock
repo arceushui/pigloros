@@ -5607,12 +5607,12 @@ dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
- "libc",
  "piglor-ledger",
  "pos-conformance",
  "pos-core",
  "pos-crypto",
  "pos-experiment",
+ "pos-local-erasure-loader",
  "pos-plugin-agent",
  "pos-plugin-eval",
  "pos-plugin-geo",
@@ -5644,8 +5644,11 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
+ "piglor-gateway",
+ "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-local-erasure-loader",
  "pos-plugin-ledger",
  "pos-runtime",
  "pos-store",
@@ -5804,8 +5807,13 @@ name = "pos-cli"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ed25519-dalek",
+ "piglor-gateway",
+ "pos-conformance",
  "pos-core",
+ "pos-crypto",
  "pos-experiment",
+ "pos-local-erasure-loader",
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-runtime",
@@ -5893,6 +5901,7 @@ dependencies = [
  "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-local-erasure-loader",
  "pos-plugin-agent",
  "pos-plugin-eval",
  "pos-plugin-ledger",
@@ -5932,6 +5941,7 @@ dependencies = [
  "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-local-erasure-loader",
  "pos-reference",
  "pos-runtime",
  "pos-store",
@@ -5941,6 +5951,27 @@ dependencies = [
  "tokio",
  "tower",
  "ulid",
+]
+
+[[package]]
+name = "pos-local-erasure-loader"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "pos-conformance",
+ "pos-core",
+ "pos-crypto",
+ "pos-runtime",
+ "pos-store",
+ "rusqlite",
+ "rustix 1.1.6",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml",
+ "ulid",
+ "zeroize",
 ]
 
 [[package]]
