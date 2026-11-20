@@ -1267,6 +1267,8 @@ fn submission(key: u8, scope: ErasureScopeV1) -> TestResult<LocalErasureSubmissi
         actor: actor(),
         scope,
         idempotency_key_digest: reference(key),
+        mode_profile: reference(0x6d),
+        binding_epoch: 1,
     })
 }
 
@@ -1327,7 +1329,7 @@ fn a_local_submission_is_derived_idempotent_and_bound_to_its_body() -> TestResul
     let state = sender
         .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
         .map_err(fail)?;
-    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
     // An exact retry returns the original state.
     assert_eq!(
         sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
@@ -1499,12 +1501,12 @@ fn a_fresh_submission_after_a_root_grant_revocation_is_unauthorized() -> TestRes
 fn refused_before_the_subject_checks(
     store: &LocalStore,
     host: &mut ErasureExecutionHostV1,
-    error: ErasureHostErrorV1,
+    error: LocalErasureSubmitErrorV1,
 ) -> TestResult {
     assert_eq!(
         host.command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(error))
+        Err(error)
     );
     // The host's own authority view reads no object, so read the store.
     let sqlite = store.sqlite()?;
@@ -1536,13 +1538,21 @@ fn an_unauthenticated_submission_learns_nothing_of_a_held_subject() -> TestResul
     let mut expired = local_case()?;
     expired.clock = after_trust_expiry;
     let mut host = store.host(&expired, 4_096)?;
-    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::RecoveryUnavailable)?;
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::AdmissionsClosed,
+    )?;
     drop(host);
     // Once the root grant is revoked, the authentication failure answers
     // first, although request 1 still holds the subject.
     store.revoke(&shape)?;
     let mut host = store.host(&local_case()?, 4_096)?;
-    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::AuthorizationDenied)
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
+    )
 }
 
 #[test]
@@ -1573,7 +1583,7 @@ fn a_replay_is_answered_only_to_an_authorized_caller() -> TestResult {
         );
         state
     };
-    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
     // Once the root grant is revoked, neither the exact retry nor the same
     // key with another body learns the installed request: both are refused
     // as unauthorized, not answered with the state or a conflict.
@@ -1617,9 +1627,7 @@ fn an_exact_retry_is_answered_after_new_admissions_close() -> TestResult {
     );
     assert_eq!(
         sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::RecoveryUnavailable
-        ))
+        Err(LocalErasureSubmitErrorV1::AdmissionsClosed)
     );
     Ok(())
 }
@@ -1638,7 +1646,7 @@ fn a_root_grant_admits_the_last_position_of_its_window() -> TestResult {
         .command_sender()?
         .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
         .map_err(fail)?;
-    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
     Ok(())
 }
 
@@ -1675,9 +1683,7 @@ fn an_expired_bundle_closes_new_admissions_but_not_a_rejection() -> TestResult {
     );
     assert_eq!(
         sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::RecoveryUnavailable
-        ))
+        Err(LocalErasureSubmitErrorV1::AdmissionsClosed)
     );
     Ok(())
 }
@@ -1702,9 +1708,7 @@ fn an_expired_tps1_closes_new_admissions() -> TestResult {
     assert_eq!(
         host.command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::RecoveryUnavailable
-        ))
+        Err(LocalErasureSubmitErrorV1::AdmissionsClosed)
     );
     Ok(())
 }
@@ -1719,9 +1723,7 @@ fn submission_needs_a_local_composition_and_its_principal() -> TestResult {
         closed
             .command_sender()?
             .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::AuthorizationDenied
-        ))
+        Err(LocalErasureSubmitErrorV1::Unserved)
     );
     // A composition naming a root grant the store does not record.
     let store = LocalStore::new(&GrantShape::standard())?;
@@ -1746,11 +1748,11 @@ fn refused_without_retention(
     store: &LocalStore,
     host: &mut ErasureExecutionHostV1,
     submission: &LocalErasureSubmissionV1,
-    error: ErasureHostErrorV1,
+    error: LocalErasureSubmitErrorV1,
 ) -> TestResult {
     assert_eq!(
         host.command_sender()?.submit_local_erasure(submission),
-        Err(LocalErasureSubmitErrorV1::Host(error))
+        Err(error)
     );
     // The host's own authority view reads no object, so read the store.
     let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
@@ -1775,7 +1777,7 @@ fn the_root_grant_must_match_the_composition_and_name_the_operation() -> TestRes
             &store,
             &mut host,
             &submission(1, ErasureScopeV1::PrivateSubjectData)?,
-            ErasureHostErrorV1::AuthorizationDenied,
+            LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
         )
     };
     let case = local_case()?;
@@ -1831,7 +1833,7 @@ fn a_refused_submission_retains_nothing() -> TestResult {
         &store,
         &mut host,
         &stranger,
-        ErasureHostErrorV1::AuthorizationDenied,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
     )?;
     // A composition whose TPS1 has expired.
     drop(host);
@@ -1842,7 +1844,7 @@ fn a_refused_submission_retains_nothing() -> TestResult {
         &store,
         &mut host,
         &submission(1, ErasureScopeV1::PrivateSubjectData)?,
-        ErasureHostErrorV1::RecoveryUnavailable,
+        LocalErasureSubmitErrorV1::AdmissionsClosed,
     )?;
     // A revoked root grant.
     let shape = GrantShape::standard();
@@ -1853,7 +1855,7 @@ fn a_refused_submission_retains_nothing() -> TestResult {
         &store,
         &mut host,
         &submission(1, ErasureScopeV1::PrivateSubjectData)?,
-        ErasureHostErrorV1::AuthorizationDenied,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
     )?;
     // The same store admits the Principal's own submission.
     let store = LocalStore::new(&GrantShape::standard())?;
@@ -3178,13 +3180,22 @@ fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestR
     assert_frozen(&mut host, &[owned.owned, child], owned.other)
 }
 
+/// One recipient export to a grantee, with the grantee's private directory
+/// kept for the life of the test.
+struct PublishedExport {
+    _directory: tempfile::TempDir,
+    private: std::path::PathBuf,
+    grantee: EntityId,
+    export_id: [u8; 16],
+}
+
 /// Publish one recipient export of the actor's `timeline` to `grantee`
-/// under the actor's export consent, and return its export id.
+/// under the actor's export consent.
 fn publish_export(
     store: &LocalStore,
     timeline: TimelineId,
     grantee: EntityId,
-) -> TestResult<[u8; 16]> {
+) -> TestResult<PublishedExport> {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir()?;
@@ -3248,13 +3259,18 @@ fn publish_export(
             now_secs: 1,
         },
     )?;
-    Ok(publication.export_id)
+    Ok(PublishedExport {
+        _directory: directory,
+        private,
+        grantee,
+        export_id: publication.export_id,
+    })
 }
 
 #[test]
 fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestResult {
     let owned = OwnedStore::new()?;
-    let export_id = publish_export(&owned.store, owned.owned, other_actor())?;
+    let export_id = publish_export(&owned.store, owned.owned, other_actor())?.export_id;
     let (mut host, signed) = signed_freeze(
         &owned.store,
         2,
@@ -3264,7 +3280,10 @@ fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestR
     )?;
     assert_frozen(&mut host, &[owned.owned], owned.other)?;
     // Role-0 keys and Timeline payloads are private-subject-data targets;
-    // the export to the grantee is one `export-recipient` target.
+    // the export to the grantee is one `export-recipient` target, positive
+    // after its recipient-export withdrawal (ADR-136 acceptance test 3 as
+    // ADR-138 §2 amends it; executed in
+    // `a_consented_erasure_withdraws_the_grantee_export_positively`).
     let grantee = pos_core::recipient_owner_id_from_grantee(other_actor()).map_err(fail)?;
     let mut cells = store_cells()?;
     cells.push((
@@ -3321,6 +3340,7 @@ fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
         sender
             .submit_local_erasure(&submission(3, ErasureScopeV1::ConsentedSharedData)?)
             .map_err(fail)?
+            .state
             .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
@@ -3739,6 +3759,7 @@ fn the_key_and_backup_bound_is_exact_at_submit() -> TestResult {
             sender
                 .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
                 .map_err(fail)?
+                .state
                 .lifecycle(),
             ErasureLifecycleV1::Submitted
         );
@@ -3777,6 +3798,7 @@ fn the_key_list_is_bounded_on_its_own() -> TestResult {
             sender
                 .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
                 .map_err(fail)?
+                .state
                 .lifecycle(),
             ErasureLifecycleV1::Submitted
         );
@@ -5053,6 +5075,7 @@ fn a_revoked_pinned_bundle_signs_nothing_and_frees_its_subject() -> TestResult {
             sender
                 .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
                 .map_err(fail)?
+                .state
                 .lifecycle(),
             ErasureLifecycleV1::Submitted
         );
@@ -5376,6 +5399,7 @@ fn a_complete_request_frees_its_subject() -> TestResult {
             .command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
             .map_err(fail)?
+            .state
             .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
@@ -6833,6 +6857,7 @@ fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> Tes
         host.command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
             .map_err(fail)?
+            .state
             .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
@@ -6851,8 +6876,8 @@ fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> Tes
 // ---------------------------------------------------------------------------
 
 use pos_runtime::{
-    LocalErasureDriverV1, LocalErasureSignerV1, LocalErasureSigningRequestV1, LocalErasureStepV1,
-    LocalErasureSweepV1,
+    LocalErasureAdvanceV1, LocalErasureDriverV1, LocalErasureSignerV1,
+    LocalErasureSigningRequestV1, LocalErasureStepV1, LocalErasureSweepV1,
 };
 
 /// A signer of `key`, registered as the fixture signer at `epoch`.
@@ -7554,6 +7579,66 @@ fn a_refused_signature_defers_the_step() -> TestResult {
     Ok(())
 }
 
+/// `advance` commits one transition per call, in the order `step` would,
+/// and answers `Idle` once nothing is due (owner decision D7 on #1413).
+#[test]
+fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
+    let (receipt, states) = straight_run(&driver_store()?)?;
+    let store = driver_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    assert_eq!(
+        driver().advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Idle,
+            deferred: Vec::new()
+        }
+    );
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let mut steps = Vec::new();
+    loop {
+        let advanced = driver().advance(&mut host)?;
+        assert!(advanced.deferred.is_empty());
+        match advanced.step {
+            LocalErasureStepV1::Idle => break,
+            step => steps.push(step),
+        }
+    }
+    assert_eq!(steps[0], LocalErasureStepV1::Authorized);
+    assert_eq!(steps[1], LocalErasureStepV1::Frozen);
+    let advanced = finalized(steps.last().cloned().ok_or("no step")?)?;
+    assert_eq!(advanced.to_canonical_cbor()?, receipt.to_canonical_cbor()?);
+    assert_eq!(history(&mut host, request_of(1)?)?, states);
+    Ok(())
+}
+
+/// `advance` passes over a request whose step fails and commits nothing
+/// for it; a later call with the deployment's signer resumes it.
+#[test]
+fn advance_passes_over_a_request_it_cannot_step() -> TestResult {
+    let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
+    assert_eq!(
+        foreign.advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Idle,
+            deferred: vec![request_of(1)?]
+        }
+    );
+    assert_eq!(
+        lifecycle(&mut host, request_of(1)?)?,
+        ErasureLifecycleV1::Authorized
+    );
+    assert_eq!(
+        driver().advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Frozen,
+            deferred: Vec::new()
+        }
+    );
+    Ok(())
+}
+
 /// Acceptance test 5 through the driver: a submitted request whose ERAZ1
 /// no longer verifies is rejected under a retained ELREJ1, and an expired
 /// TPS1 defers authorization without committing anything.
@@ -7783,6 +7868,654 @@ fn an_overflowing_sweep_is_skipped() -> TestResult {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// ADR-138 §5 and §7: the `export-recipient` owner withdraws the grantee's
+// publication at the host seam (acceptance tests 1, 3, 6 and 7, and ADR-136
+// acceptance test 3 as ADR-138 §2 amends it; #1446).
+// ---------------------------------------------------------------------------
+
+use pos_core::LocalErasureRecipientExportWithdrawalV1;
+use pos_store::sqlite::{RecipientExportPublicationErrorV1, RecipientKeyOwnerV1};
+
+/// The `export-recipient` owner of the fixture store.
+fn export_owner() -> TestResult<ErasureReferenceV1> {
+    Ok(pos_core::local_erasure_owner_ref_v1(
+        ErasureReferenceV1::from_digest(STORE_IDENTITY),
+        u64::from(ErasureInventoryCategoryV1::Artifact),
+        "export-recipient",
+    )?)
+}
+
+impl PublishedExport {
+    /// A fresh custody handle on the grantee's private directory.
+    fn custody(&self) -> TestResult<RecipientKeyOwnerV1> {
+        Ok(RecipientKeyOwnerV1::open(&self.private, self.grantee)?)
+    }
+
+    /// The grantee's recipient owner.
+    fn grantee_owner(&self) -> TestResult<OwnerIdV1> {
+        pos_core::recipient_owner_id_from_grantee(self.grantee).map_err(fail)
+    }
+
+    /// The stored ciphertext, `recipient-export-<hex>.trx1`.
+    fn final_path(&self) -> std::path::PathBuf {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let hex: String = self
+            .export_id
+            .iter()
+            .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+            .map(char::from)
+            .collect();
+        self.private.join(format!("recipient-export-{hex}.trx1"))
+    }
+
+    /// Whether a serving read of `store` refuses the export as unavailable.
+    fn unavailable(&self, store: &LocalStore) -> TestResult<bool> {
+        Ok(matches!(
+            store
+                .sqlite()?
+                .read_recipient_export(&self.custody()?, self.export_id),
+            Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+        ))
+    }
+}
+
+impl LocalStore {
+    /// Compose `case` and recover a host over the store with `custody`
+    /// attached at composition, as the composition root that serves
+    /// recipient export does (ADR-138 §4).
+    fn custody_host(
+        &self,
+        case: &Case,
+        custody: Vec<RecipientKeyOwnerV1>,
+    ) -> TestResult<ErasureExecutionHostV1> {
+        let composition = {
+            let mut store = self.sqlite()?;
+            case.compose(&mut store).map_err(fail)?
+        };
+        let mut store = SqliteStore::open(&self.path)?;
+        store.attach_recipient_custody(custody)?;
+        Ok(
+            ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
+                store,
+                &composition,
+                ErasureRecoveryLimitsV1::from_maximum_requests(4_096)?,
+            )?,
+        )
+    }
+}
+
+/// The driver store with one recipient export of the actor's owned
+/// Timeline to `other_actor()`.
+fn export_store() -> TestResult<(LocalStore, PublishedExport)> {
+    let store = driver_store()?;
+    let export = publish_export(&store, memory_owned_timeline(), other_actor())?;
+    Ok((store, export))
+}
+
+/// Submit consented request 1 on `host` and step it until its attempt 0
+/// is dispatched.
+fn dispatch_consented(host: &mut ErasureExecutionHostV1) -> TestResult {
+    submitted(host, 1, ErasureScopeV1::ConsentedSharedData)?;
+    let steps = driven_steps(host, |step| {
+        matches!(step, LocalErasureStepV1::Dispatched(_))
+    })?;
+    assert!(matches!(
+        steps.last(),
+        Some(LocalErasureStepV1::Dispatched(_))
+    ));
+    Ok(())
+}
+
+/// The export store with consented request 1 dispatched, and its
+/// dispatched `export-recipient` command.
+fn dispatched_export_store() -> TestResult<(LocalStore, PublishedExport, ErasureOwnerCommandV1)> {
+    let (store, export) = export_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    dispatch_consented(&mut host)?;
+    let owner = export_owner()?;
+    let command = host
+        .command_sender()?
+        .dispatched_owner_commands(request_of(1)?)?
+        .into_iter()
+        .find(|command| command.destruction.owner == owner)
+        .ok_or("no dispatched export-recipient command")?;
+    Ok((store, export, command))
+}
+
+/// The `export-recipient` owner result among `results`.
+fn export_result(results: &[ErasureOwnerResultV1]) -> TestResult<ErasureOwnerResultV1> {
+    let owner = export_owner()?;
+    Ok(*results
+        .iter()
+        .find(|result| result.command().destruction.owner == owner)
+        .ok_or("no export-recipient owner result")?)
+}
+
+/// Replay request 1 on `host` and return its `export-recipient` owner
+/// result.
+fn replayed_export(host: &mut ErasureExecutionHostV1) -> TestResult<ErasureOwnerResultV1> {
+    export_result(&LocalErasureExecutorV1::replay(host, request_of(1)?).map_err(fail)?)
+}
+
+/// The ELXW1 of `command` over the withdrawal row of `export`, built
+/// independently from the row's captured fields.
+fn expected_elxw1(
+    store: &LocalStore,
+    export: &PublishedExport,
+    command: &ErasureOwnerCommandV1,
+) -> TestResult<LocalErasureRecipientExportWithdrawalV1> {
+    let (length, digest, directory, final_identity): (i64, Vec<u8>, Vec<u8>, Vec<u8>) =
+        rusqlite::Connection::open(&store.path)?.query_row(
+            "SELECT ciphertext_length, ciphertext_digest, directory_identity, final_identity
+             FROM recipient_export_withdrawals_v1 WHERE export_id = ?1",
+            rusqlite::params![export.export_id.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    Ok(LocalErasureRecipientExportWithdrawalV1 {
+        request: command.request,
+        command: command.destruction.command,
+        export_id: export.export_id,
+        timeline_id: memory_owned_timeline(),
+        grantee_owner: export.grantee_owner()?,
+        ciphertext_digest: Hash::from_bytes(digest.as_slice().try_into()?),
+        ciphertext_length: u64::try_from(length)?,
+        directory_identity: directory.as_slice().try_into()?,
+        final_identity: final_identity.as_slice().try_into()?,
+    })
+}
+
+/// The positive ELO1 binding of `command`.
+const fn positive_binding(command: &ErasureOwnerCommandV1) -> LocalOwnerResultBindingV1 {
+    LocalOwnerResultBindingV1 {
+        request: command.request,
+        attempt: command.destruction.provenance,
+        obligation: command.destruction.obligation,
+        command: command.destruction.command,
+        owner_ref: command.destruction.owner,
+        error: None,
+    }
+}
+
+/// `record` and the ELO1 of `binding` over it.
+fn prepared_withdrawal(
+    record: &LocalErasureRecipientExportWithdrawalV1,
+    binding: LocalOwnerResultBindingV1,
+) -> TestResult<PreparedLocalOwnerEffectV1> {
+    Ok(PreparedLocalOwnerEffectV1::new(
+        LocalOwnerEffectV1::RecipientExportWithdrawal(record.to_canonical_cbor()?),
+        binding,
+    )?)
+}
+
+/// Retain the effect record and ELO1 of `prepared` without committing
+/// either, and return the ELO1 address.
+fn retain_prepared(
+    store: &LocalStore,
+    prepared: &PreparedLocalOwnerEffectV1,
+) -> TestResult<ErasureReferenceV1> {
+    let effect = prepared.effect_object().ok_or("no effect record")?;
+    store.retain(&[
+        effect.canonical_cbor().to_vec(),
+        prepared.owner_result().canonical_cbor().to_vec(),
+    ])?;
+    Ok(prepared.owner_result().reference())
+}
+
+/// Ask the fixture signer, on a host reopened over `store`, to sign the
+/// owner result `owner_result`.
+fn sign_owner_result(
+    store: &LocalStore,
+    owner_result: ErasureReferenceV1,
+) -> TestResult<Result<ErasureReferenceV1, ErasureHostErrorV1>> {
+    let signer = signer_of(erasure_signer(), 1);
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    let answer = signer.sign(
+        &mut host,
+        LocalErasureSigningRequestV1::OwnerResult { owner_result },
+    );
+    Ok(answer)
+}
+
+/// ADR-138 acceptance test 1, and ADR-136 acceptance test 3 as ADR-138 §2
+/// amends it: the grantee's publication of an affected Timeline is one
+/// `export-recipient` obligation, positive after its recipient-export
+/// withdrawal. The driven request completes, its ELO1 binds `CA(ELXW1)`,
+/// the catalog row and the stored ciphertext are gone, no serving read
+/// returns the export, and the committed bytes read back the same after the
+/// store is closed and reopened.
+#[test]
+fn a_consented_erasure_withdraws_the_grantee_export_positively() -> TestResult {
+    let (store, export) = export_store()?;
+    let steps = {
+        let mut host = store.custody_host(&driver_case()?, vec![export.custody()?])?;
+        submitted(&mut host, 1, ErasureScopeV1::ConsentedSharedData)?;
+        driven_steps(&mut host, |_| false)?
+    };
+    let receipt = finalized(steps.last().cloned().ok_or("no step")?)?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_evaluated_rows(&receipt)?;
+    let mut classes = acknowledged_classes(&steps)?;
+    classes.sort_unstable();
+    assert_eq!(
+        classes,
+        ["client-cache-signal", "export-recipient", "local-replica"]
+    );
+    let mut acknowledged = Vec::new();
+    for step in &steps {
+        if let LocalErasureStepV1::Acknowledged(result) = step {
+            acknowledged.push(**result);
+        }
+    }
+    let result = export_result(&acknowledged)?;
+    assert_eq!(result.error(), None);
+    let elo1 = store.elo1(&result)?;
+    let elxw1 =
+        LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor(&store.effect(&elo1)?)?;
+    assert_eq!(elxw1, expected_elxw1(&store, &export, result.command())?);
+    assert_eq!(elxw1.reference()?, elo1.effect_digest);
+    // The withdrawn row records the disposition and its first ELO1.
+    let (disposition, committed_elo1): (Vec<u8>, Vec<u8>) =
+        rusqlite::Connection::open(&store.path)?.query_row(
+            "SELECT disposition, committed_elo1 FROM recipient_export_withdrawals_v1
+             WHERE export_id = ?1",
+            rusqlite::params![export.export_id.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+    assert_eq!(disposition, elo1.effect_digest.digest().to_vec());
+    assert_eq!(committed_elo1, result.owner_result().digest().to_vec());
+    // The catalog row and the stored ciphertext are gone, and no serving
+    // read returns the export.
+    assert!(store
+        .sqlite()?
+        .recipient_export_publications(&[memory_owned_timeline()], 4)?
+        .is_empty());
+    assert!(!export.final_path().exists());
+    assert!(export.unavailable(&store)?);
+    // Each read reopens the store: the committed bytes are unchanged.
+    assert_eq!(store.effect(&elo1)?, elxw1.to_canonical_cbor()?);
+    assert_eq!(
+        ErasurePersistencePortV1::read_object(&store.sqlite()?, result.owner_result())?,
+        elo1.to_canonical_cbor()?
+    );
+    Ok(())
+}
+
+/// ADR-138 acceptance tests 3 (a crash after T3) and 7: a replay after a
+/// committed positive ELO1 commits it again byte for byte, also on a host
+/// restarted without custody, and once acknowledged the command is not
+/// dispatched again.
+#[test]
+fn a_replay_after_a_committed_withdrawal_commits_the_same_owner_result() -> TestResult {
+    let (store, export, _) = dispatched_export_store()?;
+    let case = driver_case()?;
+    let request = request_of(1)?;
+    let committed = {
+        let mut host = store.custody_host(&case, vec![export.custody()?])?;
+        let results = LocalErasureExecutorV1::replay(&mut host, request).map_err(fail)?;
+        assert_eq!(
+            LocalErasureExecutorV1::replay(&mut host, request).map_err(fail)?,
+            results
+        );
+        export_result(&results)?
+    };
+    assert_eq!(committed.error(), None);
+    let mut host = store.host(&case, 4_096)?;
+    assert_eq!(replayed_export(&mut host)?, committed);
+    let owner = export_owner()?;
+    let steps = driven_steps(&mut host, |step| {
+        matches!(
+            step,
+            LocalErasureStepV1::Acknowledged(result)
+                if result.command().destruction.owner == owner
+        )
+    })?;
+    assert!(matches!(
+        steps.last(),
+        Some(LocalErasureStepV1::Acknowledged(result)) if **result == committed
+    ));
+    assert!(host
+        .command_sender()?
+        .dispatched_owner_commands(request)?
+        .iter()
+        .all(|command| command.destruction.owner != owner));
+    Ok(())
+}
+
+/// ADR-138 acceptance test 7 and §7: without custody the withdrawal is a
+/// negative result and the export stays retracted, never served; replaying
+/// that unacknowledged negative on a host restarted with custody re-executes
+/// the command and commits a positive owner result of the same attempt,
+/// which signs and completes the request.
+#[test]
+fn an_unacknowledged_negative_re_executes_and_turns_positive_with_custody() -> TestResult {
+    let (store, export, command) = dispatched_export_store()?;
+    let case = driver_case()?;
+    let negative = replayed_export(&mut store.host(&case, 4_096)?)?;
+    assert_eq!(
+        negative.error(),
+        Some(ErasureErrorV1::ArtifactDeletionFailed)
+    );
+    assert_eq!(*negative.command(), command);
+    assert!(export.final_path().exists());
+    assert!(export.unavailable(&store)?);
+    let mut host = store.custody_host(&case, vec![export.custody()?])?;
+    let positive = replayed_export(&mut host)?;
+    assert_eq!(positive.error(), None);
+    assert_eq!(*positive.command(), command);
+    assert_ne!(positive.owner_result(), negative.owner_result());
+    assert!(!export.final_path().exists());
+    let signer = signer_of(erasure_signer(), 1);
+    for result in [negative, positive] {
+        assert!(signer
+            .sign(
+                &mut host,
+                LocalErasureSigningRequestV1::OwnerResult {
+                    owner_result: result.owner_result(),
+                },
+            )
+            .is_ok());
+    }
+    let receipt = finalized(driver().drive(&mut host, request_of(1)?)?)?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    Ok(())
+}
+
+/// ADR-138 acceptance test 7, §7 and the #1446 journal: a target that names
+/// no publication, a publication of a Timeline outside the request's scope
+/// and a malformed catalog row each resolve to nothing, so the command is
+/// the permanent negative `ArtifactDeletionFailed` and nothing is deleted.
+#[test]
+fn an_unresolvable_export_target_is_a_permanent_negative() -> TestResult {
+    let outside = TimelineId::new().to_string();
+    for tamper in [
+        "DELETE FROM recipient_export_catalog_v1".to_owned(),
+        format!("UPDATE recipient_export_catalog_v1 SET timeline_id = '{outside}'"),
+        "UPDATE recipient_export_catalog_v1 SET owner_id = ''".to_owned(),
+    ] {
+        let (store, export, _) = dispatched_export_store()?;
+        rusqlite::Connection::open(&store.path)?.execute_batch(&tamper)?;
+        let mut host = store.custody_host(&driver_case()?, vec![export.custody()?])?;
+        assert_eq!(
+            replayed_export(&mut host)?.error(),
+            Some(ErasureErrorV1::ArtifactDeletionFailed),
+            "{tamper}"
+        );
+        assert!(export.final_path().exists(), "{tamper}");
+    }
+    Ok(())
+}
+
+/// ADR-138 acceptance test 3: a crash after T1, after the unlink or after
+/// T2 leaves a retracted export no serving read returns, and the replay
+/// completes the withdrawal with exactly the ELXW1 and ELO1 an uninterrupted
+/// run computes from the recorded capture.
+///
+/// Before T2 the owner step must still run, and it accepts an absent name
+/// only through the captured directory's custody (§5): a replay on a host
+/// restarted without that custody is negative until custody is attached.
+/// After T2 the file work is done, so the replay completes without custody.
+#[test]
+fn a_crash_inside_a_withdrawal_completes_with_identical_bytes() -> TestResult {
+    for crash in ["after T1", "after the unlink", "after T2"] {
+        let (store, export, command) = dispatched_export_store()?;
+        {
+            let mut sqlite = store.sqlite()?;
+            sqlite.attach_recipient_custody(vec![export.custody()?])?;
+            sqlite.begin_recipient_export_withdrawal(export.export_id, &export.grantee_owner()?)?;
+            if crash == "after the unlink" {
+                std::fs::remove_file(export.final_path())?;
+            }
+            if crash == "after T2" {
+                sqlite.delete_recipient_export_ciphertext(export.export_id)?;
+            }
+        }
+        assert!(export.unavailable(&store)?, "{crash}");
+        let without_custody = replayed_export(&mut store.host(&driver_case()?, 4_096)?)?;
+        let result = if crash == "after T2" {
+            without_custody
+        } else {
+            assert_eq!(
+                without_custody.error(),
+                Some(ErasureErrorV1::ArtifactDeletionFailed),
+                "{crash}"
+            );
+            replayed_export(&mut store.custody_host(&driver_case()?, vec![export.custody()?])?)?
+        };
+        let expected = prepared_withdrawal(
+            &expected_elxw1(&store, &export, &command)?,
+            positive_binding(&command),
+        )?;
+        assert_eq!(result.error(), None, "{crash}");
+        assert_eq!(
+            result.owner_result(),
+            expected.owner_result().reference(),
+            "{crash}"
+        );
+        assert_eq!(
+            store.effect(&store.elo1(&result)?)?,
+            expected.effect_object().ok_or("no ELXW1")?.canonical_cbor(),
+            "{crash}"
+        );
+        assert!(!export.final_path().exists(), "{crash}");
+    }
+    Ok(())
+}
+
+/// ADR-138 acceptance test 6: the signer signs the committed positive ELO1,
+/// and refuses an ELO1 bound to another attempt and, while the row's
+/// disposition names it, an ELXW1 whose recomputed `ELXR1` is not the row's
+/// target, one whose Timeline lies outside the request's scope, and other
+/// ELXW1 bytes stored at the disposition's address.
+#[test]
+fn the_signer_signs_a_withdrawal_only_bound_to_its_recorded_disposition() -> TestResult {
+    let (store, export, command) = dispatched_export_store()?;
+    let committed =
+        replayed_export(&mut store.custody_host(&driver_case()?, vec![export.custody()?])?)?;
+    assert_eq!(committed.error(), None);
+    assert!(sign_owner_result(&store, committed.owner_result())?.is_ok());
+    let recorded = expected_elxw1(&store, &export, &command)?;
+    let disposition = recorded.reference()?;
+    let denied = Err(ErasureHostErrorV1::AuthorizationDenied);
+    // An ELO1 of another attempt answers no dispatched command.
+    let other_attempt = prepared_withdrawal(
+        &recorded,
+        LocalOwnerResultBindingV1 {
+            attempt: reference(0x5a),
+            ..positive_binding(&command)
+        },
+    )?;
+    assert_eq!(
+        sign_owner_result(&store, retain_prepared(&store, &other_attempt)?)?,
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    let connection = rusqlite::Connection::open(&store.path)?;
+    let set_disposition = |digest: ErasureReferenceV1| {
+        connection.execute(
+            "UPDATE recipient_export_withdrawals_v1 SET disposition = ?1",
+            rusqlite::params![digest.digest().as_slice()],
+        )
+    };
+    // Each forged ELXW1 breaks one rule while the row names it.
+    for forged in [
+        LocalErasureRecipientExportWithdrawalV1 {
+            export_id: [0x99; 16],
+            ..recorded
+        },
+        LocalErasureRecipientExportWithdrawalV1 {
+            timeline_id: TimelineId::new(),
+            ..recorded
+        },
+    ] {
+        let owner_result = retain_prepared(
+            &store,
+            &prepared_withdrawal(&forged, positive_binding(&command))?,
+        )?;
+        set_disposition(forged.reference()?)?;
+        assert_eq!(sign_owner_result(&store, owner_result)?, denied);
+        set_disposition(disposition)?;
+    }
+    // Other ELXW1 bytes at the disposition's address are no evidence: the
+    // impostor's ELO1 and the committed one are both refused until the
+    // address holds its own record again.
+    let impostor = LocalErasureRecipientExportWithdrawalV1 {
+        ciphertext_length: recorded.ciphertext_length + 1,
+        ..recorded
+    };
+    let owner_result = retain_prepared(
+        &store,
+        &prepared_withdrawal(&impostor, positive_binding(&command))?,
+    )?;
+    let set_evidence = |record: &LocalErasureRecipientExportWithdrawalV1| -> TestResult<usize> {
+        Ok(connection.execute(
+            "UPDATE erasure_evidence SET object_cbor = ?1 WHERE reference_digest = ?2",
+            rusqlite::params![record.to_canonical_cbor()?, disposition.digest().as_slice()],
+        )?)
+    };
+    set_evidence(&impostor)?;
+    assert_eq!(sign_owner_result(&store, owner_result)?, denied);
+    assert_eq!(sign_owner_result(&store, committed.owner_result())?, denied);
+    set_evidence(&recorded)?;
+    assert!(sign_owner_result(&store, committed.owner_result())?.is_ok());
+    Ok(())
+}
+
+/// ADR-138 acceptance test 6, the `committed_elo1` rule: a withdrawal first
+/// committed by another request binds that request's command, so this
+/// command's positive ELO1 bound to the same disposition signs; a first
+/// commit whose ELO1 is this command's own but whose ELXW1 names another
+/// command is refused.
+#[test]
+fn the_signer_checks_the_command_only_of_the_first_committed_owner_result() -> TestResult {
+    let foreign = LocalOwnerResultBindingV1 {
+        request: reference(0x61),
+        attempt: reference(0x63),
+        obligation: reference(0x64),
+        command: reference(0x62),
+        owner_ref: reference(0x65),
+        error: None,
+    };
+    for first_is_ours in [false, true] {
+        let (store, export, command) = dispatched_export_store()?;
+        let first = {
+            let mut sqlite = store.sqlite()?;
+            sqlite.attach_recipient_custody(vec![export.custody()?])?;
+            sqlite.begin_recipient_export_withdrawal(export.export_id, &export.grantee_owner()?)?;
+            let binding = sqlite.delete_recipient_export_ciphertext(export.export_id)?;
+            let record = LocalErasureRecipientExportWithdrawalV1 {
+                request: foreign.request,
+                command: foreign.command,
+                export_id: binding.export_id,
+                timeline_id: binding.timeline_id,
+                grantee_owner: binding.grantee_owner,
+                ciphertext_digest: binding.ciphertext_digest,
+                ciphertext_length: binding.ciphertext_length,
+                directory_identity: binding.directory_identity,
+                final_identity: binding.final_identity,
+            };
+            let prepared = prepared_withdrawal(
+                &record,
+                if first_is_ours {
+                    positive_binding(&command)
+                } else {
+                    foreign
+                },
+            )?;
+            sqlite.commit_local_owner_effect(prepared.clone())?;
+            prepared
+        };
+        // Withdrawn, the command commits a positive ELO1 bound to the
+        // recorded disposition, with or without custody.
+        let result = replayed_export(&mut store.host(&driver_case()?, 4_096)?)?;
+        assert_eq!(result.error(), None);
+        assert_eq!(
+            Some(store.elo1(&result)?.effect_digest),
+            first
+                .effect_object()
+                .map(pos_core::ErasureRetainedObjectV1::reference)
+        );
+        let signed = sign_owner_result(&store, result.owner_result())?;
+        assert_eq!(
+            result.owner_result() == first.owner_result().reference(),
+            first_is_ours
+        );
+        assert_eq!(signed.is_ok(), !first_is_ours);
+    }
+    Ok(())
+}
+
+/// ADR-138 acceptance test 6: while the row is only retracted, no positive
+/// ELO1 signs, even one retained with its ELXW1; the negative the executor
+/// committed signs.
+#[test]
+fn the_signer_refuses_a_positive_owner_result_of_a_retracted_row() -> TestResult {
+    let (store, export, command) = dispatched_export_store()?;
+    let negative = replayed_export(&mut store.host(&driver_case()?, 4_096)?)?;
+    assert_eq!(
+        negative.error(),
+        Some(ErasureErrorV1::ArtifactDeletionFailed)
+    );
+    let record = LocalErasureRecipientExportWithdrawalV1 {
+        request: command.request,
+        command: command.destruction.command,
+        export_id: export.export_id,
+        timeline_id: memory_owned_timeline(),
+        grantee_owner: export.grantee_owner()?,
+        ciphertext_digest: Hash::from_bytes([0x71; 32]),
+        ciphertext_length: 1,
+        directory_identity: [0x72; 16],
+        final_identity: [0x73; 20],
+    };
+    let forged = retain_prepared(
+        &store,
+        &prepared_withdrawal(&record, positive_binding(&command))?,
+    )?;
+    assert_eq!(
+        sign_owner_result(&store, forged)?,
+        Err(ErasureHostErrorV1::AuthorizationDenied)
+    );
+    assert!(sign_owner_result(&store, negative.owner_result())?.is_ok());
+    Ok(())
+}
+
+/// `withdraw_recipient_export_for_erasure` serves only a dispatched
+/// `export-recipient` command: another class's dispatched command is a
+/// conflict on `SQLite` and on Memory alike, and nothing is withdrawn.
+/// Memory holds no publication, so it dispatches no `export-recipient`
+/// command at all (ADR-138 §6).
+#[test]
+fn only_an_export_recipient_command_withdraws() -> TestResult {
+    let (store, export, _) = dispatched_export_store()?;
+    let request = request_of(1)?;
+    let mut host = store.custody_host(&driver_case()?, vec![export.custody()?])?;
+    let replica = command_of(&mut host, request, ErasureInventoryCategoryV1::Replica)?;
+    assert_eq!(
+        host.command_sender()?
+            .withdraw_recipient_export_for_erasure(&replica)
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert!(export.final_path().exists());
+    assert!(export.unavailable(&store).map(|unavailable| !unavailable)?);
+    let mut memory = driver_memory_host(&driver_case()?)?;
+    dispatch_consented(&mut memory)?;
+    let replica = command_of(&mut memory, request, ErasureInventoryCategoryV1::Replica)?;
+    assert_eq!(
+        memory
+            .command_sender()?
+            .withdraw_recipient_export_for_erasure(&replica)
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    let owner = export_owner()?;
+    assert!(memory
+        .command_sender()?
+        .dispatched_owner_commands(request)?
+        .iter()
+        .all(|command| command.destruction.owner != owner));
+    Ok(())
+}
+
 use pos_runtime::{
     local_erasure_signer_rotation_v1, LocalErasureRotationRefusalV1, LocalErasureSignerRotationV1,
 };
@@ -7911,5 +8644,396 @@ fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
         LocalErasureRotationRefusalV1::SignerUnknown.to_string(),
         "the key registry or its current signer's public key cannot be read"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// #1449: the ELADM1 submission binding (owner decision D5 on #1413), the
+// typed admission refusals (D3, D9) and the `getErasure` projection
+// (ADR-136 §7).
+// ---------------------------------------------------------------------------
+
+use pos_core::LocalErasureAdmissionV1;
+use pos_runtime::{LocalErasureClassCountV1, LocalErasureProjectionV1};
+
+/// The `erasure_id` of the fixture actor's request `key`.
+fn erasure_id_of(key: u8) -> TestResult<Ulid> {
+    Ok(local_erasure_id_v1(
+        principal_ref()?,
+        actor(),
+        reference(key),
+    )?)
+}
+
+/// `CA(ELB1)` of `case`'s bundle.
+fn trust_of(case: &Case) -> TestResult<ErasureReferenceV1> {
+    Ok(LocalErasureBundleV1::from_canonical_cbor(&case.bundle)?.reference()?)
+}
+
+/// The projection of the fixture actor's request `key` on `host`.
+fn projection(
+    host: &mut ErasureExecutionHostV1,
+    actor: EntityId,
+    key: u8,
+) -> TestResult<Option<LocalErasureProjectionV1>> {
+    Ok(host.command_sender()?.local_erasure_projection(
+        &principal()?,
+        actor,
+        erasure_id_of(key)?,
+    )?)
+}
+
+/// Delete every retained ELADM1 of `store`.
+fn drop_admissions(store: &LocalStore) -> TestResult<usize> {
+    Ok(store
+        .sqlite()?
+        .sweep_unreferenced_erasure_objects(&["ELADM1"], &[], 16)?)
+}
+
+/// D5: a submission retains its ELADM1 with the bundle, mode profile and
+/// binding epoch it was admitted under; the exact replay answers that same
+/// binding however the replay's own binding differs.
+#[test]
+fn a_submission_binds_its_bundle_and_mode_and_a_replay_keeps_them() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let case = local_case()?;
+    let mut host = store.host(&case, 4_096)?;
+    let mut sender = host.command_sender()?;
+    let admitted = sender
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    let admission = LocalErasureAdmissionV1 {
+        request: request_of(1)?,
+        trust: trust_of(&case)?,
+        mode_profile: reference(0x6d),
+        binding_epoch: 1,
+    };
+    assert_eq!(admitted.erasure_id, erasure_id_of(1)?);
+    assert_eq!(admitted.policy, LOCAL_ERASURE_POLICY_REFERENCE_V1);
+    assert_eq!(admitted.admission, admission);
+    assert_eq!(
+        ErasurePersistencePortV1::read_object(&store.sqlite()?, admission.reference()?)?,
+        admission.to_canonical_cbor()?
+    );
+    let rebound = LocalErasureSubmissionV1 {
+        mode_profile: reference(0x6e),
+        binding_epoch: 2,
+        ..submission(1, ErasureScopeV1::PrivateSubjectData)?
+    };
+    assert_eq!(sender.submit_local_erasure(&rebound), Ok(admitted));
+    Ok(())
+}
+
+/// D5: an ELADM1 a crash retained before the ERQ1 committed is the one the
+/// later submission of that `erasure_id` binds, so an id never has two.
+#[test]
+fn a_crash_left_admission_binds_the_resubmission() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let left = LocalErasureAdmissionV1 {
+        request: request_of(1)?,
+        trust: reference(0x41),
+        mode_profile: reference(0x42),
+        binding_epoch: 7,
+    };
+    // Another request's ELADM1 is never taken for this one.
+    let other = LocalErasureAdmissionV1 {
+        request: request_of(2)?,
+        ..left
+    };
+    store.retain(&[left.to_canonical_cbor()?, other.to_canonical_cbor()?])?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let admitted = host
+        .command_sender()?
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    assert_eq!(admitted.admission, left);
+    Ok(())
+}
+
+/// A retained ELADM1 that does not decode may be the request's own, so the
+/// submission fails closed rather than retain a second one.
+#[test]
+fn an_undecodable_admission_fails_the_submission_closed() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut corrupt = Vec::new();
+    ciborium::into_writer(
+        &ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("ELADM1".to_owned()),
+            ciborium::value::Value::Integer(1.into()),
+        ]),
+        &mut corrupt,
+    )?;
+    store.retain(&[corrupt])?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    refused_without_retention(
+        &store,
+        &mut host,
+        &submission(1, ErasureScopeV1::PrivateSubjectData)?,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::RecoveryUnavailable),
+    )
+}
+
+/// A binding epoch of zero names no binding: the submission is refused and
+/// retains nothing.
+#[test]
+fn a_submission_without_a_binding_epoch_retains_nothing() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let unbound = LocalErasureSubmissionV1 {
+        binding_epoch: 0,
+        ..submission(1, ErasureScopeV1::PrivateSubjectData)?
+    };
+    refused_without_retention(
+        &store,
+        &mut host,
+        &unbound,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::Conflict),
+    )?;
+    assert_eq!(drop_admissions(&store)?, 0);
+    Ok(())
+}
+
+/// An installed request whose ELADM1 is gone is answered neither as a
+/// replay nor as a projection.
+#[test]
+fn a_request_without_its_admission_is_unavailable() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    }
+    assert_eq!(drop_admissions(&store)?, 1);
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::RecoveryUnavailable
+        ))
+    );
+    assert_eq!(
+        host.command_sender()?
+            .local_erasure_projection(&principal()?, actor(), erasure_id_of(1)?),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+/// D9 and ADR-136 §7: a host without a Local composition, an unknown id and
+/// another subject's id are all answered `None`.
+#[test]
+fn the_projection_never_tells_an_unknown_id_from_another_subjects() -> TestResult {
+    let mut closed = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    assert_eq!(projection(&mut closed, actor(), 1)?, None);
+    let mut shape = GrantShape::standard();
+    shape.actors = vec![actor(), other_actor()];
+    shape.actors.sort_unstable();
+    let store = LocalStore::new(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(projection(&mut host, actor(), 1)?, None);
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    assert!(projection(&mut host, actor(), 1)?.is_some());
+    assert_eq!(projection(&mut host, actor(), 2)?, None);
+    // The other actor names the same `erasure_id`: another subject.
+    assert_eq!(
+        host.command_sender()?.local_erasure_projection(
+            &principal()?,
+            other_actor(),
+            erasure_id_of(1)?
+        )?,
+        None
+    );
+    Ok(())
+}
+
+/// ADR-136 §7: the projection of a driven request, step by step. Its
+/// generation is the ERS1 ordinal times 2^16 plus the acknowledgements of
+/// the active attempt, so it rises
+/// with every committed step and never decreases; the acknowledgement
+/// counts are the frozen obligations and the effective positives, per
+/// class.
+#[test]
+fn the_projection_follows_a_driven_request() -> TestResult {
+    let store = driver_store()?;
+    let case = driver_case()?;
+    let mut host = store.host(&case, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let first = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
+    assert_eq!(first.erasure_id, erasure_id_of(1)?);
+    assert_eq!(first.state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(first.scope, ErasureScopeV1::PrivateSubjectData);
+    assert_eq!(first.generation, 0);
+    assert_eq!(
+        (first.required, first.positive),
+        (0, 0),
+        "nothing is frozen yet"
+    );
+    assert!(first.classes.is_empty());
+    assert_eq!(first.admission.trust, trust_of(&case)?);
+    let request = request_of(1)?;
+    let mut previous = first.generation;
+    let mut generations = vec![previous];
+    let mut acknowledged = 0_u64;
+    loop {
+        let step = driver().step(&mut host, request)?;
+        if step == LocalErasureStepV1::Idle {
+            break;
+        }
+        let current = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
+        assert!(current.generation > previous, "{step:?}");
+        if matches!(step, LocalErasureStepV1::Acknowledged(_)) {
+            acknowledged += 1;
+            // Within the attempt each acknowledgement adds one, unless the
+            // first one moved the head to awaiting acknowledgements.
+            assert!(
+                current.generation == previous + 1
+                    || current.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements,
+                "{step:?}"
+            );
+        }
+        previous = current.generation;
+        generations.push(previous);
+        // The head is the projection's state, digest included.
+        assert_eq!(
+            Some(current.state.clone()),
+            host.read_sender()?
+                .erasure_state(request)?
+                .map(|verified| verified.state().clone())
+        );
+    }
+    assert_eq!(generations[1..3], [1_u64 << 16, 2 << 16]);
+    let last = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
+    let ordinal = u64::try_from(history(&mut host, request)?.len())? - 1;
+    assert_eq!(last.generation, ordinal << 16);
+    assert_eq!(last.state.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    assert_eq!(
+        last.state.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let count = |class: &str, required, positive| LocalErasureClassCountV1 {
+        class: class.to_owned(),
+        required,
+        positive,
+    };
+    // The key, the cache signal and the replica are positive; the Timeline
+    // payload and the backup are the permanent negatives.
+    assert_eq!(
+        last.classes,
+        [
+            count("client-cache-signal", 1, 1),
+            count("key-registry", 1, 1),
+            count("local-backup-inventory", 1, 0),
+            count("local-replica", 1, 1),
+            count("timeline-payload", 1, 0),
+        ]
+    );
+    assert_eq!((last.required, last.positive), (5, 3));
+    assert_eq!(acknowledged, 5);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
+// a subject-scoped export through core `export_timeline`, then erasure,
+// then the export again through the public offline evaluator.
+// ---------------------------------------------------------------------------
+
+use pos_core::{
+    store::export_timeline, ArtifactClaimInputV1, ArtifactOptionalityV1, ArtifactStateV1,
+    CoreError, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+};
+
+/// The export artifact of the subject's owned Timeline.
+const SUBJECT_EXPORT: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0xe7; 32]);
+
+/// The offline evaluation of the subject's export under the erasure state
+/// `claim`, from the store's own facts: the export depends on the subject's
+/// role-0 key, so it is missing once the key registry tombstones that key.
+fn export_evaluation(
+    store: &LocalStore,
+    claim: ErasureReplayClaimV1,
+) -> TestResult<ReplayClaimEvaluationV1> {
+    let registry = store.sqlite()?.load_key_registry()?.ok_or("no registry")?;
+    let state = if registry.tombstone(subject_key(1)?).is_some() {
+        ArtifactStateV1::MissingKey
+    } else {
+        ArtifactStateV1::Retained
+    };
+    Ok(ReplayClaimEvaluatorV1::evaluate(
+        claim,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                SUBJECT_EXPORT,
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                reference(0xe8),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: claim,
+            state,
+        }],
+    )?)
+}
+
+/// Acceptance test 10: before the erasure the export is exact and core
+/// exports the Timeline; after it the evaluator reports the export
+/// unavailable under the receipt's weakened claim, and core refuses it.
+#[test]
+fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult {
+    let store = driver_store()?;
+    store.sqlite()?.append(
+        memory_owned_timeline(),
+        &[pos_core::EventDraft::new(
+            actor(),
+            pos_core::Kind::new("subject.note.v1"),
+            CanonicalBytes::from_static(b"subject-note"),
+        )],
+    )?;
+    let before = export_evaluation(&store, ErasureReplayClaimV1::Exact)?;
+    assert_eq!(before.replay_claim(), ErasureReplayClaimV1::Exact);
+    let exported = export_timeline(
+        &store.sqlite()?,
+        memory_owned_timeline(),
+        SUBJECT_EXPORT,
+        &before,
+    )?;
+    assert_eq!(exported.events.len(), 1);
+    let receipt = {
+        let mut host = store.host(&driver_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+        finalized(driver().drive(&mut host, request_of(1)?)?)?
+    };
+    let after = export_evaluation(&store, receipt.replay_claim())?;
+    assert_eq!(
+        after.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let [export] = after.artifacts() else {
+        return Err("one evaluated artifact".into());
+    };
+    assert_eq!(export.artifact_digest(), SUBJECT_EXPORT);
+    assert_eq!(
+        export.from(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        export.to(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert!(!export.authoritative_use_permitted());
+    assert!(matches!(
+        export_timeline(
+            &store.sqlite()?,
+            memory_owned_timeline(),
+            SUBJECT_EXPORT,
+            &after
+        ),
+        Err(CoreError::ArtifactUnavailable)
+    ));
     Ok(())
 }

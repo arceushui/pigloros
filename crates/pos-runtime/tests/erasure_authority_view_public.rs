@@ -29,7 +29,7 @@ fn the_view_reports_exactly_its_snapshot() -> Result<(), Box<dyn std::error::Err
     let identity = Hash::from_bytes([5; 32]);
     store.init_erasure_store_identity(identity)?;
     let limits = ErasureRecoveryLimitsV1::from_maximum_requests(4)?;
-    let snapshot = store.erasure_authority_snapshot_with_limits(limits)?;
+    let snapshot = store.erasure_authority_snapshot_with_limits(limits, &[])?;
     let generation = snapshot.inventory().generation();
 
     let mut host = ErasureExecutionHostV1::recover_memory_fixture_with_authority(

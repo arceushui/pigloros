@@ -299,16 +299,21 @@ pub(super) fn sir1_unsigned(
     ])
 }
 
+/// The SIR1 self-digest of the canonical encoding of its unsigned fields.
+pub(super) fn sir1_self_digest(unsigned_bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SIR1.v1\0");
+    hasher.update(unsigned_bytes);
+    *hasher.finalize().as_bytes()
+}
+
 /// The exact SIR1 envelope bytes and self-digest of `unsigned`, within the
 /// 48 MiB SIR1 bound.
 pub(super) fn sir1_envelope(unsigned: Value) -> Result<(Vec<u8>, [u8; 32]), SelectorBoundaryError> {
     encode_with_limit(&unsigned, RECOVERY_LIMIT)
         .map_err(map_artifact_integrity_failure)
         .and_then(|unsigned_bytes| {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"PiglorOS.SIR1.v1\0");
-            hasher.update(&unsigned_bytes);
-            let sir1_digest = *hasher.finalize().as_bytes();
+            let sir1_digest = sir1_self_digest(&unsigned_bytes);
             encode_with_limit(
                 &Value::Array(vec![unsigned, Value::Bytes(sir1_digest.to_vec())]),
                 RECOVERY_LIMIT,
@@ -469,7 +474,7 @@ fn write_recovery(
         })
 }
 
-fn publish_successor(
+pub(super) fn publish_successor(
     root: &File,
     owner: u32,
     previous: &[u8],
@@ -610,6 +615,17 @@ pub(super) fn read_bounded_immutable(
     owner: u32,
     limit: u64,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
+    read_held_immutable(root, name, owner, limit).map(|(_, bytes)| bytes)
+}
+
+/// [`read_bounded_immutable`], also returning the descriptor that was read,
+/// whose identity a later step rechecks.
+pub(super) fn read_held_immutable(
+    root: &File,
+    name: &str,
+    owner: u32,
+    limit: u64,
+) -> Result<(File, Vec<u8>), SelectorBoundaryError> {
     statat(root, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(map_io_to_boundary_failure)
         .and_then(|metadata| {
@@ -622,7 +638,7 @@ pub(super) fn read_bounded_immutable(
                 open_immutable_file(root, name, 0o400, length, owner)
             }
         })
-        .and_then(|file| read_complete_file(&file, limit))
+        .and_then(|file| read_complete_file(&file, limit).map(|bytes| (file, bytes)))
 }
 
 fn verify_recovery_identity(

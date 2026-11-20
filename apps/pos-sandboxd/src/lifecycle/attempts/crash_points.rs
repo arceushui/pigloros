@@ -340,6 +340,10 @@ mod cases {
             [self.id ^ 0xa5; 32]
         }
 
+        fn admission(&self) -> AttemptAdmission {
+            crate::test_fixtures::attempt_admission([self.id ^ 0xa5; 32])
+        }
+
         fn prepare(
             &self,
             planned: CommittedPlannedAttempt,
@@ -953,13 +957,11 @@ mod cases {
         Ok(u8::try_from(index + 1)?)
     }
 
-    /// The proofs restart reconciliation consults for this crash state.
+    /// The proofs restart reconciliation consults before it removes anything
+    /// for this crash state. The egress probe follows intent removal (ADR-069
+    /// R12 §7.1 step 5), so it is withheld separately.
     fn consulted_proofs(snapshot: &Snapshot, survivors: &CrashSurvivors) -> Vec<UncertainProof> {
-        let mut proofs = vec![
-            UncertainProof::Network,
-            UncertainProof::Egress,
-            UncertainProof::ProviderLoops,
-        ];
+        let mut proofs = vec![UncertainProof::Network, UncertainProof::ProviderLoops];
         if survivors.unit.is_some() {
             proofs.push(UncertainProof::UnitStop);
         }
@@ -1029,6 +1031,9 @@ mod cases {
 
     /// Restart over a crash state: with each consulted proof withheld it
     /// fails closed and removes nothing, if `withheld`; then it reconciles.
+    /// When `withheld`, that last restart withholds the egress property: it
+    /// still reconciles every attempt, and only its result keeps admission
+    /// closed (ADR-069 R12 §7.1 step 5).
     fn assert_restart_reconciles(
         runtime: &Path,
         survivors: &CrashSurvivors,
@@ -1067,7 +1072,57 @@ mod cases {
             );
             assert_admission_closed(runtime, &crashed, &label)?;
         }
-        assert_restart_succeeds(runtime, survivors, count, label, UncertainProof::None)
+        if withheld {
+            assert_egress_follows_removal(runtime, survivors, count, label)
+        } else {
+            assert_restart_succeeds(runtime, survivors, count, label, UncertainProof::None)
+        }
+    }
+
+    /// Restart with the egress property withheld: every committed attempt is
+    /// reconciled and the registry reopens, while the result refuses.
+    fn assert_egress_follows_removal(
+        runtime: &Path,
+        survivors: &CrashSurvivors,
+        count: u8,
+        label: &str,
+    ) -> TestResult {
+        let label = format!("{label}, Egress withheld");
+        let crashed = snapshot(runtime)?;
+        let restarted = restart(
+            runtime,
+            survivors,
+            UncertainProof::Egress,
+            RestartClock::SameBootSoon,
+        )?;
+        assert_swept_after_any_pending_request(&restarted, &label);
+        assert!(restarted.network_cleaned, "{label}: network");
+        assert!(!restarted.egress_proved, "{label}: egress");
+        assert!(
+            restarted
+                .result
+                .as_ref()
+                .err()
+                .is_some_and(|error| refused_by(UncertainProof::Egress, error)),
+            "{label}: {:?}",
+            restarted.result
+        );
+        let clean = snapshot(runtime)?;
+        assert_eq!(
+            clean.registry,
+            crashed
+                .registry
+                .into_iter()
+                .filter(|(name, _)| name == "activation")
+                .collect::<BTreeMap<_, _>>(),
+            "{label}: registry after restart"
+        );
+        assert!(clean.attempts.is_empty(), "{label}: {:?}", clean.attempts);
+        let reopened = registry(runtime)??;
+        for id in 1..=count {
+            reopened.commit_planned(&intent(id)?)?;
+        }
+        Ok(())
     }
 
     /// Admission stays closed while anything but the marker remains.

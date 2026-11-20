@@ -48,7 +48,9 @@ pub use binding::{
     local_erasure_execution_binding_v1, LOCAL_ERASURE_EXECUTOR_ID_V1,
     LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1, LOCAL_ERASURE_EXECUTOR_VERSION_V1,
 };
-pub use driver::{LocalErasureDriverV1, LocalErasureStepV1, LocalErasureSweepV1};
+pub use driver::{
+    LocalErasureAdvanceV1, LocalErasureDriverV1, LocalErasureStepV1, LocalErasureSweepV1,
+};
 pub use executor::LocalErasureExecutorV1;
 pub use policy::{
     compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
@@ -203,9 +205,11 @@ impl ErasureCoordinatorCompositionV1 {
             .and_then(|bundle| {
                 local_erasure_coordinator_v1(bundle.store_identity)
                     .ok()
-                    .and_then(|coordinator| {
+                    .zip(bundle.reference().ok())
+                    .and_then(|(coordinator, trust)| {
+                        let owners = bundle.owners.clone();
                         let authority = Arc::new(LocalErasureAuthorityV1 {
-                            bundle_reference: bundle.reference().ok(),
+                            bundle_reference: Some(trust),
                             bundle,
                             trust_expiry: inputs.trust.expiry(),
                             revoked_key_ids: revoked.clone(),
@@ -225,6 +229,8 @@ impl ErasureCoordinatorCompositionV1 {
                             store_request_reserve: LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
                             preparation: Arc::clone(&authority)
                                 as Arc<dyn LocalErasurePreparationV1>,
+                            trust,
+                            owners,
                         };
                         Self::new(authority, coordinator)
                             .ok()
@@ -371,7 +377,7 @@ where
     S: ErasureInventoryPersistencePortV1 + ?Sized,
 {
     store
-        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum(), &[])
         .is_ok_and(|snapshot| {
             snapshot.inventory().request_heads().is_empty()
                 || store
@@ -408,7 +414,7 @@ where
     S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + ?Sized,
 {
     store
-        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum(), &[])
         .ok()
         .and_then(|snapshot| {
             snapshot

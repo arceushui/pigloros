@@ -14,8 +14,8 @@ use std::{fs::File, io, os::unix::net::UnixStream, sync::Arc, time::Instant};
 use crate::{
     evaluator::CaseAttempt,
     sandbox_provider_protocol::{
-        AdmissionLedger, LaunchFailure, PayloadDescriptor, SandboxLimit, SelectorGrantCommitment,
-        TransferRecord,
+        AdmissionLedger, LaunchFailure, PayloadDescriptor, SandboxExecutionMode, SandboxLimit,
+        SelectorGrantCommitment, TransferRecord,
     },
     selector::SelectorBoundaryError,
 };
@@ -125,13 +125,28 @@ impl From<OutputReservationRefused> for LaunchFailure {
 /// moment (ADR-069 R9 §4.6.3).
 ///
 /// Only a completed grant write creates one. Its bytes are the exact
-/// canonical AGR1 the selector received, retained for the stored response.
+/// canonical AGR1 the selector received, retained for the stored response,
+/// with the admitted facts the attempt's terminal records need whether or
+/// not its input arrives (Redmine #443 journal 22723): the ELM1 limits, the
+/// execution mode, and the provider binary and negative-probe digests that
+/// SPR1 carries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IssuedGrant {
     bytes: Arc<[u8]>,
     digest: [u8; 32],
     admission: AdmissionLedger,
     issued_at: Option<u64>,
+    admitted: Arc<GrantedFacts>,
+}
+
+/// The admitted facts an [`IssuedGrant`] retains.
+#[derive(Debug, Eq, PartialEq)]
+struct GrantedFacts {
+    limits: Vec<SandboxLimit>,
+    limits_digest: [u8; 32],
+    mode: SandboxExecutionMode,
+    provider_binary_digest: [u8; 32],
+    negative_probe_evidence: [u8; 32],
 }
 
 impl IssuedGrant {
@@ -161,6 +176,38 @@ impl IssuedGrant {
     #[must_use]
     pub const fn issued_at(&self) -> Option<u64> {
         self.issued_at
+    }
+
+    /// The ELM1 limits AGR1 committed to by `elm1-digest`.
+    #[must_use]
+    pub fn effective_limits(&self) -> &[SandboxLimit] {
+        &self.admitted.limits
+    }
+
+    /// The ELM1 self-digest AGR1 names.
+    #[must_use]
+    pub fn effective_limits_digest(&self) -> [u8; 32] {
+        self.admitted.limits_digest
+    }
+
+    /// The admitted execution mode.
+    #[must_use]
+    pub fn execution_mode(&self) -> SandboxExecutionMode {
+        self.admitted.mode
+    }
+
+    /// The admitted SPM1 provider binary digest: SPR1's
+    /// `provider-binary-digest`.
+    #[must_use]
+    pub fn provider_binary_digest(&self) -> [u8; 32] {
+        self.admitted.provider_binary_digest
+    }
+
+    /// Ordinal 7 of the HCP1 AGR1 admitted: SPR1 ordinal 21 (ADR-069 R9
+    /// §4.5).
+    #[must_use]
+    pub fn negative_probe_evidence(&self) -> [u8; 32] {
+        self.admitted.negative_probe_evidence
     }
 }
 
@@ -205,6 +252,45 @@ impl FailedInput {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+impl IssuedGrant {
+    /// A grant under the AGR1 digest `digest`, with filler AGR1 bytes, the
+    /// ELM1 `limits` under a filler digest, the execution `mode`, issued at
+    /// 2 with this attempt live and its input incomplete, for tests that
+    /// authenticate nothing.
+    #[must_use]
+    pub fn fixture(
+        digest: [u8; 32],
+        limits: Vec<SandboxLimit>,
+        mode: SandboxExecutionMode,
+    ) -> Self {
+        Self {
+            bytes: Arc::from([0xa6_u8].as_slice()),
+            digest,
+            admission: AdmissionLedger {
+                active_attempts: 1,
+                incomplete_inputs: 1,
+            },
+            issued_at: Some(2),
+            admitted: Arc::new(GrantedFacts {
+                limits,
+                limits_digest: [0xe1; 32],
+                mode,
+                provider_binary_digest: [0xb1; 32],
+                negative_probe_evidence: [0x97; 32],
+            }),
+        }
+    }
+
+    /// The same grant whose AGR1 is the canonical `bytes`, for tests that
+    /// authenticate the stored response it heads.
+    #[must_use]
+    pub fn with_bytes(mut self, bytes: &[u8]) -> Self {
+        self.bytes = Arc::from(bytes);
+        self
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl FailedInput {
     /// A failed input of `attempt_id` under the AGR1 digest `grant_digest`,
     /// with filler grant bytes and an empty, incomplete transfer, for tests
@@ -214,15 +300,13 @@ impl FailedInput {
         Self {
             error: StagingError::Incomplete,
             attempt_id,
-            grant: IssuedGrant {
-                bytes: Arc::from([0xa6_u8].as_slice()),
-                digest: grant_digest,
-                admission: AdmissionLedger {
-                    active_attempts: 1,
-                    incomplete_inputs: 1,
-                },
-                issued_at: Some(2),
-            },
+            grant: IssuedGrant::fixture(
+                grant_digest,
+                (0..17)
+                    .map(|limit_id| SandboxLimit { limit_id, value: 1 })
+                    .collect(),
+                SandboxExecutionMode::AirGapped,
+            ),
             transfer: Some(TransferRecord {
                 start: 1,
                 deadline: 4,

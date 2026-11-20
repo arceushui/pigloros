@@ -3937,8 +3937,9 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
     fn erasure_authority_snapshot_with_limits(
         &mut self,
         limits: ErasureRecoveryLimitsV1,
+        export_targets: &[ErasureReferenceV1],
     ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
-        self.local_erasure_authority_snapshot(limits)
+        self.local_erasure_authority_snapshot(limits, export_targets)
     }
 
     fn retain_erasure_object(
@@ -3991,6 +3992,34 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         // Spelled as cargo-mutants' own replacement so that no equivalent
         // mutant is generated for this constant body.
         Ok(vec![])
+    }
+
+    /// `MemoryStore` has no recipient-export publication path, so every
+    /// `export_id` is unknown (ADR-138 §6).
+    fn begin_recipient_export_withdrawal(
+        &mut self,
+        _export_id: [u8; 16],
+        _grantee_owner: &pos_core::OwnerIdV1,
+    ) -> Result<pos_core::RecipientExportWithdrawalStateV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    /// No publication can be retracted here, so no object is ever captured
+    /// (ADR-138 §6).
+    fn delete_recipient_export_ciphertext(
+        &mut self,
+        _export_id: [u8; 16],
+    ) -> Result<pos_core::RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ArtifactDeletionFailed)
+    }
+
+    /// No target ever names a publication here (ADR-138 §6).
+    fn recipient_export_by_target(
+        &mut self,
+        _target: ErasureReferenceV1,
+        _timelines: &[TimelineId],
+    ) -> Result<Option<([u8; 16], pos_core::OwnerIdV1)>, ErasureErrorV1> {
+        Ok(None)
     }
 }
 

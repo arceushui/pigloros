@@ -6,18 +6,19 @@ use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
     local_erasure_owner_ref_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
     ArtifactDataClassV1, EntityId, ErasureArtifactClassV1, ErasureErrorV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRetainedObjectV1, LocalErasureArtifactDispositionV1,
-    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    LocalErasureCacheGenerationV1, LocalErasureClassificationV1, LocalErasureDisclosureV1,
-    LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1, LocalErasureLineageRuleV1,
-    LocalErasureNegativeResultV1, LocalErasureOwnerResultV1, LocalErasureOwnerRowV1,
-    LocalErasurePolicyV1, LocalErasureRedactionV1, LocalErasureRejectionV1,
-    LocalErasureReplicaPurgeV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
-    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
-    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1, TimelineId,
-    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
-    LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
-    LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    ErasureReplayClaimV1, ErasureRetainedObjectV1, LocalErasureAdmissionV1,
+    LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1,
+    LocalErasureBundleV1, LocalErasureCacheGenerationV1, LocalErasureClassificationV1,
+    LocalErasureDisclosureV1, LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1,
+    LocalErasureLineageRuleV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
+    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRecipientExportWithdrawalV1,
+    LocalErasureRedactionV1, LocalErasureRejectionV1, LocalErasureReplicaPurgeV1,
+    LocalErasureSelectorV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1,
+    LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1, LocalOwnerEffectV1,
+    LocalOwnerResultBindingV1, OwnerIdV1, PreparedLocalOwnerEffectV1,
+    RecipientExportWithdrawalBindingV1, TimelineId, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
 };
 use ulid::Ulid;
 
@@ -1577,6 +1578,37 @@ const REPLICA_PURGE: LocalErasureReplicaPurgeV1 = LocalErasureReplicaPurgeV1 {
     replica_id: reference(48),
 };
 
+/// One ELXW1 recipient-export withdrawal (ADR-138 §5).
+fn withdrawal() -> Result<LocalErasureRecipientExportWithdrawalV1, Box<dyn std::error::Error>> {
+    Ok(LocalErasureRecipientExportWithdrawalV1 {
+        request: reference(52),
+        command: reference(53),
+        export_id: [54; 16],
+        timeline_id: timeline(55),
+        grantee_owner: OwnerIdV1::new("recipient-owner")?,
+        ciphertext_digest: pos_core::Hash::from_bytes([56; 32]),
+        ciphertext_length: 300,
+        directory_identity: [57; 16],
+        final_identity: [58; 20],
+    })
+}
+
+/// The hand-written canonical ELXW1 of [`withdrawal`] with `owner`.
+fn withdrawal_golden(owner: &str) -> Vec<u8> {
+    Cbor::default()
+        .record("ELXW1", 9)
+        .bytes(&[52; 32])
+        .bytes(&[53; 32])
+        .bytes(&[54; 16])
+        .bytes(&[55; 16])
+        .text(owner)
+        .bytes(&[56; 32])
+        .uint(300)
+        .bytes(&[57; 16])
+        .bytes(&[58; 20])
+        .0
+}
+
 #[test]
 fn owner_effect_records_round_trip_and_refuse_corruption() -> TestResult {
     for (artifact_class, redaction, replay_claim_to) in [
@@ -1623,6 +1655,12 @@ fn owner_effect_records_round_trip_and_refuse_corruption() -> TestResult {
         LocalErasureReplicaPurgeV1::to_canonical_cbor,
         LocalErasureReplicaPurgeV1::from_canonical_cbor,
         LocalErasureReplicaPurgeV1::reference,
+    )?;
+    assert_codec(
+        &withdrawal()?,
+        LocalErasureRecipientExportWithdrawalV1::to_canonical_cbor,
+        LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor,
+        LocalErasureRecipientExportWithdrawalV1::reference,
     )
 }
 
@@ -1710,7 +1748,33 @@ fn owner_effect_records_are_bounded_at_one_kib() {
     assert_size_bound(LocalErasureCacheGenerationV1::from_canonical_cbor, 1_024);
     assert_size_bound(LocalErasureNegativeResultV1::from_canonical_cbor, 1_024);
     assert_size_bound(LocalErasureReplicaPurgeV1::from_canonical_cbor, 1_024);
+    assert_size_bound(
+        LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor,
+        1_024,
+    );
     assert_eq!(LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 1_024);
+}
+
+/// The ELXW1 grantee owner is an owner id of 1 to 128 UTF-8 bytes.
+#[test]
+fn a_withdrawal_names_a_valid_grantee_owner() -> TestResult {
+    let longest = "o".repeat(128);
+    let record = LocalErasureRecipientExportWithdrawalV1 {
+        grantee_owner: OwnerIdV1::new(longest.clone())?,
+        ..withdrawal()?
+    };
+    assert_eq!(record.to_canonical_cbor()?, withdrawal_golden(&longest));
+    for owner in [String::new(), "o".repeat(129)] {
+        assert_eq!(
+            LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor(&withdrawal_golden(
+                &owner
+            )),
+            Err(ErasureErrorV1::InvalidEncoding),
+            "{}",
+            owner.len()
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -1772,6 +1836,14 @@ fn owner_effect_records_match_hand_written_golden_vectors() -> TestResult {
         LocalErasureReplicaPurgeV1::to_canonical_cbor,
         LocalErasureReplicaPurgeV1::from_canonical_cbor,
         LocalErasureReplicaPurgeV1::reference,
+    )?;
+    assert_golden(
+        &withdrawal()?,
+        "ELXW1",
+        &withdrawal_golden("recipient-owner"),
+        LocalErasureRecipientExportWithdrawalV1::to_canonical_cbor,
+        LocalErasureRecipientExportWithdrawalV1::from_canonical_cbor,
+        LocalErasureRecipientExportWithdrawalV1::reference,
     )
 }
 
@@ -1926,5 +1998,131 @@ fn a_negative_effect_is_bound_only_by_its_matching_elo1() -> TestResult {
         ),
         Err(ErasureErrorV1::InvalidEncoding)
     );
+    Ok(())
+}
+
+/// ELADM1 (owner decision D5 on #1413): round trip, golden bytes and
+/// address, and an epoch of zero refused on both encode and decode.
+#[test]
+fn the_submission_binding_record_round_trips_and_needs_an_epoch() -> TestResult {
+    let admission = LocalErasureAdmissionV1 {
+        request: reference(61),
+        trust: reference(62),
+        mode_profile: reference(63),
+        binding_epoch: 300,
+    };
+    assert_codec(
+        &admission,
+        LocalErasureAdmissionV1::to_canonical_cbor,
+        LocalErasureAdmissionV1::from_canonical_cbor,
+        LocalErasureAdmissionV1::reference,
+    )?;
+    assert_golden(
+        &admission,
+        "ELADM1",
+        &Cbor::default()
+            .record("ELADM1", 4)
+            .bytes(&[61; 32])
+            .bytes(&[62; 32])
+            .bytes(&[63; 32])
+            .uint(300)
+            .0,
+        LocalErasureAdmissionV1::to_canonical_cbor,
+        LocalErasureAdmissionV1::from_canonical_cbor,
+        LocalErasureAdmissionV1::reference,
+    )?;
+    // The first epoch is admitted; epoch 0 is no binding.
+    let first = LocalErasureAdmissionV1 {
+        binding_epoch: 1,
+        ..admission
+    };
+    assert_eq!(
+        LocalErasureAdmissionV1::from_canonical_cbor(&first.to_canonical_cbor()?)?,
+        first
+    );
+    let unbound = LocalErasureAdmissionV1 {
+        binding_epoch: 0,
+        ..admission
+    };
+    assert_eq!(
+        unbound.to_canonical_cbor(),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(unbound.reference(), Err(ErasureErrorV1::ScopeInvalid));
+    let golden = Cbor::default()
+        .record("ELADM1", 4)
+        .bytes(&[61; 32])
+        .bytes(&[62; 32])
+        .bytes(&[63; 32])
+        .uint(0)
+        .0;
+    assert_eq!(
+        LocalErasureAdmissionV1::from_canonical_cbor(&golden),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+/// A withdrawal effect retains its ELXW1, binds it by its content address,
+/// and keeps its parsed fields for the adapter's row checks (ADR-138 §5);
+/// no other effect carries them.
+#[test]
+fn a_withdrawal_effect_keeps_its_parsed_binding() -> TestResult {
+    let record = withdrawal()?;
+    let elxw1 = record.to_canonical_cbor()?;
+    let prepared = PreparedLocalOwnerEffectV1::new(
+        LocalOwnerEffectV1::RecipientExportWithdrawal(elxw1.clone()),
+        BINDING,
+    )?;
+    assert_eq!(
+        prepared.recipient_export_withdrawal(),
+        Some(RecipientExportWithdrawalBindingV1 {
+            export_id: record.export_id,
+            timeline_id: record.timeline_id,
+            grantee_owner: record.grantee_owner,
+            ciphertext_digest: record.ciphertext_digest,
+            ciphertext_length: record.ciphertext_length,
+            directory_identity: record.directory_identity,
+            final_identity: record.final_identity,
+        })
+    );
+    let retained = prepared.effect_object().ok_or("no effect object")?;
+    assert_eq!(retained.tag(), "ELXW1");
+    assert_eq!(retained.canonical_cbor(), elxw1.as_slice());
+    assert_eq!(prepared_elo1(&prepared)?.effect_digest, record.reference()?);
+    assert!(prepared.key_tombstone().is_none());
+    assert!(prepared.existing_tombstone().is_none());
+    assert_eq!(
+        PreparedLocalOwnerEffectV1::new(
+            LocalOwnerEffectV1::ReplicaPurge(REPLICA_PURGE.to_canonical_cbor()?),
+            BINDING
+        )?
+        .recipient_export_withdrawal(),
+        None
+    );
+    // Another tag, a non-canonical ELXW1 and an oversized one are refused.
+    for (effect, expected) in [
+        (
+            LocalOwnerEffectV1::RecipientExportWithdrawal(REPLICA_PURGE.to_canonical_cbor()?),
+            ErasureErrorV1::InvalidEncoding,
+        ),
+        (
+            LocalOwnerEffectV1::RecipientExportWithdrawal(withdrawal_golden("")),
+            ErasureErrorV1::InvalidEncoding,
+        ),
+        (
+            LocalOwnerEffectV1::ReplicaPurge(elxw1),
+            ErasureErrorV1::InvalidEncoding,
+        ),
+        (
+            LocalOwnerEffectV1::RecipientExportWithdrawal(Cbor::default().bytes(&vec![0; 1_022]).0),
+            ErasureErrorV1::ScopeInvalid,
+        ),
+    ] {
+        assert_eq!(
+            PreparedLocalOwnerEffectV1::new(effect, BINDING),
+            Err(expected)
+        );
+    }
     Ok(())
 }

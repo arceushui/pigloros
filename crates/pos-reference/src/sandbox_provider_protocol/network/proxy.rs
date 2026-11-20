@@ -82,6 +82,16 @@ impl LocalNetworkSession {
     pub const fn termination(&self) -> Option<LocalNetworkTermination> {
         self.termination
     }
+
+    /// A session with no transcripts that ended with `termination`, for
+    /// tests of the provider's terminal records.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn fixture(termination: Option<LocalNetworkTermination>) -> Self {
+        Self {
+            transcripts: Vec::new(),
+            termination,
+        }
+    }
 }
 
 /// One Local attempt's admission and FD 3 channel, bound by the provider.

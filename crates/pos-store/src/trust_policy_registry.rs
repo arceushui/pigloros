@@ -33,6 +33,13 @@ impl OperatorReleaseTrustV1 {
             genesis_digest,
         }
     }
+
+    /// The operator's Ed25519 public key this release pins: the key
+    /// retained TPS1 evidence must verify under (ADR-136 Q17).
+    #[must_use]
+    pub const fn operator_public_key(&self) -> [u8; 32] {
+        self.operator_public_key
+    }
 }
 
 /// Host-owned request for one exact canonical EPF1 artifact.

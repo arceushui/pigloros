@@ -329,6 +329,34 @@ held or observed evidence, rechecks current authority through the
 `RuntimeAttestationSigner` and verified under the admitted runtime key before
 it is sent.
 
+## Recovery peer mode (#349)
+
+`recovery-peer <32 lowercase hex endpoint ID>` answers one RCC1/RCU1
+exchange of a pending SIR1 (ADR-069 R12 §5), after the root selector proved
+the previous runtime terminated. It reads only the runtime key ID and public
+key of SIR1's previous-provider binding (after checking the SIR1
+self-digest), requires the SPI1 key file to hold that key, binds
+`/run/pigloros/sandbox-selector-recovery/<id>.sock` under the R11 §6 rules,
+sends `READY=1`, and accepts exactly one connection from a root peer. The
+R11 §8 revocation responder answers it with `AuthorityResolution::Recovery`.
+The attempt state is empty only when the registry, under its exclusive
+`flock`, holds nothing but the activation marker (no committed intent and no
+temporary record); the lock is released before RCA1 is
+written. The peer exits after server EOF or on any failure, with no
+registry write, no system-bus or mountfsd call and no process creation.
+
+The root selector's recovery operation starts it (R12 §6, §7.3). Through
+`SystemdProviderLifecycle` the selector first stops the SIR1 runtime unit,
+proves no other provider unit loaded, and runs the cleanup part of restart
+reconciliation (`reconcile_cleanup`, never the egress probe), releasing the
+registry lock before it returns. It then starts
+`pigloros-provider-recovery-<hex(recovery-lifecycle-scope-id)>.service` as
+`[<previous provider binary>, recovery-peer, <hex endpoint ID>]` with
+`TimeoutStartUSec=5s` and `RuntimeMaxUSec=10.1s`, checks the main process
+against the kernel, runs the 100 ms exchange, and always stops the peer unit
+and removes the exact leaf within 5 s. Only then does it publish the next
+SIC1 and remove SIR1.
+
 ## Local attempt namespaces (#911)
 
 The Local network is built in-process over netlink (owner decisions of

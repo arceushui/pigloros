@@ -426,3 +426,27 @@ pub(crate) fn shared_test_payload() -> Arc<dyn crate::adapter_stdio::AttemptPayl
     });
     Arc::clone(shared) as Arc<dyn crate::adapter_stdio::AttemptPayload>
 }
+
+/// The admission of an Air-Gapped attempt under the AGR1 digest
+/// `grant_digest`: every ELM1 limit 1, a complete one-byte input transfer.
+pub(crate) fn attempt_admission(grant_digest: [u8; 32]) -> crate::AttemptAdmission {
+    let limits = (0..17)
+        .map(
+            |limit_id| pos_reference::sandbox_provider_protocol::SandboxLimit {
+                limit_id,
+                value: 1,
+            },
+        )
+        .collect();
+    crate::AttemptAdmission::new(
+        crate::IssuedGrant::fixture(grant_digest, limits, SandboxExecutionMode::AirGapped),
+        Some(pos_reference::sandbox_provider_protocol::TransferRecord {
+            start: 1,
+            deadline: 4,
+            finish: 3,
+            expected_bytes: 1,
+            accepted_bytes: 1,
+            complete: true,
+        }),
+    )
+}

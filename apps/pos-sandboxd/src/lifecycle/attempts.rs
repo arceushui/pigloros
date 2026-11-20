@@ -60,6 +60,8 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use super::{finish_with, RootRelease};
+use crate::attempt_records::AttemptAdmission;
+use crate::ResponseFault;
 use crate::{
     AdapterIo, AdmittedAttempt, AttemptCancel, AttemptCleanupDeadlines, AttemptCleanupError,
     AttemptEnding, AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError,
@@ -148,6 +150,16 @@ pub enum AttemptLifecycleError {
     /// The terminal cleanup did not complete.
     #[error(transparent)]
     Cleanup(#[from] AttemptCleanupError),
+    /// The attempt's terminal response could not be assembled or signed.
+    #[error(transparent)]
+    Response(#[from] ResponseFault),
+    /// The attempt ended and its terminal response is not retained yet.
+    #[error("the attempt's terminal response is not retained yet")]
+    ResponsePending,
+    /// The attempt's terminal response was refused as a provider fault; the
+    /// lifecycle is quarantined and restart reconciliation recovers.
+    #[error("the attempt's terminal response is unavailable")]
+    ResponseUnavailable,
 }
 
 /// How far an attempt got before its terminal cleanup.
@@ -226,6 +238,7 @@ pub type AttemptCleanup = Result<Option<CompletedAttemptCleanup>, AttemptLifecyc
 #[derive(Debug)]
 pub struct EndedAttempt<S> {
     attempt_id: [u8; 16],
+    admission: AttemptAdmission,
     cancel_source: Option<CancelSource>,
     progress: AttemptProgress<S>,
     cleanup: AttemptCleanup,
@@ -237,6 +250,13 @@ impl<S> EndedAttempt<S> {
     #[must_use]
     pub const fn attempt_id(&self) -> [u8; 16] {
         self.attempt_id
+    }
+
+    /// What the attempt was admitted with: its AGR1, the admitted facts
+    /// and its input transfer.
+    #[must_use]
+    pub const fn admission(&self) -> &AttemptAdmission {
+        &self.admission
     }
 
     /// Who first requested cancellation before the attempt ended, if anyone
@@ -270,6 +290,25 @@ impl<S> EndedAttempt<S> {
     /// The progress and cleanup by value, for the terminal records.
     pub fn into_parts(self) -> (AttemptProgress<S>, AttemptCleanup) {
         (self.progress, self.cleanup)
+    }
+
+    /// An ended attempt with these parts, for the terminal records' tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        attempt_id: [u8; 16],
+        admission: AttemptAdmission,
+        cancel_source: Option<CancelSource>,
+        progress: AttemptProgress<S>,
+        (cleanup, cleanup_finished_at): (AttemptCleanup, Option<u64>),
+    ) -> Self {
+        Self {
+            attempt_id,
+            admission,
+            cancel_source,
+            progress,
+            cleanup,
+            cleanup_finished_at,
+        }
     }
 }
 
@@ -311,6 +350,9 @@ trait AdmittedInput: Send + Sync {
 
     /// The self-digest of the AGR1 the attempt was admitted under.
     fn grant_digest(&self) -> [u8; 32];
+
+    /// What the attempt was admitted with, for its terminal records.
+    fn admission(&self) -> AttemptAdmission;
 
     /// Create the attempt directory for the held image of this admission.
     fn prepare(
@@ -358,6 +400,11 @@ impl AdmittedInput for VerifiedStagedInput {
 
     fn grant_digest(&self) -> [u8; 32] {
         self.entry().grant_digest()
+    }
+
+    fn admission(&self) -> AttemptAdmission {
+        let entry = self.entry();
+        AttemptAdmission::new(entry.grant().clone(), entry.transfer())
     }
 
     fn prepare(
@@ -411,6 +458,9 @@ trait FailedAdmission {
 
     /// The self-digest of the AGR1 the attempt was admitted under.
     fn grant_digest(&self) -> [u8; 32];
+
+    /// What the attempt was admitted with, for its terminal records.
+    fn admission(&self) -> AttemptAdmission;
 }
 
 impl FailedAdmission for FailedInput {
@@ -420,6 +470,10 @@ impl FailedAdmission for FailedInput {
 
     fn grant_digest(&self) -> [u8; 32] {
         self.grant().digest()
+    }
+
+    fn admission(&self) -> AttemptAdmission {
+        AttemptAdmission::new(self.grant().clone(), self.transfer())
     }
 }
 
@@ -609,7 +663,8 @@ fn settle_deadline(now: Instant, grace: Instant) -> Instant {
 ///
 /// Only a unit whose cgroup was bound was pinned: `RefUnit` precedes the
 /// binding. Its result, counters and `/work` usage are read, then its pin is
-/// released, so the teardown's absence wait can see it unloaded.
+/// released, so the teardown's absence wait can see it unloaded. The result
+/// is read for the invocation whose cgroup was bound.
 async fn conclude(
     transport: &SystemdTransientUnitTransport,
     progress: &mut AttemptProgress<SystemdVerifiedStart>,
@@ -623,20 +678,18 @@ async fn conclude(
     let Some(cgroup) = cgroup else {
         return;
     };
-    let release = evidence.release();
-    let invocation = release
-        .observation()
-        .map(crate::KernelObservation::invocation_id);
+    let invocation = cgroup.invocation_id();
     let terminal = transport
         .conclude(
             unit,
             started.zip(invocation),
             cgroup,
-            release.work(),
+            evidence.release().work(),
             settle_by,
         )
         .await;
-    evidence.conclude(terminal);
+    let bound = invocation.map(|invocation| (invocation, crate::UnitCgroup::identity(cgroup)));
+    evidence.conclude(bound, terminal);
 }
 
 /// What an attempt's run shares with cancellation and the recovery snapshot.
@@ -801,12 +854,14 @@ enum Slot<I> {
         started: bool,
         input: Option<I>,
     },
-    /// Ended, with what its cleanup achieved. `state` is `None` for an
-    /// attempt that never ran.
+    /// Ended, with what its cleanup achieved and its signed terminal
+    /// response once retained. `state` is `None` for an attempt that never
+    /// ran.
     Ended {
         grant: [u8; 32],
         state: Option<Arc<RunState>>,
         cleaned: Cleaned,
+        response: Retained,
         _input: Option<I>,
     },
     /// Reconciled, or withdrawn before it started (`intent` is `None`):
@@ -1239,12 +1294,14 @@ impl<I> AttemptLifecycle<I> {
             grant: failed.grant_digest(),
             state: None,
             cleaned: Cleaned::NothingCommitted,
+            response: Retained::Pending,
             _input: None,
         };
         attempts.set(attempt_id, ended);
         drop(attempts);
         Ok(EndedAttempt {
             attempt_id,
+            admission: failed.admission(),
             cancel_source: None,
             progress: AttemptProgress::InputFailed,
             cleanup: Ok(None),
@@ -1259,6 +1316,7 @@ impl<I> AttemptLifecycle<I> {
     {
         let attempt_id = input.attempt_id();
         let grant = input.grant_digest();
+        let admission = input.admission();
         let mut attempts = lock(&self.attempts);
         self.admissible(&attempts, attempt_id)?;
         let state = Arc::new(RunState {
@@ -1281,6 +1339,7 @@ impl<I> AttemptLifecycle<I> {
                 lifecycle: self,
                 attempt_id,
                 grant,
+                admission,
                 state,
                 ended,
                 started: false,
@@ -1360,6 +1419,7 @@ struct Claim<'l, I> {
     lifecycle: &'l AttemptLifecycle<I>,
     attempt_id: [u8; 16],
     grant: [u8; 32],
+    admission: AttemptAdmission,
     state: Arc<RunState>,
     ended: watch::Sender<bool>,
     // Set before the first registry commit; an owner dropped earlier left
@@ -1396,6 +1456,7 @@ impl<I> Claim<'_, I> {
             grant: self.grant,
             state: Some(Arc::clone(&self.state)),
             cleaned,
+            response: Retained::Pending,
             _input: input,
         };
         let mut attempts = lock(&self.lifecycle.attempts);
@@ -1473,6 +1534,7 @@ impl<I> OwnedAttempt<'_, I> {
             // source first.
             return EndedAttempt {
                 attempt_id,
+                admission: claim.admission.clone(),
                 cancel_source: claim.state.cancel.source(),
                 progress: AttemptProgress::Withdrawn,
                 cleanup: Ok(None),
@@ -1506,6 +1568,7 @@ impl<I> OwnedAttempt<'_, I> {
         let cancel_source = claim.end(Some(input), cleaned);
         EndedAttempt {
             attempt_id,
+            admission: claim.admission.clone(),
             cancel_source,
             progress,
             cleanup: cleanup.map(Some),
@@ -1602,6 +1665,10 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
         .map_err(AttemptLifecycleError::from);
     (progress, cleanup)
 }
+
+mod retention;
+
+use retention::Retained;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
