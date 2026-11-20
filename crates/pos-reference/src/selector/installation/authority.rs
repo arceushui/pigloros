@@ -15,14 +15,17 @@ pub use update::{
 
 use ed25519_dalek::VerifyingKey;
 use rustix::rand::{getrandom, GetRandomFlags};
+use std::fs::File;
 use std::path::Path;
 
 use super::{InstallationObjectKind, InstalledSelectorState, MANIFEST_LIMIT};
+use crate::provider_admission::AdmittedProviderBinary;
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxProvider, ProviderConformanceReport, SandboxAdministratorPolicy,
     SandboxProviderAdmissionInputs, SandboxRevocationSnapshot, SandboxTrustKey, SandboxTrustRole,
     SandboxTrustSnapshot,
 };
+use crate::sandbox_provider_protocol::{RecoveryCancellationContext, RevocationUpdateRequest};
 use crate::selector::SelectorBoundaryError;
 
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +115,29 @@ pub(crate) struct VerifiedPendingRecovery {
     pub(crate) selector_nonce: [u8; 16],
     /// The exact SIU1 that committed this SIR1.
     pub(crate) pending_update: Vec<u8>,
+    /// The records and previous-state authority recovery completes with.
+    pub(crate) records: PendingRecoveryRecords,
+}
+
+/// What one recovery operation completes with (ADR-069 R12 §4.1, §6): the
+/// retained SIR1 and its installation root, the exact records, the RCC1,
+/// and the previous state's admitted provider, whose runtime key verifies
+/// RCA1 even when the next RVS1 revokes it.
+#[derive(Debug)]
+pub(crate) struct PendingRecoveryRecords {
+    root: File,
+    owner: u32,
+    recovery_file: File,
+    recovery_bytes: Vec<u8>,
+    previous_manifest: Vec<u8>,
+    next_manifest: Vec<u8>,
+    rcu1: Vec<u8>,
+    revocation_update: RevocationUpdateRequest,
+    context: RecoveryCancellationContext,
+    previous: AdmittedSelectorProvider,
+    binary: AdmittedProviderBinary,
+    main_pid: u64,
+    main_start_time_ticks: u64,
 }
 
 /// Root-selected provider released after full provider admission.
