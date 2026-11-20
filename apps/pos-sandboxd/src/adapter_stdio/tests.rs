@@ -478,6 +478,10 @@ fn broken_clock() -> io::Result<u64> {
 }
 
 /// A clock that reports the feed's start and then cannot report its finish.
+///
+/// `MonotonicClock` is a plain `fn`, so the read count is a process-wide
+/// static: exactly one test may use this clock, and it reads it once per
+/// test process (nextest runs each test in its own process).
 fn clock_failing_after_one_read() -> io::Result<u64> {
     static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     if READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
