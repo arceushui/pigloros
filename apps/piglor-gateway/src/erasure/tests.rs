@@ -968,5 +968,6 @@ async fn a_request_without_its_admission_is_unavailable() -> TestResult {
     Ok(())
 }
 
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod acceptance;
