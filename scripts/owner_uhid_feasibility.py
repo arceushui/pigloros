@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """ADR-110 E20 UG1: hosted uhid feasibility for the Linux owner U-tier.
 
-Run as root (through `sudo`) on the hosted runner. It creates one virtual
-FIDO HID device through `/dev/uhid` and finds its hidraw node by the sysfs
-`report_descriptor`, whose usage page must be 0xF1D0. It then hands the node
-to the invoking user (`SUDO_UID`), the way the U-tier setup will, opens it
-as that user, and destroys the device. Each step prints one evidence line;
-any failure exits non-zero. Redmine #1474.
+Run as root (through `sudo`) on the hosted runner, after `modprobe uhid`. It
+creates one virtual FIDO HID device through `/dev/uhid` and finds its hidraw
+node by the sysfs `report_descriptor`, whose usage page must be 0xF1D0. After
+`udevadm settle` it records the node's default owner, mode and ACL and
+whether the invoking user (`SUDO_UID`) can read the descriptor and open the
+node. It then hands the node to that user, the way the CI-only U-tier setup
+will, and opens it again. Closing `/dev/uhid` destroys the device. Each step
+prints one evidence line; any failure exits non-zero. Redmine #1474.
 """
 
 from __future__ import annotations
 
+import errno
 import os
 import select
 import struct
@@ -102,28 +105,49 @@ def find_fido_hidraw(sysfs: Path, before: set[str]) -> str | None:
     return None
 
 
-def open_as(uid: int, gid: int, node: str) -> int:
-    """Fork, drop to `uid`/`gid`, open `node` read-write; return the exit code."""
+def open_as(uid: int, gid: int, path: str, flags: int) -> int:
+    """Fork, drop to `uid`/`gid` and open `path` with `flags`.
+
+    Returns 0 when the open succeeds, the errno when it fails with an
+    `OSError`, and 255 for any other failure. Only root drops groups.
+    """
     # Flush first so the child does not repeat the parent's buffered lines.
     sys.stdout.flush()
     sys.stderr.flush()
     pid = os.fork()
     if pid == 0:
-        code = 1
+        code = 255
         try:
-            os.setgroups([])
-            os.setgid(gid)
-            os.setuid(uid)
-            descriptor = os.open(node, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
-            os.close(descriptor)
-            code = 0
-        except BaseException as error:  # the child must never return into main
-            print(f"UG1 open as uid {uid} failed: {error}", file=sys.stderr)
+            try:
+                if os.geteuid() == 0:
+                    os.setgroups([])
+                os.setgid(gid)
+                os.setuid(uid)
+                os.close(os.open(path, flags | os.O_NONBLOCK | os.O_CLOEXEC))
+                code = 0
+            except OSError as error:
+                code = error.errno or 255
+            except BaseException:  # the child must never return into main
+                code = 255
         finally:
-            sys.stdout.flush()
-            sys.stderr.flush()
             os._exit(code)
     return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+
+
+def outcome(code: int) -> str:
+    if code == 0:
+        return "opened"
+    if code in (errno.EACCES, errno.EPERM):
+        return f"refused ({errno.errorcode[code]})"
+    return f"failed (code {code})"
+
+
+def run_tool(arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(arguments, capture_output=True, text=True, check=False)
+    except OSError as error:
+        print(f"UG1 {arguments[0]} unavailable: {error}")
+        return None
 
 
 def show_access(path: str) -> None:
@@ -131,9 +155,10 @@ def show_access(path: str) -> None:
     metadata = os.stat(path)
     mode = metadata.st_mode & 0o7777
     print(f"UG1 {path} uid {metadata.st_uid} gid {metadata.st_gid} mode {mode:04o}")
-    acl = subprocess.run(["getfacl", "-p", path], capture_output=True, text=True, check=False)
-    for line in (acl.stdout or acl.stderr).splitlines():
-        print(f"UG1 acl {line}")
+    acl = run_tool(["getfacl", "-p", path])
+    if acl is not None:
+        for line in (acl.stdout or acl.stderr).splitlines():
+            print(f"UG1 acl {line}")
 
 
 def main() -> int:
@@ -145,7 +170,11 @@ def main() -> int:
     sysfs = Path("/sys/class/hidraw")
     print(f"UG1 kernel {os.uname().release}")
     before = {entry.name for entry in sysfs.glob("hidraw*")} if sysfs.exists() else set()
-    uhid = os.open("/dev/uhid", os.O_RDWR | os.O_CLOEXEC)
+    try:
+        uhid = os.open("/dev/uhid", os.O_RDWR | os.O_CLOEXEC)
+    except OSError as error:
+        print(f"UG1 /dev/uhid unavailable: {error}", file=sys.stderr)
+        return 1
     try:
         os.write(uhid, create2_event(FIDO_REPORT_DESCRIPTOR))
         print("UG1 uhid CREATE2 accepted")
@@ -163,20 +192,24 @@ def main() -> int:
         path = f"/dev/{node}"
         # Let udev finish its rules for the new node before reading or
         # changing its access.
-        subprocess.run(["udevadm", "settle", "--timeout=10"], check=False)
+        settle = run_tool(["udevadm", "settle", "--timeout=10"])
+        if settle is not None:
+            print(f"UG1 udevadm settle rc={settle.returncode}")
         if not os.path.exists(path):
             print(f"UG1 {path} did not appear", file=sys.stderr)
             return 1
+        descriptor = f"{sysfs}/{node}/device/report_descriptor"
+        read = outcome(open_as(uid, gid, descriptor, os.O_RDONLY))
+        print(f"UG1 uid {uid} {read} {descriptor} for reading")
         show_access(path)
-        default = "opened" if open_as(uid, gid, path) == 0 else "refused"
-        print(f"UG1 uid {uid} {default} {path} with the default access (no seat, so no uaccess)")
+        default = outcome(open_as(uid, gid, path, os.O_RDWR))
+        print(f"UG1 uid {uid} {default} {path} read-write with the default access")
         os.chown(path, uid, gid)
         os.chmod(path, 0o600)
         show_access(path)
-        if open_as(uid, gid, path) != 0:
-            return 1
-        print(f"UG1 uid {uid} opened {path} read-write after the sudo hand-over")
-        return 0
+        handed = open_as(uid, gid, path, os.O_RDWR)
+        print(f"UG1 uid {uid} {outcome(handed)} {path} read-write after the sudo hand-over")
+        return 0 if handed == 0 and read == "opened" else 1
     finally:
         # Closing /dev/uhid destroys the device; an explicit DESTROY could
         # fail after a refused CREATE2 and hide the real error.

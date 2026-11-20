@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import struct
 import sys
 import tempfile
@@ -68,6 +70,31 @@ class DescriptorParsing(unittest.TestCase):
             (sysfs / "hidraw2" / "device").mkdir(parents=True)
             self.assertEqual(ug1.find_fido_hidraw(sysfs, {"hidraw0"}), "hidraw3")
             self.assertIsNone(ug1.find_fido_hidraw(sysfs, {"hidraw0", "hidraw3"}))
+
+
+class OpenAs(unittest.TestCase):
+    def test_reports_success_permission_and_other_errors(self) -> None:
+        uid, gid = os.getuid(), os.getgid()
+        with tempfile.TemporaryDirectory() as root:
+            readable = Path(root) / "readable"
+            readable.write_bytes(b"x")
+            self.assertEqual(ug1.open_as(uid, gid, str(readable), os.O_RDONLY), 0)
+            locked = Path(root) / "locked"
+            locked.write_bytes(b"x")
+            locked.chmod(0)
+            if uid != 0:
+                code = ug1.open_as(uid, gid, str(locked), os.O_RDONLY)
+                self.assertEqual(code, errno.EACCES)
+                self.assertEqual(ug1.outcome(code), "refused (EACCES)")
+            missing = ug1.open_as(uid, gid, str(Path(root) / "missing"), os.O_RDONLY)
+            self.assertEqual(missing, errno.ENOENT)
+            self.assertEqual(ug1.outcome(missing), f"failed (code {errno.ENOENT})")
+        self.assertEqual(ug1.outcome(0), "opened")
+        self.assertEqual(ug1.outcome(errno.EPERM), "refused (EPERM)")
+
+    def test_a_missing_tool_is_reported_not_raised(self) -> None:
+        self.assertIsNone(ug1.run_tool(["/nonexistent/ug1-tool"]))
+        self.assertEqual(ug1.run_tool([sys.executable, "-c", "pass"]).returncode, 0)
 
 
 if __name__ == "__main__":
