@@ -1982,7 +1982,7 @@ fn plain_fixture(
 
 /// The chain head every fixture of the standard grant shape records.
 fn standard_head() -> TestResult<u64> {
-    Ok(LocalStore::new(&GrantShape::standard())?.head)
+    provisioned(&mut MemoryStore::new(), &GrantShape::standard(), &[])
 }
 
 #[test]
@@ -2121,9 +2121,12 @@ fn single_owner_bundle(owner: ErasureReferenceV1) -> LocalErasureBundleV1 {
 /// The Local authority whose bundle names one `key-registry` owner, and
 /// a fixture of that bundle on `adapter` whose host builds the views.
 ///
-/// The authority is composed over an identically provisioned Memory store:
-/// composition reads only the store identity and the signer key, and a
-/// Memory store is gone into its host once that host opens.
+/// The authority is composed over an identically provisioned Memory store,
+/// since a Memory store is gone into its host once that host opens. Both
+/// stores hold no request and no retained object, and composing such an
+/// empty store reads only its store identity and signer key; the retained
+/// objects `matches_store`, `rotation_admitted` and
+/// `retained_trust_verifies` also read are absent from both.
 fn local_authority(
     adapter: Adapter,
 ) -> TestResult<(Fixture, ErasureCoordinatorCompositionV1, ErasureReferenceV1)> {
@@ -3854,6 +3857,11 @@ fn register_subject_owner_keys_on(
     Ok(())
 }
 
+// Both adapters: the closure's keys are `key_identities` of the host's
+// authority view (`erasure_authority_view.rs:425`), one per record of the
+// registry `load_key_registry` returns (`erasure_host.rs:1303`; Memory
+// `memory.rs:5790`, `SQLite` `sqlite.rs:6035`), so each registered key is one
+// Key target on either adapter.
 /// The lifecycle of the private submission of request 1 on a local
 /// fixture of `adapter` whose actor's subject owner holds `keys`, or its
 /// refusal.

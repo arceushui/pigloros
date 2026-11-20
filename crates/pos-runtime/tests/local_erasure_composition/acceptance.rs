@@ -534,8 +534,8 @@ fn the_retry_cap_ends_a_transient_failure_in_partial_failure() -> TestResult {
 /// The receipt of request 1 with its Artifact acknowledgements reordered.
 ///
 /// Drive it through its dispatch and the key's acknowledgement, then run
-/// and acknowledge its two Artifact commands against the driver's
-/// obligation order, through the Local executor, signer and authority,
+/// and acknowledge its two Artifact commands in the reverse of the
+/// driver's outbox order, through the Local executor, signer and authority,
 /// each twice when `duplicated`; then drive it to its receipt.
 fn reordered_receipt(
     host: &mut ErasureExecutionHostV1,
@@ -556,8 +556,13 @@ fn reordered_receipt(
         .filter(|command| command.destruction.category == ErasureInventoryCategoryV1::Artifact)
         .collect::<Vec<_>>();
     assert_eq!(artifacts.len(), 2);
-    // The driver runs them in increasing obligation order.
-    artifacts.sort_unstable_by_key(|command| std::cmp::Reverse(command.destruction.obligation));
+    assert_ne!(
+        artifacts[0].destruction.obligation,
+        artifacts[1].destruction.obligation
+    );
+    // The driver runs the first command of this outbox order
+    // (`LocalErasureDriverV1::attempt`), so the reverse is another order.
+    artifacts.reverse();
     let signer = signer_of(erasure_signer(), 1);
     let mut acknowledgements = Vec::new();
     for command in &artifacts {
@@ -600,6 +605,7 @@ fn reordered_receipt(
 fn reordered_or_duplicated_acknowledgements_give_identical_receipt_bytes() -> TestResult {
     for adapter in ADAPTERS {
         let (straight, _) = straight_fixture_run(adapter)?;
+        // Reordered only, then reordered and duplicated.
         for duplicated in [false, true] {
             let mut fixture = Fixture::plain(adapter)?;
             submitted(&mut fixture.host, 1, ErasureScopeV1::PrivateSubjectData)?;
@@ -629,6 +635,9 @@ fn an_expired_tps1_refuses_a_freeze_but_a_frozen_request_still_completes() -> Te
     let request = request_of(1)?;
     let (authorized, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
     let mut host = authorized.host(&expired, 4_096)?;
+    // The freeze step prepares before it signs: `prepare_freeze` refuses
+    // first in `admits_new_work` (`TrustSnapshotInvalid`), which the host
+    // maps to `RecoveryUnavailable`, so the signer is never reached.
     assert_eq!(
         driver().step(&mut host, request),
         Err(ErasureHostErrorV1::RecoveryUnavailable)
