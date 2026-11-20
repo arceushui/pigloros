@@ -1280,6 +1280,7 @@ jobs:
           --exclude 'src/provider_runtime/endpoint/tests.rs'
           --exclude 'src/provider_runtime/serving/tests.rs'
           --exclude 'src/provider_runtime/recovery_peer/tests.rs'
+          --exclude 'src/selector/recovery/tests.rs'
           --exclude 'src/provider_runtime/revocation/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
@@ -1287,6 +1288,7 @@ jobs:
           --exclude 'src/local_erasure_composition/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/community/memory_domain/tests.rs'
+          --exclude 'src/attempt_records/tests/**'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1341,6 +1343,7 @@ jobs:
           --exclude 'src/provider_runtime/endpoint/tests.rs'
           --exclude 'src/provider_runtime/serving/tests.rs'
           --exclude 'src/provider_runtime/recovery_peer/tests.rs'
+          --exclude 'src/selector/recovery/tests.rs'
           --exclude 'src/provider_runtime/revocation/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
@@ -1348,6 +1351,7 @@ jobs:
           --exclude 'src/local_erasure_composition/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/community/memory_domain/tests.rs'
+          --exclude 'src/attempt_records/tests/**'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}

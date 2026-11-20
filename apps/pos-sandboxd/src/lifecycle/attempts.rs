@@ -61,6 +61,7 @@ use tokio::time::Instant;
 
 use super::{finish_with, RootRelease};
 use crate::attempt_records::AttemptAdmission;
+use crate::ResponseFault;
 use crate::{
     AdapterIo, AdmittedAttempt, AttemptCancel, AttemptCleanupDeadlines, AttemptCleanupError,
     AttemptEnding, AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError,
@@ -149,6 +150,16 @@ pub enum AttemptLifecycleError {
     /// The terminal cleanup did not complete.
     #[error(transparent)]
     Cleanup(#[from] AttemptCleanupError),
+    /// The attempt's terminal response could not be assembled or signed.
+    #[error(transparent)]
+    Response(#[from] ResponseFault),
+    /// The attempt ended and its terminal response is not retained yet.
+    #[error("the attempt's terminal response is not retained yet")]
+    ResponsePending,
+    /// The attempt's terminal response was refused as a provider fault; the
+    /// lifecycle is quarantined and restart reconciliation recovers.
+    #[error("the attempt's terminal response is unavailable")]
+    ResponseUnavailable,
 }
 
 /// How far an attempt got before its terminal cleanup.
@@ -843,12 +854,14 @@ enum Slot<I> {
         started: bool,
         input: Option<I>,
     },
-    /// Ended, with what its cleanup achieved. `state` is `None` for an
-    /// attempt that never ran.
+    /// Ended, with what its cleanup achieved and its signed terminal
+    /// response once retained. `state` is `None` for an attempt that never
+    /// ran.
     Ended {
         grant: [u8; 32],
         state: Option<Arc<RunState>>,
         cleaned: Cleaned,
+        response: Retained,
         _input: Option<I>,
     },
     /// Reconciled, or withdrawn before it started (`intent` is `None`):
@@ -1281,6 +1294,7 @@ impl<I> AttemptLifecycle<I> {
             grant: failed.grant_digest(),
             state: None,
             cleaned: Cleaned::NothingCommitted,
+            response: Retained::Pending,
             _input: None,
         };
         attempts.set(attempt_id, ended);
@@ -1442,6 +1456,7 @@ impl<I> Claim<'_, I> {
             grant: self.grant,
             state: Some(Arc::clone(&self.state)),
             cleaned,
+            response: Retained::Pending,
             _input: input,
         };
         let mut attempts = lock(&self.lifecycle.attempts);
@@ -1650,6 +1665,10 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
         .map_err(AttemptLifecycleError::from);
     (progress, cleanup)
 }
+
+mod retention;
+
+use retention::Retained;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
