@@ -753,7 +753,9 @@ case "$1 $2" in
   esac
   printf 'A new release of gh is available\\n' >&2
   if [[ $* == *--json* ]]; then {listing}; fi ;;
-"api repos/owner/repo/commits/main") printf '%s\\n' '{tip}' ;;
+"api repos/owner/repo/commits/main")
+  if [[ "{tip}" == fail ]]; then printf 'HTTP 502: Bad Gateway\\n' >&2; exit 5; fi
+  printf '%s\\n' '{tip}' ;;
 "release create") exit {create_status} ;;
 "release download")
   if (({download_status} != 0)); then exit {download_status}; fi
@@ -963,6 +965,22 @@ esac
         result = self.run_cache("prune", "x86_64")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.gh_calls(), [self.TIP_CALL, self.LISTING])
+
+    def test_prune_deletes_nothing_when_the_tip_cannot_be_read_or_the_commit_is_unknown(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD)),
+                     tip="fail")
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 5)
+        self.assertIn("HTTP 502", result.stderr)
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL])
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD)))
+        environment = self.environment(None)
+        del environment["GITHUB_SHA"]
+        result = subprocess.run(["bash", str(KERNEL_CACHE), "prune", "x86_64"], env=environment,
+                                capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GITHUB_SHA", result.stderr)
+        self.assertFalse(any("delete-asset" in call for call in self.gh_calls()))
 
     def test_prune_does_nothing_for_a_rerun_of_an_older_commit(self):
         self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD)),

@@ -332,10 +332,13 @@ publish_cache() {
 }
 
 # Runs on every main run, so a failed deletion is retried. Assets of every
-# key name are pruned, including a rotated one. An asset goes only when it is
-# more than a week old and is not the newest asset besides the current one: a
-# rerun of an older main commit publishes its own kernel, and the kernel that
-# pull requests fetch is then that newest other asset.
+# key name are pruned, including a rotated one. A run that is not main's tip
+# prunes nothing, so a rerun of an older commit cannot delete the kernel that
+# pull requests fetch. When a push that touches none of the workflow's paths
+# lands after a kernel-touching one, the earlier run is no longer the tip and
+# pruning waits for the next kernel-touching push. An asset goes only when it
+# is more than a week old and is not the newest asset besides the current one;
+# that guards a push landing between the tip check and the listing.
 prune() {
   local name current assets created cutoff others tip
   # A rerun of an older main commit must not prune: the kernel pull requests
