@@ -479,15 +479,20 @@ impl ProviderLifecyclePort for PeerPort {
             .join(format!("{}.sock", hex(&launch.recovery_endpoint_id())));
         let listener = bind_leaf(&leaf)?;
         if reply == Reply::Panic {
+            refuse(&listener);
             drop(listener);
             std::panic::resume_unwind(Box::new("injected unwinding after the peer start"));
         }
         if self.script.peer == Peer::NotListening {
+            refuse(&listener);
             drop(listener);
         } else {
             let behaviour = self.script.peer;
             let clock = Arc::clone(&self.clock);
-            let thread = std::thread::spawn(move || serve_peer(&listener, behaviour, &clock));
+            let thread = std::thread::spawn(move || {
+                serve_peer(&listener, behaviour, &clock);
+                refuse(&listener);
+            });
             let locked = self.peer.lock();
             if let Ok(mut peer) = locked {
                 *peer = Some((leaf, thread));
@@ -533,6 +538,14 @@ fn bind_leaf(leaf: &Path) -> Result<UnixListener, ProviderLifecycleError> {
                 .map(|()| listener)
         })
         .map_err(|_| ProviderLifecycleError::Unavailable)
+}
+
+/// Stop `listener` accepting before it is dropped. A child process that a
+/// concurrent test spawns inherits the descriptor until its `exec`, which
+/// would keep the leaf listening past the drop and make the host's refused
+/// probe fail; a shut-down listener refuses connections whoever holds it.
+fn refuse(listener: &UnixListener) {
+    let _shut = rustix::net::shutdown(listener, rustix::net::Shutdown::Both);
 }
 
 /// The peer's one connection: RCC1, RCU1 and client EOF, then the reply
