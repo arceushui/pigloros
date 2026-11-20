@@ -3858,10 +3858,9 @@ fn register_subject_owner_keys_on(
 }
 
 // Both adapters: the closure's keys are `key_identities` of the host's
-// authority view (`erasure_authority_view.rs:425`), one per record of the
-// registry `load_key_registry` returns (`erasure_host.rs:1303`; Memory
-// `memory.rs:5790`, `SQLite` `sqlite.rs:6035`), so each registered key is one
-// Key target on either adapter.
+// authority view, one per record of the registry `load_key_registry` returns,
+// which `MemoryStore` and `SqliteStore` both implement. So each registered key
+// is one Key target on either adapter.
 /// The lifecycle of the private submission of request 1 on a local
 /// fixture of `adapter` whose actor's subject owner holds `keys`, or its
 /// refusal.
