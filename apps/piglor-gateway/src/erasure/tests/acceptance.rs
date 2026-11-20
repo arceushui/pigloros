@@ -153,15 +153,16 @@ impl Disclosure {
             text.push_str(value.to_str()?);
         }
         let body = serde_json::from_slice::<Value>(&answer.bytes).unwrap_or_default();
-        self.check_text(&text, body["provenance"]["digest"].as_str())
+        self.check_text(&text, body["provenance"]["digest"].as_str());
+        Ok(())
     }
 
     /// [`Self::check`] of one projection body.
-    fn check_body(&self, body: &Value) -> TestResult {
-        self.check_text(&body.to_string(), body["provenance"]["digest"].as_str())
+    fn check_body(&self, body: &Value) {
+        self.check_text(&body.to_string(), body["provenance"]["digest"].as_str());
     }
 
-    fn check_text(&self, text: &str, provenance: Option<&str>) -> TestResult {
+    fn check_text(&self, text: &str, provenance: Option<&str>) {
         for withheld in [SIGNER_OWNER, "subject:"] {
             assert!(!text.contains(withheld), "{withheld} in {text}");
         }
@@ -179,7 +180,6 @@ impl Disclosure {
                 );
             }
         }
-        Ok(())
     }
 }
 
@@ -304,7 +304,7 @@ async fn the_served_partition_freezes_only_the_actors_lineage() -> TestResult {
     let disclosure = Disclosure::of(&admitted.json()?, &[id.clone(), Ulid::nil().to_string()])?;
     disclosure.check(&admitted)?;
     for body in &observed {
-        disclosure.check_body(body)?;
+        disclosure.check_body(body);
     }
     for answer in [
         served
