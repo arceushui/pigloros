@@ -31,12 +31,12 @@
 use std::path::PathBuf;
 
 use pos_core::{
-    AuthorityPersistencePortV1, ErasureInventoryPersistencePortV1, ErasurePersistencePortV1,
-    EventStore,
+    AuthorityPersistencePortV1, ErasureHostErrorV1, ErasureInventoryPersistencePortV1,
+    ErasurePersistencePortV1, ErasureRecoveryLimitsV1, EventStore,
 };
-use pos_runtime::ErasureCoordinatorCompositionV1;
 #[cfg(target_os = "linux")]
 use pos_runtime::LocalErasureCompositionErrorV1;
+use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::{sqlite::SqliteStore, StoreConfig};
 
 #[cfg(target_os = "linux")]
@@ -126,6 +126,27 @@ impl std::fmt::Display for LocalErasureLoadErrorV1 {
 }
 
 impl std::error::Error for LocalErasureLoadErrorV1 {}
+
+/// Why a key-less root cannot open its store: the composition is refused,
+/// or the host cannot recover the store under it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalErasureOpenErrorV1 {
+    /// The store's erasure authority cannot be composed.
+    Load(LocalErasureLoadErrorV1),
+    /// The erasure host refuses the store under the composed authority.
+    Host(ErasureHostErrorV1),
+}
+
+impl std::fmt::Display for LocalErasureOpenErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Load(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Host(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for LocalErasureOpenErrorV1 {}
 
 /// Where a key-less root reads its Local erasure trust inputs: its
 /// credential directory, if any, and the deployment trust state store.
@@ -226,6 +247,51 @@ impl LocalErasureRecoveryV1 {
             .ok()
             .ok_or(LocalErasureLoadErrorV1::StoreUnavailable)
             .and_then(|mut store| Self::for_store(&mut store, source))
+    }
+
+    /// Open the store `config` names the way every key-less root does:
+    /// compose its authority ([`Self::for_config`]), then recover the
+    /// erasure host under it with the compiled recovery limits.
+    ///
+    /// # Errors
+    /// Returns [`LocalErasureOpenErrorV1::Load`] for a refused composition
+    /// and [`LocalErasureOpenErrorV1::Host`] when the host refuses the
+    /// store.
+    pub fn open_host(
+        config: StoreConfig,
+        source: &LocalErasureTrustSourceV1,
+    ) -> Result<ErasureExecutionHostV1, LocalErasureOpenErrorV1> {
+        Self::for_config(&config, source)
+            .map_err(LocalErasureOpenErrorV1::Load)
+            .and_then(|composition| {
+                ErasureExecutionHostV1::open_with_authority(
+                    config,
+                    &composition,
+                    ErasureRecoveryLimitsV1::compiled_maximum(),
+                )
+                .map_err(LocalErasureOpenErrorV1::Host)
+            })
+    }
+
+    /// [`Self::open_host`] over the `SQLite` file `path`, read-only: the
+    /// composition reads a read-only handle ([`Self::for_read_only`]).
+    ///
+    /// # Errors
+    /// Returns the [`Self::open_host`] refusals.
+    pub fn open_read_only_host(
+        path: &str,
+        source: &LocalErasureTrustSourceV1,
+    ) -> Result<ErasureExecutionHostV1, LocalErasureOpenErrorV1> {
+        Self::for_read_only(path, source)
+            .map_err(LocalErasureOpenErrorV1::Load)
+            .and_then(|composition| {
+                ErasureExecutionHostV1::open_read_only_with_authority(
+                    path,
+                    &composition,
+                    ErasureRecoveryLimitsV1::compiled_maximum(),
+                )
+                .map_err(LocalErasureOpenErrorV1::Host)
+            })
     }
 }
 
@@ -350,6 +416,43 @@ mod tests {
         let config = StoreConfig::Sqlite { path: path.clone() };
         assert!(LocalErasureRecoveryV1::for_config(&config, &none).is_ok());
         assert!(LocalErasureRecoveryV1::for_read_only(&path, &none).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_store_without_an_identity_opens_under_the_closed_authority() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let none = source(None, &directory.path().join("absent-trust.db"));
+        assert!(LocalErasureRecoveryV1::open_host(StoreConfig::Memory, &none).is_ok());
+        let path = store_path(directory.path())?;
+        let config = StoreConfig::Sqlite { path: path.clone() };
+        assert!(LocalErasureRecoveryV1::open_host(config, &none).is_ok());
+        assert!(LocalErasureRecoveryV1::open_read_only_host(&path, &none).is_ok());
+        drop(identified(&path)?);
+        let config = StoreConfig::Sqlite { path: path.clone() };
+        for refusal in [
+            LocalErasureRecoveryV1::open_host(config, &none).err(),
+            LocalErasureRecoveryV1::open_read_only_host(&path, &none).err(),
+        ] {
+            assert_eq!(
+                refusal,
+                Some(LocalErasureOpenErrorV1::Load(
+                    LocalErasureLoadErrorV1::CredentialsMissing
+                ))
+            );
+        }
+        for (error, message) in [
+            (
+                LocalErasureOpenErrorV1::Load(LocalErasureLoadErrorV1::StoreUnavailable),
+                LocalErasureLoadErrorV1::StoreUnavailable.to_string(),
+            ),
+            (
+                LocalErasureOpenErrorV1::Host(ErasureHostErrorV1::RecoveryUnavailable),
+                ErasureHostErrorV1::RecoveryUnavailable.to_string(),
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+        }
         Ok(())
     }
 
