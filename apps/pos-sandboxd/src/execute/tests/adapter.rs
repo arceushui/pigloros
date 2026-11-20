@@ -137,11 +137,14 @@ impl FakeHost {
                 systemd.push(held);
             }
         }
-        let held = self
+        let mut held = self
             .systemd_held
             .lock()
             .map(|held| held.iter().map(number).collect::<Vec<_>>())
             .unwrap_or_default();
+        if let Ok(watched) = self.adapter_stdout.lock() {
+            held.extend(watched.iter().map(number));
+        }
         let done = Arc::clone(&self.adapter_done);
         let report = Arc::clone(&self.stdio_report);
         let released = Arc::clone(&self.released);
@@ -184,8 +187,13 @@ impl FakeHost {
                 report.input = read;
             }
             if script.never_finish {
-                if let Ok(mut stdout) = stdout.lock() {
-                    *stdout = Some(StdOwnedFd::from(output));
+                let output = StdOwnedFd::from(output);
+                // A duplicate lets the fake's kill watch the channel.
+                if let (Ok(watched), Ok(mut stdout)) = (output.try_clone(), stdout.lock()) {
+                    stdout.push(watched);
+                }
+                if let Ok(mut kept) = kept.lock() {
+                    kept.push(output);
                 }
                 return;
             }
