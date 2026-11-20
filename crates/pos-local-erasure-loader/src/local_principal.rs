@@ -69,17 +69,30 @@ pub fn recorded_registry_digest<S>(store: &S) -> Result<Option<Hash>, LocalPrinc
 where
     S: AuthorityPersistencePortV1 + ?Sized,
 {
-    match store.load_authority(local_principal_grant_id()) {
-        Err(AuthorityPersistenceErrorV1::Conflict) => Ok(None),
-        Err(AuthorityPersistenceErrorV1::Unavailable) => {
-            Err(LocalPrincipalReadErrorV1::Unavailable)
-        }
-        Err(_) => Err(LocalPrincipalReadErrorV1::Corrupt),
-        Ok(persisted) => Ok(persisted
-            .chain()
-            .grants()
-            .last()
-            .map(CapabilityGrantV1::authority_registry_digest)),
+    store
+        .load_authority(local_principal_grant_id())
+        .map(Some)
+        .or_else(absent_authority)
+        .map(|persisted| {
+            persisted.and_then(|persisted| {
+                persisted
+                    .chain()
+                    .grants()
+                    .last()
+                    .map(CapabilityGrantV1::authority_registry_digest)
+            })
+        })
+}
+
+/// An authority read error as a recorded digest: no chain for the absent
+/// leaf grant (`Conflict`) means no Local Principal.
+fn absent_authority<T>(
+    error: AuthorityPersistenceErrorV1,
+) -> Result<Option<T>, LocalPrincipalReadErrorV1> {
+    match error {
+        AuthorityPersistenceErrorV1::Conflict => Ok(None),
+        AuthorityPersistenceErrorV1::Unavailable => Err(LocalPrincipalReadErrorV1::Unavailable),
+        _ => Err(LocalPrincipalReadErrorV1::Corrupt),
     }
 }
 

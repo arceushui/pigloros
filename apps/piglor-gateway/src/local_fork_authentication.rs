@@ -1799,10 +1799,17 @@ mod tests {
         expect_unavailable(credential_names(&opened));
         test_ok(fs::remove_file(host_path));
 
-        test_ok(fs::write(
-            directory.path().join(OsString::from_vec(vec![0xff])),
-            [],
-        ));
+        let unreadable = directory.path().join(OsString::from_vec(vec![0xff]));
+        test_ok(fs::write(&unreadable, []));
+        expect_invalid(credential_names(&opened));
+        test_ok(fs::remove_file(unreadable));
+
+        // One unexpected name, and two names that are not the pair, are
+        // invalid rather than missing or accepted.
+        let unexpected = directory.path().join("unexpected");
+        test_ok(fs::write(&unexpected, []));
+        expect_invalid(credential_names(&opened));
+        test_ok(fs::write(directory.path().join("unexpected-too"), []));
         expect_invalid(credential_names(&opened));
     }
 
