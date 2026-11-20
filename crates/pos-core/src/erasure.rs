@@ -2975,15 +2975,20 @@ pub trait ErasureInventoryPersistencePortV1 {
     /// Delete the captured objects of one retracted publication, sync their
     /// directory and record the deletion (ADR-138 §5, owner step and T2).
     ///
+    /// It returns the captured binding of the deleted objects, the fields an
+    /// ELXW1 of this withdrawal binds besides its request and command, so
+    /// the owner builds its disposition from exactly what was deleted. A
+    /// repeat after a committed deletion returns the same binding.
+    ///
     /// # Errors
     /// Returns [`ErasureErrorV1::ArtifactDeletionFailed`] for every refusal
-    /// or failure: no retracted, captured row; no custody bound to the
-    /// captured directory; a captured name now holding another object; or a
-    /// failed unlink, sync or commit.
+    /// or failure: no retracted, captured row; a malformed row; no custody
+    /// bound to the captured directory; a captured name now holding another
+    /// object; or a failed unlink, sync or commit.
     fn delete_recipient_export_ciphertext(
         &mut self,
         export_id: [u8; 16],
-    ) -> Result<(), ErasureErrorV1>;
+    ) -> Result<RecipientExportWithdrawalBindingV1, ErasureErrorV1>;
 
     /// Resolve one `ELXR1` target to its publication's export identity and
     /// grantee owner (ADR-138 §5): first through the withdrawal row with
@@ -4054,16 +4059,17 @@ pub use local_records::{
     local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_request_v1,
     local_erasure_requester_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
     local_erasure_store_target_v1, local_erasure_subject_v1, local_erasure_timeline_payload_v1,
-    ErasureOwnerResultV1, LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1,
-    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureCacheGenerationV1,
-    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
-    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureNegativeResultV1,
-    LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
-    LocalErasureRecipientExportWithdrawalV1, LocalErasureRedactionV1, LocalErasureRejectionV1,
-    LocalErasureReplicaPurgeV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
-    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
-    ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
-    LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
+    ErasureOwnerResultV1, LocalErasureAdmissionV1, LocalErasureArtifactDispositionV1,
+    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureCacheGenerationV1, LocalErasureClassificationV1, LocalErasureDisclosureV1,
+    LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1, LocalErasureLineageRuleV1,
+    LocalErasureNegativeResultV1, LocalErasureOwnerResultV1, LocalErasureOwnerRowV1,
+    LocalErasurePolicyV1, LocalErasureRecipientExportWithdrawalV1, LocalErasureRedactionV1,
+    LocalErasureRejectionV1, LocalErasureReplicaPurgeV1, LocalErasureSelectorV1,
+    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
+    LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
 /// The committed ERSC1 and ERSE1 chain of one request, read through its
 /// current manifest and scope index without validating the record.
@@ -4124,8 +4130,9 @@ pub trait ErasureRecordedAttemptReadV1: recorded_scope_sealed::Sealed {
 ///
 /// [`ErasureRecordedProgressReadV1`] builds it by the same complete core
 /// recovery a coordinator runs before any lifecycle command, so a driver can
-/// build an ERRA1 from it and a signer can re-derive from it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// build an ERRA1 from it and a signer can re-derive from it. Its default
+/// is the progress of a request with no obligation and no attempt.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ErasureRecordedProgressV1 {
     /// The frozen EROS1 obligations, in the obligation set's order.
     pub obligations: Vec<ErasureObligationV1>,
@@ -8073,7 +8080,7 @@ mod coverage_paths {
         fn delete_recipient_export_ciphertext(
             &mut self,
             _export_id: [u8; 16],
-        ) -> Result<(), ErasureErrorV1> {
+        ) -> Result<RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
             Err(ErasureErrorV1::ArtifactDeletionFailed)
         }
 

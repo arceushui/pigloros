@@ -102,6 +102,20 @@ impl OperationSpecV1 for RevokeConsentOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::REVOKE_CONSENT;
 }
 
+/// `POST /v1/me/erasures`.
+pub struct RequestErasureOperation;
+
+impl OperationSpecV1 for RequestErasureOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::REQUEST_ERASURE;
+}
+
+/// `GET /v1/me/erasures/{erasure_id}`.
+pub struct ReadErasureOperation;
+
+impl OperationSpecV1 for ReadErasureOperation {
+    const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_ERASURE;
+}
+
 /// `POST /v1/preferences`.
 pub struct CreatePreferenceOperation;
 

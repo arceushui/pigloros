@@ -1,0 +1,29 @@
+{
+  "name": "erasure-scope-too-large",
+  "operation_id": "requestErasure",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-24",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "scope": "private-subject-data",
+      "impact_acknowledged": true
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:erasure-scope-too-large",
+      "title": "Erasure scope too large",
+      "status": 400,
+      "detail": "the erasure scope exceeds the Local erasure limit",
+      "instance": "/v1/me/erasures",
+      "code": "erasure-scope-too-large",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

@@ -17,11 +17,12 @@ A case payload is RFC 8785 JSON with exactly the members `schema`
 (`pigloros.gateway-client-conformance.case.v2`), `family` (the family name) and `subcases`
 (1 to 64). There is no reader for provider contract 1.0.0. A sub-case has exactly `id`
 (`<prefix>.<n>`), `title`, `composition` (`open`, `authorized`, `authorized-air-gapped`,
-`authorized-consented` or `authorized-rooms`), `exchanges` (1 to 128), and
+`authorized-consented`, `authorized-rooms`, `authorized-erasure`, `authorized-erasure-held`,
+`authorized-erasure-expired` or `authorized-erasure-closed`), `exchanges` (1 to 128), and
 optionally `canary` (1 to 64 printable ASCII bytes). An exchange has exactly `router`
 (`loopback` or `spectator`), `method` (`GET` or `POST`), `path`, `expect`, and optionally
 `actor` (`true`), `body` (any JSON value other than null) and `capture` (`"timeline"`,
-`"consent"` or `"room"`). An
+`"consent"`, `"room"` or `"erasure"`). An
 optional member that is null is the same as an absent one. A `title` is 1 to 160 printable ASCII
 bytes (space allowed), a `path` 1 to 256 printable ASCII bytes without space, and a sub-case `id`
 is the family prefix, a dot and one or more decimal digits. A payload outside
@@ -41,6 +42,8 @@ The path without its query names one route; any other path is outside the gramma
 | actions | `POST /v1/timelines/:id/actions` | `world.action.v1.submit` |
 | session | `GET /v1/session` | `session.read` |
 | revoke | `POST /v1/me/consent-revocations` | `consent.revoke` |
+| erasures | `POST /v1/me/erasures` | `erasure.request` |
+| erasure | `GET /v1/me/erasures/:erasure` | `erasure.read` |
 | rooms | `POST /v1/scenario-rooms` | `scenario-room.create` |
 | revisions | `POST /v1/scenario-rooms/:room/revisions` | `scenario-room.derive` |
 | revision | `GET /v1/scenario-rooms/:room/revisions/:revision` | `scenario-room.read` |
@@ -51,6 +54,8 @@ of the response of the last earlier sent exchange of the sub-case that sets `cap
 `timeline`; a path that uses it before any such capture is outside the grammar. The literal
 `{room}` in a path is likewise the `id` of the response of the last earlier sent exchange that
 sets `capture` to `room`, and `:revision` is a positive decimal integer without a leading zero.
+The literal `{erasure}` in a path is the `request_id` of the response of the last earlier sent
+exchange that sets `capture` to `erasure`.
 The literal
 `{consent}` in a request body is replaced by the `consent_ref` of the first member of
 `consents` of the response of the last earlier sent exchange that sets `capture` to `consent`;
@@ -86,6 +91,18 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   permitted, so it governs `timeline.create`. The consent is recorded at sequence 1 of the Principal's consent
   Timeline; the consent-bound grant is issued at position 1 of its own authority Timeline, so
   the Principal's Session generation is 3 until the consent is revoked.
+- `authorized-erasure`: the `authorized` composition (#1449) whose fixture Local Principal is
+  granted only `erasure.request` (resource `erasure`, action `request`) and `erasure.read`
+  (resource `erasure.status`, action `read`), served with the Local erasure authority (ADR-136):
+  a fixture deployment trust state holds an operator-signed TPS1 whose one root is the fixture
+  `erasure-bundle/fixture` root, the production `provision_local_erasure` registers a fixture
+  role-2 signer and builds the bundle, which that root signs, and the Gateway's own
+  `serve --require-local-erasure` loader composes the authority from the four serve
+  credentials. No driver runs, so an admitted erasure stays `submitted`.
+  `authorized-erasure-held` is the same composition in which the fixture actor already has one
+  erasure in progress, admitted before the Gateway serves; `authorized-erasure-expired` is the
+  same composition under a bundle that expired at Unix second 1; `authorized-erasure-closed`
+  is the same Principal served with the closed erasure authority.
 - `authorized-rooms`: the `authorized` composition (#303) whose fixture Local Principal is
   granted `timeline.create`, `session.read`, `consent.revoke`, `scenario-room.create` (resource `scenario-room`,
   action `create`), `scenario-room.derive` (resource `scenario-room.revision`, action `derive`)
@@ -107,10 +124,10 @@ identical actions of one sub-case are an exact retry.
 
 The observation of a sent exchange is `{"status": <code>, "body": <body>}`. The body is
 `{"json": <value>}` when the response bytes are one JSON value, else the string `"non-json"`.
-The value is normalized. First, every text value equal to the consent or room the sub-case has
-captured so far (including by this exchange) becomes the slot literal `"{consent}"` or
-`"{room}"`, so a response echoing the captured consent or room is pinned and an echo of any
-other value stays raw. Then the identities, cursors and messages the documentation does not
+The value is normalized. First, every text value equal to the consent, room or erasure the
+sub-case has captured so far (including by this exchange) becomes the slot literal
+`"{consent}"`, `"{room}"` or `"{erasure}"`, so a response echoing the captured consent, room
+or erasure is pinned and an echo of any other value stays raw. Then the identities, cursors and messages the documentation does not
 fix are permitted nondeterministic operational fields:
 
 - a member `next_cursor` whose value is `v1.<64 lowercase hex>.<ULID>.<positive integer>`
@@ -127,7 +144,13 @@ fix are permitted nondeterministic operational fields:
 - in an object whose `schema_id` is `urn:pigloros:gateway:v1:schema:scenario-room-revision`,
   the `digest` of its member `provenance`, when it is 64 lowercase hex digits not all zero,
   becomes `"<hash>"` (a room revision's provenance covers its descriptor hash and Event ID);
-  every other provenance digest, such as a Session's, stays as it is.
+  so does the `provenance` `digest` of an `urn:pigloros:gateway:v1:schema:erasure` object and
+  the `bound_inputs` `trust` of an `urn:pigloros:gateway:v1:schema:admission-receipt` object
+  (the ERS1 state digest and the bundle digest cover the store's own erasure identity, drawn
+  per store); every other provenance digest, such as a Session's, stays as it is;
+- a member `request_id`, `operation_id` or `operation_url` is treated as a member `id`: every
+  ULID segment of it becomes `<ulid>`, after a value equal to the captured erasure became
+  `"{erasure}"`.
 
 Any other value, including a malformed ID or cursor, stays as it is, so the exchange does not
 match. An exchange matches when its observation equals `expect`.
@@ -169,7 +192,12 @@ are 0.
   hash ADR-041 amendment A4 states; the sub-case's one idempotency key used for a different
   create is the `409` `idempotency-conflict` problem, a derive repeated from the same parent
   answers the head (`200`, the ADR-041 section 7 duplicate) and a different derive from that
-  non-head parent is the `409` `append-conflict` problem.
+  non-head parent is the `409` `append-conflict` problem; on `authorized-erasure` a
+  private-subject-data erasure is admitted with the `202` admission receipt (the BLAKE3 of the
+  sub-case ID as its key digest, the pinned Local erasure policy and the Local mode profile as
+  bound inputs), an exact retry answers the same receipt, the same key for consented shared
+  data is the `409` `idempotency-conflict` problem, and the erasure reads back `submitted` with
+  generation 0, no obligation and the `exact` claim (#1449).
 - **denied** (`capability-denied`): an action without a host authorizer is the `401`
   `unauthenticated` problem and an action the fixture authority does not grant is the `403`
   `unauthorized` problem, each followed by an empty poll (denial without state change); a route
@@ -179,14 +207,24 @@ are 0.
   Principal), is the `401` `unauthenticated` problem; a room whose `privacy_export_ref` names a
   consent the Principal does not hold is the `403` `consent-invalid` problem, one naming its
   consent after the consent is revoked is the `403` `revoked` problem, and one whose persona the
-  grant's actors do not cover is the `403` `unauthorized` problem.
+  grant's actors do not cover is the `403` `unauthorized` problem; on `authorized` an erasure
+  request is the `403` `unauthorized` problem, an erasure read the `404`
+  `not-found-or-unavailable` problem and an erasure request without the actor header the `401`
+  `unauthenticated` problem; on `authorized-erasure-closed` an erasure request is the
+  non-retryable `503` `temporarily-unavailable` problem and a read is `404`; on
+  `authorized-erasure-expired` an erasure request is the non-retryable `503`
+  `temporarily-unavailable` problem.
 - **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are the `400`
   `invalid-request` problem; a Timeline ID that is not a ULID is `400` `invalid-request`;
   integer action `params` are the `422` `admission-rejected` problem, and nothing is committed;
   a room naming a governance record the host does not record is the `422`
-  `admission-rejected` problem.
+  `admission-rejected` problem; on `authorized-erasure` an erasure request whose
+  `impact_acknowledged` is false is `400` `invalid-request`, one for `public-record` is the
+  `400` `erasure-scope-retained` problem and an erasure ID that is not a ULID is `400`
+  `invalid-request`.
 - **resource-exhaustion** (`resource-limit`): 64 root Timelines are created and the 65th is the
-  `429` `resource-limit-exceeded` problem.
+  `429` `resource-limit-exceeded` problem; on `authorized-erasure-held` another erasure request
+  of the subject is the retryable `429` `resource-limit-exceeded` problem.
 - **deletion-redaction:** public-listener redaction. A canary Society Signal is committed
   through the loopback router; on the same Gateway the spectator router answers the Timeline
   events and signals routes with the `404` `not-found-or-unavailable` problem, still answers `/health` and `/v1/ledger`, and no

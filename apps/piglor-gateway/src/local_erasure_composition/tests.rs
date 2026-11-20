@@ -7,9 +7,8 @@ use std::time::Duration;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use pos_core::{
-    local_erasure_bundle_signing_message_v1, EntityId, ErasureHostErrorV1, ErasureLifecycleV1,
-    ErasureReferenceV1, ErasureScopeV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    OwnerIdV1, PrincipalRefV1,
+    local_erasure_bundle_signing_message_v1, EntityId, ErasureLifecycleV1, ErasureReferenceV1,
+    ErasureScopeV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1, OwnerIdV1, PrincipalRefV1,
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
@@ -61,22 +60,22 @@ fn signed(bundle: &[u8], root: &SigningKey) -> TestResult<Vec<u8>> {
 
 /// A Gateway store with its Local Principal, provisioned for Local erasure
 /// under a signed bundle, and its deployment trust state.
-struct World {
+pub(crate) struct World {
     deployment: Deployment,
-    fixture: Fixture,
-    bundle: Vec<u8>,
+    pub(crate) fixture: Fixture,
+    pub(crate) bundle: Vec<u8>,
     signature: Vec<u8>,
 }
 
 impl World {
     /// The Local Principal of the provisioning fixture.
-    fn new() -> TestResult<Self> {
+    pub(crate) fn new() -> TestResult<Self> {
         Self::over(Fixture::new(true)?)
     }
 
     /// Provision Local erasure on `fixture`, which records its Local
     /// Principal, and sign the bundle with the TPS1 bundle root.
-    fn over(fixture: Fixture) -> TestResult<Self> {
+    pub(crate) fn over(fixture: Fixture) -> TestResult<Self> {
         let deployment = Deployment::new(&[])?;
         let bundle = provision_local_erasure(
             &fixture.request("bundle.elb1"),
@@ -95,7 +94,12 @@ impl World {
 
     /// A protected credential directory `name` holding the four erasure
     /// credentials, with the signer seed `seed`, and `extra`.
-    fn credentials(&self, name: &str, seed: &[u8], extra: &[(&str, &[u8])]) -> TestResult<PathBuf> {
+    pub(crate) fn credentials(
+        &self,
+        name: &str,
+        seed: &[u8],
+        extra: &[(&str, &[u8])],
+    ) -> TestResult<PathBuf> {
         let mut credentials: Vec<(&str, &[u8])> = vec![
             (LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, self.bundle.as_slice()),
             (
@@ -132,7 +136,7 @@ impl World {
     }
 
     /// The serve inputs over this world's store and trust state.
-    fn inputs<'a>(&'a self, credentials: &'a Path) -> LocalErasureServeInputsV1<'a> {
+    pub(crate) fn inputs<'a>(&'a self, credentials: &'a Path) -> LocalErasureServeInputsV1<'a> {
         LocalErasureServeInputsV1 {
             sqlite_path: &self.fixture.path,
             credential_directory: credentials,
@@ -143,7 +147,7 @@ impl World {
 
     /// Open this world's erasure host with `composition`, attached to the
     /// Local mode the fixture bound.
-    fn host(
+    pub(crate) fn host(
         &self,
         composition: &ErasureCoordinatorCompositionV1,
     ) -> TestResult<ErasureExecutionHostV1> {
@@ -161,18 +165,18 @@ impl World {
     }
 }
 
-fn principal() -> TestResult<PrincipalRefV1> {
+pub(crate) fn principal() -> TestResult<PrincipalRefV1> {
     Ok(PrincipalRefV1::try_new(
         Ulid::from_string(PRINCIPAL_ID)?.to_bytes(),
         "local",
     )?)
 }
 
-fn actor() -> TestResult<EntityId> {
+pub(crate) fn actor() -> TestResult<EntityId> {
     Ok(EntityId::from_ulid(Ulid::from_string(ACTOR)?))
 }
 
-fn other_actor() -> TestResult<EntityId> {
+pub(crate) fn other_actor() -> TestResult<EntityId> {
     Ok(EntityId::from_ulid(Ulid::from_string(OTHER_ACTOR)?))
 }
 
@@ -183,6 +187,8 @@ fn submission() -> TestResult<LocalErasureSubmissionV1> {
         actor: actor()?,
         scope: ErasureScopeV1::PrivateSubjectData,
         idempotency_key_digest: ErasureReferenceV1::from_digest([0x11; 32]),
+        mode_profile: ErasureReferenceV1::from_digest([0x12; 32]),
+        binding_epoch: 1,
     })
 }
 
@@ -215,10 +221,11 @@ async fn valid_credentials_compose_the_local_erasure_authority() -> TestResult {
     let driver = LocalErasureDriverTaskV1::spawn(&gateway, started);
     let trigger = driver.trigger().ok_or("a Local driver has a trigger")?;
     driver.stop().await;
-    // The stopped driver task released its wake: only `trigger` holds it.
-    assert_eq!(Arc::strong_count(&trigger.0), 1);
     assert!(gateway.shutdown().await.is_ok());
     drop(gateway);
+    // The stopped driver task and the dropped Gateway's admission hook
+    // released the wake: only `trigger` holds it.
+    assert_eq!(Arc::strong_count(&trigger.0), 1);
     Ok(())
 }
 
@@ -234,9 +241,7 @@ async fn without_the_flag_the_composition_stays_closed() -> TestResult {
         host.command_sender()?
             .submit_local_erasure(&submission()?)
             .err(),
-        Some(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::AuthorizationDenied
-        ))
+        Some(LocalErasureSubmitErrorV1::Unserved)
     );
     let started = erasure.start(&mut host);
     assert_eq!(started.sweep(), None);
@@ -472,14 +477,20 @@ async fn a_skipped_startup_sweep_does_not_fail_startup() -> TestResult {
 /// A Local Principal store whose root grant lets the fixture actor request
 /// erasure, provisioned for Local erasure.
 fn erasure_world() -> TestResult<World> {
+    erasure_world_granting(&[
+        GatewayOperationV1::CREATE_TIMELINE,
+        GatewayOperationV1::REQUEST_ERASURE,
+    ])
+}
+
+/// A Local Principal store whose root grant covers both fixture actors for
+/// `operations`, provisioned for Local erasure.
+pub(crate) fn erasure_world_granting(operations: &[GatewayOperationV1]) -> TestResult<World> {
     let fixture = Fixture::new(false)?;
     let provision = LocalPrincipalProvisionV1::try_new(
         &principal()?,
         [actor()?, other_actor()?],
-        [
-            GatewayOperationV1::CREATE_TIMELINE,
-            GatewayOperationV1::new("erasure.request", "erasure", "request", "operation"),
-        ],
+        operations.iter().copied(),
     )?;
     let mut host = open_recovered_erasure_host(
         StoreConfig::Sqlite {
@@ -517,6 +528,7 @@ fn submitted() -> TestResult<Submitted> {
         .command_sender()?
         .submit_local_erasure(&submission()?)
         .map_err(|error| format!("{error:?}"))?
+        .state
         .request();
     // A second subject's request beside it.
     host.command_sender()?

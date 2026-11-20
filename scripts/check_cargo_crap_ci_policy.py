@@ -103,11 +103,13 @@ TEST_ONLY_EXCLUSIONS = (
     "src/provider_runtime/endpoint/tests.rs",
     "src/provider_runtime/serving/tests.rs",
     "src/provider_runtime/recovery_peer/tests.rs",
+    "src/selector/recovery/tests.rs",
     "src/provider_runtime/revocation/tests.rs",
     "src/scenario_room/tests.rs",
     "src/executor/scenario_room/tests.rs",
     "src/local_erasure_provision/tests.rs",
     "src/local_erasure_composition/tests.rs",
+    "src/erasure/tests.rs",
     "src/mode_profile/tests.rs",
     "src/community/memory_domain/tests.rs",
     # The attempt records' test-only submodules.

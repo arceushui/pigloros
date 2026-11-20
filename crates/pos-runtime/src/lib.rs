@@ -78,9 +78,11 @@ pub use erasure_authority_view::{
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
-    ErasureReadSenderV1, LocalErasureSubmissionBindingV1, LocalErasureSubmissionV1,
-    LocalErasureSubmitErrorV1, LocalFreezePreparationV1,
+    ErasureReadSenderV1, LocalErasureAdmittedV1, LocalErasureSubmissionBindingV1,
+    LocalErasureSubmissionV1, LocalErasureSubmitErrorV1, LocalFreezePreparationV1,
 };
+#[cfg(target_os = "linux")]
+pub use erasure_host::{LocalErasureClassCountV1, LocalErasureProjectionV1};
 #[cfg(target_os = "linux")]
 pub use erasure_local_authority::{
     compiled_local_erasure_policy_v1, local_erasure_execution_binding_v1,

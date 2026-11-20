@@ -205,9 +205,11 @@ impl ErasureCoordinatorCompositionV1 {
             .and_then(|bundle| {
                 local_erasure_coordinator_v1(bundle.store_identity)
                     .ok()
-                    .and_then(|coordinator| {
+                    .zip(bundle.reference().ok())
+                    .and_then(|(coordinator, trust)| {
+                        let owners = bundle.owners.clone();
                         let authority = Arc::new(LocalErasureAuthorityV1 {
-                            bundle_reference: bundle.reference().ok(),
+                            bundle_reference: Some(trust),
                             bundle,
                             trust_expiry: inputs.trust.expiry(),
                             revoked_key_ids: revoked.clone(),
@@ -227,6 +229,8 @@ impl ErasureCoordinatorCompositionV1 {
                             store_request_reserve: LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
                             preparation: Arc::clone(&authority)
                                 as Arc<dyn LocalErasurePreparationV1>,
+                            trust,
+                            owners,
                         };
                         Self::new(authority, coordinator)
                             .ok()

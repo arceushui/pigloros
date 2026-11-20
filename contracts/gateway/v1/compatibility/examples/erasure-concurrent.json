@@ -1,0 +1,29 @@
+{
+  "name": "erasure-concurrent",
+  "operation_id": "requestErasure",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-27",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "scope": "private-subject-data",
+      "impact_acknowledged": true
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 429,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:resource-limit-exceeded",
+      "title": "Resource limit exceeded",
+      "status": 429,
+      "detail": "another erasure of the subject is in progress",
+      "instance": "/v1/me/erasures",
+      "code": "resource-limit-exceeded",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": true
+    }
+  }
+}
