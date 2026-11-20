@@ -48,7 +48,9 @@ pub use binding::{
     local_erasure_execution_binding_v1, LOCAL_ERASURE_EXECUTOR_ID_V1,
     LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1, LOCAL_ERASURE_EXECUTOR_VERSION_V1,
 };
-pub use driver::{LocalErasureDriverV1, LocalErasureStepV1, LocalErasureSweepV1};
+pub use driver::{
+    LocalErasureAdvanceV1, LocalErasureDriverV1, LocalErasureStepV1, LocalErasureSweepV1,
+};
 pub use executor::LocalErasureExecutorV1;
 pub use policy::{
     compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
@@ -371,7 +373,7 @@ where
     S: ErasureInventoryPersistencePortV1 + ?Sized,
 {
     store
-        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum(), &[])
         .is_ok_and(|snapshot| {
             snapshot.inventory().request_heads().is_empty()
                 || store
@@ -408,7 +410,7 @@ where
     S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + ?Sized,
 {
     store
-        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum(), &[])
         .ok()
         .and_then(|snapshot| {
             snapshot
