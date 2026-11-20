@@ -78,16 +78,18 @@ impl RetainedResponse {
     /// Re-issue this Completed response once its output transfer timed out
     /// (R9 §4.7): the successor TME1 records `transfer`, which is
     /// incomplete, and SAU1 event 10, SPR1 and SPY1 follow it. The earlier
-    /// records stay in the chain.
+    /// records stay in the chain. `transfer` is `None` when a time of the
+    /// output transfer could not be read.
     ///
     /// # Errors
     /// [`ResponseFault::Evidence`] when this response cannot be re-issued
-    /// ([`EvidenceFault::NotReissuable`]) or the successor is refused, and
-    /// [`ResponseFault::Sign`] when a record is refused or a signature does
-    /// not verify under `admitted`.
+    /// ([`EvidenceFault::NotReissuable`]), a time of the output transfer
+    /// could not be read ([`EvidenceFault::Clock`], R9 Amendment 1 change F)
+    /// or the successor is refused, and [`ResponseFault::Sign`] when a
+    /// record is refused or a signature does not verify under `admitted`.
     pub fn successor<R: RuntimeAttestationSigner>(
         &self,
-        transfer: TransferRecord,
+        transfer: Option<TransferRecord>,
         signer: &R,
         admitted: AdmittedRuntimeKey<'_>,
     ) -> Result<Self, ResponseFault> {
