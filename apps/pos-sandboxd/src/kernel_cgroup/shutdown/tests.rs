@@ -168,6 +168,10 @@ mod cases {
             UnusedKiller
         }
 
+        fn start_failure(_error: &std::io::Error) -> crate::StartFailure {
+            crate::StartFailure::default()
+        }
+
         async fn start(
             &self,
             _unit: TransientServiceUnitName,
