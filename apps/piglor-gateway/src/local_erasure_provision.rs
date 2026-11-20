@@ -351,7 +351,7 @@ fn credentialed_bundle(
 
 /// The current Unix second (UTC); a clock before the epoch reads as the
 /// largest second, so it fails closed against every TPS1 expiry.
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(u64::MAX, |elapsed| elapsed.as_secs())
@@ -361,7 +361,9 @@ fn unix_now() -> u64 {
 ///
 /// The seed is copied straight into a zeroizing buffer, so no other copy of
 /// it outlives this call.
-fn signer_material(seed: &[u8]) -> Result<SigningKeyMaterial, LocalErasureProvisionErrorV1> {
+pub(crate) fn signer_material(
+    seed: &[u8],
+) -> Result<SigningKeyMaterial, LocalErasureProvisionErrorV1> {
     (seed.len() == 32)
         .then(|| {
             let mut secret = Zeroizing::new([0_u8; 32]);
@@ -484,6 +486,7 @@ fn provision_store(
                     store
                         .erasure_authority_snapshot_with_limits(
                             ErasureRecoveryLimitsV1::compiled_maximum(),
+                            &[],
                         )
                         .map_err(io::Error::other)
                         .and_then(|snapshot| {
@@ -727,4 +730,4 @@ fn out_unavailable(kind: io::ErrorKind) -> io::Error {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
+pub mod tests;

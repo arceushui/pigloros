@@ -25,6 +25,11 @@ pub mod host_timelines;
 mod http;
 pub mod ledger_config;
 #[cfg(target_os = "linux")]
+pub mod local_erasure_composition;
+#[cfg(not(target_os = "linux"))]
+#[path = "local_erasure_composition_closed.rs"]
+pub mod local_erasure_composition;
+#[cfg(target_os = "linux")]
 pub mod local_erasure_provision;
 #[cfg(target_os = "linux")]
 pub mod local_fork_authentication;

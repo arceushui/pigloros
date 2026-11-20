@@ -289,6 +289,19 @@ fn ensure_plaintext_preference_allowed(
     }
 }
 
+/// At most one category's obligations may name `ELXR1` targets (ADR-138 §5);
+/// both erasure authority snapshot adapters refuse more as
+/// [`pos_core::ErasureErrorV1::ScopeInvalid`].
+pub(crate) const fn export_targets_admitted(
+    export_targets: &[ErasureReferenceV1],
+) -> Result<(), pos_core::ErasureErrorV1> {
+    if export_targets.len() > pos_core::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
+        Err(pos_core::ErasureErrorV1::ScopeInvalid)
+    } else {
+        Ok(())
+    }
+}
+
 /// A committed or indeterminate topology write invalidates a cached inventory.
 pub(crate) const fn inventory_generation_may_have_changed<T>(
     result: &Result<T, CoreError>,
