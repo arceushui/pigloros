@@ -1809,7 +1809,23 @@ mod tests {
         let unexpected = directory.path().join("unexpected");
         test_ok(fs::write(&unexpected, []));
         expect_invalid(credential_names(&opened));
-        test_ok(fs::write(directory.path().join("unexpected-too"), []));
+        let unexpected_too = directory.path().join("unexpected-too");
+        test_ok(fs::write(&unexpected_too, []));
+        expect_invalid(credential_names(&opened));
+        test_ok(fs::remove_file(unexpected));
+        test_ok(fs::remove_file(unexpected_too));
+
+        // A pair holding only one of the two names is invalid, whichever
+        // position the other name sorts into.
+        let auth_path = directory.path().join(AUTH_CREDENTIAL_NAME);
+        let after = directory.path().join("zz-after");
+        test_ok(fs::write(&auth_path, []));
+        test_ok(fs::write(&after, []));
+        expect_invalid(credential_names(&opened));
+        test_ok(fs::remove_file(auth_path));
+        test_ok(fs::remove_file(after));
+        test_ok(fs::write(directory.path().join("aa-before"), []));
+        test_ok(fs::write(directory.path().join(HOST_CREDENTIAL_NAME), []));
         expect_invalid(credential_names(&opened));
     }
 
