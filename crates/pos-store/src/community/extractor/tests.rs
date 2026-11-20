@@ -1091,16 +1091,55 @@ fn a_record_of_another_generation_is_refused() -> TestResult {
     Ok(())
 }
 
+fn shared_state_children_resolve_to_the_listed_record(
+    key: &mut CommunityArtifactProtectorV1,
+    first: &CommunityProtectedRecordV1,
+    second: &CommunityProtectedRecordV1,
+    state_bytes: &[u8],
+) -> TestResult {
+    let shared = producer(state_bytes, hash(4), MEMBER)?;
+    let shared_producer = protect(
+        key,
+        Kind::ExecutionProvenance,
+        &shared.to_canonical_cbor(),
+        &[],
+    )?;
+    let shared_revision = revision(Revision {
+        origin: INITIALIZATION,
+        member: MEMBER,
+        state: adr_h("CSC1", state_bytes),
+        producer: shared.digest(),
+        owner: COB,
+    })?;
+    for (children, outcome) in [
+        (vec![first, &shared_producer], Ok(())),
+        (vec![second, &shared_producer], Ok(())),
+        (
+            vec![first, second, &shared_producer],
+            Err(Error::InvalidBinding),
+        ),
+    ] {
+        let listed = protect(key, Kind::StateRevisionOrHead, &shared_revision, &children)?;
+        assert_eq!(
+            resolve(&[first, second, &shared_producer, &listed], key)?,
+            outcome
+        );
+    }
+    Ok(())
+}
+
+/// Two members that start from one catalogue State each protect their own
+/// CSC1 of one logical identity (note 22661, item 4): both records resolve,
+/// and a child resolves to the one record its parent's ARD1 lists. A parent
+/// listing both is ambiguous and refuses, as does one listing neither.
 #[test]
 fn duplicate_identities_and_missing_or_unlisted_children_are_refused() -> TestResult {
     let mut key = protector(GENERATION)?;
     let state_bytes = state(b"state")?;
     let first = protect(&mut key, Kind::StateContent, &state_bytes, &[])?;
     let second = protect(&mut key, Kind::StateContent, &state_bytes, &[])?;
-    assert_eq!(
-        resolve(&[&first, &second], &key)?,
-        Err(Error::InvalidBinding)
-    );
+    assert_eq!(resolve(&[&first, &second], &key)?, Ok(()));
+    shared_state_children_resolve_to_the_listed_record(&mut key, &first, &second, &state_bytes)?;
 
     // A CSR1 whose ARD1 omits its CSC1 and CIS1.
     let initializer = producer(&state_bytes, hash(4), MEMBER)?;

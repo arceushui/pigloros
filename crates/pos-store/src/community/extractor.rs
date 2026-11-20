@@ -88,6 +88,10 @@ pub struct CommunityArtifactBatchInputV1<'a> {
 /// An owner-verified complete community closure, ready for the atomic
 /// commit. It grants no read; COA1 and current authority come after.
 pub struct CommunityArtifactBatchV1 {
+    #[cfg(target_os = "linux")]
+    timeline: TimelineId,
+    #[cfg(target_os = "linux")]
+    generation: [u8; 16],
     records: Vec<CommunityProtectedRecordV1>,
     graph_root_digest: Hash,
 }
@@ -97,6 +101,13 @@ impl CommunityArtifactBatchV1 {
     #[must_use]
     pub fn records(&self) -> &[CommunityProtectedRecordV1] {
         &self.records
+    }
+
+    /// The Timeline and generation of the verified root, whose
+    /// artifact-catalogue owner owns every record's ARD1.
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn coordinates(&self) -> (TimelineId, [u8; 16]) {
+        (self.timeline, self.generation)
     }
 
     /// `H(CGR1)` of the verified root.
@@ -184,6 +195,10 @@ pub fn prepare_community_artifact_batch_v1(
     check_shape(&extracted, &edges, &root)?;
     check_closure(&extracted, &edges, &root)?;
     Ok(CommunityArtifactBatchV1 {
+        #[cfg(target_os = "linux")]
+        timeline: root.timeline,
+        #[cfg(target_os = "linux")]
+        generation: root.generation,
         records: extracted.into_iter().map(|record| record.record).collect(),
         graph_root_digest: root.digest,
     })
@@ -468,25 +483,40 @@ fn read_node(
 /// to list exactly their required edges. A record's resolved children keep
 /// the order of its logical children: a CSR1 lists `[CSC1, CIS1]` and a
 /// `StateRevision` node `[CSR1, CSC1, InitialState]`.
+///
+/// Members that start from one catalogue State each protect their own CSC1
+/// of that one logical record (note 22661, item 4), so a logical identity
+/// may name several records. A child resolves to the one such record whose
+/// registration its parent's ARD1 lists; none or several refuse.
 fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
-    let mut by_identity = BTreeMap::new();
+    let mut by_identity: BTreeMap<([u8; 4], Hash), Vec<usize>> = BTreeMap::new();
     for (index, record) in extracted.iter().enumerate() {
-        if by_identity
-            .insert((record.magic, record.logical), index)
-            .is_some()
-        {
-            return Err(Error::InvalidBinding);
-        }
-    }
-    let find = |magic: [u8; 4], digest: Hash| {
         by_identity
-            .get(&(magic, digest))
-            .copied()
-            .ok_or(Error::InvalidBinding)
-    };
+            .entry((record.magic, record.logical))
+            .or_default()
+            .push(index);
+    }
     extracted
         .iter()
         .map(|record| {
+            let listed = &record.record.registration().fields().child_artifacts;
+            let find = |magic: [u8; 4], digest: Hash| {
+                let mut found = by_identity
+                    .get(&(magic, digest))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|candidate| {
+                        let address = extracted[*candidate].record.registration().address();
+                        listed
+                            .iter()
+                            .any(|edge| edge.registration_address == address)
+                    });
+                match (found.next(), found.next()) {
+                    (Some(index), None) => Ok(index),
+                    _ => Err(Error::InvalidBinding),
+                }
+            };
             let mut children = Vec::with_capacity(3);
             for child in &record.children {
                 match *child {

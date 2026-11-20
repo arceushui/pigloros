@@ -19,6 +19,8 @@ use pos_core::community_lifecycle::{
 use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "linux")]
+use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::private_hash::scope_set_digest;
 use super::sealer::SealedMetadataV1;
@@ -146,6 +148,20 @@ pub struct MemoryCommunityDomainV1 {
     /// The community inventory generation (G5): 0 at bootstrap, advanced
     /// only by a committed inventory effect.
     pub(super) inventory_generation: u64,
+    /// The highest native producer ordinal ever allocated (ADR-129 §4). An
+    /// allocation burns its ordinal even when the operation fails; CSI1
+    /// records it only in a committed successor (owner decision on #560,
+    /// 2026-11-20, item 5).
+    #[cfg(target_os = "linux")]
+    pub(super) native_producer_ordinal: u64,
+    /// The current CSI1 when a committed operation replaced the bootstrap
+    /// one: the protection ID of the key that sealed it, and its CNE1.
+    #[cfg(target_os = "linux")]
+    pub(super) selection: Option<([u8; 16], SealedMetadataV1)>,
+    /// Every committed initialization by `(T, operation_id)`, its retry key
+    /// (A5.3(5), R6.3(4)).
+    #[cfg(target_os = "linux")]
+    pub(super) initializations: BTreeMap<(TimelineId, [u8; 16]), CommittedInitializationV1>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -180,6 +196,12 @@ impl MemoryCommunityDomainV1 {
                 keys: BTreeMap::new(),
                 bootstrap: None,
                 inventory_generation: 0,
+                #[cfg(target_os = "linux")]
+                native_producer_ordinal: 0,
+                #[cfg(target_os = "linux")]
+                selection: None,
+                #[cfg(target_os = "linux")]
+                initializations: BTreeMap::new(),
             })
         }
     }
@@ -263,7 +285,7 @@ impl MemoryCommunityDomainV1 {
 
     /// Per-call fail-closed evaluation of the exact request against the
     /// chain loaded now; it latches nothing, so each operation repeats it.
-    fn admit(
+    pub(super) fn admit(
         &self,
         policy: &CommunityMetadataPolicyV1,
         authority: &mut CommunityMetadataAuthorityV1,
