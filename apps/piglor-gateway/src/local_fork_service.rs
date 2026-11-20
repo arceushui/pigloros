@@ -935,7 +935,7 @@ pub mod tests {
             ledger: LedgerConfig::new(None, false),
             local_erasure_trust_state: Some(trust_state),
         };
-        let (managed, erasure) =
+        let (LocalForkAdmissionCredentialsV1 { profile, .. }, erasure) =
             managed_credentials_and_erasure(&deployment).map_err(io::Error::other)?;
         let mut host = ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Sqlite {
@@ -948,13 +948,8 @@ pub mod tests {
         let mode = bind_gateway_mode_v1(deployment.profile, deployment.composition, &mut host)
             .map_err(io::Error::other)?;
         let erasure = erasure.start(&mut host);
-        drop(managed.credentials);
-        let (gateway, coordinator) = open_with_credentials(
-            host,
-            (current_peer_credentials()?, managed.profile),
-            None,
-            &mode,
-        )?;
+        let (gateway, coordinator) =
+            open_with_credentials(host, (current_peer_credentials()?, profile), None, &mode)?;
         let listener = start_listener(coordinator, socket)?;
         Ok((gateway, listener, erasure))
     }

@@ -344,6 +344,12 @@ impl Served {
     /// order of a serve's shutdown.
     async fn stop(self, driver: LocalErasureDriverTaskV1) -> TestResult<World> {
         driver.stop().await;
+        self.shut_down().await
+    }
+
+    /// Stop the Fork admission listener, then the Gateway, as a serve's
+    /// shutdown does once its driver has stopped.
+    async fn shut_down(self) -> TestResult<World> {
         if let Some(listener) = self.listener {
             listener.stop().await?;
         }
@@ -584,7 +590,7 @@ async fn get_erasure_answers_one_not_found(mode: ServeMode) -> TestResult {
         malformed.problem()?,
         (StatusCode::BAD_REQUEST, "invalid-request".to_owned(), false)
     );
-    served.gateway.shutdown().await?;
+    served.shut_down().await?;
     // A missing grant answers the same bytes.
     let (ungranted, driver) =
         Served::serve(mode, &[GatewayOperationV1::REQUEST_ERASURE], compiled())?;
@@ -618,7 +624,7 @@ async fn parallel_requests_of_one_subject_admit_one(mode: ServeMode) -> TestResu
         )
     );
     assert!(!answers[1].headers.contains_key("retry-after"));
-    served.gateway.shutdown().await?;
+    served.shut_down().await?;
     Ok(())
 }
 
@@ -1103,7 +1109,7 @@ async fn a_request_without_its_admission_is_unavailable() -> TestResult {
             true
         )
     );
-    served.gateway.shutdown().await?;
+    served.shut_down().await?;
     Ok(())
 }
 
