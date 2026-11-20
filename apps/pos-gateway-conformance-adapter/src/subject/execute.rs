@@ -600,16 +600,17 @@ mod tests {
     use pos_core::ErasureInventoryPersistencePortV1 as _;
     use pos_store::sqlite::SqliteStore;
 
-    /// ADR-136 acceptance test 11 does not apply to the adapter (D21).
+    /// Only the compositions with a fixture erasure bundle record an erasure identity.
     ///
-    /// None of its hosts recovers a store that holds ERQ1 records without a
-    /// private key. Every composition without a fixture erasure bundle
-    /// serves a store that records no erasure identity under the closed
-    /// composition, so it holds no ERQ1 to recover; only the
-    /// `authorized-erasure` compositions record one, and they compose the
-    /// Local erasure authority with its signer credential.
+    /// ADR-136 acceptance test 11 does not apply to the adapter: it never
+    /// acts as a key-less root (D21). This test proves that every
+    /// composition without a fixture erasure bundle serves a store that
+    /// records no erasure identity, under the closed composition, so it has
+    /// no ERQ1 to recover. The `authorized-erasure` compositions do record
+    /// one; they compose through the `serve` loader, which refuses to start
+    /// without the signer credential, so they hold the signer.
     #[test]
-    fn only_the_erasure_compositions_record_an_erasure_identity(
+    fn only_the_erasure_bundle_compositions_record_an_erasure_identity(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
