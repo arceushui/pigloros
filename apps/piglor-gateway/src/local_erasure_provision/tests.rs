@@ -12,8 +12,8 @@ use pos_core::{
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
     local_erasure_execution_binding_v1, ErasureCoordinatorCompositionV1,
-    LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1,
-    LOCAL_ERASURE_POLICY_REFERENCE_V1,
+    LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1, LocalErasureRotationRefusalV1,
+    LocalErasureSignerRotationV1, LOCAL_ERASURE_POLICY_REFERENCE_V1,
 };
 use pos_store::sqlite::SqliteStore;
 use pos_store::trust_policy_registry::{
@@ -181,6 +181,7 @@ impl Fixture {
             expiry: 0,
             signer_owner: SIGNER_OWNER.to_owned(),
             signer_epoch: 1,
+            rotation: LocalErasureSignerRotationV1::Routine,
         }
     }
 
@@ -295,6 +296,7 @@ fn the_command_line_parses_its_flags_and_defaults() {
             expiry: 0,
             signer_owner: "signer".to_owned(),
             signer_epoch: 1,
+            rotation: LocalErasureSignerRotationV1::Routine,
         })
     );
     let explicit = LocalErasureProvisionRequestV1::parse(&args(&[
@@ -314,6 +316,24 @@ fn the_command_line_parses_its_flags_and_defaults() {
         explicit.map(|request| (request.expiry, request.signer_epoch)),
         Ok((1_900_000_000, 2))
     );
+    for (value, rotation) in [
+        ("routine", Ok(LocalErasureSignerRotationV1::Routine)),
+        ("compromise", Ok(LocalErasureSignerRotationV1::Compromise)),
+        ("forced", Err(LocalErasureProvisionErrorV1::Usage)),
+    ] {
+        let parsed = LocalErasureProvisionRequestV1::parse(&args(&[
+            "db",
+            "--issued-by",
+            "erasure-bundle/root",
+            "--signer-owner",
+            "signer",
+            "--out",
+            "/bundle",
+            "--rotation",
+            value,
+        ]));
+        assert_eq!(parsed.map(|request| request.rotation), rotation, "{value}");
+    }
 }
 
 #[test]
@@ -1181,5 +1201,79 @@ fn a_run_interrupted_after_the_signer_registration_completes() -> TestResult {
     )?;
     assert!(fixture.store_identity()?.is_some());
     assert_eq!(fixture.compose(&deployment, &bundle)?, None);
+    Ok(())
+}
+
+/// Owner decision of 2026-11-18 on #1431: a re-run with the registered key
+/// is unchanged; a compromise registers a new key only once the installed
+/// TPS1 revokes the old one. A routine rotation while a request pins a
+/// bundle is refused by the same rule, which the pos-runtime composition
+/// tests drive with a pinned request.
+#[test]
+fn a_new_signer_key_is_registered_only_as_the_tps1_allows() -> TestResult {
+    let deployment = Deployment::new(&[])?;
+    let trust = deployment.trust()?;
+    let fixture = Fixture::new(true)?;
+    let first = provision_local_erasure(
+        &fixture.request("a"),
+        &signer(SIGNER_SEED),
+        &trust,
+        present(),
+    )?;
+    // The same key again: the exact same bundle, nothing new registered.
+    assert_eq!(
+        provision_local_erasure(
+            &fixture.request("again"),
+            &signer(SIGNER_SEED),
+            &trust,
+            present()
+        )?,
+        first
+    );
+    assert_eq!(fixture.registered_signer(2)?, None);
+
+    // A compromise the installed TPS1 does not reflect registers nothing.
+    let mut compromise = fixture.request("b");
+    compromise.signer_epoch = 2;
+    compromise.rotation = LocalErasureSignerRotationV1::Compromise;
+    assert_eq!(
+        refusal(provision_local_erasure(
+            &compromise,
+            &signer(ROTATED_SEED),
+            &trust,
+            present()
+        )),
+        Some(LocalErasureProvisionErrorV1::Rotation(
+            LocalErasureRotationRefusalV1::NotRevoked
+        ))
+    );
+    assert_eq!(fixture.registered_signer(2)?, None);
+    assert_eq!(
+        LocalErasureProvisionErrorV1::Rotation(LocalErasureRotationRefusalV1::NotRevoked)
+            .to_string(),
+        "refused to register a new local erasure signer key: the installed TPS1 does not \
+         revoke the old signer's bundle"
+    );
+
+    // Once the TPS1 revokes the old signer key, the compromise registers
+    // the new one.
+    let old_signer = signer_key_id(SIGNER_SEED);
+    let revoking = Deployment::new(&[old_signer.as_str()])?;
+    let mut revoked = compromise;
+    revoked.out = fixture.directory.path().join("c");
+    provision_local_erasure(
+        &revoked,
+        &signer(ROTATED_SEED),
+        &revoking.trust()?,
+        present(),
+    )?;
+    assert_eq!(
+        fixture.registered_signer(2)?,
+        Some(
+            SigningKey::from_bytes(&ROTATED_SEED)
+                .verifying_key()
+                .to_bytes()
+        )
+    );
     Ok(())
 }

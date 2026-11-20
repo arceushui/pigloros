@@ -36,16 +36,16 @@ use pos_core::{
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
     ErasureObligationInputV1, ErasureObligationV1, ErasureOwnerCommandV1, ErasureOwnerResultV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecordedAttemptReadV1,
-    ErasureRecordedProgressReadV1, ErasureRecordedProgressV1, ErasureRecordedScopeReadV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureRecordedProgressV1, ErasureRecordedScopeReadV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, EventStore, Hash, KeyDestructionRequestV1,
     KeyIdentityV1, KeyRegistryStateV1, LocalErasureArtifactDispositionV1,
-    LocalErasureCacheGenerationV1, LocalErasureNegativeResultV1, LocalErasureRedactionV1,
-    LocalErasureReplicaPurgeV1, LocalOwnerEffectV1, LocalOwnerResultBindingV1,
-    PreparedLocalOwnerEffectV1, TimelineId,
+    LocalErasureCacheGenerationV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
+    LocalErasureRedactionV1, LocalErasureReplicaPurgeV1, LocalOwnerEffectV1,
+    LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1,
 };
 
-use super::{map_erasure_error, ErasureCommandSenderV1, ErasureHostStore, HostedCoordinatorPortV1};
+use super::{map_erasure_error, ErasureCommandSenderV1, ErasureHostStore};
 use crate::erasure_authority_view::VIEW_LIST_MAX;
 
 use ErasureInventoryCategoryV1::{Artifact, Backup, Key, Replica};
@@ -150,39 +150,20 @@ impl ErasureCommandSenderV1<'_> {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureOwnerCommandV1>, ErasureHostErrorV1> {
-        let limits = self.host.recovery_limits;
-        let authority = self.host.authority.clone();
-        self.host
-            .ensure_generation_with_inventory(self.generation)
-            .and_then(|installed| {
-                authority
-                    .ok_or(ErasureHostErrorV1::AuthorizationDenied)
-                    .map(|authority| (installed, authority))
-            })
-            .and_then(|(installed, authority)| {
-                let port = HostedCoordinatorPortV1::new(
-                    self.host.store.host_store(),
-                    authority.as_ref(),
-                    limits,
-                )
-                .with_verified_inventory(installed);
-                let persistence: &dyn ErasurePersistencePortV1 = &port;
-                persistence
-                    .recorded_progress(&port, &port, request)
-                    .map_err(map_erasure_error)
-            })
-            .map(|progress| {
-                let mut commands =
-                    progress.map_or_else(Vec::new, |progress| outbox(request, &progress));
-                commands.sort_by_key(|command| execution_rank(command.destruction.category));
-                commands
-            })
+        self.recorded_local_progress(request).map(|progress| {
+            let mut commands =
+                progress.map_or_else(Vec::new, |progress| outbox(request, &progress));
+            commands.sort_by_key(|command| execution_rank(command.destruction.category));
+            commands
+        })
     }
 
     /// Destroy the key of one `key-registry` command (ADR-136 §4a).
     ///
-    /// The command runs under the protected-append fence of `host_timeline`,
-    /// the store's Erasure Host Timeline, which every bundle lists as a host
+    /// The command runs under the protected-append fence of the store's
+    /// Erasure Host Timeline, `ELHT1` of its erasure store identity, which
+    /// the host derives itself (owner decision of 2026-11-18 on #1431: no
+    /// caller supplies the Timeline). Every bundle lists it as a host
     /// Timeline, so no erasure ever freezes it. Inside that one fence it
     /// commits two transactions: the pending destruction of `identity`, then
     /// its tombstone together with the positive ELO1 through
@@ -204,23 +185,27 @@ impl ErasureCommandSenderV1<'_> {
     /// # Errors
     /// [`ErasureHostErrorV1::Conflict`] unless `command` is a dispatched
     /// `key-registry` command of the request's active attempt whose target
-    /// is `identity`'s key; the payload-free fence error when
-    /// `host_timeline` is unavailable; [`ErasureHostErrorV1::AdapterFailure`]
+    /// is `identity`'s key; the payload-free error of a store identity that
+    /// cannot be read, or the fence error when the Erasure Host Timeline is
+    /// unavailable; [`ErasureHostErrorV1::AdapterFailure`]
     /// or another payload-free error when the registry cannot be read or
     /// written, which commits no owner result.
     pub fn destroy_key_for_erasure(
         &mut self,
         command: &ErasureOwnerCommandV1,
         identity: KeyIdentityV1,
-        host_timeline: TimelineId,
     ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
         self.host
-            .with_store_fence(
-                self.generation,
-                host_timeline,
-                ErasureProtectedOperationV1::Append,
-                |store| Ok(destroyed_key(store, command, identity)),
-            )
+            .ensure_generation(self.generation)
+            .and_then(|()| self.local_erasure_host_timeline())
+            .and_then(|host_timeline| {
+                self.host.with_store_fence(
+                    self.generation,
+                    host_timeline,
+                    ErasureProtectedOperationV1::Append,
+                    |store| Ok(destroyed_key(store, command, identity)),
+                )
+            })
             .and_then(std::convert::identity)
     }
 
@@ -229,7 +214,7 @@ impl ErasureCommandSenderV1<'_> {
     ///
     /// A `key-registry` command whose target names no registered key is the
     /// permanent negative `KeyDestructionFailed`; every other key command
-    /// runs [`Self::destroy_key_for_erasure`] under `host_timeline`. A
+    /// runs [`Self::destroy_key_for_erasure`]. A
     /// `local-replica` command runs only once every other obligation of the
     /// attempt has a retained ELO1 (F1).
     ///
@@ -241,15 +226,12 @@ impl ErasureCommandSenderV1<'_> {
     pub(crate) fn execute_local_owner(
         &mut self,
         command: &ErasureOwnerCommandV1,
-        host_timeline: TimelineId,
     ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
         self.host
             .ensure_generation(self.generation)
             .and_then(|()| owner_work(self.host.store.host_store(), command))
             .and_then(|(work, active)| match work {
-                OwnerWorkV1::KeyDestruction => {
-                    self.registered_key_destruction(command, host_timeline)
-                }
+                OwnerWorkV1::KeyDestruction => self.registered_key_destruction(command),
                 OwnerWorkV1::ReplicaPurge => {
                     let store = self.host.store.host_store();
                     others_executed(store, command, &active)
@@ -267,6 +249,37 @@ impl ErasureCommandSenderV1<'_> {
             })
     }
 
+    /// Re-derive the owner result `owner_result` names before the Local
+    /// signer signs it (ADR-136 §5 purpose 1; owner decision of 2026-11-18
+    /// on #1431).
+    ///
+    /// The retained ELO1 must answer a command the request's active attempt
+    /// dispatches, rebuilt from its retained obligation, and must be exactly
+    /// the ELO1 one of the Local executor's outcomes for that command
+    /// assembles: its `effect_digest` is `CA(effect)` of that effect by the
+    /// `PreparedLocalOwnerEffectV1` rule, the deletion receipt of the key's
+    /// tombstone or the address of its ELAD1, ELCG1, ELNEG1 or ELRP1. The
+    /// effect must be committed: the registry holds that tombstone, or the
+    /// store holds that exact record.
+    ///
+    /// # Errors
+    /// [`ErasureHostErrorV1::AuthorizationDenied`] for an ELO1 or obligation
+    /// that cannot be read, an ELO1 whose effect digest no committed effect
+    /// of its command yields; [`ErasureHostErrorV1::Conflict`] for a command
+    /// the active attempt does not dispatch; otherwise the payload-free read
+    /// error.
+    pub(crate) fn verified_owner_result(
+        &mut self,
+        owner_result: ErasureReferenceV1,
+    ) -> Result<(), ErasureHostErrorV1> {
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| bound_command(self.host.store.host_store(), owner_result))
+            .and_then(|command| {
+                committed_owner_result(self.host.store.host_store(), &command, owner_result)
+            })
+    }
+
     /// Destroy the registered key a `key-registry` command targets; a target
     /// that names no registered key is the permanent negative
     /// `KeyDestructionFailed`.
@@ -277,7 +290,6 @@ impl ErasureCommandSenderV1<'_> {
     fn registered_key_destruction(
         &mut self,
         command: &ErasureOwnerCommandV1,
-        host_timeline: TimelineId,
     ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
         let key_digest = command.destruction.target.key_digest;
         loaded_registry(self.host.store.host_store())
@@ -290,7 +302,7 @@ impl ErasureCommandSenderV1<'_> {
                         ErasureErrorV1::KeyDestructionFailed,
                     );
                 };
-                self.destroy_key_for_erasure(command, identity, host_timeline)
+                self.destroy_key_for_erasure(command, identity)
             })
     }
 }
@@ -725,8 +737,32 @@ fn disposition(
     store: &mut dyn ErasureHostStore,
     command: &ErasureOwnerCommandV1,
 ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
-    registered_dependencies(store, command.request, command.destruction.target)
-        .and_then(|dependencies| {
+    redactable(store, command).and_then(|redacted| {
+        if redacted {
+            disposition_record(command)
+                .map_err(map_erasure_error)
+                .and_then(|effect| committed(store, command, None, effect))
+        } else {
+            negative(store, command, ErasureErrorV1::ArtifactDeletionFailed)
+        }
+    })
+}
+
+/// Q7: whether the ARD1 row of `command`'s target is registered in the
+/// request's committed scope, depends on at least one key, and the key
+/// registry has tombstoned every key it depends on, so the artifact is
+/// unreadable and its positive ELAD1 is due. The executor's disposition and
+/// the signer's re-derivation of a positive ELAD1 share this rule.
+///
+/// # Errors
+/// The payload-free error of an unreadable scope, registration list or
+/// registry.
+fn redactable(
+    store: &dyn ErasureHostStore,
+    command: &ErasureOwnerCommandV1,
+) -> Result<bool, ErasureHostErrorV1> {
+    registered_dependencies(store, command.request, command.destruction.target).and_then(
+        |dependencies| {
             loaded_registry(store).map(|registry| {
                 dependencies
                     .zip(registry)
@@ -737,16 +773,8 @@ fn disposition(
                                 .all(|identity| registry.tombstone(*identity).is_some())
                     })
             })
-        })
-        .and_then(|redacted| {
-            if redacted {
-                disposition_record(command)
-                    .map_err(map_erasure_error)
-                    .and_then(|effect| committed(store, command, None, effect))
-            } else {
-                negative(store, command, ErasureErrorV1::ArtifactDeletionFailed)
-            }
-        })
+        },
+    )
 }
 
 /// The `client-cache-signal` effect of `command`: the ELCG1 of the
@@ -920,4 +948,142 @@ fn purged_replica(
             ErasureErrorV1::ReplicaNegativeAcknowledgement,
         ),
     }
+}
+
+/// The command the retained ELO1 `owner_result` answers, rebuilt from its
+/// retained obligation and the attempt the ELO1 names.
+///
+/// # Errors
+/// [`ErasureHostErrorV1::AuthorizationDenied`] when the ELO1 or its
+/// obligation cannot be read.
+fn bound_command(
+    store: &dyn ErasureHostStore,
+    owner_result: ErasureReferenceV1,
+) -> Result<ErasureOwnerCommandV1, ErasureHostErrorV1> {
+    ErasurePersistencePortV1::read_object(store, owner_result)
+        .and_then(|bytes| LocalErasureOwnerResultV1::from_canonical_cbor(&bytes))
+        .and_then(|elo1| {
+            store
+                .read_object(elo1.obligation)
+                .and_then(|bytes| ErasureObligationV1::from_canonical_cbor(&bytes))
+                .map(|obligation| ErasureOwnerCommandV1 {
+                    request: elo1.request,
+                    destruction: ErasureDestructionCommandV1::from_obligation(
+                        &obligation,
+                        elo1.attempt,
+                    ),
+                })
+        })
+        .ok()
+        .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+}
+
+/// Whether the Local executor's path for `work` can commit `effect` with
+/// outcome `error`: its class's own positive record, or one of the
+/// negative codes that path emits (M1 of the #1431 review). A tombstone a
+/// key destruction commits is matched as the tombstone the registry holds.
+fn emits(work: OwnerWorkV1, error: Option<ErasureErrorV1>, effect: &LocalOwnerEffectV1) -> bool {
+    matches!(
+        (work, error, effect),
+        (
+            OwnerWorkV1::Disposition,
+            None,
+            LocalOwnerEffectV1::ArtifactDisposition(_)
+        ) | (
+            OwnerWorkV1::Disposition,
+            Some(ErasureErrorV1::ArtifactDeletionFailed),
+            LocalOwnerEffectV1::Negative(_)
+        ) | (
+            OwnerWorkV1::CacheGeneration,
+            None,
+            LocalOwnerEffectV1::CacheGeneration(_)
+        ) | (
+            OwnerWorkV1::KeyDestruction,
+            None,
+            LocalOwnerEffectV1::ExistingTombstone(_)
+        ) | (
+            OwnerWorkV1::KeyDestruction,
+            Some(ErasureErrorV1::KeyDestructionFailed),
+            LocalOwnerEffectV1::Negative(_)
+        ) | (
+            OwnerWorkV1::ReplicaPurge,
+            None,
+            LocalOwnerEffectV1::ReplicaPurge(_)
+        ) | (
+            OwnerWorkV1::ReplicaPurge,
+            Some(ErasureErrorV1::ReplicaTimeout | ErasureErrorV1::ReplicaNegativeAcknowledgement),
+            LocalOwnerEffectV1::Negative(_)
+        )
+    ) || matches!(
+        (work, error, effect),
+        (OwnerWorkV1::Refused(code), Some(emitted), LocalOwnerEffectV1::Negative(_))
+            if code == emitted
+    )
+}
+
+/// Whether `owner_result` is the ELO1 of a committed outcome the Local
+/// executor's path for the dispatched `command`'s class can produce. A
+/// positive ELAD1 must also still meet Q7 (`redactable`): every key the
+/// ARD1 row depends on is tombstoned, as when the executor emitted it.
+///
+/// # Errors
+/// [`ErasureHostErrorV1::Conflict`] unless the active attempt dispatches
+/// `command`; [`ErasureHostErrorV1::AuthorizationDenied`] when no committed
+/// effect of `command` yields `owner_result`; otherwise the payload-free
+/// read error.
+fn committed_owner_result(
+    store: &mut dyn ErasureHostStore,
+    command: &ErasureOwnerCommandV1,
+    owner_result: ErasureReferenceV1,
+) -> Result<(), ErasureHostErrorV1> {
+    owner_work(store, command)
+        .and_then(|(work, active)| {
+            committed_scope(store, command.request).and_then(|(commitment, _)| {
+                loaded_registry(store).map(|registry| {
+                    (
+                        work,
+                        (commitment.reference(), active.admitted_position()),
+                        registry,
+                    )
+                })
+            })
+        })
+        .and_then(|(work, scope, registry)| {
+            candidate_effects(command, scope, registry.as_ref())
+                .into_iter()
+                .filter(|(error, effect)| {
+                    effect
+                        .as_ref()
+                        .is_ok_and(|effect| emits(work, *error, effect))
+                })
+                .filter_map(|(error, effect)| {
+                    effect
+                        .and_then(|effect| {
+                            PreparedLocalOwnerEffectV1::new(effect, owner_binding(command, error))
+                        })
+                        .ok()
+                        .map(|prepared| (error, prepared))
+                })
+                .find(|(_, prepared)| prepared.owner_result().reference() == owner_result)
+                .filter(|(_, prepared)| {
+                    prepared.effect_object().is_none_or(|effect| {
+                        store
+                            .read_object(effect.reference())
+                            .is_ok_and(|bytes| bytes == effect.canonical_cbor())
+                    })
+                })
+                .map(|(error, _)| work == OwnerWorkV1::Disposition && error.is_none())
+                .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+        })
+        .and_then(|positive_disposition| {
+            if positive_disposition {
+                redactable(store, command).and_then(|redacted| {
+                    redacted
+                        .then_some(())
+                        .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+                })
+            } else {
+                Ok(())
+            }
+        })
 }

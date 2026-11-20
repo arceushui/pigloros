@@ -1,6 +1,8 @@
 //! Single-owner execution boundary for erasure-protected store operations.
 
 #[cfg(target_os = "linux")]
+mod local_lifecycle;
+#[cfg(target_os = "linux")]
 mod local_owner;
 mod world_replay_read;
 
@@ -13,6 +15,8 @@ use crate::erasure_authority_view::{
     ErasureViewListErrorV1, HostAuthorityViewV1, VIEW_LIST_MAX,
 };
 
+#[cfg(target_os = "linux")]
+use pos_core::ErasureRecordedProgressV1;
 use pos_core::{
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     store::{
@@ -728,6 +732,12 @@ pub struct LocalErasureSubmissionBindingV1 {
     pub(crate) preparation: Arc<dyn LocalErasurePreparationV1>,
 }
 
+/// What the Local authority prepares for one freeze: the `CA(ERFA1-AUTH)`
+/// body digest a purpose-0 ELS1 must sign and the objects to retain before
+/// the freeze commits, or `None` when the freeze commits
+/// `Rejected(ScopeInvalid)` without a signature.
+pub(crate) type PreparedFreezeV1 = Option<(ErasureReferenceV1, Vec<Vec<u8>>)>;
+
 /// The pure Local erasure evaluations the host asks of the Local authority
 /// besides the authority trait (ADR-136 §5 and §6). They read only the
 /// host-built view.
@@ -769,12 +779,40 @@ pub(crate) trait LocalErasurePreparationV1: Send + Sync {
 
     /// The ERFA1-AUTH body digest the freeze of `request` admits on this
     /// view, which a purpose-0 ELS1 must sign, and the objects to retain
-    /// before the freeze commits.
+    /// before the freeze commits; `None` when the freeze commits
+    /// `Rejected(ScopeInvalid)` without a signature.
     fn prepare_freeze(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
-    ) -> Result<(ErasureReferenceV1, Vec<Vec<u8>>), ErasureErrorV1>;
+    ) -> Result<PreparedFreezeV1, ErasureErrorV1>;
+
+    /// The attempt of the frozen request `erq1` that is due now, with the
+    /// ELB1 bytes it pins, which must be retained before its admission;
+    /// `None` when no attempt is due. `progress` has no active attempt.
+    ///
+    /// # Errors
+    /// The closed error of an attempt that cannot be built.
+    #[cfg(target_os = "linux")]
+    fn prepare_attempt(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        erq1: &ErasureRequestV1,
+        progress: &ErasureRecordedProgressV1,
+    ) -> Result<Option<(ErasureRetryAdmissionV1, Vec<u8>)>, ErasureErrorV1>;
+
+    /// The receipt input that closes the active attempt of `progress`, the
+    /// progress of `erq1`, and the ELD1 disclosures it names, which must be
+    /// retained before it is finalized.
+    ///
+    /// # Errors
+    /// The closed error of a receipt that cannot be built.
+    #[cfg(target_os = "linux")]
+    fn prepare_receipt(
+        &self,
+        erq1: &ErasureRequestV1,
+        progress: &ErasureRecordedProgressV1,
+    ) -> Result<(ErasureReceiptInputV1, Vec<Vec<u8>>), ErasureErrorV1>;
 
     /// Whether `state` holds its subject's one active erasure on this view:
     /// it is pre-terminal or has an active attempt, unless that attempt is
@@ -784,6 +822,42 @@ pub(crate) trait LocalErasurePreparationV1: Send + Sync {
         view: &dyn ErasureAuthorityReadViewV1,
         state: &ErasureVerifiedStateV1,
     ) -> bool;
+}
+
+/// What the Local freeze of one request needs (ADR-136 §5; owner decision
+/// Q11 on #1431).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalFreezePreparationV1 {
+    /// A purpose-0 ELS1 must sign this `CA(ERFA1-AUTH)` body digest before
+    /// the freeze names it as its provenance.
+    Sign(ErasureReferenceV1),
+    /// The closure is over its bound or holds a cell without an ELP1 row:
+    /// the freeze commits `Rejected(ScopeInvalid)` under the request's own
+    /// `CA(ERAZ1)`, without a signature.
+    CommitsRejection,
+}
+
+/// What the attempts of a frozen request need next.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalAttemptPreparationV1 {
+    /// An attempt is active: its outbox runs, then its receipt issues.
+    Active,
+    /// This attempt is due, and the ELB1 it pins is retained. Boxed only
+    /// to keep the variants a similar size.
+    Dispatch(Box<ErasureRetryAdmissionV1>),
+    /// No attempt is due.
+    Idle,
+}
+
+/// The receipt that closes one active attempt, ready to sign.
+#[cfg(target_os = "linux")]
+pub(crate) struct LocalReceiptPreparationV1 {
+    /// The receipt input; its `signature` is still core-filled.
+    pub(crate) input: ErasureReceiptInputV1,
+    /// `CA(ERCB1)` of the receipt finalize commits for `input`, the digest
+    /// a purpose-2 ELS1 signs.
+    pub(crate) body: ErasureReferenceV1,
 }
 
 /// One Local erasure submission from the Gateway (ADR-136 §6).
@@ -4118,8 +4192,32 @@ impl ErasureCommandSenderV1<'_> {
     /// Returns a payload-free host error. If persistence succeeds but successor
     /// publication fails, the host is poisoned and no further sender is issued.
     pub fn create_timeline(&mut self, name: &str) -> Result<Timeline, ErasureHostErrorV1> {
+        self.create_root(TimelineMeta::root(name))
+    }
+
+    /// Create a root Timeline owned by `owner` and publish its successor
+    /// inventory generation, exactly as [`Self::create_timeline`] does.
+    ///
+    /// The owner is recorded at creation (ADR-136 §1): a Local erasure of
+    /// `owner` selects the root and every Fork of it that inherits the
+    /// owner, while the root stays unaffected for a request frozen before it
+    /// existed.
+    ///
+    /// # Errors
+    /// Returns the payload-free host errors of [`Self::create_timeline`].
+    pub fn create_owned_timeline(
+        &mut self,
+        name: &str,
+        owner: EntityId,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.create_root(TimelineMeta::root_owned(name, owner))
+    }
+
+    /// Create the fresh root `meta` through the positively checked root
+    /// topology transition.
+    fn create_root(&mut self, meta: TimelineMeta) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let candidate = Timeline::new(TimelineMeta::root(name));
+        let candidate = Timeline::new(meta);
         let (timeline, generation) =
             self.host
                 .apply_root_topology_change(candidate, |permit, store, candidate| {
@@ -4161,8 +4259,9 @@ impl ErasureCommandSenderV1<'_> {
     /// [`Self::create_timeline`] publishes it.
     ///
     /// A host-owned record keeps a well-known identity this way: a client
-    /// creates root Timelines only through [`Self::create_timeline`], whose
-    /// identities are fresh, so it can never claim `id` first.
+    /// creates root Timelines only through [`Self::create_timeline`] and
+    /// [`Self::create_owned_timeline`], whose identities are fresh, so it can
+    /// never claim `id` first.
     ///
     /// # Errors
     /// Returns a payload-free host error. If persistence succeeds but successor
@@ -4538,37 +4637,30 @@ impl ErasureCommandSenderV1<'_> {
             .map_err(LocalErasureSubmitErrorV1::Host)
     }
 
-    /// Prepare the access freeze of one Local erasure request (ADR-136 §5).
+    /// Prepare the access freeze of one Local erasure request (ADR-136 §5;
+    /// owner decision Q11 on #1431).
     ///
-    /// The Local authority recomputes the freeze the current snapshot admits
-    /// and returns `CA(ERFA1-AUTH)`, the body a purpose-0 ELS1 must sign.
-    /// The host first retains the bundle and lineage-rule records the freeze
-    /// will reference; nothing else is written. The signed ELS1 is then
-    /// retained and named as the provenance of [`Self::freeze_access`].
+    /// The Local authority recomputes the freeze the current snapshot admits.
+    /// When it admits one, the result is
+    /// [`LocalFreezePreparationV1::Sign`] with `CA(ERFA1-AUTH)`, the body a
+    /// purpose-0 ELS1 must sign, and the host first retains the bundle,
+    /// lineage-rule, installed TPS1 and bundle-signature records the freeze
+    /// will reference. The signed ELS1 is then retained and named as the
+    /// provenance of [`Self::freeze_access`]. A closure over its bound is
+    /// [`LocalFreezePreparationV1::CommitsRejection`]: `freeze_access`
+    /// commits it as `Rejected(ScopeInvalid)` under the request's own ERAZ1,
+    /// without a signature, and nothing is retained.
     ///
     /// # Errors
     /// [`ErasureHostErrorV1::AuthorizationDenied`] on a host without a Local
     /// composition; otherwise the payload-free error of a freeze the
-    /// authority would not admit, including a closure over its bound, which
-    /// `freeze_access` commits as a rejection.
+    /// authority would neither admit nor commit as a rejection.
     pub fn prepare_local_freeze(
         &mut self,
         request: ErasureReferenceV1,
-    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
-        let binding = self
-            .host
-            .local_submission
-            .clone()
-            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        self.host
-            .ensure_generation(self.generation)
-            .and_then(|()| self.host.ready_state())
-            .and_then(|(_, _, installed)| {
-                self.with_local_view(installed, |view| {
-                    binding.preparation.prepare_freeze(view, request)
-                })
-            })
-            .and_then(|(digest, objects)| {
+    ) -> Result<LocalFreezePreparationV1, ErasureHostErrorV1> {
+        self.local_freeze_preparation(request)
+            .and_then(|(preparation, objects)| {
                 objects
                     .iter()
                     .try_for_each(|object| {
@@ -4578,8 +4670,38 @@ impl ErasureCommandSenderV1<'_> {
                             .retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
                             .map(drop)
                     })
-                    .map(|()| digest)
+                    .map(|()| preparation)
                     .map_err(map_erasure_error)
+            })
+    }
+
+    /// The freeze preparation of `request` on a fresh snapshot and the
+    /// objects it retains, without retaining them: what
+    /// [`Self::prepare_local_freeze`] retains, and what the Local signer
+    /// re-derives before it signs a purpose-0 ELS1.
+    pub(crate) fn local_freeze_preparation(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<(LocalFreezePreparationV1, Vec<Vec<u8>>), ErasureHostErrorV1> {
+        self.host
+            .local_submission
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+            .and_then(|binding| {
+                self.host
+                    .ensure_generation(self.generation)
+                    .and_then(|()| self.host.ready_state())
+                    .and_then(|(_, _, installed)| {
+                        self.with_local_view(installed, |view| {
+                            binding.preparation.prepare_freeze(view, request)
+                        })
+                    })
+            })
+            .map(|prepared| {
+                prepared.map_or(
+                    (LocalFreezePreparationV1::CommitsRejection, Vec::new()),
+                    |(digest, objects)| (LocalFreezePreparationV1::Sign(digest), objects),
+                )
             })
     }
 
@@ -5720,6 +5842,71 @@ impl ErasureReadSenderV1<'_> {
             .host_store()
             .root_timeline_count_bounded(maximum)
             .map_store_error()
+    }
+
+    /// Count the visible root Timelines other than the host-owned roots
+    /// `host_roots`, without exceeding `maximum + 1`.
+    ///
+    /// `host_roots` names distinct root identities that only the host
+    /// creates and that hold no geographic evidence, such as a consent
+    /// Timeline or the Erasure Host Timeline; each the installed inventory
+    /// records is left out of the count, and one it does not record changes
+    /// nothing. A client root ceiling therefore never counts them.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn client_root_timeline_count_bounded(
+        &mut self,
+        maximum: usize,
+        host_roots: &[TimelineId],
+    ) -> Result<usize, ErasureHostErrorV1> {
+        self.host
+            .ensure_generation_with_inventory(self.generation)
+            .map(|inventory| {
+                host_roots
+                    .iter()
+                    .filter(|&&root| inventory.records_timeline(root))
+                    .count()
+            })
+            .and_then(|recorded| {
+                self.host
+                    .store
+                    .host_store()
+                    .root_timeline_count_bounded(maximum.saturating_add(recorded))
+                    .map_store_error()
+                    .map(|count| count.saturating_sub(recorded))
+            })
+    }
+
+    /// The Erasure Host Timeline of this store
+    /// ([`pos_core::local_erasure_host_timeline_v1`] of its erasure store
+    /// identity), or `None` while the store records no identity.
+    ///
+    /// The identity is write-once, so a recorded Erasure Host Timeline never
+    /// changes. The read reveals only the derived Timeline identity.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error for a stale sender or an
+    /// unreadable identity.
+    pub fn local_erasure_host_timeline(
+        &mut self,
+    ) -> Result<Option<TimelineId>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation).and_then(|()| {
+            self.host
+                .store
+                .host_store()
+                .erasure_store_identity()
+                .and_then(|identity| {
+                    identity
+                        .map(|identity| {
+                            pos_core::local_erasure_host_timeline_v1(
+                                ErasureReferenceV1::from_digest(*identity.as_bytes()),
+                            )
+                        })
+                        .transpose()
+                })
+                .map_err(map_erasure_error)
+        })
     }
 
     /// Return the logical head of one inventory-classified Timeline.
