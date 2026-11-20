@@ -251,9 +251,10 @@ impl LocalErasureRecoveryV1 {
             .and_then(|mut store| Self::for_store(&mut store, source))
     }
 
-    /// Open the store `config` names the way every key-less root does:
-    /// compose its authority ([`Self::for_config`]), then recover the
-    /// erasure host under it with the compiled recovery limits.
+    /// Open the store `config` names the way every key-less root does.
+    ///
+    /// It composes the store's authority ([`Self::for_config`]), then
+    /// recovers the erasure host under it with the compiled recovery limits.
     ///
     /// # Errors
     /// Returns [`LocalErasureOpenErrorV1::Load`] for a refused composition
