@@ -35,6 +35,7 @@
 # unsigned or foreign path. Only main runs save the cache; pull requests
 # restore it by the exact key. The key name is part of the cache key, so a
 # rotated key never restores entries signed by the old one.
+# Needs bash 4.4 or later (inherit_errexit); the hosted Ubuntu runners ship 5.x.
 set -euo pipefail
 # A failure inside $(...) stops the script too, as it does outside.
 shopt -s inherit_errexit
@@ -112,8 +113,13 @@ trusted_public_keys() {
   nix config show trusted-public-keys
 }
 
+# in_list WORD LIST: LIST, space-separated, contains WORD as a whole entry.
+in_list() {
+  [[ " $2 " == *" $1 "* ]]
+}
+
 require_trusted() {
-  if [[ " $(trusted_public_keys) " != *" $1 "* ]]; then
+  if ! in_list "$1" "$(trusted_public_keys)"; then
     printf 'the signing key public half %s is not in trusted-public-keys\n' "$1" >&2
     exit 1
   fi
@@ -194,7 +200,8 @@ selftest_sample() {
     args = [ \"-c\" \"echo ${nonce} > \$out\" ];
   }")"
   info="$(nix path-info --json --json-format 1 "${path}")"
-  if ! jq -e '[.[]] | length == 1 and all(.ca == null)' >/dev/null <<<"${info}"; then
+  # --argjson rejects empty or malformed output, which jq -e would pass.
+  if ! jq -e -n --argjson info "${info}" '$info | [.[]] | length == 1 and all(.ca == null)' >/dev/null; then
     printf 'the self-test sample %s is content-addressed\n' "${path}" >&2
     exit 1
   fi
@@ -202,8 +209,10 @@ selftest_sample() {
 }
 
 selftest() {
-  local dir=$1 secret public path entry found=false refused
-  for entry in $(trusted_public_keys); do
+  local dir=$1 secret public path entry found=false refused trusted
+  # Read once, so both trust checks below judge the same, non-empty list.
+  trusted="$(trusted_public_keys)"
+  for entry in ${trusted}; do
     if [[ ${entry} =~ ^${signing_key_name}:[A-Za-z0-9+/]{43}=$ ]]; then
       found=true
     fi
@@ -214,7 +223,7 @@ selftest() {
   fi
   secret="$(nix key generate-secret --key-name qemu-kernel-cache-selftest)"
   public="$(printf '%s' "${secret}" | nix key convert-secret-to-public)"
-  if (require_trusted "${public}") 2>/dev/null; then
+  if in_list "${public}" "${trusted}"; then
     printf 'the throwaway key %s is unexpectedly trusted\n' "${public}" >&2
     exit 1
   fi

@@ -199,7 +199,7 @@ jobs:
   # The qemu-kernel-cache environment allows only main to deploy; that is a
   # repository setting this workflow's policy oracle cannot read.
   kernel-cache:
-    name: kernel cache (${{ matrix.architecture }})
+    name: kernel cache
     needs: policy
     if: ${{ github.event_name != 'pull_request' }}
     environment: qemu-kernel-cache

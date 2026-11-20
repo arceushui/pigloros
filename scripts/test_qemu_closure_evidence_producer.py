@@ -742,7 +742,6 @@ esac
             "key generate-secret --key-name qemu-kernel-cache-selftest",
             "key convert-secret-to-public",
             f"stdin {self.THROWAWAY_SECRET}",
-            "config show trusted-public-keys",
             f"path-info --json --json-format 1 {self.SAMPLE}",
             f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {self.SAMPLE}",
             "key-mode 600",
@@ -787,6 +786,24 @@ esac
         result = self.run_cache("selftest", str(self.cache))
         self.assertEqual(result.returncode, 4)
         self.assertNotIn("content-addressed", result.stderr)
+        self.assertFalse(any(call.startswith("copy") for call in self.calls()))
+
+    def selftest_with(self, case: str, action: str) -> subprocess.CompletedProcess:
+        self.stub_nix(verify_status=1, import_status=1)
+        stub = (self.bin / "nix").read_text()
+        self.assertIn(f"{case})", stub)
+        (self.bin / "nix").write_text(stub.replace(f"{case})", f'{case}) {action} ;;\n"unused")', 1))
+        return self.run_cache("selftest", str(self.cache))
+
+    def test_selftest_stops_when_the_trust_list_cannot_be_read(self):
+        result = self.selftest_with('"config show"', "exit 5")
+        self.assertEqual(result.returncode, 5)
+        self.assertFalse(any(call.startswith(("key", "copy")) for call in self.calls()))
+
+    def test_selftest_refuses_empty_path_info_output(self):
+        result = self.selftest_with('"path-info --json"', ":")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is content-addressed", result.stderr)
         self.assertFalse(any(call.startswith("copy") for call in self.calls()))
 
     def test_selftest_fails_when_verification_fails_for_another_reason(self):
