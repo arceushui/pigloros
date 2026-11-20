@@ -32,6 +32,11 @@ sha2 = { workspace = true }
 workspace = true
 
 [[test]]
+name = "enrollment_public"
+path = "tests/enrollment_public.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "enrollment_store_public"
 path = "tests/enrollment_store_public.rs"
 required-features = ["test-support"]

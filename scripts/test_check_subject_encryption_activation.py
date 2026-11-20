@@ -27,6 +27,7 @@ class ActivationPolicyTests(unittest.TestCase):
             "mint_owner_consent_v2_permit",
             "destroy_subject_key",
             "VolatileSubjectNonceLedgerV1",
+            "OwnerEnrollmentAdapter",
             "VolatileEnrollmentStore",
         ]:
             for source in [
