@@ -96,6 +96,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/execute/tests.rs",
     "src/attempt_records/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
+    "src/execute/tests/adapter.rs",
     "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
     "src/provider_runtime/tests.rs",
