@@ -2,37 +2,47 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::io::Write as _;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::super::events::Events;
 use crate::{NativeFactory, NativeOperations, NativePulse, NativeResult};
+
+/// How long a dropped fixture waits for its browser to exit. The exit normally
+/// arrives within seconds of the controller close. A browser that never exits
+/// used to keep the test, and the shared native lock, until the 65-minute step
+/// timeout, and the test's own error was never reported (#1468).
+const RETIREMENT_BOUND: Duration = Duration::from_secs(120);
 
 /// A raw SDK fixture still owns a real environment on its creating STA when
 /// an assertion unwinds. Keep that apartment borrowed until retirement, just
 /// as the production host keeps a quarantined Surface.
 pub(super) struct Session<'a> {
-    native: Box<dyn NativeOperations>,
+    // `None` only after a stalled retirement leaked every native owner.
+    native: Option<Box<dyn NativeOperations>>,
     events: Rc<Events>,
     factory: &'a dyn NativeFactory,
     browser_pid: Cell<Option<u32>>,
     had_controller: Cell<bool>,
+    retirement_bound: Duration,
 }
 
 impl<'a> Session<'a> {
     pub(super) fn new(factory: &'a dyn NativeFactory, events: Rc<Events>) -> NativeResult<Self> {
         factory.session().map(|native| Self {
-            native,
+            native: Some(native),
             events,
             factory,
             browser_pid: Cell::new(None),
             had_controller: Cell::new(false),
+            retirement_bound: RETIREMENT_BOUND,
         })
     }
 
     pub(super) fn controller_completion(&mut self) -> Option<NativeResult<()>> {
-        let completion = self.native.controller_completion();
+        let completion = self.as_mut().controller_completion();
         if completion.as_ref().is_some_and(Result::is_ok) {
             self.had_controller.set(true);
         }
@@ -40,7 +50,7 @@ impl<'a> Session<'a> {
     }
 
     pub(super) fn browser_pid(&self) -> NativeResult<u32> {
-        self.native.browser_pid().inspect(|pid| {
+        self.as_ref().browser_pid().inspect(|pid| {
             if *pid != 0 {
                 self.browser_pid.set(Some(*pid));
                 self.events.expect_browser(*pid);
@@ -49,11 +59,15 @@ impl<'a> Session<'a> {
     }
 
     pub(super) fn as_mut(&mut self) -> &mut (dyn NativeOperations + 'static) {
-        self.native.as_mut()
+        self.native
+            .as_deref_mut()
+            .expect("native owners are retained until the session drops")
     }
 
     pub(super) fn as_ref(&self) -> &(dyn NativeOperations + 'static) {
-        self.native.as_ref()
+        self.native
+            .as_deref()
+            .expect("native owners are retained until the session drops")
     }
 
     fn pump_retaining(&self) {
@@ -64,30 +78,51 @@ impl<'a> Session<'a> {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+
+    /// The browser never exited: name it, then leak every native owner (and
+    /// with them the apartment) instead of releasing them under a live
+    /// browser. The test's own error is then reported and the suite goes on.
+    fn abandon_stalled_retirement(&mut self) {
+        let browser = self
+            .browser_pid
+            .get()
+            .map(|pid| (pid, crate::Native::inspect_process_with_image(pid)));
+        let mut stderr = std::io::stderr().lock();
+        let _logged_or_unavailable = writeln!(
+            stderr,
+            "NATIVE_RETIREMENT_STALLED bound={:?} pending={} exited={:?} browser={browser:?}",
+            self.retirement_bound,
+            self.as_ref().pending(),
+            self.events.exited(),
+        );
+        let _flushed_or_unavailable = stderr.flush();
+        std::mem::forget(self.native.take());
+    }
 }
 
 impl Deref for Session<'_> {
     type Target = dyn NativeOperations;
 
     fn deref(&self) -> &Self::Target {
-        self.native.as_ref()
+        self.as_ref()
     }
 }
 
 impl DerefMut for Session<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.native.as_mut()
+        self.as_mut()
     }
 }
 
 impl Drop for Session<'_> {
     fn drop(&mut self) {
+        let started = Instant::now();
         loop {
-            let _zeroed_or_retained = self.native.close_buffers();
-            let _environment = self.native.environment_completion();
+            let _zeroed_or_retained = self.as_mut().close_buffers();
+            let _environment = self.as_mut().environment_completion();
             let _controller = self.controller_completion();
-            if !self.native.pending() {
-                if let Ok(has_controller) = self.native.has_controller() {
+            if !self.as_ref().pending() {
+                if let Ok(has_controller) = self.as_ref().has_controller() {
                     self.had_controller
                         .set(self.had_controller.get() || has_controller);
                     if has_controller && self.browser_pid.get().is_none() {
@@ -100,18 +135,24 @@ impl Drop for Session<'_> {
                     if !self.had_controller.get() || exited {
                         // A failed pre-controller creation leaves its recordless
                         // folder intact. A controller requires its own exit event.
-                        if self.native.unsubscribe_view().is_ok()
-                            && self.native.unsubscribe_exit().is_ok()
-                            && self.native.drop_environment().is_ok()
-                            && self.native.destroy_window().is_ok()
+                        let native = self.as_mut();
+                        if native.unsubscribe_view().is_ok()
+                            && native.unsubscribe_exit().is_ok()
+                            && native.drop_environment().is_ok()
+                            && native.destroy_window().is_ok()
                         {
                             break;
                         }
                     } else if self.browser_pid.get().is_some() {
-                        let _subscribed_or_removed = self.native.unsubscribe_view();
-                        let _closed_or_retained = self.native.close_controller();
+                        let native = self.as_mut();
+                        let _subscribed_or_removed = native.unsubscribe_view();
+                        let _closed_or_retained = native.close_controller();
                     }
                 }
+            }
+            if started.elapsed() >= self.retirement_bound {
+                self.abandon_stalled_retirement();
+                break;
             }
             self.pump_retaining();
         }
@@ -317,6 +358,28 @@ mod tests {
         assert!(session.is_ok(), "session creation: {error:?}");
         drop(session);
         assert!(native.calls.borrow().contains(&"drop_environment"));
+    }
+
+    #[test]
+    fn raw_session_whose_browser_never_exits_leaks_its_owners_after_the_bound() {
+        let native = Factory::new(Creation::Ready, FakeClock::start());
+        let events = Rc::new(Events::default());
+        let session = Session::new(&native, Rc::clone(&events)).map(|mut session| {
+            let created = session.create_controller();
+            assert!(created.is_ok(), "controller creation: {created:?}");
+            assert_eq!(session.controller_completion(), Some(Ok(())));
+            session.retirement_bound = Duration::ZERO;
+            session
+        });
+        let error = session.as_ref().err();
+        assert!(session.is_ok(), "session creation: {error:?}");
+        // No exit event ever arrives; the drop must still return.
+        drop(session);
+        let calls = native.calls.borrow();
+        assert!(calls.contains(&"close_controller"));
+        for retained in ["unsubscribe_exit", "drop_environment", "destroy_window"] {
+            assert!(!calls.contains(&retained), "released {retained}");
+        }
     }
 
     #[test]
