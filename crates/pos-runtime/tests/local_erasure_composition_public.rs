@@ -6868,8 +6868,8 @@ fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> Tes
 // ---------------------------------------------------------------------------
 
 use pos_runtime::{
-    LocalErasureDriverV1, LocalErasureSignerV1, LocalErasureSigningRequestV1, LocalErasureStepV1,
-    LocalErasureSweepV1,
+    LocalErasureAdvanceV1, LocalErasureDriverV1, LocalErasureSignerV1,
+    LocalErasureSigningRequestV1, LocalErasureStepV1, LocalErasureSweepV1,
 };
 
 /// A signer of `key`, registered as the fixture signer at `epoch`.
@@ -7567,6 +7567,66 @@ fn a_refused_signature_defers_the_step() -> TestResult {
     assert_eq!(
         driver().step(&mut host, request_of(1)?)?,
         LocalErasureStepV1::Frozen
+    );
+    Ok(())
+}
+
+/// `advance` commits one transition per call, in the order `step` would,
+/// and answers `Idle` once nothing is due (owner decision D7 on #1413).
+#[test]
+fn advance_commits_one_transition_per_call_until_idle() -> TestResult {
+    let (receipt, states) = straight_run(&driver_store()?)?;
+    let store = driver_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    assert_eq!(
+        driver().advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Idle,
+            deferred: Vec::new()
+        }
+    );
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let mut steps = Vec::new();
+    loop {
+        let advanced = driver().advance(&mut host)?;
+        assert!(advanced.deferred.is_empty());
+        match advanced.step {
+            LocalErasureStepV1::Idle => break,
+            step => steps.push(step),
+        }
+    }
+    assert_eq!(steps[0], LocalErasureStepV1::Authorized);
+    assert_eq!(steps[1], LocalErasureStepV1::Frozen);
+    let advanced = finalized(steps.last().cloned().ok_or("no step")?)?;
+    assert_eq!(advanced.to_canonical_cbor()?, receipt.to_canonical_cbor()?);
+    assert_eq!(history(&mut host, request_of(1)?)?, states);
+    Ok(())
+}
+
+/// `advance` passes over a request whose step fails and commits nothing
+/// for it; a later call with the deployment's signer resumes it.
+#[test]
+fn advance_passes_over_a_request_it_cannot_step() -> TestResult {
+    let (store, _) = driven_until(|step| *step == LocalErasureStepV1::Authorized)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    let foreign = LocalErasureDriverV1::new(signer_of(rotated_signer(), 1));
+    assert_eq!(
+        foreign.advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Idle,
+            deferred: vec![request_of(1)?]
+        }
+    );
+    assert_eq!(
+        lifecycle(&mut host, request_of(1)?)?,
+        ErasureLifecycleV1::Authorized
+    );
+    assert_eq!(
+        driver().advance(&mut host)?,
+        LocalErasureAdvanceV1 {
+            step: LocalErasureStepV1::Frozen,
+            deferred: Vec::new()
+        }
     );
     Ok(())
 }

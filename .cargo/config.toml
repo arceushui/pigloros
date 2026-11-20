@@ -1,0 +1,8 @@
+# ADR-123 revision 6, decisions G1 and G2 (Redmine #1451): the workspace's one
+# bundled SQLite image registers the `sqlite_filestat` diagnostic that the
+# protected store binding reads. On SQLite 3.54.x that registration also needs
+# `walstatFunc`, so FILESTAT alone does not compile. `force = true` overrides any
+# caller environment, so local, CI and coverage builds compile the same image.
+# `crates/pos-store/tests/sqlite_native_build_public.rs` asserts the result.
+[env]
+LIBSQLITE3_FLAGS = { value = "SQLITE_ENABLE_FILESTAT SQLITE_ENABLE_WALSTAT", force = true }

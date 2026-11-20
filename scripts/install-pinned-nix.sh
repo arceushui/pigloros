@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Install the hash-pinned Nix 2.34.9 release (the nixos-26.05 Nix) as a
 # multi-user daemon on a GitHub-hosted Ubuntu runner. The only substituter is
-# cache.nixos.org, with signatures required; builds stay sandboxed.
+# cache.nixos.org, with signatures required; builds stay sandboxed. The one
+# other trusted key signs the evidence guest's kernel, which main builds and
+# caches (scripts/qemu-kernel-cache.sh); its secret half is a secret of the
+# qemu-kernel-cache environment, which only main may deploy to.
 # Usage: install-pinned-nix.sh
 set -euo pipefail
 
 # The effective trust settings, each exactly as nix.conf below sets them.
 declare -A expected_settings=(
   [substituters]=https://cache.nixos.org
-  [trusted-public-keys]=cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+  [trusted-public-keys]='cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= piglor-qemu-kernel-1:62KZ76u3AzKRSSsmRDqEanDdgOu7j81BXH5VINsQj9c='
   [require-sigs]=true
   [sandbox]=true
 )
@@ -61,7 +64,7 @@ tar -xJf "${tarball}" -C "${work}"
 cat >"${work}/nix.conf" <<'EOF'
 experimental-features = nix-command flakes
 substituters = https://cache.nixos.org
-trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= piglor-qemu-kernel-1:62KZ76u3AzKRSSsmRDqEanDdgOu7j81BXH5VINsQj9c=
 require-sigs = true
 sandbox = true
 accept-flake-config = false

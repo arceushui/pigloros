@@ -433,14 +433,16 @@ impl TerminationEvidenceFields {
             && self.work_after.is_none()
     }
 
-    /// Progress 1: a start job; snapshots only with a unit, both or neither;
-    /// no ending, capture, feed or output transfer; only a pin failure.
+    /// Progress 1: snapshots only with a unit, both or neither; no ending,
+    /// capture, feed or output transfer; only a pin failure. A null start
+    /// job is missing evidence (code 2), not a shape error: the provider
+    /// requested the start but observed no result it can name (owner
+    /// reading G1, Redmine #443 journal 22723).
     const fn started_shape(&self) -> bool {
         matches!(
             self.launch_failure,
             None | Some(LaunchFailure::UnitRefFailed)
-        ) && self.start_job.is_some()
-            && (self.unit.is_some() || self.baseline.is_none())
+        ) && (self.unit.is_some() || self.baseline.is_none())
             && self.baseline.is_some() == self.terminal.is_some()
             && self.ending.is_none()
             && self.nothing_after_release()
@@ -456,10 +458,11 @@ impl TerminationEvidenceFields {
 
     /// Progress 2: a done start job, the unit, both snapshots, an ending and
     /// a capture; no launch or barrier failure. A null `adapter-input` is
-    /// missing evidence, not a shape error (R10 §4.8).
+    /// missing evidence, not a shape error (R10 §4.8), and so is a null
+    /// start job (owner reading G1, Redmine #443 journal 22723).
     const fn released_shape(&self) -> bool {
         self.launch_failure.is_none()
-            && matches!(self.start_job, Some(StartJobResult::Done))
+            && matches!(self.start_job, None | Some(StartJobResult::Done))
             && self.unit.is_some()
             && self.baseline.is_some()
             && self.terminal.is_some()

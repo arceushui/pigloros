@@ -1,4 +1,4 @@
-//! Pre-open refusal for ADR-129's dedicated Linux namespace.
+//! Pre-open refusal for ADR-123's dedicated Linux namespace.
 //!
 //! Finding the reserved coordination entry denies an ordinary native open;
 //! its absence does not qualify a connection or grant protected use. The
