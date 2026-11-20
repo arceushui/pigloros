@@ -221,7 +221,7 @@ Local Principal is provisioned:
 ```text
 piglor-gateway provision-local-erasure <sqlite-path> --issued-by <erasure-bundle/...>
     --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>]
-    [--signer-epoch <epoch>]
+    [--signer-epoch <epoch>] [--rotation routine|compromise]
 ```
 
 The unit reads exactly two credentials: `pigloros.local-erasure-signer`, the role-2 signer's
@@ -252,7 +252,19 @@ An exact re-run emits the same bundle. A routine signer rotation re-runs it with
 credential, a higher `--signer-epoch` and a new `--out`. A re-run on a store that already has its
 Erasure Host Timeline writes only through the store itself, so it also works once the store holds
 erasure requests; a store that holds erasure requests but has no Erasure Host Timeline is refused.
-The key registry refuses another key for a registered identity, a lower epoch and a reused key. The
+The key registry refuses another key for a registered identity, a lower epoch and a reused key. A
+new signer epoch becomes the key registry's only active role-2 key, so the old signer can sign
+nothing more, not even for a request pinned to its bundle. A routine rotation (the default
+`--rotation routine`) is therefore refused, before any write, while any erasure request pins a
+bundle: one frozen before its first attempt, or with an active attempt. Let the driver close those
+attempts first, then rotate. After a key compromise, revoke the old signer key
+`erasure-signer/<64 hex>` (and the bundle root, if it is compromised too) in the installed TPS1, then
+re-run with `--rotation compromise`: the command registers the new key only once the TPS1 revokes the
+old signer key and the root or signer of every pinned bundle. Requests pinned to the revoked bundle
+stay contained. A re-run with the registered key changes nothing. The pin check and the key registration are
+two steps, so run the command only with the Gateway stopped: a serving Gateway could pin a bundle
+between them. The unit's `Conflicts=piglor-gateway.service` does this; never run it beside a
+serving Gateway by other means. The
 command holds the store lock shared, like every offline writer; the unit's
 `Conflicts=piglor-gateway.service` stops `serve` while it updates the key registry. The unit writes
 `/var/lib/pigloros/local-erasure-bundle.elb1` for the root `erasure-bundle/local`: move the file
