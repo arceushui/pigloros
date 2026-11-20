@@ -1,0 +1,37 @@
+[package]
+name = "pos-owner-adapter"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# ADR-110 E15: the real ADR-091 owner adapter is part of the subject-encryption
+# activation surface, so it exists only with this feature (or in this crate's
+# own unit tests) until activation (#1438). It forwards the gated encryptor
+# lock it is built on. Never enable it in a deployable graph; enforced by
+# scripts/check_test_support_features.py.
+test-support = ["pos-owner-bridge/test-support"]
+
+[dependencies]
+pos-core = { path = "../pos-core" }
+pos-crypto = { path = "../pos-crypto" }
+pos-owner-bridge = { path = "../pos-owner-bridge" }
+pos-owner-bridge-codec = { path = "../pos-owner-bridge-codec" }
+ulid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Unit tests build the gated modules under cfg(test), which needs the gated
+# encryptor lock and the bridge fakes.
+pos-owner-bridge = { path = "../pos-owner-bridge", features = ["test-support"] }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "enrollment_store_public"
+path = "tests/enrollment_store_public.rs"
+required-features = ["test-support"]

@@ -27,6 +27,7 @@ class ActivationPolicyTests(unittest.TestCase):
             "mint_owner_consent_v2_permit",
             "destroy_subject_key",
             "VolatileSubjectNonceLedgerV1",
+            "VolatileEnrollmentStore",
         ]:
             for source in [
                 f"fn build() {{ owner::{name}(); }}",

@@ -5958,6 +5958,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-owner-adapter"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-crypto",
+ "pos-owner-bridge",
+ "pos-owner-bridge-codec",
+ "sha2 0.11.1",
+ "ulid",
+ "zeroize",
+]
+
+[[package]]
 name = "pos-owner-bridge"
 version = "0.1.0"
 dependencies = [
