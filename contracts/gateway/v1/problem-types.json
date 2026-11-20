@@ -214,6 +214,33 @@
         500
       ],
       "description": "The Gateway could not complete the request. The detail is a fixed safe text; no host fault description leaves the Gateway."
+    },
+    {
+      "code": "erasure-scope-retained",
+      "type": "urn:pigloros:gateway:v1:problem:erasure-scope-retained",
+      "title": "Erasure scope retained",
+      "statuses": [
+        400
+      ],
+      "description": "The erasure names a scope class this deployment always retains; nothing was requested. Request a destruction-eligible class."
+    },
+    {
+      "code": "erasure-scope-too-large",
+      "type": "urn:pigloros:gateway:v1:problem:erasure-scope-too-large",
+      "title": "Erasure scope too large",
+      "statuses": [
+        400
+      ],
+      "description": "The subject's erasure closure exceeds the deployment's erasure_closure_targets limit; nothing was requested and no quota was used."
+    },
+    {
+      "code": "erasure-quota-exhausted",
+      "type": "urn:pigloros:gateway:v1:problem:erasure-quota-exhausted",
+      "title": "Erasure quota exhausted",
+      "statuses": [
+        409
+      ],
+      "description": "The subject has used its lifetime share of the store's erasure requests; a retry never succeeds."
     }
   ]
 }
