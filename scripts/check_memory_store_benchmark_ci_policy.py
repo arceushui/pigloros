@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from ci_stage_policy import PREFLIGHT_STAGE_IF, PREFLIGHT_STAGE_NEEDS
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
@@ -21,10 +23,7 @@ UPLOAD_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd
 COMPARATOR_STEP_NAME = "Test advisory benchmark comparator"
 COMPARATOR_COMMAND = "python3 scripts/test_compare_memory_store_benchmarks.py"
 REQUIRED_COMPARATOR_JOBS = frozenset({"test", "coverage"})
-SCOPED_JOB_IF = (
-    "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
-    "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
-)
+SCOPED_JOB_IF = PREFLIGHT_STAGE_IF
 BENCHMARK_SOURCE_REF = "${{ github.event.pull_request.head.sha || github.sha }}"
 TRUSTED_EVENT_ORDER = ("push", "schedule")
 TRUSTED_BASELINE_CONDITION = (
@@ -321,7 +320,7 @@ def check_ci_workflow(workflow_path: pathlib.Path) -> None:
     for job_name in sorted(REQUIRED_COMPARATOR_JOBS):
         job = require_mapping(jobs.get(job_name), f"missing {job_name!r} job")
         require(
-            job.get("needs") == ["ci_change_scope", "preflight-gate"],
+            job.get("needs") == PREFLIGHT_STAGE_NEEDS,
             f"{job_name} must retain required preflight dependencies",
         )
         require(

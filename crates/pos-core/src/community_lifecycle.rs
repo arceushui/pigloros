@@ -7,6 +7,7 @@
 
 mod authority_catalogue;
 mod authority_evidence;
+mod budget_quote;
 mod classification;
 mod copy_inventory;
 mod current_view;
@@ -56,9 +57,13 @@ pub use authority_catalogue::{
     MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1,
 };
 pub use authority_evidence::{
-    CommunityAuthorityEvidenceInputV1, CommunityAuthorityEvidenceV1, CommunityClockBoundV1,
-    CommunityDecisionRowV1, CommunityObjectBindingV1, MAX_COMMUNITY_DECISION_ROWS_V1,
-    MAX_COMMUNITY_OBJECT_BINDINGS_V1,
+    community_recipient_identity_digest_v1, CommunityAuthorityEvidenceInputV1,
+    CommunityAuthorityEvidenceV1, CommunityClockBoundV1, CommunityDecisionRowV1,
+    CommunityObjectBindingV1, MAX_COMMUNITY_DECISION_ROWS_V1, MAX_COMMUNITY_OBJECT_BINDINGS_V1,
+};
+pub use budget_quote::{
+    CommunityBudgetQuoteInputV1, CommunityBudgetQuoteV1, CommunityDueMemberBudgetV1,
+    CommunitySharedCountsV1, MAX_COMMUNITY_BUDGET_QUOTE_BYTES_V1,
 };
 pub use classification::{
     CommunityArtifactChildrenV1, CommunityClassificationProofInputV1,
@@ -69,11 +74,11 @@ pub use copy_inventory::{
     CommunityCopyStateV1,
 };
 pub use current_view::{
-    CommunityAuthorityViewRowV1, CommunityClockLatchV1, CommunityCurrentViewInputV1,
-    CommunityCurrentViewV1, CommunityKeyStateV1, CommunityKeyViewRowV1, CommunityScopeStateV1,
-    CommunityScopeViewRowV1, CommunityTrustViewRowV1, MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1,
-    MAX_COMMUNITY_VIEW_KEY_ROWS_V1, MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1,
-    MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
+    community_authority_bindings_digest_v1, CommunityAuthorityViewRowV1, CommunityClockLatchV1,
+    CommunityCurrentViewInputV1, CommunityCurrentViewV1, CommunityKeyStateV1,
+    CommunityKeyViewRowV1, CommunityScopeStateV1, CommunityScopeViewRowV1, CommunityTrustViewRowV1,
+    MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1, MAX_COMMUNITY_VIEW_KEY_ROWS_V1,
+    MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1, MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
 };
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
@@ -156,7 +161,7 @@ pub use prepared::{
 pub use profile::{
     community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
-    COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+    COMMUNITY_INITIALIZER_SET_SCHEMA_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{

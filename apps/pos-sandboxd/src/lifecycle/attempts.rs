@@ -719,7 +719,9 @@ impl RunState {
 ///
 /// Its identities are as this runtime and its durable record know them. Each
 /// is a claim for the sealed recovery (#349) to correlate with fresh kernel
-/// evidence, never evidence itself.
+/// evidence, never evidence itself. Its [`Self::cleanup_proved`] is the one
+/// fact the live revocation responder reads (ADR-069 R11 §8.5): only a
+/// snapshot whose every attempt proved its cleanup is acknowledged.
 #[derive(Debug, Eq, PartialEq)]
 pub struct LiveAttemptIdentity {
     attempt_id: [u8; 16],
@@ -727,9 +729,19 @@ pub struct LiveAttemptIdentity {
     sim1_digest: [u8; 32],
     recorded: Option<RecoveredAttemptIntent>,
     cgroup: Option<(u64, u64)>,
+    cleanup_proved: bool,
 }
 
 impl LiveAttemptIdentity {
+    /// Whether the attempt ended with its cleanup proved: its slot is
+    /// `Ended` with the removed intent (ADR-069 R11 §8.5). Only then may the
+    /// live revocation responder acknowledge it as cancelled; any other live
+    /// attempt means no RCA1, and recovery follows (R11 D8).
+    #[must_use]
+    pub const fn cleanup_proved(&self) -> bool {
+        self.cleanup_proved
+    }
+
     /// The `AttemptId`.
     #[must_use]
     pub const fn attempt_id(&self) -> [u8; 16] {
@@ -781,7 +793,10 @@ impl LiveAttemptIdentity {
 
 /// The live attempts of a runtime fenced for recovery.
 ///
-/// This is the exact identity handoff to the sealed recovery (#349).
+/// This is the exact identity handoff to the sealed recovery (#349), and
+/// the live attempt state of the provider's revocation responder (ADR-069
+/// R11 §8.1): an attempt that never ran (withdrawn before it started, or
+/// ended by a failed input) is never listed.
 ///
 /// Only [`AttemptLifecycle::fence_and_snapshot`] creates one, once per
 /// runtime; it has no public constructor and cannot be cloned.
@@ -1151,15 +1166,23 @@ impl<I> AttemptLifecycle<I> {
         for (attempt_id, slot) in &lock(&self.attempts).slots {
             // An attempt that never ran left nothing to recover.
             if let Slot::Ended {
-                state: Some(state), ..
+                state: Some(state),
+                cleaned,
+                ..
             } = slot
             {
-                ended.push((*attempt_id, Arc::clone(state)));
+                ended.push((
+                    *attempt_id,
+                    Arc::clone(state),
+                    matches!(cleaned, Cleaned::Proved(_)),
+                ));
             }
         }
         let attempts = ended
             .into_iter()
-            .map(|(attempt_id, state)| self.identity(attempt_id, &state))
+            .map(|(attempt_id, state, cleanup_proved)| {
+                self.identity(attempt_id, &state, cleanup_proved)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         // A concurrent call may have handed out its snapshot meanwhile.
         if self.snapshot_taken.swap(true, Ordering::AcqRel) {
@@ -1210,6 +1233,7 @@ impl<I> AttemptLifecycle<I> {
         &self,
         attempt_id: [u8; 16],
         state: &RunState,
+        cleanup_proved: bool,
     ) -> Result<LiveAttemptIdentity, AttemptLifecycleError> {
         let unit_name = TransientServiceUnitName::from_attempt_id(attempt_id)
             .map_err(|_| SystemdAttemptRegistryError::InvalidIntent)?;
@@ -1220,6 +1244,7 @@ impl<I> AttemptLifecycle<I> {
             sim1_digest: state.sim1_digest,
             recorded,
             cgroup: state.bound_cgroup(),
+            cleanup_proved,
         })
     }
 }

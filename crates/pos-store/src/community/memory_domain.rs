@@ -16,16 +16,16 @@ use pos_core::community_lifecycle::{
     CommunityRecordKindsV1, CommunityScopeMembersV1, CommunitySelectionInputV1,
     CommunitySelectionV1, CommunityTimelineFloorsV1,
 };
-use pos_core::{
-    AuthorityPersistencePortV1, AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId,
-};
+use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::private_hash::scope_set_digest;
 use super::sealer::SealedMetadataV1;
+use super::store_domain::CommunityStoreDomainV1;
 use super::vault::{fresh_identity, VaultKeyV1};
 use crate::memory::MemoryStore;
+use crate::trusted_clock::MemoryTrustedClockAuthorityV1;
 
 /// Preferred CBOR encoding of the empty scope-member array.
 const EMPTY_SCOPE_ROWS: [u8; 1] = [0x80];
@@ -138,8 +138,14 @@ impl BootstrapRecordV1 {
 pub struct MemoryCommunityDomainV1 {
     pub(super) store: MemoryStore,
     pub(super) store_incarnation: [u8; 16],
+    /// The installed trusted-clock authority every operation reserves on
+    /// (owner decision on #560, note 22722, G1).
+    pub(super) clock: MemoryTrustedClockAuthorityV1,
     pub(super) keys: BTreeMap<[u8; 16], VaultKeyV1>,
     pub(super) bootstrap: Option<BootstrapRecordV1>,
+    /// The community inventory generation (G5): 0 at bootstrap, advanced
+    /// only by a committed inventory effect.
+    pub(super) inventory_generation: u64,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -152,19 +158,28 @@ impl MemoryCommunityDomainV1 {
     ///
     /// The trusted composition provisions the store incarnation, so it can
     /// persist the exact metadata grant for this resource before handing the
-    /// store over; nothing here can add a grant afterwards.
+    /// store over; nothing here can add a grant afterwards. It also installs
+    /// the domain's trusted-clock authority, on which every lifecycle call
+    /// reserves its one trusted sample (owner decision on #560, note 22722,
+    /// G1).
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a zero incarnation.
-    pub fn new(store: MemoryStore, store_incarnation: [u8; 16]) -> Result<Self, Error> {
+    pub fn new(
+        store: MemoryStore,
+        store_incarnation: [u8; 16],
+        clock: MemoryTrustedClockAuthorityV1,
+    ) -> Result<Self, Error> {
         if store_incarnation == [0; 16] {
             Err(Error::InvalidBinding)
         } else {
             Ok(Self {
                 store,
                 store_incarnation,
+                clock,
                 keys: BTreeMap::new(),
                 bootstrap: None,
+                inventory_generation: 0,
             })
         }
     }
@@ -187,10 +202,10 @@ impl MemoryCommunityDomainV1 {
         &self,
         policy: &CommunityMetadataPolicyV1,
     ) -> Result<PersistedAuthorityV1, Error> {
-        self.store
-            .load_authority(policy.as_input().metadata_authority_leaf_grant)
-            .ok()
-            .ok_or(Error::EvidenceUnavailable)
+        CommunityStoreDomainV1::load_authority(
+            self,
+            policy.as_input().metadata_authority_leaf_grant,
+        )
     }
 
     /// Bootstrap a proven-empty domain, or verify an existing one.

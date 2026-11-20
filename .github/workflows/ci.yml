@@ -32,6 +32,14 @@
 # coverage, cargo-crap, security, platform, and report jobs are skipped
 # successfully. Any Rust, manifest, dependency, script, workflow, or
 # build-policy change keeps the complete gate set.
+#
+# Within that set, a pull request whose changes all lie inside workspace member
+# directories runs the plain test and lint jobs (test-shard, test doctests,
+# feature-matrix, clippy, rustdoc, asan-build and asan) only for the members
+# it can affect (scripts/affected_packages.py). Coverage, cargo-crap,
+# mutation, CodeQL, Docker, conformance and the Windows lanes keep the whole
+# workspace. Pushes to main, manual runs and Trunk merge-queue test pull
+# requests always run the whole workspace in every job.
 
 name: ci
 
@@ -59,14 +67,22 @@ env:
 # ── Quality gates ────────────────────────────────────────────────────────────
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
-# any Cargo-heavy work. The core gates then run together; core-gate releases
-# at most eight heavy standard jobs. The lightweight cargo-crap analysis starts
-# as soon as hosted coverage (and the native lane, when in scope) succeeds, so
-# main publishes its trusted baseline without waiting for the other core jobs.
-# Mutation and the ASan shards follow standard-gate as the final expensive
-# stage and run beside each other. The native Windows owner lane starts after
-# the ledger Windows runner and runs beside every other stage: only cargo-crap
-# (native LCOV) waits for it, and ci-gate requires both results directly.
+# any Cargo-heavy work. The core jobs then run together; the complete core set
+# releases at most eight heavy standard jobs. The lightweight cargo-crap
+# analysis starts as soon as hosted coverage (and the native lane, when in
+# scope) succeeds, so main publishes its trusted baseline without waiting for
+# the other core jobs. Mutation and the ASan shards follow the complete
+# standard set as the final expensive stage and run beside each other. The
+# native Windows owner lane starts after the ledger Windows runner and runs
+# beside every other stage: only cargo-crap (native LCOV) waits for it, and
+# ci-gate requires both results directly.
+#
+# preflight-gate, core-gate and standard-gate only report stage verdicts to
+# ci-gate. Each later stage needs the gate's underlying jobs directly and
+# repeats the gate's pass rule as its condition (the *-stage-needs and
+# *-stage-if anchors), so no stage waits in the runner queue for an empty
+# aggregator. scripts/ci_stage_policy.py holds the canonical conditions and
+# scripts/test_ci_workflow_policy.py proves each equals its gate's verdict.
 
 jobs:
 
@@ -80,6 +96,8 @@ jobs:
     outputs:
       rust: ${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || steps.full.outputs.rust }}
       owner_windows: ${{ steps.owner_windows.outputs.owner_windows }}
+      rust_packages: ${{ steps.rust_packages.outputs.rust_packages }}
+      rust_doc_packages: ${{ steps.rust_packages.outputs.rust_doc_packages }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -106,6 +124,62 @@ jobs:
         id: full
         if: github.event_name != 'pull_request' || hashFiles('.github/rust-scope.yml') == ''
         run: printf 'rust=true\n' >> "$GITHUB_OUTPUT"
+      # Phase-1 package scope (scripts/affected_packages.py, run from the
+      # trusted base): on a pull request with Rust changes, the plain test and
+      # lint jobs build and test only the members the diff can affect. Any
+      # doubt selects the whole workspace: another event, failed detection, a
+      # Trunk merge-queue test pull request (trunk-merge/*), a possibly
+      # truncated (3000-file) or unlisted diff, a missing or failing script,
+      # or output of an unexpected shape.
+      - name: Resolve the affected Rust packages
+        id: rust_packages
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DETECTED: ${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.rust || '' }}
+          HEAD_REF: ${{ github.head_ref }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          packages=--workspace
+          doc_packages=--workspace
+          selection='^(--workspace|-p [A-Za-z0-9_-]+( -p [A-Za-z0-9_-]+)*)$'
+          listing="${RUNNER_TEMP}/pull-request-files.jsonl"
+          if [[ "${EVENT_NAME}" != pull_request || "${DETECTED}" != true ]]; then
+            echo 'Not a scoped pull request; running the whole workspace.'
+          elif [[ "${HEAD_REF}" == trunk-merge/* ]]; then
+            echo 'Merge-queue test pull request; running the whole workspace.'
+          elif [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then
+            echo '::warning::The changed-file list may be truncated; running the whole workspace.'
+          elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo '::warning::The pull request number is unavailable; running the whole workspace.'
+          elif ! gh api --method GET --paginate -f per_page=100 \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \
+            --jq '.[] | {filename, previous_filename}' >"${listing}"; then
+            echo '::warning::Changed files could not be listed; running the whole workspace.'
+          elif ! resolved="$(python3 scripts/affected_packages.py \
+            --expected-files "$((10#${CHANGED_FILES}))" "${listing}")"; then
+            echo '::warning::The affected packages could not be resolved; running the whole workspace.'
+          else
+            mapfile -t lines <<<"${resolved}"
+            candidate="${lines[0]-}"
+            candidate="${candidate#rust_packages=}"
+            doc_candidate="${lines[1]-}"
+            doc_candidate="${doc_candidate#rust_doc_packages=}"
+            if (( ${#lines[@]} == 2 )) \
+              && [[ "${lines[0]-}" == rust_packages=* && "${lines[1]-}" == rust_doc_packages=* ]] \
+              && [[ "${candidate}" =~ ${selection} ]] \
+              && [[ "${doc_candidate}" == none || "${doc_candidate}" =~ ${selection} ]] \
+              && [[ "${candidate}" != --workspace || "${doc_candidate}" == --workspace ]]; then
+              packages="${candidate}"
+              doc_packages="${doc_candidate}"
+            else
+              echo '::warning::The affected-package output is malformed; running the whole workspace.'
+            fi
+          fi
+          printf 'Rust packages: %s\nDoctest packages: %s\n' "${packages}" "${doc_packages}"
+          printf 'rust_packages=%s\n' "${packages}" >> "$GITHUB_OUTPUT"
+          printf 'rust_doc_packages=%s\n' "${doc_packages}" >> "$GITHUB_OUTPUT"
       # Only an explicit 'false' from successful detection skips the native
       # Windows owner lane. paths-filter emits nothing for a key the base
       # revision's filter file lacks, and failed detection, non-pull-request
@@ -156,10 +230,12 @@ jobs:
       - name: Trunk Check (pull-request diff)
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
 
+  # Reports the preflight verdict to core-gate and ci-gate. The next stage
+  # starts from *preflight-stage-needs and *preflight-stage-if instead.
   preflight-gate:
     name: preflight-gate
     if: ${{ always() }}
-    needs:
+    needs: &preflight-stage-needs
       - ci_change_scope
       - trunk-pr
       - pinned-dependencies
@@ -211,11 +287,30 @@ jobs:
 
   fmt:
     name: fmt
-    needs: [ci_change_scope, preflight-gate]
-    # preflight-gate intentionally accepts the push-only skip of trunk-pr.
-    # !cancelled() prevents that optional ancestor from propagating a skip here;
-    # the explicit result check still stops the stage after a failed preflight.
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *preflight-stage-needs
+    # The preflight pass rule accepts the push-only skip of trunk-pr and the
+    # Rust-scope skips. !cancelled() keeps those skips from propagating here;
+    # the explicit result checks still stop the stage after a failed preflight.
+    if: &preflight-stage-if >-
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
+      needs.conformance-fixtures.result == 'success' &&
+      needs.conformance-non-linux.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.trunk-pr.result == 'success') ||
+      (github.event_name != 'pull_request' && needs.trunk-pr.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust == 'true' &&
+      needs.pinned-dependencies.result == 'success' &&
+      needs.source-policies.result == 'success' &&
+      needs.owner-bridge-policies.result == 'success' &&
+      needs.plugin-component-fixtures.result == 'success' &&
+      needs.third-party-notices.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust != 'true' &&
+      needs.pinned-dependencies.result == 'skipped' &&
+      needs.source-policies.result == 'skipped' &&
+      needs.owner-bridge-policies.result == 'skipped' &&
+      needs.plugin-component-fixtures.result == 'skipped' &&
+      needs.third-party-notices.result == 'skipped')) &&
+      (needs.ci_change_scope.outputs.rust == 'true' ||
+      github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -231,13 +326,50 @@ jobs:
 
   rustdoc:
     name: rustdoc
-    needs:
+    needs: &core-stage-needs
       - ci_change_scope
-      - core-gate
-    if: >-
+      - trunk-pr
+      - pinned-dependencies
+      - source-policies
+      - owner-bridge-policies
+      - conformance-fixtures
+      - conformance-non-linux
+      - plugin-component-fixtures
+      - third-party-notices
+      - fmt
+      - feature-matrix
+      - test
+      - test-shards
+      - clippy
+      - coverage
+    if: &core-stage-if >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.core-gate.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+      needs.conformance-fixtures.result == 'success' &&
+      needs.conformance-non-linux.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.trunk-pr.result == 'success') ||
+      (github.event_name != 'pull_request' && needs.trunk-pr.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust == 'true' &&
+      needs.pinned-dependencies.result == 'success' &&
+      needs.source-policies.result == 'success' &&
+      needs.owner-bridge-policies.result == 'success' &&
+      needs.plugin-component-fixtures.result == 'success' &&
+      needs.third-party-notices.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust != 'true' &&
+      needs.pinned-dependencies.result == 'skipped' &&
+      needs.source-policies.result == 'skipped' &&
+      needs.owner-bridge-policies.result == 'skipped' &&
+      needs.plugin-component-fixtures.result == 'skipped' &&
+      needs.third-party-notices.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.fmt.result == 'success' &&
+      needs.feature-matrix.result == 'success' && needs.test.result == 'success' &&
+      needs.test-shards.result == 'success' && needs.clippy.result == 'success' &&
+      needs.coverage.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust == 'false' && needs.fmt.result == 'skipped' &&
+      needs.feature-matrix.result == 'skipped' && needs.test.result == 'skipped' &&
+      needs.test-shards.result == 'skipped' && needs.clippy.result == 'skipped' &&
+      needs.coverage.result == 'skipped')) &&
+      (needs.ci_change_scope.outputs.rust == 'true' ||
+      github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -251,12 +383,15 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --all-features --no-deps --locked
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
+        run: |
+          read -ra packages <<<"${CARGO_PACKAGES}"
+          cargo doc "${packages[@]}" --all-features --no-deps --locked
 
   feature-matrix:
     name: feature-matrix
-    needs: [ci_change_scope, preflight-gate]
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *preflight-stage-needs
+    if: *preflight-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -269,7 +404,11 @@ jobs:
           shared-key: feature-matrix
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check (no default features)
-        run: cargo check --workspace --all-targets --no-default-features --locked
+        env:
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
+        run: |
+          read -ra packages <<<"${CARGO_PACKAGES}"
+          cargo check "${packages[@]}" --all-targets --no-default-features --locked
       - name: Plugin trust registry Memory vectors (no default features)
         run: >
           cargo test -p pos-store --no-default-features
@@ -277,7 +416,11 @@ jobs:
           --test plugin_trust_registry_memory_policy_public
           --test plugin_trust_registry_memory_evaluation_public --locked
       - name: cargo check (all features, all targets)
-        run: cargo check --workspace --all-targets --all-features --locked
+        env:
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
+        run: |
+          read -ra packages <<<"${CARGO_PACKAGES}"
+          cargo check "${packages[@]}" --all-targets --all-features --locked
       - name: Prove reference evaluator implementation independence
         run: bash scripts/check-reference-evaluator-independence.sh
       - name: Prove the conformance adapter dependency graph
@@ -285,8 +428,8 @@ jobs:
 
   test:
     name: test
-    needs: [ci_change_scope, preflight-gate]
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *preflight-stage-needs
+    if: *preflight-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -308,12 +451,27 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The workspace tests run in the test-shard matrix. Doctests are not
       # supported by nextest, so libtest still runs them here.
+      # A scoped pull request whose affected members have no library target
+      # has no doctest; cargo refuses --doc for such a selection.
       - name: cargo test doctests (all features, ignored included)
+        env:
+          CARGO_DOC_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_doc_packages || '--workspace' }}
         run: |
           set -euo pipefail
-          cargo test --workspace --all-features --locked --doc -- --include-ignored 2>&1 | tee /tmp/cargo-doctest.log
+          if [[ "${CARGO_DOC_PACKAGES}" == none ]]; then
+            echo 'No affected package has a library target; no doctest is in scope.'
+            exit 0
+          fi
+          read -ra packages <<<"${CARGO_DOC_PACKAGES}"
+          cargo test "${packages[@]}" --all-features --locked --doc -- --include-ignored 2>&1 | tee /tmp/cargo-doctest.log
       - name: Require no ignored test in the doctest summary
-        run: bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-doctest.log
+        env:
+          CARGO_DOC_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_doc_packages || '--workspace' }}
+        run: |
+          set -euo pipefail
+          if [[ "${CARGO_DOC_PACKAGES}" != none ]]; then
+            bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-doctest.log
+          fi
 
   # The nextest suite is CPU-bound (~860 test-seconds on a 4-vCPU runner after
   # the crypto dependency opt-level change), so it is split across runners.
@@ -321,8 +479,8 @@ jobs:
   # bundle tests over every shard.
   test-shard:
     name: test shard (${{ matrix.shard }}/3)
-    needs: [ci_change_scope, preflight-gate]
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *preflight-stage-needs
+    if: *preflight-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -379,13 +537,22 @@ jobs:
       - name: cargo nextest partition (all features, ignored included)
         env:
           SHARD: ${{ matrix.shard }}
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
+        # A scoped package set can leave a slice without tests; only then may
+        # a slice run none. test-shards still proves every selected test ran
+        # exactly once.
         run: |
           set -euo pipefail
           log="${RUNNER_TEMP}/nextest-shard.log"
+          read -ra packages <<<"${CARGO_PACKAGES}"
+          no_tests=fail
+          if [[ "${CARGO_PACKAGES}" != --workspace ]]; then
+            no_tests=pass
+          fi
           printf 'nextest partition: slice:%s/3\n' "${SHARD}" >"${log}"
-          cargo nextest run --workspace --all-features --locked \
+          cargo nextest run "${packages[@]}" --all-features --locked \
             --user-config-file none --ignore-default-filter \
-            --run-ignored all --no-fail-fast \
+            --run-ignored all --no-fail-fast --no-tests="${no_tests}" \
             --partition "slice:${SHARD}/3" 2>&1 | tee -a "${log}"
       - name: Upload shard summary log
         if: ${{ always() }}
@@ -424,13 +591,8 @@ jobs:
 
   reference-evaluator-release:
     name: reference-evaluator-release
-    needs:
-      - ci_change_scope
-      - core-gate
-    if: >-
-      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.core-gate.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *core-stage-needs
+    if: *core-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -541,15 +703,8 @@ jobs:
 
   materialize-conformance-bundles:
     name: materialize-conformance-bundles
-    needs:
-      - ci_change_scope
-      - conformance-fixtures
-      - core-gate
-    if: >-
-      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.conformance-fixtures.result == 'success' &&
-      needs.core-gate.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *core-stage-needs
+    if: *core-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -737,8 +892,8 @@ jobs:
 
   clippy:
     name: clippy
-    needs: [ci_change_scope, preflight-gate]
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *preflight-stage-needs
+    if: *preflight-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -757,9 +912,12 @@ jobs:
       - name: Reject new lint suppressions
         run: bash scripts/check-no-new-lint-suppressions.sh origin/main
       - name: cargo clippy (workspace lint policy, pedantic, deny warnings)
-        run: >
-          cargo clippy --workspace --all-features --all-targets --locked --
-          -D warnings -W clippy::pedantic
+        env:
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
+        run: |
+          read -ra packages <<<"${CARGO_PACKAGES}"
+          cargo clippy "${packages[@]}" --all-features --all-targets --locked -- \
+            -D warnings -W clippy::pedantic
       # Library and binary targets only: the shim's test targets depend on
       # pos-crypto, whose C build cannot target MSVC from this Linux runner.
       # The native owner-bridge-windows job lints every target with these flags.
@@ -781,8 +939,8 @@ jobs:
   # Q9.10). Build it for both supported architectures and inspect the result.
   static-launcher:
     name: static-launcher
-    needs: [ci_change_scope, preflight-gate]
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *preflight-stage-needs
+    if: *preflight-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -848,8 +1006,8 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [ci_change_scope, preflight-gate]
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *preflight-stage-needs
+    if: *preflight-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -938,6 +1096,8 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # Reports the core verdict to standard-gate and ci-gate. The standard stage
+  # starts from *core-stage-needs and *core-stage-if instead.
   core-gate:
     name: core-gate
     if: ${{ always() }}
@@ -1119,10 +1279,13 @@ jobs:
           --exclude 'src/provider_runtime/tests.rs'
           --exclude 'src/provider_runtime/endpoint/tests.rs'
           --exclude 'src/provider_runtime/serving/tests.rs'
+          --exclude 'src/provider_runtime/recovery_peer/tests.rs'
+          --exclude 'src/provider_runtime/revocation/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
+          --exclude 'src/community/memory_domain/tests.rs'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1176,10 +1339,13 @@ jobs:
           --exclude 'src/provider_runtime/tests.rs'
           --exclude 'src/provider_runtime/endpoint/tests.rs'
           --exclude 'src/provider_runtime/serving/tests.rs'
+          --exclude 'src/provider_runtime/recovery_peer/tests.rs'
+          --exclude 'src/provider_runtime/revocation/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
+          --exclude 'src/community/memory_domain/tests.rs'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1210,13 +1376,8 @@ jobs:
 
   audit:
     name: dependency-policy (audit / deny / shear)
-    needs:
-      - ci_change_scope
-      - core-gate
-    if: >-
-      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.core-gate.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *core-stage-needs
+    if: *core-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1251,15 +1412,38 @@ jobs:
   # Always runs, including for documentation-only pull requests: the main
   # ruleset's code_scanning rule needs an uploaded analysis for the head commit,
   # and a skipped job uploads none, which leaves the PR unmergeable. Rust PRs
-  # wait for core-gate; documentation-only PRs run it even if preflight fails.
+  # wait for the core pass rule; documentation-only PRs run it even if
+  # preflight fails.
   codeql:
     name: CodeQL (Rust)
-    needs:
-      - ci_change_scope
-      - core-gate
+    needs: *core-stage-needs
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      (needs.core-gate.result == 'success' ||
+      ((needs.ci_change_scope.result == 'success' &&
+      needs.conformance-fixtures.result == 'success' &&
+      needs.conformance-non-linux.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.trunk-pr.result == 'success') ||
+      (github.event_name != 'pull_request' && needs.trunk-pr.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust == 'true' &&
+      needs.pinned-dependencies.result == 'success' &&
+      needs.source-policies.result == 'success' &&
+      needs.owner-bridge-policies.result == 'success' &&
+      needs.plugin-component-fixtures.result == 'success' &&
+      needs.third-party-notices.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust != 'true' &&
+      needs.pinned-dependencies.result == 'skipped' &&
+      needs.source-policies.result == 'skipped' &&
+      needs.owner-bridge-policies.result == 'skipped' &&
+      needs.plugin-component-fixtures.result == 'skipped' &&
+      needs.third-party-notices.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.fmt.result == 'success' &&
+      needs.feature-matrix.result == 'success' && needs.test.result == 'success' &&
+      needs.test-shards.result == 'success' && needs.clippy.result == 'success' &&
+      needs.coverage.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust == 'false' && needs.fmt.result == 'skipped' &&
+      needs.feature-matrix.result == 'skipped' && needs.test.result == 'skipped' &&
+      needs.test-shards.result == 'skipped' && needs.clippy.result == 'skipped' &&
+      needs.coverage.result == 'skipped'))) ||
       needs.ci_change_scope.outputs.rust == 'false') }}
     permissions:
       actions: read
@@ -1293,13 +1477,8 @@ jobs:
   # tests from it.
   asan-build:
     name: asan build (nextest archive)
-    needs:
-      - ci_change_scope
-      - core-gate
-    if: >-
-      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.core-gate.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *core-stage-needs
+    if: *core-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -1326,10 +1505,12 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/scripts/asan/serial-link.sh
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_TEST_DEBUG: line-tables-only
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
         run: |
           set -euo pipefail
+          read -ra packages <<<"${CARGO_PACKAGES}"
           RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly-2026-07-01 nextest archive --workspace --all-features \
+            cargo +nightly-2026-07-01 nextest archive "${packages[@]}" --all-features \
             --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \
             --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
           test -f "${RUNNER_TEMP}/asan-link.lock"
@@ -1347,12 +1528,80 @@ jobs:
   # rust-src and rust-cache are intentionally absent.
   asan:
     name: asan shard (${{ matrix.shard }})
-    needs:
+    needs: &standard-stage-needs
       - ci_change_scope
-      - standard-gate
+      - trunk-pr
+      - pinned-dependencies
+      - source-policies
+      - owner-bridge-policies
+      - conformance-fixtures
+      - conformance-non-linux
+      - plugin-component-fixtures
+      - third-party-notices
+      - fmt
+      - feature-matrix
+      - test
+      - test-shards
+      - clippy
+      - coverage
+      - codeql
+      - rustdoc
+      - reference-evaluator-release
+      - materialize-conformance-bundles
+      - audit
+      - ledger-windows
+      - docker-build
+      - world-client-wasm
+      - world-client-browser-parity
       - asan-build
+      - static-launcher
     # The shards run beside diff mutation testing; ci-gate requires both.
-    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && needs.asan-build.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: >-
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
+      needs.conformance-fixtures.result == 'success' &&
+      needs.conformance-non-linux.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.trunk-pr.result == 'success') ||
+      (github.event_name != 'pull_request' && needs.trunk-pr.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust == 'true' &&
+      needs.pinned-dependencies.result == 'success' &&
+      needs.source-policies.result == 'success' &&
+      needs.owner-bridge-policies.result == 'success' &&
+      needs.plugin-component-fixtures.result == 'success' &&
+      needs.third-party-notices.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust != 'true' &&
+      needs.pinned-dependencies.result == 'skipped' &&
+      needs.source-policies.result == 'skipped' &&
+      needs.owner-bridge-policies.result == 'skipped' &&
+      needs.plugin-component-fixtures.result == 'skipped' &&
+      needs.third-party-notices.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.fmt.result == 'success' &&
+      needs.feature-matrix.result == 'success' && needs.test.result == 'success' &&
+      needs.test-shards.result == 'success' && needs.clippy.result == 'success' &&
+      needs.coverage.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust == 'false' && needs.fmt.result == 'skipped' &&
+      needs.feature-matrix.result == 'skipped' && needs.test.result == 'skipped' &&
+      needs.test-shards.result == 'skipped' && needs.clippy.result == 'skipped' &&
+      needs.coverage.result == 'skipped')) && needs.codeql.result == 'success' &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.rustdoc.result == 'success'
+      && needs.reference-evaluator-release.result == 'success' &&
+      needs.materialize-conformance-bundles.result == 'success' &&
+      needs.audit.result == 'success' && needs.ledger-windows.result == 'success' &&
+      needs.docker-build.result == 'success' &&
+      needs.world-client-wasm.result == 'success' &&
+      needs.world-client-browser-parity.result == 'success' &&
+      needs.asan-build.result == 'success' && needs.static-launcher.result == 'success')
+      || (needs.ci_change_scope.outputs.rust == 'false' &&
+      needs.rustdoc.result == 'skipped' &&
+      needs.reference-evaluator-release.result == 'skipped' &&
+      needs.materialize-conformance-bundles.result == 'skipped' &&
+      needs.audit.result == 'skipped' && needs.ledger-windows.result == 'skipped' &&
+      needs.docker-build.result == 'skipped' &&
+      needs.world-client-wasm.result == 'skipped' &&
+      needs.world-client-browser-parity.result == 'skipped' &&
+      needs.asan-build.result == 'skipped' && needs.static-launcher.result == 'skipped'))
+      && needs.asan-build.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' ||
+      github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -1431,6 +1680,10 @@ jobs:
           ASAN_SHARD: ${{ matrix.shard }}
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
+          CARGO_PACKAGES: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust_packages || '--workspace' }}
+        # The archive holds exactly the packages asan-build selected. A scoped
+        # selection may leave a partition without tests, and without
+        # pos-conformance the four conformance partitions have nothing to run.
         run: |
           set -euo pipefail
           test -x "/usr/bin/llvm-symbolizer-18"
@@ -1446,33 +1699,47 @@ jobs:
             --no-output-indent
             --test-threads 2
           )
+          conformance=true
+          if [[ "${CARGO_PACKAGES}" != --workspace ]]; then
+            nextest_args+=(--no-tests=pass)
+            if [[ " ${CARGO_PACKAGES} " != *" -p pos-conformance "* ]]; then
+              conformance=false
+            fi
+          fi
           run_asan_partition() {
             ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
               cargo "${nextest_args[@]}" "$@"
           }
+          run_conformance_partition() {
+            if [[ "${conformance}" == true ]]; then
+              run_asan_partition "$@"
+            else
+              printf 'pos-conformance is not in the affected packages; skipped: %s\n' "$*"
+            fi
+          }
           case "${ASAN_SHARD}" in
             bundle-coverage)
-              run_asan_partition \
+              run_conformance_partition \
                 -E 'binary_id(pos-conformance::bundle_contract_coverage_public)'
               ;;
             bundle-public-1)
-              run_asan_partition \
+              run_conformance_partition \
                 -E 'binary_id(pos-conformance::bundle_contract_public)' \
                 --partition slice:1/2 --run-ignored all
               ;;
             bundle-public-2)
-              run_asan_partition \
+              run_conformance_partition \
                 -E 'binary_id(pos-conformance::bundle_contract_public)' \
                 --partition slice:2/2 --run-ignored all
               ;;
             moat-proof)
-              run_asan_partition \
+              run_conformance_partition \
                 -E 'binary_id(pos-conformance::moat_proof_public)'
               ;;
             remainder-1)
               run_asan_partition -E 'not package(pos-conformance)' \
                 --partition slice:1/2
-              run_asan_partition \
+              run_conformance_partition \
                 -E 'package(pos-conformance) & not (binary_id(pos-conformance::bundle_contract_coverage_public) | binary_id(pos-conformance::bundle_contract_public) | binary_id(pos-conformance::moat_proof_public))'
               ;;
             remainder-2)
@@ -1515,15 +1782,36 @@ jobs:
 
   docker-build:
     name: docker-build
-    needs:
-      - ci_change_scope
-      - core-gate
-      - third-party-notices
+    needs: *core-stage-needs
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.core-gate.result == 'success' &&
+      needs.conformance-fixtures.result == 'success' &&
+      needs.conformance-non-linux.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.trunk-pr.result == 'success') ||
+      (github.event_name != 'pull_request' && needs.trunk-pr.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust == 'true' &&
+      needs.pinned-dependencies.result == 'success' &&
+      needs.source-policies.result == 'success' &&
+      needs.owner-bridge-policies.result == 'success' &&
+      needs.plugin-component-fixtures.result == 'success' &&
+      needs.third-party-notices.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust != 'true' &&
+      needs.pinned-dependencies.result == 'skipped' &&
+      needs.source-policies.result == 'skipped' &&
+      needs.owner-bridge-policies.result == 'skipped' &&
+      needs.plugin-component-fixtures.result == 'skipped' &&
+      needs.third-party-notices.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.fmt.result == 'success' &&
+      needs.feature-matrix.result == 'success' && needs.test.result == 'success' &&
+      needs.test-shards.result == 'success' && needs.clippy.result == 'success' &&
+      needs.coverage.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust == 'false' && needs.fmt.result == 'skipped' &&
+      needs.feature-matrix.result == 'skipped' && needs.test.result == 'skipped' &&
+      needs.test-shards.result == 'skipped' && needs.clippy.result == 'skipped' &&
+      needs.coverage.result == 'skipped')) &&
       needs.third-party-notices.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+      (needs.ci_change_scope.outputs.rust == 'true' ||
+      github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -1569,13 +1857,8 @@ jobs:
 
   world-client-wasm:
     name: world-client-wasm
-    needs:
-      - ci_change_scope
-      - core-gate
-    if: >-
-      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.core-gate.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs: *core-stage-needs
+    if: *core-stage-if
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -1631,6 +1914,8 @@ jobs:
           WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ runner.temp }}/world-client-webdriver.json
         run: bash scripts/check-world-client-wasm.sh browser
 
+  # Reports the standard verdict to ci-gate. Mutation, the ASan shards and the
+  # main-only reports start from the standard pass rule instead.
   standard-gate:
     name: standard-gate
     if: ${{ always() }}
@@ -1685,10 +1970,52 @@ jobs:
 
   mutation-checks:
     name: diff mutation testing
-    needs:
-      - ci_change_scope
-      - standard-gate
-    if: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust == 'true' }}
+    needs: *standard-stage-needs
+    if: >-
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
+      needs.conformance-fixtures.result == 'success' &&
+      needs.conformance-non-linux.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.trunk-pr.result == 'success') ||
+      (github.event_name != 'pull_request' && needs.trunk-pr.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust == 'true' &&
+      needs.pinned-dependencies.result == 'success' &&
+      needs.source-policies.result == 'success' &&
+      needs.owner-bridge-policies.result == 'success' &&
+      needs.plugin-component-fixtures.result == 'success' &&
+      needs.third-party-notices.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust != 'true' &&
+      needs.pinned-dependencies.result == 'skipped' &&
+      needs.source-policies.result == 'skipped' &&
+      needs.owner-bridge-policies.result == 'skipped' &&
+      needs.plugin-component-fixtures.result == 'skipped' &&
+      needs.third-party-notices.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.fmt.result == 'success' &&
+      needs.feature-matrix.result == 'success' && needs.test.result == 'success' &&
+      needs.test-shards.result == 'success' && needs.clippy.result == 'success' &&
+      needs.coverage.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust == 'false' && needs.fmt.result == 'skipped' &&
+      needs.feature-matrix.result == 'skipped' && needs.test.result == 'skipped' &&
+      needs.test-shards.result == 'skipped' && needs.clippy.result == 'skipped' &&
+      needs.coverage.result == 'skipped')) && needs.codeql.result == 'success' &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.rustdoc.result == 'success'
+      && needs.reference-evaluator-release.result == 'success' &&
+      needs.materialize-conformance-bundles.result == 'success' &&
+      needs.audit.result == 'success' && needs.ledger-windows.result == 'success' &&
+      needs.docker-build.result == 'success' &&
+      needs.world-client-wasm.result == 'success' &&
+      needs.world-client-browser-parity.result == 'success' &&
+      needs.asan-build.result == 'success' && needs.static-launcher.result == 'success')
+      || (needs.ci_change_scope.outputs.rust == 'false' &&
+      needs.rustdoc.result == 'skipped' &&
+      needs.reference-evaluator-release.result == 'skipped' &&
+      needs.materialize-conformance-bundles.result == 'skipped' &&
+      needs.audit.result == 'skipped' && needs.ledger-windows.result == 'skipped' &&
+      needs.docker-build.result == 'skipped' &&
+      needs.world-client-wasm.result == 'skipped' &&
+      needs.world-client-browser-parity.result == 'skipped' &&
+      needs.asan-build.result == 'skipped' && needs.static-launcher.result == 'skipped'))
+      && github.event_name == 'pull_request' &&
+      needs.ci_change_scope.outputs.rust == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/mutation.yml
@@ -1739,6 +2066,8 @@ jobs:
         run: bash scripts/test-check-pinned-dependencies.sh
       - name: Test CI workflow policy
         run: python scripts/test_ci_workflow_policy.py
+      - name: Test the affected-package resolver
+        run: python scripts/test_affected_packages.py
       - name: Test mutation workflow policy
         run: python scripts/test_mutation_workflow_policy.py
       - name: Test deploy workflow policy
@@ -1868,12 +2197,83 @@ jobs:
       - name: Test Windows shim coverage exclusions
         run: python scripts/test_owner_bridge_windows_cov_ignore.py
 
-  # Main-only reports keep running only after every normal check, including
-  # cargo-crap, which standard-gate no longer covers.
+  # Main-only reports keep running only after every normal check passes the
+  # standard pass rule, and after cargo-crap, which that rule does not cover.
   modules-structure:
     name: modules-structure (reports only)
-    needs: [standard-gate, cargo-crap]
-    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' && needs.cargo-crap.result == 'success' }}
+    needs: &main-report-needs
+      - ci_change_scope
+      - trunk-pr
+      - pinned-dependencies
+      - source-policies
+      - owner-bridge-policies
+      - conformance-fixtures
+      - conformance-non-linux
+      - plugin-component-fixtures
+      - third-party-notices
+      - fmt
+      - feature-matrix
+      - test
+      - test-shards
+      - clippy
+      - coverage
+      - codeql
+      - rustdoc
+      - reference-evaluator-release
+      - materialize-conformance-bundles
+      - audit
+      - ledger-windows
+      - docker-build
+      - world-client-wasm
+      - world-client-browser-parity
+      - asan-build
+      - static-launcher
+      - cargo-crap
+    if: &main-report-if >-
+      ${{ !cancelled() && github.event_name != 'pull_request' &&
+      needs.ci_change_scope.result == 'success' &&
+      needs.conformance-fixtures.result == 'success' &&
+      needs.conformance-non-linux.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.trunk-pr.result == 'success') ||
+      (github.event_name != 'pull_request' && needs.trunk-pr.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust == 'true' &&
+      needs.pinned-dependencies.result == 'success' &&
+      needs.source-policies.result == 'success' &&
+      needs.owner-bridge-policies.result == 'success' &&
+      needs.plugin-component-fixtures.result == 'success' &&
+      needs.third-party-notices.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust != 'true' &&
+      needs.pinned-dependencies.result == 'skipped' &&
+      needs.source-policies.result == 'skipped' &&
+      needs.owner-bridge-policies.result == 'skipped' &&
+      needs.plugin-component-fixtures.result == 'skipped' &&
+      needs.third-party-notices.result == 'skipped')) &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.fmt.result == 'success' &&
+      needs.feature-matrix.result == 'success' && needs.test.result == 'success' &&
+      needs.test-shards.result == 'success' && needs.clippy.result == 'success' &&
+      needs.coverage.result == 'success') ||
+      (needs.ci_change_scope.outputs.rust == 'false' && needs.fmt.result == 'skipped' &&
+      needs.feature-matrix.result == 'skipped' && needs.test.result == 'skipped' &&
+      needs.test-shards.result == 'skipped' && needs.clippy.result == 'skipped' &&
+      needs.coverage.result == 'skipped')) && needs.codeql.result == 'success' &&
+      ((needs.ci_change_scope.outputs.rust != 'false' && needs.rustdoc.result == 'success'
+      && needs.reference-evaluator-release.result == 'success' &&
+      needs.materialize-conformance-bundles.result == 'success' &&
+      needs.audit.result == 'success' && needs.ledger-windows.result == 'success' &&
+      needs.docker-build.result == 'success' &&
+      needs.world-client-wasm.result == 'success' &&
+      needs.world-client-browser-parity.result == 'success' &&
+      needs.asan-build.result == 'success' && needs.static-launcher.result == 'success')
+      || (needs.ci_change_scope.outputs.rust == 'false' &&
+      needs.rustdoc.result == 'skipped' &&
+      needs.reference-evaluator-release.result == 'skipped' &&
+      needs.materialize-conformance-bundles.result == 'skipped' &&
+      needs.audit.result == 'skipped' && needs.ledger-windows.result == 'skipped' &&
+      needs.docker-build.result == 'skipped' &&
+      needs.world-client-wasm.result == 'skipped' &&
+      needs.world-client-browser-parity.result == 'skipped' &&
+      needs.asan-build.result == 'skipped' && needs.static-launcher.result == 'skipped'))
+      && needs.cargo-crap.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1910,8 +2310,8 @@ jobs:
 
   depgraph:
     name: depgraph
-    needs: [standard-gate, cargo-crap]
-    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' && needs.cargo-crap.result == 'success' }}
+    needs: *main-report-needs
+    if: *main-report-if
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1985,7 +2385,8 @@ jobs:
           done
 
           # cargo-crap waits for the native Windows lane, so it is required
-          # here rather than in standard-gate, which mutation and ASan follow.
+          # here rather than in the standard pass rule that mutation and ASan
+          # follow.
           expected_cargo_crap=success
           if [[ "${RUST_SCOPE_RESULT}" = false ]]; then
             expected_cargo_crap=skipped
