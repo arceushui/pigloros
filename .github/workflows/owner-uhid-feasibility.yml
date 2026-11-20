@@ -1,0 +1,35 @@
+# ADR-110 E20 UG1 (Redmine #1474): one recorded hosted run showing that a
+# virtual FIDO device made through uhid gets a hidraw node whose sysfs
+# report_descriptor names usage page 0xF1D0, and that the runner user can open
+# it after the sudo hand-over the Linux owner U-tier will use. Evidence, not a
+# merge gate.
+name: owner-uhid-feasibility
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/owner-uhid-feasibility.yml
+      - scripts/owner_uhid_feasibility.py
+      - scripts/test_owner_uhid_feasibility.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ug1:
+    name: UG1 hosted uhid feasibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the UG1 script
+        run: python3 scripts/test_owner_uhid_feasibility.py
+      - name: Load uhid
+        run: |
+          sudo modprobe uhid
+          ls -l /dev/uhid
+      - name: Create a virtual FIDO device and open its hidraw node as the runner user
+        run: sudo --preserve-env=SUDO_UID python3 scripts/owner_uhid_feasibility.py
