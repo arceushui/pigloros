@@ -973,6 +973,7 @@ esac
         self.assertEqual(result.returncode, 5)
         self.assertIn("HTTP 502", result.stderr)
         self.assertEqual(self.gh_calls(), [self.TIP_CALL])
+        self.log.unlink()
         self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD)))
         environment = self.environment(None)
         del environment["GITHUB_SHA"]
@@ -980,7 +981,7 @@ esac
                                 capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GITHUB_SHA", result.stderr)
-        self.assertFalse(any("delete-asset" in call for call in self.gh_calls()))
+        self.assertEqual(self.gh_calls(), [])
 
     def test_prune_does_nothing_for_a_rerun_of_an_older_commit(self):
         self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD)),
