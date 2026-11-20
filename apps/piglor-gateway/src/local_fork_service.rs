@@ -1650,6 +1650,48 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-136 §4a and acceptance test 2 at the socket: a Fork naming the
+    /// recorded Erasure Host Timeline as its parent is answered code 4, the
+    /// answer of a parent the store does not hold, before any FAC1 runs. It
+    /// writes nothing, and its retry answers the same bytes.
+    #[tokio::test]
+    async fn listener_refuses_the_erasure_host_timeline_as_a_fork_parent() -> TestResult {
+        let (world, _) = provisioned_world(&[])?;
+        let identity = pos_core::Hash::from_bytes([0x5e; 32]);
+        pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
+            &mut SqliteStore::open(world.path()?)?,
+            identity,
+        )?;
+        let erasure_host = pos_core::local_erasure_host_timeline_v1(
+            ErasureReferenceV1::from_digest(*identity.as_bytes()),
+        )?;
+        open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: world.path()?.to_owned(),
+            },
+            GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?
+        .command_sender()?
+        .open_root_timeline(erasure_host, "erasure host")?;
+        let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
+        assert_eq!(
+            gateway.host_timelines(),
+            crate::host_timelines::HostTimelinesV1::new(Some(erasure_host))
+        );
+        assert_eq!(
+            &request(&world.socket, &bind_payload(40), false)?[..10],
+            &BIND_OK
+        );
+        let before = graph_rows(&world)?;
+        let payload = fork_payload(41, erasure_host)?;
+        assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
+        assert_eq!(graph_rows(&world)?, before);
+        assert_eq!(request(&world.socket, &payload, false)?, rejected(4));
+        stop(&world, gateway, listener).await?;
+        Ok(())
+    }
+
     fn assert_single_host_connection_structure() {
         // Everything before the unit-test module, including test-only
         // production helpers such as `map_journal_for_test`, is scanned.
