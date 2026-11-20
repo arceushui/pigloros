@@ -360,11 +360,11 @@ def main() -> None:
     for fragment in (
         "python scripts/check_isolated_test_runner_policy.py",
         "python scripts/test_check_isolated_test_runner_policy.py",
-        "cargo nextest run --workspace --all-features --locked",
+        'cargo nextest run "${packages[@]}" --all-features --locked',
         "--run-ignored all --no-fail-fast",
         '--partition "slice:${SHARD}/3"',
         "assert-no-ignored-in-test-summary.sh --partitioned=3",
-        "cargo test --workspace --all-features --locked --doc -- --include-ignored",
+        'cargo test "${packages[@]}" --all-features --locked --doc -- --include-ignored',
         "cargo llvm-cov nextest --workspace --all-features --locked",
         "--user-config-file none --ignore-default-filter",
         "name: cargo test with ASan",

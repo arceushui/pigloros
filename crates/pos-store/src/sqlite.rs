@@ -10181,10 +10181,9 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
 
     fn commit_local_owner_effect(
         &mut self,
-        effect: pos_core::LocalOwnerEffectV1,
-        elo1: &[u8],
+        prepared: pos_core::PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        self.local_erasure_commit_owner_effect(effect, elo1)
+        self.local_erasure_commit_owner_effect(&prepared)
     }
 
     fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
