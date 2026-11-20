@@ -65,6 +65,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/local_erasure_composition/tests.rs",
     "src/erasure/tests.rs",
     "src/mode_profile/tests.rs",
+    "src/community/memory_domain/tests.rs",
 )
 EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS = (
     "src/adapter/native_tests.rs",
