@@ -440,7 +440,7 @@ impl CommunityLifecycleAuthorityV1 {
                 let now = reservation.sampled_at().as_micros();
                 record.issued_at <= now && now < record.expires_at
             })
-            .and_then(|(verified, reservation)| self.call(request, &verified, &reservation))
+            .and_then(|(verified, reservation)| self.call(request, &verified, reservation))
             .ok_or(Error::EvidenceUnavailable)
     }
 
@@ -449,7 +449,7 @@ impl CommunityLifecycleAuthorityV1 {
         &self,
         request: CommunityAdministrativeRequestV1,
         verified: &VerifiedAuthenticatedPrincipalEvidenceV1,
-        reservation: &TrustedClockReservationV1,
+        reservation: TrustedClockReservationV1,
     ) -> Option<CommunityAuthorityCallV1> {
         principal_digest_v1(&verified.evidence().record().principal)
             .ok()
@@ -464,11 +464,36 @@ impl CommunityLifecycleAuthorityV1 {
                             .min(authenticated.expires_at()),
                         authenticated,
                         actor_entity_id,
-                        reservation_id: reservation.reservation_seq(),
-                        at_time: reservation.sampled_at(),
+                        reservation,
                     }
                 })
             })
+    }
+
+    /// The final writer's decision-bound check (A5.4; owner decision on
+    /// #560, 2026-11-20, item 1), which consumes the call.
+    ///
+    /// Under the ADR-112 release guard on `domain`'s own trusted clock, the
+    /// writer's time is the call's sample `t_r` plus the monotonic time
+    /// elapsed since the guard start, so the operation keeps its one wall
+    /// sample (G1). The writer refuses at or after the call's decision bound.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for a call another authority issued, a
+    /// domain other than the installed one, a guard that cannot open, a
+    /// monotonic rollback, and a writer time at or after the bound (A5.5).
+    #[cfg(target_os = "linux")]
+    pub(super) fn check_writer_bound<D: CommunityStoreDomainV1>(
+        &mut self,
+        call: CommunityAuthorityCallV1,
+        domain: &mut D,
+    ) -> Result<(), Error> {
+        if call.catalogue_digest != self.catalogue_digest
+            || domain.store_incarnation() != self.store_incarnation
+        {
+            return Err(Error::EvidenceUnavailable);
+        }
+        domain.check_writer_bound(call.reservation, self.mono.as_mut(), call.decision_bound)
     }
 
     /// Evaluate the call's administrative request (A5.1) against the chain
@@ -640,7 +665,7 @@ impl CommunityLifecycleAuthorityV1 {
                     action: shape.action.to_owned(),
                     purpose: PURPOSE.to_owned(),
                     audience: shape.audience.to_owned(),
-                    at_time: call.at_time,
+                    at_time: call.at_time(),
                     authority_timeline: leaf.issuance_timeline(),
                     at_position: persisted.head_position(),
                     consent_timeline: None,
@@ -702,8 +727,7 @@ pub struct CommunityAuthorityCallV1 {
     request: CommunityAdministrativeRequestV1,
     authenticated: AuthenticatedPrincipalResultV1,
     actor_entity_id: EntityId,
-    reservation_id: u64,
-    at_time: WallTime,
+    reservation: TrustedClockReservationV1,
     decision_bound: WallTime,
 }
 
@@ -718,13 +742,13 @@ impl CommunityAuthorityCallV1 {
     /// reservation, the CAU1 `clock_bound` `reservation_id` (G1).
     #[must_use]
     pub const fn reservation_id(&self) -> u64 {
-        self.reservation_id
+        self.reservation.reservation_seq()
     }
 
     /// The trusted-clock reservation sample `t_r` of this call.
     #[must_use]
     pub const fn at_time(&self) -> WallTime {
-        self.at_time
+        self.reservation.sampled_at()
     }
 
     /// The credential's expiry (R6.2(3)(iii)).

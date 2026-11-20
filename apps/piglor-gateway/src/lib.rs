@@ -12,8 +12,6 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod action_admission_tests;
 pub mod authorization;
-#[cfg(target_os = "linux")]
-pub mod deployment_trust;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
@@ -34,6 +32,14 @@ pub mod local_erasure_composition;
 pub mod local_erasure_composition;
 #[cfg(target_os = "linux")]
 pub mod local_erasure_provision;
+// Test-only. The Local erasure signing fixtures under the loader's
+// `tests/support`, shared with the loader and the key-less root tests; the
+// items are `pub` so every test that includes them may use a subset.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../../crates/pos-local-erasure-loader/tests/support/signing.rs"]
+pub mod local_erasure_signing_fixture;
 #[cfg(target_os = "linux")]
 pub mod local_fork_authentication;
 #[cfg(target_os = "linux")]
@@ -4835,7 +4841,7 @@ mod tests {
         let gateway = memory_gw();
         for host_timeline in [
             local_principal::local_principal_consent_timeline(),
-            local_principal::local_principal_authority_timeline(),
+            pos_local_erasure_loader::local_principal::local_principal_authority_timeline(),
         ] {
             assert!(matches!(
                 gateway

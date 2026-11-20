@@ -33,9 +33,22 @@ pub fn community_catalogue_owner_reference_v1(
     timeline: TimelineId,
     generation: [u8; 16],
 ) -> Result<Hash> {
-    OwnerIdV1::from_borrowed(&catalogue_owner_text(timeline, generation))
+    community_catalogue_owner_v1(timeline, generation)
         .map(|owner| ArtifactRegistrationV1::owner_reference(&owner))
-        .map_err(owner_error)
+}
+
+/// The generation's artifact-catalogue owner `community-artifact:<T32>:<G32>`
+/// (ADR-128 §1, §3), the owner of every community ARD1 catalogue row of that
+/// generation.
+///
+/// # Errors
+/// Returns `InvalidBinding` if the owner text is not a valid `OwnerIdV1`.
+/// The text is always 84 ASCII bytes, so this does not occur for any T/G.
+pub fn community_catalogue_owner_v1(
+    timeline: TimelineId,
+    generation: [u8; 16],
+) -> Result<OwnerIdV1> {
+    OwnerIdV1::from_borrowed(&catalogue_owner_text(timeline, generation)).map_err(owner_error)
 }
 
 /// Untrusted original COB1 fields; the catalogue-owner spelling is derived.
