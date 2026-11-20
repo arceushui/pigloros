@@ -104,6 +104,9 @@ def find_fido_hidraw(sysfs: Path, before: set[str]) -> str | None:
 
 def open_as(uid: int, gid: int, node: str) -> int:
     """Fork, drop to `uid`/`gid`, open `node` read-write; return the exit code."""
+    # Flush first so the child does not repeat the parent's buffered lines.
+    sys.stdout.flush()
+    sys.stderr.flush()
     pid = os.fork()
     if pid == 0:
         code = 1
