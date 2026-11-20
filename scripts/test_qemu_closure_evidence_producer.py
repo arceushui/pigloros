@@ -743,7 +743,7 @@ esac
             "key convert-secret-to-public",
             f"stdin {self.THROWAWAY_SECRET}",
             "config show trusted-public-keys",
-            f"path-info --json {self.SAMPLE}",
+            f"path-info --json --json-format 1 {self.SAMPLE}",
             f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {self.SAMPLE}",
             "key-mode 600",
             f"key-content {self.THROWAWAY_SECRET}",
@@ -778,6 +778,15 @@ esac
         result = self.selftest(sample_ca='"fixed:r:sha256:0123"')
         self.assertEqual(result.returncode, 1)
         self.assertIn("is content-addressed", result.stderr)
+        self.assertFalse(any(call.startswith("copy") for call in self.calls()))
+
+    def test_selftest_stops_when_path_info_fails(self):
+        self.stub_nix(verify_status=1, import_status=1)
+        stub = (self.bin / "nix").read_text().replace('"path-info --json")', '"path-info --json") exit 4 ;;\n"unused")')
+        (self.bin / "nix").write_text(stub)
+        result = self.run_cache("selftest", str(self.cache))
+        self.assertEqual(result.returncode, 4)
+        self.assertNotIn("content-addressed", result.stderr)
         self.assertFalse(any(call.startswith("copy") for call in self.calls()))
 
     def test_selftest_fails_when_verification_fails_for_another_reason(self):

@@ -41,7 +41,7 @@ PRODUCER_SHA256 = {
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "6ceb5c5e07c875e421beed6d58da4a157c67b7476c9ac799c5284c93f2f94f8d",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
-    "scripts/qemu-kernel-cache.sh": "c73ad6c3477794eefcfe4cdd146bde9a98554b6f1b98747b7205d160ef2ba802",
+    "scripts/qemu-kernel-cache.sh": "86354a927b9c2a9acecf885d1e2152aa9c80b2e1f1e6f17d7dc27d6ba35a1d7b",
     "scripts/qemu-closure-evidence.sh": "7f9dc68a4fb67e20e21f8bd40cf36b4c0c0335fa4e0c6d69416194941f73c091",
     "scripts/check_qemu_closure_evidence.py": "77a82f944d01c5514f16dfd180899e32a83243005f7dee96f063abf3d12700ac",
     "deploy/nixos/flake.nix": "cfd9e71e22b18412dab4e3bc4d8a10ff702dcab3284f41c542a83947bce85e69",

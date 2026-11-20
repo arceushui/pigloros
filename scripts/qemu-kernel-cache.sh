@@ -9,7 +9,8 @@
 #   verify ARCH DIR  require DIR to hold every output's closure, intact and
 #                    signed by a key in trusted-public-keys
 #   import ARCH DIR  copy every kernel output from DIR into the store
-#   selftest DIR     (pull requests) run the same signing, verifying and import
+#   selftest DIR     (pull requests; needs jq, which the hosted Ubuntu runners
+#                    ship) run the same signing, verifying and import
 #                    code on a throwaway input-addressed path with a throwaway
 #                    key. It proves the committed public key is trusted, not
 #                    that the environment's secret matches it; export checks
@@ -35,6 +36,8 @@
 # restore it by the exact key. The key name is part of the cache key, so a
 # rotated key never restores entries signed by the old one.
 set -euo pipefail
+# A failure inside $(...) stops the script too, as it does outside.
+shopt -s inherit_errexit
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flake="${root}/deploy/nixos"
@@ -182,7 +185,7 @@ import_cache() {
 # signature. A content-addressed path (nix store add-file, builtins.toFile)
 # needs no signature at all and would prove nothing.
 selftest_sample() {
-  local nonce path
+  local nonce path info
   nonce="$(date +%s%N)"
   path="$(nix build --impure --no-link --print-out-paths --expr "derivation {
     name = \"qemu-kernel-cache-selftest-${nonce}\";
@@ -190,7 +193,8 @@ selftest_sample() {
     builder = \"/bin/sh\";
     args = [ \"-c\" \"echo ${nonce} > \$out\" ];
   }")"
-  if ! nix path-info --json "${path}" | jq -e '[.[]] | length == 1 and all(.ca == null)' >/dev/null; then
+  info="$(nix path-info --json --json-format 1 "${path}")"
+  if ! jq -e '[.[]] | length == 1 and all(.ca == null)' >/dev/null <<<"${info}"; then
     printf 'the self-test sample %s is content-addressed\n' "${path}" >&2
     exit 1
   fi
