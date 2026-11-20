@@ -3267,11 +3267,12 @@ where
     )?;
     store.execute_fork_admission_command(&session, &policy, &principal)?;
     let owner = EntityId::new();
-    let owned = store.create_timeline_with_meta(TimelineMeta::root_owned("owned-parent", owner))?;
-    let unowned = store.create_timeline("unowned-parent")?;
+    let owned_parent =
+        store.create_timeline_with_meta(TimelineMeta::root_owned("owned-parent", owner))?;
+    let unowned_parent = store.create_timeline("unowned-parent")?;
     for (operation, parent, expected) in [
-        ([64; 32], owned.id(), Some(owner)),
-        ([65; 32], unowned.id(), None),
+        ([64; 32], owned_parent.id(), Some(owner)),
+        ([65; 32], unowned_parent.id(), None),
     ] {
         let command = fork_command(
             store,
