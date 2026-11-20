@@ -58,7 +58,7 @@ fn builders_render_exactly_the_p4_names_and_expose_their_identity() -> TestResul
 }
 
 #[test]
-fn builders_refuse_owners_outside_the_hex32_grammar_and_epoch_zero() {
+fn builders_refuse_owners_outside_the_hex32_grammar_the_nil_owner_and_epoch_zero() {
     let refused = [
         HEX.to_owned(),
         format!("Subject:{HEX}"),
@@ -69,6 +69,7 @@ fn builders_refuse_owners_outside_the_hex32_grammar_and_epoch_zero() {
         "subject:0123456789abcde/0123456789abcdef".to_owned(),
         "subject:0123456789abcde:0123456789abcdef".to_owned(),
         "subject:0123456789abcde`0123456789abcdef".to_owned(),
+        "subject:00000000000000000000000000000000".to_owned(),
     ];
     for owner in refused {
         assert_eq!(
@@ -95,6 +96,16 @@ fn parsing_inverts_rendering_for_both_kinds_and_slots() -> TestResult {
             );
         }
     }
+    let nil = "binding.00000000000000000000000000000000.1.scb1";
+    let (parsed, slot) = SubjectKeyArtifactName::parse(nil.as_bytes()).ok_or("nil name")?;
+    assert_eq!(
+        (parsed.canonical(), parsed.owner_id(), slot),
+        (
+            nil.to_owned(),
+            "subject:00000000000000000000000000000000".to_owned(),
+            Canonical
+        )
+    );
     Ok(())
 }
 

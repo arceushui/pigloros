@@ -83,11 +83,14 @@ impl SubjectKeyArtifactName {
     /// Build the reserved name for an owner id and a positive epoch.
     ///
     /// Returns `None` unless `owner_id` is `subject:` followed by exactly 32
-    /// lowercase hex digits and `epoch` is not zero.
+    /// lowercase hex digits of a non-nil subject and `epoch` is not zero.
+    /// Parsing still classifies a nil owner's name as reserved, so a stray
+    /// one is refused rather than ignored.
     #[must_use]
     pub fn new(kind: SubjectKeyArtifactKind, owner_id: &str, epoch: u64) -> Option<Self> {
         owner_id
             .strip_prefix(OWNER_PREFIX)
+            .filter(|owner_hex| owner_hex.bytes().any(|digit| digit != b'0'))
             .and_then(|owner_hex| Self::checked(kind, owner_hex, epoch))
     }
 
