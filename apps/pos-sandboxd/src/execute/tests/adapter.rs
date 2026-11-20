@@ -635,6 +635,30 @@ fn reservation_and_channel_refusals_keep_their_launch_failure() {
             ExecuteError::StdioChannel(crate::StdioChannelError::NotNullDevice),
             Some(LaunchFailure::StdioChannelFailed),
         ),
+        (
+            ExecuteError::Recheck(crate::ImageActivationError::Transport),
+            Some(LaunchFailure::PreStartRecheckFailed),
+        ),
+        (
+            ExecuteError::RootIdentity,
+            Some(LaunchFailure::PreStartRecheckFailed),
+        ),
+        (
+            ExecuteError::Cgroup(Box::new(
+                crate::SystemdTransientUnitTransportError::UnitRef(zbus::Error::IncorrectType),
+            )),
+            Some(LaunchFailure::UnitRefFailed),
+        ),
+        (
+            ExecuteError::Cgroup(Box::new(
+                crate::SystemdTransientUnitTransportError::UnitUnref(zbus::Error::IncorrectType),
+            )),
+            None,
+        ),
+        (
+            ExecuteError::Cgroup(Box::new(std::io::Error::other("not a transport error"))),
+            None,
+        ),
         (ExecuteError::OutputAlreadyReserved, None),
         (ExecuteError::HostTimeout, None),
     ];

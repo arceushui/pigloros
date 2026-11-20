@@ -402,6 +402,14 @@ impl UnitHost for FakeHost {
         }
     }
 
+    /// The fake's failed start job.
+    fn start_failure(_error: &Injected) -> crate::StartFailure {
+        crate::StartFailure {
+            job: Some(pos_reference::sandbox_provider_protocol::StartJobResult::Failed),
+            readback: None,
+        }
+    }
+
     fn start(
         &self,
         unit_name: TransientServiceUnitName,
@@ -1254,18 +1262,68 @@ async fn faulted(
 #[tokio::test]
 async fn a_unit_that_fails_to_start_is_killed() -> TestResult {
     let (scenario, failed) = faulted(&[Fault::Start]).await?;
-    assert!(matches!(failed.error, ExecuteError::Unit(_)));
+    // The requested properties and the host's observation travel with the
+    // failure (TME1 `start-job-result`, RQE1 status 3).
+    let start = failed
+        .error
+        .unverified_start()
+        .ok_or("no unverified start")?;
+    assert!(!start.requested().is_empty());
+    assert_eq!(
+        start.observed().job,
+        Some(pos_reference::sandbox_provider_protocol::StartJobResult::Failed)
+    );
+    assert!(start.observed().readback.is_none());
+    assert!(std::error::Error::source(start).is_some());
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(scenario.entries().ends_with(&names(&["kill", "stop"])));
     assert_eq!(scenario.cgroup_kills(), 0);
     assert!(failed.cgroup.is_none());
+    // Its terminal records: progress 1, the failed job, and an RQE1 of the
+    // submitted properties whose readback could not be obtained (code 10).
+    let ended = crate::EndedAttempt::for_test(
+        [0x5a; 16],
+        crate::test_fixtures::attempt_admission([0x6b; 32]),
+        None,
+        crate::AttemptProgress::Failed {
+            error: failed.error,
+            unit: failed.unit,
+            started: failed.started,
+            evidence: None,
+        },
+        (Ok(None), Some(10)),
+    );
+    let records = ended.records()?;
+    let fields = records.termination().fields();
+    assert_eq!(
+        fields.progress,
+        pos_reference::sandbox_provider_protocol::AttemptProgressCode::StartedNotReleased
+    );
+    assert_eq!(
+        fields.start_job,
+        Some(pos_reference::sandbox_provider_protocol::StartJobResult::Failed)
+    );
+    let requested = records.requested().fields();
+    assert_eq!(
+        requested.status,
+        pos_reference::sandbox_provider_protocol::RequestedConfigurationStatus::ReadbackUnavailable
+    );
+    assert!(requested
+        .requested
+        .as_ref()
+        .is_some_and(|requested| !requested.is_empty()));
+    assert!(requested.readback.is_none());
+    assert_eq!(
+        records.classification().code(),
+        Some(pos_reference::sandbox_provider_protocol::TerminalCode::ProtocolFailure)
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn an_unacknowledged_kill_after_a_failed_start_leaves_the_unit_unknown() -> TestResult {
     let (_scenario, failed) = faulted(&[Fault::Start, Fault::Kill]).await?;
-    assert!(matches!(failed.error, ExecuteError::Unit(_)));
+    assert!(failed.error.unverified_start().is_some());
     assert_eq!(failed.unit, UnitState::Unknown);
     Ok(())
 }
@@ -1336,7 +1394,13 @@ async fn timed_out(
 #[tokio::test]
 async fn a_start_that_never_answers_is_cut_off_and_the_unit_killed() -> TestResult {
     let (scenario, failed) = timed_out(&[Fault::HangStart], false).await?;
-    assert!(matches!(failed.error, ExecuteError::HostTimeout));
+    // No start-job result was observed: missing evidence (owner reading G1,
+    // Redmine #443 journal 22723).
+    let start = failed
+        .error
+        .unverified_start()
+        .ok_or("no unverified start")?;
+    assert_eq!(start.observed(), &crate::StartFailure::default());
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(failed.started.is_none());
     assert!(scenario
