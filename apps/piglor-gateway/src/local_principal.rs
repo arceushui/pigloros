@@ -1531,7 +1531,7 @@ fn sorted_set<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{
         body::Body,
@@ -3626,8 +3626,9 @@ mod tests {
     }
 
     /// Record an erasure store identity in the store at `path` and open its
-    /// Erasure Host Timeline, as `provision-local-erasure` does.
-    fn provision_erasure_host_timeline(path: &str) -> TestResult<TimelineId> {
+    /// Erasure Host Timeline, as `provision-local-erasure` does; shared with
+    /// the Fork-admission listener tests.
+    pub(crate) fn provision_erasure_host_timeline(path: &str) -> TestResult<TimelineId> {
         let identity = Hash::from_bytes([0x5e; 32]);
         pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
             &mut SqliteStore::open(path)?,

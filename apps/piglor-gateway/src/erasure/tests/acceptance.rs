@@ -99,8 +99,8 @@ fn assert_monotonic(observed: &[Value]) -> TestResult {
             .ok_or("an unknown replay claim")?;
         if let Some((earlier_generation, earlier_claim)) = previous {
             assert!(earlier_generation <= generation, "{observed:?}");
-            // `weakened_to` keeps the earlier claim only when the later one
-            // is stronger.
+            // `weakened_to` returns the later claim only when it is not
+            // stronger than the earlier one, and the earlier claim otherwise.
             assert_eq!(earlier_claim.weakened_to(claim), claim, "{observed:?}");
         }
         previous = Some((generation, claim));
@@ -347,13 +347,23 @@ async fn every_actors_used_quota_holds_across_a_restart() -> TestResult {
     }
     let world = served.stop(driver).await?;
     let (served, driver) = Served::over(world, limits)?;
-    for (subject, receipt) in subjects.into_iter().zip(&receipts) {
-        let read = served
-            .read(subject, &erasure_id(subject, "erasure-1")?.to_string())
+    // Each recovered request reads at its first receipt again, and the
+    // driver is then stopped, so nothing advances under the requests below.
+    for subject in subjects {
+        served
+            .receipted(subject, &erasure_id(subject, "erasure-1")?.to_string())
             .await?;
-        assert_eq!(read.status, StatusCode::OK);
-        let state = read.json()?["state"].clone();
-        assert!(state == "partial-failure" || state == "complete", "{state}");
+    }
+    driver.stop().await;
+    // Why `409` and never `429`: `local_subject_admission` answers
+    // `Concurrent` only for a request that is pre-terminal or has an active
+    // attempt. Each request is past its first receipt, and its closure (the
+    // store target's cache signal and replica) has no transient negative
+    // without a held `SQLite` reader, so no retry attempt is ever admitted
+    // and none is active. The scan then counts one request against
+    // `q_subject = 1`, which is `QuotaExhausted`. The exact retry is
+    // answered before that check.
+    for (subject, receipt) in subjects.into_iter().zip(&receipts) {
         let retried = served
             .request(subject, "erasure-1", "private-subject-data")
             .await?;
@@ -373,7 +383,7 @@ async fn every_actors_used_quota_holds_across_a_restart() -> TestResult {
             )
         );
     }
-    served.stop(driver).await?;
+    served.gateway.shutdown().await?;
     Ok(())
 }
 
