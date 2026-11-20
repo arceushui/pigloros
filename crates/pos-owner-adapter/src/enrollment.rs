@@ -14,16 +14,27 @@
 //!
 //! Errors use the bridge's three owner kinds: `Wrap` for randomness, sealing
 //! and authenticated opening; `Registry` for a refused identity, inventory,
-//! ledger or epoch; `DurableWrite` for a failed P3 step 4 or 5 write. A commit
-//! that fails after its P3a staging record leaves that record and whatever it
-//! staged for ADR-137 P5 recovery, which no artifact of this crate performs.
+//! ledger or epoch; `DurableWrite` for a failed P3 step 4 or 5 write.
+//!
+//! A commit that fails after its P3a staging record leaves that record and
+//! whatever it staged (wrap, binding, SNL1 row) in place. ADR-137 P5 orphan
+//! recovery is the cleanup path for them; this crate does not yet run the
+//! immediate P5 deletion that P3 asks for after a definite failure, which
+//! awaits an owner decision.
+//!
+//! Known limitation: the pos-crypto key types take the root and the PRF
+//! output as by-value `[u8; 32]` arrays, so each passes through a stack
+//! temporary that is not wiped; the values that this crate owns are held in
+//! `Zeroizing` or in the wiping pos-crypto types.
 
 use pos_core::EntityId;
 use pos_crypto::subject_key::{
     subject_owner_id, SubjectKeyWrapParamsV1, SubjectKeyWrapV1, SubjectPrfOutputV1,
     SubjectRootKeyV1,
 };
-use pos_crypto::subject_nonce_ledger::{SubjectNonceLedgerRowV1, SubjectNonceLedgerV1};
+use pos_crypto::subject_nonce_ledger::{
+    SubjectNonceLedgerRowV1, SubjectNonceLedgerV1, SubjectStoreFileIdV1,
+};
 use pos_owner_bridge::encryptor_lock::linux::{
     SubjectEncryptorLock, SubjectKeyArtifactKind, SubjectKeyArtifactName,
     SubjectOwnerExclusiveGuard,
@@ -52,6 +63,12 @@ const RANDOM_BYTES: usize = 108;
 const WRAP: OwnerError = OwnerError::new(OwnerErrorKind::Wrap);
 const REGISTRY: OwnerError = OwnerError::new(OwnerErrorKind::Registry);
 const DURABLE_WRITE: OwnerError = OwnerError::new(OwnerErrorKind::DurableWrite);
+/// The store-file identity with the longest SNL1 encoding, so a step 2 dry
+/// run that fits proves the real step 5 row fits.
+const WIDEST_STORE_FILE_ID: SubjectStoreFileIdV1 = SubjectStoreFileIdV1::Linux {
+    device: u64::MAX,
+    inode: u64::MAX,
+};
 
 /// The in-memory root and its `SubjectKeyWrapV1`, never persisted before
 /// `commit`.
@@ -136,6 +153,7 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
         let mut buffer = [0_u8; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES];
         confirmed
             .binding()
+            // Unreachable: the bridge validated this binding when it built it.
             .ok()
             .filter(|binding| {
                 (
@@ -154,6 +172,7 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
                     context.epoch,
                 )
             })
+            // Unreachable error: a validated binding always fits 4,096 bytes.
             .and_then(|binding| encode_subject_credential_binding(&binding, &mut buffer).ok())
             .map(|length| buffer[..length].to_vec())
             .ok_or(REGISTRY)
@@ -161,6 +180,7 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
 
     fn stage(&self, kind: SubjectKeyArtifactKind, bytes: &[u8]) -> Result<(), OwnerError> {
         SubjectKeyArtifactName::new(kind, &self.context.owner_id, self.context.epoch)
+            // Unreachable: open() derived a non-nil owner and the epoch is at least 1.
             .ok_or(DURABLE_WRITE)
             .and_then(|name| {
                 self.lock
@@ -169,17 +189,14 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
             })
     }
 
-    /// P3 step 5: add the new row through one checked ledger replacement,
-    /// then read the replaced ledger back.
+    /// P3 step 5: re-read the ledger under the held lock, add the new row
+    /// through one checked ledger replacement, then read it back.
+    ///
+    /// The step 2 dry run already proved that the row fits; it can fail here
+    /// only if the ledger changed outside this process's lifetime lock.
     fn stage_ledger_row(&self, row: SubjectNonceLedgerRowV1) -> Result<(), OwnerError> {
         read_ledger(self.lock)
-            .and_then(|ledger| {
-                let mut rows: Vec<_> = ledger.rows().cloned().chain([row]).collect();
-                rows.sort_by(|left, right| {
-                    (&left.owner_id, left.epoch).cmp(&(&right.owner_id, right.epoch))
-                });
-                SubjectNonceLedgerV1::new(rows).ok()
-            })
+            .and_then(|ledger| with_row(&ledger, row))
             .and_then(|ledger| {
                 self.lock
                     .replace_nonce_ledger_bytes(ledger.as_bytes())
@@ -293,6 +310,10 @@ struct Sealing<'a> {
     prf_input: PrfInput,
 }
 
+/// Draw the root, salts and nonce and seal the wrap in memory.
+///
+/// The root and the PRF output reach pos-crypto as by-value `[u8; 32]`
+/// temporaries, which are not wiped (the module's known limitation).
 fn seal(
     random: &mut impl SecureRandom,
     sealing: Sealing<'_>,
@@ -317,11 +338,16 @@ fn seal(
             let fingerprint = fingerprint(&root);
             (EnrollmentCandidate { root, wrap }, fingerprint)
         })
+        // Unreachable: the subject is non-nil, the epoch at least 1, the RP ID
+        // fixed and canonical, and the bridge's verifier bounds the credential ID
+        // to 1-1,024 bytes.
         .or(Err(WRAP))
 }
 
 /// ADR-110 §8 E4: authenticate and open the wrap under the confirmation PRF,
 /// and fingerprint the root that the open produced.
+///
+/// The PRF output reaches pos-crypto as a by-value `[u8; 32]` temporary.
 fn confirm(candidate: &EnrollmentCandidate, prf: &[u8; 32]) -> Result<RootFingerprint, OwnerError> {
     candidate
         .wrap
@@ -337,6 +363,10 @@ fn fingerprint(root: &SubjectRootKeyV1) -> RootFingerprint {
 
 /// ADR-137 P3 step 2: the smallest epoch strictly above every epoch the
 /// store, the artifact inventory and the SNL1 ledger name for the owner.
+///
+/// It also dry-runs P3 step 5: the ledger with this epoch's row added, using
+/// the widest store-file identity, must still be a valid SNL1. So a full
+/// ledger refuses with `Registry` before anything is staged.
 fn next_epoch(
     lock: &SubjectEncryptorLock,
     store: &mut impl EnrollmentStore,
@@ -346,7 +376,7 @@ fn next_epoch(
 ) -> Result<u64, OwnerError> {
     let registry = store.registry_epoch_ceiling(owner_id, subject)?;
     let ledger = read_ledger(lock).ok_or(REGISTRY)?;
-    let ledger = ledger
+    let rows = ledger
         .rows()
         .filter(|row| row.owner_id == owner_id)
         .map(|row| row.epoch)
@@ -354,9 +384,34 @@ fn next_epoch(
         .unwrap_or_default();
     registry
         .max(inventory.epoch_ceiling(owner_id))
-        .max(ledger)
+        .max(rows)
         .checked_add(1)
+        .filter(|epoch| {
+            let probe = SubjectNonceLedgerRowV1 {
+                owner_id: owner_id.to_owned(),
+                epoch: *epoch,
+                root_material_digest: [0; 32],
+                store_file_id: WIDEST_STORE_FILE_ID,
+                data_next: 1,
+                bootstrap_next: 1,
+            };
+            with_row(&ledger, probe).is_some()
+        })
         .ok_or(REGISTRY)
+}
+
+/// `ledger` with `row` inserted in SNL1 identity order, or `None` when the
+/// result is not a valid SNL1 (over 1 MiB, or a repeated identity).
+///
+/// Owner IDs have a fixed length and CBOR unsigned integers sort by value,
+/// so `(owner_id, epoch)` order is SNL1's identity-byte order.
+fn with_row(
+    ledger: &SubjectNonceLedgerV1,
+    row: SubjectNonceLedgerRowV1,
+) -> Option<SubjectNonceLedgerV1> {
+    let mut rows: Vec<_> = ledger.rows().cloned().chain([row]).collect();
+    rows.sort_by(|left, right| (&left.owner_id, left.epoch).cmp(&(&right.owner_id, right.epoch)));
+    SubjectNonceLedgerV1::new(rows).ok()
 }
 
 /// Read and strictly decode the SNL1 ledger, or `None`.

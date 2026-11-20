@@ -3,8 +3,9 @@
 //! open, so a wrong PRF, a tampered wrap and a tampered tag each fail.
 
 use pos_core::EntityId;
-use pos_crypto::subject_key::{SubjectKeyWrapV1, SubjectRootKeyV1};
+use pos_crypto::subject_key::{SubjectKeyWrapV1, SubjectPrfOutputV1, SubjectRootKeyV1};
 use pos_owner_bridge::fake::clock::FakeRandom;
+use pos_owner_bridge::{SecureRandom, UnavailableCode};
 use pos_owner_bridge_codec::PrfInput;
 use ulid::Ulid;
 
@@ -73,6 +74,42 @@ fn a_tampered_tag_or_wrap_field_fails_the_open() {
         let opened = tampered(offset).map(|candidate| confirm(&candidate, &PRF).err());
         assert_eq!(opened, Some(Some(WRAP)));
     }
+}
+
+/// A source that fills byte `i` of every draw with `i`.
+struct Counting;
+
+impl SecureRandom for Counting {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), UnavailableCode> {
+        out.iter_mut()
+            .zip(0_u8..)
+            .for_each(|(byte, value)| *byte = value);
+        Ok(())
+    }
+}
+
+#[test]
+fn one_draw_splits_into_root_wrap_salt_subkey_salt_and_nonce_in_order() {
+    let drawn: Vec<u8> = (0_u8..108).collect();
+    let checked = seal(&mut Counting, sealing(), &PRF)
+        .ok()
+        .map(|(candidate, _)| {
+            let params = candidate.wrap.params();
+            assert_eq!(params.wrap_salt.as_slice(), &drawn[32..64]);
+            assert_eq!(params.subkey_salt.as_slice(), &drawn[64..96]);
+            assert_eq!(params.wrap_nonce.as_slice(), &drawn[96..108]);
+            let expected = SubjectRootKeyV1::from_bytes(std::array::from_fn(|index| drawn[index]));
+            let opened = candidate
+                .wrap
+                .open(&SubjectPrfOutputV1::from_bytes(PRF))
+                .ok();
+            assert_eq!(
+                opened.map(|root| root.material_digest()),
+                Some(expected.material_digest())
+            );
+            assert_eq!(candidate.root.material_digest(), expected.material_digest());
+        });
+    assert!(checked.is_some());
 }
 
 #[test]

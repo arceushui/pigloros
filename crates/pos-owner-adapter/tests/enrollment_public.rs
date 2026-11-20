@@ -726,6 +726,62 @@ fn commit_refuses_an_inventory_or_ledger_that_became_unusable() -> TestResult {
     Ok(())
 }
 
+/// Rows of `OTHER` that fill the SNL1 ledger so closely to its 1 MiB bound
+/// that no further row fits.
+///
+/// Each row encodes to 105 bytes (an epoch of 5 bytes and the widest store
+/// file identity) after a 10-byte header: 9,986 rows take 1,048,540 bytes,
+/// leaving 36, below the 85 bytes of the smallest row `SUBJECT` can add.
+fn full_ledger() -> Vec<SubjectNonceLedgerRowV1> {
+    (0..9_986)
+        .map(|index| SubjectNonceLedgerRowV1 {
+            epoch: 65_536 + index,
+            store_file_id: SubjectStoreFileIdV1::Linux {
+                device: u64::MAX,
+                inode: u64::MAX,
+            },
+            data_next: 1,
+            bootstrap_next: 1,
+            ..row(OTHER, 1)
+        })
+        .collect()
+}
+
+#[test]
+fn a_ledger_without_room_for_the_row_refuses_opening() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.write_ledger(&full_ledger())?;
+    let store = VolatileEnrollmentStore::new(FILE);
+    assert_eq!(
+        fixture.open(SUBJECT, store, FakeRandom::seeded(5)).err(),
+        Some(REGISTRY)
+    );
+    Ok(())
+}
+
+#[test]
+fn commit_refuses_a_ledger_without_room_before_staging_anything() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut store = VolatileEnrollmentStore::new(FILE);
+    let mut adapter = fixture.open(SUBJECT, &mut store, FakeRandom::seeded(5))?;
+    let context = adapter.context().clone();
+    let full = full_ledger();
+    let mut port = Interposed {
+        port: &mut adapter,
+        committer: None,
+        before_commit: Box::new(|| {
+            assert!(fixture.write_ledger(&full).is_ok());
+        }),
+    };
+    assert_eq!(enroll(honest(), &context, &mut port)?, Err(REGISTRY));
+    drop(port);
+    drop(adapter);
+    assert!(staged(&store).is_empty());
+    assert!(fixture.names()?.is_empty());
+    assert_eq!(fixture.ledger_rows()?, full);
+    Ok(())
+}
+
 #[test]
 fn commit_refuses_the_candidate_and_binding_of_another_enrollment() -> TestResult {
     let fixture = Fixture::new()?;
