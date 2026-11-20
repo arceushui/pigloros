@@ -63,17 +63,19 @@ impl SubjectEncryptorLock {
     /// # Errors
     /// Returns `Unavailable(InterfaceUnavailable)` for any other owner
     /// spelling, while the owner's exclusive lock is held, or after a panic
-    /// inside the lock table. A refusal leaves no hold behind.
+    /// inside the lock table. A refusal leaves no hold behind, and the error
+    /// does not say which of these causes refused it.
     pub fn try_lock_subject_owner_shared(
         &self,
         owner_id: &str,
     ) -> Result<SubjectOwnerSharedGuard<'_>, BridgeError> {
         self.subject_owners.hold(owner_id, |holders| {
             admit(!holders.exclusive.contains(owner_id)).map(|()| {
-                *holders.shared.entry(owner_id.to_owned()).or_default() += 1;
+                let owner_id = owner_id.to_owned();
+                *holders.shared.entry(owner_id.clone()).or_default() += 1;
                 SubjectOwnerSharedGuard {
                     locks: &self.subject_owners,
-                    owner_id: owner_id.to_owned(),
+                    owner_id,
                 }
             })
         })
@@ -84,12 +86,17 @@ impl SubjectEncryptorLock {
     ///
     /// The owner is checked as for the shared lock. The lock is granted only
     /// when no shared or exclusive holder of this owner remains; it never
-    /// waits for one to drain (ADR-123 §6: every lock is nonblocking).
+    /// waits for one to drain (ADR-123 §6: every lock is nonblocking), and a
+    /// refused attempt does not fence out later shared holders. The caller
+    /// retries, as D2's `DestructionRetryLater` does. ADR-110 §1a gives the
+    /// ADR-091 owner locks to the one owner thread, so a shared hold ends with
+    /// its operation and cannot keep the exclusive lock away indefinitely.
     ///
     /// # Errors
     /// Returns `Unavailable(InterfaceUnavailable)` for any other owner
     /// spelling, while any holder of this owner remains, or after a panic
-    /// inside the lock table. A refusal leaves no hold behind.
+    /// inside the lock table. A refusal leaves no hold behind, and the error
+    /// does not say which of these causes refused it.
     pub fn try_lock_subject_owner_exclusive(
         &self,
         owner_id: &str,
@@ -97,10 +104,11 @@ impl SubjectEncryptorLock {
         self.subject_owners.hold(owner_id, |holders| {
             admit(!holders.exclusive.contains(owner_id) && !holders.shared.contains_key(owner_id))
                 .map(|()| {
-                    holders.exclusive.insert(owner_id.to_owned());
+                    let owner_id = owner_id.to_owned();
+                    holders.exclusive.insert(owner_id.clone());
                     SubjectOwnerExclusiveGuard {
                         locks: &self.subject_owners,
-                        owner_id: owner_id.to_owned(),
+                        owner_id,
                     }
                 })
         })
@@ -144,15 +152,12 @@ impl SubjectOwnerExclusiveGuard<'_> {
 impl Drop for SubjectOwnerSharedGuard<'_> {
     fn drop(&mut self) {
         self.locks.release(|holders| {
-            let remaining = holders
-                .shared
-                .get(&self.owner_id)
-                .map_or(0, |count| count - 1);
-            if remaining == 0 {
-                holders.shared.remove(&self.owner_id);
-            } else {
-                holders.shared.insert(self.owner_id.clone(), remaining);
-            }
+            holders.shared.retain(|owner_id, count| {
+                if *owner_id == self.owner_id {
+                    *count -= 1;
+                }
+                *count > 0
+            });
         });
     }
 }
