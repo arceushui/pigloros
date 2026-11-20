@@ -768,6 +768,18 @@ esac
         self.assertEqual(result.returncode, 1)
         self.assertIn("unexpectedly trusted", result.stderr)
 
+    def test_selftest_splits_the_trust_list_on_any_whitespace(self):
+        trusted = f"{self.NIXOS}\\t{self.PUBLIC}\\n{self.THROWAWAY_PUBLIC}"
+        self.stub_nix(verify_status=1, import_status=1)
+        stub = (self.bin / "nix").read_text()
+        old = '"config show") printf \'%s\\n\' '
+        self.assertIn(old, stub)
+        (self.bin / "nix").write_text(stub.replace(
+            old + f"'{self.NIXOS} {self.PUBLIC}'", f"\"config show\") printf '{trusted}\\n'", 1))
+        result = self.run_cache("selftest", str(self.cache))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("unexpectedly trusted", result.stderr)
+
     def test_selftest_fails_when_an_untrusted_signature_verifies(self):
         result = self.selftest(verify_status=0)
         self.assertEqual(result.returncode, 1)

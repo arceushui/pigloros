@@ -113,9 +113,18 @@ trusted_public_keys() {
   nix config show trusted-public-keys
 }
 
-# in_list WORD LIST: LIST, space-separated, contains WORD as a whole entry.
+# in_list WORD LIST: LIST, whitespace-separated, contains WORD as a whole
+# entry. read -d '' -a takes every line and splits without glob expansion;
+# it returns 1 at the end of input, which is not an error here.
 in_list() {
-  [[ " $2 " == *" $1 "* ]]
+  local entry entries
+  read -r -d '' -a entries <<<"$2" || true
+  for entry in "${entries[@]}"; do
+    if [[ ${entry} == "$1" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 require_trusted() {
@@ -202,17 +211,18 @@ selftest_sample() {
   info="$(nix path-info --json --json-format 1 "${path}")"
   # --argjson rejects empty or malformed output, which jq -e would pass.
   if ! jq -e -n --argjson info "${info}" '$info | [.[]] | length == 1 and all(.ca == null)' >/dev/null; then
-    printf 'the self-test sample %s is content-addressed\n' "${path}" >&2
+    printf 'the self-test sample %s is content-addressed or its path-info is unreadable\n' "${path}" >&2
     exit 1
   fi
   printf '%s\n' "${path}"
 }
 
 selftest() {
-  local dir=$1 secret public path entry found=false refused trusted
+  local dir=$1 secret public path entry entries found=false refused trusted
   # Read once, so both trust checks below judge the same, non-empty list.
   trusted="$(trusted_public_keys)"
-  for entry in ${trusted}; do
+  read -r -d '' -a entries <<<"${trusted}" || true
+  for entry in "${entries[@]}"; do
     if [[ ${entry} =~ ^${signing_key_name}:[A-Za-z0-9+/]{43}=$ ]]; then
       found=true
     fi
