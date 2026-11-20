@@ -145,7 +145,8 @@ other `LEC` test.
   has no field-level output, and the Gateway has no subject-export route.
   Test 10 is therefore covered at artifact level through the runtime seam.
 - **A Fork the service admits records no owner (tests 2 and 11, pending
-  #1477, owner 2026-11-20):** the ADR says a Fork inherits its parent's owner. The runtime host's Fork does
+  #1477, owner 2026-11-20):** the ADR says a Fork inherits its parent's
+  owner. The runtime host's Fork does
   (`TimelineMeta::forked_from_owned`). The Fork admission service's FCC1
   creates its child with `TimelineMeta::forked_from`, so the child has no
   owner (`crates/pos-store/src/sqlite.rs`, the FCC1 child of
@@ -156,7 +157,8 @@ other `LEC` test.
   behaviour (frozen through lineage); #1477 tightens it to an owner
   assertion.
 - **The service refuses a Fork of an affected parent after the freeze (tests
-  2 and 11, ADR errata, owner 2026-11-20):** the ADR says "Forks of affected Timelines are always in
+  2 and 11, ADR errata, owner 2026-11-20):** the ADR says "Forks of
+  affected Timelines are always in
   scope through ELLR1, including Forks admitted by the Fork admission
   service". The service admits a Fork only of a parent that every active
   request proves unaffected (ADR-106 r3,
