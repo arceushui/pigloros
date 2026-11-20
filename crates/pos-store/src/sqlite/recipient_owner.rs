@@ -41,6 +41,9 @@ use super::{
 #[cfg(feature = "test-support")]
 use super::{RecipientExportPublicationTestArtifactsV1, RecipientExportPublicationTestFaultV1};
 
+mod withdrawal;
+pub use withdrawal::RecipientCustodyAttachErrorV1;
+
 const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
     RecipientExportDecryptionErrorV1::Registry(KeyRegistryErrorV1::RegistryUnavailable);
 /// Passed to the decryption port for an absent identity, or a destroyed one
@@ -1324,6 +1327,10 @@ impl SqliteStore {
             ensure_recipient_export_catalog(&self.conn)?;
             fresh_recipient_export_id().and_then(|export_id| {
                 recipient_export_catalog_contains(&self.conn, export_id)
+                    .and_then(|catalog_contains| {
+                        recipient_export_withdrawal_contains(&self.conn, export_id)
+                            .map(|withdrawal_contains| catalog_contains || withdrawal_contains)
+                    })
                     .map_err(RecipientExportPublicationErrorV1::Store)
                     .and_then(|catalog_contains| {
                         recipient_export_pending_contains(&self.conn, export_id)
@@ -1387,7 +1394,8 @@ impl SqliteStore {
     ///
     /// Returns [`RecipientExportPublicationErrorV1::ArtifactUnavailable`] for
     /// an absent, malformed, or digest-mismatched catalog object, and for a
-    /// publication whose source Timeline is access-frozen. Any other erasure
+    /// publication whose source Timeline is access-frozen or that an ADR-138
+    /// recipient-export withdrawal has retracted. Any other erasure
     /// containment failure is [`RecipientExportPublicationErrorV1::Store`].
     pub fn read_recipient_export(
         &self,
@@ -1395,9 +1403,7 @@ impl SqliteStore {
         export_id: [u8; 16],
     ) -> Result<Vec<u8>, RecipientExportPublicationErrorV1> {
         validate_owner_directory(owner)?;
-        let stored = load_recipient_export_catalog(&self.conn, export_id)?
-            .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
-        let expected = stored
+        let expected = unwithdrawn_recipient_export(&self.conn, export_id)?
             .validate_for(owner)
             .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
         self.with_erasure_read_fence(
@@ -1972,7 +1978,55 @@ fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreEr
             CREATE INDEX IF NOT EXISTS recipient_export_pending_owner_v1
                 ON recipient_export_pending_v1 (owner_id, export_id);
             CREATE INDEX IF NOT EXISTS recipient_export_catalog_timeline_v1
-                ON recipient_export_catalog_v1 (timeline_id, export_id);",
+                ON recipient_export_catalog_v1 (timeline_id, export_id);
+            CREATE TABLE IF NOT EXISTS recipient_export_withdrawals_v1 (
+                export_id BLOB NOT NULL PRIMARY KEY CHECK (length(export_id) = 16),
+                target BLOB NOT NULL UNIQUE CHECK (length(target) = 32),
+                owner_id TEXT NOT NULL,
+                timeline_id TEXT NOT NULL,
+                ciphertext_length INTEGER NOT NULL CHECK (ciphertext_length >= 0),
+                ciphertext_digest BLOB NOT NULL CHECK (length(ciphertext_digest) = 32),
+                directory_identity BLOB NULL
+                    CHECK (directory_identity IS NULL OR length(directory_identity) = 16),
+                final_identity BLOB NULL
+                    CHECK (final_identity IS NULL OR length(final_identity) = 20),
+                staging_identity BLOB NULL
+                    CHECK (staging_identity IS NULL OR length(staging_identity) = 20),
+                capture_status INTEGER NOT NULL CHECK (capture_status IN (0, 1, 2, 3)),
+                objects_deleted INTEGER NOT NULL CHECK (objects_deleted IN (0, 1)),
+                disposition BLOB NULL CHECK (disposition IS NULL OR length(disposition) = 32),
+                committed_elo1 BLOB NULL
+                    CHECK (committed_elo1 IS NULL OR length(committed_elo1) = 32)
+            );",
+        )
+        .map_err(storage_error)
+}
+
+/// The catalog row of `export_id`, unless it is absent or an ADR-138
+/// recipient-export withdrawal has retracted it.
+fn unwithdrawn_recipient_export(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<StoredRecipientExportV1, RecipientExportPublicationErrorV1> {
+    let stored = load_recipient_export_catalog(connection, export_id)?
+        .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+    if recipient_export_withdrawal_contains(connection, export_id)? {
+        return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+    }
+    Ok(stored)
+}
+
+/// Whether an ADR-138 withdrawal row names `export_id`; such an identity is
+/// never served nor reserved again. The table is created with the catalog.
+fn recipient_export_withdrawal_contains(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recipient_export_withdrawals_v1 WHERE export_id = ?1)",
+            rusqlite::params![export_id.as_slice()],
+            |row| row.get(0),
         )
         .map_err(storage_error)
 }
@@ -3225,20 +3279,20 @@ mod tests {
 
     use super::*;
 
-    type RecipientTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    pub(super) type RecipientTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     const TEST_RECIPIENT_EXPORT_DIGEST: ErasureReferenceV1 =
         ErasureReferenceV1::from_digest([241; 32]);
 
-    struct RecipientPublicationFixture {
-        _temporary: tempfile::TempDir,
-        store: SqliteStore,
-        owner: RecipientKeyOwnerV1,
-        authority: ConsentAuthority,
-        token: ConsentCapabilityToken,
-        timeline: TimelineId,
-        descriptor: RecipientKeyDescriptorV1,
-        evaluation: ReplayClaimEvaluationV1,
+    pub(super) struct RecipientPublicationFixture {
+        pub(super) _temporary: tempfile::TempDir,
+        pub(super) store: SqliteStore,
+        pub(super) owner: RecipientKeyOwnerV1,
+        pub(super) authority: ConsentAuthority,
+        pub(super) token: ConsentCapabilityToken,
+        pub(super) timeline: TimelineId,
+        pub(super) descriptor: RecipientKeyDescriptorV1,
+        pub(super) evaluation: ReplayClaimEvaluationV1,
     }
 
     fn owner_fixture() -> Result<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1), CoreError> {
@@ -3279,7 +3333,8 @@ mod tests {
         .map_err(|error| error.to_string().into())
     }
 
-    fn recipient_publication_fixture() -> RecipientTestResult<RecipientPublicationFixture> {
+    pub(super) fn recipient_publication_fixture() -> RecipientTestResult<RecipientPublicationFixture>
+    {
         let (temporary, mut store, owner) = owner_fixture()?;
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         let subject = EntityId::new();
@@ -3325,7 +3380,7 @@ mod tests {
         })
     }
 
-    const fn recipient_publication_request<'a>(
+    pub(super) const fn recipient_publication_request<'a>(
         timeline: TimelineId,
         recipient: RecipientKeyDescriptorV1,
         evaluation: &'a ReplayClaimEvaluationV1,

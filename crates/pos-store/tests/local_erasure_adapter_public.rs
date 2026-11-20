@@ -164,7 +164,7 @@ fn snapshot_and_identity(
     store: &mut impl LocalErasureStore,
 ) -> Result<ErasureAuthoritySnapshotV1, Box<dyn std::error::Error>> {
     seed_topology(store)?;
-    let empty = store.erasure_authority_snapshot_with_limits(limits()?)?;
+    let empty = store.erasure_authority_snapshot_with_limits(limits()?, &[])?;
     assert_eq!(empty.store_identity(), None);
     assert_eq!(empty.timelines(), expected_rows().as_slice());
     assert_eq!(empty.timeline(timeline_id(3)), Some(&expected_rows()[2]));
@@ -180,7 +180,7 @@ fn snapshot_and_identity(
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(store.erasure_store_identity()?, Some(identity));
-    let snapshot = store.erasure_authority_snapshot_with_limits(limits()?)?;
+    let snapshot = store.erasure_authority_snapshot_with_limits(limits()?, &[])?;
     assert_eq!(snapshot.store_identity(), Some(identity));
     Ok(snapshot)
 }
@@ -207,7 +207,7 @@ fn authority_snapshot_and_store_identity_have_adapter_parity() -> TestResult {
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
-        reopened.erasure_authority_snapshot_with_limits(limits()?)?,
+        reopened.erasure_authority_snapshot_with_limits(limits()?, &[])?,
         sqlite
     );
     Ok(())
@@ -217,17 +217,17 @@ fn authority_snapshot_and_store_identity_have_adapter_parity() -> TestResult {
 fn snapshot_rows_must_name_exactly_the_topology() -> TestResult {
     let mut store = MemoryStore::new();
     seed_topology(&mut store)?;
-    let inventory = store.erasure_authority_snapshot_with_limits(limits()?)?;
+    let inventory = store.erasure_authority_snapshot_with_limits(limits()?, &[])?;
     let mut missing = expected_rows();
     missing.pop();
     assert_eq!(
-        ErasureAuthoritySnapshotV1::new(inventory.inventory().clone(), missing, None),
+        ErasureAuthoritySnapshotV1::new(inventory.inventory().clone(), missing, None, Vec::new()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     let mut reordered = expected_rows();
     reordered.swap(0, 1);
     assert_eq!(
-        ErasureAuthoritySnapshotV1::new(inventory.inventory().clone(), reordered, None),
+        ErasureAuthoritySnapshotV1::new(inventory.inventory().clone(), reordered, None, Vec::new()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -247,7 +247,7 @@ fn sqlite_snapshot_refuses_a_malformed_owner_row() -> TestResult {
         [timeline_id(2).to_string()],
     )?;
     assert_eq!(
-        store.erasure_authority_snapshot_with_limits(limits()?),
+        store.erasure_authority_snapshot_with_limits(limits()?, &[]),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -776,7 +776,7 @@ fn sqlite_authority_snapshot_does_not_rebind_a_stale_inventory() -> TestResult {
 
     let mut peer = pos_store::sqlite::SqliteStore::open(path)?;
     peer.retain_erasure_object(&record("ELS1", 1)?, 1_024)?;
-    store.erasure_authority_snapshot_with_limits(limits()?)?;
+    store.erasure_authority_snapshot_with_limits(limits()?, &[])?;
 
     let tombstone = || LocalOwnerEffectV1::KeyTombstone {
         request: Box::new(key_request()),
