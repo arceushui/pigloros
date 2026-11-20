@@ -221,7 +221,7 @@ Local Principal is provisioned:
 ```text
 piglor-gateway provision-local-erasure <sqlite-path> --issued-by <erasure-bundle/...>
     --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>]
-    [--signer-epoch <epoch>]
+    [--signer-epoch <epoch>] [--rotation routine|compromise]
 ```
 
 The unit reads exactly two credentials: `pigloros.local-erasure-signer`, the role-2 signer's
@@ -252,7 +252,19 @@ An exact re-run emits the same bundle. A routine signer rotation re-runs it with
 credential, a higher `--signer-epoch` and a new `--out`. A re-run on a store that already has its
 Erasure Host Timeline writes only through the store itself, so it also works once the store holds
 erasure requests; a store that holds erasure requests but has no Erasure Host Timeline is refused.
-The key registry refuses another key for a registered identity, a lower epoch and a reused key. The
+The key registry refuses another key for a registered identity, a lower epoch and a reused key. A
+new signer epoch becomes the key registry's only active role-2 key, so the old signer can sign
+nothing more, not even for a request pinned to its bundle. A routine rotation (the default
+`--rotation routine`) is therefore refused, before any write, while any erasure request pins a
+bundle: one frozen before its first attempt, or with an active attempt. Let the driver close those
+attempts first, then rotate. After a key compromise, revoke the old signer key
+`erasure-signer/<64 hex>` (and the bundle root, if it is compromised too) in the installed TPS1, then
+re-run with `--rotation compromise`: the command registers the new key only once the TPS1 revokes the
+old signer key and the root or signer of every pinned bundle. Requests pinned to the revoked bundle
+stay contained. A re-run with the registered key changes nothing. The pin check and the key registration are
+two steps, so run the command only with the Gateway stopped: a serving Gateway could pin a bundle
+between them. The unit's `Conflicts=piglor-gateway.service` does this; never run it beside a
+serving Gateway by other means. The
 command holds the store lock shared, like every offline writer; the unit's
 `Conflicts=piglor-gateway.service` stops `serve` while it updates the key registry. The unit writes
 `/var/lib/pigloros/local-erasure-bundle.elb1` for the root `erasure-bundle/local`: move the file
@@ -308,7 +320,9 @@ are HTML conveniences outside the JSON contract.
 - **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive and starts a fresh read. `next_from_seq` is `null` only when the Timeline is exhausted; otherwise it is the inclusive sequence of the first omitted Event. A host-owned Gateway also returns `next_cursor`, which binds that sequence, Timeline, and installed erasure inventory generation. Continue a page with `?cursor=<next_cursor>`; a generation change rejects the cursor with `409` `append-conflict`, so restart from a fresh `from_seq`. `cursor` and `from_seq` cannot appear together. A future independent client will continue polling until exhaustion; this transport behavior is not, by itself, product MVP evidence.
 - **Response budget:** each polling response is at most 1 MiB. The Gateway may return fewer than `limit` Events to stay within that budget. Polling uses the store's bounded-read seam and requests exactly `limit + 1` candidates so the first omitted Event becomes the cursor. The internal read byte bound covers all selected candidates at their per-field maxima; the separate wire-size check trims the page to 1 MiB. The memory adapter derives Fork-segment lengths from Timeline heads and seeks directly into contiguous per-Timeline Event vectors. SQLite derives the same segment ranges from indexed Timeline metadata and uses `(timeline_id, seq)` primary-key range predicates with `LIMIT` in both phases: it first selects only `seq`, `typeof(payload)`, `length(CAST(payload AS BLOB))`, and `length(CAST(event_type AS BLOB))`, validates them, and only then fetches at most the same bounded number of full Events in the same snapshot transaction. Neither adapter scans preceding Event history for a late cursor. SQLite files must use UTF-8 encoding, Event sequences must be contiguous from 1 through `timelines.head_seq`, and offline imports must preserve payloads with SQLite `BLOB` storage class. Existing SQLite files are sequence-validated once when opened; supported import APIs validate committed batches as they arrive. Opening UTF-16 or non-contiguous databases, or polling non-BLOB payload rows, fails closed with an actionable store error. Direct SQL mutation that bypasses `EventStore` while the database is open is outside the supported write boundary. Stored payloads over 256 KiB or imported `event_type` values over 64 KiB return a deterministic `413` `resource-limit-exceeded` problem. The metadata ceiling reserves at most 384 KiB for worst-case JSON escaping; together with the maximum payload's 512 KiB hex form and fixed Event fields this fits the 1 MiB envelope. The exact response-size check still handles decoded payload expansion. For Gateway-authored Events, admission serializes an exact `EventView`-equivalent envelope with worst-case sequence and cursor widths.
 - **Fork traversal bound:** one poll traverses at most 64 parent links. Imported deeper chains and corrupt ancestry cycles fail with a `413` problem before an unbounded ancestry collection can grow. The bound does not change shallow Fork pagination, including Timelines exposing 10,001 logical Events.
-- **Timeline bound:** one Gateway process accepts at most 64 **root** Timelines. Forks and identity-preserving imported children do not consume root capacity. Quota checks use a bounded scalar store seam that stops at quota + 1 and never lists or clones Timeline metadata.
+- **Timeline bound:** one Gateway process accepts at most 64 **root** Timelines. Forks, identity-preserving imported children and the host Timelines (the Consent Timeline, the Local Principal's authority Timeline and the Erasure Host Timeline) do not consume root capacity. Quota checks use a bounded scalar store seam that stops at quota + 1 and never lists or clones Timeline metadata.
+- **Owner:** `POST /v1/timelines` records the actor its decision admitted as the owner of the new root (ADR-136 §1), so a Local erasure of that actor selects the root and the Forks that inherit its owner; an unprotected composition creates an unowned root. Scenario Room Timelines stay unowned and are never selected by an erasure.
+- **Host Timelines:** no client route reads, appends to or acts on a host Timeline, and a local Fork admission naming one as its parent is refused exactly as for a parent the store does not hold (`404 not-found-or-unavailable` on HTTP, code 4 on the Fork-admission socket).
 - **Event bound:** each Timeline accepts at most 10,000 **owned** Events. A Fork's inherited parent Events remain readable but do not consume its own ceiling. This bounds incremental storage per Timeline without discouraging Forks.
 - **Errors:** every failure, including malformed JSON bodies, unknown paths and unserved methods (`405`), is an RFC 9457 `application/problem+json` body whose `code` is one of the closed families of `problem-types.json` (see the [contract guide](../../contracts/gateway/v1/README.md#problems)). A path under another API major such as `/v2/...` is `400` `unsupported-version`; any other unrouted path is `404` `not-found-or-unavailable`. `detail` wording is not part of the contract.
 - **Body limit:** 1 MiB (`MAX_HTTP_BODY_BYTES`); returns a `413` `resource-limit-exceeded` problem when exceeded.

@@ -8,13 +8,14 @@ use crate::{
         DenialEvidenceBatch, DenialEvidenceReceipt, GatewayAuthorization,
         GatewayAuthorizationDecision, GatewayAuthorizationError,
     },
+    host_timelines::HostTimelinesV1,
     AdmittedAction, EventNotice,
 };
 use pos_core::{
     clock::WallTime,
     event::{Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
-    ids::TimelineId,
+    ids::{EntityId, TimelineId},
     store::{AppendDedupScope, EventReadBounds, EventStore, PurgeOutcome, SeqRange},
     timeline::Timeline,
     AuthorityErrorV1, AuthorityPersistenceErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit,
@@ -286,6 +287,7 @@ mod lifecycle_coverage_tests {
                 global_permit,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "draining-queued-work".to_owned(),
                     reply,
                 },
@@ -435,12 +437,17 @@ enum Command {
     PendingAppendIdentityCleanup {
         reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
     },
+    /// Count client root Timelines; the host roots `host_roots` are left
+    /// out of the count.
     RootCount {
         maximum: usize,
+        host_roots: Vec<TimelineId>,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
     },
+    /// Create a root Timeline, owned by `owner` when one is given.
     Create {
         name: String,
+        owner: Option<EntityId>,
         reply: oneshot::Sender<Result<Timeline, StoreExecutorError>>,
     },
     Read {
@@ -1059,6 +1066,9 @@ struct ExecutorControl {
     join_completion: watch::Sender<Option<JoinOutcome>>,
     command_deadline: Duration,
     shutdown_deadline: Duration,
+    /// The host Timelines of the owned store, read before the worker took
+    /// the host.
+    host_timelines: HostTimelinesV1,
 }
 
 pub(crate) struct CommandEnvelope {
@@ -1106,7 +1116,11 @@ impl StoreExecutor {
         drop(
             store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
         );
-        Self::spawn(ExecutorStore::Generic(store), None)
+        Self::spawn(
+            ExecutorStore::Generic(store),
+            None,
+            HostTimelinesV1::new(None),
+        )
     }
 
     #[cfg(test)]
@@ -1115,29 +1129,46 @@ impl StoreExecutor {
         permit: ConsentAppendPermit,
     ) -> Self {
         drop(store.bind_consent_authority(permit));
-        Self::spawn(ExecutorStore::Generic(store), None)
+        Self::spawn(
+            ExecutorStore::Generic(store),
+            None,
+            HostTimelinesV1::new(None),
+        )
     }
 
     pub(crate) fn new_with_erasure_host(
-        mut host: ErasureExecutionHostV1,
+        host: ErasureExecutionHostV1,
         permit: ConsentAppendPermit,
     ) -> Result<Self, CoreError> {
-        host.bind_consent_authority(permit)
-            .map_err(host_error_to_core)?;
-        Ok(Self::spawn(ExecutorStore::Host(Box::new(host), None), None))
+        Self::bind_host(host, permit).map(|(host, host_timelines)| {
+            Self::spawn(ExecutorStore::Host(host, None), None, host_timelines)
+        })
     }
 
     pub(crate) fn new_with_owntracks_erasure_host(
-        mut host: ErasureExecutionHostV1,
+        host: ErasureExecutionHostV1,
         owner_key: [u8; 32],
         permit: ConsentAppendPermit,
     ) -> Result<Self, CoreError> {
+        Self::bind_host(host, permit).map(|(host, host_timelines)| {
+            Self::spawn(
+                ExecutorStore::Host(host, None),
+                Some(owner_key),
+                host_timelines,
+            )
+        })
+    }
+
+    /// Bind the Gateway's consent authority to `host` and read its host
+    /// Timelines, before the worker takes the host.
+    fn bind_host(
+        mut host: ErasureExecutionHostV1,
+        permit: ConsentAppendPermit,
+    ) -> Result<(Box<ErasureExecutionHostV1>, HostTimelinesV1), CoreError> {
         host.bind_consent_authority(permit)
-            .map_err(host_error_to_core)?;
-        Ok(Self::spawn(
-            ExecutorStore::Host(Box::new(host), None),
-            Some(owner_key),
-        ))
+            .and_then(|()| HostTimelinesV1::of_host(&mut host))
+            .map_err(host_error_to_core)
+            .map(|host_timelines| (Box::new(host), host_timelines))
     }
 
     #[cfg(test)]
@@ -1152,6 +1183,7 @@ impl StoreExecutor {
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store))),
             None,
+            HostTimelinesV1::new(None),
         )
     }
 
@@ -1168,13 +1200,19 @@ impl StoreExecutor {
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(store))),
             Some(owner_key),
+            HostTimelinesV1::new(None),
         )
     }
 
-    fn spawn(store: ExecutorStore, owntracks_owner_key: Option<[u8; 32]>) -> Self {
+    fn spawn(
+        store: ExecutorStore,
+        owntracks_owner_key: Option<[u8; 32]>,
+        host_timelines: HostTimelinesV1,
+    ) -> Self {
         Self::spawn_with_deadlines(
             store,
             owntracks_owner_key,
+            host_timelines,
             COMMAND_DEADLINE,
             SHUTDOWN_DEADLINE,
             #[cfg(test)]
@@ -1189,7 +1227,14 @@ impl StoreExecutor {
         shutdown_deadline: Duration,
     ) -> Self {
         store.bind_test_erasure_gate();
-        Self::spawn_with_deadlines(store, None, command_deadline, shutdown_deadline, None)
+        Self::spawn_with_deadlines(
+            store,
+            None,
+            HostTimelinesV1::new(None),
+            command_deadline,
+            shutdown_deadline,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -1201,6 +1246,7 @@ impl StoreExecutor {
         Self::spawn_with_deadlines(
             store,
             None,
+            HostTimelinesV1::new(None),
             Duration::from_secs(1),
             Duration::from_secs(1),
             Some(observer),
@@ -1210,6 +1256,7 @@ impl StoreExecutor {
     fn spawn_with_deadlines(
         store: ExecutorStore,
         owntracks_owner_key: Option<[u8; 32]>,
+        host_timelines: HostTimelinesV1,
         command_deadline: Duration,
         shutdown_deadline: Duration,
         #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
@@ -1230,6 +1277,7 @@ impl StoreExecutor {
             join_completion,
             command_deadline,
             shutdown_deadline,
+            host_timelines,
         });
         let worker_state = Arc::clone(&control.state);
         let worker_shutdown = Arc::clone(&control.shutdown);
@@ -1276,6 +1324,7 @@ impl StoreExecutor {
                 join_completion,
                 command_deadline,
                 shutdown_deadline,
+                host_timelines: HostTimelinesV1::new(None),
             }),
         }
     }
@@ -1657,11 +1706,26 @@ impl StoreExecutor {
             reply
         })
     }
-    pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
-        submit!(self, |reply| Command::RootCount { maximum, reply })
+    /// The host Timelines of the store this executor owns, read when it
+    /// took ownership of the host.
+    pub(crate) fn host_timelines(&self) -> HostTimelinesV1 {
+        self.control.host_timelines
     }
-    pub(crate) async fn create(&self, name: String) -> Result<Timeline, StoreExecutorError> {
-        submit!(self, |reply| Command::Create { name, reply })
+    /// Count the client root Timelines, leaving out the host Timelines.
+    pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
+        let host_roots = self.host_timelines().roots();
+        submit!(self, |reply| Command::RootCount {
+            maximum,
+            host_roots,
+            reply
+        })
+    }
+    pub(crate) async fn create(
+        &self,
+        name: String,
+        owner: Option<EntityId>,
+    ) -> Result<Timeline, StoreExecutorError> {
+        submit!(self, |reply| Command::Create { name, owner, reply })
     }
     pub(crate) async fn read(
         &self,
@@ -1793,18 +1857,19 @@ impl StoreExecutor {
     /// Fork-admission commands; the executor handle kept by the Gateway
     /// cannot construct them.
     pub(crate) fn new_with_fork_admission_host(
-        mut host: ErasureExecutionHostV1,
+        host: ErasureExecutionHostV1,
         owntracks_owner_key: Option<[u8; 32]>,
         permit: ConsentAppendPermit,
         slot: ForkAdmissionSlotV1,
     ) -> Result<(Self, ForkAdmissionSubmitterV1), CoreError> {
-        host.bind_consent_authority(permit)
-            .map_err(host_error_to_core)?;
-        let executor = Self::spawn(
-            ExecutorStore::Host(Box::new(host), Some(Box::new(slot))),
-            owntracks_owner_key,
-        );
-        Ok((executor.clone(), ForkAdmissionSubmitterV1 { executor }))
+        Self::bind_host(host, permit).map(|(host, host_timelines)| {
+            let executor = Self::spawn(
+                ExecutorStore::Host(host, Some(Box::new(slot))),
+                owntracks_owner_key,
+                host_timelines,
+            );
+            (executor.clone(), ForkAdmissionSubmitterV1 { executor })
+        })
     }
 
     /// Submit one Fork-admission command from a plain OS thread and block for
@@ -3024,10 +3089,16 @@ fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandE
         Command::PendingAppendIdentityCleanup { reply } => {
             execute_pending_append_identity_cleanup_command(state, reply);
         }
-        Command::RootCount { maximum, reply } => {
-            execute_root_count_command(state, maximum, reply);
+        Command::RootCount {
+            maximum,
+            host_roots,
+            reply,
+        } => {
+            execute_root_count_command(state, maximum, &host_roots, reply);
         }
-        Command::Create { name, reply } => execute_create_command(state, &name, reply),
+        Command::Create { name, owner, reply } => {
+            execute_create_command(state, &name, owner, reply);
+        }
         Command::Read {
             timeline,
             range,
@@ -3139,36 +3210,56 @@ fn execute_purge_command(
     );
 }
 
+/// Count the client root Timelines: the host counts every root except the
+/// host roots it records. A test store has no host Timelines to leave out.
 fn execute_root_count_command(
     state: &mut ExecutorState,
     maximum: usize,
+    host_roots: &[TimelineId],
     reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
 ) {
     send_store_result(
         reply,
         state.store.execute(
             |host| {
-                host.read_sender()
-                    .and_then(|mut sender| sender.root_timeline_count_bounded(maximum))
+                host.read_sender().and_then(|mut sender| {
+                    sender.client_root_timeline_count_bounded(maximum, host_roots)
+                })
             },
             |store| store.root_timeline_count_bounded(maximum),
         ),
     );
 }
 
+/// Create a root Timeline; the host records `owner` at creation (ADR-136
+/// §1). A test store has no owner seam, so it refuses an owned root rather
+/// than create it unowned.
 fn execute_create_command(
     state: &mut ExecutorState,
     name: &str,
+    owner: Option<EntityId>,
     reply: oneshot::Sender<Result<Timeline, StoreExecutorError>>,
 ) {
     send_store_result(
         reply,
         state.store.execute(
             |host| {
-                host.command_sender()
-                    .and_then(|mut sender| sender.create_timeline(name))
+                // Both arms borrow `sender` mutably, so this cannot be one
+                // `map_or_else` with two closures.
+                host.command_sender().and_then(|mut sender| match owner {
+                    Some(owner) => sender.create_owned_timeline(name, owner),
+                    None => sender.create_timeline(name),
+                })
             },
-            |store| store.create_timeline(name),
+            |store| {
+                if owner.is_some() {
+                    Err(CoreError::Storage(
+                        "a test store records no Timeline owner".to_owned(),
+                    ))
+                } else {
+                    store.create_timeline(name)
+                }
+            },
         ),
     );
 }
@@ -3251,7 +3342,7 @@ mod read_page_coverage_tests {
             } else {
                 StoreExecutor::new(Box::new(store))
             };
-            let Ok(timeline) = executor.create("read-page-coverage".to_owned()).await else {
+            let Ok(timeline) = executor.create("read-page-coverage".to_owned(), None).await else {
                 return Err("expected test Timeline creation".into());
             };
             let Ok(page) = executor
@@ -4259,6 +4350,14 @@ mod tests {
         Ok(())
     }
 
+    /// Whether a blocking store reported entry within ten seconds, so a
+    /// command that never reaches it fails instead of hanging.
+    fn entered(receiver: &std::sync::mpsc::Receiver<()>) -> bool {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_ok()
+    }
+
     struct BlockingRootCountStore {
         inner: MemoryStore,
         entered: std::sync::mpsc::Sender<()>,
@@ -4488,7 +4587,7 @@ mod tests {
         executor.shutdown().await.test_ok()?;
         assert!(!executor.is_ready());
         assert!(matches!(
-            executor.create("after-shutdown".to_owned()).await,
+            executor.create("after-shutdown".to_owned(), None).await,
             Err(super::StoreExecutorError::Closed)
         ));
         assert!(matches!(
@@ -4509,6 +4608,24 @@ mod tests {
         );
     }
 
+    /// A test store has no owner seam: an owned root is refused, never
+    /// created unowned, and nothing is created.
+    #[tokio::test]
+    async fn a_test_store_refuses_an_owned_root(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        assert!(matches!(
+            executor
+                .create("owned".to_owned(), Some(EntityId::new()))
+                .await,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(_)))
+        ));
+        assert!(matches!(executor.root_count(1).await, Ok(0)));
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+        Ok(())
+    }
+
     async fn expired_queued_command_is_not_executed_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
@@ -4516,6 +4633,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "expired".to_owned(),
                     reply,
                 },
@@ -4530,7 +4648,7 @@ mod tests {
             result.await.test_ok()?,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
-        assert!(executor.create("fresh".to_owned()).await.is_ok());
+        assert!(executor.create("fresh".to_owned(), None).await.is_ok());
         executor.shutdown().await.test_ok()?;
         drop(executor);
 
@@ -4564,7 +4682,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4617,16 +4735,16 @@ mod tests {
         );
         let first = {
             let executor = executor.clone();
-            tokio::spawn(async move { executor.create("first".to_owned()).await })
+            tokio::spawn(async move { executor.create("first".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
 
         assert!(matches!(
-            executor.create("expired".to_owned()).await,
+            executor.create("expired".to_owned(), None).await,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
         release_sender.send(()).test_ok()?;
@@ -4672,10 +4790,10 @@ mod tests {
         );
         let first = {
             let executor = executor.clone();
-            tokio::spawn(async move { executor.create("started".to_owned()).await })
+            tokio::spawn(async move { executor.create("started".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4770,6 +4888,29 @@ mod tests {
     }
 
     #[test]
+    fn expired_root_commands_reply() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::RootCount {
+                host_roots: Vec::new(),
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Create {
+                owner: None,
+                name: "expired".to_owned(),
+                reply,
+            },
+            receiver,
+        );
+    }
+
+    #[test]
     fn expired_store_commands_reply() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
@@ -4792,18 +4933,6 @@ mod tests {
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::PendingAppendIdentityCleanup { reply }, receiver);
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(Command::RootCount { maximum: 1, reply }, receiver);
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::Create {
-                name: "expired".to_owned(),
-                reply,
-            },
-            receiver,
-        );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
@@ -5211,7 +5340,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5258,7 +5387,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5305,7 +5434,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5316,6 +5445,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "drained-write".to_owned(),
                     reply: create_reply,
                 },
@@ -5335,6 +5465,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit(
                 Command::Create {
+                    owner: None,
                     name: "rejected-after-draining".to_owned(),
                     reply: rejected_reply,
                 },
@@ -5384,7 +5515,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5419,7 +5550,7 @@ mod tests {
         );
         assert!(!executor.is_ready());
         assert!(matches!(
-            executor.create("unhealthy".to_owned()).await,
+            executor.create("unhealthy".to_owned(), None).await,
             Err(super::StoreExecutorError::Unhealthy)
         ));
         assert!(matches!(
@@ -5520,7 +5651,7 @@ mod tests {
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         drop(receiver);
         assert!(matches!(
-            executor.create("closed-channel".to_owned()).await,
+            executor.create("closed-channel".to_owned(), None).await,
             Err(super::StoreExecutorError::Closed)
         ));
 
@@ -5531,7 +5662,7 @@ mod tests {
             retryable_shutdown: false,
         };
         assert!(matches!(
-            executor.create("unhealthy".to_owned()).await,
+            executor.create("unhealthy".to_owned(), None).await,
             Err(super::StoreExecutorError::Unhealthy)
         ));
         assert!(matches!(
@@ -5572,6 +5703,7 @@ mod tests {
         assert!(executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "poisoned-state".to_owned(),
                     reply,
                 },
@@ -5641,6 +5773,7 @@ mod tests {
         assert!(executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "poisoned-ordinal".to_owned(),
                     reply,
                 },
@@ -5687,6 +5820,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "overflow".to_owned(),
                     reply,
                 },
@@ -5913,6 +6047,7 @@ mod tests {
                 global_permit: write_global,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "disconnected-write".to_owned(),
                     reply: write_reply,
                 },
@@ -5989,7 +6124,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6091,6 +6226,7 @@ mod tests {
                 global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "pending-unwind".to_owned(),
                     reply: pending_write_reply,
                 },
@@ -6188,6 +6324,7 @@ mod tests {
                 global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "channel-unwind".to_owned(),
                     reply: channel_reply,
                 },
@@ -6239,7 +6376,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6277,6 +6414,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "reserved-write".to_owned(),
                     reply,
                 },
@@ -6395,6 +6533,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6403,7 +6542,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6459,6 +6598,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6467,7 +6607,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6476,6 +6616,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "immediate-write".to_owned(),
                     reply: write_reply,
                 },
@@ -6538,6 +6679,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6546,7 +6688,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6577,6 +6719,7 @@ mod tests {
             executor
                 .try_submit(
                     Command::Create {
+                        owner: None,
                         name: "expired-priority".to_owned(),
                         reply,
                     },
@@ -6592,6 +6735,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "live-priority".to_owned(),
                     reply: write_reply,
                 },
@@ -6653,6 +6797,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6661,7 +6806,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6675,6 +6820,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "fair-write".to_owned(),
                     reply: create_reply,
                 },
@@ -6747,6 +6893,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6755,7 +6902,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6784,6 +6931,7 @@ mod tests {
         let write_ordinal = executor
             .try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "post-probe-write".to_owned(),
                     reply: write_reply,
                 },
@@ -6810,21 +6958,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!selected_before_write.contains(&write_ordinal));
         assert_eq!(write_burst_counters, vec![8]);
-        assert_eq!(
-            &operations.lock().test_ok()?[..10],
-            &[
-                "root_count",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "create",
-            ]
-        );
+        let expected = [["root_count"].as_slice(), &["read"; 8], &["create"]].concat();
+        assert_eq!(&operations.lock().test_ok()?[..10], expected.as_slice());
         executor.shutdown().await.test_ok()?;
 
         drop(executor);
@@ -6863,6 +6998,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6871,7 +7007,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6881,6 +7017,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "write-1".to_owned(),
                     reply: first_reply,
                 },
@@ -6893,6 +7030,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "write-2".to_owned(),
                     reply: second_reply,
                 },
@@ -7011,7 +7149,7 @@ mod tests {
             observer,
         ));
         let timeline = executor
-            .create("concurrent-appends".to_owned())
+            .create("concurrent-appends".to_owned(), None)
             .await
             .test_ok()?;
         let timeline_id = timeline.id();
@@ -7020,7 +7158,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -7244,6 +7382,7 @@ mod tests {
             let ordinal = executor
                 .try_submit_with_admission_for_test(
                     Command::Create {
+                        owner: None,
                         name: format!("global-{expected}"),
                         reply,
                     },
@@ -7257,6 +7396,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "global-saturated".to_owned(),
                     reply,
                 },
@@ -7273,6 +7413,7 @@ mod tests {
         let ordinal = executor
             .try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "after-global-saturation".to_owned(),
                     reply,
                 },
@@ -7311,6 +7452,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "closed".to_owned(),
                     reply,
                 },
@@ -7349,7 +7491,7 @@ mod tests {
     async fn normal_completion_releases_admission_permits_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
-        assert!(executor.create("completed".to_owned()).await.is_ok());
+        assert!(executor.create("completed".to_owned(), None).await.is_ok());
         assert!(executor.timeline(TimelineId::new()).await.is_ok());
         tokio::time::timeout(Duration::from_secs(1), async {
             while executor.control.global_budget.available_permits() != super::QUEUE_CAPACITY

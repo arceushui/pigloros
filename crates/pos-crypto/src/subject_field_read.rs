@@ -85,11 +85,13 @@ pub enum SubjectFieldOwnerReadErrorV1 {
 /// unique logical range with [`pos_core::CanonicalBytes::try_zeroize_owned`].
 ///
 /// The inherited raw plaintext cap is 8,192 logical bytes per invocation/field
-/// result. The sole selector's accepted grammar permits at most 5,442 canonical
-/// bytes, hence at most 10,884 validated logical bytes in staging plus the fresh
-/// handoff immediately before delivery. This excludes capacity, malformed staging,
-/// crypto scratch, prior copies and caller-retained/copied data, with no cross-call
-/// budget. Invalid plaintext, including raw-cap overflow, delivers `Integrity`.
+/// result. The sole selector's accepted grammar
+/// ([`crate::preference_weights::validate_preference_weights`]) permits at most
+/// 5,442 canonical bytes, hence at most 10,884 validated logical bytes in
+/// staging plus the fresh handoff immediately before delivery. This excludes
+/// capacity, malformed staging, crypto scratch, prior copies and
+/// caller-retained/copied data, with no cross-call budget. Invalid plaintext,
+/// including raw-cap overflow, delivers `Integrity`.
 ///
 /// Replay may use this port, but does not automatically replay callback effects.
 /// Protected plaintext/results never enter a Projection; only accepted clear

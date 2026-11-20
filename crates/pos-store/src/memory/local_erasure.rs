@@ -8,7 +8,7 @@
 use pos_core::{
     store::EventStore, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureErrorV1,
     ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureRetainedObjectV1, Hash, LocalOwnerEffectV1, PreparedLocalOwnerEffectV1,
+    ErasureRetainedObjectV1, Hash, KeyTombstoneV1, PreparedLocalOwnerEffectV1,
 };
 
 use super::MemoryStore;
@@ -50,28 +50,30 @@ impl MemoryStore {
 
     pub(super) fn local_erasure_commit_owner_effect(
         &mut self,
-        effect: LocalOwnerEffectV1,
-        elo1: &[u8],
+        prepared: &PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        PreparedLocalOwnerEffectV1::new(effect, elo1).and_then(|prepared| {
-            prepared
-                .effect_object()
-                .map_or(Ok(()), |object| self.retainable(object))
-                .and_then(|()| self.retainable(prepared.owner_result()))
-                .and_then(|()| {
-                    prepared
-                        .key_tombstone()
-                        .map_or(Ok(()), |(request, deletion_receipt)| {
-                            self.complete_tombstone(request, deletion_receipt)
-                        })
-                })
-                .map(|()| {
-                    if let Some(object) = prepared.effect_object() {
-                        self.insert_retained(object);
-                    }
-                    self.insert_retained(prepared.owner_result())
-                })
-        })
+        prepared
+            .effect_object()
+            .map_or(Ok(()), |object| self.retainable(object))
+            .and_then(|()| self.retainable(prepared.owner_result()))
+            .and_then(|()| {
+                prepared
+                    .key_tombstone()
+                    .map_or(Ok(()), |(request, deletion_receipt)| {
+                        self.complete_tombstone(request, deletion_receipt)
+                    })
+            })
+            .and_then(|()| {
+                prepared
+                    .existing_tombstone()
+                    .map_or(Ok(()), |tombstone| self.holds_tombstone(&tombstone))
+            })
+            .map(|()| {
+                if let Some(object) = prepared.effect_object() {
+                    self.insert_retained(object);
+                }
+                self.insert_retained(prepared.owner_result())
+            })
     }
 
     pub(super) const fn local_erasure_store_identity(&self) -> Option<Hash> {
@@ -158,6 +160,17 @@ impl MemoryStore {
             entry.insert(object.canonical_cbor().to_vec());
         }
         reference
+    }
+
+    /// Whether the key registry holds exactly `tombstone`.
+    fn holds_tombstone(&self, tombstone: &KeyTombstoneV1) -> Result<(), ErasureErrorV1> {
+        self.load_key_registry()
+            .ok()
+            .flatten()
+            .and_then(|registry| registry.tombstone(tombstone.identity))
+            .filter(|held| held == tombstone)
+            .map(drop)
+            .ok_or(ErasureErrorV1::KeyDestructionFailed)
     }
 
     fn complete_tombstone(

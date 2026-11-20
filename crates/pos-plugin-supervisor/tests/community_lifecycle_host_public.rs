@@ -22,7 +22,12 @@ use pos_store::community::{
     metadata_resource, CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
 };
 use pos_store::memory::MemoryStore;
+use pos_store::MemoryTrustedClockAuthorityV1;
 use ulid::Ulid;
+
+/// The composition-root seal the community owner is installed with.
+static OWNER_SEAL: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
@@ -148,13 +153,17 @@ impl Installation {
         }
         Ok(Self {
             registry,
-            domain: MemoryCommunityDomainV1::new(store, INCARNATION)?,
+            domain: MemoryCommunityDomainV1::new(
+                store,
+                INCARNATION,
+                MemoryTrustedClockAuthorityV1::new(),
+            )?,
         })
     }
 
     fn catalogue(&self, catalogue: Hash, native: Hash) -> Fallible<CommunityInstalledCatalogueV1> {
         let authority = CommunityMetadataAuthorityV1::new(
-            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            &OWNER_SEAL,
             CommunityMetadataAuthorityInputV1 {
                 registry: self.registry.clone(),
                 principal: owner()?,

@@ -48,6 +48,25 @@ const _: () = assert!(MAX_ENCODED_BYTES < MAX_VIEW);
 // A CPK1 bstr always has a 2-byte head (see `encoded_len`).
 const _: () = assert!(super::MAX_COMMUNITY_PASS_KEY_BYTES_V1 <= 255);
 
+/// ADR-129 §3 `H("AuthorityBindings", preferred [ordered_CPG1_binding_digests,
+/// ordered_CRF1_digests])`, a CAV1 authority row's binding digest.
+///
+/// `grants` are the persisted chain's binding digests, root to leaf, and
+/// `revocations` the persisted CRF1 digests in Timeline order; the caller
+/// reads both from its own authority store.
+#[must_use]
+pub fn community_authority_bindings_digest_v1(grants: &[Hash], revocations: &[Hash]) -> Hash {
+    let mut preimage = Vec::with_capacity(19 + 34 * (grants.len() + revocations.len()));
+    preimage.push(0x82);
+    for list in [grants, revocations] {
+        encode_head(&mut preimage, 4, list.len() as u64);
+        for digest in list {
+            encode_hash(&mut preimage, *digest);
+        }
+    }
+    digest(b"PiglorOS.Community.AuthorityBindings.v1\0", &preimage)
+}
+
 /// Scope row state; only `Open` admits use.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum CommunityScopeStateV1 {

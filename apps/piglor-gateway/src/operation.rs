@@ -130,6 +130,23 @@ impl OperationSpecV1 for ReadOptionSpecOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::READ_OPTION_SPEC;
 }
 
+/// The actor a protected decision admitted.
+///
+/// Only [`OperationAuthority::run_as_actor`] makes one, from the decision it
+/// took, so a mutation that records its actor, such as the owner of a new
+/// root Timeline ([`Gateway::create_timeline`], ADR-136 §1), can never be
+/// handed an entity no decision admitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdmittedActorV1(EntityId);
+
+impl AdmittedActorV1 {
+    /// The admitted actor's entity.
+    #[must_use]
+    pub const fn entity_id(self) -> EntityId {
+        self.0
+    }
+}
+
 /// The authority inputs of one protected operation, from the request head.
 ///
 /// They are only the acting entity, when the request names a valid one.
@@ -231,10 +248,39 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
         Fut: Future<Output = Result<T, GatewayError>> + Send + 'static,
         T: Send + 'static,
     {
+        self.run_as_actor(gateway, target_timeline, move |gateway, _| {
+            operation(gateway)
+        })
+        .await
+    }
+
+    /// [`Self::run`], handing `operation` the actor the decision admitted:
+    /// `None` on a Gateway composition that protects nothing. A mutation
+    /// that records its actor, such as the owner of a new root Timeline
+    /// (ADR-136 §1), takes it from here, never from the request.
+    ///
+    /// # Errors
+    /// Returns the failures of [`Self::run`].
+    pub async fn run_as_actor<T, F, Fut>(
+        self,
+        gateway: &Gateway,
+        target_timeline: Option<TimelineId>,
+        operation: F,
+    ) -> Result<T, GatewayError>
+    where
+        F: FnOnce(Gateway, Option<AdmittedActorV1>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, GatewayError>> + Send + 'static,
+        T: Send + 'static,
+    {
         let permit = self.authorize(gateway, target_timeline).await?;
         let gateway = gateway.clone();
         tokio::spawn(async move {
-            let output = operation(gateway).await;
+            // The permit moves into the task whole: it holds the authority
+            // fence until the operation completes.
+            let actor = permit
+                .decision()
+                .map(|decision| AdmittedActorV1(decision.actor_entity_id()));
+            let output = operation(gateway, actor).await;
             drop(permit);
             output
         })

@@ -18,6 +18,11 @@
 //! they are never call results. No method accepts an authentication result,
 //! registry snapshot, principal, actor or decision from its caller.
 //!
+//! The evaluators reach a domain only through the crate-private store-domain
+//! seam (owner decision on #560, note 22571): they are generic over it, so
+//! every backend's domain is evaluated by the same code. The Memory domain is
+//! its only implementation until the `SQLite` domain lands.
+//!
 //! Execution authority exists only inside an administrative call: a member
 //! request is built from the call's own Timeline and operation constraint.
 //! Community `run_pass` and `verify_recording` authority is therefore
@@ -32,13 +37,14 @@ use pos_core::community_lifecycle::{
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalEvidenceV1, ForkAuthenticationPolicyV1,
 };
-use pos_core::trusted_clock::TrustedWallSourceV1;
+use pos_core::trusted_clock::{
+    GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
+};
 use pos_core::{
-    AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1,
-    AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
-    ConsentEvidenceV1, EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime,
-    MAX_AUTHORITY_TEXT_BYTES,
+    AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorityTrustRootSealV1, AuthorizationDecisionV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1,
+    EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime, MAX_AUTHORITY_TEXT_BYTES,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, VerifiedAuthenticatedPrincipalEvidenceV1,
@@ -46,7 +52,7 @@ use pos_crypto::fork_authentication::{
 
 use super::attestation::{authenticated_result, evaluation_snapshot};
 use super::initializer::CommunityInitializerOwnerV1;
-use super::memory_domain::MemoryCommunityDomainV1;
+use super::store_domain::CommunityStoreDomainV1;
 
 const LIFECYCLE_CATEGORY: &str = "community.lifecycle-control";
 const EXECUTION_CATEGORY: &str = "community.execution-state";
@@ -292,8 +298,10 @@ pub struct CommunityLifecycleAuthorityInputV1 {
     pub store_incarnation: [u8; 16],
 }
 
-/// Installed community lifecycle authority with its trusted wall source.
+/// Installed community lifecycle authority with its trusted wall and guard
+/// monotonic sources, which every call's trusted-clock reservation uses.
 pub struct CommunityLifecycleAuthorityV1 {
+    seal: &'static AuthorityTrustRootSealV1,
     catalogue: CommunityAuthorityCatalogueV1,
     catalogue_digest: Hash,
     policy: ForkAuthenticationPolicyV1,
@@ -301,23 +309,26 @@ pub struct CommunityLifecycleAuthorityV1 {
     member_recipient: String,
     store_incarnation: [u8; 16],
     wall: Box<dyn TrustedWallSourceV1>,
+    mono: Box<dyn GuardMonotonicSourceV1>,
 }
 
 impl CommunityLifecycleAuthorityV1 {
     /// Install the authority at the trusted composition root, which alone
-    /// holds the [`AuthorityTrustRootSealV1`] (#1374). Without the seal it
-    /// cannot be installed:
+    /// holds the [`AuthorityTrustRootSealV1`] (#1374). The authority keeps
+    /// that seal to build each request's evaluation snapshot and
+    /// authentication result. Without the seal it cannot be installed:
     ///
     /// ```compile_fail,E0061
-    /// use pos_core::trusted_clock::TrustedWallSourceV1;
+    /// use pos_core::trusted_clock::{GuardMonotonicSourceV1, TrustedWallSourceV1};
     /// use pos_store::community::{
     ///     CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
     /// };
     /// fn forge(
     ///     input: CommunityLifecycleAuthorityInputV1,
     ///     wall: impl TrustedWallSourceV1 + 'static,
+    ///     mono: impl GuardMonotonicSourceV1 + 'static,
     /// ) {
-    ///     let _ = CommunityLifecycleAuthorityV1::new(input, wall);
+    ///     let _ = CommunityLifecycleAuthorityV1::new(input, wall, mono);
     /// }
     /// ```
     ///
@@ -329,9 +340,10 @@ impl CommunityLifecycleAuthorityV1 {
     /// an empty or over-128-byte member recipient, and for a zero store
     /// incarnation.
     pub fn new(
-        _seal: &AuthorityTrustRootSealV1,
+        seal: &'static AuthorityTrustRootSealV1,
         input: CommunityLifecycleAuthorityInputV1,
         wall: impl TrustedWallSourceV1 + 'static,
+        mono: impl GuardMonotonicSourceV1 + 'static,
     ) -> Result<Self, Error> {
         let pins = input.catalogue.as_input();
         let overlap = input
@@ -356,6 +368,7 @@ impl CommunityLifecycleAuthorityV1 {
             return Err(Error::InvalidBinding);
         }
         Ok(Self {
+            seal,
             catalogue_digest: input.catalogue.digest(),
             catalogue: input.catalogue,
             policy: input.authentication_policy,
@@ -363,23 +376,44 @@ impl CommunityLifecycleAuthorityV1 {
             member_recipient: input.member_recipient,
             store_incarnation: input.store_incarnation,
             wall: Box::new(wall),
+            mono: Box::new(mono),
         })
+    }
+
+    /// The CAP1-pinned Plugin trust scope of every CAV1 trust row (D9).
+    #[cfg(target_os = "linux")]
+    pub(super) fn trust_scope(&self) -> &str {
+        &self.catalogue.as_input().trust_scope
+    }
+
+    /// The installed member recipient, CAU1's recipient identity (G6).
+    pub(super) fn member_recipient(&self) -> &str {
+        &self.member_recipient
     }
 
     /// Authenticate one administrative call from its one FAE1 (R6.2(3)).
     ///
     /// The FAE1 must decode canonically, verify under the installed FAP1,
     /// carry the nonce bound to H(CAP1) and this request's resource, action
-    /// and operation constraint, and be valid at a fresh trusted wall sample.
-    /// Its principal must have a CAP1 actor row. The FAE1 is a bearer
+    /// and operation constraint, and be valid at the operation's one trusted
+    /// sample. Its principal must have a CAP1 actor row. The FAE1 is a bearer
     /// credential: only its digest is kept, as the result's binding digest.
     ///
+    /// Only a verified credential reserves the trusted clock, on `domain`'s
+    /// own clock authority. The reservation sample `t_r` is both `now` for
+    /// the validity check and every request's `at_time`, so R6.2(3)(iii) has
+    /// one shared sample, and the call's decision bound is
+    /// `min(D, expires_at)` (owner decision on #560, note 22722, G1).
+    ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` for any of those failures.
-    pub fn authenticate(
+    /// Returns `EvidenceUnavailable` for any of those failures, for a domain
+    /// other than the installed one, and when the trusted clock cannot
+    /// reserve (A5.5, "no trusted wall sample").
+    pub fn authenticate<D: CommunityStoreDomainV1>(
         &mut self,
         credential: &[u8],
         request: CommunityAdministrativeRequestV1,
+        domain: &mut D,
     ) -> Result<CommunityAuthorityCallV1, Error> {
         let nonce = community_authentication_nonce_v1(
             self.catalogue_digest,
@@ -393,21 +427,21 @@ impl CommunityLifecycleAuthorityV1 {
                 verify_authenticated_principal_evidence_v1(&self.policy, evidence).ok()
             })
             .filter(|verified| verified.evidence().record().operation_nonce == nonce)
-            .and_then(|verified| self.sampled(verified))
-            .filter(|(verified, now)| {
-                let record = verified.evidence().record();
-                record.issued_at <= now.as_micros() && now.as_micros() < record.expires_at
-            })
-            .and_then(|(verified, now)| self.call(request, &verified, now))
+            .filter(|_| domain.store_incarnation() == self.store_incarnation)
             .ok_or(Error::EvidenceUnavailable)
-    }
-
-    /// Sample the trusted wall only once the credential has verified.
-    fn sampled(
-        &mut self,
-        verified: VerifiedAuthenticatedPrincipalEvidenceV1,
-    ) -> Option<(VerifiedAuthenticatedPrincipalEvidenceV1, WallTime)> {
-        self.wall.sample().ok().map(|now| (verified, now))
+            .and_then(|verified| {
+                domain
+                    .reserve_clock(self.wall.as_mut(), self.mono.as_mut())
+                    .map(|reservation| (verified, reservation))
+            })
+            .ok()
+            .filter(|(verified, reservation)| {
+                let record = verified.evidence().record();
+                let now = reservation.sampled_at().as_micros();
+                record.issued_at <= now && now < record.expires_at
+            })
+            .and_then(|(verified, reservation)| self.call(request, &verified, &reservation))
+            .ok_or(Error::EvidenceUnavailable)
     }
 
     /// Derive `authenticated` and the actor from verified evidence (R6.2(3)(iv), (4)).
@@ -415,18 +449,24 @@ impl CommunityLifecycleAuthorityV1 {
         &self,
         request: CommunityAdministrativeRequestV1,
         verified: &VerifiedAuthenticatedPrincipalEvidenceV1,
-        at_time: WallTime,
+        reservation: &TrustedClockReservationV1,
     ) -> Option<CommunityAuthorityCallV1> {
         principal_digest_v1(&verified.evidence().record().principal)
             .ok()
             .and_then(|principal| self.catalogue.actor_for(principal))
             .and_then(|actor_entity_id| {
-                authenticated_result(verified).map(|authenticated| CommunityAuthorityCallV1 {
-                    catalogue_digest: self.catalogue_digest,
-                    request,
-                    authenticated,
-                    actor_entity_id,
-                    at_time,
+                authenticated_result(self.seal, verified).map(|authenticated| {
+                    CommunityAuthorityCallV1 {
+                        catalogue_digest: self.catalogue_digest,
+                        request,
+                        decision_bound: reservation
+                            .decision_bound()
+                            .min(authenticated.expires_at()),
+                        authenticated,
+                        actor_entity_id,
+                        reservation_id: reservation.reservation_seq(),
+                        at_time: reservation.sampled_at(),
+                    }
                 })
             })
     }
@@ -443,10 +483,10 @@ impl CommunityLifecycleAuthorityV1 {
     /// domain other than the installed one, a missing or foreign leaf, a
     /// leaf that binds consent references, a chain grant not attested as
     /// issued, or a decision that is not `Active`.
-    pub fn authorize_administrative(
+    pub fn authorize_administrative<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         self.evaluate(
@@ -470,12 +510,12 @@ impl CommunityLifecycleAuthorityV1 {
     /// # Errors
     /// Returns `EvidenceUnavailable` for a retire or reset call, which uses
     /// no State, and for every failure `authorize_administrative` refuses.
-    pub fn authorize_member(
+    pub fn authorize_member<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
         member: &CommunityMemberBindingV1<'_>,
         action: CommunityMemberActionV1,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         if !call.request.action.uses_state() {
@@ -515,12 +555,12 @@ impl CommunityLifecycleAuthorityV1 {
     /// starts from no initializer; for an owner installed for another
     /// authority catalogue or a digest it does not hold; and for every
     /// failure `authorize_administrative` refuses.
-    pub fn authorize_initializer(
+    pub fn authorize_initializer<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
         owner: &CommunityInitializerOwnerV1,
         initializer: Hash,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         if !matches!(
@@ -549,12 +589,12 @@ impl CommunityLifecycleAuthorityV1 {
     }
 
     /// Check the call is this authority's and the domain is the one it was
-    /// installed for, load the chain from the domain's own store, and
-    /// evaluate it.
-    fn evaluate(
+    /// installed for, load the chain from the domain's own store through the
+    /// store-domain seam (#560, note 22571), and evaluate it.
+    fn evaluate<D: CommunityStoreDomainV1>(
         &self,
         call: &CommunityAuthorityCallV1,
-        domain: &MemoryCommunityDomainV1,
+        domain: &D,
         leaf_grant_id: Hash,
         shape: RequestShapeV1<'_>,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
@@ -564,7 +604,6 @@ impl CommunityLifecycleAuthorityV1 {
             return Err(Error::EvidenceUnavailable);
         }
         domain
-            .store
             .load_authority(leaf_grant_id)
             .ok()
             .and_then(|persisted| self.admit(call, &persisted, shape))
@@ -620,6 +659,7 @@ impl CommunityLifecycleAuthorityV1 {
             })
             .and_then(|request| {
                 evaluation_snapshot(
+                    self.seal,
                     &self.attestation,
                     pins.authority_registry_digest,
                     call.authenticated.registry_binding_digest(),
@@ -647,13 +687,13 @@ struct RequestShapeV1<'a> {
 /// One authenticated administrative call (R6.2(6)).
 ///
 /// It holds the derived request, the `authenticated` result and actor
-/// derived from the call's FAE1, and the trusted wall sample every request
-/// of the call uses as `at_time`.
+/// derived from the call's FAE1, and the trusted-clock reservation sample
+/// every request of the call uses as `at_time`.
 ///
 /// It is bound to the H(CAP1) of the authority that issued it, and another
 /// authority refuses it. It serves one operation: its `at_time` is the
 /// operation's single trusted sample, and the operation's final writer
-/// enforces its decision bound against [`Self::expires_at`] (A5.4).
+/// refuses at or after its [`Self::decision_bound`] (A5.4).
 ///
 /// It has no public constructor; only [`CommunityLifecycleAuthorityV1::authenticate`]
 /// produces it.
@@ -662,7 +702,9 @@ pub struct CommunityAuthorityCallV1 {
     request: CommunityAdministrativeRequestV1,
     authenticated: AuthenticatedPrincipalResultV1,
     actor_entity_id: EntityId,
+    reservation_id: u64,
     at_time: WallTime,
+    decision_bound: WallTime,
 }
 
 impl CommunityAuthorityCallV1 {
@@ -672,17 +714,32 @@ impl CommunityAuthorityCallV1 {
         &self.request
     }
 
-    /// The trusted wall sample of this call.
+    /// The positive sequence of this call's committed trusted-clock
+    /// reservation, the CAU1 `clock_bound` `reservation_id` (G1).
+    #[must_use]
+    pub const fn reservation_id(&self) -> u64 {
+        self.reservation_id
+    }
+
+    /// The trusted-clock reservation sample `t_r` of this call.
     #[must_use]
     pub const fn at_time(&self) -> WallTime {
         self.at_time
     }
 
-    /// The credential's expiry, which bounds the operation's decision bound
-    /// (A5.4, R6.2(3)(iii)).
+    /// The credential's expiry (R6.2(3)(iii)).
     #[must_use]
     pub const fn expires_at(&self) -> WallTime {
         self.authenticated.expires_at()
+    }
+
+    /// The operation's effective decision bound: the earlier of the
+    /// reservation's `D = t_r + 32 s` and the credential's expiry (owner
+    /// decision on #560, note 22722, G1). CAU1 records it and the final
+    /// writer refuses at or after it (A5.4).
+    #[must_use]
+    pub const fn decision_bound(&self) -> WallTime {
+        self.decision_bound
     }
 }
 
@@ -692,6 +749,7 @@ impl CommunityAuthorityCallV1 {
 pub struct CommunityAuthorityAdmissionV1 {
     request: AuthorizationRequestV1,
     decision: AuthorizationDecisionV1,
+    leaf_grant_id: Hash,
     authorization_ref: ArtifactRefV1,
     principal_ref: ArtifactRefV1,
 }
@@ -707,6 +765,14 @@ impl CommunityAuthorityAdmissionV1 {
     #[must_use]
     pub const fn decision(&self) -> &AuthorizationDecisionV1 {
         &self.decision
+    }
+
+    /// The leaf grant the `Active` decision evaluated, captured when the
+    /// admission was minted: only an `Active` decision, which always names
+    /// its leaf, is admitted.
+    #[must_use]
+    pub const fn leaf_grant_id(&self) -> Hash {
+        self.leaf_grant_id
     }
 
     /// `[0x4341_0002, len(AUD1), BLAKE3-256(AUD1)]` over the canonical AUD1.
@@ -731,12 +797,16 @@ fn admission(
         .encode()
         .ok()
         .zip(decision.principal().encode().ok())
-        .map(|(aud, principal)| CommunityAuthorityAdmissionV1 {
-            authorization_ref: artifact_ref(COMMUNITY_AUD_SCHEMA_V1, &aud),
-            principal_ref: artifact_ref(COMMUNITY_PRINCIPAL_SCHEMA_V1, &principal),
-            request,
-            decision,
-        })
+        .zip(decision.grant_id())
+        .map(
+            |((aud, principal), leaf_grant_id)| CommunityAuthorityAdmissionV1 {
+                authorization_ref: artifact_ref(COMMUNITY_AUD_SCHEMA_V1, &aud),
+                principal_ref: artifact_ref(COMMUNITY_PRINCIPAL_SCHEMA_V1, &principal),
+                request,
+                decision,
+                leaf_grant_id,
+            },
+        )
 }
 
 fn artifact_ref(schema_id: u32, bytes: &CanonicalBytes) -> ArtifactRefV1 {
