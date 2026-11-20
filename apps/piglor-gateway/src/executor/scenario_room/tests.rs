@@ -36,6 +36,7 @@ fn admission() -> Result<RoomAdmissionV1, ulid::DecodeError> {
         governance_record: Some(entity(GOVERNANCE)?),
         max_events: 16,
         max_timelines: 16,
+        host_timelines: crate::host_timelines::HostTimelinesV1::new(None),
     })
 }
 
@@ -402,6 +403,56 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
     // meets the ceiling when it creates the room's Timeline.
     assert_eq!(
         refusal(create(&mut host, 4, 4, 4, &two)?),
+        "TimelineCeiling"
+    );
+    Ok(())
+}
+
+/// ADR-136 §4a: the host Timelines (here the Consent Timeline and an
+/// Erasure Host Timeline) are outside the root-Timeline ceiling, so a host
+/// with a ceiling of two still holds the request Timeline and one room.
+#[test]
+fn host_timelines_are_outside_the_room_root_ceiling() -> TestResult {
+    let mut host = host(true)?;
+    let erasure_host = TimelineId::new();
+    {
+        let mut commands = host.command_sender()?;
+        commands.open_root_timeline(
+            crate::local_principal::local_principal_consent_timeline(),
+            "consent",
+        )?;
+        commands.open_root_timeline(erasure_host, "erasure host")?;
+    }
+    let two = RoomAdmissionV1 {
+        max_timelines: 2,
+        host_timelines: crate::host_timelines::HostTimelinesV1::new(Some(erasure_host)),
+        ..admission()?
+    };
+    let created = ok(create(&mut host, 1, 1, 1, &two)?)?;
+    let (committed, stored) = stored_of(&created);
+    assert!(committed);
+    // Owner decision D18 on #1413: a room's Timeline stays unowned, so no
+    // erasure selects it.
+    let room = host
+        .read_sender()?
+        .timeline(stored.timeline)?
+        .ok_or("the room's Timeline is recorded")?;
+    assert!(room.meta.owner.is_none());
+    assert_eq!(
+        refusal(create(&mut host, 2, 2, 2, &two)?),
+        "TimelineCeiling"
+    );
+    // Without the exemption the same host is already at its ceiling.
+    let counted = RoomAdmissionV1 {
+        max_timelines: 2,
+        ..admission()?
+    };
+    let mut host = self::host(true)?;
+    host.command_sender()?
+        .open_root_timeline(erasure_host, "erasure host")?;
+    host.command_sender()?.create_timeline("client")?;
+    assert_eq!(
+        refusal(create(&mut host, 3, 3, 3, &counted)?),
         "TimelineCeiling"
     );
     Ok(())

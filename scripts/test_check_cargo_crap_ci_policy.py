@@ -52,17 +52,21 @@ EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS = (
 EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
+    "src/execute/tests.rs",
+    "src/attempt_records/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
     "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
     "src/provider_runtime/tests.rs",
     "src/provider_runtime/endpoint/tests.rs",
     "src/provider_runtime/serving/tests.rs",
+    "src/provider_runtime/recovery_peer/tests.rs",
     "src/provider_runtime/revocation/tests.rs",
     "src/scenario_room/tests.rs",
     "src/executor/scenario_room/tests.rs",
     "src/local_erasure_provision/tests.rs",
     "src/mode_profile/tests.rs",
+    "src/community/memory_domain/tests.rs",
 )
 EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS = (
     "src/adapter/native_tests.rs",
