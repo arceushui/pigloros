@@ -15,6 +15,8 @@ import io
 import json
 import os
 import pathlib
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -617,7 +619,7 @@ esac
             f"stdin {self.SECRET}",
             "config show trusted-public-keys",
             *self.path_evals("x86_64"),
-            f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {' '.join(self.OUTPUTS)}",
+            f"copy --to file://{self.cache}?compression=zstd&secret-key={key_path} {' '.join(self.OUTPUTS)}",
             "key-mode 600",
             f"key-content {self.SECRET}",
             *self.path_evals("x86_64"),
@@ -722,6 +724,133 @@ esac
         self.assertIn("the kernel has no output paths", result.stderr)
         self.assertFalse(any(call.startswith("copy") for call in self.calls()))
 
+    ASSET = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxya.tar"
+    OLD_ASSET = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxyz.tar"
+    OTHER_ARCH = "qemu-kernel-piglor-qemu-kernel-1-aarch64-0123456789abcdfghijklmnpqrsvwxyz.tar"
+
+    def stub_gh(self, assets: tuple[str, ...] = (), release: str = "present", create_status: int = 0,
+                archive: pathlib.Path | None = None) -> None:
+        # Logs each call as "gh ARGS". `release view` lists the assets, reports
+        # a missing release as gh does, or fails with another error; `upload`
+        # logs the archive's member names.
+        listing = " ".join(f"'{asset}'" for asset in assets)
+        listing = f"printf '%s\\n' {listing}" if assets else ":"
+        (self.bin / "gh").write_text(f"""#!/bin/bash
+printf 'gh %s\\n' "$*" >>"{self.log}"
+case "$1 $2" in
+"release view")
+  case "{release}" in
+  missing) printf 'release not found\\n' >&2; exit 1 ;;
+  broken) printf 'HTTP 502: Bad Gateway\\n' >&2; exit 4 ;;
+  esac
+  if [[ $* == *--json* ]]; then {listing}; fi ;;
+"release create") exit {create_status} ;;
+"release download")
+  cp -- "{archive}" "$7/$5" ;;
+"release upload")
+  printf 'upload-listing %s\\n' "$(tar -tf "$4" | sort | tr '\\n' ' ')" >>"{self.log}" ;;
+esac
+""")
+        (self.bin / "gh").chmod(0o755)
+
+    def archive(self, *members: tuple[str, str]) -> pathlib.Path:
+        source = self.base / "source"
+        source.mkdir()
+        for name, kind in members:
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "link":
+                path.symlink_to("/etc/passwd")
+            else:
+                path.write_text(name)
+        archive = self.base / "archive.tar"
+        subprocess.run(["tar", "-cf", str(archive), "-C", str(source), "."], check=True)
+        return archive
+
+    def gh_calls(self) -> list[str]:
+        return [call for call in self.calls() if call.startswith(("gh ", "upload-listing "))]
+
+    def test_fetch_unpacks_the_asset_named_by_the_kernel_derivation(self):
+        archive = self.archive(("nix-cache-info", "file"), ("nar/a.nar.zst", "file"))
+        self.stub_gh(assets=(self.OTHER_ARCH, self.ASSET), archive=archive)
+        result = self.run_cache("fetch", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "hit=true\n")
+        self.assertEqual((self.cache / "nar" / "a.nar.zst").read_text(), "nar/a.nar.zst")
+        download = next(call for call in self.gh_calls() if call.startswith("gh release download"))
+        self.assertRegex(download, rf"^gh release download qemu-kernel-cache --pattern {re.escape(self.ASSET)} --dir /")
+
+    def test_fetch_misses_without_the_asset_or_the_release(self):
+        for stub in ({"assets": (self.OLD_ASSET, self.OTHER_ARCH)}, {"release": "missing"}):
+            with self.subTest(stub=stub):
+                self.log.unlink(missing_ok=True)
+                self.stub_gh(**stub)
+                result = self.run_cache("fetch", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "hit=false\n")
+                self.assertEqual(self.gh_calls(),
+                                 ["gh release view qemu-kernel-cache --json assets --jq .assets[].name"])
+                self.assertFalse(self.cache.exists())
+
+    def test_fetch_fails_when_the_release_cannot_be_listed(self):
+        self.stub_gh(release="broken")
+        result = self.run_cache("fetch", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("HTTP 502", result.stderr)
+
+    def test_fetch_refuses_links_and_paths_outside_the_cache(self):
+        for members in ((("nix-cache-info", "file"), ("nar/link", "link")),
+                        (("nix-cache-info", "file"), ("nar/a b", "file"))):
+            with self.subTest(members=members):
+                shutil.rmtree(self.base / "source", ignore_errors=True)
+                self.stub_gh(assets=(self.ASSET,), archive=self.archive(*members))
+                result = self.run_cache("fetch", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(self.cache.exists())
+        traversal = self.base / "traversal.tar"
+        subprocess.run(["tar", "-cf", str(traversal), "-C", str(self.base), "--transform", "s,^,../,",
+                        "nix.log"], check=True)
+        self.stub_gh(assets=(self.ASSET,), archive=traversal)
+        result = self.run_cache("fetch", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected kernel cache archive entry: ../nix.log", result.stderr)
+        self.assertFalse(self.cache.exists())
+
+    def test_publish_uploads_the_cache_and_drops_this_architectures_older_assets(self):
+        self.cache.mkdir()
+        (self.cache / "nix-cache-info").write_text("StoreDir: /nix/store\n")
+        self.stub_gh(assets=(self.OLD_ASSET, self.OTHER_ARCH, self.ASSET))
+        result = self.run_cache("publish", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.gh_calls()
+        self.assertEqual(calls[0], "gh release view qemu-kernel-cache")
+        self.assertRegex(calls[1], rf"^gh release upload qemu-kernel-cache /.*/{re.escape(self.ASSET)}$")
+        self.assertEqual(calls[2:], [
+            "upload-listing ./ ./nix-cache-info ",
+            "gh release view qemu-kernel-cache --json assets --jq .assets[].name",
+            f"gh release delete-asset qemu-kernel-cache {self.OLD_ASSET} --yes",
+        ])
+
+    def test_publish_creates_the_release_or_finds_the_one_another_job_created(self):
+        self.cache.mkdir()
+        (self.cache / "nix-cache-info").write_text("StoreDir: /nix/store\n")
+        for create_status, status in ((0, 0), (1, 1)):
+            with self.subTest(create_status=create_status):
+                self.log.unlink(missing_ok=True)
+                self.stub_gh(release="missing", create_status=create_status)
+                result = self.run_cache("publish", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, status, result.stderr)
+                calls = self.gh_calls()
+                self.assertEqual(calls[0], "gh release view qemu-kernel-cache")
+                self.assertTrue(calls[1].startswith("gh release create qemu-kernel-cache --prerelease --latest=false"))
+                if create_status:
+                    # The release still does not exist, so nothing is uploaded.
+                    self.assertEqual(calls[2:], ["gh release view qemu-kernel-cache"])
+                else:
+                    self.assertTrue(calls[2].startswith("gh release upload qemu-kernel-cache "))
+
     def selftest(self, **stub) -> subprocess.CompletedProcess:
         self.stub_nix(**{"verify_status": 1, "import_status": 1, **stub})
         return self.run_cache("selftest", str(self.cache))
@@ -743,7 +872,7 @@ esac
             "key convert-secret-to-public",
             f"stdin {self.THROWAWAY_SECRET}",
             f"path-info --json --json-format 1 {self.SAMPLE}",
-            f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {self.SAMPLE}",
+            f"copy --to file://{self.cache}?compression=zstd&secret-key={key_path} {self.SAMPLE}",
             "key-mode 600",
             f"key-content {self.THROWAWAY_SECRET}",
             verify,

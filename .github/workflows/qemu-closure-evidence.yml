@@ -30,9 +30,9 @@ on:
       - scripts/qemu_qmp_query_kvm.py
       - scripts/test_qemu_closure_evidence_producer.py
       - scripts/qemu-kernel-cache.sh
-  # Main saves the signed kernel cache that pull requests restore: when the
-  # kernel's inputs change, and daily so the entry is never evicted (unused
-  # entries expire after 7 days) and silently falls back to a source build.
+  # Main publishes the signed kernel cache that pull requests fetch whenever
+  # the kernel's inputs change. Release assets are never evicted, so no
+  # scheduled refresh is needed.
   push:
     branches: [main]
     paths:
@@ -40,8 +40,6 @@ on:
       - deploy/nixos/**
       - scripts/install-pinned-nix.sh
       - scripts/qemu-kernel-cache.sh
-  schedule:
-    - cron: 23 4 * * *
 
 permissions:
   contents: read
@@ -49,7 +47,7 @@ permissions:
 concurrency:
   group: qemu-closure-evidence-${{ github.ref }}
   # A newer push supersedes a pull request run; a main kernel build always
-  # finishes, so the cache entry is saved.
+  # finishes, so its cache is published.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -124,23 +122,25 @@ jobs:
           df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
       - name: Install the hash-pinned Nix release
         run: bash scripts/install-pinned-nix.sh
-      - name: Name the kernel cache entry
-        id: kernel-key
-        run: bash scripts/qemu-kernel-cache.sh key "${EVIDENCE_ARCHITECTURE}" >>"${GITHUB_OUTPUT}"
-      # Exact key only: a different kernel derivation builds from source.
-      - name: Restore the signed kernel built on main
+      # Exact kernel derivation only: a different kernel builds from source,
+      # and so does a failed download.
+      - name: Fetch the signed kernel built on main
         id: kernel-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/qemu-kernel-cache
-          key: ${{ steps.kernel-key.outputs.key }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! bash scripts/qemu-kernel-cache.sh fetch "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache" >>"${GITHUB_OUTPUT}"; then
+            echo '::warning::qemu-kernel-cache fetch failed: building the kernel from source.'
+            echo 'hit=false' >>"${GITHUB_OUTPUT}"
+          fi
       - name: Note a kernel cache miss
-        if: ${{ steps.kernel-cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.kernel-cache.outputs.hit != 'true' }}
         run: echo 'qemu-kernel-cache miss, so the kernel is built from source.' >>"${GITHUB_STEP_SUMMARY}"
       # The daemon still checks every signature. An entry it refuses leaves
       # the store unchanged, and the next step builds the kernel from source.
       - name: Import the signed kernel
-        if: ${{ steps.kernel-cache.outputs.cache-hit == 'true' }}
+        if: ${{ steps.kernel-cache.outputs.hit == 'true' }}
         run: |
           if ! bash scripts/qemu-kernel-cache.sh import "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"; then
             echo '::warning::qemu-kernel-cache refused: building the kernel from source.'
@@ -195,14 +195,17 @@ jobs:
         run: bash scripts/qemu-kernel-cache.sh selftest "${RUNNER_TEMP}/qemu-kernel-cache-selftest"
 
   # Builds the guest kernel once per kernel derivation on main, signs it with
-  # the main-only key and saves it for pull requests (scripts/qemu-kernel-cache.sh).
-  # The qemu-kernel-cache environment allows only main to deploy; that is a
-  # repository setting this workflow's policy oracle cannot read.
+  # the main-only key and publishes it as a release asset for pull requests
+  # (scripts/qemu-kernel-cache.sh). The qemu-kernel-cache environment allows
+  # only main to deploy; that is a repository setting this workflow's policy
+  # oracle cannot read. Only this job may write the release.
   kernel-cache:
     name: kernel cache
     needs: policy
     if: ${{ github.event_name != 'pull_request' }}
     environment: qemu-kernel-cache
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -222,31 +225,28 @@ jobs:
       - *sdk-headroom
       - name: Install the hash-pinned Nix release
         run: bash scripts/install-pinned-nix.sh
-      - name: Name the kernel cache entry
-        id: kernel-key
-        run: bash scripts/qemu-kernel-cache.sh key "${EVIDENCE_ARCHITECTURE}" >>"${GITHUB_OUTPUT}"
-      # A full restore, so a hit is verified: an entry that is not intact and
+      # A full download, so a hit is verified: an asset that is not intact and
       # signed by the trusted key fails this job on main until it is deleted.
-      - name: Restore the kernel cache entry
-        id: kernel-restore
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/qemu-kernel-cache
-          key: ${{ steps.kernel-key.outputs.key }}
-      - name: Verify the cached kernel
-        if: ${{ steps.kernel-restore.outputs.cache-hit == 'true' }}
+      - name: Fetch the published kernel
+        id: kernel-fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/qemu-kernel-cache.sh fetch "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache" >>"${GITHUB_OUTPUT}"
+      - name: Verify the published kernel
+        if: ${{ steps.kernel-fetch.outputs.hit == 'true' }}
         run: bash scripts/qemu-kernel-cache.sh verify "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"
       - name: Build the kernel
-        if: ${{ steps.kernel-restore.outputs.cache-hit != 'true' }}
+        if: ${{ steps.kernel-fetch.outputs.hit != 'true' }}
         run: bash scripts/qemu-kernel-cache.sh build "${EVIDENCE_ARCHITECTURE}"
       - name: Sign the kernel
-        if: ${{ steps.kernel-restore.outputs.cache-hit != 'true' }}
+        if: ${{ steps.kernel-fetch.outputs.hit != 'true' }}
         env:
           QEMU_KERNEL_CACHE_SIGNING_KEY: ${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}
         run: bash scripts/qemu-kernel-cache.sh export "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"
-      - name: Save the signed kernel
-        if: ${{ steps.kernel-restore.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/qemu-kernel-cache
-          key: ${{ steps.kernel-key.outputs.key }}
+      - name: Publish the signed kernel
+        if: ${{ steps.kernel-fetch.outputs.hit != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/qemu-kernel-cache.sh publish "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"
