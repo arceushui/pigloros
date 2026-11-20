@@ -3319,7 +3319,9 @@ fn service_admitted_fork(
     let fork = service_command(host, &session, 2, Some(parent))?;
     match host.execute_fork_admission_command(&session, &policy, &fork)? {
         pos_core::ForkAdmissionOperationResultV1::Fork(receipt) => Ok(receipt.child_id),
-        other => Err(format!("expected an admitted Fork, got {other:?}").into()),
+        other @ pos_core::ForkAdmissionOperationResultV1::PrincipalOwner(_) => {
+            Err(format!("expected an admitted Fork, got {other:?}").into())
+        }
     }
 }
 
