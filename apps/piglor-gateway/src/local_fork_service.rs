@@ -1759,8 +1759,16 @@ pub mod tests {
     fn assert_single_host_connection_structure() {
         // Everything before the unit-test module, including test-only
         // production helpers such as `map_journal_for_test`, is scanned.
-        let production =
-            |source: &'static str| source.split("\nmod tests {").next().unwrap_or(source);
+        // This file's test module is `pub mod tests`, so its managed-mode
+        // seams satisfy `clippy::redundant_pub_crate`; either form ends the
+        // production source.
+        let production = |source: &'static str| {
+            source
+                .split("\nmod tests {")
+                .next()
+                .and_then(|before| before.split("\npub mod tests {").next())
+                .unwrap_or(source)
+        };
         let coordinator = production(include_str!("local_fork_coordinator.rs"));
         let listener = production(include_str!("local_fork_listener.rs"));
         let service = production(include_str!("local_fork_service.rs"));

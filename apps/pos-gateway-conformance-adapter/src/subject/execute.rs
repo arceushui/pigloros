@@ -600,6 +600,36 @@ mod tests {
     use pos_core::ErasureInventoryPersistencePortV1 as _;
     use pos_store::sqlite::SqliteStore;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Set only for a test re-executed inside the Air-Gapped test shape.
+    const IN_AIR_GAPPED_NAMESPACE: &str = "PIGLOROS_AIR_GAPPED_TEST_NAMESPACE";
+
+    /// Run `body` as the test `name` of this binary inside the ADR-135 §4
+    /// test shape (#1422), as the adapter's public tests run its attempts.
+    ///
+    /// The `authorized-air-gapped` composition binds the Air-Gapped mode,
+    /// whose `air-gapped-no-route` predicate holds only there. The parent
+    /// re-executes this test binary under `scripts/air-gapped-namespace.sh`
+    /// and requires the child to pass.
+    fn in_air_gapped_namespace(name: &str, body: impl FnOnce() -> TestResult) -> TestResult {
+        if std::env::var_os(IN_AIR_GAPPED_NAMESPACE).is_some() {
+            return body();
+        }
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/air-gapped-namespace.sh");
+        let status = std::process::Command::new(script)
+            .arg(std::env::current_exe()?)
+            .args(["--exact", name, "--nocapture"])
+            .env(IN_AIR_GAPPED_NAMESPACE, "1")
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{name} failed in the Air-Gapped test namespace: {status}").into())
+        }
+    }
+
     /// Only the compositions with a fixture erasure bundle record an erasure identity.
     ///
     /// ADR-136 acceptance test 11 does not apply to the adapter: it never
@@ -609,9 +639,22 @@ mod tests {
     /// no ERQ1 to recover. The `authorized-erasure` compositions do record
     /// one; they compose through the `serve` loader, which refuses to start
     /// without the signer credential, so they hold the signer.
+    ///
+    /// Each composition is built as the adapter's execution builds it, in
+    /// the Air-Gapped test shape: outside it, `authorized-air-gapped` does
+    /// not compose, because its `air-gapped-no-route` predicate refuses the
+    /// networked host.
     #[test]
-    fn only_the_erasure_bundle_compositions_record_an_erasure_identity(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn only_the_erasure_bundle_compositions_record_an_erasure_identity() -> TestResult {
+        in_air_gapped_namespace(
+            "subject::execute::tests::only_the_erasure_bundle_compositions_record_an_erasure_identity",
+            every_composition_records_an_identity_only_with_a_bundle,
+        )
+    }
+
+    /// The body of
+    /// [`only_the_erasure_bundle_compositions_record_an_erasure_identity`].
+    fn every_composition_records_an_identity_only_with_a_bundle() -> TestResult {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
