@@ -1957,29 +1957,37 @@ fn idempotency(key: u8) -> TestResult<LocalErasureIdempotencyV1> {
     })
 }
 
-/// A store retaining the valid ERAZ1, ELSEL1 and ELIDEM1 of key 1 plus
-/// `extra`, and a host over it.
-fn plain_host(
+/// The local fixture on `adapter` retaining the valid ERAZ1, ELSEL1 and
+/// ELIDEM1 of key 1 at chain head `head`, plus `extra`.
+fn plain_fixture(
+    adapter: Adapter,
+    head: u64,
     extra: &[LocalErasureAuthorizationV1],
-) -> TestResult<(LocalStore, ErasureExecutionHostV1)> {
-    let store = LocalStore::new(&GrantShape::standard())?;
+) -> TestResult<Fixture> {
     let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
     let mut objects = vec![
-        authorization(1, store.head)?.to_canonical_cbor()?,
+        authorization(1, head)?.to_canonical_cbor()?,
         LocalErasureSelectorV1 { subject }.to_canonical_cbor()?,
         idempotency(1)?.to_canonical_cbor()?,
     ];
     for record in extra {
         objects.push(record.to_canonical_cbor()?);
     }
-    store.retain(&objects)?;
-    let host = store.host(&local_case()?, 4_096)?;
-    Ok((store, host))
+    let (fixture, ()) = Fixture::local(adapter, &GrantShape::standard(), 4_096, |store| {
+        retain_objects(store, &objects)
+    })?;
+    assert_eq!(fixture.head, head);
+    Ok(fixture)
+}
+
+/// The chain head every fixture of the standard grant shape records.
+fn standard_head() -> TestResult<u64> {
+    Ok(LocalStore::new(&GrantShape::standard())?.head)
 }
 
 #[test]
 fn the_authority_recomputes_every_eraz1_rule_of_a_plain_submission() -> TestResult {
-    let head = LocalStore::new(&GrantShape::standard())?.head;
+    let head = standard_head()?;
     let changes: [&dyn Fn(&mut LocalErasureAuthorizationV1); 8] = [
         &|record| record.principal_ref = reference(0x81),
         &|record| "erasure.read".clone_into(&mut record.operation),
@@ -1996,30 +2004,31 @@ fn the_authority_recomputes_every_eraz1_rule_of_a_plain_submission() -> TestResu
         change(&mut record);
         tampered.push(record);
     }
-    let (store, mut host) = plain_host(&tampered)?;
-    assert_eq!(store.head, head);
-    // Every ERAZ1 that breaks a rule, or is not retained, is unauthorized.
-    for record in &tampered {
+    for adapter in ADAPTERS {
+        let mut fixture = plain_fixture(adapter, head, &tampered)?;
+        // Every ERAZ1 that breaks a rule, or is not retained, is
+        // unauthorized.
+        for record in &tampered {
+            assert_eq!(
+                PlainRequest::with_authorization(1, record, head)?.submit(&mut fixture.host),
+                Err(ErasureHostErrorV1::AuthorizationDenied)
+            );
+        }
+        let mut missing = PlainRequest::valid(1, head)?;
+        missing.input.authorization = reference(0x85);
         assert_eq!(
-            PlainRequest::with_authorization(1, record, head)?.submit(&mut host),
+            missing.submit(&mut fixture.host),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
     }
-    let mut missing = PlainRequest::valid(1, head)?;
-    missing.input.authorization = reference(0x85);
-    assert_eq!(
-        missing.submit(&mut host),
-        Err(ErasureHostErrorV1::AuthorizationDenied)
-    );
     Ok(())
 }
 
 #[test]
 fn the_authority_recomputes_every_erq1_field_of_a_plain_submission() -> TestResult {
-    let head = LocalStore::new(&GrantShape::standard())?.head;
+    let head = standard_head()?;
     let mut rebound = authorization(1, head)?;
     rebound.erq1_request = reference(0x84);
-    let (_store, mut host) = plain_host(std::slice::from_ref(&rebound))?;
     // Every ERQ1 field the host derives is recomputed; a mismatch conflicts.
     let changes: [&dyn Fn(&mut ErasureRequestInputV1); 8] = [
         &|input| input.subject = reference(0x86),
@@ -2031,63 +2040,70 @@ fn the_authority_recomputes_every_erq1_field_of_a_plain_submission() -> TestResu
         &|input| input.horizon_position = LOCAL_ERASURE_ATTEMPT_WINDOW_V1 + 1,
         &|input| input.provenance = reference(0x8a),
     ];
-    for change in changes {
-        let mut request = PlainRequest::valid(1, head)?;
-        change(&mut request.input);
-        assert_eq!(request.submit(&mut host), Err(ErasureHostErrorV1::Conflict));
+    for adapter in ADAPTERS {
+        let mut fixture = plain_fixture(adapter, head, std::slice::from_ref(&rebound))?;
+        let host = &mut fixture.host;
+        for change in &changes {
+            let mut request = PlainRequest::valid(1, head)?;
+            change(&mut request.input);
+            assert_eq!(request.submit(host), Err(ErasureHostErrorV1::Conflict));
+        }
+        // An ERAZ1 bound to a request id the key does not derive conflicts.
+        let mut rebound_request = PlainRequest::with_authorization(1, &rebound, head)?;
+        rebound_request.input.request = reference(0x84);
+        assert_eq!(
+            rebound_request.submit(host),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        // The valid plain submission is admitted; a second one for the
+        // subject is refused while the first is pre-terminal.
+        assert_eq!(
+            PlainRequest::valid(1, head)?.submit(host),
+            Ok(ErasureLifecycleV1::Submitted)
+        );
+        assert_eq!(
+            host.command_sender()?
+                .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::Concurrent)
+        );
     }
-    // An ERAZ1 bound to a request id the key does not derive conflicts.
-    let mut rebound_request = PlainRequest::with_authorization(1, &rebound, head)?;
-    rebound_request.input.request = reference(0x84);
-    assert_eq!(
-        rebound_request.submit(&mut host),
-        Err(ErasureHostErrorV1::Conflict)
-    );
-    // The valid plain submission is admitted; a second one for the subject
-    // is refused while the first is pre-terminal.
-    assert_eq!(
-        PlainRequest::valid(1, head)?.submit(&mut host),
-        Ok(ErasureLifecycleV1::Submitted)
-    );
-    assert_eq!(
-        host.command_sender()?
-            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Concurrent)
-    );
     Ok(())
 }
 
 #[test]
 fn a_plain_submission_cannot_bypass_the_subject_checks() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    let head = store.head;
+    let head = standard_head()?;
     let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
-    store.retain(&[
+    let objects = [
         authorization(2, head)?.to_canonical_cbor()?,
         LocalErasureSelectorV1 { subject }.to_canonical_cbor()?,
         idempotency(2)?.to_canonical_cbor()?,
         rejection(1)?.to_canonical_cbor()?,
-    ])?;
-    // One request head over the reserve: the subject's quota is 1.
-    let mut host = store.host(&local_case()?, RESERVE + 1)?;
-    {
-        let mut sender = host.command_sender()?;
-        sender
+    ];
+    for adapter in ADAPTERS {
+        // One request head over the reserve: the subject's quota is 1.
+        let (mut fixture, ()) =
+            Fixture::local(adapter, &GrantShape::standard(), RESERVE + 1, |store| {
+                retain_objects(store, &objects)
+            })?;
+        assert_eq!(fixture.head, head);
+        let host = &mut fixture.host;
+        host.command_sender()?
             .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
             .map_err(fail)?;
+        // While request 1 is pre-terminal a plain request 2 is refused.
+        assert_eq!(
+            PlainRequest::valid(2, head)?.submit(host),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        // Once request 1 is rejected the quota still refuses it.
+        host.command_sender()?
+            .reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+        assert_eq!(
+            PlainRequest::valid(2, head)?.submit(host),
+            Err(ErasureHostErrorV1::Conflict)
+        );
     }
-    // While request 1 is pre-terminal a plain request 2 is refused.
-    assert_eq!(
-        PlainRequest::valid(2, head)?.submit(&mut host),
-        Err(ErasureHostErrorV1::Conflict)
-    );
-    // Once request 1 is rejected the quota still refuses it.
-    host.command_sender()?
-        .reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
-    assert_eq!(
-        PlainRequest::valid(2, head)?.submit(&mut host),
-        Err(ErasureHostErrorV1::Conflict)
-    );
     Ok(())
 }
 
@@ -2102,15 +2118,15 @@ fn single_owner_bundle(owner: ErasureReferenceV1) -> LocalErasureBundleV1 {
     with_owner
 }
 
-/// The composed Local authority over a provisioned store whose bundle
-/// names one `key-registry` owner, and a host-built view of that store.
-fn local_authority() -> TestResult<(
-    LocalStore,
-    ErasureCoordinatorCompositionV1,
-    ErasureExecutionHostV1,
-    ErasureReferenceV1,
-)> {
-    let store = LocalStore::new(&GrantShape::standard())?;
+/// The Local authority whose bundle names one `key-registry` owner, and
+/// a fixture of that bundle on `adapter` whose host builds the views.
+///
+/// The authority is composed over an identically provisioned Memory store:
+/// composition reads only the store identity and the signer key, and a
+/// Memory store is gone into its host once that host opens.
+fn local_authority(
+    adapter: Adapter,
+) -> TestResult<(Fixture, ErasureCoordinatorCompositionV1, ErasureReferenceV1)> {
     let owner = pos_core::local_erasure_owner_ref_v1(
         ErasureReferenceV1::from_digest(STORE_IDENTITY),
         1,
@@ -2118,344 +2134,363 @@ fn local_authority() -> TestResult<(
     )?;
     let case = Case::signed(&single_owner_bundle(owner), &bundle_root(), &[])?;
     let composition = {
-        let mut sqlite = SqliteStore::open(&store.path)?;
-        sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-        case.compose(&mut sqlite).map_err(fail)?
+        let mut scratch = MemoryStore::new();
+        provisioned(&mut scratch, &GrantShape::standard(), &[])?;
+        case.compose(&mut scratch).map_err(fail)?
     };
-    let host = store.host(&case, 4_096)?;
-    Ok((store, composition, host, owner))
+    let (fixture, ()) = Fixture::open(adapter, &GrantShape::standard(), (case, 4_096), |_| Ok(()))?;
+    Ok((fixture, composition, owner))
 }
 
 #[test]
 fn the_local_authority_refuses_an_unbound_freeze() -> TestResult {
-    let (_store, composition, mut host, _owner) = local_authority()?;
-    let view = host.authority_view()?;
-    let authority = composition.authority();
-    let request = reference(0x90);
-    let transition = |lifecycle, freeze_position| ErasureStateTransitionV1 {
-        lifecycle,
-        freeze_position,
-        pending_owners: Vec::new(),
-        failed_owners: Vec::new(),
-        acknowledged_targets: Vec::new(),
-        replay_claim: ErasureReplayClaimV1::Exact,
-        provenance: reference(0x98),
-    };
-    // Only `AccessFrozen` at the Local freeze position is admitted, and only
-    // for a request the installed inventory holds.
-    for (lifecycle, position) in [
-        (ErasureLifecycleV1::AccessFrozen, Some(2)),
-        (ErasureLifecycleV1::AccessFrozen, None),
-        (ErasureLifecycleV1::Authorized, Some(1)),
-        (ErasureLifecycleV1::AccessFrozen, Some(1)),
-    ] {
+    for adapter in ADAPTERS {
+        let (mut fixture, composition, _owner) = local_authority(adapter)?;
+        let view = fixture.host.authority_view()?;
+        let authority = composition.authority();
+        let request = reference(0x90);
+        let transition = |lifecycle, freeze_position| ErasureStateTransitionV1 {
+            lifecycle,
+            freeze_position,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: reference(0x98),
+        };
+        // Only `AccessFrozen` at the Local freeze position is admitted, and only
+        // for a request the installed inventory holds.
+        for (lifecycle, position) in [
+            (ErasureLifecycleV1::AccessFrozen, Some(2)),
+            (ErasureLifecycleV1::AccessFrozen, None),
+            (ErasureLifecycleV1::Authorized, Some(1)),
+            (ErasureLifecycleV1::AccessFrozen, Some(1)),
+        ] {
+            assert_eq!(
+                authority
+                    .admit_atomic_freeze(&view, request, &transition(lifecycle, position))
+                    .map(drop),
+                Err(ErasureErrorV1::PolicyConflict)
+            );
+        }
+        // The view built outside a host command reads no scope, so it observes
+        // no partition, and no ARD1 row, publication or key.
+        let missing = Err(ErasureErrorV1::ProvenanceMissing);
         assert_eq!(
             authority
-                .admit_atomic_freeze(&view, request, &transition(lifecycle, position))
+                .verified_topology_observation(&view, request, reference(0x99))
                 .map(drop),
-            Err(ErasureErrorV1::PolicyConflict)
+            missing
+        );
+        assert_eq!(view.recorded_scope(request).map(drop), missing);
+        let unread = Err(ErasureViewListErrorV1::Read(
+            ErasureErrorV1::ProvenanceMissing,
+        ));
+        assert_eq!(
+            view.artifact_registrations(authority_timeline()).map(drop),
+            unread
+        );
+        assert_eq!(
+            view.recipient_export_publications(&[authority_timeline()])
+                .map(drop),
+            unread
+        );
+        assert_eq!(
+            view.key_identities(&pos_core::OwnerIdV1::from_static("subject:owner"))
+                .map(drop),
+            unread
         );
     }
-    // The view built outside a host command reads no scope, so it observes
-    // no partition, and no ARD1 row, publication or key.
-    let missing = Err(ErasureErrorV1::ProvenanceMissing);
-    assert_eq!(
-        authority
-            .verified_topology_observation(&view, request, reference(0x99))
-            .map(drop),
-        missing
-    );
-    assert_eq!(view.recorded_scope(request).map(drop), missing);
-    let unread = Err(ErasureViewListErrorV1::Read(
-        ErasureErrorV1::ProvenanceMissing,
-    ));
-    assert_eq!(
-        view.artifact_registrations(authority_timeline()).map(drop),
-        unread
-    );
-    assert_eq!(
-        view.recipient_export_publications(&[authority_timeline()])
-            .map(drop),
-        unread
-    );
-    assert_eq!(
-        view.key_identities(&pos_core::OwnerIdV1::from_static("subject:owner"))
-            .map(drop),
-        unread
-    );
     Ok(())
 }
 
 #[test]
 fn the_local_authority_recomputes_every_fork_scope_extension() -> TestResult {
-    let (_store, composition, mut host, _owner) = local_authority()?;
-    let view = host.authority_view()?;
-    let authority = composition.authority();
-    let request = reference(0x90);
-    let parent = TimelineMeta::root("local-authority-parent");
-    let root_child = TimelineMeta::root("local-authority-child");
-    let fork_child = TimelineMeta::forked_from(parent.id, Seq::ZERO, "local-authority-fork");
-    let child_scope = pos_core::local_erasure_fork_scope_v1(fork_child.id)?;
-    let extension = |child: &TimelineMeta, fork| {
-        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
-            request,
-            scope_commitment: reference(0x91),
-            fork,
-            child_timeline: child.id,
-            lineage_rule: reference(0x93),
-            predecessor_extension: None,
-            admission_provenance: pos_core::local_erasure_fork_admission_v1(
+    for adapter in ADAPTERS {
+        let (mut fixture, composition, _owner) = local_authority(adapter)?;
+        let view = fixture.host.authority_view()?;
+        let authority = composition.authority();
+        let request = reference(0x90);
+        let parent = TimelineMeta::root("local-authority-parent");
+        let root_child = TimelineMeta::root("local-authority-child");
+        let fork_child = TimelineMeta::forked_from(parent.id, Seq::ZERO, "local-authority-fork");
+        let child_scope = pos_core::local_erasure_fork_scope_v1(fork_child.id)?;
+        let extension = |child: &TimelineMeta, fork| {
+            ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
                 request,
-                parent.id,
-                child.id,
-                reference(0x93),
-            )?,
-        })
-    };
-    let fork_input = |child: &TimelineMeta, child_scope| ErasureForkAdmissionInputV1 {
-        operation: reference(0x95),
-        expected_inventory_generation: reference(0x96),
-        child_scope,
-        child: child.clone(),
-    };
-    let missing = Err(ErasureErrorV1::ProvenanceMissing);
-    // A child the view does not record has no parent to recompute from.
-    let recorded = extension(&fork_child, child_scope)?;
-    assert_eq!(authority.admit_scope_extension(&view, &recorded), missing);
-    assert_eq!(
-        authority.validate_scope_extension_with_view(&view, &recorded),
-        missing
-    );
-    // An identified Fork recomputes `ELFS1` and `ELFX1` from its own child.
-    assert_eq!(
-        authority.admit_fork_scope_extension(
-            &view,
-            &recorded,
-            &fork_input(&fork_child, child_scope)
-        ),
-        Ok(())
-    );
-    for (candidate, input) in [
-        (recorded, fork_input(&fork_child, reference(0x97))),
-        (recorded, fork_input(&root_child, child_scope)),
-        (
-            extension(&fork_child, reference(0x97))?,
-            fork_input(&fork_child, reference(0x97)),
-        ),
-        (
-            extension(&root_child, child_scope)?,
-            fork_input(&root_child, child_scope),
-        ),
-    ] {
+                scope_commitment: reference(0x91),
+                fork,
+                child_timeline: child.id,
+                lineage_rule: reference(0x93),
+                predecessor_extension: None,
+                admission_provenance: pos_core::local_erasure_fork_admission_v1(
+                    request,
+                    parent.id,
+                    child.id,
+                    reference(0x93),
+                )?,
+            })
+        };
+        let fork_input = |child: &TimelineMeta, child_scope| ErasureForkAdmissionInputV1 {
+            operation: reference(0x95),
+            expected_inventory_generation: reference(0x96),
+            child_scope,
+            child: child.clone(),
+        };
+        let missing = Err(ErasureErrorV1::ProvenanceMissing);
+        // A child the view does not record has no parent to recompute from.
+        let recorded = extension(&fork_child, child_scope)?;
+        assert_eq!(authority.admit_scope_extension(&view, &recorded), missing);
         assert_eq!(
-            authority.admit_fork_scope_extension(&view, &candidate, &input),
+            authority.validate_scope_extension_with_view(&view, &recorded),
             missing
         );
-    }
-    assert_eq!(
-        authority.resolve_fork_child_scope(&view, parent.id, &fork_child),
-        Ok(child_scope)
-    );
-    for (fork_parent, child) in [(root_child.id, &fork_child), (parent.id, &root_child)] {
+        // An identified Fork recomputes `ELFS1` and `ELFX1` from its own child.
         assert_eq!(
-            authority
-                .resolve_fork_child_scope(&view, fork_parent, child)
-                .map(drop),
-            missing
+            authority.admit_fork_scope_extension(
+                &view,
+                &recorded,
+                &fork_input(&fork_child, child_scope)
+            ),
+            Ok(())
         );
+        for (candidate, input) in [
+            (recorded, fork_input(&fork_child, reference(0x97))),
+            (recorded, fork_input(&root_child, child_scope)),
+            (
+                extension(&fork_child, reference(0x97))?,
+                fork_input(&fork_child, reference(0x97)),
+            ),
+            (
+                extension(&root_child, child_scope)?,
+                fork_input(&root_child, child_scope),
+            ),
+        ] {
+            assert_eq!(
+                authority.admit_fork_scope_extension(&view, &candidate, &input),
+                missing
+            );
+        }
+        assert_eq!(
+            authority.resolve_fork_child_scope(&view, parent.id, &fork_child),
+            Ok(child_scope)
+        );
+        for (fork_parent, child) in [(root_child.id, &fork_child), (parent.id, &root_child)] {
+            assert_eq!(
+                authority
+                    .resolve_fork_child_scope(&view, fork_parent, child)
+                    .map(drop),
+                missing
+            );
+        }
     }
     Ok(())
 }
 
 #[test]
 fn the_local_authority_refuses_an_unknown_attempt_or_unpinned_acknowledgement() -> TestResult {
-    let (_store, composition, mut host, _owner) = local_authority()?;
-    let view = host.authority_view()?;
-    let authority = composition.authority();
-    let request = reference(0x90);
-    let mut matrix = Vec::new();
-    for category in ErasureInventoryCategoryV1::CANONICAL {
-        matrix.push(ErasureFreezeApplicabilityRowV1::new(
-            category,
-            0,
-            ErasureApplicabilityDecisionV1::Inapplicable,
-            None,
-        )?);
-    }
-    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
-        request,
-        scope_commitment: reference(0xc0),
-        obligation_set: reference(0xc1),
-        applicability_matrix: matrix,
-        freeze_position: 1,
-        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-        trust: reference(0xc2),
-        authorization_provenance: reference(0xc3),
-    })?;
-    let freeze_authorization =
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: admission.authorization_body_digest()?,
-            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-            trust: reference(0xc2),
-            evidence: vec![0xc4],
-        })?;
-    let attempt = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
-        request,
-        attempt_ordinal: 0,
-        source_receipt: None,
-        unresolved_obligations: vec![reference(0xc5)],
-        command_identities: vec![reference(0xc6)],
-        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-        trust: reference(0xc2),
-        admitted_position: 2,
-        deadline_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
-        authorization_provenance: reference(0xc7),
-    })?;
-    let acknowledgement =
-        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+    for adapter in ADAPTERS {
+        let (mut fixture, composition, _owner) = local_authority(adapter)?;
+        let view = fixture.host.authority_view()?;
+        let authority = composition.authority();
+        let request = reference(0x90);
+        let mut matrix = Vec::new();
+        for category in ErasureInventoryCategoryV1::CANONICAL {
+            matrix.push(ErasureFreezeApplicabilityRowV1::new(
+                category,
+                0,
+                ErasureApplicabilityDecisionV1::Inapplicable,
+                None,
+            )?);
+        }
+        let admission =
+            ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+                request,
+                scope_commitment: reference(0xc0),
+                obligation_set: reference(0xc1),
+                applicability_matrix: matrix,
+                freeze_position: 1,
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                trust: reference(0xc2),
+                authorization_provenance: reference(0xc3),
+            })?;
+        let freeze_authorization =
+            ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+                admission_body_digest: admission.authorization_body_digest()?,
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                trust: reference(0xc2),
+                evidence: vec![0xc4],
+            })?;
+        let attempt = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
             request,
-            command: reference(0xc6),
-            attempt: attempt.reference(),
-            obligation: reference(0xc5),
-            owner: reference(0xc8),
-            scope: reference(0xc0),
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-            evidence: reference(0xc9),
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![reference(0xc5)],
+            command_identities: vec![reference(0xc6)],
             policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
             trust: reference(0xc2),
+            admitted_position: 2,
+            deadline_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+            authorization_provenance: reference(0xc7),
         })?;
-    let missing = Err(ErasureErrorV1::ProvenanceMissing);
-    // Freeze evidence must name the bundle it pins; this one names none.
-    assert_eq!(
-        authority.validate_freeze_authorization_with_view(&view, &admission, &freeze_authorization),
-        Err(ErasureErrorV1::Unauthorized)
-    );
-    // The installed inventory holds no such request, and the detached view
-    // reads no bundle the acknowledgement could pin, nor any attempt.
-    assert_eq!(
-        authority.admit_attempt(&view, &attempt).map(drop),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    assert_eq!(
-        authority.admit_acknowledgement(&view, &acknowledgement),
-        Err(ErasureErrorV1::TrustSnapshotInvalid)
-    );
-    assert_eq!(view.active_attempt(request).map(drop), missing);
-    assert_eq!(view.frozen_trust(request).map(drop), missing);
+        let acknowledgement =
+            ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+                request,
+                command: reference(0xc6),
+                attempt: attempt.reference(),
+                obligation: reference(0xc5),
+                owner: reference(0xc8),
+                scope: reference(0xc0),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+                evidence: reference(0xc9),
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                trust: reference(0xc2),
+            })?;
+        let missing = Err(ErasureErrorV1::ProvenanceMissing);
+        // Freeze evidence must name the bundle it pins; this one names none.
+        assert_eq!(
+            authority.validate_freeze_authorization_with_view(
+                &view,
+                &admission,
+                &freeze_authorization
+            ),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        // The installed inventory holds no such request, and the detached view
+        // reads no bundle the acknowledgement could pin, nor any attempt.
+        assert_eq!(
+            authority.admit_attempt(&view, &attempt).map(drop),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            authority.admit_acknowledgement(&view, &acknowledgement),
+            Err(ErasureErrorV1::TrustSnapshotInvalid)
+        );
+        assert_eq!(view.active_attempt(request).map(drop), missing);
+        assert_eq!(view.frozen_trust(request).map(drop), missing);
+    }
     Ok(())
 }
 
 #[test]
 fn a_receipt_needs_an_active_attempt_and_correction_and_resolution_are_refused() -> TestResult {
-    let (store, composition, mut host, _owner) = local_authority()?;
-    let view = host.authority_view()?;
-    let authority = composition.authority();
-    let request = reference(0x90);
-    let resolution =
-        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+    for adapter in ADAPTERS {
+        let (mut fixture, composition, _owner) = local_authority(adapter)?;
+        let view = fixture.host.authority_view()?;
+        let authority = composition.authority();
+        let request = reference(0x90);
+        let resolution =
+            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+                request,
+                affected_digests: vec![reference(0x99)],
+                action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+                scope_commitment: reference(0x9a),
+                policy: reference(0x9b),
+                trust: reference(0x9c),
+                principal: reference(0x9d),
+                authorization_provenance: reference(0x9e),
+                reason: reference(0x9f),
+                issue_position: 1,
+                predecessor_resolution: None,
+            })?;
+        let correction =
+            pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+                rejected_request: request,
+                rejected_terminal_state: reference(0xa0),
+                correction_reason: reference(0xa1),
+                authorization_provenance: reference(0xa2),
+            })?;
+        let erq1 = ErasureRequestV1::new(PlainRequest::valid(1, fixture.head)?.input)?;
+        let receipt = ErasureReceiptInputV1 {
             request,
-            affected_digests: vec![reference(0x99)],
-            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
-            scope_commitment: reference(0x9a),
-            policy: reference(0x9b),
-            trust: reference(0x9c),
-            principal: reference(0x9d),
-            authorization_provenance: reference(0x9e),
-            reason: reference(0x9f),
-            issue_position: 1,
-            predecessor_resolution: None,
-        })?;
-    let correction =
-        pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-            rejected_request: request,
-            rejected_terminal_state: reference(0xa0),
-            correction_reason: reference(0xa1),
-            authorization_provenance: reference(0xa2),
-        })?;
-    let erq1 = ErasureRequestV1::new(PlainRequest::valid(1, store.head)?.input)?;
-    let receipt = ErasureReceiptInputV1 {
-        request,
-        terminal_state: reference(0xa3),
-        coordinator: reference(0xa4),
-        lifecycle: ErasureLifecycleV1::Complete,
-        freeze_position: 1,
-        acknowledgements: Vec::new(),
-        frozen_targets: Vec::new(),
-        pending_owners: Vec::new(),
-        failed_owners: Vec::new(),
-        inventories: ErasureReceiptInventoriesV1 {
-            artifacts: Vec::new(),
-            keys: Vec::new(),
-            replicas: Vec::new(),
-            backups: Vec::new(),
-        },
-        replay_claim: ErasureReplayClaimV1::Exact,
-        policy: reference(0xa5),
-        trust: reference(0xa6),
-        provenance: reference(0xa7),
-        issue_position: 2,
-        signature: reference(0xa8),
-        receipt_digest: reference(0),
-    };
-    // Receipts are served, but only for a request with a readable active
-    // attempt; this request has none.
-    assert_eq!(
-        authority.admit_receipt(&view, &receipt),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    // Corrected submission and administrative resolution are refused (Q14, Q4).
-    let conflict = Err(ErasureErrorV1::PolicyConflict);
-    assert_eq!(
-        authority.admit_corrected_submission(&view, &erq1, &correction),
-        conflict
-    );
-    assert_eq!(
-        authority.admit_administrative_resolution(&view, &resolution),
-        conflict
-    );
-    assert_eq!(
-        authority.validate_administrative_resolution_with_view(&view, &resolution),
-        conflict
-    );
+            terminal_state: reference(0xa3),
+            coordinator: reference(0xa4),
+            lifecycle: ErasureLifecycleV1::Complete,
+            freeze_position: 1,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: ErasureReplayClaimV1::Exact,
+            policy: reference(0xa5),
+            trust: reference(0xa6),
+            provenance: reference(0xa7),
+            issue_position: 2,
+            signature: reference(0xa8),
+            receipt_digest: reference(0),
+        };
+        // Receipts are served, but only for a request with a readable active
+        // attempt; this request has none.
+        assert_eq!(
+            authority.admit_receipt(&view, &receipt),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        // Corrected submission and administrative resolution are refused (Q14, Q4).
+        let conflict = Err(ErasureErrorV1::PolicyConflict);
+        assert_eq!(
+            authority.admit_corrected_submission(&view, &erq1, &correction),
+            conflict
+        );
+        assert_eq!(
+            authority.admit_administrative_resolution(&view, &resolution),
+            conflict
+        );
+        assert_eq!(
+            authority.validate_administrative_resolution_with_view(&view, &resolution),
+            conflict
+        );
+    }
     Ok(())
 }
 
 #[test]
 fn destruction_goes_only_to_an_owner_the_bundle_names() -> TestResult {
-    let (_store, composition, mut host, owner) = local_authority()?;
-    let view = host.authority_view()?;
-    let authority = composition.authority();
-    let request = reference(0x90);
-    let command = |owner| ErasureDestructionCommandV1 {
-        obligation: reference(0xb0),
-        category: ErasureInventoryCategoryV1::Key,
-        target: ErasureRequiredTargetV1 {
-            artifact_class: ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest: reference(0xb1),
-            key_role: ErasureKeyRoleV1::DataEncryption,
-            key_digest: reference(0xb2),
-            replica_set: reference(0xb3),
-            replica_id: reference(0xb4),
-        },
-        owner,
-        command: reference(0xb5),
-        provenance: reference(0xb6),
-    };
-    assert_eq!(authority.dispatch_destruction(&view, request, &[]), Ok(()));
-    assert_eq!(
-        authority.dispatch_destruction(&view, request, &[command(owner)]),
-        Ok(())
-    );
-    assert_eq!(
-        authority.dispatch_destruction(&view, request, &[command(owner), command(reference(0xb7))]),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-    // The view built outside a host command reads no stored object.
-    assert_eq!(view.retained_object(reference(0xb8)), None);
-    assert!(view.local_principal_authority(grant_id()).is_none());
-    assert_eq!(view.maximum_requests(), 4_096);
-    assert!(view.verified_requests().is_empty());
-    assert!(view.verified_request(request).is_none());
+    for adapter in ADAPTERS {
+        let (mut fixture, composition, owner) = local_authority(adapter)?;
+        let view = fixture.host.authority_view()?;
+        let authority = composition.authority();
+        let request = reference(0x90);
+        let command = |owner| ErasureDestructionCommandV1 {
+            obligation: reference(0xb0),
+            category: ErasureInventoryCategoryV1::Key,
+            target: ErasureRequiredTargetV1 {
+                artifact_class: ErasureArtifactClassV1::TimelineReplay,
+                artifact_digest: reference(0xb1),
+                key_role: ErasureKeyRoleV1::DataEncryption,
+                key_digest: reference(0xb2),
+                replica_set: reference(0xb3),
+                replica_id: reference(0xb4),
+            },
+            owner,
+            command: reference(0xb5),
+            provenance: reference(0xb6),
+        };
+        assert_eq!(authority.dispatch_destruction(&view, request, &[]), Ok(()));
+        assert_eq!(
+            authority.dispatch_destruction(&view, request, &[command(owner)]),
+            Ok(())
+        );
+        assert_eq!(
+            authority.dispatch_destruction(
+                &view,
+                request,
+                &[command(owner), command(reference(0xb7))]
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        // The view built outside a host command reads no stored object.
+        assert_eq!(view.retained_object(reference(0xb8)), None);
+        assert!(view.local_principal_authority(grant_id()).is_none());
+        assert_eq!(view.maximum_requests(), 4_096);
+        assert!(view.verified_requests().is_empty());
+        assert!(view.verified_request(request).is_none());
+    }
     Ok(())
 }
 
@@ -2806,56 +2841,59 @@ fn refused_signatures(digest: ErasureReferenceV1) -> TestResult<Vec<Vec<u8>>> {
 /// the ERFA1 body that the pinned bundle's signer made.
 #[test]
 fn committed_freeze_evidence_pins_one_policy_and_trust() -> TestResult {
-    let (_store, composition, mut host, owner) = local_authority()?;
-    let view = host.authority_view()?;
-    let authority = composition.authority();
-    let trust = single_owner_bundle(owner).reference()?;
-    let mut matrix = Vec::new();
-    for category in ErasureInventoryCategoryV1::CANONICAL {
-        matrix.push(ErasureFreezeApplicabilityRowV1::new(
-            category,
-            0,
-            ErasureApplicabilityDecisionV1::Inapplicable,
-            None,
-        )?);
+    for adapter in ADAPTERS {
+        let (mut fixture, composition, owner) = local_authority(adapter)?;
+        let view = fixture.host.authority_view()?;
+        let authority = composition.authority();
+        let trust = single_owner_bundle(owner).reference()?;
+        let mut matrix = Vec::new();
+        for category in ErasureInventoryCategoryV1::CANONICAL {
+            matrix.push(ErasureFreezeApplicabilityRowV1::new(
+                category,
+                0,
+                ErasureApplicabilityDecisionV1::Inapplicable,
+                None,
+            )?);
+        }
+        let admission =
+            ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+                request: reference(0x90),
+                scope_commitment: reference(0xc0),
+                obligation_set: reference(0xc1),
+                applicability_matrix: matrix,
+                freeze_position: 1,
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                trust,
+                authorization_provenance: reference(0xc3),
+            })?;
+        let body = admission.authorization_body_digest()?;
+        let signed = signature_record(
+            LocalErasureSignaturePurposeV1::FreezeAuthorization,
+            body,
+            &erasure_signer(),
+            1,
+        )?;
+        let validated = |policy, pinned| {
+            ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+                admission_body_digest: body,
+                policy,
+                trust: pinned,
+                evidence: signed.clone(),
+            })
+            .and_then(|authorization| {
+                authority.validate_freeze_authorization_with_view(&view, &admission, &authorization)
+            })
+        };
+        assert_eq!(validated(LOCAL_ERASURE_POLICY_REFERENCE_V1, trust), Ok(()));
+        assert_eq!(
+            validated(reference(0xc4), trust),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            validated(LOCAL_ERASURE_POLICY_REFERENCE_V1, reference(0xc5)),
+            Err(ErasureErrorV1::Unauthorized)
+        );
     }
-    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
-        request: reference(0x90),
-        scope_commitment: reference(0xc0),
-        obligation_set: reference(0xc1),
-        applicability_matrix: matrix,
-        freeze_position: 1,
-        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-        trust,
-        authorization_provenance: reference(0xc3),
-    })?;
-    let body = admission.authorization_body_digest()?;
-    let signed = signature_record(
-        LocalErasureSignaturePurposeV1::FreezeAuthorization,
-        body,
-        &erasure_signer(),
-        1,
-    )?;
-    let validated = |policy, pinned| {
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: body,
-            policy,
-            trust: pinned,
-            evidence: signed.clone(),
-        })
-        .and_then(|authorization| {
-            authority.validate_freeze_authorization_with_view(&view, &admission, &authorization)
-        })
-    };
-    assert_eq!(validated(LOCAL_ERASURE_POLICY_REFERENCE_V1, trust), Ok(()));
-    assert_eq!(
-        validated(reference(0xc4), trust),
-        Err(ErasureErrorV1::Unauthorized)
-    );
-    assert_eq!(
-        validated(LOCAL_ERASURE_POLICY_REFERENCE_V1, reference(0xc5)),
-        Err(ErasureErrorV1::Unauthorized)
-    );
     Ok(())
 }
 
@@ -5816,89 +5854,91 @@ fn committed_evidence_still_verifies_after_a_bundle_rotation() -> TestResult {
 
 #[test]
 fn recovery_needs_a_resolvable_bundle_and_the_issue_position() -> TestResult {
-    let (_store, composition, mut host, owner) = local_authority()?;
-    let view = host.authority_view()?;
-    let authority = composition.authority();
-    let mut current = bundle();
-    current.owners = vec![LocalErasureOwnerRowV1 {
-        category: 1,
-        ack_class: "key-registry".to_owned(),
-        owner_ref: owner,
-    }];
-    let erq1 = ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(0x90),
-        subject: reference(0xca),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(0xcb)],
-        requester: reference(0xcc),
-        authorization: reference(0xc7),
-        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-        request_position: 0,
-        horizon_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
-        provenance: reference(0xcd),
-    })?;
-    // Attempt 0 as its request derives it, pinning the composed bundle.
-    let pinned = ErasureRetryAdmissionInputV1 {
-        request: erq1.reference(),
-        attempt_ordinal: 0,
-        source_receipt: None,
-        unresolved_obligations: vec![reference(0xc5)],
-        command_identities: vec![reference(0xc6)],
-        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-        trust: current.reference()?,
-        admitted_position: 2,
-        deadline_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
-        authorization_provenance: reference(0xc7),
-    };
-    let attempt = ErasureRetryAdmissionV1::new(pinned.clone())?;
-    // The same attempt pinning a bundle that is neither composed nor
-    // retained.
-    let unresolved = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
-        trust: reference(0xc2),
-        ..pinned
-    })?;
-    assert_eq!(
-        authority.validate_attempt_with_view(&view, &erq1, &attempt),
-        Ok(())
-    );
-    assert_eq!(
-        authority.validate_attempt_with_view(&view, &erq1, &unresolved),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    let acknowledgement =
-        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
-            request: erq1.reference(),
-            command: reference(0xc6),
-            attempt: unresolved.reference(),
-            obligation: reference(0xc5),
-            owner,
-            scope: reference(0xc0),
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-            evidence: reference(0xc9),
+    for adapter in ADAPTERS {
+        let (mut fixture, composition, owner) = local_authority(adapter)?;
+        let view = fixture.host.authority_view()?;
+        let authority = composition.authority();
+        let mut current = bundle();
+        current.owners = vec![LocalErasureOwnerRowV1 {
+            category: 1,
+            ack_class: "key-registry".to_owned(),
+            owner_ref: owner,
+        }];
+        let erq1 = ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: reference(0x90),
+            subject: reference(0xca),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(0xcb)],
+            requester: reference(0xcc),
+            authorization: reference(0xc7),
             policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
-            trust: reference(0xc2),
+            request_position: 0,
+            horizon_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+            provenance: reference(0xcd),
         })?;
-    assert_eq!(
-        authority.validate_acknowledgement_with_view(&view, &acknowledgement),
-        Err(ErasureErrorV1::TrustSnapshotInvalid)
-    );
-    // One executed obligation: a complete receipt of attempt 0 issues at
-    // 2 + 1. Another position is refused before its signature is read;
-    // at that position the unretained signature is refused.
-    let late = ErasureReceiptV1::new(receipt_input(&[], 7, reference(0xce)))?;
-    let reached = ErasureReceiptV1::new(receipt_input(&[], 3, reference(0xce)))?;
-    assert_eq!(
-        authority.validate_receipt_with_view(&view, &unresolved, &reached),
-        Err(ErasureErrorV1::TrustSnapshotInvalid)
-    );
-    assert_eq!(
-        authority.validate_receipt_with_view(&view, &attempt, &late),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    assert_eq!(
-        authority.validate_receipt_with_view(&view, &attempt, &reached),
-        Err(ErasureErrorV1::Unauthorized)
-    );
+        // Attempt 0 as its request derives it, pinning the composed bundle.
+        let pinned = ErasureRetryAdmissionInputV1 {
+            request: erq1.reference(),
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![reference(0xc5)],
+            command_identities: vec![reference(0xc6)],
+            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            trust: current.reference()?,
+            admitted_position: 2,
+            deadline_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+            authorization_provenance: reference(0xc7),
+        };
+        let attempt = ErasureRetryAdmissionV1::new(pinned.clone())?;
+        // The same attempt pinning a bundle that is neither composed nor
+        // retained.
+        let unresolved = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            trust: reference(0xc2),
+            ..pinned
+        })?;
+        assert_eq!(
+            authority.validate_attempt_with_view(&view, &erq1, &attempt),
+            Ok(())
+        );
+        assert_eq!(
+            authority.validate_attempt_with_view(&view, &erq1, &unresolved),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        let acknowledgement =
+            ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+                request: erq1.reference(),
+                command: reference(0xc6),
+                attempt: unresolved.reference(),
+                obligation: reference(0xc5),
+                owner,
+                scope: reference(0xc0),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+                evidence: reference(0xc9),
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                trust: reference(0xc2),
+            })?;
+        assert_eq!(
+            authority.validate_acknowledgement_with_view(&view, &acknowledgement),
+            Err(ErasureErrorV1::TrustSnapshotInvalid)
+        );
+        // One executed obligation: a complete receipt of attempt 0 issues at
+        // 2 + 1. Another position is refused before its signature is read;
+        // at that position the unretained signature is refused.
+        let late = ErasureReceiptV1::new(receipt_input(&[], 7, reference(0xce)))?;
+        let reached = ErasureReceiptV1::new(receipt_input(&[], 3, reference(0xce)))?;
+        assert_eq!(
+            authority.validate_receipt_with_view(&view, &unresolved, &reached),
+            Err(ErasureErrorV1::TrustSnapshotInvalid)
+        );
+        assert_eq!(
+            authority.validate_receipt_with_view(&view, &attempt, &late),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            authority.validate_receipt_with_view(&view, &attempt, &reached),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+    }
     Ok(())
 }
 
@@ -7147,9 +7187,17 @@ fn straight_fixture_run(
 
 /// Retain the ELREJ1 of each request of `keys` on `store`.
 fn retain_rejections(store: &mut dyn SeedStore, keys: &[u8]) -> TestResult {
+    let mut records = Vec::new();
     for key in keys {
-        let record = rejection(*key)?.to_canonical_cbor()?;
-        store.retain_erasure_object(&record, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
+        records.push(rejection(*key)?.to_canonical_cbor()?);
+    }
+    retain_objects(store, &records)
+}
+
+/// Retain each of `objects` on `store`.
+fn retain_objects(store: &mut dyn SeedStore, objects: &[Vec<u8>]) -> TestResult {
+    for object in objects {
+        store.retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
     }
     Ok(())
 }
