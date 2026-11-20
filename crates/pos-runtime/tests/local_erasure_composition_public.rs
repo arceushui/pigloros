@@ -7300,8 +7300,8 @@ fn held_attempts(
 /// Acceptance test 4 (Q10): a transient negative is retried automatically,
 /// each retry at its §6 positions, every partial failure issues exactly at
 /// its deadline, and a retry that succeeds completes the request at its
-/// reached position. The cap of three retries is the unit-tested
-/// `attempt_due` rule; here two real timeouts keep the run short.
+/// reached position. The retry cap is
+/// `acceptance::the_retry_cap_ends_a_transient_failure_in_partial_failure`.
 #[test]
 fn a_transient_negative_is_retried_until_it_succeeds() -> TestResult {
     let store = driver_store()?;
@@ -7709,41 +7709,37 @@ fn the_driver_rejects_an_unverifiable_authorization_and_defers_an_expired_one() 
         driver().drive(&mut host, request)?,
         LocalErasureStepV1::Rejected
     );
-    assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Rejected);
-    drop(host);
     let rejection = LocalErasureRejectionV1 {
         request,
         error: ErasureErrorV1::Unauthorized,
     };
+    // The committed ERS1 is the core rejection record over `CA(ELREJ1)`.
+    let committed = host
+        .read_sender()?
+        .erasure_state(request)?
+        .ok_or("request missing")?
+        .state()
+        .clone();
+    assert_eq!(committed.lifecycle(), ErasureLifecycleV1::Rejected);
+    let recorded = pos_core::ErasureAuthorizationRejectionV1::new(
+        pos_core::ErasureAuthorizationRejectionInputV1 {
+            request,
+            authorization_provenance: rejection.reference()?,
+        },
+    )?;
+    assert_eq!(committed.provenance(), recorded.reference());
+    // An exact retry reproduces the committed rejection and commits nothing.
+    assert_eq!(
+        host.command_sender()?
+            .reject_erasure_request(request, rejection.reference()?)?,
+        committed
+    );
+    assert_eq!(driver().step(&mut host, request)?, LocalErasureStepV1::Idle);
+    assert_eq!(history(&mut host, request)?.len(), 2);
+    drop(host);
     assert!(
         ErasurePersistencePortV1::read_object(&store.sqlite()?, rejection.reference()?).is_ok()
     );
-    Ok(())
-}
-
-/// Q11 through the driver: a closure that outgrew its bound after
-/// submission commits its freeze rejection under the request's ERAZ1.
-#[test]
-fn the_driver_commits_a_freeze_rejection_without_a_signature() -> TestResult {
-    let store = LocalStore::new(&GrantShape::standard())?;
-    let roots = store.owned_roots(actor(), 4_095)?;
-    store
-        .sqlite()?
-        .create_timeline_with_meta(host_timeline_meta()?)?;
-    let mut host = store.host(&driver_case()?, 4_096)?;
-    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
-    let request = request_of(1)?;
-    assert_eq!(
-        driver().step(&mut host, request)?,
-        LocalErasureStepV1::Authorized
-    );
-    host.command_sender()?
-        .fork_timeline(roots[0], Seq::ZERO, "growth")?;
-    assert_eq!(
-        driver().drive(&mut host, request)?,
-        LocalErasureStepV1::FreezeRejected
-    );
-    assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Rejected);
     Ok(())
 }
 
@@ -8424,3 +8420,12 @@ fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult 
     ));
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// The ADR-136 acceptance matrix, slice C6a (#1469): the runtime gaps of
+// acceptance tests 2 to 6, over both adapters. It reuses every fixture
+// above; `docs/erasure/adr-136-acceptance-matrix.md` maps each bullet.
+// ---------------------------------------------------------------------------
+
+#[path = "local_erasure_composition/acceptance.rs"]
+mod acceptance;
