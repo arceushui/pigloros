@@ -19,18 +19,16 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rustix::fs::{statat, AtFlags};
-use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 use super::{
-    artifact_invalid, fresh_synchronization_ids, io_error, listener_socket_identity,
-    remove_matching_socket, selector_unavailable, synchronize_fixed_provider,
-    validate_listener_parent, SocketIdentity, ROOT_UID,
+    fresh_synchronization_ids, io_error, listener_socket_identity, remove_matching_socket,
+    selector_unavailable, synchronize_fixed_provider, validate_listener_parent, SocketIdentity,
+    ROOT_UID,
 };
 use crate::provider_admission::{admitted_provider_binary, AdmittedProviderBinary};
 use crate::provider_transport::{process_start_time_ticks, ProviderTransport};
@@ -38,8 +36,10 @@ use crate::selector::installation::authority::{
     AdmittedProviderRuntime, AdmittedSelectorProvider, ProviderRuntimeSlot,
 };
 use crate::selector::installation::open_directory_chain;
+pub(super) use crate::selector::runtime_lifecycle::proc_executable_digest;
 use crate::selector::runtime_lifecycle::{
-    ObservationChallenge, ProviderLifecyclePort, RuntimeSlotTarget, StartedRuntimeObservation,
+    process_control_group, require_refused, ObservationChallenge, ProviderLifecyclePort,
+    RuntimeSlotTarget, StartedRuntimeObservation,
 };
 use crate::selector::SelectorBoundaryError;
 
@@ -53,7 +53,8 @@ const STALE_TERMINATION_BOUND: Duration = Duration::from_secs(10);
 const RUNTIME_START_BOUND: Duration = Duration::from_secs(32);
 
 /// The BLAKE3 digest of a process's executable, read at most `length + 1`
-/// bytes deep. Production uses [`proc_executable_digest`].
+/// bytes deep. Production uses
+/// [`crate::selector::runtime_lifecycle::proc_executable_digest`].
 pub(super) type ExecutableDigest = fn(NonZeroU64, u64) -> Result<[u8; 32], SelectorBoundaryError>;
 
 /// Start the selected provider's runtime and admit exactly its main process.
@@ -159,40 +160,6 @@ fn verify_started_process(
         .and_then(|()| same_process())
 }
 
-pub(super) fn process_control_group(pid: NonZeroU64) -> Result<String, SelectorBoundaryError> {
-    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .map_err(artifact_invalid)
-        .and_then(|text| unified_cgroup(&text).map(str::to_owned))
-}
-
-/// The one cgroup2 membership line `0::<path>` of a cgroup2-only host.
-fn unified_cgroup(text: &str) -> Result<&str, SelectorBoundaryError> {
-    text.strip_prefix("0::")
-        .and_then(|rest| rest.strip_suffix('\n'))
-        .filter(|path| !path.contains('\n'))
-        .ok_or(SelectorBoundaryError::ArtifactInvalid)
-}
-
-/// The BLAKE3 digest of `/proc/<pid>/exe`, the process's own executable.
-pub(super) fn proc_executable_digest(
-    pid: NonZeroU64,
-    length: u64,
-) -> Result<[u8; 32], SelectorBoundaryError> {
-    File::open(format!("/proc/{pid}/exe"))
-        .map_err(artifact_invalid)
-        .and_then(|executable| bounded_digest(executable, length))
-}
-
-fn bounded_digest(source: impl Read, length: u64) -> Result<[u8; 32], SelectorBoundaryError> {
-    let mut hasher = blake3::Hasher::new();
-    let mut bounded = source.take(length.saturating_add(1));
-    let copied = io::copy(&mut bounded, &mut hasher);
-    copied
-        .map_err(io_error)
-        .and_then(|copied| require(copied == length))
-        .map(|()| *hasher.finalize().as_bytes())
-}
-
 fn remove_stale_endpoints(
     admitted: &AdmittedSelectorProvider,
 ) -> Result<(), SelectorBoundaryError> {
@@ -254,26 +221,6 @@ fn stale_socket(
     }
 }
 
-/// A non-blocking `connect()` must fail with exactly `ECONNREFUSED`: no
-/// process listens on the leaf any more.
-fn require_refused(path: &Path) -> Result<(), SelectorBoundaryError> {
-    SocketAddrUnix::new(path)
-        .map_err(artifact_invalid)
-        .and_then(|address| {
-            socket_with(
-                AddressFamily::UNIX,
-                SocketType::STREAM,
-                SocketFlags::CLOEXEC.union(SocketFlags::NONBLOCK),
-                None,
-            )
-            .map_err(io_error)
-            .and_then(|socket| match connect(&socket, &address) {
-                Err(rustix::io::Errno::CONNREFUSED) => Ok(()),
-                _ => Err(SelectorBoundaryError::ArtifactInvalid),
-            })
-        })
-}
-
 /// R11 §5.0 step 8: only the observed main process may answer.
 fn admit_started_runtime(
     admitted: &AdmittedSelectorProvider,
@@ -304,6 +251,7 @@ mod tests {
 
     use super::*;
     use crate::root_selector::tests::own_runtime_observation;
+    use crate::selector::runtime_lifecycle::{bounded_digest, unified_cgroup};
     use crate::selector::runtime_lifecycle::{
         CgroupPath, ProviderLifecycleError, StaleUnitsObservation,
     };
@@ -384,6 +332,34 @@ mod tests {
                     own.control_group().clone(),
                 )),
             }
+        }
+
+        // Normal open never runs a recovery operation.
+        fn terminate_previous_runtime(
+            &self,
+            _target: &crate::selector::recovery::PreviousRuntimeTarget<'_>,
+            _deadline: Instant,
+        ) -> Result<crate::selector::recovery::PreviousRuntimeObservation, ProviderLifecycleError>
+        {
+            Err(ProviderLifecycleError::Unavailable)
+        }
+
+        fn reconcile_recovery_slot(
+            &self,
+            _target: &crate::selector::recovery::RecoverySlotTarget<'_>,
+            _deadline: Instant,
+        ) -> Result<crate::selector::recovery::RecoverySlotObservation, ProviderLifecycleError>
+        {
+            Err(ProviderLifecycleError::Unavailable)
+        }
+
+        fn start_recovery_peer(
+            &self,
+            _launch: &crate::selector::recovery::RecoveryPeerLaunch<'_>,
+            _deadline: Instant,
+        ) -> Result<crate::selector::recovery::RecoveryPeerObservation, ProviderLifecycleError>
+        {
+            Err(ProviderLifecycleError::Unavailable)
         }
     }
 

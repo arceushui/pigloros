@@ -314,7 +314,9 @@ pub use attempt_evidence::{
     TerminalServiceError,
 };
 #[cfg(target_os = "linux")]
-pub use attempt_records::{AttemptAdmission, AttemptRecords, EvidenceFault};
+pub use attempt_records::{
+    AttemptAdmission, AttemptRecords, EvidenceFault, ResponseFault, RetainedResponse,
+};
 #[cfg(target_os = "linux")]
 pub use execute::{
     execute, AttemptCancel, AttemptEnding, AttemptExecution, CancelSignal, ExecuteError,
@@ -358,8 +360,8 @@ pub use namespace_network::{
 };
 #[cfg(target_os = "linux")]
 pub use restart::{
-    reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup, ReconciledRestart,
-    RestartReconciliationError, RootsReleased,
+    reconcile_cleanup, reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup,
+    ReconciledRestart, RestartReconciliationError, RootsReleased,
 };
 
 #[cfg(target_os = "linux")]

@@ -1,8 +1,10 @@
 #![cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 //! ADR-123 filesystem coordination, without a native store constructor.
 //!
-//! This component grants no store, key or consent authority. Installing the
-//! protected profile still requires the complete constructor/alias/retirement
+//! This component grants no store, key or consent authority. It only opens the
+//! coordination child and its lock entry: the quiescent installation step in
+//! [`crate::owner_store_installation`] alone creates them (ADR-123 §3, §3a).
+//! The protected profile still requires the complete constructor/alias/retirement
 //! proof and managed native owner. Ordinary openers are not joined by this API.
 
 use std::fmt;
@@ -17,10 +19,10 @@ use rustix::io::{self, Errno};
 use crate::owner_store_admission::OwnerStoreOperationV1;
 
 const NAMESPACE: &str = crate::protected_sqlite_namespace::COORDINATION_DIRECTORY;
-const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
+pub(crate) const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_XDEV);
-const OBSERVE: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+pub(crate) const OBSERVE: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 const LOCK_FLAGS: OFlags = OFlags::RDWR
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC)
@@ -55,7 +57,9 @@ impl<'operation> OwnerStoreFileInterlockV1<'operation> {
     /// entry resolution forbids symlinks and mount crossings; existing data
     /// files must be singly linked regular/euid/0600 objects. Missing WAL/SHM
     /// files remain missing. The fixed child and dev/ino-keyed lock are never
-    /// selected from an independent path or removed on release.
+    /// selected from an independent path or removed on release. They must
+    /// already exist: a missing child or lock entry refuses, and nothing is
+    /// created (ADR-123 §3).
     ///
     /// The operation borrow prevents releasing admission while the lock lives:
     /// ```compile_fail
@@ -83,10 +87,7 @@ impl<'operation> OwnerStoreFileInterlockV1<'operation> {
         CheckedNamespace::open(test_database_directory, main_basename)
             .and_then(|namespace| {
                 open_coordination_directory(&namespace.directory).and_then(|coordination| {
-                    let name = format!(
-                        "store-namespace.v1.{:016x}.{:016x}.lock",
-                        namespace.main.stat.st_dev, namespace.main.stat.st_ino
-                    );
+                    let [name, ..] = reserved_names(&namespace.main.stat);
                     open_lock(&coordination, &name).and_then(|lock| {
                         namespace.recheck().map(|()| Self {
                             _admission: PhantomData,
@@ -101,20 +102,29 @@ impl<'operation> OwnerStoreFileInterlockV1<'operation> {
     }
 }
 
-struct FileWitness {
-    descriptor: OwnedFd,
-    stat: Stat,
+/// The ADR-123 §3b reserved entries of the coordination child for the screened
+/// main file `main`: the filesystem interlock, the ADR-137 consent lease and
+/// the in-child Gateway mode lock, each keyed on the main file's coordination
+/// key.
+pub(crate) fn reserved_names(main: &Stat) -> [String; 3] {
+    ["store-namespace", "gateway-consent-lease", "gateway-mode"]
+        .map(|entry| format!("{entry}.v1.{:016x}.{:016x}.lock", main.st_dev, main.st_ino))
 }
 
-struct CheckedNamespace {
-    directory: OwnedFd,
+pub(crate) struct FileWitness {
+    descriptor: OwnedFd,
+    pub(crate) stat: Stat,
+}
+
+pub(crate) struct CheckedNamespace {
+    pub(crate) directory: OwnedFd,
     main_basename: String,
-    main: FileWitness,
+    pub(crate) main: FileWitness,
     companions: [Option<FileWitness>; 2],
 }
 
 impl CheckedNamespace {
-    fn open(directory: &Path, main_basename: &str) -> io::Result<Self> {
+    pub(crate) fn open(directory: &Path, main_basename: &str) -> io::Result<Self> {
         enforce(directory.is_absolute() && valid_basename(main_basename))
             .and_then(|()| {
                 fs::openat(
@@ -140,7 +150,7 @@ impl CheckedNamespace {
             })
     }
 
-    fn recheck(&self) -> io::Result<()> {
+    pub(crate) fn recheck(&self) -> io::Result<()> {
         validate_directory(&self.directory)
             .and_then(|()| check_regular(&self.main.descriptor))
             .and_then(|_| read_file(&self.directory, &self.main_basename))
@@ -172,7 +182,7 @@ fn valid_basename(name: &str) -> bool {
         && name != NAMESPACE
 }
 
-fn enforce(accepted: bool) -> io::Result<()> {
+pub(crate) fn enforce(accepted: bool) -> io::Result<()> {
     accepted.then_some(()).ok_or(Errno::ACCESS)
 }
 
@@ -199,7 +209,7 @@ fn read_file(directory: &OwnedFd, name: &str) -> io::Result<FileWitness> {
     })
 }
 
-fn optional_file(directory: &OwnedFd, name: &str) -> io::Result<Option<FileWitness>> {
+pub(crate) fn optional_file(directory: &OwnedFd, name: &str) -> io::Result<Option<FileWitness>> {
     read_file(directory, name).map(Some).or_else(|error| {
         if error == Errno::NOENT {
             Ok(None)
@@ -216,28 +226,35 @@ fn read_companions(directory: &OwnedFd, name: &str) -> io::Result<[Option<FileWi
         .and_then(|wal| optional_file(directory, &format!("{name}-shm")).map(|shm| [wal, shm]))
 }
 
-fn open_coordination_directory(directory: &OwnedFd) -> io::Result<OwnedFd> {
-    fs::mkdirat(directory, NAMESPACE, Mode::RWXU)
-        .or_else(|error| {
-            if error == Errno::EXIST {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        })
-        .and_then(|()| {
-            fs::openat2(
-                directory,
-                NAMESPACE,
-                OBSERVE.union(OFlags::DIRECTORY),
-                Mode::empty(),
-                RESOLVE,
-            )
-        })
-        .and_then(|child| validate_directory(&child).map(|()| child))
+/// Open the existing coordination child of `directory`, never creating it.
+///
+/// The child must be a private/euid/exact 0700 directory, not on NFS, and
+/// physically distinct from its parent.
+pub(crate) fn open_coordination_directory(directory: &OwnedFd) -> io::Result<OwnedFd> {
+    fs::openat2(
+        directory,
+        NAMESPACE,
+        OBSERVE.union(OFlags::DIRECTORY),
+        Mode::empty(),
+        RESOLVE,
+    )
+    .and_then(|child| {
+        validate_directory(&child)
+            .and_then(|()| fs::fstat(directory))
+            .and_then(|parent| fs::fstat(&child).map(|stat| distinct_child(&parent, &stat)))
+            .and_then(enforce)
+            .map(|()| child)
+    })
 }
 
-fn check_regular(descriptor: &OwnedFd) -> io::Result<Stat> {
+/// Whether a coordination child is a different physical directory from its
+/// parent. Real filesystems with `RESOLVE_NO_XDEV` make the same object hard
+/// to produce, so the check is a pure function the unit tests reach directly.
+const fn distinct_child(parent: &Stat, child: &Stat) -> bool {
+    !(parent.st_dev == child.st_dev && parent.st_ino == child.st_ino)
+}
+
+pub(crate) fn check_regular(descriptor: &OwnedFd) -> io::Result<Stat> {
     fs::fstat(descriptor).and_then(|stat| {
         enforce(private_metadata(&stat, FileType::RegularFile, 0o600) && stat.st_nlink == 1)
             .map(|()| stat)
@@ -245,8 +262,8 @@ fn check_regular(descriptor: &OwnedFd) -> io::Result<Stat> {
 }
 
 fn open_lock(directory: &OwnedFd, name: &str) -> io::Result<OwnedFd> {
-    optional_file(directory, name)
-        .and_then(|observed| open_observed_lock(directory, name, observed.as_ref()))
+    read_file(directory, name)
+        .and_then(|observed| open_observed_lock(directory, name, &observed))
         .and_then(|descriptor| {
             verify_lock_entry(directory, name, &descriptor)
                 .and_then(|()| fs::flock(&descriptor, FlockOperation::NonBlockingLockExclusive))
@@ -258,25 +275,19 @@ fn open_lock(directory: &OwnedFd, name: &str) -> io::Result<OwnedFd> {
 fn open_observed_lock(
     directory: &OwnedFd,
     name: &str,
-    observed: Option<&FileWitness>,
+    observed: &FileWitness,
 ) -> io::Result<OwnedFd> {
-    let (flags, mode) = if observed.is_some() {
-        (LOCK_FLAGS, Mode::empty())
-    } else {
-        (
-            LOCK_FLAGS.union(OFlags::CREATE).union(OFlags::EXCL),
-            Mode::RUSR.union(Mode::WUSR),
-        )
-    };
-    fs::openat2(directory, name, flags, mode, RESOLVE).and_then(|descriptor| {
-        check_regular(&descriptor).and_then(|stat| {
-            enforce(observed.is_none_or(|witness| same_file(&witness.stat, &stat)))
-                .map(|()| descriptor)
-        })
+    fs::openat2(directory, name, LOCK_FLAGS, Mode::empty(), RESOLVE).and_then(|descriptor| {
+        check_regular(&descriptor)
+            .and_then(|stat| enforce(same_file(&observed.stat, &stat)).map(|()| descriptor))
     })
 }
 
-fn verify_lock_entry(directory: &OwnedFd, name: &str, descriptor: &OwnedFd) -> io::Result<()> {
+pub(crate) fn verify_lock_entry(
+    directory: &OwnedFd,
+    name: &str,
+    descriptor: &OwnedFd,
+) -> io::Result<()> {
     check_regular(descriptor).and_then(|stat| {
         read_file(directory, name).and_then(|current| enforce(same_file(&stat, &current.stat)))
     })
@@ -286,7 +297,7 @@ const fn file_id(stat: &Stat) -> [u64; 2] {
     [stat.st_dev, stat.st_ino]
 }
 
-fn same_file(first: &Stat, second: &Stat) -> bool {
+pub(crate) fn same_file(first: &Stat, second: &Stat) -> bool {
     file_id(first) == file_id(second)
 }
 
@@ -360,22 +371,59 @@ mod tests {
     }
 
     #[test]
-    fn coordination_creation_and_observation_failures_do_not_replace_entries() -> TestResult {
+    fn coordination_lookup_and_observation_failures_do_not_create_or_replace_entries() -> TestResult
+    {
         let directory = private_directory()?;
         create(directory.path(), "main")?;
         let namespace = CheckedNamespace::open(directory.path(), "main")?;
+        let child = directory.path().join(NAMESPACE);
+        assert!(open_coordination_directory(&namespace.directory).is_err());
+        assert!(!child.exists());
+        std::fs::create_dir(&child)?;
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700))?;
         assert!(open_coordination_directory(&namespace.main.descriptor).is_err());
         let coordination = open_coordination_directory(&namespace.directory)?;
-        let child = directory.path().join(NAMESPACE);
+        assert!(open_lock(&coordination, "lock").is_err());
+        assert!(!child.join("lock").exists());
         create(&child, "lock")?;
         let observed = read_file(&coordination, "lock")?;
         std::fs::rename(child.join("lock"), child.join("old-lock"))?;
         create(&child, "lock")?;
-        assert!(open_observed_lock(&coordination, "lock", Some(&observed)).is_err());
+        assert!(open_observed_lock(&coordination, "lock", &observed).is_err());
         assert!(verify_lock_entry(&coordination, "lock", &observed.descriptor).is_err());
-        assert!(open_observed_lock(&coordination, "lock", None).is_err());
         assert!(child.join("old-lock").is_file());
         assert!(child.join("lock").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn a_child_must_be_physically_distinct_from_its_parent() -> TestResult {
+        let directory = private_directory()?;
+        let parent = fs::fstat(fs::openat(CWD, directory.path(), OBSERVE, Mode::empty())?)?;
+        assert!(!distinct_child(&parent, &parent));
+        let mut other = parent;
+        other.st_ino = other.st_ino.wrapping_add(1);
+        assert!(distinct_child(&parent, &other));
+        other = parent;
+        other.st_dev = other.st_dev.wrapping_add(1);
+        assert!(distinct_child(&parent, &other));
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_names_follow_the_coordination_key() -> TestResult {
+        let directory = private_directory()?;
+        let mut main = fs::fstat(fs::openat(CWD, directory.path(), OBSERVE, Mode::empty())?)?;
+        main.st_dev = 0x0a;
+        main.st_ino = u64::MAX;
+        assert_eq!(
+            reserved_names(&main),
+            [
+                "store-namespace.v1.000000000000000a.ffffffffffffffff.lock",
+                "gateway-consent-lease.v1.000000000000000a.ffffffffffffffff.lock",
+                "gateway-mode.v1.000000000000000a.ffffffffffffffff.lock",
+            ]
+        );
         Ok(())
     }
 }

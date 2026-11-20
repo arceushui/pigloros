@@ -344,8 +344,18 @@ The attempt state is empty only when the registry, under its exclusive
 temporary record); the lock is released before RCA1 is
 written. The peer exits after server EOF or on any failure, with no
 registry write, no system-bus or mountfsd call and no process creation.
-Until the selector's recovery operation starts it (#349 B), the mode is
-reached only through argv.
+
+The root selector's recovery operation starts it (R12 §6, §7.3). Through
+`SystemdProviderLifecycle` the selector first stops the SIR1 runtime unit,
+proves no other provider unit loaded, and runs the cleanup part of restart
+reconciliation (`reconcile_cleanup`, never the egress probe), releasing the
+registry lock before it returns. It then starts
+`pigloros-provider-recovery-<hex(recovery-lifecycle-scope-id)>.service` as
+`[<previous provider binary>, recovery-peer, <hex endpoint ID>]` with
+`TimeoutStartUSec=5s` and `RuntimeMaxUSec=10.1s`, checks the main process
+against the kernel, runs the 100 ms exchange, and always stops the peer unit
+and removes the exact leaf within 5 s. Only then does it publish the next
+SIC1 and remove SIR1.
 
 ## Local attempt namespaces (#911)
 

@@ -15,12 +15,18 @@ mod tests {
 
     use pos_core::CoreError;
     use pos_store::owner_store_admission::{OwnerStoreAdmissionV1, OwnerStoreOperationV1};
+    use pos_store::owner_store_installation::{
+        install_owner_store_namespace_v1, OwnerStoreInstallationV1,
+    };
     use pos_store::owner_store_interlock::OwnerStoreFileInterlockV1;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const NAMESPACE: &str = ".pigloros-store-namespace-v1";
     const MAIN: &str = "main.db";
     const CHILD_DIRECTORY: &str = "PIGLOR_INTERLOCK_TEST_CHILD_DIRECTORY";
+    /// A `SQLite` 3 header in WAL mode (file format versions 2 and 2), which
+    /// the installation step requires of the main file.
+    const MAIN_BYTES: [u8; 20] = *b"SQLite format 3\0\x10\x00\x02\x02";
 
     /// Serialises forks against lock releases in this multi-threaded harness.
     ///
@@ -59,8 +65,23 @@ mod tests {
             directory: tempfile::TempDir,
         ) -> Result<Self, Box<dyn std::error::Error>> {
             fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
-            create(directory.path(), MAIN)?;
+            create_with(directory.path(), MAIN, &MAIN_BYTES)?;
             Ok(Self { directory })
+        }
+
+        /// A fixture whose coordination child the installation step created.
+        fn installed() -> Result<Self, Box<dyn std::error::Error>> {
+            let fixture = Self::new()?;
+            fixture.install()?;
+            Ok(fixture)
+        }
+
+        fn install(&self) -> TestResult {
+            assert_eq!(
+                install_owner_store_namespace_v1(self.path(), MAIN)?,
+                OwnerStoreInstallationV1::Installed
+            );
+            Ok(())
         }
 
         fn path(&self) -> &Path {
@@ -82,12 +103,16 @@ mod tests {
     }
 
     fn create(directory: &Path, name: &str) -> TestResult {
+        create_with(directory, name, b"unchanged file contents")
+    }
+
+    fn create_with(directory: &Path, name: &str, contents: &[u8]) -> TestResult {
         OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(directory.join(name))?
-            .write_all(b"unchanged file contents")?;
+            .write_all(contents)?;
         Ok(())
     }
 
@@ -110,8 +135,8 @@ mod tests {
 
     #[test]
     fn contention_aliases_and_unrelated_directories_share_only_their_own_lock() -> TestResult {
-        let fixture = Fixture::new()?;
-        let other = Fixture::new()?;
+        let fixture = Fixture::installed()?;
+        let other = Fixture::installed()?;
         let aliases = tempfile::tempdir()?;
         symlink(fixture.path(), aliases.path().join("alias"))?;
         let admission = OwnerStoreAdmissionV1::new();
@@ -143,8 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_names_and_missing_or_unsafe_main_refuse_before_namespace_creation() -> TestResult {
-        let fixture = Fixture::new()?;
+    fn invalid_names_and_missing_or_unsafe_main_refuse_before_the_lock() -> TestResult {
+        let fixture = Fixture::installed()?;
         let nested = fixture.path().join("sub");
         fs::create_dir(&nested)?;
         create(&nested, MAIN)?;
@@ -184,7 +209,7 @@ mod tests {
             fixture.path(),
             MAIN,
         ));
-        assert!(!fixture.coordination().exists());
+        assert_eq!(fs::metadata(fixture.lock_path()?)?.len(), 0);
         operation.complete_cleanly();
         Ok(())
     }
@@ -201,6 +226,10 @@ mod tests {
             &operation, relative, MAIN,
         ));
         assert!(!fixture.coordination().exists());
+        fixture.install()?;
+        refused(OwnerStoreFileInterlockV1::try_acquire(
+            &operation, relative, MAIN,
+        ));
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
         drop(held);
         operation.complete_cleanly();
@@ -210,7 +239,8 @@ mod tests {
     #[test]
     fn directories_symlinks_and_hard_links_cannot_be_main_candidates() -> TestResult {
         for kind in ["directory", "symlink", "hardlink"] {
-            let fixture = Fixture::new()?;
+            let fixture = Fixture::installed()?;
+            let lock = fixture.lock_path()?;
             let original = fixture.path().join(MAIN);
             match kind {
                 "directory" => {
@@ -230,16 +260,16 @@ mod tests {
                 fixture.path(),
                 MAIN,
             ));
-            assert!(!fixture.coordination().exists());
+            assert_eq!(fs::metadata(&lock)?.len(), 0);
             operation.complete_cleanly();
         }
         Ok(())
     }
 
     #[test]
-    fn every_existing_companion_is_screened_before_any_coordination_creation() -> TestResult {
+    fn every_existing_companion_is_screened_before_the_lock() -> TestResult {
         for suffix in ["-wal", "-shm", "-journal"] {
-            let fixture = Fixture::new()?;
+            let fixture = Fixture::installed()?;
             let name = format!("{MAIN}{suffix}");
             create(fixture.path(), &name)?;
             fs::set_permissions(
@@ -253,14 +283,13 @@ mod tests {
                 fixture.path(),
                 MAIN,
             ));
-            assert!(!fixture.coordination().exists());
             assert_eq!(
                 fs::read(fixture.path().join(name))?,
                 b"unchanged file contents"
             );
             operation.complete_cleanly();
         }
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::installed()?;
         create(fixture.path(), &format!("{MAIN}-journal"))?;
         let admission = OwnerStoreAdmissionV1::new();
         let operation = enter(&admission);
@@ -269,7 +298,7 @@ mod tests {
             fixture.path(),
             MAIN,
         ));
-        assert!(!fixture.coordination().exists());
+        assert_eq!(fs::metadata(fixture.lock_path()?)?.len(), 0);
         operation.complete_cleanly();
         Ok(())
     }
@@ -280,11 +309,13 @@ mod tests {
         for suffix in ["-wal", "-shm"] {
             create(fixture.path(), &format!("{MAIN}{suffix}"))?;
         }
+        fixture.install()?;
         let admission = OwnerStoreAdmissionV1::new();
         let operation = enter(&admission);
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
         drop(held);
-        for suffix in ["", "-wal", "-shm"] {
+        assert_eq!(fs::read(fixture.path().join(MAIN))?, MAIN_BYTES);
+        for suffix in ["-wal", "-shm"] {
             assert_eq!(
                 fs::read(fixture.path().join(format!("{MAIN}{suffix}")))?,
                 b"unchanged file contents"
@@ -360,6 +391,36 @@ mod tests {
         ));
         assert_eq!(fs::metadata(&lock)?.permissions().mode() & 0o7777, 0o640);
         assert_eq!(fs::read(lock)?, b"unchanged file contents");
+        operation.complete_cleanly();
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_child_or_lock_entry_refuses_and_creates_nothing() -> TestResult {
+        let fixture = Fixture::new()?;
+        let admission = OwnerStoreAdmissionV1::new();
+        let operation = enter(&admission);
+        refused(OwnerStoreFileInterlockV1::try_acquire(
+            &operation,
+            fixture.path(),
+            MAIN,
+        ));
+        assert!(!fixture.coordination().exists());
+        fixture.install()?;
+        let lock = fixture.lock_path()?;
+        fs::remove_file(&lock)?;
+        refused(OwnerStoreFileInterlockV1::try_acquire(
+            &operation,
+            fixture.path(),
+            MAIN,
+        ));
+        assert!(!lock.exists());
+        assert_eq!(
+            install_owner_store_namespace_v1(fixture.path(), MAIN)?,
+            OwnerStoreInstallationV1::Installed
+        );
+        let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
+        drop(held);
         operation.complete_cleanly();
         Ok(())
     }
@@ -478,7 +539,7 @@ mod tests {
 
     #[test]
     fn a_separate_process_refuses_contention_then_acquires_after_release() -> TestResult {
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::installed()?;
         let admission = OwnerStoreAdmissionV1::new();
         let operation = enter(&admission);
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
@@ -497,7 +558,7 @@ mod tests {
 
     #[test]
     fn child_owner_reaps_after_abandoned_wait_and_termination_timeout() -> TestResult {
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::installed()?;
         let admission = OwnerStoreAdmissionV1::new();
         let operation = enter(&admission);
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
