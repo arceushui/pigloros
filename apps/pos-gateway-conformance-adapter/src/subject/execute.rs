@@ -594,6 +594,7 @@ async fn exchange_all(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{compose, ScratchStore};
     use crate::subject::payload::CompositionV2;
