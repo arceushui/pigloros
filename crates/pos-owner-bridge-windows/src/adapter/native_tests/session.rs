@@ -2,12 +2,21 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::io::Write as _;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::super::events::Events;
 use crate::{NativeFactory, NativeOperations, NativePulse, NativeResult};
+
+/// How long a dropped fixture waits for its browser to exit. The exit normally
+/// arrives within seconds of the controller close. A browser that never exits
+/// used to keep the test, and the shared native lock, silent until the
+/// 65-minute step timeout (#1468). Past this bound the session prints the
+/// stalled browser and aborts the test process, so the step fails within
+/// minutes. Under libtest that also ends the other tests in the binary.
+const RETIREMENT_BOUND: Duration = Duration::from_mins(2);
 
 /// A raw SDK fixture still owns a real environment on its creating STA when
 /// an assertion unwinds. Keep that apartment borrowed until retirement, just
@@ -18,6 +27,10 @@ pub(super) struct Session<'a> {
     factory: &'a dyn NativeFactory,
     browser_pid: Cell<Option<u32>>,
     had_controller: Cell<bool>,
+    retirement_bound: Duration,
+    // Ends the process once the bound passes: no owner may be released under a
+    // live browser, and a hung test would otherwise hold the step to its timeout.
+    abandon: fn() -> !,
 }
 
 impl<'a> Session<'a> {
@@ -28,6 +41,8 @@ impl<'a> Session<'a> {
             factory,
             browser_pid: Cell::new(None),
             had_controller: Cell::new(false),
+            retirement_bound: RETIREMENT_BOUND,
+            abandon: std::process::abort,
         })
     }
 
@@ -64,6 +79,23 @@ impl<'a> Session<'a> {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+
+    /// Name the browser that never exited, while every owner is still held.
+    fn report_stalled_retirement(&self) {
+        let browser = self
+            .browser_pid
+            .get()
+            .map(|pid| (pid, crate::Native::inspect_process_with_image(pid)));
+        let mut stderr = std::io::stderr().lock();
+        let _logged_or_unavailable = writeln!(
+            stderr,
+            "NATIVE_RETIREMENT_STALLED bound={:?} pending={} exited={:?} browser={browser:?}; aborting",
+            self.retirement_bound,
+            self.native.pending(),
+            self.events.exited(),
+        );
+        let _flushed_or_unavailable = stderr.flush();
+    }
 }
 
 impl Deref for Session<'_> {
@@ -82,6 +114,7 @@ impl DerefMut for Session<'_> {
 
 impl Drop for Session<'_> {
     fn drop(&mut self) {
+        let started = Instant::now();
         loop {
             let _zeroed_or_retained = self.native.close_buffers();
             let _environment = self.native.environment_completion();
@@ -112,6 +145,10 @@ impl Drop for Session<'_> {
                         let _closed_or_retained = self.native.close_controller();
                     }
                 }
+            }
+            if started.elapsed() >= self.retirement_bound {
+                self.report_stalled_retirement();
+                (self.abandon)();
             }
             self.pump_retaining();
         }
@@ -317,6 +354,39 @@ mod tests {
         assert!(session.is_ok(), "session creation: {error:?}");
         drop(session);
         assert!(native.calls.borrow().contains(&"drop_environment"));
+    }
+
+    #[test]
+    fn raw_session_whose_browser_never_exits_is_abandoned_after_the_bound() {
+        thread_local! {
+            static ABANDONED: Cell<bool> = const { Cell::new(false) };
+        }
+        fn record() -> ! {
+            ABANDONED.with(|abandoned| abandoned.set(true));
+            // Stands in for the abort: the drop ends here, as the process would.
+            std::panic::resume_unwind(Box::new("abandoned stalled retirement"))
+        }
+        let native = Factory::new(Creation::Ready, FakeClock::start());
+        let events = Rc::new(Events::default());
+        let session = Session::new(&native, Rc::clone(&events)).map(|mut session| {
+            let created = session.create_controller();
+            assert!(created.is_ok(), "controller creation: {created:?}");
+            assert_eq!(session.controller_completion(), Some(Ok(())));
+            session.retirement_bound = Duration::ZERO;
+            session.abandon = record;
+            session
+        });
+        let error = session.as_ref().err();
+        assert!(session.is_ok(), "session creation: {error:?}");
+        // No exit event ever arrives; the drop must still end, through `abandon`.
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(session)));
+        assert!(dropped.is_err());
+        assert!(ABANDONED.with(Cell::get));
+        let calls = native.calls.borrow();
+        assert!(calls.contains(&"close_controller"));
+        for retained in ["unsubscribe_exit", "drop_environment", "destroy_window"] {
+            assert!(!calls.contains(&retained), "released {retained}");
+        }
     }
 
     #[test]

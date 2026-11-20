@@ -338,3 +338,83 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     drop(staged);
     Ok(())
 }
+
+/// ADR-069 R12 §7.1 steps 3 to 7 and I19, as the root selector runs them
+/// on this host: the SPI1 cleanup budget, the exclusive registry, the
+/// foreign-intent check before any cleanup, `reconcile_cleanup` and never the
+/// egress probe, and the registry lock free as soon as it returns.
+#[test]
+fn the_selector_cleanup_refuses_foreign_intents_and_releases_the_lock() -> TestResult {
+    if !in_isolated_root(
+        "provider_runtime::reconcile::tests::the_selector_cleanup_refuses_foreign_intents_and_releases_the_lock",
+    )? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution()?;
+    install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+    directory("/run/pigloros", 0o755)?;
+    for path in [
+        "/run/pigloros/sandbox",
+        "/run/pigloros/sandbox/registry",
+        "/run/pigloros/sandbox/attempts",
+    ] {
+        directory(path, 0o700)?;
+    }
+    directory(&format!("{SANDBOX_ARTIFACT_ROOT}/images"), 0o755)?;
+    let servers = Mutex::new(Vec::new());
+    let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let transport = runtime.block_on(fake_bus(&servers, &calls))?;
+    let registry = Path::new("/run/pigloros/sandbox/registry");
+    let lock_is_free = || -> TestResult<bool> {
+        Ok(rustix::fs::flock(
+            &File::open(registry)?,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .is_ok())
+    };
+    let cleanup = |live: &[[u8; 16]], fails: bool| {
+        runtime.block_on(crate::provider_lifecycle::host_cleanup(
+            &transport,
+            live,
+            Instant::now() + Duration::from_secs(10),
+            Network { fails },
+        ))
+    };
+
+    // An intent of an attempt SIR1 does not name is refused before any
+    // cleanup step, and the lock is released.
+    SystemdAttemptRegistry::open()?
+        .commit_planned(&crate::PlannedAttemptIntent::new([9; 16], [2; 32])?)?;
+    let records = fs::read_dir(registry)?.count();
+    assert_eq!(
+        cleanup(&[], false),
+        Err(pos_reference::selector::runtime_lifecycle::ProviderLifecycleError::ForeignResource)
+    );
+    assert_eq!(fs::read_dir(registry)?.count(), records);
+    assert!(lock_is_free()?);
+    assert_eq!(calls[1].load(Ordering::SeqCst), 0, "no unit was listed");
+    for entry in fs::read_dir(registry)? {
+        let entry = entry?;
+        if entry.file_name() != "activation" {
+            fs::remove_file(entry.path())?;
+        }
+    }
+
+    // A failed orphan sweep is a residue.
+    assert_eq!(
+        cleanup(&[], true),
+        Err(pos_reference::selector::runtime_lifecycle::ProviderLifecycleError::ResidualResource)
+    );
+    assert!(lock_is_free()?);
+    // A clean host reconciles nothing, and the lock is free at once.
+    // No activation was recorded, so no wait was applied.
+    assert_eq!(cleanup(&[[9; 16]], false), Ok((Vec::new(), Duration::ZERO)));
+    assert!(lock_is_free()?);
+    assert!(SystemdAttemptRegistry::open().is_ok());
+    drop(servers);
+    drop(staged);
+    Ok(())
+}

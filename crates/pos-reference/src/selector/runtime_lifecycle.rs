@@ -11,11 +11,20 @@
 //! implements the port as `SystemdProviderLifecycle`, and only the
 //! `apps/pos-root-selector` package composes it (R12 §3).
 
+use std::fs::File;
+use std::io::{self, Read};
 use std::num::NonZeroU64;
+use std::path::Path;
 use std::time::Instant;
+
+use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 use crate::provider_admission::AdmittedProviderBinary;
 use crate::selector::installation::authority::{fresh_selector_id, ProviderRuntimeSlot};
+use crate::selector::recovery::{
+    PreviousRuntimeObservation, PreviousRuntimeTarget, RecoveryPeerLaunch, RecoveryPeerObservation,
+    RecoverySlotObservation, RecoverySlotTarget,
+};
 use crate::selector::SelectorBoundaryError;
 
 const MAX_CGROUP_PATH_BYTES: usize = 4096;
@@ -284,8 +293,8 @@ pub enum ProviderLifecycleError {
 ///
 /// Every call is synchronous and bounded by an absolute deadline. An `Ok`
 /// result is an observation the selector still checks; an `Err` keeps
-/// admission closed. The #349 recovery operations join this trait in R12's
-/// later slices.
+/// admission closed. The first two operations serve normal open (#1399);
+/// the last three serve root-owned recovery (#349, R12 §6).
 pub trait ProviderLifecyclePort {
     /// Stop every loaded `pigloros-provider-runtime-*` and
     /// `pigloros-provider-recovery-*` unit, and prove each unloaded and its
@@ -314,6 +323,44 @@ pub trait ProviderLifecyclePort {
         slot: &RuntimeSlotTarget<'_>,
         deadline: Instant,
     ) -> Result<StartedRuntimeObservation, ProviderLifecycleError>;
+
+    /// Terminate the previous runtime unit of one pending SIR1, prove no
+    /// foreign provider unit loaded, and run the cleanup part of restart
+    /// reconciliation over its attempts (R12 §7.1). The registry lock is
+    /// released before it returns.
+    ///
+    /// # Errors
+    /// Fails closed for a foreign unit or intent, any residue, an
+    /// unavailable manager or registry, and a missed deadline.
+    fn terminate_previous_runtime(
+        &self,
+        target: &PreviousRuntimeTarget<'_>,
+        deadline: Instant,
+    ) -> Result<PreviousRuntimeObservation, ProviderLifecycleError>;
+
+    /// Stop the recovery-peer unit of `target`, if loaded, prove it unloaded
+    /// and report its control group (R12 §7.3). It is idempotent.
+    ///
+    /// # Errors
+    /// Fails closed if the unit cannot be stopped or remains, the manager is
+    /// unavailable or the deadline passes.
+    fn reconcile_recovery_slot(
+        &self,
+        target: &RecoverySlotTarget<'_>,
+        deadline: Instant,
+    ) -> Result<RecoverySlotObservation, ProviderLifecycleError>;
+
+    /// Start the one recovery-peer unit of `launch` and wait until it is
+    /// ready (R12 §7.3 items 2 to 4).
+    ///
+    /// # Errors
+    /// Fails closed if the start is refused, the start job does not end
+    /// `done`, the manager's evidence is inconsistent or the deadline passes.
+    fn start_recovery_peer(
+        &self,
+        launch: &RecoveryPeerLaunch<'_>,
+        deadline: Instant,
+    ) -> Result<RecoveryPeerObservation, ProviderLifecycleError>;
 }
 
 /// The `/proc/<pid>/stat` start-time ticks (field 22) of one live process.
@@ -324,6 +371,87 @@ pub trait ProviderLifecyclePort {
 pub fn process_start_time_ticks(pid: NonZeroU64) -> Result<u64, ProviderLifecycleError> {
     crate::provider_transport::process_start_time_ticks(pid)
         .map_err(|_| ProviderLifecycleError::Contradiction)
+}
+
+/// The unified cgroup2 path of one live process, from `/proc/<pid>/cgroup`.
+///
+/// # Errors
+/// Returns [`SelectorBoundaryError::ArtifactInvalid`] when the record cannot
+/// be read or is not one cgroup2 membership line.
+pub(crate) fn process_control_group(pid: NonZeroU64) -> Result<String, SelectorBoundaryError> {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .and_then(|text| unified_cgroup(&text).map(str::to_owned))
+}
+
+/// The one cgroup2 membership line `0::<path>` of a cgroup2-only host.
+pub(crate) fn unified_cgroup(text: &str) -> Result<&str, SelectorBoundaryError> {
+    text.strip_prefix("0::")
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .filter(|path| !path.contains('\n'))
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
+}
+
+/// The BLAKE3 digest of `/proc/<pid>/exe`, the process's own executable.
+///
+/// # Errors
+/// Returns a closed error when the executable cannot be opened or read, or
+/// its length is not `length`.
+pub(crate) fn proc_executable_digest(
+    pid: NonZeroU64,
+    length: u64,
+) -> Result<[u8; 32], SelectorBoundaryError> {
+    File::open(format!("/proc/{pid}/exe"))
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .and_then(|executable| bounded_digest(executable, length))
+}
+
+/// The BLAKE3 digest of exactly `length` bytes of `source`, read at most
+/// `length + 1` bytes deep.
+///
+/// # Errors
+/// Returns [`SelectorBoundaryError::Io`] for a read failure and
+/// [`SelectorBoundaryError::ArtifactInvalid`] for another length.
+pub(crate) fn bounded_digest(
+    source: impl Read,
+    length: u64,
+) -> Result<[u8; 32], SelectorBoundaryError> {
+    let mut hasher = blake3::Hasher::new();
+    let mut bounded = source.take(length.saturating_add(1));
+    let copied = io::copy(&mut bounded, &mut hasher);
+    copied
+        .map_err(|_| SelectorBoundaryError::Io)
+        .and_then(|copied| {
+            if copied == length {
+                Ok(*hasher.finalize().as_bytes())
+            } else {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            }
+        })
+}
+
+/// A non-blocking `connect()` must fail with exactly `ECONNREFUSED`: no
+/// process listens on the leaf any more.
+///
+/// # Errors
+/// Returns [`SelectorBoundaryError::ArtifactInvalid`] for any other outcome
+/// and [`SelectorBoundaryError::Io`] when no socket can be created.
+pub(crate) fn require_refused(path: &Path) -> Result<(), SelectorBoundaryError> {
+    SocketAddrUnix::new(path)
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .and_then(|address| {
+            socket_with(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                SocketFlags::CLOEXEC.union(SocketFlags::NONBLOCK),
+                None,
+            )
+            .map_err(|_| SelectorBoundaryError::Io)
+            .and_then(|socket| match connect(&socket, &address) {
+                Err(rustix::io::Errno::CONNREFUSED) => Ok(()),
+                _ => Err(SelectorBoundaryError::ArtifactInvalid),
+            })
+        })
 }
 
 #[cfg(test)]
