@@ -220,7 +220,9 @@ struct Released {
     ending: AttemptEnding,
     output: Option<Vec<u8>>,
     ceiling: bool,
-    feed_complete: bool,
+    /// Whether the stdin feed completed; `None` when the clock could not
+    /// report one of its times.
+    feed_complete: Option<bool>,
     network: NetworkEvidence,
     /// KOE1 `/work` and TME1 `work-after`: mount ID and capacity.
     work: Option<(u64, u64)>,
@@ -245,7 +247,7 @@ impl Default for Released {
             ending: AttemptEnding::CgroupEmpty,
             output: None,
             ceiling: false,
-            feed_complete: true,
+            feed_complete: Some(true),
             network: NetworkEvidence::None,
             work: None,
             work_after: None,
@@ -375,7 +377,7 @@ fn adapter(run: &Released) -> TestResult<AdapterIo> {
         None => framed()?,
     };
     Ok(AdapterIo::for_test_capture(
-        feed(run.feed_complete),
+        run.feed_complete.map(feed),
         output,
         run.ceiling,
         charge,
@@ -590,7 +592,7 @@ fn each_process_and_transfer_limit_id_selects_its_code() -> TestResult {
         (
             "16 stdin feed",
             Released {
-                feed_complete: false,
+                feed_complete: Some(false),
                 ..Released::default()
             },
             Some(TerminalCode::ProtocolFailure),
@@ -1131,6 +1133,16 @@ fn unreadable_times_and_unordered_records_are_faults() -> TestResult {
         negative.ended()?.records(),
         Err(EvidenceFault::Clock)
     ));
+    // An unreadable `adapter-input` time is a provider fault too, never R10's
+    // null `adapter-input` (R9 Amendment 1 change F).
+    let no_feed_time = Released {
+        feed_complete: None,
+        ..Released::default()
+    };
+    assert!(matches!(
+        no_feed_time.ended()?.records(),
+        Err(EvidenceFault::Clock)
+    ));
     let early_cleanup = Released {
         cleaned_at: Some(1),
         ..Released::default()
@@ -1150,21 +1162,98 @@ fn unreadable_times_and_unordered_records_are_faults() -> TestResult {
     Ok(())
 }
 
+/// The pre-release resource evidence with a baseline snapshot taken at
+/// `baseline_at`.
+fn evidence_at(baseline_at: (i64, i64)) -> TestResult<ReleaseResources> {
+    Ok(ReleaseResources::new(
+        ACTIVATED,
+        AttemptLimitEventSnapshot::for_test(CGROUP, quiet(), baseline_at)?,
+        EffectiveCgroupLimits::for_test(CGROUP)?,
+    ))
+}
+
+/// R9 Amendment 1 change F: the production host refuses the release when
+/// the baseline snapshot's `observed-at` is no readable time.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_production_host_times_the_baseline_snapshot() -> TestResult {
+    use crate::{SystemdTransientUnitTransport, UnitHost};
+    for (at, timed) in [
+        ((1_000, 1), true),
+        ((-1, 0), false),
+        ((0, -1), false),
+        ((i64::MAX, 0), false),
+        ((18_446_744_073, 709_551_615), true),
+        ((18_446_744_073, 709_551_616), false),
+    ] {
+        assert_eq!(
+            <SystemdTransientUnitTransport as UnitHost>::evidence_timed(&evidence_at(at)?),
+            timed,
+            "{at:?}"
+        );
+    }
+    Ok(())
+}
+
+/// R9 Amendment 1 change F: an attempt whose execute path sent no
+/// `ReleaseV1` because a pre-release time was unreadable has no records and
+/// no response, whichever of the two times failed.
+#[test]
+fn an_unreadable_pre_release_time_is_a_provider_fault() -> TestResult {
+    for (baseline_at, recorded) in [((-1, 0), true), ((1_000, 1), false)] {
+        let mut evidence = ResourceEvidence::new(Some(evidence_at(baseline_at)?), release(None)?);
+        evidence.conclude(Some((INVOCATION, CGROUP)), terminal(&Released::default())?);
+        let ended = EndedAttempt::for_test(
+            ATTEMPT,
+            admission(
+                SandboxExecutionMode::AirGapped,
+                recorded.then(|| input(true)),
+            ),
+            None,
+            AttemptProgress::Failed {
+                error: ExecuteError::UnreadableClock,
+                unit: UnitState::Killed,
+                started: Some(start()),
+                evidence: Some(evidence),
+            },
+            (cleanup(true)?, Some(CLEANED_AT)),
+        );
+        assert!(matches!(ended.records(), Err(EvidenceFault::Clock)));
+        let public = signing_key().verifying_key();
+        assert!(matches!(
+            ended.signed_response(&signer(), crate::AdmittedRuntimeKey::new(KEY_ID, &public)),
+            Err(super::ResponseFault::Evidence(EvidenceFault::Clock))
+        ));
+    }
+    Ok(())
+}
+
 /// A failure after `ReleaseV1` leaves no ending, which a progress-2 TME1
 /// requires: no records, by the owner's decision (2026-11-19, Q2).
 #[test]
 fn a_failure_after_the_release_is_a_provider_fault() -> TestResult {
+    let ended = failed_after_release()?;
+    assert!(matches!(ended.records(), Err(EvidenceFault::Record(_))));
+    // No response is emitted either.
+    let public = signing_key().verifying_key();
+    assert!(matches!(
+        ended.signed_response(&signer(), crate::AdmittedRuntimeKey::new(KEY_ID, &public)),
+        Err(super::ResponseFault::Evidence(EvidenceFault::Record(_)))
+    ));
+    Ok(())
+}
+
+/// An attempt that failed after its `ReleaseV1` was sent.
+fn failed_after_release() -> TestResult<EndedAttempt<String>> {
     let requested =
         crate::RequestedConfiguration::requested_configuration_evidence(&start(), ATTEMPT, AGR1)?;
     let observation = observation(None);
     let koe1 =
         crate::observation_evidence(ATTEMPT, AGR1, READY1, requested.digest(), &observation)?;
-    let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-    let public = key.verifying_key();
-    let signer = crate::KeyFileRuntimeSigner::from_signing_key(key, "runtime".to_owned());
+    let public = signing_key().verifying_key();
     let sent = crate::issue_release(
-        &signer,
-        crate::AdmittedRuntimeKey::new("runtime", &public),
+        &signer(),
+        crate::AdmittedRuntimeKey::new(KEY_ID, &public),
         pos_reference::sandbox_provider_protocol::ExecutionReleaseFields {
             attempt_id: ATTEMPT,
             nonce: [0x61; 32],
@@ -1193,20 +1282,13 @@ fn a_failure_after_the_release_is_a_provider_fault() -> TestResult {
         started: Some(start()),
         evidence: Some(evidence(release, quiet(), terminal(&run)?)?),
     };
-    let ended = EndedAttempt::for_test(
+    Ok(EndedAttempt::for_test(
         ATTEMPT,
         admission(SandboxExecutionMode::AirGapped, Some(input(true))),
         None,
         progress,
         (cleanup(true)?, Some(CLEANED_AT)),
-    );
-    assert!(matches!(ended.records(), Err(EvidenceFault::Record(_))));
-    // No response is emitted either.
-    assert!(matches!(
-        ended.signed_response(&signer, crate::AdmittedRuntimeKey::new("runtime", &public)),
-        Err(super::ResponseFault::Evidence(EvidenceFault::Record(_)))
-    ));
-    Ok(())
+    ))
 }
 
 mod response;

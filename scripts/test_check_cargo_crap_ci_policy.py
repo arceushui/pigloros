@@ -55,6 +55,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/execute/tests.rs",
     "src/attempt_records/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
+    "src/execute/tests/adapter.rs",
     "src/revision/tests.rs",
     "src/provider_lifecycle/tests.rs",
     "src/provider_runtime/tests.rs",
@@ -89,6 +90,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/action_admission_tests.rs",
     *EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS,
     *EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS,
+    "src/attempt_records/tests/**",
     *EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS,
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
@@ -557,6 +559,9 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/provider_barrier/production.rs",
             "src/provider_lifecycle.rs",
             "src/provider_lifecycle/production.rs",
+            "src/attempt_records.rs",
+            "src/attempt_records/response.rs",
+            "src/attempt_records/tests_production.rs",
             "src/adapter.rs",
             "src/adapter/native.rs",
             "src/adapter/native_tests_production.rs",

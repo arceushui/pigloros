@@ -83,6 +83,8 @@ enum Fault {
     RequestedConfiguration,
     Bind,
     Evidence,
+    /// The baseline snapshot's `observed-at` could not be read.
+    UntimedEvidence,
     HangEvidence,
     Kill,
     ReadCgroup,
@@ -470,6 +472,8 @@ impl UnitHost for FakeHost {
         let activated = self.activated.unwrap_or_else(monotonic_now_ns);
         let outcome = if self.faulty(Fault::Evidence) {
             Err(Injected)
+        } else if self.faulty(Fault::UntimedEvidence) {
+            Ok((activated, 0))
         } else {
             // The evidence is the activation it was read with.
             Ok((activated, activated))
@@ -479,6 +483,12 @@ impl UnitHost for FakeHost {
             hang_if(hang).await;
             outcome
         }
+    }
+
+    /// The fake's evidence is the activation it was read with; zero stands
+    /// for an unreadable baseline `observed-at`.
+    fn evidence_timed(evidence: &u64) -> bool {
+        *evidence != 0
     }
 
     fn stop(
@@ -2025,6 +2035,48 @@ mod release_evidence {
         assert!(failed.started.is_some());
         assert!(!scenario.entries().iter().any(|entry| entry == "release"));
         Ok(())
+    }
+
+    /// R9 Amendment 1 change F: a pre-release time the clock could not
+    /// report sends no `ReleaseV1`; the unit is killed and its cgroup and
+    /// evidence kept for the terminal cleanup.
+    #[tokio::test]
+    async fn an_untimed_baseline_snapshot_sends_no_release() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.faults.push(Fault::UntimedEvidence);
+        let failed = scenario.fails().await?;
+        assert_untimed_release(&scenario, &failed);
+        assert_eq!(failed.evidence, Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_untimed_input_transfer_sends_no_release() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        let mut job = scenario.job(
+            ATTEMPT,
+            SandboxExecutionMode::AirGapped,
+            ModePlan::AirGapped,
+            GENEROUS_WATCHDOG_MS,
+        )?;
+        job.attempt = job.attempt.without_input_record();
+        let recheck = root_for(&scenario.log, &job.attempt);
+        let failed = failure(scenario.run_on(&LoopbackNetwork, job, recheck).await)?;
+        assert_untimed_release(&scenario, &failed);
+        assert!(failed.evidence.is_some_and(|evidence| evidence != 0));
+        Ok(())
+    }
+
+    fn assert_untimed_release(
+        scenario: &Scenario,
+        failed: &ExecuteFailure<FakeCgroup, u64, String>,
+    ) {
+        assert!(matches!(failed.error, ExecuteError::UnreadableClock));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(failed.cgroup.is_some());
+        assert!(failed.started.is_some());
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        assert_eq!(failed.error.launch_failure(), None);
     }
 
     #[tokio::test]
