@@ -129,7 +129,8 @@ fn lower_hex_32(text: &str) -> Option<[u8; 32]> {
         .then(|| std::array::from_fn(|index| nibbles[2 * index] * 16 + nibbles[2 * index + 1]))
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;

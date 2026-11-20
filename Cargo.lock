@@ -5644,8 +5644,11 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
+ "piglor-gateway",
+ "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-local-erasure-loader",
  "pos-plugin-ledger",
  "pos-runtime",
  "pos-store",
@@ -5804,8 +5807,13 @@ name = "pos-cli"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ed25519-dalek",
+ "piglor-gateway",
+ "pos-conformance",
  "pos-core",
+ "pos-crypto",
  "pos-experiment",
+ "pos-local-erasure-loader",
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-runtime",
@@ -5893,6 +5901,7 @@ dependencies = [
  "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-local-erasure-loader",
  "pos-plugin-agent",
  "pos-plugin-eval",
  "pos-plugin-ledger",

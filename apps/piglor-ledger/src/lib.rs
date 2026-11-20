@@ -35,6 +35,10 @@ pub(crate) mod json;
 pub mod key_output;
 pub(crate) mod verify;
 
+use pos_local_erasure_loader::{
+    LocalErasureOpenErrorV1, LocalErasureRecoveryV1, LocalErasureTrustSourceV1,
+};
+
 /// Private compatibility adapter for the ledger domain port.
 ///
 /// The concrete store never escapes the execution host. Every implemented
@@ -46,38 +50,33 @@ struct HostedLedgerStore {
 }
 
 impl HostedLedgerStore {
-    fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
-        Self::open_with_authority(config, &composition)
+    /// Open `config` under the erasure authority the shared loader composes
+    /// from this process's deployment trust source.
+    fn open(config: pos_store::StoreConfig) -> Result<Self, LocalErasureOpenErrorV1> {
+        Self::open_with_trust(config, &LocalErasureTrustSourceV1::from_environment())
     }
 
-    fn open_with_authority(
+    /// Open `config` under the erasure authority composed from `source`:
+    /// closed for a store without an erasure store identity, else the Local
+    /// erasure authority with no executor, or a typed refusal.
+    fn open_with_trust(
         config: pos_store::StoreConfig,
-        composition: &pos_runtime::ErasureCoordinatorCompositionV1,
-    ) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        pos_runtime::ErasureExecutionHostV1::open_with_authority(
-            config,
-            composition,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .map(Self::from_host)
+        source: &LocalErasureTrustSourceV1,
+    ) -> Result<Self, LocalErasureOpenErrorV1> {
+        LocalErasureRecoveryV1::open_host(config, source).map(Self::from_host)
     }
 
-    fn open_read_only(path: &str) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
-        Self::open_read_only_with_authority(path, &composition)
+    /// [`Self::open`] over the `SQLite` file `path`, read-only.
+    fn open_read_only(path: &str) -> Result<Self, LocalErasureOpenErrorV1> {
+        Self::open_read_only_with_trust(path, &LocalErasureTrustSourceV1::from_environment())
     }
 
-    fn open_read_only_with_authority(
+    /// [`Self::open_with_trust`] over the `SQLite` file `path`, read-only.
+    fn open_read_only_with_trust(
         path: &str,
-        composition: &pos_runtime::ErasureCoordinatorCompositionV1,
-    ) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        pos_runtime::ErasureExecutionHostV1::open_read_only_with_authority(
-            path,
-            composition,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .map(Self::from_host)
+        source: &LocalErasureTrustSourceV1,
+    ) -> Result<Self, LocalErasureOpenErrorV1> {
+        LocalErasureRecoveryV1::open_read_only_host(path, source).map(Self::from_host)
     }
 
     const fn from_host(host: pos_runtime::ErasureExecutionHostV1) -> Self {
@@ -195,5 +194,122 @@ pub enum CliError {
 impl From<pos_core::CoreError> for CliError {
     fn from(e: pos_core::CoreError) -> Self {
         Self::Store(e.to_string())
+    }
+}
+
+// Test-only. The shared Local erasure signing fixtures and the key-less root
+// store fixture of ADR-136 acceptance test 11 (#1450); the items are `pub`
+// so this crate may use a subset.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../../crates/pos-local-erasure-loader/tests/support/signing.rs"]
+pub mod signing;
+
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../piglor-gateway/tests/support/keyless_store.rs"]
+pub mod keyless_store;
+
+/// ADR-136 acceptance test 11 for the ledger root (#1450): its read-write
+/// and read-only opens compose the closed authority for a store without an
+/// erasure store identity, recover a store that holds a Local erasure
+/// request from valid credentials, and refuse missing or invalid ones.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod keyless_erasure_tests {
+    use pos_core::store::EventStore;
+    use pos_local_erasure_loader::{
+        LocalErasureLoadErrorV1, LocalErasureOpenErrorV1, LocalErasureTrustSourceV1,
+    };
+    use pos_runtime::LocalErasureCompositionErrorV1;
+    use pos_store::StoreConfig;
+
+    use super::keyless_store::KeylessStore;
+    use super::signing::TestResult;
+    use super::HostedLedgerStore;
+
+    /// The refusals of the read-write and the read-only open of `store`
+    /// from `source`.
+    fn refusals(
+        store: &KeylessStore,
+        source: &LocalErasureTrustSourceV1,
+    ) -> [Option<LocalErasureOpenErrorV1>; 2] {
+        [
+            HostedLedgerStore::open_with_trust(store.config(), source).err(),
+            HostedLedgerStore::open_read_only_with_trust(&store.path, source).err(),
+        ]
+    }
+
+    #[test]
+    fn a_store_without_an_identity_opens_and_works() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join("ledger.db")
+            .to_str()
+            .ok_or("temporary path is not UTF-8")?
+            .to_owned();
+        let source = LocalErasureTrustSourceV1 {
+            credential_directory: None,
+            trust_state: directory.path().join("absent-trust.db"),
+        };
+        let mut store = HostedLedgerStore::open_with_trust(
+            StoreConfig::Sqlite { path: path.clone() },
+            &source,
+        )?;
+        let timeline = store.create_timeline("ledger")?;
+        drop(store);
+        let read_only = HostedLedgerStore::open_read_only_with_trust(&path, &source)?;
+        assert_eq!(
+            read_only
+                .get_timeline(timeline.id())?
+                .map(|found| found.id()),
+            Some(timeline.id())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_credentials_recover_a_store_that_holds_a_request() -> TestResult {
+        let store = KeylessStore::new()?;
+        let source = store.valid_source("valid")?;
+        let recovered = HostedLedgerStore::open_with_trust(store.config(), &source)?;
+        let timelines = recovered.list_timelines()?.len();
+        assert!(timelines > 0);
+        drop(recovered);
+        let read_only = HostedLedgerStore::open_read_only_with_trust(&store.path, &source)?;
+        assert_eq!(read_only.list_timelines()?.len(), timelines);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_credentials_are_a_typed_refusal() -> TestResult {
+        let store = KeylessStore::new()?;
+        let missing = Some(LocalErasureOpenErrorV1::Load(
+            LocalErasureLoadErrorV1::CredentialsMissing,
+        ));
+        assert_eq!(
+            refusals(&store, &store.missing_source()),
+            [missing, missing]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_bundle_or_signature_is_a_typed_refusal() -> TestResult {
+        let store = KeylessStore::new()?;
+        let invalid = Some(LocalErasureOpenErrorV1::Load(
+            LocalErasureLoadErrorV1::Composition(LocalErasureCompositionErrorV1::BundleInvalid),
+        ));
+        for source in [
+            store.invalid_bundle_source("invalid-bundle")?,
+            store.forged_signature_source("forged-signature")?,
+        ] {
+            assert_eq!(refusals(&store, &source), [invalid, invalid]);
+        }
+        Ok(())
     }
 }

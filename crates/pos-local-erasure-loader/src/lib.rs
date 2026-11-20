@@ -353,12 +353,14 @@ pub fn unix_now() -> u64 {
         .map_or(u64::MAX, |elapsed| elapsed.as_secs())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "../tests/support/signing.rs"]
 pub mod signing_fixture;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::path::Path;

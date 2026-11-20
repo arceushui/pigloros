@@ -32,6 +32,9 @@ use pos_core::{
     ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ManifestPluginRosterV1,
     PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline, TimelineMeta,
 };
+use pos_local_erasure_loader::{
+    LocalErasureOpenErrorV1, LocalErasureRecoveryV1, LocalErasureTrustSourceV1,
+};
 use pos_runtime::{
     LocalScheduledAdmissionHostV1, ManifestRegistrationErrorV1, PluginExecutionModeV1,
     PluginRegistry, ScheduledAdmissionStoreV1,
@@ -217,6 +220,17 @@ fn ensure_registry_erasure_gate(
 
 fn hosted_store_error(error: pos_core::ErasureHostErrorV1) -> ExperimentError {
     ExperimentError::Store(host_error(error))
+}
+
+/// The error of a refused store open: a refused composition is a store
+/// error naming its typed refusal.
+fn hosted_open_error(error: LocalErasureOpenErrorV1) -> ExperimentError {
+    match error {
+        LocalErasureOpenErrorV1::Load(error) => {
+            ExperimentError::Store(pos_core::CoreError::Storage(error.to_string()))
+        }
+        LocalErasureOpenErrorV1::Host(error) => hosted_store_error(error),
+    }
 }
 
 fn bind_fork_registry_erasure_gate(
@@ -449,7 +463,7 @@ impl RunResult {
         self.store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)
-            .and_then(|config| HostedExperimentStore::open(config).map_err(hosted_store_error))
+            .and_then(|config| HostedExperimentStore::open(config).map_err(hosted_open_error))
             .and_then(|store| {
                 store
                     .logical_head(self.timeline_id)
@@ -522,7 +536,7 @@ impl RunResult {
             .store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-        let mut store = HostedExperimentStore::open(store_config).map_err(hosted_store_error)?;
+        let mut store = HostedExperimentStore::open(store_config).map_err(hosted_open_error)?;
         let timelines = store.list_timelines()?;
         let timeline = timelines
             .iter()
@@ -589,7 +603,7 @@ impl RunResult {
                 .store_config
                 .clone()
                 .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-            let store = HostedExperimentStore::open(config).map_err(hosted_store_error)?;
+            let store = HostedExperimentStore::open(config).map_err(hosted_open_error)?;
             Some(store.logical_head(self.timeline_id)?.as_u64())
         } else {
             None
@@ -1655,8 +1669,7 @@ impl Experiment {
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store =
-            HostedExperimentStore::open(store_config.clone()).map_err(hosted_store_error)?;
+        let store = HostedExperimentStore::open(store_config.clone()).map_err(hosted_open_error)?;
         self.start_with_hosted_store_and_recipe(store, Some(store_config))
     }
 
@@ -1752,7 +1765,7 @@ impl Experiment {
     ) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
         HostedExperimentStore::open(store_config.clone())
-            .map_err(hosted_store_error)
+            .map_err(hosted_open_error)
             .and_then(|store| self.resume_with_hosted_store(timeline_id, store, store_config))
     }
 
@@ -3283,7 +3296,7 @@ impl BacktestRunner {
     /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
     pub fn run(self) -> Result<BacktestResult, ExperimentError> {
         HostedExperimentStore::open(self.config.store_config.clone())
-            .map_err(hosted_store_error)
+            .map_err(hosted_open_error)
             .and_then(|store| self.run_with_hosted_store(store))
     }
 
@@ -11527,5 +11540,121 @@ mod fault_injection_tests {
         ) -> Result<pos_core::Timeline, CoreError> {
             pos_core::store::import_committed_with_rollback(self, meta, events)
         }
+    }
+}
+
+// Test-only. The shared Local erasure signing fixtures and the key-less root
+// store fixture of ADR-136 acceptance test 11 (#1450), which provisions its
+// store through the Gateway (`test-support`); the items are `pub` so this
+// crate may use a subset.
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../../crates/pos-local-erasure-loader/tests/support/signing.rs"]
+pub mod signing;
+
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../piglor-gateway/tests/support/keyless_store.rs"]
+pub mod keyless_store;
+
+/// ADR-136 acceptance test 11 for the experiment root (#1450): its store
+/// open composes the closed authority for a store without an erasure store
+/// identity, recovers a store that holds a Local erasure request from valid
+/// credentials, and refuses missing or invalid ones.
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod keyless_erasure_tests {
+    use pos_core::store::EventStore;
+    use pos_local_erasure_loader::{
+        LocalErasureLoadErrorV1, LocalErasureOpenErrorV1, LocalErasureTrustSourceV1,
+    };
+    use pos_runtime::LocalErasureCompositionErrorV1;
+
+    use super::keyless_store::KeylessStore;
+    use super::signing::TestResult;
+    use super::{hosted_open_error, ExperimentError, HostedExperimentStore, StoreConfig};
+
+    #[test]
+    fn a_store_without_an_identity_opens_and_works() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let config = StoreConfig::Sqlite {
+            path: directory
+                .path()
+                .join("experiment.db")
+                .to_str()
+                .ok_or("temporary path is not UTF-8")?
+                .to_owned(),
+        };
+        let source = LocalErasureTrustSourceV1 {
+            credential_directory: None,
+            trust_state: directory.path().join("absent-trust.db"),
+        };
+        let mut store = HostedExperimentStore::open_with_trust(config.clone(), &source)?;
+        let timeline = store.create_timeline("experiment")?;
+        drop(store);
+        let reopened = HostedExperimentStore::open_with_trust(config, &source)?;
+        assert_eq!(
+            reopened
+                .get_timeline(timeline.id())?
+                .map(|found| found.id()),
+            Some(timeline.id())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_credentials_recover_a_store_that_holds_a_request() -> TestResult {
+        let store = KeylessStore::new()?;
+        let source = store.valid_source("valid")?;
+        let recovered = HostedExperimentStore::open_with_trust(store.config(), &source)?;
+        assert!(!recovered.list_timelines()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_credentials_are_a_typed_refusal() -> TestResult {
+        let store = KeylessStore::new()?;
+        let refusal =
+            HostedExperimentStore::open_with_trust(store.config(), &store.missing_source())
+                .err()
+                .ok_or("an identified store without credentials is refused")?;
+        assert_eq!(
+            refusal,
+            LocalErasureOpenErrorV1::Load(LocalErasureLoadErrorV1::CredentialsMissing)
+        );
+        assert!(matches!(
+            hosted_open_error(refusal),
+            ExperimentError::Store(pos_core::CoreError::Storage(message))
+                if message == LocalErasureLoadErrorV1::CredentialsMissing.to_string()
+        ));
+        assert!(matches!(
+            hosted_open_error(LocalErasureOpenErrorV1::Host(
+                pos_core::ErasureHostErrorV1::AccessFrozen
+            )),
+            ExperimentError::Store(pos_core::CoreError::ErasureAccessFrozen)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_bundle_or_signature_is_a_typed_refusal() -> TestResult {
+        let store = KeylessStore::new()?;
+        for source in [
+            store.invalid_bundle_source("invalid-bundle")?,
+            store.forged_signature_source("forged-signature")?,
+        ] {
+            assert_eq!(
+                HostedExperimentStore::open_with_trust(store.config(), &source).err(),
+                Some(LocalErasureOpenErrorV1::Load(
+                    LocalErasureLoadErrorV1::Composition(
+                        LocalErasureCompositionErrorV1::BundleInvalid
+                    )
+                ))
+            );
+        }
+        Ok(())
     }
 }

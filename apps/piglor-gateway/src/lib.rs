@@ -35,7 +35,8 @@ pub mod local_erasure_provision;
 // Test-only. The Local erasure signing fixtures under the loader's
 // `tests/support`, shared with the loader and the key-less root tests; the
 // items are `pub` so every test that includes them may use a subset.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "../../../crates/pos-local-erasure-loader/tests/support/signing.rs"]
 pub mod local_erasure_signing_fixture;
