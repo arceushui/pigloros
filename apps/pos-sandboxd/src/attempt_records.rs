@@ -608,6 +608,10 @@ fn unserved_proxy<S>(
         })
 }
 
+mod response;
+
+pub use response::{ResponseFault, RetainedResponse};
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
