@@ -24,7 +24,8 @@
 //! | `key-registry` | the two key-destruction phases, the tombstone bound to ELO1 |
 //! | `artifact-store`, `managed-report` | ELAD1 when the ARD1 row depends on keys and every one is tombstoned (Q7), else ELNEG1 `ArtifactDeletionFailed` |
 //! | `client-cache-signal` | ELCG1 at the attempt's admitted position (Q8) |
-//! | `export-recipient`, `timeline-payload` | ELNEG1 `ArtifactDeletionFailed` |
+//! | `export-recipient` | the ADR-138 recipient-export withdrawal: ELXW1 once withdrawn, else ELNEG1 `ArtifactDeletionFailed` |
+//! | `timeline-payload` | ELNEG1 `ArtifactDeletionFailed` |
 //! | `local-backup-inventory` | ELNEG1 `BackupInventoryIncomplete` |
 //! | `local-replica` | once every other owner has an ELO1, the F1 purge outside every fence, then ELRP1 or ELNEG1 (Q3) |
 //!
@@ -33,20 +34,28 @@
 
 use pos_core::{
     deletion_receipt, local_erasure_key_digest_v1, local_erasure_owner_ref_v1,
-    ErasureDestructionCommandV1, ErasureErrorV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
-    ErasureObligationInputV1, ErasureObligationV1, ErasureOwnerCommandV1, ErasureOwnerResultV1,
-    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecordedAttemptReadV1,
-    ErasureRecordedProgressV1, ErasureRecordedScopeReadV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, EventStore, Hash, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistryStateV1, LocalErasureArtifactDispositionV1,
-    LocalErasureCacheGenerationV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
-    LocalErasureRedactionV1, LocalErasureReplicaPurgeV1, LocalOwnerEffectV1,
-    LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1,
+    ErasureArtifactClassV1, ErasureDestructionCommandV1, ErasureErrorV1, ErasureHostErrorV1,
+    ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationV1,
+    ErasureOwnerCommandV1, ErasureOwnerResultV1, ErasurePersistencePortV1,
+    ErasureProtectedOperationV1, ErasureRecordedAttemptReadV1, ErasureRecordedProgressV1,
+    ErasureRecordedScopeReadV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionV1, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistryStateV1, LocalErasureArtifactDispositionV1, LocalErasureCacheGenerationV1,
+    LocalErasureNegativeResultV1, LocalErasureOwnerResultV1, LocalErasureRedactionV1,
+    LocalErasureReplicaPurgeV1, LocalOwnerEffectV1, LocalOwnerResultBindingV1,
+    PreparedLocalOwnerEffectV1, TimelineId,
 };
 
 use super::{map_erasure_error, ErasureCommandSenderV1, ErasureHostStore};
 use crate::erasure_authority_view::VIEW_LIST_MAX;
+
+mod recipient_export;
+
+#[cfg(test)]
+pub(super) use recipient_export::resolved_export;
+pub(super) use recipient_export::ExportPublicationsV1;
+use recipient_export::{recorded_withdrawals, withdrawal_bound, RecordedWithdrawalV1};
 
 use ErasureInventoryCategoryV1::{Artifact, Backup, Key, Replica};
 
@@ -63,6 +72,8 @@ enum OwnerWorkV1 {
     KeyDestruction,
     /// The F1 local-replica purge.
     ReplicaPurge,
+    /// The ADR-138 recipient-export withdrawal.
+    RecipientExportWithdrawal,
 }
 
 /// Every acknowledgement class of the compiled ELP1 with its category and
@@ -77,7 +88,7 @@ const LOCAL_OWNER_WORK: [(ErasureInventoryCategoryV1, &str, OwnerWorkV1); 8] = [
     (
         Artifact,
         "export-recipient",
-        OwnerWorkV1::Refused(ErasureErrorV1::ArtifactDeletionFailed),
+        OwnerWorkV1::RecipientExportWithdrawal,
     ),
     (Artifact, "managed-report", OwnerWorkV1::Disposition),
     (
@@ -209,14 +220,70 @@ impl ErasureCommandSenderV1<'_> {
             .and_then(std::convert::identity)
     }
 
+    /// Withdraw the recipient export one `export-recipient` command targets
+    /// (ADR-138 §5).
+    ///
+    /// Like [`Self::destroy_key_for_erasure`], the command runs under the
+    /// protected-append fence of the store's Erasure Host Timeline, `ELHT1`
+    /// of its erasure store identity, which the host derives itself. Inside
+    /// that one fence it resolves the command's `ELXR1` target to its
+    /// publication through the request's effective scope Timelines, with the
+    /// publications this sender scanned once for that scope, then runs
+    /// T1, the owner step with T2, and T3 through
+    /// `commit_local_owner_effect` (§7):
+    ///
+    /// - a target that names no publication, a T1 error, a capture that
+    ///   failed (no custody, a missing or an unsafe object) or a failed owner
+    ///   step is the permanent negative `ArtifactDeletionFailed`;
+    /// - an already withdrawn publication commits a positive ELO1 of this
+    ///   command bound to the recorded ELXW1;
+    /// - otherwise the ELXW1 of this command over the deleted objects'
+    ///   captured binding commits with its positive ELO1.
+    ///
+    /// Every step is idempotent, so a re-run after a crash completes the
+    /// withdrawal, and a re-run after a committed positive ELO1 commits the
+    /// same bytes again.
+    ///
+    /// # Errors
+    /// [`ErasureHostErrorV1::Conflict`] unless `command` is a dispatched
+    /// `export-recipient` command of the request's active attempt; the
+    /// payload-free error of a store identity that cannot be read, or the
+    /// fence error when the Erasure Host Timeline is unavailable; otherwise
+    /// a payload-free error when no owner result could be made durable.
+    pub fn withdraw_recipient_export_for_erasure(
+        &mut self,
+        command: &ErasureOwnerCommandV1,
+    ) -> Result<ErasureOwnerResultV1, ErasureHostErrorV1> {
+        self.host
+            .ensure_generation(self.generation)
+            .and_then(|()| self.local_erasure_host_timeline())
+            .and_then(|host_timeline| {
+                let publications = &mut self.export_publications;
+                self.host.with_store_fence(
+                    self.generation,
+                    host_timeline,
+                    ErasureProtectedOperationV1::Append,
+                    |store| {
+                        Ok(recipient_export::withdrawn_export(
+                            store,
+                            command,
+                            publications,
+                        ))
+                    },
+                )
+            })
+            .and_then(std::convert::identity)
+    }
+
     /// Run the owner work of one dispatched command and return its owner
     /// result; `LocalErasureExecutorV1` is the only caller.
     ///
     /// A `key-registry` command whose target names no registered key is the
     /// permanent negative `KeyDestructionFailed`; every other key command
-    /// runs [`Self::destroy_key_for_erasure`]. A
+    /// runs [`Self::destroy_key_for_erasure`]. An `export-recipient` command
+    /// runs [`Self::withdraw_recipient_export_for_erasure`]. A
     /// `local-replica` command runs only once every other obligation of the
-    /// attempt has a retained ELO1 (F1).
+    /// attempt has a retained ELO1 (F1), an ELXW1 positive included.
     ///
     /// # Errors
     /// [`ErasureHostErrorV1::Conflict`] for a command that is not
@@ -232,9 +299,13 @@ impl ErasureCommandSenderV1<'_> {
             .and_then(|()| owner_work(self.host.store.host_store(), command))
             .and_then(|(work, active)| match work {
                 OwnerWorkV1::KeyDestruction => self.registered_key_destruction(command),
+                OwnerWorkV1::RecipientExportWithdrawal => {
+                    self.withdraw_recipient_export_for_erasure(command)
+                }
                 OwnerWorkV1::ReplicaPurge => {
+                    let limits = self.host.recovery_limits;
                     let store = self.host.store.host_store();
-                    others_executed(store, command, &active)
+                    others_executed(store, command, &active, limits)
                         .and_then(|()| purged_replica(store, command))
                 }
                 OwnerWorkV1::Disposition => disposition(self.host.store.host_store(), command),
@@ -258,9 +329,12 @@ impl ErasureCommandSenderV1<'_> {
     /// the ELO1 one of the Local executor's outcomes for that command
     /// assembles: its `effect_digest` is `CA(effect)` of that effect by the
     /// `PreparedLocalOwnerEffectV1` rule, the deletion receipt of the key's
-    /// tombstone or the address of its ELAD1, ELCG1, ELNEG1 or ELRP1. The
-    /// effect must be committed: the registry holds that tombstone, or the
-    /// store holds that exact record.
+    /// tombstone or the address of its ELAD1, ELCG1, ELNEG1, ELRP1 or ELXW1.
+    /// The effect must be committed: the registry holds that tombstone, or
+    /// the store holds that exact record. A positive ELXW1 must also be the
+    /// recorded disposition of a withdrawn row, re-derived from one snapshot
+    /// taken with the command's `ELXR1` target, under ADR-138 §7's signer
+    /// rules (`withdrawal_bound`).
     ///
     /// # Errors
     /// [`ErasureHostErrorV1::AuthorizationDenied`] for an ELO1 or obligation
@@ -272,11 +346,12 @@ impl ErasureCommandSenderV1<'_> {
         &mut self,
         owner_result: ErasureReferenceV1,
     ) -> Result<(), ErasureHostErrorV1> {
+        let limits = self.host.recovery_limits;
         self.host
             .ensure_generation(self.generation)
             .and_then(|()| bound_command(self.host.store.host_store(), owner_result))
             .and_then(|command| {
-                committed_owner_result(self.host.store.host_store(), &command, owner_result)
+                committed_owner_result(self.host.store.host_store(), &command, owner_result, limits)
             })
     }
 
@@ -364,6 +439,36 @@ fn committed_scope(
         .recorded_scope(request)
         .map_err(map_erasure_error)
         .and_then(|scope| scope.ok_or(ErasureHostErrorV1::RecoveryUnavailable))
+}
+
+/// The request's effective scope Timelines (ADR-138 §5): its ERSC1
+/// Timelines and the child each ERSE1 of its chain adds.
+fn effective_timelines(
+    commitment: &ErasureScopeCommitmentV1,
+    extensions: &[ErasureScopeExtensionV1],
+) -> Vec<TimelineId> {
+    commitment
+        .scope_timeline_ids()
+        .iter()
+        .copied()
+        .chain(
+            extensions
+                .iter()
+                .map(ErasureScopeExtensionV1::child_timeline),
+        )
+        .collect()
+}
+
+/// The effective scope Timelines of the committed `request`.
+///
+/// # Errors
+/// As [`committed_scope`].
+fn scope_timelines(
+    store: &dyn ErasureHostStore,
+    request: ErasureReferenceV1,
+) -> Result<Vec<TimelineId>, ErasureHostErrorV1> {
+    committed_scope(store, request)
+        .map(|(commitment, extensions)| effective_timelines(&commitment, &extensions))
 }
 
 /// Whether `active` dispatches `command`: it is the attempt the command
@@ -687,17 +792,10 @@ fn registered_dependencies(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<Option<Vec<KeyIdentityV1>>, ErasureHostErrorV1> {
-    committed_scope(store, request)
-        .and_then(|(commitment, extensions)| {
-            commitment
-                .scope_timeline_ids()
-                .iter()
-                .copied()
-                .chain(
-                    extensions
-                        .iter()
-                        .map(ErasureScopeExtensionV1::child_timeline),
-                )
+    scope_timelines(store, request)
+        .and_then(|timelines| {
+            timelines
+                .into_iter()
                 .map(|timeline| {
                     EventStore::artifact_registrations_for_timeline(store, timeline, VIEW_LIST_MAX)
                         .ok()
@@ -792,12 +890,14 @@ fn cache_effect(
 
 /// Every effect the Local executor can commit for `command`, with its
 /// outcome: its class's positive record, an existing tombstone of its key,
+/// the recorded ELXW1 of its withdrawn `ELXR1` target among `withdrawn`,
 /// and each negative code. A command of another class simply has no ELO1
 /// over the other classes' candidates.
 fn candidate_effects(
     command: &ErasureOwnerCommandV1,
     (scope, generation): (ErasureReferenceV1, u64),
     registry: Option<&KeyRegistryStateV1>,
+    withdrawn: &[RecordedWithdrawalV1],
 ) -> Vec<CandidateEffectV1> {
     let tombstone = key_identity(registry, command.destruction.target.key_digest)
         .and_then(|identity| registry.and_then(|registry| registry.tombstone(identity)));
@@ -817,6 +917,19 @@ fn candidate_effects(
             Ok(LocalOwnerEffectV1::ExistingTombstone(Box::new(tombstone))),
         )
     }));
+    candidates.extend(
+        withdrawn
+            .iter()
+            .filter(|recorded| recorded.target == command.destruction.target.artifact_digest)
+            .map(|recorded| {
+                (
+                    None,
+                    Ok(LocalOwnerEffectV1::RecipientExportWithdrawal(
+                        recorded.elxw1.clone(),
+                    )),
+                )
+            }),
+    );
     candidates
 }
 
@@ -827,8 +940,9 @@ fn has_owner_result(
     command: &ErasureOwnerCommandV1,
     scope: (ErasureReferenceV1, u64),
     registry: Option<&KeyRegistryStateV1>,
+    withdrawn: &[RecordedWithdrawalV1],
 ) -> Result<bool, ErasureHostErrorV1> {
-    candidate_effects(command, scope, registry)
+    candidate_effects(command, scope, registry, withdrawn)
         .into_iter()
         .map(|(error, effect)| {
             effect
@@ -857,62 +971,66 @@ fn retained(
     }
 }
 
-/// Whether the obligation at `obligation` of `attempt` has a retained ELO1.
-fn obligation_has_owner_result(
+/// The command of every obligation of `active` other than `command`'s,
+/// rebuilt from its retained obligation.
+fn other_commands(
     store: &dyn ErasureHostStore,
-    request: ErasureReferenceV1,
-    (attempt, obligation): (ErasureReferenceV1, ErasureReferenceV1),
-    scope: (ErasureReferenceV1, u64),
-    registry: Option<&KeyRegistryStateV1>,
-) -> Result<bool, ErasureHostErrorV1> {
-    store
-        .read_object(obligation)
-        .and_then(|bytes| ErasureObligationV1::from_canonical_cbor(&bytes))
-        .map_err(map_erasure_error)
-        .and_then(|obligation| {
-            has_owner_result(
-                store,
-                &ErasureOwnerCommandV1 {
-                    request,
+    command: &ErasureOwnerCommandV1,
+    active: &ErasureRetryAdmissionV1,
+) -> Result<Vec<ErasureOwnerCommandV1>, ErasureHostErrorV1> {
+    let attempt = active.reference();
+    active
+        .unresolved_obligations()
+        .iter()
+        .filter(|obligation| **obligation != command.destruction.obligation)
+        .map(|obligation| {
+            store
+                .read_object(*obligation)
+                .and_then(|bytes| ErasureObligationV1::from_canonical_cbor(&bytes))
+                .map(|obligation| ErasureOwnerCommandV1 {
+                    request: command.request,
                     destruction: ErasureDestructionCommandV1::from_obligation(&obligation, attempt),
-                },
-                scope,
-                registry,
-            )
+                })
+                .map_err(map_erasure_error)
         })
+        .collect()
 }
 
 /// Whether every obligation of `active` other than `command`'s has a
 /// retained ELO1 of this attempt, so the local replica runs after every
-/// other owner of the request (F1).
+/// other owner of the request (F1). The recorded ELXW1 of every withdrawn
+/// export target among them is read from one snapshot (ADR-138 §5).
 ///
 /// # Errors
 /// [`ErasureHostErrorV1::Conflict`] while another owner has no owner
 /// result; otherwise the payload-free read error.
 fn others_executed(
-    store: &dyn ErasureHostStore,
+    store: &mut dyn ErasureHostStore,
     command: &ErasureOwnerCommandV1,
     active: &ErasureRetryAdmissionV1,
+    limits: ErasureRecoveryLimitsV1,
 ) -> Result<(), ErasureHostErrorV1> {
-    let attempt = active.reference();
     committed_scope(store, command.request)
         .and_then(|(commitment, _)| loaded_registry(store).map(|registry| (commitment, registry)))
         .and_then(|(commitment, registry)| {
-            let scope = (commitment.reference(), active.admitted_position());
-            active
-                .unresolved_obligations()
-                .iter()
-                .filter(|obligation| **obligation != command.destruction.obligation)
-                .map(|obligation| {
-                    obligation_has_owner_result(
-                        store,
-                        command.request,
-                        (attempt, *obligation),
-                        scope,
-                        registry.as_ref(),
-                    )
+            other_commands(store, command, active).and_then(|remaining| {
+                let targets = remaining
+                    .iter()
+                    .filter(|other| {
+                        other.destruction.target.artifact_class == ErasureArtifactClassV1::Export
+                    })
+                    .map(|other| other.destruction.target.artifact_digest)
+                    .collect::<Vec<_>>();
+                recorded_withdrawals(store, limits, &targets).and_then(|withdrawn| {
+                    let scope = (commitment.reference(), active.admitted_position());
+                    remaining
+                        .iter()
+                        .map(|other| {
+                            has_owner_result(store, other, scope, registry.as_ref(), &withdrawn)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
                 })
-                .collect::<Result<Vec<_>, _>>()
+            })
         })
         .and_then(|executed| {
             executed
@@ -981,7 +1099,8 @@ fn bound_command(
 /// Whether the Local executor's path for `work` can commit `effect` with
 /// outcome `error`: its class's own positive record, or one of the
 /// negative codes that path emits (M1 of the #1431 review). A tombstone a
-/// key destruction commits is matched as the tombstone the registry holds.
+/// key destruction commits is matched as the tombstone the registry holds,
+/// and a withdrawal's ELXW1 as the disposition its row records.
 fn emits(work: OwnerWorkV1, error: Option<ErasureErrorV1>, effect: &LocalOwnerEffectV1) -> bool {
     matches!(
         (work, error, effect),
@@ -990,7 +1109,7 @@ fn emits(work: OwnerWorkV1, error: Option<ErasureErrorV1>, effect: &LocalOwnerEf
             None,
             LocalOwnerEffectV1::ArtifactDisposition(_)
         ) | (
-            OwnerWorkV1::Disposition,
+            OwnerWorkV1::Disposition | OwnerWorkV1::RecipientExportWithdrawal,
             Some(ErasureErrorV1::ArtifactDeletionFailed),
             LocalOwnerEffectV1::Negative(_)
         ) | (
@@ -1013,6 +1132,10 @@ fn emits(work: OwnerWorkV1, error: Option<ErasureErrorV1>, effect: &LocalOwnerEf
             OwnerWorkV1::ReplicaPurge,
             Some(ErasureErrorV1::ReplicaTimeout | ErasureErrorV1::ReplicaNegativeAcknowledgement),
             LocalOwnerEffectV1::Negative(_)
+        ) | (
+            OwnerWorkV1::RecipientExportWithdrawal,
+            None,
+            LocalOwnerEffectV1::RecipientExportWithdrawal(_)
         )
     ) || matches!(
         (work, error, effect),
@@ -1021,69 +1144,140 @@ fn emits(work: OwnerWorkV1, error: Option<ErasureErrorV1>, effect: &LocalOwnerEf
     )
 }
 
+/// What the signer re-derives one command's owner result from, read once:
+/// the committed ERSC1 and the attempt's admitted position, the key
+/// registry, the request's effective scope Timelines, and the withdrawn row
+/// of the command's `ELXR1` target with its recorded ELXW1, from one
+/// snapshot taken with that target (ADR-138 §7).
+struct OwnerEvidenceV1 {
+    scope: (ErasureReferenceV1, u64),
+    registry: Option<KeyRegistryStateV1>,
+    timelines: Vec<TimelineId>,
+    withdrawn: Vec<RecordedWithdrawalV1>,
+}
+
+/// The evidence the signer re-derives `command`'s owner result from.
+///
+/// # Errors
+/// The payload-free error of an unreadable scope, registry or snapshot.
+fn owner_evidence(
+    store: &mut dyn ErasureHostStore,
+    command: &ErasureOwnerCommandV1,
+    active: &ErasureRetryAdmissionV1,
+    limits: ErasureRecoveryLimitsV1,
+) -> Result<OwnerEvidenceV1, ErasureHostErrorV1> {
+    committed_scope(store, command.request).and_then(|(commitment, extensions)| {
+        loaded_registry(store).and_then(|registry| {
+            recorded_withdrawals(store, limits, &[command.destruction.target.artifact_digest]).map(
+                |withdrawn| OwnerEvidenceV1 {
+                    scope: (commitment.reference(), active.admitted_position()),
+                    registry,
+                    timelines: effective_timelines(&commitment, &extensions),
+                    withdrawn,
+                },
+            )
+        })
+    })
+}
+
+/// The outcome of the committed effect of `command` whose ELO1 is
+/// `owner_result`, among the effects the path for `work` can commit.
+///
+/// # Errors
+/// [`ErasureHostErrorV1::AuthorizationDenied`] when no committed effect of
+/// that path yields `owner_result`.
+fn committed_outcome(
+    store: &dyn ErasureHostStore,
+    command: &ErasureOwnerCommandV1,
+    owner_result: ErasureReferenceV1,
+    work: OwnerWorkV1,
+    evidence: &OwnerEvidenceV1,
+) -> Result<Option<ErasureErrorV1>, ErasureHostErrorV1> {
+    candidate_effects(
+        command,
+        evidence.scope,
+        evidence.registry.as_ref(),
+        &evidence.withdrawn,
+    )
+    .into_iter()
+    .filter(|(error, effect)| {
+        effect
+            .as_ref()
+            .is_ok_and(|effect| emits(work, *error, effect))
+    })
+    .filter_map(|(error, effect)| {
+        effect
+            .and_then(|effect| {
+                PreparedLocalOwnerEffectV1::new(effect, owner_binding(command, error))
+            })
+            .ok()
+            .map(|prepared| (error, prepared))
+    })
+    .find(|(_, prepared)| prepared.owner_result().reference() == owner_result)
+    .filter(|(_, prepared)| {
+        prepared.effect_object().is_none_or(|effect| {
+            store
+                .read_object(effect.reference())
+                .is_ok_and(|bytes| bytes == effect.canonical_cbor())
+        })
+    })
+    .map(|(error, _)| error)
+    .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+}
+
+/// The rules a positive outcome must still meet when it is signed: a
+/// positive ELAD1 Q7 (`redactable`), every key the ARD1 row depends on
+/// tombstoned, as when the executor emitted it; a positive ELXW1 ADR-138
+/// §7 (`withdrawal_bound`) against its withdrawn row.
+///
+/// # Errors
+/// [`ErasureHostErrorV1::AuthorizationDenied`] when a rule fails;
+/// otherwise the payload-free read error.
+fn positive_rules(
+    store: &dyn ErasureHostStore,
+    command: &ErasureOwnerCommandV1,
+    owner_result: ErasureReferenceV1,
+    outcome: (OwnerWorkV1, Option<ErasureErrorV1>),
+    evidence: &OwnerEvidenceV1,
+) -> Result<(), ErasureHostErrorV1> {
+    match outcome {
+        (OwnerWorkV1::Disposition, None) => redactable(store, command),
+        (OwnerWorkV1::RecipientExportWithdrawal, None) => {
+            Ok(evidence.withdrawn.iter().any(|recorded| {
+                withdrawal_bound(recorded, command, owner_result, &evidence.timelines)
+            }))
+        }
+        _ => Ok(true),
+    }
+    .and_then(|holds| {
+        holds
+            .then_some(())
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)
+    })
+}
+
 /// Whether `owner_result` is the ELO1 of a committed outcome the Local
-/// executor's path for the dispatched `command`'s class can produce. A
-/// positive ELAD1 must also still meet Q7 (`redactable`): every key the
-/// ARD1 row depends on is tombstoned, as when the executor emitted it.
+/// executor's path for the dispatched `command`'s class can produce, and a
+/// positive one still meets its class's rules (`positive_rules`).
 ///
 /// # Errors
 /// [`ErasureHostErrorV1::Conflict`] unless the active attempt dispatches
 /// `command`; [`ErasureHostErrorV1::AuthorizationDenied`] when no committed
-/// effect of `command` yields `owner_result`; otherwise the payload-free
-/// read error.
+/// effect of `command` yields `owner_result`, or a rule fails; otherwise the
+/// payload-free read error.
 fn committed_owner_result(
     store: &mut dyn ErasureHostStore,
     command: &ErasureOwnerCommandV1,
     owner_result: ErasureReferenceV1,
+    limits: ErasureRecoveryLimitsV1,
 ) -> Result<(), ErasureHostErrorV1> {
     owner_work(store, command)
         .and_then(|(work, active)| {
-            committed_scope(store, command.request).and_then(|(commitment, _)| {
-                loaded_registry(store).map(|registry| {
-                    (
-                        work,
-                        (commitment.reference(), active.admitted_position()),
-                        registry,
-                    )
-                })
+            owner_evidence(store, command, &active, limits).map(|evidence| (work, evidence))
+        })
+        .and_then(|(work, evidence)| {
+            committed_outcome(store, command, owner_result, work, &evidence).and_then(|error| {
+                positive_rules(store, command, owner_result, (work, error), &evidence)
             })
-        })
-        .and_then(|(work, scope, registry)| {
-            candidate_effects(command, scope, registry.as_ref())
-                .into_iter()
-                .filter(|(error, effect)| {
-                    effect
-                        .as_ref()
-                        .is_ok_and(|effect| emits(work, *error, effect))
-                })
-                .filter_map(|(error, effect)| {
-                    effect
-                        .and_then(|effect| {
-                            PreparedLocalOwnerEffectV1::new(effect, owner_binding(command, error))
-                        })
-                        .ok()
-                        .map(|prepared| (error, prepared))
-                })
-                .find(|(_, prepared)| prepared.owner_result().reference() == owner_result)
-                .filter(|(_, prepared)| {
-                    prepared.effect_object().is_none_or(|effect| {
-                        store
-                            .read_object(effect.reference())
-                            .is_ok_and(|bytes| bytes == effect.canonical_cbor())
-                    })
-                })
-                .map(|(error, _)| work == OwnerWorkV1::Disposition && error.is_none())
-                .ok_or(ErasureHostErrorV1::AuthorizationDenied)
-        })
-        .and_then(|positive_disposition| {
-            if positive_disposition {
-                redactable(store, command).and_then(|redacted| {
-                    redacted
-                        .then_some(())
-                        .ok_or(ErasureHostErrorV1::AuthorizationDenied)
-                })
-            } else {
-                Ok(())
-            }
         })
 }

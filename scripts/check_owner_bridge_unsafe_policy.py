@@ -1931,7 +1931,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/obstruction/tests.rs': 'f8b4ec091ca43d5652f3852b08ab5c1642ce1f8f269001ae886f202b7770b210',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': 'b31eca2c9b8dd862fe08312b9b9583f94402be495432e61950b162e00031bdab',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': '75ab4125d3d73408247b96d86724aaf1afa9e1163ff67efe3f962c4c779e61dc',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': 'dfbb90c082db2ae740681117de33344e068ab798cb9dd0b6bc05923b42af8b9a',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '921544a6c11558b17879befec7f0e9afae3fecdc068e183633745451fbeb4545',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': '46828ff25edf3810bae3c0890b81faf3aad8632a38150e0d465f5a00d628f16c',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '6fcd4e9d65e7fd1c08aafc78ddf2772b120378addcf252dbc253148b4a3f858d',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '9eecf9c656fc640a0f3979d6681537ef7c0272c833070d9c1c3852139a0d01d4',

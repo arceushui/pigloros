@@ -5,53 +5,91 @@
 //! the mode-1 challenge of the pending transaction. Any SIU1 other than the
 //! byte-identical pending one is rejected and changes nothing.
 //!
-//! The byte-identical SIU1 starts one new recovery operation, which begins
-//! by loading SIR1 again (R12 §6). This slice ends the operation there: the
-//! termination, recovery-peer and completion steps are later slices on the
-//! same seam, so the connection closes without a reply, SIR1 stays, and the
-//! selector stays in `RecoveryPending`.
+//! The byte-identical SIU1 runs one new recovery operation with its own
+//! 100 ms exchange (R12 §6, m6). It begins by loading SIR1 again. After its
+//! durable completion the connection receives the exact RCA1 and server EOF,
+//! and the selector opens normally from the next SIC1. Any failure closes the
+//! connection without a reply, keeps SIR1 and stays in `RecoveryPending`; no
+//! operation is retried automatically.
 
+use std::io::Write as _;
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use super::{
     configure_update_stream, read_control_frame, require_stream_eof, root_peer,
-    write_control_frame, OwnedAdministratorListener, ROOT_UID,
+    write_control_frame, NormalOpen, OwnedAdministratorListener, SelectorMode, ROOT_UID,
 };
+use crate::selector::installation::authority::AuthenticatedSelectorBootstrap;
 use crate::selector::installation::{FixedInstallation, InstalledSelectorState};
-use crate::selector::recovery::PendingRecoveryTarget;
+use crate::selector::recovery::{
+    require_absent_evaluator_endpoint, CompletedRecovery, PendingRecoveryTarget,
+    ProviderTerminationAuthority, RecoveryError,
+};
+use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
 use crate::selector::SelectorBoundaryError;
 
 /// Reopens the installation for a new recovery operation.
 type InstallationOpener = Box<dyn Fn() -> Result<FixedInstallation, SelectorBoundaryError> + Send>;
+
+/// Where each closed failure kind is reported: standard error in production.
+type DiagnosticSink = Mutex<Box<dyn std::io::Write + Send>>;
 
 /// One pending transaction and how the selector serves it.
 pub(super) struct PendingRecovery {
     target: PendingRecoveryTarget,
     peer_uid: u32,
     reopen: InstallationOpener,
+    authority: ProviderTerminationAuthority<dyn ProviderLifecyclePort + Send + Sync>,
+    opening: NormalOpen,
+    evaluator: PathBuf,
+    diagnostics: DiagnosticSink,
 }
 
 impl PendingRecovery {
-    /// The production state: root peers only, and the fixed installation.
-    pub(super) fn fixed(target: PendingRecoveryTarget) -> Self {
+    /// The production state: root peers only, the fixed installation, and
+    /// the termination authority over the selector's one lifecycle port.
+    pub(super) fn fixed(target: PendingRecoveryTarget, opening: NormalOpen) -> Self {
         Self {
             target,
             peer_uid: ROOT_UID,
             reopen: Box::new(InstalledSelectorState::open_fixed),
+            authority: opening.authority(),
+            opening,
+            evaluator: PathBuf::from(crate::selector::SANDBOX_SELECTOR_SOCKET),
+            diagnostics: Mutex::new(Box::new(std::io::stderr())),
         }
     }
 
-    /// Serves the administrative listener until its pathname identity is
-    /// lost or its accept loop fails. Nothing is ever admitted.
+    /// Serves the administrative listener until one recovery operation
+    /// completed durably, and returns the next state. Nothing is admitted
+    /// meanwhile.
+    ///
+    /// # Errors
+    /// Returns the listener's error when its pathname identity is lost or
+    /// its accept loop fails.
     pub(super) fn serve(
         &self,
         listener: &OwnedAdministratorListener,
-    ) -> Result<(), SelectorBoundaryError> {
+    ) -> Result<AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
         loop {
-            self.serve_once(listener)?;
+            if let Some(outcome) = self.serve_once(listener).transpose() {
+                return outcome;
+            }
         }
+    }
+
+    /// Normal open from the next state of a completed recovery.
+    pub(super) fn open(
+        &self,
+        administrator: &OwnedAdministratorListener,
+        bootstrap: AuthenticatedSelectorBootstrap,
+    ) -> Result<SelectorMode, SelectorBoundaryError> {
+        self.opening.open(administrator, bootstrap)
     }
 
     /// One poll of the administrative listener: answers a waiting connection,
@@ -59,29 +97,45 @@ impl PendingRecovery {
     ///
     /// # Errors
     /// Returns the listener's error when its pathname identity is lost or
-    /// accepting fails. A connection's own outcome never ends serving.
+    /// accepting fails. A connection's own failure never ends serving.
     fn serve_once(
         &self,
         listener: &OwnedAdministratorListener,
-    ) -> Result<(), SelectorBoundaryError> {
-        match listener.verify().and_then(|()| listener.try_accept())? {
-            Some(stream) => {
-                let _retry_result = self.answer(stream);
-            }
-            None => thread::sleep(Duration::from_millis(10)),
-        }
-        Ok(())
+    ) -> Result<Option<AuthenticatedSelectorBootstrap>, SelectorBoundaryError> {
+        listener
+            .verify()
+            .and_then(|()| listener.try_accept())
+            .map(|accepted| {
+                accepted.map_or_else(
+                    || {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    },
+                    |stream| {
+                        self.answer(stream)
+                            .inspect_err(|error| {
+                                self.report("administrative connection closed", error);
+                            })
+                            .ok()
+                    },
+                )
+            })
     }
 
     /// One administrative connection: the mode-1 challenge, then at most one
     /// framed SIU1 and client write EOF.
     ///
     /// # Errors
-    /// Every outcome closes the connection without a reply. A foreign peer,
-    /// malformed framing, an expired challenge, or a SIU1 other than the
-    /// pending one is [`SelectorBoundaryError::ArtifactInvalid`]. The pending
-    /// SIU1 starts a recovery operation, which stops closed.
-    fn answer(&self, mut stream: UnixStream) -> Result<(), SelectorBoundaryError> {
+    /// A foreign peer, malformed framing, an expired challenge, or a SIU1
+    /// other than the pending one is [`SelectorBoundaryError::ArtifactInvalid`]
+    /// and closes the connection without a reply. The pending SIU1 runs one
+    /// recovery operation; its failure also closes without a reply. After its
+    /// durable completion the exact RCA1 and server EOF are sent, and the
+    /// next state is returned even if that reply cannot be delivered.
+    fn answer(
+        &self,
+        mut stream: UnixStream,
+    ) -> Result<AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
         if !root_peer(&stream, self.peer_uid) {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
@@ -106,31 +160,60 @@ impl PendingRecovery {
                     Err(SelectorBoundaryError::ArtifactInvalid)
                 }
             })
+            .map(|completed| {
+                let _reply =
+                    write_control_frame(&mut stream, &completed.acknowledgement).and_then(|()| {
+                        stream
+                            .shutdown(Shutdown::Write)
+                            .map_err(|_| SelectorBoundaryError::Io)
+                    });
+                completed.bootstrap
+            })
     }
 
-    /// A new recovery operation reloads SIR1 from the installation, which
-    /// must still name the pending transaction.
+    /// Runs one new recovery operation. The evaluator pathname must still
+    /// be absent (R12 §8 M4, I13: checked at each transition). The operation
+    /// reloads SIR1 from the installation, which must still name the pending
+    /// transaction, and draws a fresh operation ID (R12 §4.1). A failure is
+    /// reported on standard error by its closed kind.
     ///
     /// # Errors
-    /// Returns [`SelectorBoundaryError::ArtifactInvalid`] when SIR1 is gone,
-    /// fails authentication, or names another transaction. Otherwise returns
-    /// [`SelectorBoundaryError::SelectorUnavailable`]: the operation's
-    /// remaining steps are not available, so it stops closed.
-    fn begin_recovery_operation(&self) -> Result<(), SelectorBoundaryError> {
-        (self.reopen)()
+    /// Returns [`SelectorBoundaryError::ArtifactInvalid`] when an evaluator
+    /// node exists, or SIR1 is gone, fails authentication or names another
+    /// transaction, and the operation's own failure otherwise. SIR1 then
+    /// stays.
+    pub(super) fn begin_recovery_operation(
+        &self,
+    ) -> Result<CompletedRecovery, SelectorBoundaryError> {
+        require_absent_evaluator_endpoint(&self.evaluator)
+            .and_then(|()| (self.reopen)().map_err(RecoveryError::from))
             .and_then(|installation| match installation {
                 FixedInstallation::RecoveryPending(installed) => {
-                    PendingRecoveryTarget::load(&installed).map_err(SelectorBoundaryError::from)
+                    PendingRecoveryTarget::load(&installed)
                 }
-                FixedInstallation::Admissible(_) => Err(SelectorBoundaryError::ArtifactInvalid),
+                FixedInstallation::Admissible(_) => Err(RecoveryError::Mismatch),
             })
             .and_then(|operation| {
-                Err(if operation.identity() == self.target.identity() {
-                    SelectorBoundaryError::SelectorUnavailable
+                if operation.identity() == self.target.identity() {
+                    self.authority.recover(operation)
                 } else {
-                    SelectorBoundaryError::ArtifactInvalid
-                })
+                    Err(RecoveryError::Mismatch)
+                }
             })
+            .inspect_err(|error| self.report("recovery operation failed", error))
+            .map_err(SelectorBoundaryError::from)
+    }
+
+    /// One diagnostic line with the closed failure kind; it names no
+    /// secret. A sink that cannot be written changes nothing.
+    fn report(&self, what: &str, error: &impl std::fmt::Display) {
+        writeln!(
+            self.diagnostics
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            "pos-root-selector: {what}: {error}"
+        )
+        .ok();
     }
 }
 
@@ -138,15 +221,22 @@ impl PendingRecovery {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs::{self, File};
-    use std::io::{Read as _, Write as _};
+    use std::io::Read as _;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
+
+    use std::path::Path;
+    use std::sync::Arc;
 
     use super::*;
     use crate::control_framing;
     use crate::evaluator_protocol::{array, decode_canonical, uint};
     use crate::root_selector::OwnedSelectorListener;
     use crate::selector::installation::tests::updates::{SuccessorRevocation, UpdateFixture};
+    use crate::selector::recovery::tests::{
+        peer_executable_digest, test_host, PeerPort, Reply, Script,
+    };
+    use crate::selector::runtime_lifecycle::ProviderLifecycleError;
 
     const RECOVERY_NAME: &str = "installation-update.cbor";
 
@@ -157,6 +247,59 @@ mod tests {
     /// The selector's result, the challenge the client read, and its reply.
     type Exchanged = (Result<(), SelectorBoundaryError>, Vec<u8>, Vec<u8>);
 
+    /// A recovery directory, an empty cgroup2 stand-in and the diagnostic
+    /// lines for one test.
+    struct Directories {
+        recovery: tempfile::TempDir,
+        cgroups: tempfile::TempDir,
+        diagnostics: Captured,
+    }
+
+    impl Directories {
+        fn new() -> TestResult<Self> {
+            let recovery = tempfile::tempdir()?;
+            fs::set_permissions(recovery.path(), fs::Permissions::from_mode(0o700))?;
+            Ok(Self {
+                recovery,
+                cgroups: tempfile::tempdir()?,
+                diagnostics: Captured::default(),
+            })
+        }
+    }
+
+    /// The diagnostic lines a selector wrote, in place of standard error.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
+                .into_owned()
+        }
+    }
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A port whose every recovery operation fails at its first step.
+    fn refusing() -> Script {
+        Script {
+            terminate: Reply::Refuse(ProviderLifecycleError::Unavailable),
+            ..Script::default()
+        }
+    }
+
     fn opener(root: PathBuf) -> InstallationOpener {
         Box::new(move || {
             File::open(&root)
@@ -165,15 +308,44 @@ mod tests {
         })
     }
 
-    fn pending(fixture: &UpdateFixture, peer_uid: u32) -> TestResult<PendingRecovery> {
+    fn pending(
+        fixture: &UpdateFixture,
+        peer_uid: u32,
+        directories: &Directories,
+    ) -> TestResult<PendingRecovery> {
+        pending_with(fixture, peer_uid, directories, refusing())
+    }
+
+    fn pending_with(
+        fixture: &UpdateFixture,
+        peer_uid: u32,
+        directories: &Directories,
+        script: Script,
+    ) -> TestResult<PendingRecovery> {
         let reopen = opener(fixture.path().to_path_buf());
         let FixedInstallation::RecoveryPending(installed) = reopen()? else {
             return Err("no SIR1 is pending".into());
+        };
+        let port = Arc::new(PeerPort::new(directories.recovery.path(), script));
+        let host = test_host(
+            directories.recovery.path(),
+            directories.cgroups.path(),
+            port.clock(),
+        )?;
+        let opening = NormalOpen {
+            recovery_directory: Arc::new(File::open(directories.recovery.path())?),
+            port: Arc::clone(&port) as super::super::SelectorPort,
+            executable_digest: peer_executable_digest,
+            recovery_host: crate::selector::recovery::RecoveryHost::fixed,
         };
         Ok(PendingRecovery {
             target: PendingRecoveryTarget::load(&installed)?,
             peer_uid,
             reopen,
+            authority: ProviderTerminationAuthority::new(port, host),
+            opening,
+            evaluator: directories.recovery.path().join("sandbox-provider.sock"),
+            diagnostics: Mutex::new(Box::new(directories.diagnostics.clone())),
         })
     }
 
@@ -202,7 +374,7 @@ mod tests {
             let _read = client.read_to_end(&mut reply);
             (challenge, reply)
         });
-        let result = recovery.answer(server);
+        let result = recovery.answer(server).map(drop);
         let (challenge, reply) = client_thread.join().map_err(|_| "client thread panicked")?;
         Ok((result, challenge, reply))
     }
@@ -215,7 +387,8 @@ mod tests {
             vec![[41; 16]],
             SuccessorRevocation::Nothing,
         )?;
-        let recovery = pending(&fixture, own_uid(fixture.path())?)?;
+        let directories = Directories::new()?;
+        let recovery = pending(&fixture, own_uid(fixture.path())?, &directories)?;
 
         let (result, challenge, reply) = exchange(&recovery, Some(&request))?;
         assert_eq!(result, Err(SelectorBoundaryError::SelectorUnavailable));
@@ -237,7 +410,8 @@ mod tests {
         let (_committed, request) =
             fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
         let uid = own_uid(fixture.path())?;
-        let recovery = pending(&fixture, uid)?;
+        let directories = Directories::new()?;
+        let recovery = pending(&fixture, uid, &directories)?;
 
         let mut changed = request.clone();
         let last = changed.len() - 1;
@@ -250,7 +424,7 @@ mod tests {
         assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
         assert!(reply.is_empty());
 
-        let foreign = pending(&fixture, uid.wrapping_add(1))?;
+        let foreign = pending(&fixture, uid.wrapping_add(1), &directories)?;
         let (result, challenge, _) = exchange(&foreign, Some(&request))?;
         assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
         assert!(challenge.is_empty());
@@ -269,7 +443,8 @@ mod tests {
         let fixture = UpdateFixture::new()?;
         let (_committed, request) =
             fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
-        let recovery = pending(&fixture, own_uid(fixture.path())?)?;
+        let directories = Directories::new()?;
+        let recovery = pending(&fixture, own_uid(fixture.path())?, &directories)?;
         let directory = tempfile::tempdir()?;
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
         let socket = directory.path().join("administrator.sock");
@@ -278,14 +453,14 @@ mod tests {
         };
         listener.set_nonblocking()?;
 
-        recovery.serve_once(&listener)?;
+        assert!(recovery.serve_once(&listener)?.is_none());
 
         // The client queues its whole request first, so one thread suffices.
         let mut client = UnixStream::connect(&socket)?;
         control_framing::write_frame(&mut client, &request, FRAME_LIMIT)
             .map_err(|_| "the client could not send its update")?;
         client.shutdown(std::net::Shutdown::Write)?;
-        recovery.serve_once(&listener)?;
+        assert!(recovery.serve_once(&listener)?.is_none());
         let challenge = control_framing::read_frame(&mut client, FRAME_LIMIT)
             .ok()
             .flatten()
@@ -294,6 +469,17 @@ mod tests {
         let mut reply = Vec::new();
         client.read_to_end(&mut reply)?;
         assert!(reply.is_empty());
+        // The failed operation and the closed connection are each reported
+        // by their closed kind.
+        assert_eq!(
+            directories.diagnostics.text(),
+            format!(
+                "pos-root-selector: recovery operation failed: {}\n\
+                 pos-root-selector: administrative connection closed: {}\n",
+                RecoveryError::Lifecycle(ProviderLifecycleError::Unavailable),
+                SelectorBoundaryError::SelectorUnavailable,
+            )
+        );
 
         fs::remove_file(&socket)?;
         assert!(recovery.serve_once(&listener).is_err());
@@ -306,7 +492,8 @@ mod tests {
         let fixture = UpdateFixture::new()?;
         let (_committed, request) =
             fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
-        let recovery = pending(&fixture, own_uid(fixture.path())?)?;
+        let directories = Directories::new()?;
+        let recovery = pending(&fixture, own_uid(fixture.path())?, &directories)?;
         let recovery_path = fixture.path().join(RECOVERY_NAME);
 
         fs::remove_file(&recovery_path)?;
@@ -323,6 +510,123 @@ mod tests {
         garbage.write_all(b"not a SIR1")?;
         let (result, _, _) = exchange(&recovery, Some(&request))?;
         assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
+        Ok(())
+    }
+
+    /// R12 §8 and I13: the byte-identical SIU1 runs one operation; only after
+    /// its durable completion does the client receive the exact RCA1 and
+    /// server EOF. A retry after completion is stale.
+    #[test]
+    fn the_pending_update_completes_recovery_and_receives_the_exact_rca1() -> TestResult {
+        let fixture = UpdateFixture::new()?;
+        let (_committed, request) = fixture.commit_pending_update(
+            vec![[41; 16]],
+            vec![[41; 16]],
+            SuccessorRevocation::Nothing,
+        )?;
+        let directories = Directories::new()?;
+        let uid = own_uid(fixture.path())?;
+        let recovery = pending_with(&fixture, uid, &directories, Script::default())?;
+
+        let (result, _, reply) = exchange(&recovery, Some(&request))?;
+        assert_eq!(result, Ok(()));
+        let mut framed = reply.as_slice();
+        let acknowledgement = control_framing::read_frame(&mut framed, FRAME_LIMIT)
+            .ok()
+            .flatten()
+            .ok_or("no RCA1 frame")?;
+        assert!(framed.is_empty(), "anything after the RCA1 frame");
+        let rca1 = recovery
+            .target
+            .authenticate_recovery_acknowledgement(&acknowledgement)?;
+        assert_eq!(rca1.cancelled_attempt_ids(), [[41; 16]]);
+        assert!(!fixture.path().join(RECOVERY_NAME).exists());
+
+        let (result, _, reply) = exchange(&recovery, Some(&request))?;
+        assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
+        assert!(reply.is_empty());
+        Ok(())
+    }
+
+    /// Serving stops at the first durable completion, and the selector then
+    /// opens normally from the next state; here that open fails closed, since
+    /// the port cannot start a runtime.
+    #[test]
+    fn serving_ends_at_completion_and_opens_from_the_next_state() -> TestResult {
+        let fixture = UpdateFixture::new()?;
+        let (_committed, request) =
+            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
+        let directories = Directories::new()?;
+        let recovery = pending_with(
+            &fixture,
+            own_uid(fixture.path())?,
+            &directories,
+            Script::default(),
+        )?;
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let socket = directory.path().join("administrator.sock");
+        let listener = OwnedAdministratorListener {
+            inner: OwnedSelectorListener::bind_path(&socket, own_uid(directory.path())?)?,
+        };
+        listener.set_nonblocking()?;
+        let client = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            let mut client = UnixStream::connect(&socket).map_err(|error| error.to_string())?;
+            control_framing::write_frame(&mut client, &request, FRAME_LIMIT)
+                .map_err(|_| "the client could not send its update")?;
+            client
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| error.to_string())?;
+            let mut received = Vec::new();
+            client
+                .read_to_end(&mut received)
+                .map_err(|error| error.to_string())?;
+            Ok(received)
+        });
+        assert!(SelectorMode::RecoveryPending(recovery)
+            .serve(listener)
+            .is_err());
+        let received = client.join().map_err(|_| "client thread panicked")??;
+        let mut framed = received.as_slice();
+        let challenge = control_framing::read_frame(&mut framed, FRAME_LIMIT)
+            .ok()
+            .flatten()
+            .ok_or("no challenge")?;
+        assert_eq!(uint(&array(&decode_canonical(&challenge)?, 5)?[4])?, 1);
+        assert!(control_framing::read_frame(&mut framed, FRAME_LIMIT)
+            .ok()
+            .flatten()
+            .is_some());
+        assert!(!fixture.path().join(RECOVERY_NAME).exists());
+        Ok(())
+    }
+
+    /// R12 §8 M4 and I13: every new operation first requires the evaluator
+    /// pathname absent; a node there stops it before any port call, and
+    /// the node is kept.
+    #[test]
+    fn an_evaluator_node_stops_each_new_operation_before_it_starts() -> TestResult {
+        let fixture = UpdateFixture::new()?;
+        let (_committed, request) =
+            fixture.commit_pending_update(Vec::new(), Vec::new(), SuccessorRevocation::Nothing)?;
+        let directories = Directories::new()?;
+        let recovery = pending_with(
+            &fixture,
+            own_uid(fixture.path())?,
+            &directories,
+            Script::default(),
+        )?;
+        drop(std::os::unix::net::UnixListener::bind(&recovery.evaluator)?);
+        let (result, _, reply) = exchange(&recovery, Some(&request))?;
+        assert_eq!(result, Err(SelectorBoundaryError::ArtifactInvalid));
+        assert!(reply.is_empty());
+        assert!(recovery.evaluator.exists());
+        assert!(fixture.path().join(RECOVERY_NAME).exists());
+        // Once the node is gone, the same SIU1 completes recovery.
+        fs::remove_file(&recovery.evaluator)?;
+        let (result, _, reply) = exchange(&recovery, Some(&request))?;
+        assert_eq!(result, Ok(()));
+        assert!(!reply.is_empty());
         Ok(())
     }
 }
