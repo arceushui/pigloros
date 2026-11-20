@@ -32,4 +32,4 @@ jobs:
           sudo modprobe uhid
           ls -l /dev/uhid
       - name: Create a virtual FIDO device and open its hidraw node as the runner user
-        run: sudo --preserve-env=SUDO_UID python3 scripts/owner_uhid_feasibility.py
+        run: sudo python3 scripts/owner_uhid_feasibility.py
