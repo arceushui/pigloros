@@ -390,8 +390,11 @@ fn each_export_grantee_is_one_negative_export_recipient_obligation() -> TestResu
         EntityId::from_ulid(Ulid::from_bytes([0x7c; 16])),
     ];
     let mut expected = Vec::new();
+    // Every custody directory stays alive until the drive ends.
+    let mut custody = Vec::new();
     for grantee in grantees {
-        let export_id = publish_export(&store, memory_owned_timeline(), grantee)?;
+        let (export_id, directory) = publish_export(&store, memory_owned_timeline(), grantee)?;
+        custody.push(directory);
         let owner = pos_core::recipient_owner_id_from_grantee(grantee).map_err(fail)?;
         expected.push(pos_core::local_erasure_export_recipient_v1(
             export_id, &owner,
@@ -421,6 +424,7 @@ fn each_export_grantee_is_one_negative_export_recipient_obligation() -> TestResu
         .collect::<Vec<_>>();
     targets.sort_unstable();
     assert_eq!(targets, expected);
+    drop(custody);
     Ok(())
 }
 
