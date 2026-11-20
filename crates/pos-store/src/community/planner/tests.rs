@@ -77,6 +77,15 @@ impl CommunityStoreDomainV1 for Fake<'_> {
         Err(Error::EvidenceUnavailable)
     }
 
+    fn check_writer_bound(
+        &mut self,
+        _reservation: TrustedClockReservationV1,
+        _mono: &mut dyn GuardMonotonicSourceV1,
+        _bound: pos_core::WallTime,
+    ) -> Result<(), Error> {
+        Err(Error::EvidenceUnavailable)
+    }
+
     fn inventory_generation(&self) -> u64 {
         self.inventory_generation
     }

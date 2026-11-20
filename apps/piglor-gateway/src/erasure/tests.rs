@@ -34,7 +34,7 @@ use crate::local_erasure_composition::tests::{
 use crate::local_erasure_composition::{
     LocalErasureDriverTaskV1, LocalErasureServeV1, LocalErasureStartV1,
 };
-use crate::local_erasure_provision::tests::{TestResult, SIGNER_SEED};
+use crate::local_erasure_signing_fixture::{TestResult, SIGNER_SEED};
 use crate::local_principal::local_gateway;
 use crate::mode_profile::{test_attach_host, test_binding, GatewayModeProfileIdV1};
 use crate::operation::ACTOR_ENTITY_HEADER;

@@ -2634,8 +2634,9 @@ mod tests {
 
     /// #1448: with `--require-local-erasure` the unit's one directory holds
     /// the Fork-admission and the four Local erasure credentials. A
-    /// directory without the erasure credentials, and an invalid erasure
-    /// credential, both refuse startup before the database opens.
+    /// directory without the erasure credentials, and invalid erasure
+    /// credentials, both refuse startup before the database opens. The
+    /// loader checks the release trust credential before the signer.
     #[tokio::test]
     async fn serve_with_local_erasure_reads_both_credential_sets_before_database_open() -> TestResult
     {
@@ -2662,10 +2663,10 @@ mod tests {
         let refused = serve_with_local_erasure_for_test(&world, &both, &trust_state)
             .await
             .err()
-            .ok_or("served with an invalid erasure signer")?;
+            .ok_or("served with invalid erasure credentials")?;
         assert_eq!(
             refused.to_string(),
-            "the local erasure signer credential is not a 32-byte Ed25519 seed"
+            "the release trust credential is invalid"
         );
         assert!(!world.database.exists());
         Ok(())

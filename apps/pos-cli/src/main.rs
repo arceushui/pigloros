@@ -121,6 +121,21 @@ use ulid::Ulid;
 
 include!("host_store.rs");
 
+// Test-only. The shared Local erasure signing fixtures and the key-less root
+// store fixture of ADR-136 acceptance test 11 (#1450); the items are `pub`
+// so this crate may use a subset.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../../crates/pos-local-erasure-loader/tests/support/signing.rs"]
+pub mod signing;
+
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../piglor-gateway/tests/support/keyless_store.rs"]
+pub mod keyless_store;
+
 const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 /// Fixed manifest slot of the built-in reference agent Plugin.
@@ -170,7 +185,7 @@ fn open_store(
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     HostedCliStore::open(config)
         .map(|store| Box::new(store) as Box<dyn pos_core::store::EventStore>)
-        .map_err(hosted_cli_store_error)
+        .map_err(hosted_cli_open_error)
 }
 
 #[derive(serde::Deserialize)]
