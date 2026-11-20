@@ -1267,6 +1267,8 @@ fn submission(key: u8, scope: ErasureScopeV1) -> TestResult<LocalErasureSubmissi
         actor: actor(),
         scope,
         idempotency_key_digest: reference(key),
+        mode_profile: reference(0x6d),
+        binding_epoch: 1,
     })
 }
 
@@ -1327,7 +1329,7 @@ fn a_local_submission_is_derived_idempotent_and_bound_to_its_body() -> TestResul
     let state = sender
         .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
         .map_err(fail)?;
-    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
     // An exact retry returns the original state.
     assert_eq!(
         sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
@@ -1499,12 +1501,12 @@ fn a_fresh_submission_after_a_root_grant_revocation_is_unauthorized() -> TestRes
 fn refused_before_the_subject_checks(
     store: &LocalStore,
     host: &mut ErasureExecutionHostV1,
-    error: ErasureHostErrorV1,
+    error: LocalErasureSubmitErrorV1,
 ) -> TestResult {
     assert_eq!(
         host.command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(error))
+        Err(error)
     );
     // The host's own authority view reads no object, so read the store.
     let sqlite = store.sqlite()?;
@@ -1536,13 +1538,21 @@ fn an_unauthenticated_submission_learns_nothing_of_a_held_subject() -> TestResul
     let mut expired = local_case()?;
     expired.clock = after_trust_expiry;
     let mut host = store.host(&expired, 4_096)?;
-    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::RecoveryUnavailable)?;
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::AdmissionsClosed,
+    )?;
     drop(host);
     // Once the root grant is revoked, the authentication failure answers
     // first, although request 1 still holds the subject.
     store.revoke(&shape)?;
     let mut host = store.host(&local_case()?, 4_096)?;
-    refused_before_the_subject_checks(&store, &mut host, ErasureHostErrorV1::AuthorizationDenied)
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
+    )
 }
 
 #[test]
@@ -1573,7 +1583,7 @@ fn a_replay_is_answered_only_to_an_authorized_caller() -> TestResult {
         );
         state
     };
-    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
     // Once the root grant is revoked, neither the exact retry nor the same
     // key with another body learns the installed request: both are refused
     // as unauthorized, not answered with the state or a conflict.
@@ -1617,9 +1627,7 @@ fn an_exact_retry_is_answered_after_new_admissions_close() -> TestResult {
     );
     assert_eq!(
         sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::RecoveryUnavailable
-        ))
+        Err(LocalErasureSubmitErrorV1::AdmissionsClosed)
     );
     Ok(())
 }
@@ -1638,7 +1646,7 @@ fn a_root_grant_admits_the_last_position_of_its_window() -> TestResult {
         .command_sender()?
         .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
         .map_err(fail)?;
-    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(state.state.lifecycle(), ErasureLifecycleV1::Submitted);
     Ok(())
 }
 
@@ -1675,9 +1683,7 @@ fn an_expired_bundle_closes_new_admissions_but_not_a_rejection() -> TestResult {
     );
     assert_eq!(
         sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::RecoveryUnavailable
-        ))
+        Err(LocalErasureSubmitErrorV1::AdmissionsClosed)
     );
     Ok(())
 }
@@ -1702,9 +1708,7 @@ fn an_expired_tps1_closes_new_admissions() -> TestResult {
     assert_eq!(
         host.command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::RecoveryUnavailable
-        ))
+        Err(LocalErasureSubmitErrorV1::AdmissionsClosed)
     );
     Ok(())
 }
@@ -1719,9 +1723,7 @@ fn submission_needs_a_local_composition_and_its_principal() -> TestResult {
         closed
             .command_sender()?
             .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
-        Err(LocalErasureSubmitErrorV1::Host(
-            ErasureHostErrorV1::AuthorizationDenied
-        ))
+        Err(LocalErasureSubmitErrorV1::Unserved)
     );
     // A composition naming a root grant the store does not record.
     let store = LocalStore::new(&GrantShape::standard())?;
@@ -1746,11 +1748,11 @@ fn refused_without_retention(
     store: &LocalStore,
     host: &mut ErasureExecutionHostV1,
     submission: &LocalErasureSubmissionV1,
-    error: ErasureHostErrorV1,
+    error: LocalErasureSubmitErrorV1,
 ) -> TestResult {
     assert_eq!(
         host.command_sender()?.submit_local_erasure(submission),
-        Err(LocalErasureSubmitErrorV1::Host(error))
+        Err(error)
     );
     // The host's own authority view reads no object, so read the store.
     let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
@@ -1775,7 +1777,7 @@ fn the_root_grant_must_match_the_composition_and_name_the_operation() -> TestRes
             &store,
             &mut host,
             &submission(1, ErasureScopeV1::PrivateSubjectData)?,
-            ErasureHostErrorV1::AuthorizationDenied,
+            LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
         )
     };
     let case = local_case()?;
@@ -1831,7 +1833,7 @@ fn a_refused_submission_retains_nothing() -> TestResult {
         &store,
         &mut host,
         &stranger,
-        ErasureHostErrorV1::AuthorizationDenied,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
     )?;
     // A composition whose TPS1 has expired.
     drop(host);
@@ -1842,7 +1844,7 @@ fn a_refused_submission_retains_nothing() -> TestResult {
         &store,
         &mut host,
         &submission(1, ErasureScopeV1::PrivateSubjectData)?,
-        ErasureHostErrorV1::RecoveryUnavailable,
+        LocalErasureSubmitErrorV1::AdmissionsClosed,
     )?;
     // A revoked root grant.
     let shape = GrantShape::standard();
@@ -1853,7 +1855,7 @@ fn a_refused_submission_retains_nothing() -> TestResult {
         &store,
         &mut host,
         &submission(1, ErasureScopeV1::PrivateSubjectData)?,
-        ErasureHostErrorV1::AuthorizationDenied,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AuthorizationDenied),
     )?;
     // The same store admits the Principal's own submission.
     let store = LocalStore::new(&GrantShape::standard())?;
@@ -3338,6 +3340,7 @@ fn the_closure_bound_is_exact_at_submit_and_freeze() -> TestResult {
         sender
             .submit_local_erasure(&submission(3, ErasureScopeV1::ConsentedSharedData)?)
             .map_err(fail)?
+            .state
             .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
@@ -3756,6 +3759,7 @@ fn the_key_and_backup_bound_is_exact_at_submit() -> TestResult {
             sender
                 .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
                 .map_err(fail)?
+                .state
                 .lifecycle(),
             ErasureLifecycleV1::Submitted
         );
@@ -3794,6 +3798,7 @@ fn the_key_list_is_bounded_on_its_own() -> TestResult {
             sender
                 .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
                 .map_err(fail)?
+                .state
                 .lifecycle(),
             ErasureLifecycleV1::Submitted
         );
@@ -5070,6 +5075,7 @@ fn a_revoked_pinned_bundle_signs_nothing_and_frees_its_subject() -> TestResult {
             sender
                 .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
                 .map_err(fail)?
+                .state
                 .lifecycle(),
             ErasureLifecycleV1::Submitted
         );
@@ -5393,6 +5399,7 @@ fn a_complete_request_frees_its_subject() -> TestResult {
             .command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
             .map_err(fail)?
+            .state
             .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
@@ -6850,6 +6857,7 @@ fn a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject() -> Tes
         host.command_sender()?
             .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
             .map_err(fail)?
+            .state
             .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
@@ -8636,5 +8644,396 @@ fn an_unreadable_pin_or_signer_refuses_every_rotation() -> TestResult {
         LocalErasureRotationRefusalV1::SignerUnknown.to_string(),
         "the key registry or its current signer's public key cannot be read"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// #1449: the ELADM1 submission binding (owner decision D5 on #1413), the
+// typed admission refusals (D3, D9) and the `getErasure` projection
+// (ADR-136 §7).
+// ---------------------------------------------------------------------------
+
+use pos_core::LocalErasureAdmissionV1;
+use pos_runtime::{LocalErasureClassCountV1, LocalErasureProjectionV1};
+
+/// The `erasure_id` of the fixture actor's request `key`.
+fn erasure_id_of(key: u8) -> TestResult<Ulid> {
+    Ok(local_erasure_id_v1(
+        principal_ref()?,
+        actor(),
+        reference(key),
+    )?)
+}
+
+/// `CA(ELB1)` of `case`'s bundle.
+fn trust_of(case: &Case) -> TestResult<ErasureReferenceV1> {
+    Ok(LocalErasureBundleV1::from_canonical_cbor(&case.bundle)?.reference()?)
+}
+
+/// The projection of the fixture actor's request `key` on `host`.
+fn projection(
+    host: &mut ErasureExecutionHostV1,
+    actor: EntityId,
+    key: u8,
+) -> TestResult<Option<LocalErasureProjectionV1>> {
+    Ok(host.command_sender()?.local_erasure_projection(
+        &principal()?,
+        actor,
+        erasure_id_of(key)?,
+    )?)
+}
+
+/// Delete every retained ELADM1 of `store`.
+fn drop_admissions(store: &LocalStore) -> TestResult<usize> {
+    Ok(store
+        .sqlite()?
+        .sweep_unreferenced_erasure_objects(&["ELADM1"], &[], 16)?)
+}
+
+/// D5: a submission retains its ELADM1 with the bundle, mode profile and
+/// binding epoch it was admitted under; the exact replay answers that same
+/// binding however the replay's own binding differs.
+#[test]
+fn a_submission_binds_its_bundle_and_mode_and_a_replay_keeps_them() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let case = local_case()?;
+    let mut host = store.host(&case, 4_096)?;
+    let mut sender = host.command_sender()?;
+    let admitted = sender
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    let admission = LocalErasureAdmissionV1 {
+        request: request_of(1)?,
+        trust: trust_of(&case)?,
+        mode_profile: reference(0x6d),
+        binding_epoch: 1,
+    };
+    assert_eq!(admitted.erasure_id, erasure_id_of(1)?);
+    assert_eq!(admitted.policy, LOCAL_ERASURE_POLICY_REFERENCE_V1);
+    assert_eq!(admitted.admission, admission);
+    assert_eq!(
+        ErasurePersistencePortV1::read_object(&store.sqlite()?, admission.reference()?)?,
+        admission.to_canonical_cbor()?
+    );
+    let rebound = LocalErasureSubmissionV1 {
+        mode_profile: reference(0x6e),
+        binding_epoch: 2,
+        ..submission(1, ErasureScopeV1::PrivateSubjectData)?
+    };
+    assert_eq!(sender.submit_local_erasure(&rebound), Ok(admitted));
+    Ok(())
+}
+
+/// D5: an ELADM1 a crash retained before the ERQ1 committed is the one the
+/// later submission of that `erasure_id` binds, so an id never has two.
+#[test]
+fn a_crash_left_admission_binds_the_resubmission() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let left = LocalErasureAdmissionV1 {
+        request: request_of(1)?,
+        trust: reference(0x41),
+        mode_profile: reference(0x42),
+        binding_epoch: 7,
+    };
+    // Another request's ELADM1 is never taken for this one.
+    let other = LocalErasureAdmissionV1 {
+        request: request_of(2)?,
+        ..left
+    };
+    store.retain(&[left.to_canonical_cbor()?, other.to_canonical_cbor()?])?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let admitted = host
+        .command_sender()?
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    assert_eq!(admitted.admission, left);
+    Ok(())
+}
+
+/// A retained ELADM1 that does not decode may be the request's own, so the
+/// submission fails closed rather than retain a second one.
+#[test]
+fn an_undecodable_admission_fails_the_submission_closed() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut corrupt = Vec::new();
+    ciborium::into_writer(
+        &ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("ELADM1".to_owned()),
+            ciborium::value::Value::Integer(1.into()),
+        ]),
+        &mut corrupt,
+    )?;
+    store.retain(&[corrupt])?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    refused_without_retention(
+        &store,
+        &mut host,
+        &submission(1, ErasureScopeV1::PrivateSubjectData)?,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::RecoveryUnavailable),
+    )
+}
+
+/// A binding epoch of zero names no binding: the submission is refused and
+/// retains nothing.
+#[test]
+fn a_submission_without_a_binding_epoch_retains_nothing() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let unbound = LocalErasureSubmissionV1 {
+        binding_epoch: 0,
+        ..submission(1, ErasureScopeV1::PrivateSubjectData)?
+    };
+    refused_without_retention(
+        &store,
+        &mut host,
+        &unbound,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::Conflict),
+    )?;
+    assert_eq!(drop_admissions(&store)?, 0);
+    Ok(())
+}
+
+/// An installed request whose ELADM1 is gone is answered neither as a
+/// replay nor as a projection.
+#[test]
+fn a_request_without_its_admission_is_unavailable() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    }
+    assert_eq!(drop_admissions(&store)?, 1);
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::RecoveryUnavailable
+        ))
+    );
+    assert_eq!(
+        host.command_sender()?
+            .local_erasure_projection(&principal()?, actor(), erasure_id_of(1)?),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+/// D9 and ADR-136 §7: a host without a Local composition, an unknown id and
+/// another subject's id are all answered `None`.
+#[test]
+fn the_projection_never_tells_an_unknown_id_from_another_subjects() -> TestResult {
+    let mut closed = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    assert_eq!(projection(&mut closed, actor(), 1)?, None);
+    let mut shape = GrantShape::standard();
+    shape.actors = vec![actor(), other_actor()];
+    shape.actors.sort_unstable();
+    let store = LocalStore::new(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(projection(&mut host, actor(), 1)?, None);
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    assert!(projection(&mut host, actor(), 1)?.is_some());
+    assert_eq!(projection(&mut host, actor(), 2)?, None);
+    // The other actor names the same `erasure_id`: another subject.
+    assert_eq!(
+        host.command_sender()?.local_erasure_projection(
+            &principal()?,
+            other_actor(),
+            erasure_id_of(1)?
+        )?,
+        None
+    );
+    Ok(())
+}
+
+/// ADR-136 §7: the projection of a driven request, step by step. Its
+/// generation is the ERS1 ordinal times 2^16 plus the acknowledgements of
+/// the active attempt, so it rises
+/// with every committed step and never decreases; the acknowledgement
+/// counts are the frozen obligations and the effective positives, per
+/// class.
+#[test]
+fn the_projection_follows_a_driven_request() -> TestResult {
+    let store = driver_store()?;
+    let case = driver_case()?;
+    let mut host = store.host(&case, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let first = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
+    assert_eq!(first.erasure_id, erasure_id_of(1)?);
+    assert_eq!(first.state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(first.scope, ErasureScopeV1::PrivateSubjectData);
+    assert_eq!(first.generation, 0);
+    assert_eq!(
+        (first.required, first.positive),
+        (0, 0),
+        "nothing is frozen yet"
+    );
+    assert!(first.classes.is_empty());
+    assert_eq!(first.admission.trust, trust_of(&case)?);
+    let request = request_of(1)?;
+    let mut previous = first.generation;
+    let mut generations = vec![previous];
+    let mut acknowledged = 0_u64;
+    loop {
+        let step = driver().step(&mut host, request)?;
+        if step == LocalErasureStepV1::Idle {
+            break;
+        }
+        let current = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
+        assert!(current.generation > previous, "{step:?}");
+        if matches!(step, LocalErasureStepV1::Acknowledged(_)) {
+            acknowledged += 1;
+            // Within the attempt each acknowledgement adds one, unless the
+            // first one moved the head to awaiting acknowledgements.
+            assert!(
+                current.generation == previous + 1
+                    || current.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements,
+                "{step:?}"
+            );
+        }
+        previous = current.generation;
+        generations.push(previous);
+        // The head is the projection's state, digest included.
+        assert_eq!(
+            Some(current.state.clone()),
+            host.read_sender()?
+                .erasure_state(request)?
+                .map(|verified| verified.state().clone())
+        );
+    }
+    assert_eq!(generations[1..3], [1_u64 << 16, 2 << 16]);
+    let last = projection(&mut host, actor(), 1)?.ok_or("no projection")?;
+    let ordinal = u64::try_from(history(&mut host, request)?.len())? - 1;
+    assert_eq!(last.generation, ordinal << 16);
+    assert_eq!(last.state.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    assert_eq!(
+        last.state.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let count = |class: &str, required, positive| LocalErasureClassCountV1 {
+        class: class.to_owned(),
+        required,
+        positive,
+    };
+    // The key, the cache signal and the replica are positive; the Timeline
+    // payload and the backup are the permanent negatives.
+    assert_eq!(
+        last.classes,
+        [
+            count("client-cache-signal", 1, 1),
+            count("key-registry", 1, 1),
+            count("local-backup-inventory", 1, 0),
+            count("local-replica", 1, 1),
+            count("timeline-payload", 1, 0),
+        ]
+    );
+    assert_eq!((last.required, last.positive), (5, 3));
+    assert_eq!(acknowledged, 5);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
+// a subject-scoped export through core `export_timeline`, then erasure,
+// then the export again through the public offline evaluator.
+// ---------------------------------------------------------------------------
+
+use pos_core::{
+    store::export_timeline, ArtifactClaimInputV1, ArtifactOptionalityV1, ArtifactStateV1,
+    CoreError, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+};
+
+/// The export artifact of the subject's owned Timeline.
+const SUBJECT_EXPORT: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0xe7; 32]);
+
+/// The offline evaluation of the subject's export under the erasure state
+/// `claim`, from the store's own facts: the export depends on the subject's
+/// role-0 key, so it is missing once the key registry tombstones that key.
+fn export_evaluation(
+    store: &LocalStore,
+    claim: ErasureReplayClaimV1,
+) -> TestResult<ReplayClaimEvaluationV1> {
+    let registry = store.sqlite()?.load_key_registry()?.ok_or("no registry")?;
+    let state = if registry.tombstone(subject_key(1)?).is_some() {
+        ArtifactStateV1::MissingKey
+    } else {
+        ArtifactStateV1::Retained
+    };
+    Ok(ReplayClaimEvaluatorV1::evaluate(
+        claim,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                SUBJECT_EXPORT,
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                reference(0xe8),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: claim,
+            state,
+        }],
+    )?)
+}
+
+/// Acceptance test 10: before the erasure the export is exact and core
+/// exports the Timeline; after it the evaluator reports the export
+/// unavailable under the receipt's weakened claim, and core refuses it.
+#[test]
+fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult {
+    let store = driver_store()?;
+    store.sqlite()?.append(
+        memory_owned_timeline(),
+        &[pos_core::EventDraft::new(
+            actor(),
+            pos_core::Kind::new("subject.note.v1"),
+            CanonicalBytes::from_static(b"subject-note"),
+        )],
+    )?;
+    let before = export_evaluation(&store, ErasureReplayClaimV1::Exact)?;
+    assert_eq!(before.replay_claim(), ErasureReplayClaimV1::Exact);
+    let exported = export_timeline(
+        &store.sqlite()?,
+        memory_owned_timeline(),
+        SUBJECT_EXPORT,
+        &before,
+    )?;
+    assert_eq!(exported.events.len(), 1);
+    let receipt = {
+        let mut host = store.host(&driver_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+        finalized(driver().drive(&mut host, request_of(1)?)?)?
+    };
+    let after = export_evaluation(&store, receipt.replay_claim())?;
+    assert_eq!(
+        after.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let [export] = after.artifacts() else {
+        return Err("one evaluated artifact".into());
+    };
+    assert_eq!(export.artifact_digest(), SUBJECT_EXPORT);
+    assert_eq!(
+        export.from(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        export.to(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert!(!export.authoritative_use_permitted());
+    assert!(matches!(
+        export_timeline(
+            &store.sqlite()?,
+            memory_owned_timeline(),
+            SUBJECT_EXPORT,
+            &after
+        ),
+        Err(CoreError::ArtifactUnavailable)
+    ));
     Ok(())
 }

@@ -243,7 +243,7 @@ fn unique<'a>(keys: impl Iterator<Item = &'a str>) -> bool {
 }
 
 /// A canonical upper-case ULID.
-fn canonical_ulid(value: &str) -> Option<Ulid> {
+pub(crate) fn canonical_ulid(value: &str) -> Option<Ulid> {
     Ulid::from_string(value)
         .ok()
         .filter(|ulid| ulid.to_string() == value)

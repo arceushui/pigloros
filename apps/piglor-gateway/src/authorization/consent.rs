@@ -321,10 +321,16 @@ impl GatewayConsentedAuthorityV1 {
 impl GatewayOperationV1 {
     /// The operations no consent may govern (owner decision 2(b) on #309):
     /// reading the Session stays available whatever consent is revoked,
-    /// revoking a consent must stay possible after another is revoked, and
-    /// the network capability authorizes no data operation.
-    pub const CONSENT_EXEMPT: &'static [Self] =
-        &[Self::NETWORK, Self::READ_SESSION, Self::REVOKE_CONSENT];
+    /// revoking a consent must stay possible after another is revoked, a
+    /// subject may always request and observe its own erasure (ADR-136 §3),
+    /// and the network capability authorizes no data operation.
+    pub const CONSENT_EXEMPT: &'static [Self] = &[
+        Self::NETWORK,
+        Self::READ_SESSION,
+        Self::REVOKE_CONSENT,
+        Self::REQUEST_ERASURE,
+        Self::READ_ERASURE,
+    ];
 
     /// Whether no consent may govern this operation.
     #[must_use]
