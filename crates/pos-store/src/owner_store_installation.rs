@@ -66,7 +66,10 @@ pub enum OwnerStoreInstallationV1 {
 /// # Errors
 /// Returns a fixed storage refusal for any failed precondition or step. No
 /// path or OS diagnostic escapes. A refusal leaves every existing entry as it
-/// was, so the operator can rerun the installation.
+/// was, so the operator can rerun the installation. The process umask must
+/// keep the owner bits: a child or entry created without them fails its
+/// check and stays on disk, and a rerun refuses it until the operator
+/// removes it.
 pub fn install_owner_store_namespace_v1(
     test_database_directory: &Path,
     main_basename: &str,
