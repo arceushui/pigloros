@@ -70,8 +70,10 @@ pub enum SubjectKeyArtifactSlot {
 ///
 /// Values exist only for an owner of `subject:` plus 32 lowercase hex digits
 /// and an epoch of at least one. The rendered epoch is canonical decimal, so
-/// parsing accepts exactly the names this type renders. A name is not proof
-/// that a file holds that identity: the D2 inventory still parses every file.
+/// parsing accepts exactly the names this type can render. Building refuses
+/// the nil owner, but parsing still yields it so a stray nil-owner file is
+/// refused rather than ignored. A name is not proof that a file holds that
+/// identity: the D2 inventory still parses every file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubjectKeyArtifactName {
     kind: SubjectKeyArtifactKind,
@@ -97,7 +99,9 @@ impl SubjectKeyArtifactName {
     /// Classify a directory entry name as a P4 reserved name.
     ///
     /// Returns `None` for every other name, including non-UTF-8 names and
-    /// non-canonical spellings such as a leading zero in the epoch.
+    /// non-canonical spellings such as a leading zero in the epoch. A nil
+    /// owner's name is still classified as reserved, although
+    /// [`Self::new`] never builds one.
     #[must_use]
     pub fn parse(name: &[u8]) -> Option<(Self, SubjectKeyArtifactSlot)> {
         std::str::from_utf8(name).ok().and_then(|name| {
