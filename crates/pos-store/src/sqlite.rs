@@ -13,6 +13,7 @@ use rusqlite::{
 use std::{
     cell::Cell,
     collections::{BTreeSet, HashSet},
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -168,10 +169,14 @@ mod fork_replay_read;
 mod fork_replay_registry;
 mod fork_replay_row;
 mod fork_replay_suffix;
+mod gateway_mode_binding;
+mod gateway_revision;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod interval_test_support;
 mod local_cut_owner;
+mod local_erasure;
+mod local_replica_residual;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
 // builds expose no Plugin admission surface.
@@ -316,6 +321,9 @@ pub struct SqliteStore {
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    /// Gateway mode-binding epoch attached to this adapter instance
+    /// (ADR-134 §8). Every Event write compares it with the persisted epoch.
+    mode_binding_epoch: Option<NonZeroU64>,
 }
 
 struct SqliteSchemaColumn {
@@ -639,7 +647,56 @@ const ERASURE_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             "UNIQUE (subject_digest)",
         ],
     },
+    SqliteSchemaTable {
+        name: "erasure_store_identity",
+        columns_query: "PRAGMA table_info(erasure_store_identity)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "singleton",
+                kind: "INTEGER",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "identity",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (singleton = 1)", "CHECK (length(identity) = 32)"],
+    },
+    SqliteSchemaTable {
+        name: "erasure_retained_objects",
+        columns_query: "PRAGMA table_info(erasure_retained_objects)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "reference_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "tag",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(reference_digest) = 32)",
+            // Bound by `ERASURE_RECORD_TAG_{MIN,MAX}_BYTES_V1`; see the const assert below.
+            "CHECK (length(tag) BETWEEN 2 AND 8)",
+        ],
+    },
 ];
+
+// The `erasure_retained_objects.tag` CHECK above spells the shared record-tag
+// bounds; this keeps the literal and the core constants in step.
+const _: () = assert!(
+    pos_core::ERASURE_RECORD_TAG_MIN_BYTES_V1 == 2
+        && pos_core::ERASURE_RECORD_TAG_MAX_BYTES_V1 == 8
+);
 
 const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
     SqliteSchemaTable {
@@ -1345,6 +1402,11 @@ const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artif
          PRIMARY KEY (owner_id, operation_id),
          UNIQUE (owner_id, root_registration_address)
      );
+     CREATE TABLE IF NOT EXISTS artifact_registration_timelines (
+         timeline_id BLOB NOT NULL CHECK (length(timeline_id) = 16),
+         registration_address BLOB NOT NULL CHECK (length(registration_address) = 32),
+         PRIMARY KEY (timeline_id, registration_address)
+     );
      CREATE TABLE IF NOT EXISTS adapter_recording_sessions (
          owner_reference BLOB NOT NULL CHECK (length(owner_reference) = 32),
          run_operation_id BLOB NOT NULL CHECK (length(run_operation_id) = 32),
@@ -1474,6 +1536,54 @@ type ForkEventSuffixV1 = Vec<(
     Option<ForkInterventionAdmissionV1>,
     ForkAppendOperationV1,
 )>;
+
+/// Ordinary native entry shared by the store and trusted-clock adapter. Keep
+/// namespace refusal with the effect so callers cannot open before screening.
+/// This does not qualify protected ownership or make installation atomic.
+pub(crate) fn open_ordinary_filename(
+    filename: &str,
+    flags: OpenFlags,
+) -> Result<Connection, CoreError> {
+    #[cfg(target_os = "linux")]
+    crate::protected_sqlite_namespace::refuse_reserved_filename(filename)?;
+    Connection::open_with_flags(filename, flags)
+        .map_err(|error| CoreError::Storage(error.to_string()))
+}
+
+/// Preserve adapter-specific errors for namespace refusal versus a failed
+/// filesystem/native operation, without an unchecked path callback.
+#[cfg(target_os = "linux")]
+pub(crate) enum DatabasePathError<E> {
+    NamespaceRefused,
+    Operation(E),
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn open_database_path(
+    path: &std::path::Path,
+    flags: OpenFlags,
+) -> Result<Connection, DatabasePathError<rusqlite::Error>> {
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
+        .map_err(|_| DatabasePathError::NamespaceRefused)?;
+    Connection::open_with_flags(path, flags).map_err(DatabasePathError::Operation)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create_private_database_file(
+    path: &std::path::Path,
+) -> Result<(), DatabasePathError<std::io::Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
+        .map_err(|_| DatabasePathError::NamespaceRefused)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+        .map_err(DatabasePathError::Operation)
+}
 
 impl SqliteStore {
     pub(crate) fn require_live_fork_event_session(
@@ -1640,6 +1750,7 @@ impl SqliteStore {
                 Self::append_one_in_transaction(
                     &self.conn,
                     self.hasher.as_ref(),
+                    self.mode_binding_epoch,
                     child_timeline_id,
                     draft,
                 )
@@ -1647,7 +1758,7 @@ impl SqliteStore {
                     let local_seq = local_event.seq;
                     Self::logical_event(prefix, local_event).map(|event| (local_seq, event))
                 })
-                .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+                .map_err(|error| ForkEventAuthorityErrorV1::from(&error))
             })
             .and_then(|(local_seq, event)| {
                 ForkClassifiedProvenanceV1::derive(
@@ -1907,6 +2018,7 @@ impl SqliteStore {
     fn append_one_in_transaction(
         tx: &Connection,
         hasher: &dyn Hasher,
+        mode_binding_epoch: Option<NonZeroU64>,
         timeline: TimelineId,
         draft: EventDraft,
     ) -> Result<Event, CoreError> {
@@ -1961,7 +2073,14 @@ impl SqliteStore {
         ) {
             return Err(CoreError::Storage(error.to_string()));
         }
-        Ok(Event {
+        gateway_mode_binding::record_commit_epoch_in_transaction(
+            tx,
+            mode_binding_epoch,
+            timeline,
+            seq,
+            seq,
+        )
+        .map(|()| Event {
             id: event_id,
             entity: draft.entity,
             event_type: draft.event_type,
@@ -2094,8 +2213,7 @@ impl SqliteStore {
         initialize_schema: bool,
         options: SqliteStoreOpenOptionsV1,
     ) -> Result<Self, CoreError> {
-        let conn = Connection::open_with_flags(path, flags)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = open_ordinary_filename(path, flags)?;
         conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
         let writer_reservation_connection =
@@ -2133,6 +2251,7 @@ impl SqliteStore {
             plugin_trust_poisoned: Cell::new(false),
             #[cfg(test)]
             destruction_transaction_hook: None,
+            mode_binding_epoch: None,
         };
         store.finish_open(
             initialize_schema,
@@ -2147,7 +2266,7 @@ impl SqliteStore {
         options: SqliteStoreOpenOptionsV1,
     ) -> Option<Connection> {
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Connection::open_with_flags(
+            open_ordinary_filename(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
             )
@@ -2469,25 +2588,36 @@ impl SqliteStore {
 
     fn prepare_authority_schema(&self) -> Result<(), CoreError> {
         self.conn
-            .execute_batch(
+            .execute_batch(&format!(
                 "BEGIN IMMEDIATE;
                  CREATE TABLE IF NOT EXISTS authority_state (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                      state_cbor BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS authority_denials (
+                     sequence INTEGER PRIMARY KEY,
+                     evidence BLOB NOT NULL CHECK (length(evidence) IN (14, 71))
+                 );
+                 {}
+                 {}
                  COMMIT;",
-            )
+                sqlite_schema_ddl(gateway_mode_binding::GATEWAY_MODE_SCHEMA_TABLES),
+                sqlite_schema_ddl(gateway_revision::GATEWAY_REVISION_SCHEMA_TABLES)
+            ))
             .map_err(Self::into_storage_error)
             .and_then(|()| self.validate_authority_schema_and_state())
     }
 
     fn validate_authority_schema_and_state(&self) -> Result<(), CoreError> {
-        self.validate_authority_schema().and_then(|()| {
-            read_authority_state(&self.conn)
-                .map(|_| ())
-                .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
-        })
+        self.validate_authority_schema()
+            .and_then(|()| self.validate_gateway_mode_schema())
+            .and_then(|()| self.validate_gateway_revision_schema())
+            .and_then(|()| {
+                read_authority_state(&self.conn)
+                    .map(|_| ())
+                    .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
+            })
     }
 
     fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
@@ -2535,24 +2665,50 @@ impl SqliteStore {
     }
 
     fn validate_authority_schema(&self) -> Result<(), CoreError> {
+        [
+            (
+                "authority_state",
+                &[
+                    "singleton integer primary key check (singleton = 1)",
+                    "schema_version integer not null check (schema_version = 1)",
+                    "state_cbor blob not null",
+                ][..],
+            ),
+            (
+                "authority_denials",
+                &[
+                    "sequence integer primary key",
+                    "evidence blob not null check (length(evidence) in (14, 71))",
+                ][..],
+            ),
+        ]
+        .into_iter()
+        .try_for_each(|(table, required)| self.validate_authority_table(table, required))
+    }
+
+    fn validate_authority_table(&self, table: &str, required: &[&str]) -> Result<(), CoreError> {
         let sql = self
             .conn
             .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'authority_state'",
-                [],
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
                 |row| row.get::<_, String>(0),
             )
-            .map_err(Self::into_storage_error)?;
+            .optional()
+            .map_err(Self::into_storage_error)?
+            .ok_or_else(|| {
+                // A read-only open cannot create a table a newer schema added;
+                // one writable open of the same database must come first.
+                CoreError::Storage(format!(
+                    "SQLite {table} table is missing; open the store writable once to create it"
+                ))
+            })?;
         let normalized = normalize_schema_sql(&sql);
-        for required in [
-            "singleton integer primary key check (singleton = 1)",
-            "schema_version integer not null check (schema_version = 1)",
-            "state_cbor blob not null",
-        ] {
+        for required in required {
             if !normalized.contains(&normalize_schema_sql(required)) {
-                return Err(CoreError::Storage(
-                    "SQLite authority_state table has an incompatible schema".to_owned(),
-                ));
+                return Err(CoreError::Storage(format!(
+                    "SQLite {table} table has an incompatible schema"
+                )));
             }
         }
         Ok(())
@@ -3839,6 +3995,7 @@ impl SqliteStore {
                     let event = Self::append_one_in_transaction(
                         &self.conn,
                         self.hasher.as_ref(),
+                        self.mode_binding_epoch,
                         timeline,
                         draft.clone(),
                     )?;
@@ -4047,7 +4204,8 @@ impl SqliteStore {
             &self.conn,
             self.erasure_gate_bound,
             self.erasure_inventory_data_version,
-        )?;
+        )
+        .map_err(|refusal| self.stale_binding_refusal(refusal))?;
         if !self.erasure_gate_bound {
             return Ok(());
         }
@@ -4148,6 +4306,7 @@ impl SqliteStore {
                         Self::append_one_in_transaction(
                             &self.conn,
                             self.hasher.as_ref(),
+                            self.mode_binding_epoch,
                             timeline,
                             draft.clone(),
                         )
@@ -4211,6 +4370,7 @@ impl SqliteStore {
                         Self::append_one_in_transaction(
                             &self.conn,
                             self.hasher.as_ref(),
+                            self.mode_binding_epoch,
                             timeline,
                             draft.clone(),
                         )
@@ -4408,6 +4568,7 @@ impl SqliteStore {
     fn append_geo_cell_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         hasher: &dyn Hasher,
+        mode_binding_epoch: Option<NonZeroU64>,
         timeline: TimelineId,
         entity: EntityId,
         event_id: EventId,
@@ -4453,7 +4614,14 @@ impl SqliteStore {
             ],
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(Event {
+        gateway_mode_binding::record_commit_epoch_in_transaction(
+            tx,
+            mode_binding_epoch,
+            timeline,
+            seq,
+            seq,
+        )
+        .map(|()| Event {
             id: event_id,
             entity,
             event_type: Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE),
@@ -4873,6 +5041,7 @@ impl GeographicAdmissionStore for SqliteStore {
         let event = Self::append_geo_cell_in_transaction(
             &tx,
             self.hasher.as_ref(),
+            self.mode_binding_epoch,
             request.timeline(),
             request.entity(),
             event_id,
@@ -5113,8 +5282,13 @@ impl GeoLocationAdmissionStore for SqliteStore {
             request.payload().clone(),
         )
         .with_wall_time(admitted_at);
-        let event =
-            Self::append_one_in_transaction(&tx, self.hasher.as_ref(), request.timeline(), draft)?;
+        let event = Self::append_one_in_transaction(
+            &tx,
+            self.hasher.as_ref(),
+            self.mode_binding_epoch,
+            request.timeline(),
+            draft,
+        )?;
         let link = pos_core::geo_admission::GeoLocationAdmissionLinkV1::for_snapshot(
             request.timeline(),
             event.id,
@@ -5702,6 +5876,16 @@ impl EventStore for SqliteStore {
             self,
             owner_id,
             registration_address,
+        )
+    }
+
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+        ArtifactRegistrationPersistencePortV1::artifact_registrations_for_timeline(
+            self, timeline, max,
         )
     }
 
@@ -6706,7 +6890,7 @@ impl EventStore for SqliteStore {
                 let _ = store
                     .get_timeline(timeline)?
                     .ok_or(CoreError::TimelineNotFound(timeline))?;
-                return Ok(());
+                return store.empty_commit_mode_check();
             }
             crate::ensure_non_geographic_events(events, timeline)
                 .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
@@ -7089,7 +7273,13 @@ impl SqliteStore {
                 ],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
-        Ok(())
+        gateway_mode_binding::record_commit_epoch_in_transaction(
+            &self.conn,
+            self.mode_binding_epoch,
+            timeline,
+            head_seq.next(),
+            new_head,
+        )
     }
 
     fn compute_chain_hash_at(
@@ -7213,6 +7403,15 @@ impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
             for record in batch.records() {
                 inserted |= commit_sqlite_artifact_registration_record(&self.conn, record)?;
             }
+            if let Some(timeline) = batch.source_timeline() {
+                for record in batch.records() {
+                    inserted |= bind_sqlite_artifact_registration_timeline(
+                        &self.conn,
+                        timeline,
+                        record.registration_address(),
+                    )?;
+                }
+            }
             sqlite_commit_artifact_registration_operation(
                 &self.conn,
                 &owner_id,
@@ -7239,6 +7438,14 @@ impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
     ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
     {
         sqlite_read_artifact_registration(&self.conn, owner_id, registration_address)
+    }
+
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+        sqlite_artifact_registrations_for_timeline(&self.conn, timeline, max)
     }
 }
 
@@ -9283,6 +9490,94 @@ fn commit_sqlite_artifact_registration_record(
     }
 }
 
+/// Bind one registration to its source Timeline; `true` when the binding is new.
+fn bind_sqlite_artifact_registration_timeline(
+    connection: &Connection,
+    timeline: TimelineId,
+    registration_address: Hash,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO artifact_registration_timelines
+             (timeline_id, registration_address) VALUES (?1, ?2)",
+            params![
+                timeline.inner().to_bytes().as_slice(),
+                registration_address.as_bytes().as_slice(),
+            ],
+        )
+        .map(|changed| changed != 0)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+}
+
+/// Every row bound to `timeline`, in registration-address order, streamed so
+/// the read stops one binding past `max`. Rows and bindings are append-only
+/// and committed together, so a binding without a consistent row is
+/// corruption, never a row to skip.
+///
+/// The binding read, each row load and the closure validation are separate
+/// statements, not one snapshot. That is consistent only because the catalog
+/// is append-only: a concurrent commit cannot change or remove a binding,
+/// row or closure object already read, and a binding it adds after the
+/// binding read is not returned.
+fn sqlite_artifact_registrations_for_timeline(
+    connection: &Connection,
+    timeline: TimelineId,
+    max: usize,
+) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    sqlite_artifact_registration_catalog_present(connection).and_then(|present| {
+        if !present {
+            return Ok(Vec::new());
+        }
+        connection
+            .prepare(
+                "SELECT registration_address FROM artifact_registration_timelines
+                 WHERE timeline_id = ?1 ORDER BY registration_address",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![timeline.inner().to_bytes().as_slice()], |row| {
+                        row.get::<_, Vec<u8>>(0)
+                    })
+                    .and_then(|rows| rows.take(max.saturating_add(1)).collect())
+            })
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+            .and_then(|addresses: Vec<Vec<u8>>| {
+                if addresses.len() > max {
+                    Err(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds)
+                } else {
+                    addresses
+                        .iter()
+                        .map(|bytes| sqlite_bound_artifact_registration(connection, bytes))
+                        .collect::<Result<Vec<_>, _>>()
+                }
+            })
+            .and_then(|rows| sqlite_validate_bound_closures(connection, rows))
+    })
+}
+
+fn sqlite_validate_bound_closures(
+    connection: &Connection,
+    rows: Vec<ArtifactRegistrationCatalogRowV1>,
+) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    let bound: Vec<&ArtifactRegistrationCatalogRowV1> = rows.iter().collect();
+    let validated = crate::validate_bound_closures_once(&bound, |address| {
+        sqlite_validate_artifact_registration_closure_visiting(connection, address)
+    });
+    validated.map(|()| rows)
+}
+
+fn sqlite_bound_artifact_registration(
+    connection: &Connection,
+    address_bytes: &[u8],
+) -> Result<ArtifactRegistrationCatalogRowV1, ArtifactRegistrationPersistenceErrorV1> {
+    sqlite_artifact_hash(address_bytes)
+        .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        .and_then(|address| {
+            sqlite_load_artifact_registration_by_address(connection, address)
+                .and_then(|row| row.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog))
+        })
+}
+
 fn sqlite_artifact_registration_table_exists(
     connection: &Connection,
 ) -> Result<bool, rusqlite::Error> {
@@ -9301,10 +9596,31 @@ pub(crate) fn sqlite_artifact_registration_schema_exists(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master
          WHERE type = 'table' AND name = 'artifact_registrations')
          AND EXISTS(SELECT 1 FROM sqlite_master
-         WHERE type = 'table' AND name = 'artifact_registration_operations')",
+         WHERE type = 'table' AND name = 'artifact_registration_operations')
+         AND EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registration_timelines')",
         [],
         |row| row.get(0),
     )
+}
+
+/// `false` when the catalog was never created, which reads as empty; a
+/// catalog with only part of its schema is corruption.
+fn sqlite_artifact_registration_catalog_present(
+    connection: &Connection,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    let table_exists = sqlite_artifact_registration_table_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !table_exists {
+        return Ok(false);
+    }
+    let complete_schema = sqlite_artifact_registration_schema_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if complete_schema {
+        Ok(true)
+    } else {
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    }
 }
 
 fn sqlite_read_artifact_registration(
@@ -9312,15 +9628,8 @@ fn sqlite_read_artifact_registration(
     owner_id: &OwnerIdV1,
     registration_address: Hash,
 ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
-    let table_exists = sqlite_artifact_registration_table_exists(connection)
-        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
-    if !table_exists {
+    if !sqlite_artifact_registration_catalog_present(connection)? {
         return Ok(None);
-    }
-    let complete_schema = sqlite_artifact_registration_schema_exists(connection)
-        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
-    if !complete_schema {
-        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
     }
     let Some(row) = sqlite_load_artifact_registration_by_address(connection, registration_address)?
     else {
@@ -9407,6 +9716,14 @@ fn sqlite_validate_artifact_registration_closure(
     connection: &Connection,
     root: Hash,
 ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    sqlite_validate_artifact_registration_closure_visiting(connection, root).map(|_| ())
+}
+
+/// Validate the closure of `root` and return every address it visited.
+fn sqlite_validate_artifact_registration_closure_visiting(
+    connection: &Connection,
+    root: Hash,
+) -> Result<BTreeSet<Hash>, ArtifactRegistrationPersistenceErrorV1> {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
     let mut catalog_rows = Vec::new();
@@ -9445,9 +9762,7 @@ fn sqlite_validate_artifact_registration_closure(
     validate_artifact_registration_catalog_graph_v1(root, &catalog_rows)?;
     let root_row = sqlite_load_artifact_registration_by_address(connection, root)?
         .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
-        && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
-    {
+    if root_row.is_repro_manifest_root() {
         let root_record = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
             .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
         let stored_root = sqlite_artifact_registration_operation_root(
@@ -9461,7 +9776,7 @@ fn sqlite_validate_artifact_registration_closure(
         let transcript_bytes = find_sqlite_root_transcript_bytes(&catalog_rows, &root_record)?;
         sqlite_validate_root_adapter_recording(connection, &root_record, transcript_bytes)?;
     }
-    Ok(())
+    Ok(seen)
 }
 
 fn find_sqlite_root_transcript_bytes<'a>(
@@ -9847,6 +10162,61 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         self.erasure_inventory_data_version = version_after;
         self.erasure_inventory_generation = Some(snapshot.generation());
         Ok(snapshot)
+    }
+
+    fn erasure_authority_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+        self.local_erasure_authority_snapshot(limits)
+    }
+
+    fn retain_erasure_object(
+        &mut self,
+        canonical: &[u8],
+        max_bytes: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_retain(canonical, max_bytes)
+    }
+
+    fn commit_local_owner_effect(
+        &mut self,
+        prepared: pos_core::PreparedLocalOwnerEffectV1,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_commit_owner_effect(&prepared)
+    }
+
+    fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
+        self.local_erasure_store_identity()
+    }
+
+    fn init_erasure_store_identity(&mut self, id: Hash) -> Result<Hash, ErasureErrorV1> {
+        self.local_erasure_init_store_identity(id)
+    }
+
+    fn sweep_unreferenced_erasure_objects(
+        &mut self,
+        tags: &[&str],
+        keep: &[ErasureReferenceV1],
+        max: usize,
+    ) -> Result<usize, ErasureErrorV1> {
+        self.local_erasure_sweep(tags, keep, max)
+    }
+
+    fn retained_erasure_objects(
+        &mut self,
+        tag: &str,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+        self.local_erasure_retained(tag, max)
+    }
+
+    fn recipient_export_publications(
+        &mut self,
+        timelines: &[TimelineId],
+        max: usize,
+    ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
+        self.local_erasure_recipient_export_publications(timelines, max)
     }
 
     fn begin_protected_effect_interval(
@@ -12338,12 +12708,18 @@ impl SqliteStore {
             );
         }
         authority.session_identity = self.fork_admission_authority_runtime.session_identity;
+        // ADR-134 §8: a stale or unattached writer of a bound store commits
+        // no FAC1, for a Fork and a Principal-to-Owner binding alike.
         advance_wall_fence(
             &mut authority,
             self.fork_admission_authority_enabled,
             session,
         )
-        .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        .map_err(pos_core::ForkAdmissionErrorV1::from)
+        .and_then(|()| {
+            self.empty_commit_mode_check()
+                .map_err(|error| pos_core::ForkAdmissionErrorV1::from(&error))
+        })?;
         let now = authority.last_authority_wall_time;
         let (issued_at, expires_at) = match &command {
             VerifiedForkAdmissionCommandV1::PrincipalOwner {
@@ -14508,6 +14884,87 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         read_authority_state(&self.conn).and_then(|state| state.resolve(leaf_grant_id))
     }
+
+    /// One autocommit `INSERT` is its own committed transaction; inside an
+    /// outer transaction it would not commit before the host answers, so it
+    /// fails closed instead. Sequences are append-only, so the highest one
+    /// bounds the row count: at [`pos_core::MAX_AUTHORIZATION_DENIAL_RECORDS`]
+    /// the insert writes nothing and the record fails closed.
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding())
+            || !self.conn.is_autocommit()
+        {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        sqlite_append_denial_evidence(
+            &self.conn,
+            permit.evidence(),
+            pos_core::MAX_AUTHORIZATION_DENIAL_RECORDS,
+        )
+    }
+
+    fn load_authorization_denials(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        self.conn
+            .prepare_cached(
+                "SELECT sequence, evidence FROM authority_denials
+                 WHERE sequence > ?1 ORDER BY sequence LIMIT ?2",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(
+                        params![
+                            i64::try_from(after).unwrap_or(i64::MAX),
+                            i64::try_from(limit.min(pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ))
+                                .unwrap_or(i64::MAX)
+                        ],
+                        |row| {
+                            row.get::<_, i64>(0).and_then(|sequence| {
+                                row.get::<_, Vec<u8>>(1).map(|bytes| (sequence, bytes))
+                            })
+                        },
+                    )
+                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            })
+            .or(Err(AuthorityPersistenceErrorV1::Unavailable))
+            .and_then(|rows| {
+                rows.iter()
+                    .map(|(sequence, bytes)| {
+                        pos_core::AuthorizationDenialEvidenceV1::decode(bytes).map(|evidence| {
+                            (u64::try_from(*sequence).unwrap_or_default(), evidence)
+                        })
+                    })
+                    .collect()
+            })
+    }
+}
+
+/// Append one denial-evidence record unless the log already holds
+/// `capacity` records; at the bound nothing is written and it fails closed.
+fn sqlite_append_denial_evidence(
+    conn: &Connection,
+    evidence: &pos_core::AuthorizationDenialEvidenceV1,
+    capacity: u64,
+) -> Result<(), AuthorityPersistenceErrorV1> {
+    conn.execute(
+        "INSERT INTO authority_denials (evidence)
+         SELECT ?1 WHERE COALESCE((SELECT MAX(sequence) FROM authority_denials), 0) < ?2",
+        params![
+            evidence.encode(),
+            i64::try_from(capacity).unwrap_or(i64::MAX)
+        ],
+    )
+    .ok()
+    .filter(|inserted| *inserted == 1)
+    .map(|_| ())
+    .ok_or(AuthorityPersistenceErrorV1::Unavailable)
 }
 
 /// Resolve each coordinator WKE1 against this transaction's key registry,
@@ -15075,6 +15532,7 @@ mod tests {
     mod protected_interval_cleanup;
 
     use super::*;
+
     use crate::classified_fork_fixture::database_rows;
     use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
@@ -15091,6 +15549,31 @@ mod tests {
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lower_read_only_writer_opener_independently_refuses_reserved_namespace(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // The lower factory must refuse even if the namespace became reserved
+        // after the outer opener's check. This exercises that native edge
+        // directly without racing installation or claiming atomic activation.
+        let directory = tempfile::tempdir()?;
+        std::fs::create_dir(
+            directory
+                .path()
+                .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+        )?;
+        let database = directory.path().join("main.db");
+        let path = database.to_str().ok_or("fixture path is not UTF-8")?;
+        assert!(SqliteStore::open_writer_reservation_connection(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+            SqliteStoreOpenOptionsV1::default(),
+        )
+        .is_none());
+        assert!(!database.exists());
+        Ok(())
+    }
 
     // Measure the durable rewrite fixture outside the tests/ exporter filter.
     #[cfg_attr(coverage_nightly, coverage(on))]
@@ -15425,6 +15908,7 @@ mod tests {
         let _ = SqliteStore::append_one_in_transaction(
             &store.conn,
             store.hasher.as_ref(),
+            None,
             fork.child_id,
             tests::make_draft(EntityId::new(), b"classified-registration-event"),
         )?;
@@ -16861,6 +17345,53 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_denial_record_inside_an_outer_transaction_fails_closed() {
+        let mut store = tests::new_store();
+        let registry = pos_core::AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            Hash::from_bytes([7; 32]),
+            vec![Hash::from_bytes([8; 32])],
+            Vec::new(),
+            Vec::new(),
+        )
+        .test_ok();
+        let host = pos_core::AuthorityPersistenceHostV1::new(&registry);
+        let evidence = pos_core::AuthorizationDenialEvidenceV1::Suppressed(
+            pos_core::AuthorizationDenialSuppressionV1::try_new(
+                pos_core::AuthorizationDenialScopeV1::Host,
+                3,
+            )
+            .test_ok(),
+        );
+        store
+            .bind_authority_persistence(host.persistence_binding())
+            .test_ok();
+        store.conn.execute_batch("BEGIN").test_ok();
+        assert_eq!(
+            store.record_authorization_denial(host.authorize_denial(evidence)),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        store.conn.execute_batch("ROLLBACK").test_ok();
+        store
+            .record_authorization_denial(host.authorize_denial(evidence))
+            .test_ok();
+        assert_eq!(
+            store.load_authorization_denials(0, 1).test_ok(),
+            vec![(1, evidence)]
+        );
+
+        // At the capacity the insert writes nothing and fails closed.
+        assert_eq!(
+            sqlite_append_denial_evidence(&store.conn, &evidence, 1),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.load_authorization_denials(0, 8).test_ok(),
+            vec![(1, evidence)]
+        );
+    }
+
+    #[test]
     fn sqlite_origin_schema_rejects_missing_columns() {
         let store = tests::new_store();
         store
@@ -16937,6 +17468,7 @@ mod tests {
             assert!(SqliteStore::append_one_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 tests::make_draft(EntityId::new(), b"draft"),
             )
@@ -16944,6 +17476,7 @@ mod tests {
             assert!(SqliteStore::append_geo_cell_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 EntityId::new(),
                 EventId::new(),
@@ -16979,6 +17512,7 @@ mod tests {
             assert!(SqliteStore::append_one_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 tests::make_draft(EntityId::new(), b"draft"),
             )
@@ -16986,6 +17520,7 @@ mod tests {
             assert!(SqliteStore::append_geo_cell_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 EntityId::new(),
                 EventId::new(),
@@ -18267,6 +18802,7 @@ mod tests {
         let error = SqliteStore::append_one_in_transaction(
             &tx,
             store.hasher.as_ref(),
+            None,
             TimelineId::new(),
             make_draft(EntityId::new(), b"unknown"),
         )
@@ -19724,7 +20260,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn bounded_read_rejects_aggregate_event_bytes_before_full_event_query() {
         let mut store = new_store();
         let timeline = store.create_timeline("aggregate-bytes").test_ok();
@@ -19770,6 +20306,16 @@ mod tests {
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
         BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(20));
+        // A successful read with no elapsed cap reaches the pause regardless of
+        // host scheduling; the deadline probes below keep their original caps.
+        let delayed_events = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 10),
+            )
+            .test_ok();
+        assert_eq!(delayed_events, events);
         let time_error = store
             .read_bounded(
                 timeline.id(),
@@ -27047,6 +27593,7 @@ mod coverage_entrypoints {
         expect_err(SqliteStore::append_geo_cell_in_transaction(
             &tx,
             store.hasher.as_ref(),
+            None,
             timeline.id(),
             EntityId::new(),
             EventId::new(),
@@ -28455,6 +29002,7 @@ pub(super) mod key_registry_coverage {
             let batch = prepare_artifact_registration_batch_v1(
                 owner_id,
                 root_address,
+                None,
                 inputs,
                 &StructuralOwnerVerifier,
             )?;

@@ -1,0 +1,41 @@
+{
+  "name": "draft-decision-preview-missing-idempotency-key",
+  "operation_id": "createDecisionPreview",
+  "request": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "scenario_room": {
+        "id": "01JC0GATEWAYW9R00M00000001",
+        "revision": 2,
+        "digest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+      },
+      "preference": {
+        "id": "01JC0GATEWAYW9PREF0000001A",
+        "revision": 1,
+        "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "option_spec": {
+        "id": "01JC0GATEWAYW9QPT10N00001A",
+        "revision": 1,
+        "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+      },
+      "profile_id": "deterministic-local-v1"
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "Idempotency-Key is required",
+      "instance": "/v1/decision-previews",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

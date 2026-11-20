@@ -11,6 +11,7 @@ use zbus::OwnedObjectPath;
 
 use crate::{CgroupRoot, TransientServiceUnitName};
 
+mod effective_limits;
 mod kill;
 mod limit_events;
 #[cfg(target_os = "linux")]
@@ -18,6 +19,10 @@ mod shutdown;
 #[cfg(target_os = "linux")]
 pub use shutdown::{AttemptShutdownDeadlines, AttemptShutdownError};
 
+pub use effective_limits::{
+    EffectiveCgroupLimits, EffectiveKernelLimit, EffectiveLimitError, EffectiveLimitMismatch,
+    EffectiveLimitSource, EffectiveLimitVerdict, WorkCapacity,
+};
 pub use limit_events::{
     AttemptLimitEventCounter, AttemptLimitEventDelta, AttemptLimitEventSnapshot,
     AttemptLimitEventSource,
@@ -150,6 +155,31 @@ impl CgroupRoot {
     #[cfg(test)]
     pub(crate) const fn for_test(root: File) -> Self {
         Self(root)
+    }
+
+    /// Whether the cgroup `control_group` still exists beneath this mount.
+    ///
+    /// The path is resolved beneath the retained root without symlinks.
+    /// Absence is exactly `ENOENT`.
+    ///
+    /// # Errors
+    /// Rejects an invalid path and any other open failure.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn contains(&self, control_group: &str) -> Result<bool, AttemptCgroupError> {
+        let relative = relative_cgroup_path(control_group)?;
+        match openat2(
+            &self.0,
+            relative,
+            OFlags::RDONLY
+                .union(OFlags::DIRECTORY)
+                .union(OFlags::CLOEXEC),
+            Mode::empty(),
+            RESOLVE_CHILD,
+        ) {
+            Ok(_) => Ok(true),
+            Err(Errno::NOENT) => Ok(false),
+            Err(error) => Err(AttemptCgroupError::PathOpen(error)),
+        }
     }
 }
 
@@ -402,6 +432,14 @@ impl crate::UnitCgroup for BoundAttemptCgroup {
 
     fn kill_all(&mut self) -> Result<(), AttemptCgroupError> {
         Self::kill_all(self)
+    }
+
+    fn identity(&self) -> (u64, u64) {
+        (self.identity.device, self.identity.inode)
+    }
+
+    fn directory(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.directory)
     }
 }
 
@@ -749,6 +787,26 @@ mod tests {
             Some(AttemptCgroupError::Metadata(_))
         ));
         assert_eq!(reads, 2);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn containment_is_exact_absence_beneath_the_retained_root() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("system.slice/unit.service"))?;
+        fs::write(root.path().join("file"), b"")?;
+        let cgroups = CgroupRoot::for_test(File::open(root.path())?);
+        assert!(cgroups.contains("/system.slice/unit.service")?);
+        assert!(!cgroups.contains("/system.slice/gone.service")?);
+        assert!(matches!(
+            cgroups.contains("system.slice"),
+            Err(AttemptCgroupError::InvalidPath)
+        ));
+        assert!(matches!(
+            cgroups.contains("/file"),
+            Err(AttemptCgroupError::PathOpen(Errno::NOTDIR))
+        ));
         Ok(())
     }
 }

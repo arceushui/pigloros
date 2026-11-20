@@ -47,6 +47,8 @@ pub struct MemberPassV1 {
     /// The gate's summary, or the closed error that refused the member (or, after an offer
     /// failure, the `InvalidInvocation` that refused the pass).
     pub gate: Result<GateSummaryV1, CommunityPluginHostErrorV1>,
+    /// The actual gate fact, retained even if a later authorization offer fails.
+    pub content_validation: ContentValidationV1,
     /// The invocation ID the Driver built in this pass, if it got that far.
     pub invocation_id: Option<[u8; 16]>,
     /// The failure this pass produced for the member, never an earlier pass's.
@@ -62,7 +64,9 @@ pub enum PassResultV1 {
     Refused,
     /// The whole batch committed, with the commit receipt when the pass had any Event.
     Committed(Option<Box<PipelineCommitReceiptV1>>),
-    /// The pass failed and was discarded. An outcome in doubt is `InDoubt`, never a failure.
+    /// The request was rejected before opening a pass, or the opened pass failed and was
+    /// discarded. Rejection leaves any existing pass untouched. An outcome in doubt is
+    /// `InDoubt`, never a failure.
     Failed {
         /// The closed host error that discarded the pass, or `None` when the error is the
         /// host's own and not a community Plugin host failure.
@@ -80,9 +84,11 @@ pub enum PassResultV1 {
 pub struct CommunityPassOutcomeV1 {
     /// The Tick of the pass.
     pub tick: u64,
-    /// The trusted UTC second sampled for the pass, `None` when the sample failed.
+    /// The trusted UTC second sampled for the pass, `None` when the sample failed or the
+    /// request was rejected before opening a pass.
     pub utc: Option<i64>,
-    /// One entry per selected member, in host schedule order.
+    /// One entry per selected member, in host schedule order. Empty when the request was
+    /// rejected before opening a pass.
     pub gates: Vec<MemberPassV1>,
     /// How the pass ended.
     pub result: PassResultV1,

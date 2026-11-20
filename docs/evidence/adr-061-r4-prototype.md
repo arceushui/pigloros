@@ -26,7 +26,7 @@ The evidence is executable:
 
 | Item | Value |
 |---|---|
-| Crate | `wasmtime` `=49.0.2` as proven; the current pin is `=50.0.1` (security patch releases for RUSTSEC-2026-0353..0364, #630, RUSTSEC-2026-0378..0379, and RUSTSEC-2026-0422..0424) (MSRV 1.96) |
+| Crate | `wasmtime` `=49.0.2` as proven; the current pin is `=50.0.3` (MSRV 1.97) |
 | Requested features | `default-features = false`, `component-model`, `cranelift`, `runtime` (ADR-061 revision 5, decision 2) |
 | Resolved Wasmtime features | `component-model`, `cranelift`, `once_cell`, `runtime`, `std`, `wasmtime-jit-icache-coherence` |
 | Rust toolchain | 1.97.1 (repository pin; the download is verified only by rustup's own checks) |
@@ -150,7 +150,7 @@ call counts against `host_calls`.
 
 ## Budget measurements
 
-The values below are exact. Fuel and memory are deterministic for the pinned
+The values below are exact for Wasmtime 50.0.3. Fuel and memory are deterministic for the pinned
 Wasmtime and the fixture bytes, and `budget_measurements_match_the_recorded_evidence`
 asserts every value. They are the #541 fixtures (ABI 0.0 and the V1
 `output-digest`), run through the engine under the default V1 profile; each
@@ -158,9 +158,9 @@ asserts every value. They are the #541 fixtures (ABI 0.0 and the V1
 
 | Guest | Component bytes | Call | Startup fuel | Call fuel | Linear memory reserved |
 |---|---:|---|---:|---:|---:|
-| Rust | 51,947 | `describe` | 1 | 3,113 | 1,179,648 |
-| Rust | | `reduce`, 11-byte observation | 1 | 21,112 | 1,179,648 |
-| Rust | | `reduce`, 1 MiB observation | 1 | 16,798,314 | 2,293,760 |
+| Rust | 51,947 | `describe` | 4 | 3,113 | 1,179,648 |
+| Rust | | `reduce`, 11-byte observation | 4 | 21,112 | 1,179,648 |
+| Rust | | `reduce`, 1 MiB observation | 4 | 16,798,314 | 2,293,760 |
 | C | 88,893 | `describe` | 19 | 3,019 | 131,072 |
 | C | | `reduce`, 11-byte observation | 19 | 20,744 | 131,072 |
 | C | | `reduce`, 1 MiB observation | 19 | 9,982,361 | 1,179,648 |

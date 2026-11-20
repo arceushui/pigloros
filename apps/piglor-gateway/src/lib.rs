@@ -3,20 +3,29 @@
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
-//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. Host-bound Principal
-//! authorization is opt-in through [`GatewayAuthorization`].
+//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. The production serve
+//! composition ([`local_principal::local_gateway`]) requires host-bound Principal authorization
+//! ([`GatewayAuthorization`]) for every protected operation.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod action_admission_tests;
 pub mod authorization;
+#[cfg(target_os = "linux")]
+pub mod deployment_trust;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
 pub mod executor;
+// Public so its crate-only items satisfy both `unreachable_pub` and
+// `clippy::redundant_pub_crate`: in a private module `pub(crate)` trips the
+// latter and `pub` the former.
+pub mod host_timelines;
 mod http;
 pub mod ledger_config;
+#[cfg(target_os = "linux")]
+pub mod local_erasure_provision;
 #[cfg(target_os = "linux")]
 pub mod local_fork_authentication;
 #[cfg(target_os = "linux")]
@@ -27,18 +36,30 @@ pub mod local_fork_coordinator;
 pub mod local_fork_listener;
 #[cfg(target_os = "linux")]
 pub mod local_fork_service;
+pub mod local_principal;
+pub mod mode_profile;
+pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
+pub mod problem;
+pub mod revision;
+pub mod scenario_room;
 pub mod startup;
 
 pub use authorization::{
-    AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
-    GatewayAuthenticationRequest, GatewayAuthorization, GatewayAuthorizationAudit,
-    GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
-    GatewayAuthorizationTarget, LocalAuthenticationAdapter,
+    AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
+    GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
+    GatewayAuthorityDenial, GatewayAuthorityRecordV1, GatewayAuthoritySourceV1,
+    GatewayAuthorization, GatewayAuthorizationAudit, GatewayAuthorizationDecision,
+    GatewayAuthorizationError, GatewayAuthorizationRequest, GatewayAuthorizationTarget,
+    GatewayConsentRecordV1, GatewayConsentRevocationV1, GatewayConsentV1,
+    GatewayConsentedAuthorityV1, GatewayConsentsV1, GatewayOperationV1, GatewayPinnedAuthorityV1,
+    LocalAuthenticationAdapter, PendingAuthorityDenial, RecordedAuthorityDenial,
+    MAX_DENIAL_RECORDS_PER_MINUTE, MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
+pub use operation::{GatewayOperationPermitV1, OperationAuthority, OperationSpecV1};
 #[cfg(test)]
 use pos_core::store::{AppendIdentity, AppendIntent, AppendOrDuplicateOutcome};
 #[cfg(test)]
@@ -95,18 +116,19 @@ fn gateway_binding_error(
     }
 }
 
+/// Bind `plugin` to the installed EPF1 its test's bound Local mode selects
+/// (ADR-134 §7, field 9).
 #[cfg(test)]
 fn gateway_output_binding<P: Plugin>(
     plugin: &P,
     configuration_details: &[u8],
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    pos_runtime::OutputPolicyBindingV1::from_source(
+    let mode = mode_profile::test_binding(mode_profile::GatewayModeProfileIdV1::Local, []);
+    gateway_output_binding_with_profile(
         plugin,
-        pos_runtime::OutputPolicySourceV1::Gateway,
         configuration_details,
-        "deterministic-local-v1",
+        mode.registration_profile_id(),
     )
-    .map_err(|error| gateway_binding_error(plugin.name(), error))
 }
 
 #[cfg(test)]
@@ -357,12 +379,14 @@ mod coverage_tests {
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
         let registry = super::fixture_action_registry_builder(std::iter::empty(), None).test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
-        assert!(matches!(
-            super::gateway_action_registry_builder(std::iter::empty(), None),
-            Err(RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
-            ))
-        ));
+        for selection in ["live-local-v1", "live-air-gapped-v1"] {
+            assert!(matches!(
+                super::gateway_action_registry_builder(std::iter::empty(), None, selection),
+                Err(RuntimeError::OutputAdmission(
+                    OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+                ))
+            ));
+        }
     }
 
     // Counts selected-factory invocations while delegating to the Gateway factory.
@@ -479,6 +503,7 @@ mod coverage_tests {
             registry.register_from_host_catalogue_entry(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
+                "live-local-v1",
             ),
             Err(RuntimeError::OutputAdmission(
                 OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
@@ -497,6 +522,7 @@ mod coverage_tests {
             .register_host_catalogue_fixture(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
+                "deterministic-local-v1",
             )
             .test_ok();
         assert_eq!(configuration.builds.get(), 1);
@@ -533,8 +559,16 @@ mod coverage_tests {
         let schemas_before = registry.composition().schemas.len();
         let foreign = HostCatalogueEntryV1::<ForeignApproverConfiguration>::gateway();
         for result in [
-            registry.register_from_host_catalogue_entry(&foreign, &ForeignApproverConfiguration),
-            registry.register_host_catalogue_fixture(&foreign, &ForeignApproverConfiguration),
+            registry.register_from_host_catalogue_entry(
+                &foreign,
+                &ForeignApproverConfiguration,
+                "live-local-v1",
+            ),
+            registry.register_host_catalogue_fixture(
+                &foreign,
+                &ForeignApproverConfiguration,
+                "deterministic-local-v1",
+            ),
         ] {
             assert!(matches!(
                 result,
@@ -547,6 +581,7 @@ mod coverage_tests {
             registry.register_host_catalogue_fixture(
                 &HostCatalogueEntryV1::<ExtraReducerConfiguration>::gateway(),
                 &ExtraReducerConfiguration,
+                "deterministic-local-v1",
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
@@ -590,6 +625,7 @@ mod coverage_tests {
                 .register_host_catalogue_fixture(
                     &HostCatalogueEntryV1::<GatewayActionPlugin>::gateway(),
                     frozen,
+                    "deterministic-local-v1",
                 )
                 .test_ok();
             registry.retained_closure_replay_identities()
@@ -735,6 +771,87 @@ mod coverage_tests {
 
         assert!(gateway.owntracks_enabled);
         drop(gateway);
+    }
+
+    /// A private 32-byte owner key in `directory`, which is created with
+    /// `mode` when it does not exist yet.
+    #[cfg(unix)]
+    fn private_owner_key(directory: &Path, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(directory).test_ok();
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).test_ok();
+        let key = directory.join("owner.key");
+        std::fs::write(&key, [7_u8; 32]).test_ok();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).test_ok();
+        key
+    }
+
+    /// Every ancestor of the owner key is checked: each is a real
+    /// directory, the key's own directory is never group- or
+    /// other-writable, and a writable directory above it must be sticky.
+    #[cfg(unix)]
+    #[test]
+    fn owntracks_owner_key_ancestors_must_be_private_real_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().test_ok();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).test_ok();
+        let root = root.path();
+
+        // A clean 0700 chain loads; the temporary directory above it may
+        // be the system's sticky world-writable one.
+        let clean = private_owner_key(&root.join("clean"), 0o700);
+        assert!(OwnTracksOwnerKey::load(&clean).is_ok());
+        // Mode bits outside group and other write never refuse a parent.
+        let read_only = private_owner_key(&root.join("read-only"), 0o755);
+        assert!(OwnTracksOwnerKey::load(&read_only).is_ok());
+
+        // A sticky world-writable directory above the key's parent is
+        // accepted.
+        std::fs::create_dir(root.join("shared")).test_ok();
+        let below_sticky = private_owner_key(&root.join("shared").join("private"), 0o700);
+        std::fs::set_permissions(root.join("shared"), std::fs::Permissions::from_mode(0o1777))
+            .test_ok();
+        assert!(OwnTracksOwnerKey::load(&below_sticky).is_ok());
+
+        // The key's own directory, group- or other-writable, is refused
+        // even when sticky.
+        for mode in [0o1770, 0o1707, 0o770, 0o707] {
+            let parent = root.join(format!("parent-{mode:o}"));
+            let key = private_owner_key(&parent, 0o700);
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A writable directory above the parent that is not sticky is
+        // refused.
+        for mode in [0o770, 0o707] {
+            let open = root.join(format!("open-{mode:o}"));
+            std::fs::create_dir(&open).test_ok();
+            let key = private_owner_key(&open.join("private"), 0o700);
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A symlinked ancestor is refused although the key it reaches is
+        // private and complete.
+        std::fs::create_dir(root.join("real")).test_ok();
+        private_owner_key(&root.join("real").join("private"), 0o700);
+        symlink(root.join("real"), root.join("link")).test_ok();
+        let through_link = root.join("link").join("private").join("owner.key");
+        assert!(std::fs::read(&through_link).is_ok());
+        assert!(OwnTracksOwnerKey::load(&through_link).is_err());
+
+        // A non-directory ancestor is refused by the ancestor check itself:
+        // the file is not group- or other-writable, so only its type
+        // refuses it (through `load` the path would also fail later).
+        std::fs::write(root.join("file"), [1_u8]).test_ok();
+        std::fs::set_permissions(root.join("file"), std::fs::Permissions::from_mode(0o644))
+            .test_ok();
+        let under_file = root.join("file").join("owner.key");
+        assert!(crate::validate_owner_key_ancestors(&under_file).is_err());
+        assert!(OwnTracksOwnerKey::load(&under_file).is_err());
     }
 
     #[cfg(unix)]
@@ -939,7 +1056,7 @@ mod coverage_tests {
             .await
             .test_ok();
         gateway
-            .create_timeline("owntracks-generic-event-store")
+            .create_timeline("owntracks-generic-event-store", None)
             .await
             .test_ok();
         let mut notices = gateway.subscribe();
@@ -983,7 +1100,7 @@ mod coverage_tests {
         let gateway = Gateway::new_with_geo_location_admission(MemoryStore::default());
 
         let created = gateway
-            .create_timeline("privileged-generic-command")
+            .create_timeline("privileged-generic-command", None)
             .await
             .test_ok();
 
@@ -1095,6 +1212,28 @@ pub struct Gateway {
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     authorization: Option<Arc<GatewayAuthorization>>,
+    /// Whether protected operations need [`Self::authorization`] (always set
+    /// with it), so a composition without its authorizer fails closed.
+    authorization_required: bool,
+}
+
+/// Whether a composition protects its operations, and with which authorizer.
+enum GatewayProtection {
+    /// The in-process harness composition: nothing is protected.
+    Unprotected,
+    /// Every protected operation requires the authorizer; without one it
+    /// answers `401`.
+    Required(Option<Arc<GatewayAuthorization>>),
+}
+
+impl GatewayProtection {
+    /// The authorizer and whether protected operations require one.
+    fn into_parts(self) -> (Option<Arc<GatewayAuthorization>>, bool) {
+        match self {
+            Self::Unprotected => (None, false),
+            Self::Required(authorization) => (authorization, true),
+        }
+    }
 }
 
 /// Action kinds admitted by the Gateway World approver.
@@ -1192,19 +1331,16 @@ impl pos_runtime::InstalledPluginFactoryV1 for GatewayActionPlugin {
     }
 }
 
-/// Registration operation applied to the selected Gateway catalogue entry.
-type GatewayCatalogueRegistration = fn(
-    &mut PluginRegistry,
-    &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
-    &FrozenGatewayActionConfiguration,
-) -> Result<(), pos_runtime::RuntimeError>;
-
 // Resolve the frozen configuration and register the reviewed Gateway entry.
 // Production and nonproduction registries differ only in `register`.
 fn gateway_action_registry_with(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    register: GatewayCatalogueRegistration,
+    register: impl FnOnce(
+        &mut PluginRegistry,
+        &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
+        &FrozenGatewayActionConfiguration,
+    ) -> Result<(), pos_runtime::RuntimeError>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     let frozen = FrozenGatewayActionConfiguration::resolve(bodies)?;
     let mut registry = PluginRegistry::new().without_erasure_gate();
@@ -1240,23 +1376,23 @@ fn gateway_action_registry_with_authority(
 }
 
 // The production registry selects the reviewed Gateway entry with installed
-// evidence. Wave 8 has no installed Gateway EPF1, so it fails closed; #461
-// owns positive activation.
+// evidence for the profile the bound execution mode selects (ADR-134 §7,
+// field 9: Local `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135).
+// No installed Gateway EPF1 exists, so it fails closed; #461 owns positive
+// activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
+    registration_profile_id: &str,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    gateway_action_registry_with(
-        bodies,
-        authority,
-        PluginRegistry::register_from_host_catalogue_entry::<GatewayActionPlugin>,
-    )
+    gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
+        registry.register_from_host_catalogue_entry(entry, frozen, registration_profile_id)
+    })
 }
 
 // Behavior fixtures have no installed profile, session pin, or production
-// registration authority. They exist only in unit tests and behind the
-// `test-support` feature, which no deployable graph enables, so they never
-// enter the release builder.
+// registration authority. They exist only in unit tests, so they never enter
+// the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
 ///
 /// It selects the same reviewed catalogue entry, factory and registration
@@ -1264,31 +1400,27 @@ fn gateway_action_registry_builder(
 ///
 /// # Errors
 /// Returns an error when canonical body validation or fixture registration fails.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    gateway_action_registry_with(
-        bodies,
-        authority,
-        PluginRegistry::register_host_catalogue_fixture::<GatewayActionPlugin>,
-    )
+    gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
+        registry.register_host_catalogue_fixture(entry, frozen, "deterministic-local-v1")
+    })
 }
 
-/// Build a nonproduction, action-capable Gateway around a verified erasure host.
+/// Build a unit-test, action-capable Gateway around a verified erasure host.
 ///
 /// The action registry is the fixture registration of the reviewed Gateway
-/// entry, and `authorization` is whatever the caller pins: this composition is
-/// fixture-only and is never a source of production authority (ADR-108). It
-/// exists only in unit tests and behind the `test-support` feature, for the
-/// gateway-client-conformance subject adapter (#1295).
+/// entry, and `authorization` is whatever the test pins: this composition is
+/// never a source of production authority (ADR-108). Production composes its
+/// authorizer only through [`Gateway::require_authorization`] (#1361).
 ///
 /// # Errors
 /// Returns an error when the store, fixture registry, or Gateway cannot be built.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn gateway_with_erasure_host_and_authorization(
+#[cfg(test)]
+pub(crate) fn gateway_with_erasure_host_and_authorization(
     host: ErasureExecutionHostV1,
     bodies: impl IntoIterator<Item = EntityId>,
     authorization: GatewayAuthorization,
@@ -1309,8 +1441,24 @@ pub fn gateway_with_erasure_host_and_authorization(
         false,
         action_registry,
         consent_authority,
-        Some(Arc::new(authorization)),
+        GatewayProtection::Required(Some(Arc::new(test_local_authorization(authorization)))),
     )
+}
+
+/// The Local execution mode every unit-test action composition is bound to.
+#[cfg(test)]
+fn test_local_mode() -> mode_profile::GatewayModeBindingV1 {
+    mode_profile::test_binding(mode_profile::GatewayModeProfileIdV1::Local, [])
+}
+
+/// `authorization` bound to the Local mode of [`test_local_mode`], which
+/// refuses no authorizer.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_local_authorization(authorization: GatewayAuthorization) -> GatewayAuthorization {
+    authorization
+        .with_mode_binding(&test_local_mode())
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
 }
 
 /// Bytes the Gateway configuration details spend before the bodies: the
@@ -1620,12 +1768,27 @@ pub enum GatewayError {
     /// limit is permanent, so retrying the same request cannot help.
     #[error("timeline dependency set is exhausted")]
     DependencySetExhausted,
-    /// The provider-neutral host authorization decision denied the operation.
-    #[error("authorization denied")]
-    AuthorizationDenied,
+    /// The provider-neutral host authority denied the operation; the
+    /// denial's family selects its public problem. Only a
+    /// [`RecordedAuthorityDenial`], whose ADN1 record the store committed,
+    /// can carry it.
+    #[error("{0}")]
+    AuthorizationDenied(RecordedAuthorityDenial),
     /// The provider-neutral host authorization boundary is unavailable.
     #[error("authorization unavailable")]
     AuthorizationUnavailable,
+    /// A denial's durable evidence could not be recorded, so the Gateway
+    /// fails closed without answering the denial.
+    #[error("authorization evidence unavailable")]
+    AuthorizationEvidenceUnavailable,
+    /// This Principal, or the host, reached its denial-record bound for the
+    /// current window; the denial gets no record of its own (only the
+    /// window's suppression count) and is not answered as a denial.
+    #[error("authorization denial limit reached")]
+    DenialRecordLimitReached {
+        /// Whole seconds until the current window closes, at least 1.
+        retry_after_seconds: u64,
+    },
     /// Consent payload did not meet its closed V1 contract.
     #[error(transparent)]
     ConsentCodec(#[from] ConsentCodecError),
@@ -1677,60 +1840,73 @@ impl OwnTracksOwnerKey {
     }
 }
 
+/// Whether this platform has the owner-key file checks: they exist on Unix
+/// only, and every other platform refuses the owner key (fails closed).
 #[cfg(unix)]
-fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
-    }
-}
-
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> = Ok(());
 #[cfg(not(unix))]
-fn absolute_owner_key_path(_path: &Path) -> Result<PathBuf, GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> =
+    Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+
+// One item per name with an internal `cfg` split: same-name `cfg` twins
+// would be paired by line in the cargo-crap baseline.
+fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
+    OWNER_KEY_PLATFORM.and_then(|()| {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
+        }
+    })
 }
 
-#[cfg(unix)]
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
-    use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
 
-    let parent = path
-        .parent()
-        .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
-    for (distance, ancestor) in parent.ancestors().enumerate() {
-        let metadata = std::fs::symlink_metadata(ancestor)
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
-        let mode = metadata.mode();
-        let writable_by_group_or_other = mode & 0o022 != 0;
-        let sticky = mode & 0o1000 != 0;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || (writable_by_group_or_other && (distance == 0 || !sticky))
-        {
-            return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+        let parent = path
+            .parent()
+            .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        for (distance, ancestor) in parent.ancestors().enumerate() {
+            let metadata = std::fs::symlink_metadata(ancestor)
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+            let mode = metadata.mode();
+            let writable_by_group_or_other = mode & 0o022 != 0;
+            let sticky = mode & 0o1000 != 0;
+            // `symlink_metadata` never reports a symlink as a directory, so
+            // this also refuses every symlinked ancestor.
+            if !metadata.is_dir() || (writable_by_group_or_other && (distance == 0 || !sticky)) {
+                return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+            }
         }
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    OWNER_KEY_PLATFORM
 }
 
-#[cfg(not(unix))]
-fn validate_owner_key_ancestors(_path: &Path) -> Result<(), GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
-}
-
-#[cfg(unix)]
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn owner_key_is_permissive(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    metadata.mode() & 0o077 != 0
-}
-
-#[cfg(not(unix))]
-const fn owner_key_is_permissive(_metadata: &std::fs::Metadata) -> bool {
-    true
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode()
+    };
+    // Without Unix permission bits every key is treated as permissive.
+    #[cfg(not(unix))]
+    let mode = {
+        let _ = metadata;
+        0o777
+    };
+    mode & 0o077 != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1766,7 +1942,7 @@ impl From<executor::StoreExecutorError> for GatewayError {
 fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> GatewayError {
     match error {
         executor::ActionCommandError::Executor(error) => error.into(),
-        executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
+        executor::ActionCommandError::Authorization(error) => map_authorization_error(&error),
         executor::ActionCommandError::Admission(error) => human_admission_failure(error, maximum),
         #[cfg(test)]
         executor::ActionCommandError::AdmissionUnavailable => {
@@ -1811,60 +1987,105 @@ const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> Gatewa
     }
 }
 
-/// The Gateway error family of a not-admitted store outcome.
-#[derive(Clone, Copy)]
+/// The Gateway error family of a not-admitted store outcome, numbered so
+/// [`NOT_ADMITTED_ERRORS`] is indexed by it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NotAdmitted {
-    AuthorityDenied,
-    PolicyUnavailable,
-    LimitReached,
-    HostFault,
-    SetExhausted,
-    Stale,
-    Rejected,
+    PolicyUnavailable = 0,
+    LimitReached = 1,
+    HostFault = 2,
+    SetExhausted = 3,
+    Stale = 4,
+    ModeBindingStale = 5,
+    Rejected = 6,
 }
 
-/// Classify every outcome; the match has no wildcard, so a new
-/// `PipelineOutcomeV1` variant fails to compile until it is routed here.
-const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
-    match outcome {
-        PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
-            NotAdmitted::AuthorityDenied
-        }
-        PipelineOutcomeV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
-        PipelineOutcomeV1::ResourceExhausted => NotAdmitted::LimitReached,
-        PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
-        PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
-        PipelineOutcomeV1::InvalidObservation
-        | PipelineOutcomeV1::AdmissionConflict
-        | PipelineOutcomeV1::DomainConflict => NotAdmitted::Stale,
-        PipelineOutcomeV1::Rejected
-        | PipelineOutcomeV1::InvalidPluginResult
-        | PipelineOutcomeV1::InvalidProviderResult
-        | PipelineOutcomeV1::Committed(_)
-        | PipelineOutcomeV1::RecoveredDuplicate(_) => NotAdmitted::Rejected,
-    }
+impl NotAdmitted {
+    /// The number of families: the last variant's discriminant plus one.
+    const COUNT: usize = Self::Rejected as usize + 1;
 }
 
-/// A store outcome names no protected record: authority failures reuse the
-/// authorization errors, the dependency faults are a host fault and a
+/// The family of every outcome kind, indexed by
+/// [`pos_core::PipelineOutcomeKindV1`]. Its length is the kind count; the
+/// oracle test `every_outcome_kind_routes_through_the_family_table` fails to
+/// compile until a new outcome is routed here.
+///
+/// The executor turns a store revocation or expiry into a pending denial
+/// that is answered only once recorded; one that arrives here unrecorded is
+/// a host fault, never an answered denial.
+const NOT_ADMITTED_FAMILIES: [NotAdmitted; pos_core::PipelineOutcomeKindV1::COUNT] = [
+    NotAdmitted::Rejected,          // Rejected
+    NotAdmitted::Stale,             // InvalidObservation
+    NotAdmitted::HostFault,         // AuthorityRevoked
+    NotAdmitted::HostFault,         // AuthorityExpired
+    NotAdmitted::PolicyUnavailable, // PolicyIndeterminate
+    NotAdmitted::LimitReached,      // ResourceExhausted
+    NotAdmitted::Rejected,          // InvalidPluginResult
+    NotAdmitted::Rejected,          // InvalidProviderResult
+    NotAdmitted::Stale,             // DomainConflict
+    NotAdmitted::Stale,             // AdmissionConflict
+    NotAdmitted::Rejected,          // Committed
+    NotAdmitted::Rejected,          // RecoveredDuplicate
+    NotAdmitted::HostFault,         // InvalidDependencyDeclaration
+    NotAdmitted::SetExhausted,      // DependencySetExhausted
+    NotAdmitted::ModeBindingStale,  // ModeBindingStale
+];
+
+const _: () = assert!(NOT_ADMITTED_FAMILIES.len() == pos_core::PipelineOutcomeKindV1::COUNT);
+
+/// Classify every outcome by its kind.
+fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
+    family_of_kind(outcome.kind())
+}
+
+/// The family of one outcome kind; a kind past the table fails closed as a
+/// host fault.
+fn family_of_kind(kind: pos_core::PipelineOutcomeKindV1) -> NotAdmitted {
+    NOT_ADMITTED_FAMILIES
+        .get(kind as usize)
+        .copied()
+        .unwrap_or(NotAdmitted::HostFault)
+}
+
+/// A store outcome names no protected record: an unavailable policy reuses the
+/// authorization error, an unrecorded authority denial and the dependency
+/// faults are a host fault and a
 /// permanent per-Timeline limit, and a stale cursor or domain state is one shape.
 fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
     not_admitted_error(not_admitted_family(outcome), maximum)
 }
 
-/// The stable Gateway error of one family; the match has no wildcard.
+/// The stable Gateway error of each family, indexed by [`NotAdmitted`]. The
+/// oracle test `every_family_routes_through_the_error_table` fails to compile
+/// until a new family is routed here.
+const NOT_ADMITTED_ERRORS: [fn(u64) -> GatewayError; NotAdmitted::COUNT] = [
+    |_| GatewayError::AuthorizationUnavailable,
+    |maximum| GatewayError::EventLimitReached { maximum },
+    |_| GatewayError::ActionAdmissionUnavailable,
+    |_| GatewayError::DependencySetExhausted,
+    |_| GatewayError::ActionObservationStale,
+    |_| GatewayError::Store(CoreError::ModeBindingStale),
+    |_| {
+        GatewayError::ActionRejected(ActionRejected::DomainValidationFailed(
+            "action was not admitted".to_owned(),
+        ))
+    },
+];
+
+const _: () = assert!(NOT_ADMITTED_ERRORS.len() == NotAdmitted::COUNT);
+
+/// The admission-unavailable answer of a family past the table.
+const fn admission_unavailable(_maximum: u64) -> GatewayError {
+    GatewayError::ActionAdmissionUnavailable
+}
+
+/// The stable Gateway error of one family; a family past the table fails
+/// closed as admission-unavailable.
 fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
-    match family {
-        NotAdmitted::AuthorityDenied => GatewayError::AuthorizationDenied,
-        NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
-        NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
-        NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
-        NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
-        NotAdmitted::Stale => GatewayError::ActionObservationStale,
-        NotAdmitted::Rejected => GatewayError::ActionRejected(
-            ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
-        ),
-    }
+    NOT_ADMITTED_ERRORS
+        .get(family as usize)
+        .copied()
+        .unwrap_or(admission_unavailable)(maximum)
 }
 
 impl From<ActionSubmissionError> for GatewayError {
@@ -2054,9 +2275,10 @@ impl Gateway {
         owntracks_enabled: bool,
         action_registry: Result<Arc<PluginRegistry>, pos_runtime::RuntimeError>,
         consent_authority: ConsentAuthority,
-        authorization: Option<Arc<GatewayAuthorization>>,
+        protection: GatewayProtection,
     ) -> Result<Self, GatewayError> {
         let action_registry = action_registry.map_err(GatewayError::ActionRegistry)?;
+        let (authorization, authorization_required) = protection.into_parts();
         Ok(Self {
             store,
             bus,
@@ -2067,6 +2289,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization,
+            authorization_required,
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2099,6 +2322,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2133,8 +2357,23 @@ impl Gateway {
                     Arc::new(registry)
                 }),
             consent_authority,
-            None,
+            GatewayProtection::Unprotected,
         )
+    }
+
+    /// Construct an unprotected Gateway for an in-process test harness.
+    ///
+    /// Every operation is served without a Principal decision. It exists for
+    /// the gateway-client-conformance `open` composition and the
+    /// non-interference harnesses only; no binary path composes it (a
+    /// structure test checks this), and production composes
+    /// [`local_principal::local_gateway`].
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot be bound.
+    #[doc(hidden)]
+    pub fn unprotected_for_harness(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+        Self::with_empty_registry(host, GatewayProtection::Unprotected)
     }
 
     /// Construct a Gateway whose executor exclusively owns the recovered
@@ -2144,12 +2383,27 @@ impl Gateway {
     /// Plugin/action checks. All [`pos_core::store::EventStore`] effects remain in the host-owned
     /// single-consumer command stream.
     ///
-    /// Protected actions remain unavailable until the host supplies an
-    /// installed policy through the authorized constructor.
+    /// Every protected operation requires `authorization`; without it (an
+    /// unprovisioned host) each answers `401`. Actions also need an
+    /// installed World action catalogue (#461).
     ///
     /// # Errors
     /// Returns a store error if the recovered host cannot be bound.
-    pub fn new_with_erasure_host(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+    pub(crate) fn new_with_erasure_host(
+        host: ErasureExecutionHostV1,
+        authorization: Option<GatewayAuthorization>,
+    ) -> Result<Self, GatewayError> {
+        Self::with_empty_registry(
+            host,
+            GatewayProtection::Required(authorization.map(Arc::new)),
+        )
+    }
+
+    /// The Gateway over `host` without a World action catalogue.
+    fn with_empty_registry(
+        host: ErasureExecutionHostV1,
+        protection: GatewayProtection,
+    ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
         let store = executor::StoreExecutor::new_with_erasure_host(
@@ -2166,7 +2420,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            protection,
         )
     }
 
@@ -2177,45 +2431,63 @@ impl Gateway {
     /// host command stream. Provider authentication and ADR-059 authorization
     /// therefore cannot enable a proposed action outside ADR-060 containment.
     ///
+    /// The bound execution mode `mode` selects the registration profile
+    /// (ADR-134 §7) and enters the execution-profile security revision of
+    /// every admission (§6).
+    ///
     /// # Errors
-    /// Returns a store or action-registry error if the recovered host or its
-    /// declared output policy cannot be bound.
+    /// Returns [`CoreError::ModeBindingStale`] when the host's store is not
+    /// bound to `mode`, [`GatewayError::AuthorizationUnavailable`] when `mode`
+    /// refuses `authorization`, or a store or action-registry error if the
+    /// recovered host or its declared output policy cannot be bound.
     pub fn new_with_erasure_host_and_authorization(
-        host: ErasureExecutionHostV1,
+        mut host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
+        mode: &mode_profile::GatewayModeBindingV1,
     ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
-        let store = executor::StoreExecutor::new_with_erasure_host(
-            host,
-            consent_authority.append_permit(),
-        )?;
+        let (store, authorization) = mode
+            .bind_host_authorization(&mut host, authorization)
+            .and_then(|authorization| {
+                executor::StoreExecutor::new_with_erasure_host(
+                    host,
+                    consent_authority.append_permit(),
+                )
+                .map(|store| (store, authorization))
+                .map_err(GatewayError::Store)
+            })?;
         Self::from_host_components(
             store,
             broadcast::channel(EVENT_BUS_CAPACITY).0,
             GatewayLimits::LOCAL_DEFAULT,
             false,
             bind_action_registry_erasure_gate(
-                gateway_action_registry_builder(bodies, Some(consent_authority.clone())),
+                gateway_action_registry_builder(
+                    bodies,
+                    Some(consent_authority.clone()),
+                    mode.registration_profile_id(),
+                ),
                 gate,
             ),
             consent_authority,
-            Some(Arc::new(authorization)),
+            GatewayProtection::Required(Some(Arc::new(authorization))),
         )
     }
 
     /// Construct authenticated local `OwnTracks` ingress behind one recovered
     /// host-owned Gateway store and erasure containment gate.
     ///
-    /// Protected Gateway actions remain unavailable; `OwnTracks` ingress is
-    /// independently authenticated by its owner key.
+    /// `OwnTracks` ingress is independently authenticated by its owner key;
+    /// every other protected operation requires `authorization`.
     ///
     /// # Errors
     /// Returns a store error if the recovered host cannot be bound.
-    pub fn new_with_owntracks_erasure_host(
+    pub(crate) fn new_with_owntracks_erasure_host(
         host: ErasureExecutionHostV1,
         owner_key: &OwnTracksOwnerKey,
+        authorization: Option<GatewayAuthorization>,
     ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -2234,7 +2506,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            GatewayProtection::Required(authorization.map(Arc::new)),
         )
     }
 
@@ -2254,6 +2526,7 @@ impl Gateway {
         host: ErasureExecutionHostV1,
         owntracks_owner_key: Option<&OwnTracksOwnerKey>,
         slot: executor::ForkAdmissionSlotV1,
+        authorization: Option<GatewayAuthorization>,
     ) -> Result<(Self, executor::ForkAdmissionSubmitterV1), GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -2273,7 +2546,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            GatewayProtection::Required(authorization.map(Arc::new)),
         )?;
         Ok((gateway, submitter))
     }
@@ -2306,6 +2579,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2315,6 +2589,10 @@ impl Gateway {
     /// The authorizer owns adapter evidence and the current authority snapshot;
     /// the Gateway never receives credentials or turns adapter output into
     /// policy.  Proposed actions and configured protected reads use this seam.
+    ///
+    /// Test-only: the store has no authority ports, so every denial fails
+    /// closed as unavailable evidence (503) and is never answered as a
+    /// denial. No production composition can build it.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new_with_world_bodies_and_authorization(
@@ -2351,7 +2629,8 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: Some(Arc::new(authorization)),
+            authorization: Some(Arc::new(test_local_authorization(authorization))),
+            authorization_required: true,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2387,6 +2666,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2423,6 +2703,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2460,6 +2741,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2491,6 +2773,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2612,10 +2895,18 @@ impl Gateway {
         self.store.erasure_status().await.map_err(Into::into)
     }
 
-    /// Return whether this Gateway has a provider-neutral host authorizer.
+    /// Return whether this Gateway protects its operations: it has a
+    /// provider-neutral host authorizer, or its composition requires one and
+    /// fails closed without it.
     #[must_use]
     pub const fn has_authorization(&self) -> bool {
-        self.authorization.is_some()
+        self.authorization_required
+    }
+
+    /// Whether this Gateway requires an authorizer it does not have (an
+    /// unprovisioned host), so every protected route answers `401`.
+    pub(crate) const fn is_unprovisioned(&self) -> bool {
+        self.authorization_required && self.authorization.is_none()
     }
 
     /// Drain queued store commands and join the dedicated worker.
@@ -2624,6 +2915,8 @@ impl Gateway {
     /// Returns a typed executor lifecycle error when the worker cannot drain,
     /// join, or complete within its bounded shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), GatewayError> {
+        self.wait_for_admitted_operations().await;
+        self.flush_denial_markers_before_shutdown().await;
         self.store.shutdown().await.map_err(Into::into)
     }
 
@@ -2659,20 +2952,53 @@ impl Gateway {
             .map_err(GatewayError::from)
     }
 
-    /// Create a root Timeline.
+    /// Create a root Timeline, owned by `owner` when one is given.
     ///
-    /// Forks and imported child Timelines do not consume the root-Timeline ceiling.
+    /// The owner is recorded at creation (ADR-136 §1). It is only ever the
+    /// actor a decision admitted ([`operation::AdmittedActorV1`]): a
+    /// protected composition passes it, and an unprotected one creates an
+    /// unowned root. Forks, imported child
+    /// Timelines and the host Timelines (the Consent Timeline, the
+    /// authority Timeline and the Erasure Host Timeline) do not consume the
+    /// root-Timeline ceiling.
     ///
     /// # Errors
     /// Returns [`GatewayError::Store`] on backend failure.
-    pub async fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
+    pub async fn create_timeline(
+        &self,
+        name: &str,
+        owner: Option<operation::AdmittedActorV1>,
+    ) -> Result<Timeline, GatewayError> {
         let root_count = self.store.root_count(self.limits.max_timelines).await?;
         if root_count >= self.limits.max_timelines {
             return Err(GatewayError::TimelineLimitReached {
                 maximum: self.limits.max_timelines,
             });
         }
-        Ok(self.store.create(name.to_owned()).await?)
+        Ok(self
+            .store
+            .create(
+                name.to_owned(),
+                owner.map(operation::AdmittedActorV1::entity_id),
+            )
+            .await?)
+    }
+
+    /// The host Timelines of this Gateway's store.
+    pub(crate) fn host_timelines(&self) -> host_timelines::HostTimelinesV1 {
+        self.store.host_timelines()
+    }
+
+    /// `timeline`, unless it is a host Timeline (#309, ADR-136 §4a): only
+    /// the host's own seams read or append one, so a client append, read or
+    /// action naming it is `404 not-found-or-unavailable`, exactly as for a
+    /// Timeline the store does not hold.
+    fn client_timeline(&self, timeline: TimelineId) -> Result<TimelineId, GatewayError> {
+        if self.host_timelines().contains(timeline) {
+            Err(GatewayError::ResourceUnavailable)
+        } else {
+            Ok(timeline)
+        }
     }
 
     /// Append one Gateway-owned consent grant and issue its enforcement token.
@@ -2735,6 +3061,21 @@ impl Gateway {
         timeline_id: &str,
         revocation: ConsentRevokedV1,
     ) -> Result<Event, GatewayError> {
+        self.issue_keyed_consent_revocation(timeline_id, revocation, None)
+            .await
+    }
+
+    /// Append one Gateway-owned consent revocation at its durable fence,
+    /// recording `key` as the revocation Event's correlation identity (#309).
+    ///
+    /// # Errors
+    /// Returns a closed Timeline, fence, or bounded append error.
+    pub(crate) async fn issue_keyed_consent_revocation(
+        &self,
+        timeline_id: &str,
+        revocation: ConsentRevokedV1,
+        key: Option<pos_core::CorrelationId>,
+    ) -> Result<Event, GatewayError> {
         let timeline = match parse_timeline_id(timeline_id) {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
@@ -2768,7 +3109,7 @@ impl Gateway {
             .store
             .append_consent_revocation(
                 timeline,
-                revocation.clone(),
+                (revocation.clone(), key),
                 scope,
                 self.consent_authority.append_permit(),
                 self.limits.max_events_per_timeline,
@@ -2871,7 +3212,7 @@ impl Gateway {
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<GenerationBoundEventPage, GatewayError> {
-        if self.authorization.is_some() {
+        if self.has_authorization() {
             return Err(GatewayError::AuthorizationUnavailable);
         }
         self.read_events_page_unchecked(timeline_id, from_seq, limit, expected_generation)
@@ -2891,7 +3232,8 @@ impl Gateway {
                 maximum: MAX_EVENTS_PER_POLL,
             });
         }
-        let id = parse_timeline_id(timeline_id)?;
+        let id =
+            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
         // A cursor is derived only from visible Events. Scan in bounded chunks
         // so protected Events cannot hide later public Events in the same page.
         let mut next_seq = from_seq.max(1);
@@ -2962,9 +3304,12 @@ impl Gateway {
     /// the same read with [`Self::read_events_page_authorized_after`].
     ///
     /// # Errors
-    /// Returns [`GatewayError::AuthorizationUnavailable`] or
-    /// [`GatewayError::AuthorizationDenied`] before delegating to the bounded
-    /// Timeline read errors.
+    /// Returns [`GatewayError::AuthorizationUnavailable`],
+    /// [`GatewayError::AuthorizationDenied`] or
+    /// [`GatewayError::AuthorizationEvidenceUnavailable`] before delegating to
+    /// the bounded Timeline read errors. The authority decision precedes the
+    /// lookup, so a caller without a read grant receives the same denial for
+    /// an unknown Timeline as for an existing one.
     pub async fn read_events_page_authorized(
         &self,
         timeline_id: &str,
@@ -3026,8 +3371,10 @@ impl Gateway {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
+        // A request envelope bound to another read is malformed input, not
+        // an authority decision, so it is never answered as a denial.
         if !request.targets_read(target_timeline, from_seq, limit) {
-            return Err(GatewayError::AuthorizationDenied);
+            return Err(GatewayError::InvalidAuthorizationRequest);
         }
         // The public request is an input envelope, not authority to choose the
         // operation being authorized. Rebuild the complete read semantics from
@@ -3042,9 +3389,12 @@ impl Gateway {
             limit,
             WallTime::now(),
         );
-        let fence = authorization.commit_fence().await;
-        if let Err(error) = authorization.authorize(request) {
-            return Err(map_authorization_error(error));
+        let fence = self.current_fence(authorization).await;
+        if let Err(error) = fence.authorize(authorization, request) {
+            // The denial's evidence is written after the fence is released,
+            // so an authority replacement never waits behind it.
+            drop(fence);
+            return Err(self.authorization_failure(authorization, error).await);
         }
         let page = normalize_protected_read_error(
             match self
@@ -3107,7 +3457,8 @@ impl Gateway {
                 ActionRejected::UnknownEventType,
             ));
         }
-        let timeline = parse_timeline_id(timeline_id)?;
+        let timeline =
+            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
         let entity = parse_entity_id(entity_id)?;
         let bytes = json_to_cbor(payload);
         let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), bytes);
@@ -3145,47 +3496,171 @@ impl Gateway {
         request: HumanActionRequest<'_>,
         authorization: Arc<GatewayAuthorization>,
     ) -> Result<AdmittedAction, GatewayError> {
-        let timeline = match parse_timeline_id(request.timeline_id) {
+        let timeline = match parse_timeline_id(request.timeline_id)
+            .and_then(|timeline| self.client_timeline(timeline))
+        {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
-        let fence = authorization.commit_fence().await;
-        let decision = match authorization
-            .authorize(GatewayAuthorizationRequest::action(
+        let fence = self.current_fence(&authorization).await;
+        let maximum = self.limits.max_events_per_timeline;
+        let admitted = match fence.authorize(
+            &authorization,
+            GatewayAuthorizationRequest::action(
                 request.proposal.actor_entity_id,
                 timeline,
                 request.proposal.event_type.as_str(),
                 request.proposal.capability.as_str(),
                 WallTime::now(),
-            ))
-            .map_err(map_authorization_error)
-        {
-            Ok(decision) => decision,
-            Err(error) => return Err(error),
+            ),
+        ) {
+            Ok(decision) => {
+                self.store
+                    .admit_action(
+                        timeline,
+                        Arc::clone(&self.action_registry),
+                        request.proposal,
+                        executor::AuthorizedActionContext::new(
+                            Arc::clone(&authorization),
+                            decision,
+                            self.bus.clone(),
+                        ),
+                        executor::ActionAttemptRequest::new(
+                            request.idempotency_key,
+                            request.observed_through,
+                        ),
+                        maximum,
+                    )
+                    .await
+            }
+            Err(error) => Err(executor::ActionCommandError::Authorization(error)),
         };
-        let maximum = self.limits.max_events_per_timeline;
-        let admitted = self
-            .store
-            .admit_action(
-                timeline,
-                Arc::clone(&self.action_registry),
-                request.proposal,
-                executor::AuthorizedActionContext::new(
-                    Arc::clone(&authorization),
-                    decision,
-                    self.bus.clone(),
-                ),
-                executor::ActionAttemptRequest::new(
-                    request.idempotency_key,
-                    request.observed_through,
-                ),
-                maximum,
-            )
-            .await;
+        // A denial's evidence is written after the fence is released, so an
+        // authority replacement never waits behind it.
         drop(fence);
-        admitted
-            .map(|(action, _decision)| action)
-            .map_err(|error| action_command_error(error, maximum))
+        self.admission_outcome(&authorization, admitted, maximum)
+            .await
+    }
+
+    /// The answer to one admission attempt: the committed action, an
+    /// authorization failure answered through [`Self::authorization_failure`],
+    /// or the stable error of any other refusal.
+    async fn admission_outcome(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        admitted: Result<
+            (AdmittedAction, GatewayAuthorizationDecision),
+            executor::ActionCommandError,
+        >,
+        maximum: u64,
+    ) -> Result<AdmittedAction, GatewayError> {
+        match admitted {
+            Ok((action, _decision)) => Ok(action),
+            Err(executor::ActionCommandError::Authorization(error)) => {
+                Err(self.authorization_failure(authorization, error).await)
+            }
+            Err(error) => Err(action_command_error(error, maximum)),
+        }
+    }
+
+    /// Answer one failed authorization. A denied decision is answered only
+    /// after its ADN1 record is committed in the authority store by its own
+    /// store command, outside the commit fence; a Principal or host over its
+    /// denial-record bound is answered `resource-limit-exceeded` without a
+    /// store write; every other failure keeps its stable error.
+    async fn authorization_failure(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        error: GatewayAuthorizationError,
+    ) -> GatewayError {
+        match error {
+            GatewayAuthorizationError::Denied(pending) => {
+                self.recorded_denial(authorization, pending).await
+            }
+            other => map_authorization_error(&other),
+        }
+    }
+
+    /// Record one pending denial under the denial-record bound and answer it.
+    async fn recorded_denial(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        pending: PendingAuthorityDenial,
+    ) -> GatewayError {
+        let batch = match authorization.admit_denial_record(pending) {
+            Ok(batch) => batch,
+            Err(suppression) => {
+                self.schedule_denial_flush(authorization, suppression.flush_at);
+                return GatewayError::DenialRecordLimitReached {
+                    retry_after_seconds: whole_retry_seconds(suppression.retry_after),
+                };
+            }
+        };
+        match write_denial_evidence_detached(self.store.clone(), Arc::clone(authorization), batch)
+            .await
+        {
+            Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
+            Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
+            Err(error) => error.into(),
+        }
+    }
+
+    /// Wait for every operation admitted under the authority fence (a
+    /// detached mutation task included) to complete before the store stops.
+    ///
+    /// The wait is bounded by the shutdown deadline: an operation still
+    /// running then (a hung Ledger write, for example) is reported and
+    /// abandoned, and the store shuts down under it.
+    async fn wait_for_admitted_operations(&self) {
+        let Some(authorization) = &self.authorization else {
+            return;
+        };
+        if tokio::time::timeout(
+            executor::SHUTDOWN_DEADLINE,
+            authorization.wait_for_admitted_operations(),
+        )
+        .await
+        .is_err()
+        {
+            use std::io::Write as _;
+            drop(writeln!(
+                std::io::stderr().lock(),
+                "piglor-gateway shutdown: admitted operations still running at the shutdown \
+                 deadline were abandoned"
+            ));
+        }
+    }
+
+    /// Record the unrecorded suppression counts once before the store stops;
+    /// a count the store cannot take stays pending.
+    async fn flush_denial_markers_before_shutdown(&self) {
+        if let Some(authorization) = &self.authorization {
+            let store = self.store.clone();
+            let authorization = Arc::clone(authorization);
+            drop(
+                tokio::spawn(async move { flush_denial_markers(&store, &authorization).await })
+                    .await,
+            );
+        }
+    }
+
+    /// Flush a saturated window's markers when it expires, so a flood
+    /// followed by silence still leaves its count. One timer is armed per
+    /// window, at its first suppression; it holds only a weak store handle
+    /// and the authorizer, never the Gateway, so a Gateway dropped without a
+    /// shutdown is not kept alive by it.
+    fn schedule_denial_flush(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        flush_at: Option<std::time::Instant>,
+    ) {
+        if let Some(deadline) = flush_at {
+            let store = self.store.downgrade();
+            let authorization = Arc::clone(authorization);
+            drop(tokio::spawn(async move {
+                flush_expired_denial_window(&store, &authorization, deadline).await;
+            }));
+        }
     }
 
     /// Submit a proposed action without an idempotency key or cursor.
@@ -3300,7 +3775,8 @@ impl Gateway {
         entity_id: &str,
         signal: &SocietySignal,
     ) -> Result<Event, GatewayError> {
-        let timeline = parse_timeline_id(timeline_id)?;
+        let timeline =
+            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
         let entity = parse_entity_id(entity_id)?;
         let draft = draft_signal(entity, signal);
         debug_assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
@@ -3309,6 +3785,10 @@ impl Gateway {
 
     /// The owned-Event ceiling uses this Timeline's store head. Logical Events
     /// inherited by a Fork are readable but do not consume the Fork's ceiling.
+    ///
+    /// `timeline` is never taken from a client as is: every caller passes it
+    /// through [`Self::client_timeline`] first, so no client append reaches
+    /// a host Timeline.
     async fn append_draft(
         &self,
         timeline: TimelineId,
@@ -3411,6 +3891,7 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3426,6 +3907,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3450,16 +3932,117 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 }
 
-const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
+/// Whole seconds until a retry may succeed: a partial second rounds up, and
+/// a retry is never advertised sooner than one second.
+fn whole_retry_seconds(retry_after: std::time::Duration) -> u64 {
+    retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+        .max(1)
+}
+
+/// Pause before the one retry of a failed window flush.
+const DENIAL_FLUSH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Write one batch of denial evidence and settle its markers: a marker whose
+/// record committed is acknowledged, every other handed-out count (store
+/// fault, full log, dropped or unknown command) returns to pending for a
+/// later marker. An unknown outcome may thus be counted twice, never zero
+/// times.
+async fn write_denial_evidence(
+    store: &executor::StoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+) -> Result<DenialEvidenceReceipt, executor::StoreExecutorError> {
+    let handed_out = batch.markers().to_vec();
+    let receipt = store
+        .record_denial_evidence(Arc::clone(authorization), batch)
+        .await;
+    authorization.settle_denial_markers(
+        &handed_out,
+        receipt
+            .as_ref()
+            .map_or(&[][..], DenialEvidenceReceipt::committed),
+    );
+    receipt
+}
+
+/// Run [`write_denial_evidence`] on its own task and await it. A caller
+/// dropped mid-await (a client disconnect) cannot interrupt the hand-out,
+/// store write and settlement, while an awaiting caller still answers the
+/// denial only after its record committed. A task that cannot finish is
+/// answered as unavailable evidence.
+async fn write_denial_evidence_detached(
+    store: executor::StoreExecutor,
+    authorization: Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+) -> Result<Option<RecordedAuthorityDenial>, executor::StoreExecutorError> {
+    tokio::spawn(async move {
+        write_denial_evidence(&store, &authorization, batch)
+            .await
+            .map(|receipt| receipt.denial())
+    })
+    .await
+    .unwrap_or(Ok(None))
+}
+
+/// Record every pending suppression count as markers; nothing is written
+/// when no count is pending. Returns whether every marker this flush handed
+/// out committed, so counts suppressed meanwhile never cause a retry.
+async fn flush_denial_markers(
+    store: &executor::StoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+) -> bool {
+    let batch = authorization.take_denial_markers();
+    let handed_out = batch.markers().len();
+    batch.is_empty()
+        || write_denial_evidence(store, authorization, batch)
+            .await
+            .is_ok_and(|receipt| receipt.committed().len() == handed_out)
+}
+
+/// Flush through `store` while its executor is alive; an executor that is
+/// gone (its Gateway was dropped) leaves nothing to write to.
+async fn flush_denial_markers_if_live(
+    store: &executor::WeakStoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+) -> bool {
+    match store.upgrade() {
+        Some(store) => flush_denial_markers(&store, authorization).await,
+        None => true,
+    }
+}
+
+/// Wait for a saturated window to expire, then flush its counts, retrying
+/// once after [`DENIAL_FLUSH_RETRY_DELAY`] when a marker did not commit.
+/// Counts a store still refuses stay pending for the next window, flush or
+/// shutdown.
+async fn flush_expired_denial_window(
+    store: &executor::WeakStoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+    deadline: std::time::Instant,
+) {
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    if !flush_denial_markers_if_live(store, authorization).await {
+        tokio::time::sleep(DENIAL_FLUSH_RETRY_DELAY).await;
+        flush_denial_markers_if_live(store, authorization).await;
+    }
+}
+
+/// The stable error of an authorization failure that is not answered as a
+/// recorded denial: a denial that has not been recorded fails closed as
+/// unavailable evidence.
+const fn map_authorization_error(error: &GatewayAuthorizationError) -> GatewayError {
     match error {
         GatewayAuthorizationError::AuthenticationUnavailable
         | GatewayAuthorizationError::AuthorityUnavailable => GatewayError::AuthorizationUnavailable,
         GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
-        GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
+        GatewayAuthorizationError::Denied(_) => GatewayError::AuthorizationEvidenceUnavailable,
     }
 }
 
@@ -3650,9 +4233,6 @@ pub struct ActionRequest {
     pub payload: serde_json::Value,
     /// Capability required to submit the action.
     pub capability: String,
-    /// Optional external ingress identity for retry-safe append.
-    #[serde(default)]
-    pub ingress_id: Option<String>,
 }
 
 fn default_action_type() -> String {
@@ -3845,10 +4425,10 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
 
         assert!(!gateway.has_authorization());
-        let timeline = gateway.create_timeline("foundation").await.test_ok();
+        let timeline = gateway.create_timeline("foundation", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let page = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
         assert!(page.events.is_empty());
@@ -3868,20 +4448,232 @@ mod tests {
         drop(gateway);
     }
 
+    /// ADR-134 §7: registration follows the bound mode's selection (Local
+    /// `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135) and fails
+    /// closed in both modes until #461 installs an EPF1.
     #[tokio::test]
     async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
-        let host = ErasureExecutionHostV1::open_verified_empty(
-            StoreConfig::Memory,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .test_ok();
+        for mode in [
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
+        ] {
+            let mut host = ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+            let binding = crate::mode_profile::test_bound_host(&mut host, mode);
+            assert!(matches!(
+                Gateway::new_with_erasure_host_and_authorization(
+                    host,
+                    [EntityId::new()],
+                    crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                    &binding,
+                ),
+                Err(GatewayError::ActionRegistry(_))
+            ));
+        }
+    }
+
+    /// The exhaustive oracle of the family table: a new outcome kind fails to
+    /// compile here until it is routed.
+    const fn oracle_family(kind: pos_core::PipelineOutcomeKindV1) -> NotAdmitted {
+        match kind {
+            pos_core::PipelineOutcomeKindV1::Rejected
+            | pos_core::PipelineOutcomeKindV1::InvalidPluginResult
+            | pos_core::PipelineOutcomeKindV1::InvalidProviderResult
+            | pos_core::PipelineOutcomeKindV1::Committed
+            | pos_core::PipelineOutcomeKindV1::RecoveredDuplicate => NotAdmitted::Rejected,
+            pos_core::PipelineOutcomeKindV1::InvalidObservation
+            | pos_core::PipelineOutcomeKindV1::DomainConflict
+            | pos_core::PipelineOutcomeKindV1::AdmissionConflict => NotAdmitted::Stale,
+            pos_core::PipelineOutcomeKindV1::AuthorityRevoked
+            | pos_core::PipelineOutcomeKindV1::AuthorityExpired
+            | pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration => {
+                NotAdmitted::HostFault
+            }
+            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
+            pos_core::PipelineOutcomeKindV1::ResourceExhausted => NotAdmitted::LimitReached,
+            pos_core::PipelineOutcomeKindV1::DependencySetExhausted => NotAdmitted::SetExhausted,
+            pos_core::PipelineOutcomeKindV1::ModeBindingStale => NotAdmitted::ModeBindingStale,
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_kind(
+        variant: pos_core::PipelineOutcomeKindV1,
+    ) -> Option<pos_core::PipelineOutcomeKindV1> {
+        match variant {
+            pos_core::PipelineOutcomeKindV1::Rejected => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidObservation)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidObservation => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityRevoked)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityRevoked => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityExpired)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityExpired => {
+                Some(pos_core::PipelineOutcomeKindV1::PolicyIndeterminate)
+            }
+            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate => {
+                Some(pos_core::PipelineOutcomeKindV1::ResourceExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::ResourceExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidPluginResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidPluginResult => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidProviderResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidProviderResult => {
+                Some(pos_core::PipelineOutcomeKindV1::DomainConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::DomainConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::AdmissionConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::AdmissionConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::Committed)
+            }
+            pos_core::PipelineOutcomeKindV1::Committed => {
+                Some(pos_core::PipelineOutcomeKindV1::RecoveredDuplicate)
+            }
+            pos_core::PipelineOutcomeKindV1::RecoveredDuplicate => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration => {
+                Some(pos_core::PipelineOutcomeKindV1::DependencySetExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::DependencySetExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::ModeBindingStale)
+            }
+            pos_core::PipelineOutcomeKindV1::ModeBindingStale => None,
+        }
+    }
+
+    #[test]
+    fn every_outcome_kind_routes_through_the_family_table() {
+        let mut walked = 0;
+        let mut last = pos_core::PipelineOutcomeKindV1::Rejected;
+        let mut current = Some(pos_core::PipelineOutcomeKindV1::Rejected);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(
+                family_of_kind(variant),
+                oracle_family(variant),
+                "{variant:?}"
+            );
+            last = variant;
+            walked += 1;
+            current = next_kind(variant);
+        }
+        assert_eq!(walked, pos_core::PipelineOutcomeKindV1::COUNT);
+        assert_eq!(last as usize, pos_core::PipelineOutcomeKindV1::COUNT - 1);
+    }
+
+    /// The exhaustive oracle of the error table: a new family fails to
+    /// compile here until it is routed.
+    fn oracle_error(family: NotAdmitted, maximum: u64) -> GatewayError {
+        match family {
+            NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
+            NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
+            NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
+            NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
+            NotAdmitted::Stale => GatewayError::ActionObservationStale,
+            NotAdmitted::ModeBindingStale => GatewayError::Store(CoreError::ModeBindingStale),
+            NotAdmitted::Rejected => GatewayError::ActionRejected(
+                ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
+            ),
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_family(variant: NotAdmitted) -> Option<NotAdmitted> {
+        match variant {
+            NotAdmitted::PolicyUnavailable => Some(NotAdmitted::LimitReached),
+            NotAdmitted::LimitReached => Some(NotAdmitted::HostFault),
+            NotAdmitted::HostFault => Some(NotAdmitted::SetExhausted),
+            NotAdmitted::SetExhausted => Some(NotAdmitted::Stale),
+            NotAdmitted::Stale => Some(NotAdmitted::ModeBindingStale),
+            NotAdmitted::ModeBindingStale => Some(NotAdmitted::Rejected),
+            NotAdmitted::Rejected => None,
+        }
+    }
+
+    #[test]
+    fn every_family_routes_through_the_error_table() {
+        let mut walked = 0;
+        let mut last = NotAdmitted::PolicyUnavailable;
+        let mut current = Some(NotAdmitted::PolicyUnavailable);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(
+                format!("{:?}", not_admitted_error(variant, 9)),
+                format!("{:?}", oracle_error(variant, 9))
+            );
+            last = variant;
+            walked += 1;
+            current = next_family(variant);
+        }
+        assert_eq!(walked, NotAdmitted::COUNT);
+        assert_eq!(last as usize, NotAdmitted::COUNT - 1);
         assert!(matches!(
+            admission_unavailable(9),
+            GatewayError::ActionAdmissionUnavailable
+        ));
+    }
+
+    /// ADR-134 rev 5 M4 and D10: the handle must name the binding the host's
+    /// store records, and Air-Gapped refuses an authorizer that does not read
+    /// its authority from that one bound store.
+    #[test]
+    fn host_gateway_constructor_refuses_another_store_or_a_storeless_authorizer() {
+        use crate::mode_profile::{test_binding, test_bound_host, GatewayModeProfileIdV1};
+        let open = || {
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok()
+        };
+        let construct = |host, authorization, binding: &_| {
             Gateway::new_with_erasure_host_and_authorization(
                 host,
                 [EntityId::new()],
-                crate::authorization::test_authorization_for(EntityId::new()),
+                authorization,
+                binding,
+            )
+        };
+        assert!(matches!(
+            construct(
+                open(),
+                crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                &test_binding(GatewayModeProfileIdV1::Local, []),
             ),
-            Err(GatewayError::ActionRegistry(_))
+            Err(GatewayError::Store(CoreError::ModeBindingStale))
+        ));
+
+        let mut host = open();
+        drop(test_bound_host(&mut host, GatewayModeProfileIdV1::Local));
+        assert!(matches!(
+            construct(
+                host,
+                crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                &test_binding(GatewayModeProfileIdV1::AirGapped, []),
+            ),
+            Err(GatewayError::Store(CoreError::ModeBindingStale))
+        ));
+
+        let mut host = open();
+        let air_gapped = test_bound_host(&mut host, GatewayModeProfileIdV1::AirGapped);
+        assert!(matches!(
+            construct(
+                host,
+                crate::authorization::test_authorization_for(EntityId::new()),
+                &air_gapped,
+            ),
+            Err(GatewayError::AuthorizationUnavailable)
         ));
     }
 
@@ -3895,7 +4687,7 @@ mod tests {
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
-            Gateway::new_with_erasure_host(host),
+            Gateway::unprotected_for_harness(host),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
 
@@ -3904,6 +4696,10 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
+        let binding = crate::mode_profile::test_bound_host(
+            &mut host,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+        );
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
@@ -3911,6 +4707,7 @@ mod tests {
                 host,
                 std::iter::empty(),
                 crate::authorization::test_authorization_for(EntityId::new()),
+                &binding,
             ),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
@@ -3923,7 +4720,7 @@ mod tests {
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
-            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32])),
+            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32]), None),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
     }
@@ -4007,6 +4804,30 @@ mod tests {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
     }
 
+    /// No client append, through any seam, reaches a host Timeline
+    /// (ADR-136 §4a): an action naming one is refused before the store.
+    #[tokio::test]
+    async fn an_action_append_never_reaches_a_host_timeline() {
+        let gateway = memory_gw();
+        for host_timeline in [
+            local_principal::local_principal_consent_timeline(),
+            local_principal::local_principal_authority_timeline(),
+        ] {
+            assert!(matches!(
+                gateway
+                    .append_action(
+                        &host_timeline.to_string(),
+                        &EntityId::new().to_string(),
+                        EVENT_TYPE_ACTION,
+                        &serde_json::json!({}),
+                    )
+                    .await,
+                Err(GatewayError::ResourceUnavailable)
+            ));
+        }
+        drop(gateway);
+    }
+
     fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
         ConsentGrantedV1 {
             subject_id,
@@ -4064,8 +4885,11 @@ mod tests {
 
     #[test]
     fn gateway_action_registry_builder_propagates_binding_errors() {
-        let too_many_bodies =
-            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None);
+        let too_many_bodies = gateway_action_registry_builder(
+            std::iter::repeat(EntityId::new()),
+            None,
+            "live-local-v1",
+        );
         assert!(matches!(
             too_many_bodies,
             Err(pos_runtime::RuntimeError::OutputAdmission(
@@ -4106,7 +4930,7 @@ mod tests {
                     "world.unowned".to_owned(),
                 )),
                 ConsentAuthority::new(),
-                None,
+                GatewayProtection::Unprotected,
             ),
             Err(GatewayError::ActionRegistry(
                 pos_runtime::RuntimeError::UnknownEventType(_)
@@ -4215,7 +5039,10 @@ mod tests {
             authorization,
         )
         .test_ok();
-        let timeline = gateway.create_timeline("authority-action").await.test_ok();
+        let timeline = gateway
+            .create_timeline("authority-action", None)
+            .await
+            .test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
             "body_entity_id": body,
@@ -4256,7 +5083,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(revoked, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            revoked,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
+        ));
 
         let denied = gateway
             .submit_json_action(
@@ -4268,7 +5098,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            denied,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
+        ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -4287,7 +5120,10 @@ mod tests {
         let gateway =
             super::gateway_with_erasure_host_and_authorization(host, [body], authorization)
                 .test_ok();
-        let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
+        let timeline = gateway
+            .create_timeline("host-owned-action", None)
+            .await
+            .test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
             "body_entity_id": body,
@@ -4371,7 +5207,7 @@ mod tests {
             super::gateway_with_erasure_host_and_authorization(host, [body], authorization)
                 .test_ok();
         let timeline = gateway
-            .create_timeline("host-authority-commit-recheck")
+            .create_timeline("host-authority-commit-recheck", None)
             .await
             .test_ok();
         let payload = serde_json::json!({
@@ -4425,7 +5261,7 @@ mod tests {
         )
         .test_ok();
         let timeline = gateway
-            .create_timeline("action-event-ceiling")
+            .create_timeline("action-event-ceiling", None)
             .await
             .test_ok();
         let payload = serde_json::json!({
@@ -4591,7 +5427,7 @@ mod tests {
                     "boundary-denied-actor",
                 )
                 .await,
-            Err(GatewayError::AuthorizationDenied)
+            Err(GatewayError::AuthorizationDenied(denial)) if denial.denial() == GatewayAuthorityDenial::Unauthorized
         ));
         assert!(matches!(
             gateway
@@ -4655,7 +5491,7 @@ mod tests {
         )
         .test_ok();
         let timeline = gateway
-            .create_timeline("authority-action-boundaries")
+            .create_timeline("authority-action-boundaries", None)
             .await
             .test_ok();
         let timeline_id = timeline.id().to_string();
@@ -4713,7 +5549,10 @@ mod tests {
             [],
             authorization,
         );
-        let timeline = gateway.create_timeline("authority-read").await.test_ok();
+        let timeline = gateway
+            .create_timeline("authority-read", None)
+            .await
+            .test_ok();
         let unguarded_page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
@@ -4737,7 +5576,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            denied,
+            GatewayError::AuthorizationEvidenceUnavailable
+        ));
         let invalid_timeline = gateway
             .read_events_page_authorized(
                 "not-a-timeline",
@@ -4766,7 +5608,7 @@ mod tests {
                 .test_err();
             assert!(matches!(
                 mismatched_range,
-                GatewayError::AuthorizationDenied
+                GatewayError::InvalidAuthorizationRequest
             ));
         }
 
@@ -4783,7 +5625,7 @@ mod tests {
             crate::authorization::test_authorization_for(actor),
         );
         let timeline = gateway
-            .create_timeline("authorized-public-cursor")
+            .create_timeline("authorized-public-cursor", None)
             .await
             .test_ok();
         let id = timeline.id().to_string();
@@ -4832,7 +5674,7 @@ mod tests {
             gateway
                 .read_events_page_authorized_after(&id, cursor, 1, EntityId::new())
                 .await,
-            Err(GatewayError::AuthorizationDenied)
+            Err(GatewayError::AuthorizationEvidenceUnavailable)
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4845,9 +5687,9 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let timeline = gateway
-            .create_timeline("generationless-cursor")
+            .create_timeline("generationless-cursor", None)
             .await
             .test_ok();
         // A cursor issued by an unhosted Gateway cannot continue under a host.
@@ -4893,7 +5735,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             substituted_operation,
-            GatewayError::AuthorizationDenied
+            GatewayError::AuthorizationEvidenceUnavailable
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4907,14 +5749,20 @@ mod tests {
             [],
             crate::authorization::test_expired_authorization_for(actor),
         );
-        let timeline = gateway.create_timeline("expired-read").await.test_ok();
+        let timeline = gateway
+            .create_timeline("expired-read", None)
+            .await
+            .test_ok();
         let request =
             GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::from_micros(1));
         let error = gateway
             .read_events_page_authorized(&timeline.id().to_string(), 0, 1, request)
             .await
             .test_err();
-        assert!(matches!(error, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            error,
+            GatewayError::AuthorizationEvidenceUnavailable
+        ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -5010,7 +5858,7 @@ mod tests {
             crate::authorization::test_authorization_unavailable_for(actor),
         );
         let timeline = gateway
-            .create_timeline("authority-unavailable")
+            .create_timeline("authority-unavailable", None)
             .await
             .test_ok();
         let error = gateway
@@ -5352,7 +6200,7 @@ mod tests {
             Gateway::with_executor_for_test(executor::StoreExecutor::from_sender_for_test(tx));
 
         assert!(matches!(
-            gateway.create_timeline("closed").await,
+            gateway.create_timeline("closed", None).await,
             Err(GatewayError::StoreExecutorClosed)
         ));
         assert!(matches!(
@@ -5375,7 +6223,7 @@ mod tests {
             Gateway::with_executor_for_test(executor::StoreExecutor::from_sender_for_test(tx));
 
         assert!(matches!(
-            gateway.create_timeline("closed-queue").await,
+            gateway.create_timeline("closed-queue", None).await,
             Err(GatewayError::StoreExecutorClosed)
         ));
         drop(gateway);
@@ -5449,7 +6297,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn create_timeline_and_append_action_roundtrip() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").await.test_ok();
+        let tl = gw.create_timeline("demo", None).await.test_ok();
         let entity = EntityId::new().to_string();
         let event = gw
             .append_action(
@@ -5475,7 +6323,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_issues_only_canonical_consent_events_at_the_bound_sequence() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("consent-host").await.test_ok();
+        let timeline = gateway
+            .create_timeline("consent-host", None)
+            .await
+            .test_ok();
         let mut notices = gateway.subscribe();
         let grant = consent_grant(EntityId::new(), 1);
 
@@ -5576,7 +6427,7 @@ mod tests {
         )
         .test_ok();
         let timeline = gateway
-            .create_timeline("consent-dedup-cleanup")
+            .create_timeline("consent-dedup-cleanup", None)
             .await
             .test_ok();
         let timeline_id = timeline.id().to_string();
@@ -5722,7 +6573,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_rejects_a_consent_grant_with_a_stale_sequence_before_append() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("consent-sequence").await.test_ok();
+        let timeline = gateway
+            .create_timeline("consent-sequence", None)
+            .await
+            .test_ok();
         let error = gateway
             .issue_consent_grant(
                 &timeline.id().to_string(),
@@ -5745,7 +6599,7 @@ mod tests {
             mode: ScriptMode::FailAppend,
         }));
         let timeline = gateway
-            .create_timeline("consent-grant-append-error")
+            .create_timeline("consent-grant-append-error", None)
             .await
             .test_ok();
         let error = gateway
@@ -5774,7 +6628,7 @@ mod tests {
             },
         );
         let timeline = gateway
-            .create_timeline("consent-grant-errors")
+            .create_timeline("consent-grant-errors", None)
             .await
             .test_ok();
         let subject = EntityId::new();
@@ -5813,7 +6667,7 @@ mod tests {
             },
         );
         let timeline = gateway
-            .create_timeline("consent-revocation-test")
+            .create_timeline("consent-revocation-test", None)
             .await
             .test_ok();
         let (grant_event, token) = gateway
@@ -5837,7 +6691,7 @@ mod tests {
             },
         );
         let timeline = gateway
-            .create_timeline("consent-revocation-unknown")
+            .create_timeline("consent-revocation-unknown", None)
             .await
             .test_ok();
         let unknown = ConsentRevokedV1 {
@@ -5935,7 +6789,11 @@ mod tests {
     #[tokio::test]
     async fn consent_history_lock_is_shared_by_gateway_clones() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("consent-lock").await.test_ok().id();
+        let timeline = gateway
+            .create_timeline("consent-lock", None)
+            .await
+            .test_ok()
+            .id();
         let guard = gateway.lock_consent_timeline(timeline).await;
         let clone = gateway.clone();
         let grant_task = tokio::spawn(async move {
@@ -5959,7 +6817,7 @@ mod tests {
             mode: ScriptMode::FailConsentRevocationAppend,
         }));
         let timeline = gateway
-            .create_timeline("consent-revocation-append-error")
+            .create_timeline("consent-revocation-append-error", None)
             .await
             .test_ok();
         let (_, token) = gateway
@@ -6029,8 +6887,14 @@ mod tests {
                 max_events_per_timeline: 2,
             },
         );
-        timeline_limited.create_timeline("one").await.test_ok();
-        let err = timeline_limited.create_timeline("two").await.test_err();
+        timeline_limited
+            .create_timeline("one", None)
+            .await
+            .test_ok();
+        let err = timeline_limited
+            .create_timeline("two", None)
+            .await
+            .test_err();
         assert!(matches!(
             err,
             GatewayError::TimelineLimitReached { maximum: 1 }
@@ -6043,7 +6907,10 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = event_limited.create_timeline("events").await.test_ok();
+        let timeline = event_limited
+            .create_timeline("events", None)
+            .await
+            .test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         event_limited
@@ -6089,8 +6956,8 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        gateway.create_timeline("second-root").await.test_ok();
-        let error = gateway.create_timeline("third-root").await.test_err();
+        gateway.create_timeline("second-root", None).await.test_ok();
+        let error = gateway.create_timeline("third-root", None).await.test_err();
         assert!(matches!(
             error,
             GatewayError::TimelineLimitReached { maximum: 2 }
@@ -6104,7 +6971,7 @@ mod tests {
         let gateway = Gateway::new(Box::new(ScriptedStore {
             mode: ScriptMode::RejectListUse,
         }));
-        gateway.create_timeline("root").await.test_ok();
+        gateway.create_timeline("root", None).await.test_ok();
         drop(gateway);
     }
 
@@ -6195,7 +7062,7 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = gateway.create_timeline("sqlite").await.test_ok();
+        let timeline = gateway.create_timeline("sqlite", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         let first = gateway.clone();
@@ -6486,7 +7353,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_rejects_payloads_that_cannot_fit_bounded_responses() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("payload").await.test_ok();
+        let timeline = gateway.create_timeline("payload", None).await.test_ok();
         let payload = serde_json::json!({"data": "x".repeat(MAX_EVENT_PAYLOAD_BYTES)});
         let error = gateway
             .append_action(
@@ -6560,6 +7427,52 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn scan_chunk_of_maximum_events_fits_the_page_byte_budget() {
+        // One scan chunk holds `MAX_EVENTS_PER_POLL + 1` Events and must
+        // budget each at the per-Event payload and type maxima. Sixty-one
+        // maximum Events are the fewest whose bytes exceed
+        // `(MAX_EVENTS_PER_POLL + 1) * (MAX_EVENT_PAYLOAD_BYTES -
+        // MAX_EVENT_TYPE_BYTES)`, so a budget that subtracts the type
+        // allowance instead of adding it refuses this page.
+        const EVENTS: usize = 61;
+        const _: () = assert!(
+            EVENTS * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES)
+                > (MAX_EVENTS_PER_POLL + 1) * (MAX_EVENT_PAYLOAD_BYTES - MAX_EVENT_TYPE_BYTES)
+        );
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
+        let timeline = store.create_timeline("maximum-events").test_ok();
+        let entity = EntityId::new();
+        for _ in 0..EVENTS {
+            store
+                .append(
+                    timeline.id(),
+                    &[EventDraft::new(
+                        entity,
+                        Kind::new("x".repeat(MAX_EVENT_TYPE_BYTES)),
+                        CanonicalBytes::from_vec(vec![0xff; MAX_EVENT_PAYLOAD_BYTES]),
+                    )],
+                )
+                .test_ok();
+        }
+
+        let page = Gateway::new(store)
+            .read_events_page(&timeline.id().to_string(), 0, MAX_EVENTS_PER_POLL)
+            .await
+            .test_ok();
+
+        assert_eq!(page.events.len(), EVENTS);
+        assert_eq!(page.next_from_seq, None);
+        assert!(page.next_cursor.is_none());
+        for (seq, event) in (1_u64..).zip(&page.events) {
+            assert_eq!(event.seq, Seq::from_u64(seq));
+            assert_eq!(event.event_type.as_str().len(), MAX_EVENT_TYPE_BYTES);
+            assert_eq!(event.payload.as_slice().len(), MAX_EVENT_PAYLOAD_BYTES);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn admission_budgets_the_exact_worst_case_cursor_boundary() {
         let entity = EntityId::new();
         let mut boundary = None;
@@ -6591,7 +7504,10 @@ mod tests {
         }
         let payload = boundary.test_ok();
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("cursor-boundary").await.test_ok();
+        let timeline = gateway
+            .create_timeline("cursor-boundary", None)
+            .await
+            .test_ok();
         let error = gateway
             .append_action(
                 &timeline.id().to_string(),
@@ -6629,7 +7545,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_rejects_zero_limit() {
         let gw = memory_gw();
-        let timeline = gw.create_timeline("zero").await.test_ok();
+        let timeline = gw.create_timeline("zero", None).await.test_ok();
         let err = gw
             .read_events_page(&timeline.id().to_string(), 0, 0)
             .await
@@ -6647,7 +7563,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn empty_event_page_has_no_cursor() {
         let gw = memory_gw();
-        let timeline = gw.create_timeline("empty").await.test_ok();
+        let timeline = gw.create_timeline("empty", None).await.test_ok();
         let page = gw
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
@@ -6661,7 +7577,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_cursor_is_first_omitted_sequence_and_none_at_exhaustion() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("cursor").await.test_ok();
+        let timeline = gateway.create_timeline("cursor", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         for value in 0..2 {
@@ -6690,7 +7606,7 @@ mod tests {
     #[tokio::test]
     async fn event_pages_filter_protected_events_before_deriving_cursors() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("mixed-scope").await.test_ok();
+        let timeline = gateway.create_timeline("mixed-scope", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let drafts = [
             EVENT_TYPE_ACTION,
@@ -6746,7 +7662,7 @@ mod tests {
     async fn event_pages_bound_protected_scans_and_resume_at_public_events() {
         let gateway = memory_gw();
         let timeline = gateway
-            .create_timeline("protected-scan-cap")
+            .create_timeline("protected-scan-cap", None)
             .await
             .test_ok();
         let mut drafts = (0..1_000)
@@ -6786,11 +7702,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_full_page_filled_by_one_scan_chunk_still_finds_the_next_public_event() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("protected-chunk-boundary", None)
+            .await
+            .test_ok();
+        let draft = |kind: &str| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(kind),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        };
+        // The first scan chunk holds exactly one public Event and is full, so
+        // only a further chunk can reveal whether another public Event exists.
+        let mut drafts = vec![draft(EVENT_TYPE_ACTION)];
+        drafts.extend((0..MAX_EVENTS_PER_POLL).map(|_| draft("persona.profile")));
+        drafts.push(draft(EVENT_TYPE_ACTION));
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok();
+        assert_eq!(
+            page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1]
+        );
+        let last = u64::try_from(MAX_EVENTS_PER_POLL).test_ok() + 2;
+        assert_eq!(page.next_from_seq, Some(Seq::from_u64(last)));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[allow(deprecated)]
     async fn public_page_api_and_compatibility_shim_remain_bounded() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("public-api").await.test_ok();
+        let timeline = gateway.create_timeline("public-api", None).await.test_ok();
         let drafts: Vec<_> = (0..=MAX_EVENTS_PER_POLL)
             .map(|_| {
                 EventDraft::new(
@@ -6890,7 +7844,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn append_action_rejects_other_types() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").await.test_ok();
+        let tl = gw.create_timeline("demo", None).await.test_ok();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -6912,7 +7866,7 @@ mod tests {
     async fn append_signal_and_bus_notice() {
         let gw = memory_gw();
         let mut rx = gw.subscribe();
-        let tl = gw.create_timeline("society").await.test_ok();
+        let tl = gw.create_timeline("society", None).await.test_ok();
         let signal = SocietySignal {
             dimension: SocietyDimension::Trust,
             value: 0.8,
@@ -6945,7 +7899,7 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
-        let tl = gw.create_timeline("ids").await.test_ok();
+        let tl = gw.create_timeline("ids", None).await.test_ok();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -7043,9 +7997,10 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
-            fail_create.create_timeline("x").await,
+            fail_create.create_timeline("x", None).await,
             Err(GatewayError::Store(_))
         ));
 
@@ -7061,9 +8016,10 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
-            fail_list.create_timeline("x").await,
+            fail_list.create_timeline("x", None).await,
             Err(GatewayError::Store(_))
         ));
         drop(fail_create);
@@ -7105,6 +8061,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             missing
@@ -7149,8 +8106,9 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
-        let tl = empty_append.create_timeline("e").await.test_ok();
+        let tl = empty_append.create_timeline("e", None).await.test_ok();
         let err = empty_append
             .append_action(
                 &tl.id().to_string(),
@@ -7174,6 +8132,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_get_timeline
             .append_action(
@@ -7198,8 +8157,9 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
-        let tl = fail_append.create_timeline("a").await.test_ok();
+        let tl = fail_append.create_timeline("a", None).await.test_ok();
         let err = fail_append
             .append_action(
                 &tl.id().to_string(),
@@ -7223,6 +8183,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -7282,6 +8243,7 @@ mod tests {
                 pending_consent_cleanup: new_pending_consent_cleanup(),
                 action_registry: gateway_action_registry(),
                 authorization: None,
+                authorization_required: false,
             };
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -7296,7 +8258,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_view_and_hex() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("x").await.test_ok();
+        let tl = gw.create_timeline("x", None).await.test_ok();
         let event = gw
             .append_action(
                 &tl.id().to_string(),
@@ -7356,7 +8318,7 @@ mod tests {
 
         let gw = Gateway::with_bus_capacity(open_store(StoreConfig::Memory).test_ok(), 2);
         let mut rx = gw.subscribe();
-        let tl = gw.create_timeline("lag").await.test_ok();
+        let tl = gw.create_timeline("lag", None).await.test_ok();
         let entity = EntityId::new().to_string();
         let id = tl.id().to_string();
         for _ in 0..3 {
@@ -7415,7 +8377,7 @@ mod tests {
             crate::authorization::test_authorization_for(actor),
         )
         .test_ok();
-        let timeline = gateway.create_timeline("raw-actions").await.test_ok();
+        let timeline = gateway.create_timeline("raw-actions", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let canonical = WorldActionV1 {
             actor_entity_id: actor,
@@ -7475,7 +8437,10 @@ mod tests {
             .submit_proposed_action(&timeline_id, legacy)
             .await
             .test_err();
-        assert!(matches!(error, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            error,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
+        ));
         let valid = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             actor,
@@ -7514,7 +8479,7 @@ mod tests {
             crate::authorization::test_authorization_for(actor),
         )
         .test_ok();
-        let tl = gw.create_timeline("actions").await.test_ok();
+        let tl = gw.create_timeline("actions", None).await.test_ok();
         let action = WorldActionV1 {
             actor_entity_id: actor,
             body_entity_id: body,
@@ -7551,7 +8516,10 @@ mod tests {
             .submit_proposed_action(&tl.id().to_string(), bad_cap)
             .await
             .test_err();
-        assert!(matches!(err, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            err,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
+        ));
 
         // Approver rejection
         let invalid = ProposedAction::new(
@@ -7610,9 +8578,9 @@ mod coverage_entrypoints {
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
-        let gateway = Gateway::new_with_erasure_host(host)?;
+        let gateway = Gateway::unprotected_for_harness(host)?;
         assert_eq!(gateway.erasure_status().await?, ErasureHostStatusV1::Ready);
-        let timeline = gateway.create_timeline("host-owned-gateway").await?;
+        let timeline = gateway.create_timeline("host-owned-gateway", None).await?;
         let entity = EntityId::new();
         gateway
             .append_action(

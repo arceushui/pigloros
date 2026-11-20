@@ -11,6 +11,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -224,6 +225,93 @@ class CoverageIsolationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertNotIn("Traceback", result.stderr)
+
+
+def coverage_report(root: str = "/work/repo") -> dict:
+    paths = ["src/lib.rs", "src/adapter/future+[1].rs", "src/ffi/ops.rs",
+             "src/ffi/nested/windows.rs", "src/fixtures/crates/pos-core/safe.rs"]
+    return {"data": [{"files": [
+        {"filename": f"{root}/{TOOL.SHIM_DIRECTORY}/{path}", "summary": {
+            "lines": {"count": 10}, "regions": {"count": 20}
+        }} for path in paths
+    ]}]}
+
+
+class FullFileScopeTests(unittest.TestCase):
+    def test_each_original_file_has_exactly_its_selected_floor(self) -> None:
+        for root in ["/work/repo", r"C:\work\repo", "//server/share/repo"]:
+            for separator in ["/", "\\"]:
+                value = metadata(root)
+                report = coverage_report(root)
+                for file in report["data"][0]["files"]:
+                    file["filename"] = file["filename"].replace("/", separator)
+                for scope in ["safe", "ffi"]:
+                    expression = TOOL.coverage_scope_regex(value, report, scope)
+                    for file in report["data"][0]["files"]:
+                        path = file["filename"]
+                        ffi = "/src/ffi/" in path.replace("\\", "/")
+                        self.assertEqual(bool(re.search(expression, path)), ffi if scope == "safe" else not ffi)
+                    for file in TOOL.report_paths(value, report):
+                        ffi = "/src/ffi/" in file
+                        self.assertEqual(bool(re.search(expression, file)), ffi if scope == "safe" else not ffi)
+
+    def test_drive_case_normalization_and_literal_scope_paths(self) -> None:
+        value = metadata(r"C:\work\repo+[1]")
+        report = coverage_report(r"c:\work\repo+[1]")
+        for scope in ["safe", "ffi"]:
+            TOOL.coverage_scope_regex(value, report, scope)
+        expression = TOOL.coverage_scope_regex(value, report, "ffi")
+        self.assertIsNone(re.search(expression, "crates/pos-owner-bridge-windows/src/ffi/adapter/future+[1].rs"))
+        self.assertIsNotNone(re.search(expression, "crates/pos-owner-bridge-windows/src/adapter/future+[1].rs"))
+
+    def test_unknown_paths_and_empty_or_malformed_scopes_fail_closed(self) -> None:
+        value = metadata()
+        for filename in [
+            "/different/repo/crates/pos-owner-bridge-windows/src/lib.rs",
+            "/work/repo/crates/pos-core/src/lib.rs", "crates/pos-owner-bridge-windows/tests/public.rs",
+            "crates/pos-owner-bridge-windows/src/../ffi/ops.rs", "crates/pos-owner-bridge-windows/src/ops.py",
+            "crates/pos-owner-bridge-windows/src/x\n.rs",
+        ]:
+            report = coverage_report()
+            report["data"][0]["files"][0]["filename"] = filename
+            with self.subTest(filename=filename), self.assertRaises(TOOL.MetadataError):
+                TOOL.coverage_scope_regex(value, report, "safe")
+        for report in [None, {}, {"data": []}, {"data": [{}]}, {"data": [{"files": []}]}]:
+            with self.assertRaises(TOOL.MetadataError):
+                TOOL.report_paths(value, report)
+        for count in [None, -1, True, 1.5]:
+            report = coverage_report()
+            report["data"][0]["files"][0]["summary"]["lines"]["count"] = count
+            with self.assertRaises(TOOL.MetadataError):
+                TOOL.report_paths(value, report)
+        for ffi in [False, True]:
+            report = coverage_report()
+            report["data"][0]["files"] = [f for f in report["data"][0]["files"]
+                if ("/src/ffi/" in f["filename"]) == ffi]
+            with self.assertRaises(TOOL.MetadataError):
+                TOOL.report_paths(value, report)
+        with self.assertRaises(TOOL.MetadataError):
+            TOOL.coverage_scope_regex(value, coverage_report(), "unknown")
+
+    def test_cli_generates_scopes_and_lists_only_native_report_paths(self) -> None:
+        value = metadata(r"C:\work\repo")
+        report = coverage_report(r"C:\work\repo")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            for scope in ["safe", "ffi"]:
+                result = subprocess.run([sys.executable, str(SCRIPT), "--scope", scope, "--report", str(path)],
+                    input=json.dumps(value), encoding="utf-8", capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, TOOL.coverage_scope_regex(value, report, scope) + "\n")
+            result = subprocess.run([sys.executable, str(SCRIPT), "--list-report", "--report", str(path)],
+                input=json.dumps(value), encoding="utf-8", capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), TOOL.report_paths(value, report))
+        result = subprocess.run([sys.executable, str(SCRIPT), "--scope", "safe"],
+            input=json.dumps(value), encoding="utf-8", capture_output=True, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

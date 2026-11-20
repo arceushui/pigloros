@@ -1,6 +1,9 @@
 //! Strict local HTTP decoding for V1 `OwnTracks` ingress.
 
-use crate::{Gateway, GatewayError, OwnTracksIngressResult};
+use crate::{
+    problem::{ProblemCodeV1, ProblemV1},
+    Gateway, GatewayError, OwnTracksIngressResult,
+};
 use axum::{
     body::{to_bytes, Body},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -15,24 +18,44 @@ pub(crate) const OWNTRACKS_MAX_BODY_BYTES: usize = 65_536;
 
 pub(crate) async fn post_owntracks(gateway: Gateway, headers: HeaderMap, body: Body) -> Response {
     let Ok(bytes) = to_bytes(body, OWNTRACKS_MAX_BODY_BYTES).await else {
-        return error(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large");
+        return error(ProblemV1::new(
+            ProblemCodeV1::ResourceLimitExceeded,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "body_too_large",
+        ));
     };
     if bytes.is_empty() {
         return (StatusCode::OK, "[]").into_response();
     }
     if !is_json(&headers) {
-        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type");
+        return error(ProblemV1::new(
+            ProblemCodeV1::InvalidRequest,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        ));
     }
     let Some((handle, secret)) = basic_credentials(&headers) else {
-        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+        return error(ProblemV1::new(
+            ProblemCodeV1::Unauthenticated,
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ));
     };
     let payload = match minimize_location(&bytes) {
         Ok(payload) => payload,
         Err(LocationDecodeError::MalformedJson) => {
-            return error(StatusCode::BAD_REQUEST, "malformed_json");
+            return error(ProblemV1::new(
+                ProblemCodeV1::InvalidRequest,
+                StatusCode::BAD_REQUEST,
+                "malformed_json",
+            ));
         }
         Err(LocationDecodeError::InvalidLocation) => {
-            return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_location");
+            return error(ProblemV1::new(
+                ProblemCodeV1::InvalidRequest,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_location",
+            ));
         }
     };
     drop(bytes);
@@ -45,7 +68,14 @@ pub(crate) async fn post_owntracks(gateway: Gateway, headers: HeaderMap, body: B
 fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> Response {
     match result {
         Ok(OwnTracksIngressResult::RateLimited) => {
-            let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+            let mut response = error(
+                ProblemV1::new(
+                    ProblemCodeV1::ResourceLimitExceeded,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                )
+                .retryable(),
+            );
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
@@ -56,15 +86,27 @@ fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> 
         }
         Ok(OwnTracksIngressResult::Conflict)
         | Err(GatewayError::Store(CoreError::GeographicAdmissionValidationFailed)) => {
-            error(StatusCode::FORBIDDEN, "forbidden")
-        }
-        Ok(OwnTracksIngressResult::Unavailable) => {
-            error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+            error(ProblemV1::new(
+                ProblemCodeV1::Unauthorized,
+                StatusCode::FORBIDDEN,
+                "forbidden",
+            ))
         }
         Err(GatewayError::Store(CoreError::GeographicAdmissionAuthenticationFailed)) => {
-            error(StatusCode::UNAUTHORIZED, "unauthorized")
+            error(ProblemV1::new(
+                ProblemCodeV1::Unauthenticated,
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            ))
         }
-        Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+        Ok(OwnTracksIngressResult::Unavailable) | Err(_) => error(
+            ProblemV1::new(
+                ProblemCodeV1::TemporarilyUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+            )
+            .retryable(),
+        ),
     }
 }
 
@@ -187,8 +229,9 @@ const fn base64_value(value: u8) -> Option<u8> {
     }
 }
 
-fn error(status: StatusCode, code: &'static str) -> Response {
-    (status, format!("{{\"error\":\"{code}\"}}")).into_response()
+/// An `OwnTracks` ingress failure as a v1 problem; the Gateway router renders its body.
+fn error(problem: ProblemV1) -> Response {
+    problem.into_response()
 }
 
 #[cfg(test)]

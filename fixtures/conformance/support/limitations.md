@@ -30,9 +30,11 @@ evidence, not hosted conformance. The Experiment host binary is the replay
 subject adapter; it exists only with the `test-support` feature, because it
 needs the open fixture erasure gate and the generated Plugin registration.
 
-For the replay-conformance layer: the `replay-v1` and `live-local-v1`
-execution profiles are derived from `deterministic-local-v1`, each restricted
-to one reproducibility class; the Draft authority declares neither.
+For the replay-conformance layer: the `replay-v1`, `live-local-v1` and
+`live-air-gapped-v1` execution profiles are derived by the harness, each
+restricted to one reproducibility class: `replay-v1` and `live-local-v1` from
+`deterministic-local-v1`, and `live-air-gapped-v1` (ADR-135) from
+`deterministic-air-gapped-v1`. The Draft authority declares none of them.
 
 For the replay-conformance layer: the recomputation host enforces only part of
 the named execution profile. It refuses a manifest that enables network when
@@ -70,10 +72,9 @@ not as a kernel-audited Air-Gapped execution under the Sandbox Provider.
 
 For the gateway-client-conformance layer: results are Local-relaxation
 engineering evidence, not hosted conformance. The subject is the in-process
-Gateway router of `apps/pos-gateway-conformance-adapter`, which exists only
-with the `test-support` feature because its `authorized` composition uses the
-nonproduction fixture registration of the Gateway action registry and a
-fixture authority; no production authority is sourced from it.
+Gateway router of `apps/pos-gateway-conformance-adapter`, whose `authorized`
+composition is the production serve composition with a fixture Local Principal
+document; no production authority is sourced from it.
 
 For the gateway-client-conformance layer: the normative surface is the
 documented ADR-014 route table only; there is no OpenAPI document, Golden Path

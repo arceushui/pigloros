@@ -14,7 +14,7 @@ use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use pos_core::trusted_clock::{FixtureEvaluationInstantV1, FixtureWallSourceV1};
-use pos_core::Hash;
+use pos_core::{AuthorityTrustRootSealV1, Hash};
 use pos_plugin_release::InMemoryReleaseSourceV1;
 use pos_plugin_supervisor::{
     register_community_driver, CommunityDriverConfigV1, CommunityDriverSettingsV1,
@@ -81,24 +81,31 @@ pub trait SubCaseRunnerV1 {
 }
 
 /// The runner that launches the supervised worker program.
+///
+/// It carries the composition root's [`AuthorityTrustRootSealV1`] (ADR-129 A5.9, #1374) to the
+/// evaluation world of every sub-case.
 #[derive(Clone, Debug)]
 pub struct SupervisorRunnerV1 {
     program: WorkerProgramV1,
+    seal: &'static AuthorityTrustRootSealV1,
 }
 
 impl SupervisorRunnerV1 {
-    /// A runner whose Drivers launch `program`.
+    /// A runner whose Drivers launch `program` and whose worlds are opened with `seal`.
     #[must_use]
-    pub const fn new(program: WorkerProgramV1) -> Self {
-        Self { program }
+    pub const fn new(program: WorkerProgramV1, seal: &'static AuthorityTrustRootSealV1) -> Self {
+        Self { program, seal }
     }
 
     /// A runner whose Drivers launch the program at `path`, or `None` for a relative path. A
     /// path that holds no program is not an error here: the launch fails and the member is
     /// `WorkerCrashed`.
     #[must_use]
-    pub fn with_program(path: impl Into<PathBuf>) -> Option<Self> {
-        WorkerProgramV1::new(path.into()).map(Self::new)
+    pub fn with_program(
+        path: impl Into<PathBuf>,
+        seal: &'static AuthorityTrustRootSealV1,
+    ) -> Option<Self> {
+        WorkerProgramV1::new(path.into()).map(|program| Self::new(program, seal))
     }
 }
 
@@ -109,7 +116,7 @@ impl SubCaseRunnerV1 for SupervisorRunnerV1 {
         pieces: &PiecesV1,
         mode: CommunityPluginModeV1,
     ) -> SubCaseRecordV1 {
-        let mut port = EvaluationStepPortV1::new(self.program.clone());
+        let mut port = EvaluationStepPortV1::new(self.program.clone(), self.seal);
         interpret(subcase, pieces, &mut port, mode)
     }
 }
@@ -138,15 +145,18 @@ struct OpenWorld {
 /// The real port over the S1c2 world: logic-free beyond the wiring.
 pub struct EvaluationStepPortV1 {
     program: WorkerProgramV1,
+    seal: &'static AuthorityTrustRootSealV1,
     open: Option<OpenWorld>,
 }
 
 impl EvaluationStepPortV1 {
-    /// A port whose Drivers launch `program`; it has no world until [`StepPortV1::open()`].
+    /// A port whose Drivers launch `program` and whose world is opened with `seal`; it has no
+    /// world until [`StepPortV1::open()`].
     #[must_use]
-    pub const fn new(program: WorkerProgramV1) -> Self {
+    pub const fn new(program: WorkerProgramV1, seal: &'static AuthorityTrustRootSealV1) -> Self {
         Self {
             program,
+            seal,
             open: None,
         }
     }
@@ -382,7 +392,7 @@ impl StepPortV1 for EvaluationStepPortV1 {
         } = setup;
         let world = genesis
             .ok_or(UNAVAILABLE)
-            .and_then(|genesis| CommunityEvaluationWorldV1::open(&genesis));
+            .and_then(|genesis| CommunityEvaluationWorldV1::open(&genesis, self.seal));
         world.map(|world| {
             self.open = Some(OpenWorld {
                 world,
@@ -447,7 +457,10 @@ impl StepPortV1 for EvaluationStepPortV1 {
         self.open
             .as_ref()
             .and_then(|open| open.bound.last())
-            .map(|bound| bound.handle.committed_state().bytes)
+            .map(|bound| {
+                let mut state = bound.handle.committed_state();
+                std::mem::take(&mut state.bytes)
+            })
             .unwrap_or_default()
     }
 

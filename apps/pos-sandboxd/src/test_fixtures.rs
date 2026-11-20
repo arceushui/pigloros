@@ -23,14 +23,28 @@ use pos_reference::{
 use crate::{ActiveAttempt, AdmittedAttempt};
 
 // Shared test helpers remain reachable through this public, test-only module.
-pub use crate::attempt_registry::{root_record_fixture, with_io_fault};
-pub use crate::root_attachment::recorded_identity;
+pub use crate::attempt_registry::{
+    crash_io_now, in_lock_test_process, io_count, io_crashed, root_record_fixture, with_io_crash,
+    with_io_fault,
+};
+pub use crate::restart::{
+    restart_after_crash, CrashSurvivors, RestartClock, Restarted, UncertainProof, SHORT_DEADLINE,
+    SINCE_REQUEST,
+};
+pub use crate::root_attachment::{
+    attached_fixture_root, fake_root_release, recorded_identity, release_fake_root, released_root,
+    FakeRecoveredRoots, FakeRootRelease,
+};
+pub use crate::system_bus::{
+    peer_connections, TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop,
+};
 
 /// A complete recheck token for in-process port tests without a kernel mount.
 pub(crate) fn checked_root(attempt: &AdmittedAttempt) -> crate::CheckedRoot {
     crate::CheckedRoot::rechecked(
         crate::ActivatedRootDirectory::for_attempt(attempt.unit_name().attempt_component()),
         attempt.clone(),
+        crate::RootIdentity::FIXTURE,
     )
 }
 
@@ -72,6 +86,12 @@ pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 pub const RUNTIME_KEY_ID: &str = "runtime-key";
 /// Seed belonging to that test-only admitted public key.
 pub const RUNTIME_SEED: [u8; 32] = [0x52; 32];
+
+/// The AGR1 self-digest of [`admitted`].
+pub const GRANT_DIGEST: [u8; 32] = [0x53; 32];
+
+/// The RQE1 self-digest of [`active`].
+pub const RQE1_DIGEST: [u8; 32] = [0x54; 32];
 
 /// The selected, pinned syscall record used by admitted attempt port tests.
 pub fn syscall_set() -> TestResult<pos_reference::sandbox_provider_protocol::SandboxSyscallSet> {
@@ -122,6 +142,7 @@ pub fn active() -> TestResult<ActiveAttempt> {
     Ok(ActiveAttempt::record(
         admitted()?,
         Instant::now() + Duration::from_secs(30),
+        RQE1_DIGEST,
     ))
 }
 
@@ -289,4 +310,119 @@ pub mod attempt_directory {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/support/attempt_directory.rs"
     ));
+}
+
+/// A directory standing in for a bound cgroup whose `cgroup.procs` lists
+/// `main_pid`, and that directory held open.
+pub(crate) fn cgroup_listing(main_pid: u32) -> TestResult<(tempfile::TempDir, File)> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("cgroup.procs"),
+        format!("1\n{main_pid}\n"),
+    )?;
+    let held = File::open(directory.path())?;
+    Ok((directory, held))
+}
+
+/// An admitted payload for tests: fixed input bytes, and an output
+/// reservation of `output` bytes on its own ledger, made at most once.
+#[derive(Debug)]
+pub(crate) struct TestPayload {
+    pub(crate) input: Vec<u8>,
+    pub(crate) ledger: crate::StagingLedger,
+    pub(crate) output: u64,
+    pub(crate) reserved: std::sync::atomic::AtomicBool,
+    pub(crate) fail_read: bool,
+    /// Whether a second reservation is refused, as an admitted execution's is.
+    pub(crate) single_use: bool,
+}
+
+impl Default for TestPayload {
+    fn default() -> Self {
+        Self {
+            input: b"I".to_vec(),
+            ledger: crate::StagingLedger::new(crate::StagingLimits {
+                aggregate_bytes: 1 << 20,
+            }),
+            output: 1_000,
+            reserved: std::sync::atomic::AtomicBool::new(false),
+            fail_read: false,
+            single_use: true,
+        }
+    }
+}
+
+impl TestPayload {
+    /// A payload whose input is `input`.
+    pub(crate) fn with_input(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            ..Self::default()
+        }
+    }
+}
+
+impl crate::adapter_stdio::AttemptPayload for TestPayload {
+    fn input_len(&self) -> u64 {
+        self.input.len() as u64
+    }
+
+    fn read_input_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        let start = usize::try_from(offset).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let source = self
+            .input
+            .get(start..start + buffer.len())
+            .filter(|_| !self.fail_read)
+            .ok_or(io::ErrorKind::UnexpectedEof)?;
+        buffer.copy_from_slice(source);
+        Ok(())
+    }
+
+    fn reserve_output(
+        &self,
+    ) -> Option<Result<crate::StagingCharge, crate::OutputReservationRefused>> {
+        if self
+            .reserved
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+            && self.single_use
+        {
+            return None;
+        }
+        Some(
+            self.ledger
+                .reserve_storage(self.output)
+                .map_err(|error| match error {
+                    crate::StagingError::CleanupFailed => {
+                        crate::OutputReservationRefused::AdmissionClosed
+                    }
+                    _ => crate::OutputReservationRefused::AggregateExceeded,
+                }),
+        )
+    }
+}
+
+/// An adapter feed of one byte and an empty capture, held under a charge of
+/// no bytes; `None` only if a fresh ledger refused that charge.
+pub(crate) fn adapter_io() -> Option<crate::AdapterIo> {
+    crate::StagingLedger::new(crate::StagingLimits { aggregate_bytes: 0 })
+        .reserve_storage(0)
+        .ok()
+        .map(crate::AdapterIo::for_test)
+}
+
+/// The one payload every [`AdmittedAttempt::for_test`] shares, so separately
+/// built test attempts stay equal as before. It reserves as often as it is
+/// asked; tests of the single reservation use their own payload.
+pub(crate) fn shared_test_payload() -> Arc<dyn crate::adapter_stdio::AttemptPayload> {
+    static SHARED: std::sync::OnceLock<Arc<TestPayload>> = std::sync::OnceLock::new();
+    let shared = SHARED.get_or_init(|| {
+        Arc::new(TestPayload {
+            ledger: crate::StagingLedger::new(crate::StagingLimits {
+                aggregate_bytes: u64::MAX / 2,
+            }),
+            single_use: false,
+            ..TestPayload::default()
+        })
+    });
+    Arc::clone(shared) as Arc<dyn crate::adapter_stdio::AttemptPayload>
 }

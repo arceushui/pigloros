@@ -7,12 +7,13 @@ use ciborium::value::Value;
 
 use super::codec::{
     bounded_array, byte_string, bytes_value, decode_document, digest32, encode, id16, key_id,
-    record_digest, require_canonical_order, self_digested, signed, uint, uint_value, verify_digest,
-    verify_signature,
+    record_digest, require_canonical_order, self_digested, signed, text_value, uint, uint_value,
+    valid_key_id, verify_digest, verify_signature,
 };
 use super::{
-    attempt_values, validate_attempt_ids, SandboxProviderProtocolError, SandboxRevocationSnapshot,
-    SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    attempt_values, validate_attempt_ids, Rca1, SandboxProviderProtocolError,
+    SandboxRevocationSnapshot, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    SelfDigested, Verified,
 };
 
 /// Closed selector-side revocation-update failures.
@@ -110,6 +111,13 @@ impl RecoveryCancellationContext {
             ]))
             .map_err(Into::into)
         })
+    }
+
+    /// Whether this context binds the exact bytes of `rcu1`: its
+    /// `rcu1-wire-digest` is `BLAKE3-256("PiglorOS.RCU1.Wire.v1\0" || RCU1)`.
+    #[must_use]
+    pub fn binds(&self, rcu1: &RevocationUpdateRequest) -> bool {
+        self.rcu1_wire_digest == wire_digest(rcu1.exact_bytes())
     }
 
     fn verify(&self) -> Result<(), SandboxRevocationUpdateError> {
@@ -211,6 +219,25 @@ impl RevocationUpdateRequest {
             })
     }
 
+    /// The previous and next RVS1 digests that RCU1 `bytes` claim, before
+    /// any authentication: they only select which installed authority may
+    /// authenticate it.
+    ///
+    /// # Errors
+    /// Rejects bytes that are not an RCU1 wrapper.
+    pub(crate) fn claimed_revocation_digests(
+        bytes: &[u8],
+    ) -> Result<[[u8; 32]; 2], SandboxRevocationUpdateError> {
+        decode_document(bytes)
+            .and_then(|document| {
+                signed::<8>(&document, "RCU1").and_then(|(fields, _, _)| {
+                    digest32(&fields[3])
+                        .and_then(|previous| digest32(&fields[5]).map(|next| [previous, next]))
+                })
+            })
+            .map_err(SandboxRevocationUpdateError::from)
+    }
+
     /// Exact authenticated canonical RCU1 bytes.
     #[must_use]
     pub fn exact_bytes(&self) -> &[u8] {
@@ -303,6 +330,12 @@ impl AuthenticatedRevocationAcknowledgement {
         self.acknowledgement_digest
     }
 
+    /// The cancelled-attempt set the authenticated RCA1 echoes.
+    #[must_use]
+    pub fn cancelled_attempt_ids(&self) -> &[[u8; 16]] {
+        &self.cancelled_attempt_ids
+    }
+
     pub(crate) fn matches_context(
         &self,
         context: &RecoveryCancellationContext,
@@ -317,7 +350,106 @@ impl AuthenticatedRevocationAcknowledgement {
     }
 }
 
+/// The signed body of an RCA1 before its digest and signature exist.
+///
+/// Its `remaining-matching-attempts` is always 0: the provider acknowledges
+/// only a fenced snapshot in which every attempt proved its cleanup
+/// (ADR-069 R11 D8).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevocationAcknowledgementFields {
+    /// RCU1 request identity.
+    pub request_id: [u8; 16],
+    /// Self-digest of the next RVS1.
+    pub revocation_digest: [u8; 32],
+    /// Exact committed SIR1 identity, as RCC1 names it.
+    pub sir1_digest: [u8; 32],
+    /// Exact previous provider/runtime binding, as RCC1 names it.
+    pub previous_provider_binding_digest: [u8; 32],
+    /// The RCC1 required set, in canonical order.
+    pub cancelled_attempt_ids: Vec<[u8; 16]>,
+    /// Runtime-attestation signer.
+    pub runtime_attestation_key_id: String,
+}
+
 impl RevocationAcknowledgement {
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an RCA1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects a zero identity or digest, a malformed attempt set and an
+    /// invalid key ID.
+    pub fn self_digested(
+        fields: RevocationAcknowledgementFields,
+    ) -> Result<SelfDigested<Rca1>, SandboxRevocationUpdateError> {
+        if fields.request_id == [0; 16]
+            || [
+                fields.revocation_digest,
+                fields.sir1_digest,
+                fields.previous_provider_binding_digest,
+            ]
+            .contains(&[0; 32])
+            || !valid_key_id(&fields.runtime_attestation_key_id)
+        {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds.into());
+        }
+        validate_attempts(&fields.cancelled_attempt_ids)
+            .and_then(|()| {
+                record_digest(
+                    "RCA1",
+                    &Value::Array(acknowledgement_unsigned(&fields).to_vec()),
+                )
+            })
+            .map(|digest| SelfDigested::sealed(fields, digest))
+            .map_err(SandboxRevocationUpdateError::from)
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Rca1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxRevocationUpdateError> {
+        if verified.key() == key {
+            let (fields, acknowledgement_digest, signature) = verified.into_parts();
+            Ok(Self {
+                request_id: fields.request_id,
+                revocation_digest: fields.revocation_digest,
+                sir1_digest: fields.sir1_digest,
+                previous_provider_binding_digest: fields.previous_provider_binding_digest,
+                cancelled_attempt_ids: fields.cancelled_attempt_ids,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                acknowledgement_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid.into())
+        }
+    }
+
+    /// Exact canonical RCA1 bytes.
+    ///
+    /// # Errors
+    /// Returns an encoding error if the record cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxRevocationUpdateError> {
+        let fields = RevocationAcknowledgementFields {
+            request_id: self.request_id,
+            revocation_digest: self.revocation_digest,
+            sir1_digest: self.sir1_digest,
+            previous_provider_binding_digest: self.previous_provider_binding_digest,
+            cancelled_attempt_ids: self.cancelled_attempt_ids.clone(),
+            runtime_attestation_key_id: self.runtime_attestation_key_id.clone(),
+        };
+        encode(&Value::Array(vec![
+            Value::Array(acknowledgement_unsigned(&fields).to_vec()),
+            bytes_value(&self.acknowledgement_digest),
+            bytes_value(&self.signature),
+        ]))
+        .map_err(SandboxRevocationUpdateError::from)
+    }
+
     /// Authenticate one RCA1 against its exact previous-runtime authority.
     ///
     /// Relationship checks against the committed SIR1 and RCC1 remain the
@@ -425,6 +557,20 @@ impl RevocationAcknowledgement {
     }
 }
 
+fn acknowledgement_unsigned(fields: &RevocationAcknowledgementFields) -> [Value; 9] {
+    [
+        text_value("RCA1"),
+        uint_value(1),
+        bytes_value(&fields.request_id),
+        bytes_value(&fields.revocation_digest),
+        bytes_value(&fields.sir1_digest),
+        bytes_value(&fields.previous_provider_binding_digest),
+        attempt_values(&fields.cancelled_attempt_ids),
+        uint_value(0),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
+}
+
 fn validate_attempts(attempts: &[[u8; 16]]) -> Result<(), SandboxProviderProtocolError> {
     validate_attempt_ids(attempts)
 }
@@ -447,3 +593,7 @@ fn wire_digest(bytes: &[u8]) -> [u8; 32] {
     hasher.update(bytes);
     *hasher.finalize().as_bytes()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

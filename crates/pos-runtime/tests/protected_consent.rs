@@ -64,7 +64,12 @@ fn observe(
     store: &mut MemoryStore,
     timeline: TimelineId,
 ) -> PipelineSecurityRevisionsV1 {
-    test_ok(test_ok(LocalScheduledAdmissionHostV1::shared()).observe(registry, store, timeline))
+    test_ok(
+        test_ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ))
+        .observe(registry, store, timeline),
+    )
 }
 
 /// Admit the staged pass through the local host's atomic admission.
@@ -75,13 +80,10 @@ fn admit(
     commit_head: Seq,
     commit_now_secs: u64,
 ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-    test_ok(LocalScheduledAdmissionHostV1::shared()).admit(
-        registry,
-        store,
-        revisions,
-        commit_head,
-        commit_now_secs,
-    )
+    test_ok(LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    ))
+    .admit(registry, store, revisions, commit_head, commit_now_secs)
 }
 
 fn register_protected_schema(registry: &mut RuntimePluginRegistry) {
@@ -2260,6 +2262,26 @@ impl pos_core::AuthorityPersistencePortV1 for LostOutcomePorts<'_> {
     ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
         pos_core::AuthorityPersistencePortV1::load_authority(&*self.0, leaf_grant_id)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+        pos_core::AuthorityPersistencePortV1::record_authorization_denial(&mut *self.0, permit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<
+        Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>,
+        pos_core::AuthorityPersistenceErrorV1,
+    > {
+        pos_core::AuthorityPersistencePortV1::load_authorization_denials(&*self.0, from, limit)
+    }
 }
 
 /// Recovery of an in-doubt protected pass resubmits inside the consent token
@@ -2278,7 +2300,9 @@ fn protected_recovery_fails_closed_after_the_consent_gate_is_unbound() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
     register_protected_schema(&mut registry);
-    let host = test_ok(LocalScheduledAdmissionHostV1::shared());
+    let host = test_ok(LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    ));
     let revisions = test_ok(host.observe(&registry, &mut store, timeline));
     let drafts = test_ok(registry.step_all_anchored_protected(
         timeline,

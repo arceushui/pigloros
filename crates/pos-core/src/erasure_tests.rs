@@ -1778,8 +1778,13 @@ fn erasure_host_errors_have_stable_payload_free_codes() {
         ErasureHostErrorV1::AuthorizationDenied,
         ErasureHostErrorV1::Conflict,
         ErasureHostErrorV1::AdapterFailure,
+        ErasureHostErrorV1::ModeBindingStale,
     ];
-    assert_eq!(errors.map(ErasureHostErrorV1::code), [0_u64, 1, 2, 3, 4, 5]);
+    assert_eq!(errors.len(), ErasureHostErrorV1::COUNT);
+    assert_eq!(
+        errors.map(ErasureHostErrorV1::code),
+        [0_u64, 1, 2, 3, 4, 5, 6]
+    );
     assert_eq!(
         ErasureHostErrorV1::from(ErasureContainmentErrorV1::AccessFrozen),
         ErasureHostErrorV1::AccessFrozen
@@ -1792,6 +1797,26 @@ fn erasure_host_errors_have_stable_payload_free_codes() {
         ErasureHostErrorV1::Conflict.to_string(),
         "erasure host error 4"
     );
+    for (store, host) in [
+        (
+            crate::CoreError::ErasureAccessFrozen,
+            ErasureHostErrorV1::AccessFrozen,
+        ),
+        (
+            crate::CoreError::ErasureContainmentUnavailable,
+            ErasureHostErrorV1::RecoveryUnavailable,
+        ),
+        (
+            crate::CoreError::ModeBindingStale,
+            ErasureHostErrorV1::ModeBindingStale,
+        ),
+        (
+            crate::CoreError::Storage(String::from("payload")),
+            ErasureHostErrorV1::AdapterFailure,
+        ),
+    ] {
+        assert_eq!(ErasureHostErrorV1::from(&store), host);
+    }
 }
 
 #[test]
@@ -1824,4 +1849,45 @@ fn poisoned_containment_fence_fails_closed() {
         gate.authorize(timeline, ErasureProtectedOperationV1::Read),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
+}
+
+#[test]
+fn artifact_class_and_inventory_category_convert_to_their_stable_codes() {
+    let classes = [
+        ErasureArtifactClassV1::TimelineReplay,
+        ErasureArtifactClassV1::ReproManifest,
+        ErasureArtifactClassV1::CausalTrace,
+        ErasureArtifactClassV1::CalibrationReport,
+        ErasureArtifactClassV1::Export,
+        ErasureArtifactClassV1::ForkOrSnapshot,
+        ErasureArtifactClassV1::ConformanceReport,
+    ];
+    for (expected, class) in (0_u64..).zip(classes) {
+        assert_eq!(u64::from(class), class.code());
+        assert_eq!(u64::from(class), expected);
+    }
+    for (expected, category) in (0_u64..).zip(ErasureInventoryCategoryV1::CANONICAL) {
+        assert_eq!(u64::from(category), category.code());
+        assert_eq!(u64::from(category), expected);
+    }
+}
+
+#[test]
+fn verified_inventory_states_yield_every_member_state() -> Result<(), ErasureErrorV1> {
+    let timeline = TimelineId::new();
+    let state = verified_state_for_containment(ErasureLifecycleV1::Submitted, None, Vec::new())?;
+    let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+        vec![(
+            state.clone(),
+            ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                reference(5),
+                Vec::new(),
+                vec![timeline],
+            ),
+        )],
+        vec![timeline],
+        4,
+    )?;
+    assert_eq!(inventory.states().collect::<Vec<_>>(), vec![&state]);
+    Ok(())
 }

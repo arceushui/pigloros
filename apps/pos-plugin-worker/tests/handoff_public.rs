@@ -465,7 +465,7 @@ fn the_outcome_carries_the_validation_fact_and_no_signature_claim() -> TestResul
     } = outcome;
     assert_eq!(plugin_id, "plugin-a");
     assert_eq!((tick, mode), (TICK, LOCAL));
-    assert_eq!(content_validation, ContentValidationV1::NotPerformed);
+    assert_eq!(content_validation, ContentValidationV1::BasicPackageV1);
     assert!(execution_profile_digest.is_some());
     Ok(())
 }

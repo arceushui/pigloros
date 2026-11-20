@@ -1,0 +1,46 @@
+{
+  "name": "draft-replay-degraded",
+  "operation_id": "getReplay",
+  "request": {
+    "path": {
+      "replay_id": "01JC0GATEWAYW90REP1AY00001"
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:replay",
+      "id": "01JC0GATEWAYW90REP1AY00001",
+      "generation": 4,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "host-derived"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "unavailable",
+        "reason": "not-installed"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "state": "degraded",
+      "manifest_digest": "1010101010101010101010101010101010101010101010101010101010101010",
+      "reproducibility_class": "profile-recomputation",
+      "verification_outcome": "verified-exact",
+      "replay_claim": "exact-authoritative-with-redacted-views",
+      "divergence_report_digest": null,
+      "result_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  }
+}

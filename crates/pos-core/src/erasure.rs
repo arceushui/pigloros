@@ -326,31 +326,32 @@ impl std::error::Error for ErasureContainmentErrorV1 {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureHostErrorV1 {
     /// Complete durable recovery has not been installed or was invalidated.
-    RecoveryUnavailable,
+    RecoveryUnavailable = 0,
     /// The requested Timeline/Fork intersects a frozen-or-later scope.
-    AccessFrozen,
+    AccessFrozen = 1,
     /// The caller's inventory generation or durable predecessor is stale.
-    StaleGeneration,
+    StaleGeneration = 2,
     /// An independently injected verifier denied the operation.
-    AuthorizationDenied,
+    AuthorizationDenied = 3,
     /// A stable operation identity conflicts with different bound content.
-    Conflict,
+    Conflict = 4,
     /// The owned persistence adapter failed without exposing payload details.
-    AdapterFailure,
+    AdapterFailure = 5,
+    /// The owned adapter's attached Gateway mode-binding epoch is stale
+    /// (ADR-134 §8); the write committed nothing.
+    ModeBindingStale = 6,
 }
 
 impl ErasureHostErrorV1 {
-    /// Return the stable public error code.
+    /// The number of host errors, the length of a table indexed by the
+    /// error's explicit, append-only discriminant: the last variant's plus one.
+    pub const COUNT: usize = Self::ModeBindingStale as usize + 1;
+
+    /// Return the stable public error code: the variant's explicit
+    /// discriminant.
     #[must_use]
     pub const fn code(self) -> u64 {
-        match self {
-            Self::RecoveryUnavailable => 0,
-            Self::AccessFrozen => 1,
-            Self::StaleGeneration => 2,
-            Self::AuthorizationDenied => 3,
-            Self::Conflict => 4,
-            Self::AdapterFailure => 5,
-        }
+        self as u64
     }
 }
 
@@ -359,6 +360,20 @@ impl From<ErasureContainmentErrorV1> for ErasureHostErrorV1 {
         match error {
             ErasureContainmentErrorV1::AccessFrozen => Self::AccessFrozen,
             ErasureContainmentErrorV1::RecoveryUnavailable => Self::RecoveryUnavailable,
+        }
+    }
+}
+
+/// The payload-free host error of a store failure the host's owned adapter
+/// returned: containment and stale-binding refusals keep their own error,
+/// and every other store failure is an adapter failure.
+impl From<&crate::CoreError> for ErasureHostErrorV1 {
+    fn from(error: &crate::CoreError) -> Self {
+        match error {
+            crate::CoreError::ErasureAccessFrozen => Self::AccessFrozen,
+            crate::CoreError::ErasureContainmentUnavailable => Self::RecoveryUnavailable,
+            crate::CoreError::ModeBindingStale => Self::ModeBindingStale,
+            _ => Self::AdapterFailure,
         }
     }
 }
@@ -1893,6 +1908,26 @@ impl ErasureRequestV1 {
     pub const fn provenance(&self) -> ErasureReferenceV1 {
         self.0.provenance
     }
+    /// Return the minimized subject digest.
+    #[must_use]
+    pub const fn subject(&self) -> ErasureReferenceV1 {
+        self.0.subject
+    }
+    /// Return the authorized scope class.
+    #[must_use]
+    pub const fn scope(&self) -> ErasureScopeV1 {
+        self.0.scope
+    }
+    /// Return the requester digest.
+    #[must_use]
+    pub const fn requester(&self) -> ErasureReferenceV1 {
+        self.0.requester
+    }
+    /// Return the authorization evidence digest.
+    #[must_use]
+    pub const fn authorization(&self) -> ErasureReferenceV1 {
+        self.0.authorization
+    }
     /// Return canonical selectors defining the affected Timeline/Fork scope.
     #[must_use]
     pub fn selectors(&self) -> &[ErasureReferenceV1] {
@@ -1990,6 +2025,47 @@ impl ErasureDestructionCommandV1 {
     }
 }
 
+/// One exact, coordinator-dispatched destruction command and its request.
+///
+/// It is the ADR-136 §4a `ErasureOwnerCommandV1` (owner decision Q4 on
+/// #1412): the [`ErasureDestructionCommandV1`] core handed to
+/// `dispatch_destruction` for the request's active attempt, whose
+/// `provenance` is that attempt. An ELO1 owner result binds both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureOwnerCommandV1 {
+    /// The ERQ1 request the command serves.
+    pub request: ErasureReferenceV1,
+    /// The dispatched destruction command.
+    pub destruction: ErasureDestructionCommandV1,
+}
+
+/// The ADR-075 §3 erasure execution port (ADR-136 §4a).
+///
+/// An executor receives only an exact, coordinator-dispatched command and
+/// returns the owner result it made durable, bound to that command. It has
+/// no access to the authority or the signer. The Local executor and the
+/// future non-local executors (#357) implement the same trait.
+pub trait ErasureAuthorityExecutionV1 {
+    /// What the executor runs the owner work through: the Local owner host
+    /// commands, or a non-local executor's remote client.
+    type Context: ?Sized;
+
+    /// Run the owner work of `command` and commit its owner result.
+    ///
+    /// The returned [`ErasureOwnerResultV1`] binds `CA(ELO1)` to `command`;
+    /// the driver acknowledges the command with that reference, and the
+    /// acknowledgement admission verifies the retained ELO1 against it.
+    ///
+    /// # Errors
+    /// Returns a closed error when no owner result could be made durable.
+    /// A negative owner outcome is an owner result, not an error.
+    fn execute(
+        &mut self,
+        command: &ErasureOwnerCommandV1,
+        context: &mut Self::Context,
+    ) -> Result<ErasureOwnerResultV1, ErasureErrorV1>;
+}
+
 /// Derive the content-addressed identity of one destruction command.
 #[must_use]
 pub fn destruction_command_reference(
@@ -2072,7 +2148,7 @@ pub enum ErasureArtifactClassV1 {
 }
 
 impl ErasureArtifactClassV1 {
-    const fn code(self) -> u64 {
+    pub(crate) const fn code(self) -> u64 {
         match self {
             Self::TimelineReplay => 0,
             Self::ReproManifest => 1,
@@ -2083,7 +2159,7 @@ impl ErasureArtifactClassV1 {
             Self::ConformanceReport => 6,
         }
     }
-    const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
+    pub(crate) const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
         match code {
             0 => Ok(Self::TimelineReplay),
             1 => Ok(Self::ReproManifest),
@@ -2094,6 +2170,13 @@ impl ErasureArtifactClassV1 {
             6 => Ok(Self::ConformanceReport),
             _ => Err(ErasureErrorV1::InvalidEncoding),
         }
+    }
+}
+
+impl From<ErasureArtifactClassV1> for u64 {
+    /// The stable ADR-060 V1 artifact-class code.
+    fn from(value: ErasureArtifactClassV1) -> Self {
+        value.code()
     }
 }
 
@@ -2205,6 +2288,13 @@ impl ErasureInventoryCategoryV1 {
             3 => Ok(Self::Backup),
             _ => Err(ErasureErrorV1::InvalidEncoding),
         }
+    }
+}
+
+impl From<ErasureInventoryCategoryV1> for u64 {
+    /// The stable ADR-060 V1 inventory-category code.
+    fn from(value: ErasureInventoryCategoryV1) -> Self {
+        value.code()
     }
 }
 
@@ -2722,6 +2812,145 @@ pub trait ErasureInventoryPersistencePortV1 {
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
+
+    /// Read the complete erasure inventory, the owner and Fork relation of
+    /// every Timeline in its topology, and the erasure store identity in one
+    /// adapter snapshot (ADR-136 §2.5).
+    ///
+    /// The read is evidence for the erasure authority's read view, never a
+    /// trust root. Unlike the inventory snapshot it does not rebind the
+    /// adapter's installed inventory generation.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, validation or admission error; a Timeline
+    /// row set that does not match the topology is
+    /// [`ErasureErrorV1::ProvenanceMissing`].
+    fn erasure_authority_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1>;
+
+    /// Retain one canonical record in the shared content-addressed erasure
+    /// object store and return its address (ADR-136 §4).
+    ///
+    /// The insert is idempotent and the object is non-authoritative until a
+    /// committed record references it.
+    ///
+    /// # Errors
+    /// Returns a closed validation error for a malformed or over-limit
+    /// record (see [`ErasureRetainedObjectV1::new`]), or a persistence error.
+    fn retain_erasure_object(
+        &mut self,
+        canonical: &[u8],
+        max_bytes: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+
+    /// Commit one single-host owner effect and its ELO1 owner result in one
+    /// adapter transaction, and return the ELO1 address (ADR-136 §4a).
+    ///
+    /// The ELO1 is the one [`PreparedLocalOwnerEffectV1::new`] assembled, so
+    /// its `effect_digest` is always derived from the committed effect.
+    /// Repeating a committed key tombstone is idempotent and returns the ELO1
+    /// address again, bound to the existing tombstone.
+    ///
+    /// # Errors
+    /// Returns a closed validation error for a retained address that holds
+    /// other bytes, or a persistence error. Every key-tombstone failure is the one closed
+    /// [`ErasureErrorV1::KeyDestructionFailed`]: a missing key registry, a
+    /// registry refusal, and, on an adapter whose durable state another
+    /// connection can change, an inventory changed since the adapter
+    /// installed it. Nothing is committed on error.
+    fn commit_local_owner_effect(
+        &mut self,
+        prepared: PreparedLocalOwnerEffectV1,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+
+    /// Read the write-once erasure store identity.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error.
+    fn erasure_store_identity(&mut self) -> Result<Option<crate::Hash>, ErasureErrorV1>;
+
+    /// Write the erasure store identity once and return the recorded value.
+    ///
+    /// An identical second write returns the recorded value.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] for a different identity,
+    /// or a closed persistence error.
+    fn init_erasure_store_identity(
+        &mut self,
+        id: crate::Hash,
+    ) -> Result<crate::Hash, ErasureErrorV1>;
+
+    /// Delete at most `max` retained objects whose tag is in `tags` and whose
+    /// address is not in `keep`, in increasing address order, and return how
+    /// many were deleted. Only objects newly inserted by
+    /// [`Self::retain_erasure_object`] or [`Self::commit_local_owner_effect`]
+    /// are candidates; an address the coordinator wrote first never is.
+    ///
+    /// The adapter does not know which retained objects committed records
+    /// reference: sweep safety rests entirely on the caller's `keep` list,
+    /// which must hold every referenced and every active-attempt object.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error; nothing is deleted on error.
+    fn sweep_unreferenced_erasure_objects(
+        &mut self,
+        tags: &[&str],
+        keep: &[ErasureReferenceV1],
+        max: usize,
+    ) -> Result<usize, ErasureErrorV1>;
+
+    /// Read the exact bytes of every retained object of `tag`, in increasing
+    /// address order. The candidates are exactly those
+    /// [`Self::sweep_unreferenced_erasure_objects`] considers: objects newly
+    /// inserted by [`Self::retain_erasure_object`] or
+    /// [`Self::commit_local_owner_effect`].
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when more than `max` such
+    /// objects exist, so a caller never mistakes a truncated read for the
+    /// complete set, or a closed persistence error.
+    fn retained_erasure_objects(
+        &mut self,
+        tag: &str,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, ErasureErrorV1>;
+
+    /// Read every visible recipient-export publication whose source Timeline
+    /// is in `timelines`, sorted by `(timeline, export_id)` (ADR-136 §2.6).
+    ///
+    /// A pending publication is not visible and is never returned.
+    ///
+    /// Only an adapter with no recipient-export publication write path at all,
+    /// such as `MemoryStore`, may answer with an unconditional empty list: it
+    /// can never hold a publication, so the empty answer is exact rather than
+    /// fail-open. An adapter that can publish must read its catalog, and an
+    /// absent catalog is empty only because nothing was ever published.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when more than `max`
+    /// publications match, never a truncated list,
+    /// [`ErasureErrorV1::ProvenanceMissing`] for a malformed catalog row, or a
+    /// closed persistence error.
+    fn recipient_export_publications(
+        &mut self,
+        timelines: &[TimelineId],
+        max: usize,
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
+}
+
+/// One visible recipient-export publication: its export identity, its source
+/// Timeline and the single grantee owner it was encrypted for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecipientExportPublicationRowV1 {
+    /// The 16-byte export identity.
+    pub export_id: [u8; 16],
+    /// The Timeline the export was published from.
+    pub timeline: TimelineId,
+    /// The recipient owner of the grantee the export was encrypted for.
+    pub grantee_owner: crate::OwnerIdV1,
 }
 
 /// Adapter capability for the single atomic `ERSE1` and child-Fork commit.
@@ -3038,6 +3267,11 @@ impl ErasureVerifiedInventoryV1 {
         self.request_heads.len()
     }
 
+    /// Every positively verified request state of this inventory.
+    pub fn states(&self) -> impl Iterator<Item = &ErasureVerifiedStateV1> + '_ {
+        self.members.iter().map(|(state, _)| state)
+    }
+
     /// Verify that a successor inventory preserves every existing frozen
     /// request's Timeline membership exactly.
     ///
@@ -3154,6 +3388,14 @@ impl ErasureVerifiedInventoryV1 {
         self.validate_fork_parent_has_admitted_lineage(parent)?;
         self.classification_for(parent)
             .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    /// Whether this complete inventory records the Timeline/Fork `timeline`,
+    /// whatever its classification: the inventory classifies every durable
+    /// Timeline and Fork of its snapshot.
+    #[must_use]
+    pub fn records_timeline(&self, timeline: TimelineId) -> bool {
+        self.classification_for(timeline).is_some()
     }
 
     /// Require positive exclusion of a Timeline/Fork from every recovered
@@ -3711,6 +3953,192 @@ pub trait ErasureRecoveryErrorQueryV1 {
     ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1>;
 }
 
+mod authority_snapshot;
+mod local_records;
+pub use authority_snapshot::{
+    ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureRetainedObjectV1,
+    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedLocalOwnerEffectV1,
+    ERASURE_RECORD_TAG_MAX_BYTES_V1, ERASURE_RECORD_TAG_MIN_BYTES_V1,
+    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    LOCAL_OWNER_RESULT_MAX_BYTES_V1,
+};
+pub use local_records::{
+    local_erasure_body_digest_v1, local_erasure_bundle_signing_message_v1,
+    local_erasure_coordinator_v1, local_erasure_executor_version_v1,
+    local_erasure_export_recipient_v1, local_erasure_fork_admission_v1,
+    local_erasure_fork_scope_v1, local_erasure_host_timeline_v1, local_erasure_id_v1,
+    local_erasure_key_digest_v1, local_erasure_owner_ref_v1,
+    local_erasure_receipt_body_reference_v1, local_erasure_receipt_body_v1,
+    local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_request_v1,
+    local_erasure_requester_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
+    local_erasure_store_target_v1, local_erasure_subject_v1, local_erasure_timeline_payload_v1,
+    ErasureOwnerResultV1, LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1,
+    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureCacheGenerationV1,
+    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
+    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureNegativeResultV1,
+    LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
+    LocalErasureRedactionV1, LocalErasureRejectionV1, LocalErasureReplicaPurgeV1,
+    LocalErasureSelectorV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1,
+    LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1,
+    ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
+};
+/// The committed ERSC1 and ERSE1 chain of one request, read through its
+/// current manifest and scope index without validating the record.
+///
+/// It serves ADR-136 companion §2.6 `scope_commitment` and
+/// `scope_extensions`. The trait is sealed and implemented for every persistence port, so no
+/// adapter can override it. The result is evidence, not authority: core
+/// recovery verifies the record itself and checks every topology
+/// observation an authority builds from it.
+pub trait ErasureRecordedScopeReadV1: recorded_scope_sealed::Sealed {
+    /// The request's committed ERSC1 and ERSE1 chain, `Ok(None)` when it has
+    /// no manifest or no committed scope.
+    ///
+    /// # Errors
+    /// Once the manifest records a scope, a closed read or decoding error of
+    /// any object of the chain.
+    fn recorded_scope(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)>, ErasureErrorV1>;
+}
+
+/// The admission of one request's active attempt, read through its current
+/// manifest without validating the record.
+///
+/// ADR-136 §5 and §6 need it for the `admit_attempt` subject fence and the
+/// active-attempt leg of pre-terminal.
+///
+/// The trait is sealed and implemented for every persistence port, so no
+/// adapter can override it. The result is evidence, not authority: core
+/// recovery verifies the record itself.
+pub trait ErasureRecordedAttemptReadV1: recorded_scope_sealed::Sealed {
+    /// The request's active attempt admission, `Ok(None)` when it has no
+    /// manifest or no active attempt.
+    ///
+    /// # Errors
+    /// Once the manifest records an active attempt, a closed read or
+    /// decoding error of its admission.
+    fn recorded_active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1>;
+
+    /// The trust revision the request's frozen obligation set pins,
+    /// `Ok(None)` before freeze. Core recovery requires every attempt of
+    /// the request to pin this revision.
+    ///
+    /// # Errors
+    /// Once the manifest records an obligation set, a closed read or
+    /// decoding error of it.
+    fn recorded_obligation_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
+}
+
+/// One request's attempt progress, from its verified recovery.
+///
+/// [`ErasureRecordedProgressReadV1`] builds it by the same complete core
+/// recovery a coordinator runs before any lifecycle command, so a driver can
+/// build an ERRA1 from it and a signer can re-derive from it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureRecordedProgressV1 {
+    /// The frozen EROS1 obligations, in the obligation set's order.
+    pub obligations: Vec<ErasureObligationV1>,
+    /// The effective acknowledgement inventory, ordered by obligation and
+    /// owner: the positive acknowledgements of earlier attempts and every
+    /// acknowledgement of the latest attempt, active or completed.
+    pub effective: Vec<ErasureAcknowledgementProvenanceV1>,
+    /// The admission of the active attempt, if any.
+    pub active: Option<ErasureRetryAdmissionV1>,
+    /// The number of completed attempts.
+    pub completed_attempt_count: u64,
+    /// The ERC1 receipt of the latest completed attempt, if any.
+    pub latest_receipt: Option<ErasureReceiptV1>,
+}
+
+/// The attempt progress of one request, from its verified recovery.
+///
+/// ADR-136 §5 and §6 need it for a crash-safe driver and a re-deriving
+/// signer (owner decision Q2 on #1412). The read is the complete core
+/// recovery of the request's current manifest: every structural check of
+/// its graph and the host's freeze and recovery verifiers over its freeze
+/// authorization, attempts, acknowledgements, receipts, scope extensions and
+/// administrative resolutions. A failure is returned, never retained.
+///
+/// The trait is sealed and implemented only for `dyn ErasurePersistencePortV1`,
+/// so no adapter can implement or override it; a host reads it through that
+/// trait object with its own verifiers.
+pub trait ErasureRecordedProgressReadV1: recorded_progress_sealed::Sealed {
+    /// The request's verified progress, `Ok(None)` when it has no manifest.
+    ///
+    /// # Errors
+    /// Once a manifest exists, the closed error of the first recovery check
+    /// that fails, read or decoding failure included.
+    fn recorded_progress(
+        &self,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+        recovery_verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1>;
+}
+
+impl ErasureRecordedProgressReadV1 for dyn ErasurePersistencePortV1 + '_ {
+    fn recorded_progress(
+        &self,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+        recovery_verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRecordedProgressV1>, ErasureErrorV1> {
+        persistence::recorded_progress(self, verifier, recovery_verifier, request)
+    }
+}
+
+mod recorded_progress_sealed {
+    /// Keeps [`super::ErasureRecordedProgressReadV1`] core-implemented: only
+    /// the persistence port trait object is sealed, so no adapter type can
+    /// implement it.
+    pub trait Sealed {}
+
+    impl Sealed for dyn super::ErasurePersistencePortV1 + '_ {}
+}
+
+mod recorded_scope_sealed {
+    /// Keeps [`super::ErasureRecordedScopeReadV1`] and
+    /// [`super::ErasureRecordedAttemptReadV1`] core-implemented.
+    pub trait Sealed {}
+
+    impl<P: super::ErasurePersistencePortV1 + ?Sized> Sealed for P {}
+}
+
+impl<P: ErasurePersistencePortV1 + ?Sized> ErasureRecordedScopeReadV1 for P {
+    fn recorded_scope(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)>, ErasureErrorV1>
+    {
+        persistence::recorded_scope(self, request)
+    }
+}
+
+impl<P: ErasurePersistencePortV1 + ?Sized> ErasureRecordedAttemptReadV1 for P {
+    fn recorded_active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
+        persistence::recorded_active_attempt(self, request)
+    }
+
+    fn recorded_obligation_trust(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        persistence::recorded_obligation_trust(self, request)
+    }
+}
+
 mod receipt;
 pub use receipt::target_closure_digest;
 mod artifact;
@@ -3746,6 +4174,8 @@ pub use registration_commit::{
     PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
     MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
 };
+mod local_replica;
+pub use local_replica::LocalReplicaResidualPortV1;
 mod rejoin;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
@@ -3896,14 +4326,15 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
-/// Host-owned verifier for authorization attached to recovered erasure
-/// extensions and administrative resolutions.
+/// Host-owned verifier for the evidence of recovered erasure records.
 ///
-/// The persistence layer validates immutable structural bindings. The host
-/// remains responsible for interpreting retained #186/#187 evidence and
-/// checking capabilities, principals, policy, and trust semantics.
-/// This verifier revalidates already admitted evidence during recovery; it
-/// does not itself make the admission decision.
+/// It covers future-Fork extensions, administrative resolutions, attempt
+/// admissions, owner acknowledgements and receipts. The persistence layer
+/// validates immutable structural bindings. The host remains responsible
+/// for interpreting retained #186/#187 evidence and checking capabilities,
+/// principals, policy, trust, and signature semantics. This verifier
+/// revalidates already admitted evidence during recovery, once for each
+/// recovered record; it does not itself make the admission decision.
 pub trait ErasureRecoveryAuthorizationVerifierV1 {
     /// Verify the host admission which authorized one future-Fork extension.
     ///
@@ -3926,6 +4357,51 @@ pub trait ErasureRecoveryAuthorizationVerifierV1 {
     fn validate_administrative_resolution(
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the host evidence of one recovered attempt admission.
+    ///
+    /// Recovery calls it once for each attempt of `request`, completed or
+    /// active, after the attempt's structural bindings hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization, policy, trust, or provenance error
+    /// when the admission is not the attempt the host derives for `request`.
+    fn validate_attempt_admission(
+        &self,
+        request: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the evidence of one recovered owner acknowledgement.
+    ///
+    /// Recovery calls it once for each acknowledgement it recovers, after
+    /// the acknowledgement binds its attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed owner, evidence, trust, or provenance error when the
+    /// retained evidence does not authenticate the acknowledgement.
+    fn validate_acknowledgement(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the signature commitment of one recovered receipt.
+    ///
+    /// Recovery calls it once for each completed attempt, with the attempt
+    /// admission the receipt closes, after the receipt's structural
+    /// bindings hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed policy, trust, signature, or provenance error when
+    /// the retained evidence does not authenticate the receipt.
+    fn validate_receipt(
+        &self,
+        attempt: &ErasureRetryAdmissionV1,
+        receipt: &ErasureReceiptV1,
     ) -> Result<(), ErasureErrorV1>;
 }
 
@@ -7435,20 +7911,78 @@ mod coverage_paths {
         Ok(())
     }
 
+    struct LegacyInventoryPersistencePort;
+
+    impl ErasureInventoryPersistencePortV1 for LegacyInventoryPersistencePort {
+        fn complete_erasure_inventory_snapshot(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+        }
+
+        fn erasure_authority_snapshot_with_limits(
+            &mut self,
+            _limits: ErasureRecoveryLimitsV1,
+        ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn retain_erasure_object(
+            &mut self,
+            _canonical: &[u8],
+            _max_bytes: usize,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn commit_local_owner_effect(
+            &mut self,
+            _prepared: PreparedLocalOwnerEffectV1,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn erasure_store_identity(&mut self) -> Result<Option<crate::Hash>, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn init_erasure_store_identity(
+            &mut self,
+            _id: crate::Hash,
+        ) -> Result<crate::Hash, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn sweep_unreferenced_erasure_objects(
+            &mut self,
+            _tags: &[&str],
+            _keep: &[ErasureReferenceV1],
+            _max: usize,
+        ) -> Result<usize, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn retained_erasure_objects(
+            &mut self,
+            _tag: &str,
+            _max: usize,
+        ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn recipient_export_publications(
+            &mut self,
+            _timelines: &[TimelineId],
+            _max: usize,
+        ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
     #[test]
     fn limit_aware_inventory_queries_fail_closed_without_an_override() -> Result<(), ErasureErrorV1>
     {
-        struct LegacyInventoryPersistencePort;
-
-        impl ErasureInventoryPersistencePortV1 for LegacyInventoryPersistencePort {
-            fn complete_erasure_inventory_snapshot(
-                &mut self,
-                _maximum_requests: usize,
-            ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-                ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
-            }
-        }
-
         struct LegacyInventoryQuery(Option<ErasureVerifiedInventoryV1>);
 
         impl ErasureVerifiedInventoryQueryV1 for LegacyInventoryQuery {
@@ -7512,6 +8046,21 @@ mod coverage_paths {
             empty.verified_inventory_with_limits(ErasureRecoveryLimitsV1::new(1, 1, 1)?),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_complete_inventory_records_exactly_its_topology() -> Result<(), ErasureErrorV1> {
+        let mut topology = vec![TimelineId::new(), TimelineId::new()];
+        topology.sort_unstable();
+        let inventory = ErasureVerifiedEmptyInventoryQueryV1::new(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), topology.clone(), 4)?,
+        )
+        .verified_inventory(4)?;
+        assert!(topology
+            .iter()
+            .all(|timeline| inventory.records_timeline(*timeline)));
+        assert!(!inventory.records_timeline(TimelineId::new()));
         Ok(())
     }
 

@@ -258,15 +258,15 @@ pub trait StepPortV1 {
 
 /// The canonical bytes of the outcome record.
 ///
-/// It is the deterministic CBOR array `["POB1", 2,
+/// It is the deterministic CBOR array `["POB2", 2,
 /// plugin_id, pmf1_digest, release_digest, tps1_digest, execution_profile_digest, tick, mode,
-/// content_validation, result]` (ADR-061 revision 8 decision 2; version 2 adds the trap class
-/// of a `Trapped` result, ADR-061 R13).
+/// content_validation, result]` (ADR-061 R12; a `Trapped` result retains the
+/// trap class introduced by ADR-061 R13). Historical POB1 bytes remain unchanged.
 #[must_use]
 pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
     let mut out = Vec::new();
     cbor::array(&mut out, 11);
-    cbor::text(&mut out, "POB1");
+    cbor::text(&mut out, "POB2");
     cbor::unsigned(&mut out, 2);
     cbor::text(&mut out, &outcome.plugin_id);
     for digest in [
@@ -278,8 +278,7 @@ pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
         optional_digest(&mut out, digest);
     }
     cbor::unsigned(&mut out, outcome.tick);
-    cbor::unsigned(&mut out, mode_code(outcome.mode));
-    cbor::unsigned(&mut out, validation_code(outcome.content_validation));
+    execution_evidence_bytes(&mut out, outcome.mode, outcome.content_validation);
     result_bytes(&mut out, outcome.result);
     out
 }
@@ -287,19 +286,22 @@ pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
 /// The CBOR null.
 const NULL: u8 = 0xf6;
 
-/// The wire code of an Execution Mode: 0 Local, 1 Air-Gapped.
-const fn mode_code(mode: CommunityPluginModeV1) -> u64 {
-    match mode {
+/// Write the adjacent Execution Mode and content-validation evidence fields.
+fn execution_evidence_bytes(
+    out: &mut Vec<u8>,
+    mode: CommunityPluginModeV1,
+    validation: ContentValidationV1,
+) {
+    let mode_code = match mode {
         CommunityPluginModeV1::Local => 0,
         CommunityPluginModeV1::AirGapped => 1,
-    }
-}
-
-/// The wire code of the content validation: 0 `NotPerformed`.
-const fn validation_code(validation: ContentValidationV1) -> u64 {
-    match validation {
+    };
+    let validation_code = match validation {
         ContentValidationV1::NotPerformed => 0,
-    }
+        ContentValidationV1::BasicPackageV1 => 1,
+    };
+    cbor::unsigned(out, mode_code);
+    cbor::unsigned(out, validation_code);
 }
 
 /// A 32-byte digest, or null.

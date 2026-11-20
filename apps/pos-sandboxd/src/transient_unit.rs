@@ -42,7 +42,8 @@ pub enum SystemdServiceLimitsError {
     /// ELM1 must contain exactly one record for every ID 0 through 16 in order.
     #[error("effective limits are not the complete ordered ELM1 set")]
     InvalidEffectiveLimits,
-    /// The specified exact capacity would be rejected or interpreted as infinity.
+    /// The specified exact capacity would be rejected, interpreted as
+    /// infinity, or stored by systemd as a looser kernel value.
     #[error("ELM1 limit ID {0} cannot be enforced exactly by systemd")]
     UnenforceableLimit(u8),
     /// The watchdog milliseconds cannot be represented as systemd microseconds.
@@ -59,6 +60,27 @@ const fn is_unenforceable(id: usize, value: u64) -> bool {
         || (value == 0 && matches!(id, 0 | 2 | 3 | 4))
 }
 
+/// ELM1 limit 3 (`CpuQuotaPerMillion`), sent as systemd `CPUQuotaPerSecUSec`.
+const CPU_QUOTA_LIMIT_ID: usize = 3;
+
+/// Whether systemd v260 would write a larger `cpu.max` quota than `per_million`.
+///
+/// systemd keeps the 100 ms period for shares of at least 1% and otherwise
+/// stretches it to `1 s / share`, at most 1 s. It then writes the share of
+/// that period, rounded down, but never less than the kernel's 1 ms minimum.
+/// Below 0.1% the minimum always applies. Between 0.1% and 1% the stored
+/// quota stays exact only when the share divides 10^9 microseconds; any
+/// other share would be raised to 1 ms and enforced more loosely.
+const fn is_below_systemd_cpu_minimum(per_million: u64) -> bool {
+    // 10_000 itself divides 10^9, so the band ends at 9_999 inclusive.
+    per_million < 1_000 || (per_million <= 9_999 && !1_000_000_000_u64.is_multiple_of(per_million))
+}
+
+/// Whether systemd cannot store `value` for ELM1 limit `id` exactly.
+const fn is_unrepresentable(id: usize, value: u64) -> bool {
+    is_unenforceable(id, value) || (id == CPU_QUOTA_LIMIT_ID && is_below_systemd_cpu_minimum(value))
+}
+
 impl SystemdServiceLimits {
     /// Compile exact systemd values from one complete, already authorized ELM1.
     ///
@@ -67,7 +89,8 @@ impl SystemdServiceLimits {
     ///
     /// # Errors
     /// Rejects missing, duplicate, unordered, or unknown IDs, values that
-    /// systemd rejects or treats as infinity, and watchdog conversion overflow.
+    /// systemd rejects or treats as infinity, CPU shares whose stored quota
+    /// systemd would raise, and watchdog conversion overflow.
     pub fn from_effective_limits(
         limits: &[SandboxLimit],
     ) -> Result<Self, SystemdServiceLimitsError> {
@@ -82,7 +105,7 @@ impl SystemdServiceLimits {
         let mut requested = [0; 7];
         let work_bytes = limits[WORK_BYTES_LIMIT_ID].value;
         for (id, limit) in limits.iter().enumerate() {
-            if is_unenforceable(id, limit.value) {
+            if is_unrepresentable(id, limit.value) {
                 return Err(SystemdServiceLimitsError::UnenforceableLimit(
                     limit.limit_id,
                 ));
@@ -118,6 +141,11 @@ impl SystemdServiceLimits {
 
     pub(crate) const fn value(&self, property: SystemdOperatingLimitProperty) -> u64 {
         self.requested[property.index()]
+    }
+
+    /// The requested ELM1 `WorkBytes` ceiling for the `/work` tmpfs.
+    pub(crate) const fn work_bytes(&self) -> u64 {
+        self.work_bytes
     }
 
     /// The attempt watchdog: ELM1 `WatchdogMilliseconds`, the same ceiling
@@ -225,10 +253,62 @@ pub enum LaunchMode {
     Fork,
 }
 
+/// The unit ends of the adapter's three standard descriptors (ADR-069 R10
+/// §4.1): the stdin pipe's read end, the stdout pipe's write end and the
+/// provider's checked write-only `/dev/null`.
+///
+/// Only the provider's channel creation makes one; the provider keeps the
+/// other pipe ends. The request moves these into its one submission, so the
+/// provider holds no unit end once `StartTransientUnit` returns.
+#[derive(Debug)]
+pub struct UnitStdio {
+    input: OwnedFd,
+    output: OwnedFd,
+    error: OwnedFd,
+}
+
+impl UnitStdio {
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn new(input: OwnedFd, output: OwnedFd, error: OwnedFd) -> Self {
+        Self {
+            input,
+            output,
+            error,
+        }
+    }
+
+    /// The stdin read end, the stdout write end and the stderr target.
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (OwnedFd, OwnedFd, OwnedFd) {
+        (self.input, self.output, self.error)
+    }
+
+    /// Three `/dev/null` descriptors, for requests no adapter runs under.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> std::io::Result<Self> {
+        let null = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .map(|file| OwnedFd::from(std::os::fd::OwnedFd::from(file)))
+        };
+        null().and_then(|input| {
+            null().and_then(|output| {
+                null().map(|error| Self {
+                    input,
+                    output,
+                    error,
+                })
+            })
+        })
+    }
+}
+
 /// All per-attempt inputs that the dynamic property compiler is allowed to use.
 ///
-/// The release descriptor is supplied by the existing release-barrier owner.
-/// This type neither acquires descriptors nor starts a transient unit.
+/// The release descriptor is supplied by the existing release-barrier owner,
+/// and the standard descriptors by the provider's channel creation. This
+/// type neither acquires descriptors nor starts a transient unit.
 #[derive(Debug)]
 pub struct TransientUnitLaunchInputs {
     root_directory: ActivatedRootDirectory,
@@ -236,6 +316,7 @@ pub struct TransientUnitLaunchInputs {
     mode: LaunchMode,
     release: OwnedFd,
     invocation: LauncherInvocation,
+    stdio: UnitStdio,
 }
 
 /// The launcher-mode command the unit runs: `<launcher> launch-barrier
@@ -297,6 +378,8 @@ pub struct CheckedRoot {
     root_directory: ActivatedRootDirectory,
     #[cfg(target_os = "linux")]
     admitted: crate::AdmittedAttempt,
+    #[cfg(target_os = "linux")]
+    root: crate::RootIdentity,
 }
 
 impl CheckedRoot {
@@ -304,11 +387,21 @@ impl CheckedRoot {
     pub(crate) const fn rechecked(
         root_directory: ActivatedRootDirectory,
         admitted: crate::AdmittedAttempt,
+        root: crate::RootIdentity,
     ) -> Self {
         Self {
             root_directory,
             admitted,
+            root,
         }
+    }
+
+    /// The attached root's mount, mapper and loop device, as the recheck
+    /// found them equal to the verified ones.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub const fn root_identity(&self) -> crate::RootIdentity {
+        self.root
     }
 
     #[cfg(target_os = "linux")]
@@ -337,6 +430,7 @@ impl CheckedRoot {
             .map(|admitted| Self {
                 root_directory,
                 admitted,
+                root: crate::RootIdentity::FIXTURE,
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -357,6 +451,7 @@ impl TransientUnitLaunchInputs {
         mode: LaunchMode,
         release: OwnedFd,
         invocation: LauncherInvocation,
+        stdio: UnitStdio,
     ) -> Self {
         Self {
             root_directory: root.root_directory,
@@ -364,6 +459,7 @@ impl TransientUnitLaunchInputs {
             mode,
             release,
             invocation,
+            stdio,
         }
     }
 }
@@ -407,9 +503,59 @@ pub enum SystemdTransientUnitValue {
     TemporaryFileSystem(Vec<(String, String)>),
     /// A D-Bus `a(sasb)` command list: path, argument vector, ignore-failure.
     ExecStart(Vec<(String, Vec<String>, bool)>),
+    /// A D-Bus `h` standard descriptor of the unit (ADR-069 R10 §4.2).
+    ///
+    /// The one submission moves it out, so it is `None` afterwards: the
+    /// request keeps no unit end once `StartTransientUnit` was called. A
+    /// `None` descriptor cannot be submitted.
+    StandardDescriptor(Option<OwnedFd>),
 }
 
 impl SystemdTransientUnitValue {
+    /// The value as RQE1 records it: its submitted shape, and for the
+    /// descriptor array only the names.
+    fn requested_configuration(&self) -> RequestedConfigurationValue {
+        let typed = match self {
+            Self::Static(value) => SystemdTransientUnitReadbackValue::Static((*value).into()),
+            Self::RootDirectory(path) => SystemdTransientUnitReadbackValue::String(path.clone()),
+            Self::BindReadOnlyPaths(paths) => {
+                SystemdTransientUnitReadbackValue::BindReadOnlyPaths(paths.clone())
+            }
+            Self::SystemCallFilter(names) | Self::RestrictAddressFamilies(names) => {
+                SystemdTransientUnitReadbackValue::BoolStringArray(names.clone())
+            }
+            Self::Numeric(SystemdTransientUnitNumericValue::OperatingLimit(value)) => {
+                SystemdTransientUnitReadbackValue::U64(*value)
+            }
+            Self::Numeric(SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value)) => {
+                SystemdTransientUnitReadbackValue::U32(*value)
+            }
+            Self::ExtraFileDescriptors(_) | Self::StandardDescriptor(_) => {
+                return self.descriptor_configuration()
+            }
+            Self::TemporaryFileSystem(mounts) => {
+                SystemdTransientUnitReadbackValue::TemporaryFileSystem(mounts.clone())
+            }
+            Self::ExecStart(commands) => {
+                SystemdTransientUnitReadbackValue::ExecStart(commands.clone())
+            }
+        };
+        RequestedConfigurationValue::Typed(typed)
+    }
+
+    /// A descriptor-carrying value as RQE1 records it: the descriptor
+    /// array's names, and nothing of a standard descriptor.
+    fn descriptor_configuration(&self) -> RequestedConfigurationValue {
+        match self {
+            Self::ExtraFileDescriptors(descriptors) => {
+                RequestedConfigurationValue::DescriptorNames(
+                    descriptors.iter().map(|(_, name)| name.clone()).collect(),
+                )
+            }
+            _ => RequestedConfigurationValue::Descriptor,
+        }
+    }
+
     /// The same name-list kind carrying `value`.
     const fn with_names(&self, value: (bool, Vec<String>)) -> Self {
         if matches!(self, Self::SystemCallFilter(_)) {
@@ -426,10 +572,9 @@ impl SystemdTransientUnitValue {
                 Self::BindReadOnlyPaths(expected),
                 SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
             ) => expected == actual,
-            (
-                Self::ExtraFileDescriptors(expected),
-                SystemdTransientUnitReadbackValue::StringArray(actual),
-            ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+            (Self::ExtraFileDescriptors(_) | Self::StandardDescriptor(_), _) => {
+                self.descriptor_matches(observed)
+            }
             (
                 Self::TemporaryFileSystem(expected),
                 SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
@@ -441,13 +586,41 @@ impl SystemdTransientUnitValue {
         }
     }
 
-    /// The signature of the array-valued kinds; `a(ss)` is the last of them.
+    /// Readback equality of the descriptor-carrying kinds: the array's
+    /// names, and a standard descriptor's name, which reads back empty unless
+    /// an enum is `fd` (R10 §4.3). Anything else differs.
+    fn descriptor_matches(&self, observed: &SystemdTransientUnitReadbackValue) -> bool {
+        match (self, observed) {
+            (
+                Self::ExtraFileDescriptors(expected),
+                SystemdTransientUnitReadbackValue::StringArray(actual),
+            ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+            (Self::StandardDescriptor(_), SystemdTransientUnitReadbackValue::String(name)) => {
+                name.is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    /// The signature of the array-valued and descriptor-carrying kinds;
+    /// `a(ss)` is the last of them.
     const fn collection_signature(&self) -> &'static str {
         match self {
             Self::BindReadOnlyPaths(_) => "a(ssbt)",
-            Self::ExtraFileDescriptors(_) => "a(hs)",
+            Self::ExtraFileDescriptors(_) | Self::StandardDescriptor(_) => {
+                self.descriptor_signature()
+            }
             Self::ExecStart(_) => "a(sasb)",
             _ => "a(ss)",
+        }
+    }
+
+    /// The signature of the descriptor-carrying kinds: a standard
+    /// descriptor's `h`, the descriptor array's `a(hs)`.
+    const fn descriptor_signature(&self) -> &'static str {
+        match self {
+            Self::StandardDescriptor(_) => "h",
+            _ => "a(hs)",
         }
     }
 
@@ -479,17 +652,26 @@ impl SystemdTransientUnitValue {
             | Self::SystemCallFilter(_)
             | Self::RestrictAddressFamilies(_)
             | Self::Numeric(_)
-            | Self::ExtraFileDescriptors(_) => Err(zbus::Error::IncorrectType),
+            | Self::ExtraFileDescriptors(_)
+            | Self::StandardDescriptor(_) => Err(zbus::Error::IncorrectType),
         }
     }
 }
 
-/// The last dynamic properties: descriptors, the `/work` mount and the command.
+/// The last dynamic properties: descriptors, the `/work` mount, the command
+/// and the three standard descriptors.
 fn tail_properties(
     descriptors: Vec<(OwnedFd, String)>,
     service_limits: &SystemdServiceLimits,
     invocation: &LauncherInvocation,
-) -> [SystemdTransientUnitProperty; 3] {
+    stdio: UnitStdio,
+) -> [SystemdTransientUnitProperty; 6] {
+    let standard = |kind, descriptor| {
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(kind),
+            SystemdTransientUnitValue::StandardDescriptor(Some(descriptor)),
+        )
+    };
     [
         SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::Dynamic(
@@ -506,6 +688,18 @@ fn tail_properties(
         SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::Dynamic(SystemdDynamicPropertyKind::ExecStart),
             SystemdTransientUnitValue::ExecStart(invocation.exec_start()),
+        ),
+        standard(
+            SystemdDynamicPropertyKind::StandardInputFileDescriptor,
+            stdio.input,
+        ),
+        standard(
+            SystemdDynamicPropertyKind::StandardOutputFileDescriptor,
+            stdio.output,
+        ),
+        standard(
+            SystemdDynamicPropertyKind::StandardErrorFileDescriptor,
+            stdio.error,
         ),
     ]
 }
@@ -599,8 +793,16 @@ impl SystemdTransientUnitProperty {
             }
     }
 
-    fn try_clone_for_submission(&self) -> Result<Self, zbus::Error> {
-        Self::from_cloned_value(self.kind, self.value.try_clone_for_submission())
+    /// The value to submit: a standard descriptor is moved out, every other
+    /// value is duplicated.
+    fn take_for_submission(&mut self) -> Result<Self, zbus::Error> {
+        let value = match &mut self.value {
+            SystemdTransientUnitValue::StandardDescriptor(descriptor) => Ok(
+                SystemdTransientUnitValue::StandardDescriptor(descriptor.take()),
+            ),
+            value => value.try_clone_for_submission(),
+        };
+        Self::from_cloned_value(self.kind, value)
     }
 
     fn from_cloned_value(
@@ -622,6 +824,40 @@ impl SystemdTransientUnitPropertyAccess for SystemdTransientUnitProperty {
     fn into_parts(self) -> (&'static str, SystemdTransientUnitValue) {
         (self.kind.name(), self.value)
     }
+}
+
+/// One requested property as RQE1 records it (ADR-069 R9 §4.3): the exact
+/// typed value passed to `StartTransientUnit`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestedConfigurationProperty {
+    name: &'static str,
+    value: RequestedConfigurationValue,
+}
+
+impl RequestedConfigurationProperty {
+    /// The exact systemd property name.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The submitted value.
+    #[must_use]
+    pub const fn value(&self) -> &RequestedConfigurationValue {
+        &self.value
+    }
+}
+
+/// One submitted value as RQE1 records it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RequestedConfigurationValue {
+    /// A value in the shape, and with the D-Bus signature, it was submitted.
+    Typed(SystemdTransientUnitReadbackValue),
+    /// The `ExtraFileDescriptors` (`a(hs)`) names, in submission order.
+    /// Descriptor numbers are process-local and never recorded.
+    DescriptorNames(Vec<String>),
+    /// One standard descriptor (`h`, RQE1 code 10): nothing is recorded.
+    Descriptor,
 }
 
 /// A typed observed transient-unit property used by the request verifier.
@@ -771,6 +1007,7 @@ impl TransientUnitRequest {
             mode,
             release,
             invocation,
+            stdio,
         } = inputs;
         let (address_families, descriptors) = match mode {
             LaunchMode::Local { host_service } => (
@@ -786,7 +1023,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 15);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 18);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::Hardening(*property),
@@ -846,7 +1083,12 @@ impl TransientUnitRequest {
                 SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
             ),
         ));
-        properties.extend(tail_properties(descriptors, service_limits, &invocation));
+        properties.extend(tail_properties(
+            descriptors,
+            service_limits,
+            &invocation,
+            stdio,
+        ));
         Self {
             properties,
             system_call_filter,
@@ -859,12 +1101,26 @@ impl TransientUnitRequest {
         &self.properties
     }
 
-    pub(crate) fn requested_properties_for_submission(
-        &self,
-    ) -> Result<Vec<SystemdTransientUnitProperty>, zbus::Error> {
+    /// The requested properties as RQE1 records them, in request order.
+    #[must_use]
+    pub fn requested_configuration(&self) -> Vec<RequestedConfigurationProperty> {
         self.properties
             .iter()
-            .map(SystemdTransientUnitProperty::try_clone_for_submission)
+            .map(|property| RequestedConfigurationProperty {
+                name: property.name(),
+                value: property.value.requested_configuration(),
+            })
+            .collect()
+    }
+
+    /// The properties to submit, once: the standard descriptors are moved
+    /// into them and every other descriptor is duplicated.
+    pub(crate) fn requested_properties_for_submission(
+        &mut self,
+    ) -> Result<Vec<SystemdTransientUnitProperty>, zbus::Error> {
+        self.properties
+            .iter_mut()
+            .map(SystemdTransientUnitProperty::take_for_submission)
             .collect()
     }
 
@@ -894,6 +1150,10 @@ impl TransientUnitRequest {
         }
     }
 }
+
+mod evidence;
+
+pub use evidence::{verified_requested_configuration, RequestedConfiguration};
 
 #[cfg(test)]
 fn is_normalized_absolute_path(path: &str) -> bool {

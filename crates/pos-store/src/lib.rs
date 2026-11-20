@@ -65,6 +65,16 @@ pub mod classified_fork_fixture;
 #[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
 pub mod plugin_trust_registry_fixtures;
 
+// Test-only. The shared community initialize planner fixtures under
+// `tests/support` serve the public planner tests and the planner's unit
+// tests; the items are `pub` for the same reason as the fixtures above.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/community_initialization_fixture.rs"]
+pub mod community_initialization_fixture;
+
+pub mod community;
 pub mod composition_fallback_registry;
 
 // Test-only. The shared composition fallback registry fixtures under `tests/support` serve the
@@ -95,7 +105,11 @@ pub mod owner_store_admission;
 pub mod owner_store_interlock;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
+#[cfg(target_os = "linux")]
+pub mod protected_sqlite_namespace;
 pub mod stitch;
+#[cfg(any(test, feature = "test-support"))]
+pub mod subject_data_consumer;
 mod timeline_range;
 pub mod trusted_clock;
 
@@ -162,6 +176,8 @@ pub use pos_core::store::{
     AppendIntent, AppendOrDuplicateOutcome, EventStore, PurgeOutcome, SeqRange, TimelineExport,
     APPEND_IDENTITY_RETENTION_MICROS,
 };
+use std::collections::BTreeSet;
+
 use pos_core::{
     is_consent_event_type, is_geographic_event_type, pipeline_authority_revision_v1,
     pipeline_delegation_revision_v1, pipeline_erasure_revision_v1, ErasureGate, ErasureReferenceV1,
@@ -196,6 +212,52 @@ pub use pos_core::{
 const COUNTERFACTUAL_SEAL: pos_core::CounterfactualAdapterSealV1 =
     pos_core::CounterfactualAdapterSealV1::for_adapter();
 
+/// Validate every row bound to one Timeline, each closure once (ADR-136 §2.6).
+///
+/// `validate` walks one row's closure as its root and returns every address
+/// it visited. The pass has two steps:
+///
+/// 1. every bound MRM1 row is validated as its own root, so each gets its
+///    operation-index and recorder checks;
+/// 2. every other bound row that no bound row names as a child and that no
+///    step-1 walk visited is validated as its own root. Step 2 does not feed
+///    its own walks back into that test, so the set of rows it walks depends
+///    only on the bound rows and step 1, never on their order.
+///
+/// Every remaining row is named as a child by a bound row, so following
+/// parents (finitely, since ARD1 addresses hash the child edges and rule out
+/// cycles) reaches a row walked in step 1 or 2, whose closure contains it.
+/// Every bound row is therefore validated, and the result (`Ok` or the first
+/// failure) is the same for every row order.
+///
+/// A committed batch binds its complete MRM1 closure, so in a consistent
+/// catalog step 1 visits every non-MRM1 row and step 2 walks nothing. Step 2
+/// walks a row as a root only when its bound parents are missing; such a row
+/// must then be `Required`, as any walked root must be, so it fails closed.
+fn validate_bound_closures_once(
+    rows: &[&pos_core::ArtifactRegistrationCatalogRowV1],
+    mut validate: impl FnMut(pos_core::Hash) -> Result<BTreeSet<pos_core::Hash>, BoundClosureError>,
+) -> Result<(), BoundClosureError> {
+    let mut visited = BTreeSet::new();
+    for row in rows.iter().filter(|row| row.is_repro_manifest_root()) {
+        visited.extend(validate(row.registration_address())?);
+    }
+    let named: BTreeSet<pos_core::Hash> = rows
+        .iter()
+        .flat_map(|row| row.registration().fields().child_artifacts.iter())
+        .map(|edge| edge.registration_address)
+        .collect();
+    for row in rows.iter().filter(|row| !row.is_repro_manifest_root()) {
+        let address = row.registration_address();
+        if !named.contains(&address) && !visited.contains(&address) {
+            validate(address)?;
+        }
+    }
+    Ok(())
+}
+
+type BoundClosureError = pos_core::ArtifactRegistrationPersistenceErrorV1;
+
 /// Check fresh Persona appends against the adapter's current validated registry,
 /// never a cached subject classification. Records include every lifecycle state
 /// and are retained permanently; validation also requires a record for each
@@ -222,48 +284,6 @@ fn ensure_plaintext_preference_allowed(
         Err(CoreError::SubjectPlaintextPreferenceRefused)
     } else {
         Ok(())
-    }
-}
-
-/// Map a backend failure onto the closed counterfactual port errors.
-///
-/// A missing Timeline is `ForkNotFound`, a write whose commit may or may not
-/// have landed is `OutcomeUnknown`, and every other backend failure is
-/// `StorageFailure`, which committed nothing.
-const fn counterfactual_port_error(error: &CoreError) -> pos_core::CounterfactualStoreErrorV1 {
-    match error {
-        CoreError::TimelineNotFound(_) => pos_core::CounterfactualStoreErrorV1::ForkNotFound,
-        CoreError::StorageOutcomeUnknown(_) => pos_core::CounterfactualStoreErrorV1::OutcomeUnknown,
-        _ => pos_core::CounterfactualStoreErrorV1::StorageFailure,
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod counterfactual_port_error_tests {
-    use pos_core::{CoreError, CounterfactualStoreErrorV1, TimelineId};
-
-    use super::counterfactual_port_error;
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn backend_failures_map_onto_the_closed_port_errors() {
-        assert_eq!(
-            counterfactual_port_error(&CoreError::TimelineNotFound(TimelineId::new())),
-            CounterfactualStoreErrorV1::ForkNotFound
-        );
-        assert_eq!(
-            counterfactual_port_error(&CoreError::StorageOutcomeUnknown(String::new())),
-            CounterfactualStoreErrorV1::OutcomeUnknown
-        );
-        assert_eq!(
-            counterfactual_port_error(&CoreError::Storage(String::new())),
-            CounterfactualStoreErrorV1::StorageFailure
-        );
-        assert_eq!(
-            counterfactual_port_error(&CoreError::ErasureContainmentUnavailable),
-            CounterfactualStoreErrorV1::StorageFailure
-        );
     }
 }
 
@@ -1064,13 +1084,16 @@ pub(crate) fn install_or_reject(
     }
 }
 
-/// Bind a just-committed admitted batch to its authoritative receipt.
+/// Bind a just-committed admitted batch to its authoritative receipt and the
+/// Gateway mode-binding epoch recorded for its commit (ADR-134 §8).
 pub(crate) fn committed_pipeline_receipt(
     basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineCommitReceiptV1, CoreError> {
     PipelineCommitReceiptV1::try_from_committed_events(basis, timeline, events)
+        .map(|receipt| receipt.with_mode_binding_epoch(mode_binding_epoch))
         .map_err(pipeline_receipt_error)
 }
 
@@ -1079,8 +1102,22 @@ pub(crate) fn recovered_pipeline_receipt(
     basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineOutcomeV1, CoreError> {
-    committed_pipeline_receipt(basis, timeline, events).map(PipelineOutcomeV1::RecoveredDuplicate)
+    committed_pipeline_receipt(basis, timeline, events, mode_binding_epoch)
+        .map(PipelineOutcomeV1::RecoveredDuplicate)
+}
+
+/// Answer a pipeline admission whose append met a stale Gateway mode-binding
+/// epoch with [`PipelineOutcomeV1::ModeBindingStale`]; every other error
+/// stays an error. The adapter has already rolled the attempt back.
+pub(crate) fn pipeline_mode_binding_stale_outcome(
+    error: CoreError,
+) -> Result<PipelineOutcomeV1, CoreError> {
+    match error {
+        CoreError::ModeBindingStale => Ok(PipelineOutcomeV1::ModeBindingStale),
+        error => Err(error),
+    }
 }
 
 /// Rebuild the receipt of a retained attempt found by a basis-free lookup.
@@ -1089,6 +1126,7 @@ pub(crate) fn retained_pipeline_receipt(
     timeline: TimelineId,
     draft_batch_digest: Hash,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineReceiptLookupV1, CoreError> {
     PipelineCommitReceiptV1::try_from_retained_events(
         attempt_id,
@@ -1096,7 +1134,9 @@ pub(crate) fn retained_pipeline_receipt(
         draft_batch_digest,
         events,
     )
-    .map(PipelineReceiptLookupV1::Retained)
+    .map(|receipt| {
+        PipelineReceiptLookupV1::Retained(receipt.with_mode_binding_epoch(mode_binding_epoch))
+    })
     .map_err(pipeline_receipt_error)
 }
 
@@ -1241,6 +1281,21 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
 pub fn open_store_read_only(sqlite_path: &str) -> Result<Box<dyn EventStore>, CoreError> {
     sqlite::SqliteStore::open_read_only(sqlite_path)
         .map(|store| Box::new(store) as Box<dyn EventStore>)
+}
+
+/// The persisted binding when it is exactly `expected`: the attach check of
+/// both adapters (ADR-134 §8), made on the one read the attach uses.
+pub(crate) fn expected_mode_binding(
+    current: Option<pos_core::GatewayModeBindingRecordV1>,
+    expected: &pos_core::GatewayModeProfileRefV1,
+) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1> {
+    current
+        .ok_or(pos_core::GatewayModeBindingErrorV1::Unbound)
+        .and_then(|record| {
+            (record.profile() == expected)
+                .then_some(record)
+                .ok_or(pos_core::GatewayModeBindingErrorV1::Mismatch)
+        })
 }
 
 /// Open the SQLite-backed local `OwnTracks` enrollment administration capability.
@@ -1516,6 +1571,19 @@ mod tests {
             ),
             public_key,
         )]
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn only_a_stale_mode_binding_becomes_the_stale_pipeline_outcome() {
+        assert_eq!(
+            pipeline_mode_binding_stale_outcome(CoreError::ModeBindingStale).test_ok(),
+            PipelineOutcomeV1::ModeBindingStale
+        );
+        assert!(matches!(
+            pipeline_mode_binding_stale_outcome(CoreError::ArtifactUnavailable),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     #[test]
@@ -2801,5 +2869,197 @@ mod coverage_entrypoints {
             resolve_timeline_import_public_keys_v1(&store, &export, &[]),
             Err(CoreError::Storage(message)) if message == "registry load failed"
         ));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod bound_closure_tests {
+    use super::*;
+    use pos_core::{
+        ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRegistrationCatalogRowV1,
+        ArtifactRegistrationFieldsV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1,
+        ErasureArtifactClassV1, Hash, OwnerIdV1,
+    };
+    use std::collections::BTreeMap;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn row(
+        artifact_class: ErasureArtifactClassV1,
+        bytes: &[u8],
+        children: &[&ArtifactRegistrationCatalogRowV1],
+    ) -> Result<ArtifactRegistrationCatalogRowV1, Box<dyn std::error::Error>> {
+        let owner_id = OwnerIdV1::from_static("bound-closure-owner");
+        let mut child_artifacts: Vec<_> = children
+            .iter()
+            .map(|child| pos_core::ArtifactChildEdgeV1 {
+                artifact_class: child.artifact_class(),
+                artifact_digest: child.artifact_digest(),
+                registration_address: child.registration_address(),
+                required: true,
+            })
+            .collect();
+        child_artifacts.sort_by_key(|edge| edge.registration_address);
+        let registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+            artifact_class,
+            artifact_digest: ArtifactRegistrationV1::artifact_digest(artifact_class, bytes),
+            owner_reference: ArtifactRegistrationV1::owner_reference(&owner_id),
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+            required_key_roles: Vec::new(),
+            key_dependencies: Vec::new(),
+            child_artifacts,
+        })?;
+        Ok(ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            artifact_class,
+            registration.fields().artifact_digest,
+            registration.address(),
+            bytes.to_vec(),
+            registration.canonical_cbor(),
+        )?)
+    }
+
+    /// Each bound closure is walked once: MRM1 roots first, then only
+    /// unnamed rows that no earlier walk visited.
+    #[test]
+    fn each_bound_closure_is_walked_exactly_once() -> TestResult {
+        let leaf = row(ErasureArtifactClassV1::TimelineReplay, b"leaf", &[])?;
+        // `orphan` is named by no bound row but lies in the root's closure.
+        let orphan = row(ErasureArtifactClassV1::TimelineReplay, b"orphan", &[])?;
+        let root = row(
+            ErasureArtifactClassV1::ReproManifest,
+            b"\x00\x00MRM1-root",
+            &[&leaf],
+        )?;
+        let child = row(ErasureArtifactClassV1::TimelineReplay, b"child", &[])?;
+        let parent = row(ErasureArtifactClassV1::TimelineReplay, b"parent", &[&child])?;
+        assert!(root.is_repro_manifest_root());
+        let closures: BTreeMap<Hash, BTreeSet<Hash>> = [
+            (
+                root.registration_address(),
+                [&root, &leaf, &orphan]
+                    .iter()
+                    .map(|row| row.registration_address())
+                    .collect(),
+            ),
+            (
+                parent.registration_address(),
+                [&parent, &child]
+                    .iter()
+                    .map(|row| row.registration_address())
+                    .collect(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut rows = vec![&leaf, &orphan, &root, &child, &parent];
+        rows.sort_by_key(|row| row.registration_address());
+        let mut walks: BTreeMap<Hash, usize> = BTreeMap::new();
+        validate_bound_closures_once(&rows, |address| {
+            *walks.entry(address).or_default() += 1;
+            Ok(closures
+                .get(&address)
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([address])))
+        })?;
+        let expected: BTreeMap<Hash, usize> = [
+            (root.registration_address(), 1),
+            (parent.registration_address(), 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(walks, expected);
+
+        // Step 2 never marks rows visited, so an unnamed row reached only
+        // through an unbound intermediate is still walked as its own root,
+        // and fails alike in either order.
+        let reaching = row(ErasureArtifactClassV1::TimelineReplay, b"reaching", &[])?;
+        let reached = row(ErasureArtifactClassV1::TimelineReplay, b"reached", &[])?;
+        let unbound = Hash::from_bytes([0x5a; 32]);
+        for order in [[&reaching, &reached], [&reached, &reaching]] {
+            let mut walked = BTreeSet::new();
+            let result = validate_bound_closures_once(&order, |address| {
+                walked.insert(address);
+                if address == reached.registration_address() {
+                    Err(BoundClosureError::CorruptCatalog)
+                } else {
+                    Ok(BTreeSet::from([
+                        address,
+                        unbound,
+                        reached.registration_address(),
+                    ]))
+                }
+            });
+            assert_eq!(result, Err(BoundClosureError::CorruptCatalog));
+            assert!(walked.contains(&reached.registration_address()));
+        }
+
+        // A failed walk fails the pass.
+        assert_eq!(
+            validate_bound_closures_once(&rows, |_| Err(BoundClosureError::CorruptCatalog)),
+            Err(BoundClosureError::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    /// A child shared by two MRM1 roots and a non-MRM1 parent is never walked
+    /// as a root, and every permutation of the bound rows walks the same
+    /// closures and reaches the same result: ARD1 addresses hash the child
+    /// edges, so the pass depends on the edges, not the row order.
+    #[test]
+    fn permuted_rows_with_a_shared_child_walk_the_same_closures() -> TestResult {
+        let shared = row(ErasureArtifactClassV1::TimelineReplay, b"shared", &[])?;
+        let root_a = row(
+            ErasureArtifactClassV1::ReproManifest,
+            b"\x00\x00MRM1-a",
+            &[&shared],
+        )?;
+        let root_b = row(
+            ErasureArtifactClassV1::ReproManifest,
+            b"\x00\x00MRM1-b",
+            &[&shared],
+        )?;
+        let parent = row(
+            ErasureArtifactClassV1::TimelineReplay,
+            b"parent",
+            &[&shared],
+        )?;
+        assert!(root_a.is_repro_manifest_root() && root_b.is_repro_manifest_root());
+        let bound = [&shared, &root_a, &root_b, &parent];
+        let closure = |address: Hash| BTreeSet::from([address, shared.registration_address()]);
+        let expected: BTreeMap<Hash, usize> = [&root_a, &root_b, &parent]
+            .iter()
+            .map(|row| (row.registration_address(), 1))
+            .collect();
+        let mut permutations = 0;
+        for code in 0..256_usize {
+            let indices = [code % 4, code / 4 % 4, code / 16 % 4, code / 64];
+            if (0..4).any(|index| !indices.contains(&index)) {
+                continue;
+            }
+            permutations += 1;
+            let order = indices.map(|index| bound[index]);
+            let mut walks: BTreeMap<Hash, usize> = BTreeMap::new();
+            validate_bound_closures_once(&order, |address| {
+                *walks.entry(address).or_default() += 1;
+                Ok(closure(address))
+            })?;
+            assert_eq!(walks, expected);
+            assert_eq!(
+                validate_bound_closures_once(&order, |address| {
+                    if address == parent.registration_address() {
+                        Err(BoundClosureError::CorruptCatalog)
+                    } else {
+                        Ok(closure(address))
+                    }
+                }),
+                Err(BoundClosureError::CorruptCatalog)
+            );
+        }
+        assert_eq!(permutations, 24);
+        Ok(())
     }
 }

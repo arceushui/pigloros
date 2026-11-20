@@ -6,7 +6,8 @@
 //! transient unit's current `MainPID` and every launcher-derived binding equals
 //! held or independently observed evidence. It then rechecks current authority
 //! through the [`ReleaseRecheck`] port and sends exactly one `ReleaseV1`,
-//! signed through the [`ReleaseSigner`] port. Neither message is retried.
+//! signed through the [`crate::RuntimeAttestationSigner`] port and verified
+//! under the admitted key first. Neither message is retried.
 //!
 //! Current RVS1/APT1/TRS1 digests and epochs come from the held-image
 //! authority (PR 2); the composition (PR 4) supplies them behind
@@ -22,7 +23,9 @@ use rustix::net::{
     RecvFlags, ReturnFlags, SendFlags,
 };
 
-use crate::release_signer::{issue_release, ReleaseSigner, ReleaseSignerError};
+use crate::runtime_signer::{
+    issue_release, AdmittedRuntimeKey, RuntimeAttestationSigner, RuntimeSignerError,
+};
 
 const TRUNCATED: ReturnFlags = ReturnFlags::TRUNC.union(ReturnFlags::CTRUNC);
 /// Largest `ReadyV1` datagram the provider accepts.
@@ -102,10 +105,12 @@ pub struct ReleaseBinding {
 /// bindings. `Err` means do not release.
 pub trait ReleaseRecheck {
     /// Recheck everything and return the current bindings, or why not.
+    /// `ready1_digest` is the digest of the `ReadyV1` just accepted, which the
+    /// kernel observation is bound to.
     ///
     /// # Errors
     /// Returns [`ReleaseBarrierError::Recheck`] when any recheck fails.
-    fn recheck(&self) -> Result<ReleaseBinding, ReleaseBarrierError>;
+    fn recheck(&self, ready1_digest: [u8; 32]) -> Result<ReleaseBinding, ReleaseBarrierError>;
 }
 
 /// Closed failures of the provider half. None is retryable.
@@ -132,7 +137,7 @@ pub enum ReleaseBarrierError {
     Recheck,
     /// `ReleaseV1` could not be built or signed.
     #[error(transparent)]
-    Sign(#[from] ReleaseSignerError),
+    Sign(#[from] RuntimeSignerError),
     /// `ReleaseV1` could not be sent as one message.
     #[error("ReleaseV1 could not be sent")]
     ReleaseSend,
@@ -144,6 +149,9 @@ pub enum ReleaseBarrierError {
 /// caller. The channel is the provider end of the root-created
 /// `SOCK_SEQPACKET` pair. Returns the sent release for durable evidence.
 ///
+/// `signer` signs the release, which is sent only once its signature
+/// verified under `admitted` (ADR-069 R9 §5).
+///
 /// # Errors
 /// Any [`ReleaseBarrierError`]; the caller must then fail the attempt without
 /// sending a release.
@@ -152,15 +160,17 @@ pub fn release_after_ready(
     main_pid: u32,
     expected: &ExpectedLauncherReady,
     recheck: &dyn ReleaseRecheck,
-    signer: &dyn ReleaseSigner,
+    signer: &impl RuntimeAttestationSigner,
+    admitted: AdmittedRuntimeKey<'_>,
 ) -> Result<ExecutionRelease, ReleaseBarrierError> {
     let ready = receive_ready(&channel, main_pid)?;
     if ready.fields != expected.fields() {
         return Err(ReleaseBarrierError::ReadyMismatch);
     }
-    let binding = recheck.recheck()?;
+    let binding = recheck.recheck(ready.digest)?;
     let release = issue_release(
         signer,
+        admitted,
         ExecutionReleaseFields {
             attempt_id: expected.attempt_id,
             nonce: expected.nonce,
@@ -174,7 +184,7 @@ pub fn release_after_ready(
             expected_readback_digest: binding.expected_readback_digest,
             observed_readback_digest: binding.observed_readback_digest,
             deadline_monotonic_ns: binding.deadline_monotonic_ns,
-            runtime_attestation_key_id: signer.runtime_attestation_key_id().to_owned(),
+            runtime_attestation_key_id: admitted.key_id().to_owned(),
         },
     )?;
     let sent = release.to_canonical_cbor().ok().is_some_and(|bytes| {

@@ -2,34 +2,41 @@
 //! per sub-case, its exchanges sent as raw HTTP requests through the public `router` and
 //! `spectator_router` of that Gateway, with no socket.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Body;
-use axum::http::{header, HeaderValue, Method, Request, Uri};
+use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
+use piglor_gateway::local_principal::{
+    local_gateway, provision_on_host, LocalConsentDraftV1, LocalConsentGrantDraftV1,
+    LocalPrincipalProvisionV1,
+};
+use piglor_gateway::mode_profile::{
+    bind_gateway_mode_v1, GatewayModeBindingV1, GatewayModeProfileIdV1, GatewayServeCompositionV1,
+};
+use piglor_gateway::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
 use piglor_gateway::{
-    gateway_with_erasure_host_and_authorization, router, spectator_router, AppState, Gateway,
-    GatewayAuthorization, LedgerWriteMode, LocalAuthenticationAdapter,
+    router, spectator_router, AppState, Gateway, GatewayOperationV1, LedgerWriteMode,
 };
 use piglor_ledger::LedgerView;
-use pos_core::{
-    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, ErasureRecoveryLimitsV1, Hash,
-    PrincipalRefV1, Seq, TimelineId, WallTime,
-};
+use pos_core::{EntityId, ErasureRecoveryLimitsV1, PrincipalRefV1};
 use pos_reference::evaluator::ResourceUsage;
-use pos_runtime::ErasureExecutionHostV1;
+use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
 use serde_json::{json, Map, Value};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
-use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
-use super::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
-use crate::normalize_response_v1;
+use super::payload::{
+    CaptureV2, CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, CONSENT_SLOT,
+    ROOM_SLOT, TIMELINE_SLOT,
+};
+use super::{ACTOR_ENTITY_ID, GOVERNANCE_RECORD_ID};
+use crate::{observation_v1, substitute_captured_v1};
 
 /// The header an exchange with `actor` sends.
 const ACTOR_HEADER: &str = "x-piglor-actor-entity";
@@ -126,11 +133,11 @@ fn run_subcase(
         events: 0,
     };
     // The Gateway schedules its maintenance on the runtime it is built in.
-    let gateway = {
+    let composed = {
         let _context = runtime.enter();
         compose(subcase.composition)
     };
-    gateway.map_or(unavailable, |gateway| {
+    composed.map_or(unavailable, |(gateway, _store)| {
         runtime.block_on(exchange_all(gateway, subcase, capabilities, independent))
     })
 }
@@ -147,124 +154,210 @@ fn host() -> Option<ErasureExecutionHostV1> {
     .ok()
 }
 
-/// The Gateway of a composition (requirements section 3).
-fn compose(composition: CompositionV2) -> Option<Gateway> {
+/// The Gateway of a composition (requirements section 3), with the store file it serves when
+/// it has one.
+///
+/// `open` is the unprotected in-process harness Gateway. `authorized`,
+/// `authorized-air-gapped`, `authorized-consented` and `authorized-rooms` are the production
+/// serve composition (#1361, #1360, #309, #303): the first `serve` binds a fresh `SQLite` store
+/// to the Local or the Air-Gapped execution mode, a fixture Local Principal document is
+/// provisioned into it with the production `provision_on_host`, and the Gateway is composed
+/// over that store by `local_gateway` under that binding, which requires the recorded
+/// Principal for every protected operation.
+fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
+    composition
+        .mode()
+        .map_or_else(open_gateway, |id| authorized_gateway(id, composition))
+}
+
+/// The unprotected in-process harness Gateway of the `open` composition.
+fn open_gateway() -> Option<(Gateway, Option<ScratchStore>)> {
+    host()
+        .and_then(|host| Gateway::unprotected_for_harness(host).ok())
+        .map(|gateway| (gateway, None))
+}
+
+/// The production serve composition over a fresh store bound to the execution mode `id`,
+/// whose fixture Principal is the document of `composition`.
+fn authorized_gateway(
+    id: GatewayModeProfileIdV1,
+    composition: CompositionV2,
+) -> Option<(Gateway, Option<ScratchStore>)> {
+    let store = ScratchStore::new();
+    store_host(&store)
+        .and_then(|mut host| bind_mode(&mut host, id))
+        .and_then(|_| provision_store(&store, composition))
+        .and_then(|()| store_host(&store))
+        .and_then(|mut host| {
+            bind_mode(&mut host, id).and_then(|mode| local_gateway(host, None, &mode).ok())
+        })
+        .map(|gateway| (gateway, Some(store)))
+}
+
+/// The recovered production host of `store`.
+fn store_host(store: &ScratchStore) -> Option<ErasureExecutionHostV1> {
+    open_recovered_erasure_host(
+        StoreConfig::Sqlite {
+            path: store.path_text(),
+        },
+        GatewayHostStoreV1::Standard,
+        &ErasureCoordinatorCompositionV1::closed(),
+    )
+    .ok()
+}
+
+/// Bind the store of `host` to the execution mode `id` over a loopback composition, as every
+/// `serve` does: the first binds the empty store, a later one attaches to that binding.
+fn bind_mode(
+    host: &mut ErasureExecutionHostV1,
+    id: GatewayModeProfileIdV1,
+) -> Option<GatewayModeBindingV1> {
+    bind_gateway_mode_v1(
+        id,
+        GatewayServeCompositionV1 {
+            tcp_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            owntracks_owner_key: None,
+            fork_admission_socket: None,
+            ledger_source: None,
+            network_grants: BTreeSet::new(),
+        },
+        host,
+    )
+    .ok()
+}
+
+/// The fixture Local Principal document of an authorized composition, as the fixture actor:
+/// its operations, its one consent and its governance record.
+///
+/// `authorized` and `authorized-air-gapped` may create Timelines, read their Events and read
+/// their own Session, and hold no action, signal or network grant. `authorized-consented` may
+/// also revoke a consent, and its one consent, by the fixture actor to itself, governs Timeline
+/// creation. `authorized-rooms` may create Timelines, read its Session, revoke a consent and
+/// create, derive and read Scenario Rooms; it records the fixture governance record, and its
+/// one consent governs Timeline creation and permits export, so a room may name it as its
+/// `privacy_export_ref`.
+fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
+    let consent = |export_permitted| LocalConsentDraftV1 {
+        subject: actor,
+        grantee: actor,
+        grants: vec![LocalConsentGrantDraftV1 {
+            purpose: "operation".to_owned(),
+            data_categories: vec!["timeline".to_owned()],
+            export_permitted,
+        }],
+    };
     match composition {
-        CompositionV2::Open => host().and_then(|host| Gateway::new_with_erasure_host(host).ok()),
-        CompositionV2::Authorized => fixture_authorization()
-            .zip(entity(BODY_ENTITY_ID))
-            .zip(host())
-            .and_then(|((authorization, body), host)| {
-                gateway_with_erasure_host_and_authorization(host, [body], authorization).ok()
-            }),
+        CompositionV2::AuthorizedConsented => (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+            ],
+            Some(consent(false)),
+            None,
+        ),
+        CompositionV2::AuthorizedRooms => (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::CREATE_SCENARIO_ROOM,
+                GatewayOperationV1::DERIVE_SCENARIO_ROOM,
+                GatewayOperationV1::READ_SCENARIO_ROOM,
+            ],
+            Some(consent(true)),
+            entity(GOVERNANCE_RECORD_ID),
+        ),
+        CompositionV2::Open | CompositionV2::Authorized | CompositionV2::AuthorizedAirGapped => (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+            ],
+            None,
+            None,
+        ),
     }
 }
 
-/// The fixture-only authority of the `authorized` composition: one Principal whose single
-/// grant lets the fixture actor read Timeline Events and grants no action. It is never a
-/// source of production authority (ADR-108).
-fn fixture_authorization() -> Option<GatewayAuthorization> {
+/// The operations, consent and governance record of a fixture Local Principal document.
+type FixtureDocument = (
+    Vec<GatewayOperationV1>,
+    Option<LocalConsentDraftV1>,
+    Option<EntityId>,
+);
+
+/// Provision the fixture Local Principal of `composition` into `store`. Only its document is
+/// fixture data.
+fn provision_store(store: &ScratchStore, composition: CompositionV2) -> Option<()> {
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
         .zip(entity(ACTOR_ENTITY_ID))
-        .and_then(|(principal, actor)| authenticated(&principal).zip(read_grant(principal, actor)))
-        .and_then(|(authenticated, grant)| pinned_authorization(authenticated, &grant))
-}
-
-fn authenticated(principal: &PrincipalRefV1) -> Option<AuthenticatedPrincipalResultV1> {
-    AssuranceLevelV1::try_new(1).ok().and_then(|assurance| {
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-            principal: principal.clone(),
-            adapter_id: "fixture".to_owned(),
-            assurance,
-            issued_at: WallTime::from_micros(1),
-            expires_at: WallTime::from_micros(u64::MAX),
-            binding_digest: Hash::from_bytes([2; 32]),
-        })
-        .ok()
-    })
-}
-
-fn read_grant(principal: PrincipalRefV1, actor: EntityId) -> Option<CapabilityGrantV1> {
-    CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-        resources: vec!["timeline.events".to_owned()],
-        actions: vec!["read".to_owned()],
-        purposes: vec!["read".to_owned()],
-        audiences: vec!["gateway".to_owned()],
-        actor_entity_ids: vec![actor],
-        subject_ids: Vec::new(),
-        participant_ids: Vec::new(),
-        plugin_id: None,
-        principal_roles: vec![AuthorityRoleV1::Actor],
-        max_uses: 1,
-        budget: 1,
-        environment_constraints: Vec::new(),
-    })
-    .ok()
-    .and_then(|scope| {
-        CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-            grant_id: Hash::from_bytes([5; 32]),
-            grantor: principal.clone(),
-            grantee: AuthorityGranteeV1::Principal(principal),
-            trust_domain: "gateway.fixture".to_owned(),
-            scope,
-            valid_from_position: Seq::from_u64(1),
-            valid_until_position: Seq::from_u64(50),
-            parent_grant_id: None,
-            delegation_depth: 0,
-            max_delegation_depth: 0,
-            permitted_delegate_classes: Vec::new(),
-            consent_references: Vec::new(),
-            policy_revision: Hash::from_bytes([4; 32]),
-            issuance_timeline: TimelineId::from_ulid(Ulid(1)),
-            issuance_seq: Seq::from_u64(1),
-            revocation_epoch: 0,
-            revocation_fence: None,
-            authority_registry_digest: Hash::from_bytes([3; 32]),
-        })
-        .ok()
-    })
-}
-
-fn pinned_authorization(
-    authenticated: AuthenticatedPrincipalResultV1,
-    grant: &CapabilityGrantV1,
-) -> Option<GatewayAuthorization> {
-    grant
-        .binding_digest()
-        .ok()
-        .and_then(|binding| {
-            AuthorityRegistrySnapshotV1::try_new(
-                Hash::from_bytes([3; 32]),
-                vec![authenticated.registry_binding_digest()],
-                vec![binding],
-                Vec::new(),
+        .and_then(|(principal, actor)| {
+            let (operations, consent, governance) = document(composition, actor);
+            LocalPrincipalProvisionV1::try_new_provisioned(
+                &principal,
+                [actor],
+                operations,
+                consent.as_ref(),
+                governance,
             )
             .ok()
         })
-        .and_then(|registry| {
-            let host = AuthorityPersistenceHostV1::new(&registry);
-            let mut state = AuthorityPersistenceStateV1::new();
-            host.authorize_grant(grant)
-                .ok()
-                .and_then(|permit| state.issue_grant(permit, grant.clone()).ok())
-                .and_then(|_| state.view(grant.grant_id()).ok())
-                .map(|view| {
-                    GatewayAuthorization::new(
-                        Arc::new(LocalAuthenticationAdapter::new(authenticated)),
-                        view,
-                        registry,
-                    )
-                })
+        .and_then(|provision| {
+            store_host(store).and_then(|mut host| provision_on_host(&mut host, &provision).ok())
         })
 }
 
-/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured ID.
-fn request(exchange: &ExchangeV2, timeline: Option<&str>) -> Request<Body> {
-    let body = exchange
-        .body
-        .as_ref()
-        .map_or_else(Body::empty, |value| Body::from(value.to_string()));
+/// One sub-case's `SQLite` file in the temporary directory, removed with its journal files when
+/// the sub-case ends.
+struct ScratchStore {
+    path: PathBuf,
+}
+
+impl ScratchStore {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "pos-gateway-conformance-{}-{unique}-{}.sqlite",
+                std::process::id(),
+                Ulid::generate()
+            )),
+        }
+    }
+
+    fn path_text(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for ScratchStore {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.path.clone().into_os_string();
+            path.push(suffix);
+            drop(std::fs::remove_file(path));
+        }
+    }
+}
+
+/// The header that carries the idempotency key of every request.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+/// The raw HTTP request of an exchange, with `{timeline}` and `{room}` replaced by the captured
+/// Timeline and room IDs and `{consent}` by the captured consent. Every request carries the sub-case ID as its
+/// idempotency key; routes without one ignore it.
+fn request(exchange: &ExchangeV2, slots: &Slots, key: &str) -> Request<Body> {
+    let body = exchange.body.as_ref().map_or_else(Body::empty, |value| {
+        Body::from(
+            value
+                .to_string()
+                .replace(CONSENT_SLOT, slots.consent.as_deref().unwrap_or_default()),
+        )
+    });
     let mut request = Request::new(body);
     *request.method_mut() = match exchange.method {
         MethodV2::Get => Method::GET,
@@ -272,7 +365,8 @@ fn request(exchange: &ExchangeV2, timeline: Option<&str>) -> Request<Body> {
     };
     let path = exchange
         .path
-        .replace(TIMELINE_SLOT, timeline.unwrap_or_default());
+        .replace(TIMELINE_SLOT, slots.timeline.as_deref().unwrap_or_default())
+        .replace(ROOM_SLOT, slots.room.as_deref().unwrap_or_default());
     *request.uri_mut() = Uri::try_from(path).unwrap_or_default();
     if exchange.body.is_some() {
         request.headers_mut().insert(
@@ -285,7 +379,49 @@ fn request(exchange: &ExchangeV2, timeline: Option<&str>) -> Request<Body> {
             .headers_mut()
             .insert(ACTOR_HEADER, HeaderValue::from_static(ACTOR_ENTITY_ID));
     }
+    request.headers_mut().extend(
+        HeaderValue::from_str(key)
+            .ok()
+            .map(|value| (HeaderName::from_static(IDEMPOTENCY_KEY_HEADER), value)),
+    );
     request
+}
+
+/// The captured values a sub-case's later exchanges name.
+#[derive(Default)]
+struct Slots {
+    timeline: Option<String>,
+    consent: Option<String>,
+    room: Option<String>,
+}
+
+impl Slots {
+    /// The `(slot, value)` pairs of the captured consent and room that later responses echo.
+    fn captured(&self) -> Vec<(&'static str, &str)> {
+        [
+            (CONSENT_SLOT, self.consent.as_deref()),
+            (ROOM_SLOT, self.room.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(slot, value)| value.map(|value| (slot, value)))
+        .collect()
+    }
+
+    /// Fill the slot `capture` names from the response `parsed`.
+    fn capture(&mut self, capture: Option<CaptureV2>, parsed: Option<&Value>) {
+        let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+        match capture {
+            Some(CaptureV2::Timeline) => {
+                self.timeline = text(parsed.and_then(|value| value.get("id")));
+            }
+            Some(CaptureV2::Room) => self.room = text(parsed.and_then(|value| value.get("id"))),
+            Some(CaptureV2::Consent) => {
+                self.consent =
+                    text(parsed.and_then(|value| value.pointer("/consents/0/consent_ref")));
+            }
+            None => {}
+        }
+    }
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -312,7 +448,7 @@ async fn exchange_all(
     independent: bool,
 ) -> SubCaseRunV2 {
     let (loopback, spectator) = routers(&gateway);
-    let mut timeline: Option<String> = None;
+    let mut slots = Slots::default();
     let mut observations = Vec::with_capacity(subcase.exchanges.len());
     let mut run = SubCaseRunV2 {
         record: Value::Null,
@@ -324,13 +460,15 @@ async fn exchange_all(
     let mut present = false;
     for exchange in &subcase.exchanges {
         let route = exchange.route();
-        let observation = if capabilities.iter().any(|held| held == route.capability()) {
+        let held =
+            route.is_some_and(|route| capabilities.iter().any(|held| held == route.capability()));
+        let observation = if held {
             let service = match exchange.router {
                 RouterV2::Loopback => loopback.clone(),
                 RouterV2::Spectator => spectator.clone(),
             };
             let Ok(response) = service
-                .oneshot(request(exchange, timeline.as_deref()))
+                .oneshot(request(exchange, &slots, &subcase.id))
                 .await;
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), RESPONSE_LIMIT)
@@ -338,7 +476,7 @@ async fn exchange_all(
                 .unwrap_or_default();
             run.steps += 1;
             run.output_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            run.events += u64::from(status == 201 && route.commits());
+            run.events += route.filter(|_| status == 201).map_or(0, RouteV2::events);
             if exchange.router == RouterV2::Spectator {
                 present |= subcase
                     .canary
@@ -346,18 +484,11 @@ async fn exchange_all(
                     .is_some_and(|canary| contains(&bytes, canary.as_bytes()));
             }
             let parsed = serde_json::from_slice::<Value>(&bytes).ok();
-            if exchange.captures() {
-                timeline = parsed
-                    .as_ref()
-                    .and_then(|value| value.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-            }
-            let body = parsed.map_or_else(
-                || Value::from("non-json"),
-                |value| json!({"json": normalize_response_v1(value)}),
-            );
-            json!({"status": status, "body": body})
+            slots.capture(exchange.capture(), parsed.as_ref());
+            observation_v1(
+                status,
+                parsed.map(|value| substitute_captured_v1(value, &slots.captured())),
+            )
         } else {
             json!({"refused": "capability-denied"})
         };
@@ -378,4 +509,25 @@ async fn exchange_all(
     run.matched &= !present;
     run.record = Value::Object(record);
     run
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScratchStore;
+
+    #[test]
+    fn a_scratch_store_removes_its_files() -> Result<(), Box<dyn std::error::Error>> {
+        let store = ScratchStore::new();
+        let path = store.path.clone();
+        assert_eq!(std::path::Path::new(&store.path_text()), path.as_path());
+        assert!(path.starts_with(std::env::temp_dir()));
+        std::fs::write(&path, b"store")?;
+        let mut journal = path.clone().into_os_string();
+        journal.push("-wal");
+        std::fs::write(&journal, b"journal")?;
+        drop(store);
+        assert!(!path.exists());
+        assert!(!std::path::Path::new(&journal).exists());
+        Ok(())
+    }
 }

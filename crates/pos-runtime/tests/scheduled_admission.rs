@@ -176,6 +176,7 @@ fn root_grant() -> CapabilityGrantV1 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn authority_host() -> AuthorityPersistenceHostV1 {
     AuthorityPersistenceHostV1::new(&ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![hash(200)],
         vec![ok(root_grant().binding_digest())],
@@ -1178,7 +1179,9 @@ fn local_host_publishes_admits_and_refreshes_the_session_fence() {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("local-admission")).id();
-        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let host = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         let log = Log::default();
         let mut registry = PluginRegistry::new().with_erasure_gate(gate);
         register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
@@ -1241,7 +1244,9 @@ fn local_host_fails_closed_for_a_store_bound_to_another_authority_host() {
     for (name, mut store) in stores() {
         let host = Host::prepare(store.as_mut(), 10);
         let unfenced = ok(store.create_timeline("unfenced")).id();
-        let local = ok(LocalScheduledAdmissionHostV1::shared());
+        let local = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         let error = err(local.observe(&host.registry(), store.as_mut(), unfenced));
         assert!(
             matches!(
@@ -1422,6 +1427,24 @@ impl AuthorityPersistencePortV1 for FenceRejectingPorts<'_> {
     ) -> Result<pos_core::PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.inner.load_authority(leaf_grant_id)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.inner.record_authorization_denial(permit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        self.inner.load_authorization_denials(from, limit)
+    }
 }
 
 #[test]
@@ -1431,7 +1454,9 @@ fn local_host_reports_a_fence_publication_failure_as_a_store_error() {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     ok(store.bind_erasure_gate(Arc::clone(&gate)));
     let timeline = ok(store.create_timeline("fence-publication-failure")).id();
-    let host = ok(LocalScheduledAdmissionHostV1::shared());
+    let host = ok(LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    ));
     let registry = PluginRegistry::new().with_erasure_gate(gate);
 
     let error = err(host.observe(
@@ -1537,7 +1562,9 @@ fn local_host_rejects_another_plugins_event_type_and_commits_nothing() {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("local-foreign-draft")).id();
-        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let host = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         let log = Log::default();
         let mut registry = PluginRegistry::new().with_erasure_gate(gate);
         register(&mut registry, driver("first", vec![b"a1"], &log));
@@ -2439,6 +2466,24 @@ impl AuthorityPersistencePortV1 for CountsPorts<'_> {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.inner.load_authority(leaf_grant_id)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.inner.record_authorization_denial(permit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        self.inner.load_authorization_denials(from, limit)
+    }
 }
 
 /// Whether `error` is the set-exhaustion refusal of the preflight.
@@ -2509,7 +2554,9 @@ fn observe_refuses_an_exhausted_timeline_before_any_driver_steps() {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("observe-exhausted")).id();
-        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let host = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         for payloads in &payload_sets {
             let log = Log::default();
             let mut registry = PluginRegistry::new().with_erasure_gate(gate.clone());

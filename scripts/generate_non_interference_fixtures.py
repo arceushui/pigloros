@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bind the checked-in non-interference evidence to the ADR-059 matrix (ADR-062 Revision 8
-slices N1-N4; owner notes `ADR-062_R8_NonInterference_Executions` and
-`ADR-062_R8_NonInterference_Fork`).
+slices N1-N4 and N1b; owner notes `ADR-062_R8_NonInterference_Executions` and
+`ADR-062_R8_NonInterference_Fork`, and ADR-127).
 
 Every executed row declared in `scripts/non_interference_executed_rows.json` has one oracle
 module that derives its expected NIA1 `result_digest` independently (Q3 (a)); the oracles are
@@ -26,12 +26,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import generate_non_interference_g_archive_fixtures as g_archive  # noqa: E402
 import generate_non_interference_g_fork_fixtures as g_fork  # noqa: E402
+import generate_non_interference_g_ops_fixtures as g_ops  # noqa: E402
 import generate_non_interference_g_plug_fixtures as g_plug  # noqa: E402
 import generate_non_interference_g_pub_fixtures as g_pub  # noqa: E402
 import non_interference_fixtures as shared  # noqa: E402
 
-ORACLES = (g_pub, g_fork, g_plug)
+ORACLES = (g_pub, g_plug, g_ops, g_fork, g_archive)
 
 
 def main() -> None:

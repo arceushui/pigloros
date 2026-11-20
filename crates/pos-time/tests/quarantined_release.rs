@@ -200,6 +200,7 @@ fn release<'p>(
         },
     ));
     let access = test_ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         AuthenticatedPrincipalDraftV1 {
             principal: test_ok(PrincipalRefV1::try_new([1; 16], "operators")),
             adapter_id: "test-passkey".to_owned(),

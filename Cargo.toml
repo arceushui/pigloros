@@ -30,12 +30,14 @@ members = [
   "apps/pos-experiment",
   "apps/pos-cli",
   "apps/pos-sandboxd",
+  "apps/pos-root-selector",
   "apps/pos-plugin-worker",
   "apps/pos-plugin-conformance-adapter",
   "apps/pos-metric-conformance-adapter",
   "apps/pos-gateway-conformance-adapter",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
+  "apps/piglor-owner",
   "apps/piglor-world-client",
 ]
 resolver = "2"
@@ -61,9 +63,9 @@ bytes = "1"
 serde_bytes = "0.11"
 
 # Crypto
-blake3 = "1"
+blake3 = { version = "1", features = ["zeroize"] }
 ed25519-dalek = { version = "3", features = ["serde", "rand_core", "zeroize"] }
-hpke = { version = "=0.15.0", default-features = false, features = [
+hpke = { version = "=0.15.1", default-features = false, features = [
   "alloc",
   "getrandom",
   "x25519",
@@ -82,9 +84,19 @@ httparse = { version = "=1.10.1", default-features = false }
 base64 = { version = "=0.23.1", default-features = false }
 p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
 getrandom = "=0.4.3"
+# ADR-110 Windows shim; non-Windows consumers do not inherit this dependency.
+windows = { version = "=0.62.2", default-features = false, features = ["std"] }
+webview2-com = "=0.39.1"
 # ADR-091/097 subject key wrap and subject ciphertext (ADR-110 §3 pins).
 aes-gcm = { version = "=0.11.1", default-features = false, features = [
   "aes",
+  "zeroize",
+] }
+# ADR-128 community artifact primitive. The existing aes-gcm/zeroize feature
+# also enables aes/zeroize and ghash -> polyval/zeroize in this locked graph.
+aes-gcm-siv = { version = "=0.12.1", default-features = false, features = [
+  "aes",
+  "alloc",
   "zeroize",
 ] }
 hkdf = "=0.13.0"
@@ -103,7 +115,7 @@ rusqlite = { version = "0.41", features = ["bundled", "hooks", "functions"] }
 # pin with default features off. `runtime` is the feature that lets the
 # Component Model instantiate and call a Component; `scripts/
 # check_wasmtime_feature_pin.py` fails if any further feature is resolved.
-wasmtime = { version = "=50.0.1", default-features = false, features = [
+wasmtime = { version = "=50.0.3", default-features = false, features = [
   "component-model",
   "cranelift",
   "runtime",
@@ -116,6 +128,7 @@ tempfile = "3"
 # wasm-tools release (wasmparser 0.258) that builds the guest fixtures.
 wat = "=1.262.0"
 wit-parser = { version = "=0.258.3", default-features = false }
+jsonschema = { version = "=0.59.0", default-features = false }
 
 # Data files
 toml = "1.1"

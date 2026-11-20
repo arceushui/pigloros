@@ -14,7 +14,9 @@ use pos_crypto::plugin_manifest::component_digest_v1;
 use pos_plugin_publisher::publish_plugin_release_v1;
 use pos_plugin_publisher::test_support::{
     encoding::{Material, OTHER_OWNER, OWNER, SCOPE, TICK},
-    release::{make_draft, pmf1_digest, Shape, COMPONENT_BYTES},
+    release::{
+        address_of, closure, make_draft, pmf1_digest, FixtureContent, Shape, COMPONENT_BYTES,
+    },
     world::{register, wall, Config, World},
     BoxResult,
 };
@@ -22,9 +24,10 @@ use pos_plugin_release::{
     BundleAddressV1, ContentValidationV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
 };
 use pos_runtime::community_plugin_host::{
-    gate_community_release_v1, CommunityPassAuthorizationV1, CommunityPassV1,
-    CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
-    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
+    gate_community_release_v1, BundleContentReasonV1, CommunityPassAuthorizationV1,
+    CommunityPassV1, CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1,
+    GatedCommunityReleaseV1, PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
+    ReleaseIdentityV1,
 };
 use pos_store::plugin_trust_registry::{
     PluginTrustPolicyRegistryErrorV1 as Reg, PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
@@ -213,7 +216,7 @@ fn an_installed_active_release_gates_ok_with_the_registry_facts() -> TestResult 
     assert_eq!(gated.component_digest(), component_digest_v1(&component));
     assert_eq!(gated.tps1_digest(), retained.tps1_digest());
     let validation = gated.content_validation();
-    assert_eq!(validation, ContentValidationV1::NotPerformed);
+    assert_eq!(validation, ContentValidationV1::BasicPackageV1);
     assert_eq!(gated.identity(), authorization.identity());
     let shown = format!("{gated:?}");
     assert!(shown.contains("GatedCommunityReleaseV1"));
@@ -324,7 +327,8 @@ fn unknown_key_and_ungranted_plugin_id_map_to_untrusted() -> TestResult {
         version: "3.0.0",
         ..world.first_shape()
     };
-    let draft = make_draft(foreign)?;
+    let content = FixtureContent::new(foreign.component);
+    let draft = make_draft(foreign, &content)?;
     let ungranted =
         publish_plugin_release_v1(&mut world.keys, &world.other, 1, &draft, &world.store)?;
     let unknown = unknown.address();
@@ -559,6 +563,108 @@ fn a_bad_signature_is_refused_after_the_registry_accepted_the_release() -> TestR
     rig.world.advance_revoking_keys(&[1])??;
     rig.sync()?;
     assert_eq!(rig.error(50, TICK)?, Some(KEY));
+    Ok(())
+}
+
+#[test]
+fn gate_rechecks_content_even_if_the_registry_reports_a_release_active() -> TestResult {
+    let mut rig = Rig::new()?;
+    let evaluation = rig.world.evaluate_at(&rig.address, 50, TICK)??;
+    let shape = Shape::first();
+    let mut content = FixtureContent::new(shape.component);
+    content.corrupt_provenance();
+    let malformed = rig.world.publish_with_content(shape, &content)?;
+    // Model a pre-rule registry admission; the fake deliberately returns a
+    // retained evaluation rather than claiming this malformed closure passed admission.
+    let registry = Scripted::accepting(&rig.world.registry, evaluation);
+    let pass = open_pass(50, TICK)?;
+    let gate = gate_community_release_v1(
+        &registry,
+        &expectation(PLUGIN_ID),
+        &rig.world.store,
+        malformed.address(),
+        &rig.source,
+        &pass,
+    );
+    assert_eq!(
+        gate.err(),
+        Some(Error::InvalidBundleContent {
+            reason: BundleContentReasonV1::Malformed
+        })
+    );
+    assert_eq!(registry.calls(), 1);
+    let draft = make_draft(shape, &content)?;
+    let bad_signature = draft.unsigned()?.with_signature(shape.epoch, [0; 64])?;
+    let bundle = closure(&draft, &bad_signature, shape.component)?;
+    let address = address_of(rig.world.store.publish(&bundle)?);
+    let gate = gate_community_release_v1(
+        &registry,
+        &expectation(PLUGIN_ID),
+        &rig.world.store,
+        &address,
+        &rig.source,
+        &pass,
+    );
+    assert_eq!(gate.err(), Some(UNTRUSTED));
+    assert_eq!(registry.calls(), 2);
+    Ok(())
+}
+
+/// Admission survives a registry and OCI source restart, and the reopened gate rechecks content.
+#[test]
+fn validated_admission_gates_after_sqlite_and_source_reopen() -> TestResult {
+    use std::sync::Arc;
+
+    use pos_core::{store::EventStore, ErasureContainmentGateV1};
+    use pos_plugin_publisher::test_support::world::activation;
+    use pos_plugin_publisher::{install_plugin_release_v1, PluginInstallRequestV1};
+    use pos_store::sqlite::SqliteStore;
+
+    let mut world = World::new()?;
+    let release = world.publish(Shape::first())?;
+    let material = world.material()?;
+    let source = Source::of(current(&world)?);
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("registry.db");
+    let path = path.to_str().ok_or("non-UTF-8 registry path")?;
+    let mut registry = SqliteStore::open(path)?;
+    registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let timeline = registry.create_timeline("plugin-activation")?.id();
+    let (anchor, genesis) = world.policy.anchor()?;
+    registry.provision(&anchor, &genesis)?;
+    let installed = install_plugin_release_v1(
+        &world.store,
+        release.address(),
+        &mut registry,
+        &mut wall(material.utc)?,
+        PluginInstallRequestV1 {
+            anchor: &anchor,
+            tps1_bytes: &material.tps1,
+            evidence: &material.evidence,
+            activation: activation(timeline, 1),
+        },
+    )?;
+    assert_eq!(
+        installed.content_validation(),
+        ContentValidationV1::BasicPackageV1
+    );
+    drop(registry);
+    let reopened_registry = SqliteStore::open(path)?;
+    let reopened_source = world.root.store()?;
+    let pass = open_pass(50, TICK)?;
+    let (gated, _) = gate_community_release_v1(
+        &reopened_registry,
+        &expectation(PLUGIN_ID),
+        &reopened_source,
+        release.address(),
+        &source,
+        &pass,
+    )?;
+    assert_eq!(
+        gated.content_validation(),
+        ContentValidationV1::BasicPackageV1
+    );
+    assert_eq!(gated.release_digest(), release.release_digest());
     Ok(())
 }
 

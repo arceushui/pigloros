@@ -9,13 +9,14 @@ Shared reference for humans and agents.
 3. Prefer deleting/simplifying unhittable branches over exemptions.
 4. Do not use rustdoc ` ```ignore ` fences — use ` ```text ` or a real doctest.
 5. Pull requests recognized as documentation-only by `.github/rust-scope.yml` skip Rust test, coverage, and cargo-crap jobs; Rust-affecting changes retain those gates.
+6. On a Rust-affecting pull request whose changes all lie inside workspace member directories, `test-shard`, doctests, `feature-matrix`, `clippy`, `rustdoc` and the ASan archive and shards run only the members the change can affect (`scripts/affected_packages.py`; see [How CI chooses its scope](../CONTRIBUTING.md#affected-package-scope-phase-1)). Coverage, cargo-crap and mutation keep the whole workspace, and pushes to `main`, manual runs and Trunk merge-queue test pull requests run the whole workspace everywhere. Every selected test still runs exactly once across the shards; only a scoped selection lets a shard or ASan partition run no test.
 
 ## Enforcement
 
 | Layer | Tool | Notes |
 |---|---|---|
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
-| Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
+| Git hooks | Versioned `.githooks/pre-commit` runs `cargo fmt --check`, the full Trunk check of the staged changes (every enabled linter and formatter, including `rust-test-policy`; check-only), a staged `Cargo.lock` check for manifest changes, and targeted Clippy; versioned `.githooks/pre-push` runs the full Trunk check over the pushed commits | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | CI: `cargo nextest run --run-ignored all` in three `--partition slice:k/3` shards plus `cargo test --doc -- --include-ignored`; locally `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches libtest `test result:` and nextest `Summary` lines only (no log prose FP); outside `--partitioned=N` mode fails on any ignored or skipped test or a missing summary; `--partitioned=N` instead proves the N shards ran every test exactly once (partitioning itself causes skips) |
 | Coverage | `cargo llvm-cov nextest` with `--run-ignored all` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
@@ -36,8 +37,11 @@ to prove its own unmutated scratch copy before testing mutations. A fixture
 missing only from the copied tree must fail the baseline rather than count as
 a caught mutant. The aggregate gate requires the shared baseline and every
 shard. This also applies to manual workflow dispatch. The separate baseline has
-the normal test job's 30-minute limit; mutant limits remain 120 seconds for tests, 600 seconds for
-builds, and a 60-minute shard watchdog. `scripts/test_mutation_workflow_policy.py`
+the normal test job's 30-minute limit. Mutant limits are 240 seconds for tests,
+600 seconds for builds, and a 60-minute shard watchdog. The test limit also
+bounds each shard's unmutated baseline, and pos-store's suite takes about 120
+seconds or more (mutation run 44010869119 timed out its baseline at the former
+120-second limit). `scripts/test_mutation_workflow_policy.py`
 locks this dependency and exercises failed, cancelled, missing and skipped
 results against the actual fan-in shell. Harness startup failures are not
 evidence that a mutation was caught.
@@ -56,8 +60,33 @@ same 99% line and 99% region thresholds to changed production Rust files under
 `**/src/**/*.rs`, except `crates/pos-owner-bridge-windows`, which is excluded from
 the root gate. That crate has its own thresholds (99% lines and regions for `src`
 outside `src/ffi`, 95% lines and 80% regions for `src/ffi`) in its crate-local
-`covgate.toml`, read by the Windows-only owner-bridge CI job (not yet landed), so
+`covgate.toml`, read by the Windows-only `owner-bridge-windows` CI job, so
 the Linux coverage job intentionally does not evaluate them.
+
+That job runs on every push to `main` and on pull requests whose changes touch
+the paths in the `owner_windows` filter of `.github/rust-scope.yml` (the owner
+crates, `pos-crypto`, `fixtures/owner-bridge`, workspace manifests, toolchain
+and root Cargo, lint, format and coverage configuration, the workflows and the
+scripts the lane or its consumers run), read from the trusted base revision.
+Failed detection, a base revision without that filter, a pull request at the
+3000-file listing limit, any renamed file, or a failure to list renames runs
+it. Only `cargo-crap` waits for the lane, and `ci-gate` requires both results
+directly; the standard stage, mutation and ASan never wait for it, so a failed lane
+does not hide or delay their findings. When a pull
+request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
+`crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
+`ci-gate` requires the lane's success whenever it is in scope.
+
+The Windows lane has two blocking jobs that run side by side. The coverage job
+runs the complete native test suite once under coverage instrumentation, with no
+test-exclusion filters; its readiness fixture drives 4 workers x 5 real
+ceremonies, which reaches the same code. The `readiness-soak` job runs that
+fixture uninstrumented with the full 4 workers x 250 = 1,000 real ceremonies.
+It fails if the fixture is renamed away. Under instrumentation the soak alone
+took about 40 minutes and pushed slow runners past the 65-minute step limit.
+The fixture refuses to run without `OWNER_BRIDGE_READINESS_RUNS_PER_WORKER`.
+Portable bridge and owner executable tests run separately, along with native
+doctests. The retained runtime is prepared before these tests.
 
 `covgate` reads the detailed LLVM JSON report produced by the completed
 `cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test
@@ -106,17 +135,22 @@ mirrored by `scripts/check_cargo_crap_ci_policy.py` and its independent adversar
 tests. Family wildcards, production neighbours, and score-tolerance changes
 remain rejected; all fixture cases still execute in the workspace test run.
 
-Each successful `main` workflow publishes a 90-day baseline artifact named for
-its exact commit. A pull request downloads the artifact for its base SHA, so
-newly merged functions become existing baseline entries on the next change.
-The pull request job polls for the artifact for up to five minutes to cover the
-short interval while the corresponding `main` cargo-crap job is still finishing.
-It trusts only an unexpired artifact attached to the exact base commit on the
-repository's `main` branch; it does not wait for unrelated slower jobs such as
-ASan. The aggregate `main` gate remains responsible for keeping `main` green.
-If that trusted artifact has expired or no successful `main` cargo-crap job has
-published one for the base, the pull request must rebase onto a newer `main`
-commit with a trusted baseline.
+Each successful `main` cargo-crap job publishes a 90-day baseline artifact named
+for its exact commit. The job starts as soon as hosted coverage (and the native
+lane, when in scope) succeeds, without waiting for the other core jobs, so the
+baseline appears as early as possible. A pull request downloads the artifact
+for its base SHA, so newly merged functions become existing baseline entries on
+the next change. While `main`'s run for that base is still working, the pull
+request job polls for up to 30 minutes. It trusts only an unexpired artifact
+attached to the exact commit on the repository's `main` branch. The aggregate
+`main` gate remains responsible for keeping `main` green. If the base never
+gets a baseline within that bound, the job uses the baseline of the nearest
+first-parent `main` ancestor among the 30 commits before it; a function `main`
+improved after that ancestor may then regrow up to its ancestor score, which
+the owner accepted. With no trusted baseline in that window, the job fails
+closed (pull requests that change no Rust, Cargo or toolchain input bootstrap
+instead). A failed core stage (as `core-gate` reports it) does not stop
+cargo-crap from running; `ci-gate` still fails on it.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,
@@ -198,7 +232,10 @@ targets, and execution scope remain.
 `scripts/check_asan_ci_policy.py` enforces the exact archive-build job and
 serial linker wrapper, shard matrix and filtersets, test-thread cap,
 fail-closed aggregate, and complete ASan scope by parsing the workflow's
-executable YAML semantics. Adversarial fixtures prove that disabled/non-failing
+executable YAML semantics. On a pull request the archive and shards take the
+affected-package selection, which defaults to `--workspace` for every other
+event and for a missing scope output; a selection without `pos-conformance`
+skips the four conformance-only partitions explicitly. Adversarial fixtures prove that disabled/non-failing
 steps, environment-based test runners, detached sanitizer flags, `--no-run`,
 shell success overrides, skipped prerequisites, injected setup steps, and
 test-skip arguments are rejected. The ASan job graph and pinned setup-step
@@ -231,7 +268,7 @@ require an unsuppressed audit and removal review for both rules.
 ## Local setup
 
 ```bash
-# One-time per clone (enables the versioned pre-commit hook):
+# One-time per clone (enables the versioned pre-commit and pre-push hooks):
 git config core.hooksPath .githooks
 
 # Full CI parity:

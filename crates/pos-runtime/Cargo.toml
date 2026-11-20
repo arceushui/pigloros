@@ -18,32 +18,41 @@ test-support = [
 # Exposes the process-wide local scheduled-admission host to the local
 # experiment composition root. Keeps the host out of deployable Plugin,
 # Driver, and provider graphs; it is not an in-process security boundary.
+# The host takes the composition-root seal from its caller and never mints it
+# (`scripts/check_authority_trust_root_seal.py` forbids forwarding it here).
 local-admission-host = []
 
 [dependencies]
 blake3 = { workspace = true }
+getrandom = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
 ulid = { workspace = true }
+zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }
 # The execution-time trust gate yields `ContentValidationV1` and reads release closures
 # through `ReleaseSourceV1`.
 pos-plugin-release = { path = "../pos-plugin-release" }
+pos-plugin-content = { path = "../pos-plugin-content" }
 # The install entry wraps the signed installer (ADR-061 revision 7 decision 9). The `test-support`
 # dev-dependency entry below stays alongside this normal one.
 pos-plugin-publisher = { path = "../pos-plugin-publisher" }
 
 [dev-dependencies]
 ciborium = { workspace = true }
+# The Local erasure composition tests sign TPS1 and ELB1S fixtures.
+ed25519-dalek = { workspace = true }
 # The rigged test store mints a foreign receipt with the adapter seal.
 pos-core = { path = "../pos-core", features = [
+  "authority-trust-root",
   "test-support",
   "counterfactual-adapter",
 ] }
@@ -86,6 +95,14 @@ required-features = ["test-support"]
 
 [[test]]
 name = "counterfactual_suffix_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "erasure_authority_view_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "local_erasure_composition_public"
 required-features = ["test-support"]
 
 [[test]]

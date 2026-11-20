@@ -19,6 +19,7 @@ extern crate self as pos_core;
 
 pub(crate) mod canonical_length;
 pub mod clock;
+pub mod community_lifecycle;
 pub mod composition_fallback;
 pub mod consent;
 pub mod counterfactual_dependency;
@@ -39,6 +40,8 @@ pub mod fork_ancestry;
 pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod fork_event_provenance;
+pub mod gateway_mode_binding;
+pub mod gateway_revision;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
@@ -86,6 +89,15 @@ pub mod world_recording_receipt;
 pub mod world_replay;
 pub mod world_replay_handle;
 pub mod world_transform;
+
+/// Append the lowercase hexadecimal form of `bytes` to `out`.
+pub(crate) fn append_hex(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+}
 
 /// Write the preferred definite-length CBOR header for one major type.
 pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
@@ -144,6 +156,10 @@ impl<'a> CborCursor<'a> {
 
     pub(crate) const fn is_finished(&self) -> bool {
         self.offset == self.bytes.len()
+    }
+
+    pub(crate) const fn position(&self) -> usize {
+        self.offset
     }
 
     pub(crate) fn consume_if(&mut self, byte: u8) -> bool {
@@ -341,21 +357,26 @@ pub use authority::{
     AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityMutationPermitV1,
     AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1,
     AuthorityPersistencePortV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorityViewV1, AuthorizationDecisionV1, AuthorizationOutcomeV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, BeliefRecordDraftV1, BeliefRecordV1,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConfidenceV1, ConsentEvidenceV1,
-    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
-    DelegationChainV1, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
-    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
-    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
-    PreferenceValueRevisionV1, PrincipalRefV1, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH,
-    MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_SELECTORS,
-    MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES,
-    MAX_DECISION_RECORD_BYTES, MAX_KNOWLEDGE_SNAPSHOT_BYTES, MAX_KNOWLEDGE_SNAPSHOT_RECORDS,
-    MAX_OBSERVATION_ARTIFACT_BYTES, MAX_OBSERVATION_RECORD_BYTES, MAX_OBSERVATION_SNAPSHOT_BYTES,
-    MAX_OBSERVATION_SNAPSHOT_RECORDS, MAX_PERSISTED_AUTHORITY_GRANTS,
-    MAX_PERSISTED_AUTHORITY_STATE_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
+    AuthorityRoleV1, AuthorityTrustRootSealV1, AuthorityViewV1, AuthorizationDecisionV1,
+    AuthorizationDenialEvidenceV1, AuthorizationDenialPermitV1, AuthorizationDenialRecordV1,
+    AuthorizationDenialScopeV1, AuthorizationDenialSuppressionV1, AuthorizationExpiryV1,
+    AuthorizationOutcomeV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
+    BeliefRecordDraftV1, BeliefRecordV1, CapabilityGrantDraftV1, CapabilityGrantV1,
+    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    ConfidenceV1, ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
+    ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, KnowledgeSnapshotDraftV1,
+    KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationArtifactV1, ObservationRecordDraftV1,
+    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
+    PersistedAuthorityV1, PreferenceValueRevisionV1, PrincipalRefV1,
+    AUTHORIZATION_DENIAL_RECORD_BYTES, AUTHORIZATION_DENIAL_SUPPRESSION_BYTES, DELEGATE_ACTION_V1,
+    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SCOPE_MEMBERS,
+    MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES, MAX_AUTHORIZATION_DENIALS_PER_READ,
+    MAX_AUTHORIZATION_DENIAL_RECORDS, MAX_CAPABILITY_CONSENT_REFERENCES,
+    MAX_CAPABILITY_RECORD_BYTES, MAX_DECISION_RECORD_BYTES, MAX_KNOWLEDGE_SNAPSHOT_BYTES,
+    MAX_KNOWLEDGE_SNAPSHOT_RECORDS, MAX_OBSERVATION_ARTIFACT_BYTES, MAX_OBSERVATION_RECORD_BYTES,
+    MAX_OBSERVATION_SNAPSHOT_BYTES, MAX_OBSERVATION_SNAPSHOT_RECORDS,
+    MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
+    MAX_PRINCIPAL_RECORD_BYTES,
 };
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
@@ -405,17 +426,27 @@ pub use counterfactual_store::{
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
+pub use erasure::LocalReplicaResidualPortV1;
 #[cfg(any(test, feature = "test-support"))]
 pub use erasure::NonInvokingErasureGateForTest;
 pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, extract_adapter_admission_registration_v1,
     extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
-    inspect_artifact_registration_graph_v1, prepare_artifact_registration_batch_v1,
-    selected_obligations_reference, validate_artifact_registration_catalog_graph_v1,
-    AdapterArtifactRegistrationErrorV1, ArtifactChildEdgeV1, ArtifactClaimInputV1,
-    ArtifactDataClassV1, ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1,
-    ArtifactOptionalityV1, ArtifactRedactionStateV1, ArtifactRegistrationCatalogRowV1,
+    inspect_artifact_registration_graph_v1, local_erasure_body_digest_v1,
+    local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
+    local_erasure_executor_version_v1, local_erasure_export_recipient_v1,
+    local_erasure_fork_admission_v1, local_erasure_fork_scope_v1, local_erasure_host_timeline_v1,
+    local_erasure_id_v1, local_erasure_key_digest_v1, local_erasure_owner_ref_v1,
+    local_erasure_receipt_body_reference_v1, local_erasure_receipt_body_v1,
+    local_erasure_replica_id_v1, local_erasure_replica_set_v1, local_erasure_request_v1,
+    local_erasure_requester_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
+    local_erasure_store_target_v1, local_erasure_subject_v1, local_erasure_timeline_payload_v1,
+    prepare_artifact_registration_batch_v1, selected_obligations_reference,
+    validate_artifact_registration_catalog_graph_v1, AdapterArtifactRegistrationErrorV1,
+    ArtifactChildEdgeV1, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactRedactionStateV1, ArtifactRegistrationCatalogRowV1,
     ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
     ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1,
     ArtifactRegistrationGraphSummaryV1, ArtifactRegistrationInputV1,
@@ -429,7 +460,8 @@ pub use erasure::{
     ErasureAdmittedForkContextV1, ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
     ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1,
-    ErasureAttemptOutcomeV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureAttemptOutcomeV1, ErasureAttemptQuotaReservationV1, ErasureAuthorityExecutionV1,
+    ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1, ErasureAuthorizationDecisionV1,
     ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
     ErasureCasOutcomeV1, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureCoordinator,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
@@ -445,47 +477,63 @@ pub use erasure::{
     ErasureInventoryCategoryV1, ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1,
     ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasurePersistedStateV1, ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1,
-    ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
-    ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
-    ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorQueryV1,
-    ErasureRecoveryErrorV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRejoinAdmissionV1,
-    ErasureRejoinAttestationVerifierV1, ErasureRejoinDispositionV1, ErasureRejoinInventoryV1,
-    ErasureRejoinProofInputV1, ErasureRejoinProofV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureOwnerCommandV1, ErasureOwnerResultV1, ErasurePersistedStateV1,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
+    ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
+    ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
+    ErasureRecordedAttemptReadV1, ErasureRecordedProgressReadV1, ErasureRecordedProgressV1,
+    ErasureRecordedScopeReadV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureRecoveryErrorQueryV1, ErasureRecoveryErrorV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, ErasureRejoinAdmissionV1, ErasureRejoinAttestationVerifierV1,
+    ErasureRejoinDispositionV1, ErasureRejoinInventoryV1, ErasureRejoinProofInputV1,
+    ErasureRejoinProofV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetainedObjectV1, ErasureRetryAdmissionInputV1,
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureTopologyStoreBindingV1,
     ErasureTopologyTransitionPermitV1, ErasureVerifiedEmptyInventoryQueryV1,
     ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
     ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, ErasureVerifiedTopologyProofV1,
-    EvaluatedArtifactClaimV1, PreparedArtifactRegistrationBatchV1,
+    EvaluatedArtifactClaimV1, LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1,
+    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureCacheGenerationV1,
+    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
+    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureNegativeResultV1,
+    LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
+    LocalErasureRedactionV1, LocalErasureRejectionV1, LocalErasureReplicaPurgeV1,
+    LocalErasureSelectorV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1,
+    LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1, LocalOwnerEffectV1,
+    LocalOwnerResultBindingV1, PreparedArtifactRegistrationBatchV1,
     PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, RegisteredArtifactV1,
-    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, ReproManifestArtifactRegistrationErrorV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PreparedLocalOwnerEffectV1,
+    RecipientExportPublicationRowV1, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, ReproManifestArtifactRegistrationErrorV1,
     ReproManifestRootRegistrationInputV1, StoredErasureManifestV1,
     ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
-    ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
-    ERASURE_FORK_RECOVERY_PROOF_MAX_BYTES, ERASURE_FORK_RECOVERY_PROOF_TAG_V1,
-    ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1, ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
-    ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
-    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
-    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
-    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS,
-    ERASURE_MAX_INVENTORY_CLASSIFICATIONS, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_OBLIGATIONS,
-    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_RECOVERY_ERRORS,
-    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
-    ERASURE_OBLIGATION_SET_MAX_BYTES, ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1,
-    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RECEIPT_MAX_BYTES,
-    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1, ERASURE_RECOVERY_ERROR_TAG_V1,
-    ERASURE_REJOIN_PROOF_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+    ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FORK_RECOVERY_PROOF_MAX_BYTES,
+    ERASURE_FORK_RECOVERY_PROOF_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
+    ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES, ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
+    ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
+    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
+    ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS, ERASURE_MAX_INVENTORY_CLASSIFICATIONS,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_INVENTORY_TIMELINES,
+    ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OBLIGATIONS_PER_CATEGORY, ERASURE_MAX_OUTCOME_OWNERS,
+    ERASURE_MAX_RECOVERY_ERRORS, ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS,
+    ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_MAX_BYTES, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RECEIPT_MAX_BYTES,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1, ERASURE_RECORD_TAG_MAX_BYTES_V1,
+    ERASURE_RECORD_TAG_MIN_BYTES_V1, ERASURE_RECOVERY_ERROR_TAG_V1, ERASURE_REJOIN_PROOF_TAG_V1,
+    ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
     ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, MAX_ARTIFACT_GRAPH_DEPTH_V1,
-    MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, ERASURE_SIGNER_KEY_PREFIX_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    LOCAL_OWNER_RESULT_MAX_BYTES_V1, MAX_ARTIFACT_GRAPH_DEPTH_V1, MAX_ARTIFACT_GRAPH_EDGES_V1,
+    MAX_ARTIFACT_GRAPH_KEYS_V1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
     MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
     MAX_ARTIFACT_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_CHILDREN_V1,
     MAX_ARTIFACT_REGISTRATION_KEYS_V1,
@@ -593,6 +641,20 @@ pub use fork_event_provenance::{
     MAX_FORK_EVENT_REGISTRAR_BYTES_V1, MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1,
     MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
 };
+pub use gateway_mode_binding::{
+    commit_epoch_for_append_v1, GatewayModeBindPermitV1, GatewayModeBindingErrorV1,
+    GatewayModeBindingHistoryEntryV1, GatewayModeBindingHostV1, GatewayModeBindingKindV1,
+    GatewayModeBindingPortV1, GatewayModeBindingRecordV1, GatewayModeMigrationPermitV1,
+    GatewayModeProfileRefV1, GatewayModeRotationPermitV1, MAX_GATEWAY_MODE_PROFILE_ID_BYTES,
+};
+pub use gateway_revision::{
+    admit_gateway_revision_v1, gateway_revision_mode_v1, replay_gateway_revision_v1,
+    GatewayRevisionCommitV1, GatewayRevisionDraftV1, GatewayRevisionErasureHostV1,
+    GatewayRevisionErasurePermitV1, GatewayRevisionErrorV1, GatewayRevisionIdempotencyV1,
+    GatewayRevisionKeyV1, GatewayRevisionKindV1, GatewayRevisionPortV1, GatewayRevisionRecordV1,
+    GatewayRevisionStateV1, GatewayRevisionTombstoneV1, ERASED_GATEWAY_REVISION_REQUEST_DIGEST,
+    MAX_GATEWAY_REVISION_CONTENT_BYTES,
+};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
 pub use geo_cell_admission::{
@@ -631,9 +693,10 @@ pub use pipeline::{
     pipeline_draft_vector_digest_v1, CommittedPipelineEventV1, PipelineAdmissionBasisDraftV1,
     PipelineAdmissionBasisV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
     PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, TentativePipelineResultV1,
-    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
+    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeKindV1, PipelineOutcomeV1,
+    PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    TentativePipelineResultV1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 pub use pipeline_admission::{
     pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,

@@ -13,7 +13,10 @@ use std::{fs::File, io, os::unix::net::UnixStream, sync::Arc, time::Instant};
 
 use crate::{
     evaluator::CaseAttempt,
-    sandbox_provider_protocol::{PayloadDescriptor, SandboxLimit, SelectorGrantCommitment},
+    sandbox_provider_protocol::{
+        AdmissionLedger, LaunchFailure, PayloadDescriptor, SandboxLimit, SelectorGrantCommitment,
+        TransferRecord,
+    },
     selector::SelectorBoundaryError,
 };
 
@@ -74,12 +77,6 @@ pub enum StagingError {
     /// The independently derived input ceiling forbids the declared input.
     #[error("input exceeds ELM1 InputBytes")]
     InputTooLarge,
-    /// The independently derived output ceiling forbids the declared output.
-    #[error("output exceeds ELM1 OutputBytes")]
-    OutputTooLarge,
-    /// One attempt cannot open a second output transfer.
-    #[error("output transfer is single use")]
-    OutputAlreadyReserved,
     /// A staging directory is not private and provider-owned.
     #[error("staging directory is unsafe")]
     UnsafeDirectory,
@@ -95,6 +92,228 @@ pub enum StagingError {
     /// A stream or descriptor operation failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// Why the attempt's one output reservation of exactly ELM1\[8\] bytes was
+/// refused (ADR-069 R10 §4.7).
+///
+/// The request is the policy's own ID 8 limit and the attempt's only one, so
+/// an oversized or a second reservation cannot be expressed here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum OutputReservationRefused {
+    /// The aggregate staging ledger is full (TME1 `launch-failure` 3).
+    #[error("staging aggregate cap would be exceeded")]
+    AggregateExceeded,
+    /// The ledger was closed after a cleanup failure (TME1 `launch-failure`
+    /// 5, quarantine).
+    #[error("staging admission is closed after a cleanup failure")]
+    AdmissionClosed,
+}
+
+/// TME1 `launch-failure` of a refused output reservation (ADR-069 R10 §4.7):
+/// a full aggregate ledger is 3, a ledger closed after a cleanup failure 5.
+impl From<OutputReservationRefused> for LaunchFailure {
+    fn from(refused: OutputReservationRefused) -> Self {
+        match refused {
+            OutputReservationRefused::AggregateExceeded => Self::OutputReservationRefused,
+            OutputReservationRefused::AdmissionClosed => Self::AdmissionClosed,
+        }
+    }
+}
+
+/// The AGR1 one exchange completely wrote, and the admission facts of that
+/// moment (ADR-069 R9 §4.6.3).
+///
+/// Only a completed grant write creates one. Its bytes are the exact
+/// canonical AGR1 the selector received, retained for the stored response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuedGrant {
+    bytes: Arc<[u8]>,
+    digest: [u8; 32],
+    admission: AdmissionLedger,
+    issued_at: Option<u64>,
+}
+
+impl IssuedGrant {
+    /// The exact canonical AGR1 bytes that were sent.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The AGR1 self-digest, which every later cancel and reconcile request
+    /// must name.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// TME1 `admission`: the live attempts (ELM1 ID 13), including this one,
+    /// and the incomplete inputs (ID 14) when AGR1 was issued.
+    #[must_use]
+    pub const fn admission(&self) -> AdmissionLedger {
+        self.admission
+    }
+
+    /// When AGR1 was completely written, in `CLOCK_MONOTONIC` nanoseconds;
+    /// `None` if the clock could not report it, which TME1 records as
+    /// missing evidence.
+    #[must_use]
+    pub const fn issued_at(&self) -> Option<u64> {
+        self.issued_at
+    }
+}
+
+/// An input that failed after its AGR1 was completely sent (ADR-069 §4).
+///
+/// Its staged bytes and reservations are already released. The grant, its
+/// attempt and the incomplete transfer remain: the attempt is admitted, so
+/// it ends in a stored `UnavailableAfterAdmission`, never in SPE1.
+#[derive(Debug)]
+pub struct FailedInput {
+    error: StagingError,
+    attempt_id: [u8; 16],
+    grant: IssuedGrant,
+    transfer: Option<TransferRecord>,
+}
+
+impl FailedInput {
+    /// Why the input was refused.
+    #[must_use]
+    pub const fn error(&self) -> &StagingError {
+        &self.error
+    }
+
+    /// The admitted `AttemptId`.
+    #[must_use]
+    pub const fn attempt_id(&self) -> [u8; 16] {
+        self.attempt_id
+    }
+
+    /// The AGR1 the attempt was admitted under.
+    #[must_use]
+    pub const fn grant(&self) -> &IssuedGrant {
+        &self.grant
+    }
+
+    /// TME1 `input`: the transfer as far as it got; `None` if the clock
+    /// could not report when it finished.
+    #[must_use]
+    pub const fn transfer(&self) -> Option<TransferRecord> {
+        self.transfer
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FailedInput {
+    /// A failed input of `attempt_id` under the AGR1 digest `grant_digest`,
+    /// with filler grant bytes and an empty, incomplete transfer, for tests
+    /// that authenticate nothing.
+    #[must_use]
+    pub fn fixture(attempt_id: [u8; 16], grant_digest: [u8; 32]) -> Self {
+        Self {
+            error: StagingError::Incomplete,
+            attempt_id,
+            grant: IssuedGrant {
+                bytes: Arc::from([0xa6_u8].as_slice()),
+                digest: grant_digest,
+                admission: AdmissionLedger {
+                    active_attempts: 1,
+                    incomplete_inputs: 1,
+                },
+                issued_at: Some(2),
+            },
+            transfer: Some(TransferRecord {
+                start: 1,
+                deadline: 4,
+                finish: 3,
+                expected_bytes: 1,
+                accepted_bytes: 0,
+                complete: false,
+            }),
+        }
+    }
+}
+
+/// Why staged input was not admitted.
+#[derive(Debug, thiserror::Error)]
+pub enum InputRefusal {
+    /// No AGR1 was completely sent: the exchange fails before admission.
+    #[error(transparent)]
+    NotGranted(StagingError),
+    /// AGR1 was sent: the admitted attempt's input failed.
+    #[error("admitted input failed: {}", .0.error)]
+    Failed(Box<FailedInput>),
+}
+
+/// The input-transfer window in `CLOCK_MONOTONIC` nanoseconds: its start
+/// once the complete SPX1 frame was read, and the enforced input deadline,
+/// the ELM1 ID 16 window from that same instant under any stricter
+/// transport bound.
+#[derive(Clone, Copy, Debug)]
+struct TransferWindow {
+    start: u64,
+    deadline: u64,
+}
+
+impl TransferWindow {
+    /// The window that started at `started`, sampled as `start`
+    /// nanoseconds at or after that instant, and is enforced until
+    /// `deadline`. Sampling the clock after the instant keeps the recorded
+    /// deadline at or after the enforced one.
+    fn new(started: Instant, start: u64, deadline: Instant) -> Self {
+        let length = u64::try_from(deadline.saturating_duration_since(started).as_nanos())
+            .unwrap_or(u64::MAX);
+        Self {
+            start,
+            deadline: start.saturating_add(length),
+        }
+    }
+
+    /// The transfer as far as it got: `accepted` of `expected` bytes,
+    /// finished at `finish` (R9 §6 rule 9).
+    const fn record(self, expected: u64, accepted: u64, finish: u64) -> TransferRecord {
+        TransferRecord {
+            start: self.start,
+            deadline: self.deadline,
+            finish,
+            expected_bytes: expected,
+            accepted_bytes: accepted,
+            complete: accepted == expected && finish <= self.deadline,
+        }
+    }
+}
+
+/// A source of `CLOCK_MONOTONIC` nanoseconds. Production always uses
+/// [`monotonic_ns`]; only this crate's tests supply another.
+type Clock = fn() -> io::Result<u64>;
+
+/// The current `CLOCK_MONOTONIC` time in nanoseconds.
+///
+/// # Errors
+/// `InvalidData` for a time the clock cannot report in unsigned
+/// nanoseconds, such as a negative one.
+fn monotonic_ns() -> io::Result<u64> {
+    timespec_ns(rustix::time::clock_gettime(
+        rustix::time::ClockId::Monotonic,
+    ))
+}
+
+/// `now` in nanoseconds.
+///
+/// # Errors
+/// `InvalidData` for a negative time or one beyond `u64` nanoseconds.
+fn timespec_ns(now: rustix::time::Timespec) -> io::Result<u64> {
+    u64::try_from(now.tv_sec)
+        .ok()
+        .zip(u64::try_from(now.tv_nsec).ok())
+        .and_then(|(seconds, nanoseconds)| {
+            seconds
+                .checked_mul(1_000_000_000)
+                .and_then(|whole| whole.checked_add(nanoseconds))
+        })
+        .ok_or(io::ErrorKind::InvalidData)
+        .map_err(io::Error::from)
 }
 
 /// Immutable policy derived only from the independently reconstructed case.
@@ -163,11 +382,12 @@ struct ConnectionIdentity {
     inode: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum GrantState {
     Prepared,
     Writing,
-    Granted,
+    /// AGR1 was written completely.
+    Granted(IssuedGrant),
 }
 
 /// Derived policy and atomic reservations, before any adapter input is admitted.
@@ -180,6 +400,8 @@ pub struct PreparedProviderExecution {
     connection: ConnectionIdentity,
     initial_deadline: Instant,
     input_deadline: Instant,
+    window: TransferWindow,
+    clock: Clock,
     grant: GrantState,
 }
 
@@ -191,6 +413,8 @@ pub struct AdmittedProviderExecution {
     root_image: File,
     proof: Arc<crate::sandbox_provider_protocol::VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
+    grant: IssuedGrant,
+    transfer: Option<TransferRecord>,
     // The descriptor pins staged storage even after its private name is unlinked.
     // Close owned resources before releasing bytes, then the counted attempt.
     _input: StagingCharge,
@@ -207,6 +431,6 @@ impl PreparedProviderExecution {
     /// Refuses non-root peers, invalid source/installation, expired transfers
     /// and any exhausted independently derived or aggregate resource ceiling.
     pub fn receive(stream: &mut UnixStream, ledger: &StagingLedger) -> Result<Self, StagingError> {
-        source::receive(stream, ledger)
+        source::receive(stream, ledger, monotonic_ns)
     }
 }

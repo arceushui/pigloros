@@ -8,12 +8,13 @@ This is the only writer of the payloads, oracles and evidence-status records of 
 subcommand) and runs offline.
 
 It does not use implementation output as an oracle: no Rust, no cargo and no binary of the
-repository. Every expected HTTP exchange is written here by hand from the documented Gateway
-route table (ADR-014 and `apps/piglor-gateway/README.md`) and the exchange grammar and
-normalization of `fixtures/conformance/profiles/gateway-client-conformance/
-normative-requirements.md`. The only computed values are the `society.signal` payload bytes
-(the encoding the requirements text states) and the independent-evaluation digests, both
-derived here. The only primitive it imports is the BLAKE3 hash of
+repository. Every expected HTTP exchange is written here by hand from the published Gateway v1
+contract (`contracts/gateway/v1/openapi.json` and its problem-type registry) and the exchange
+grammar and normalization of `fixtures/conformance/profiles/gateway-client-conformance/
+normative-requirements.md`. Every expected response body is also validated against the
+contract by `scripts/check_gateway_contract.py`. The only computed values are the `society.signal` payload bytes
+(the encoding the requirements text states), the independent-evaluation digests and the Session
+provenance digest (the record the `Session` schema states), all derived here. The only primitive it imports is the BLAKE3 hash of
 `generate_pmf1_golden_vectors.py`.
 
 Usage:
@@ -31,6 +32,7 @@ against its schema. It then regenerates every output and compares it with the ch
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import struct
@@ -45,6 +47,7 @@ sys.path.insert(0, str(HERE))
 import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 FIXTURES = ROOT / "fixtures/conformance"
+PROBLEM_TYPES = ROOT / "contracts/gateway/v1/problem-types.json"
 BLAKE3_VECTORS = HERE / "data/blake3_test_vectors.json"
 SCHEMA_DIGESTS_RUST = ROOT / "apps/pos-gateway-conformance-adapter/src/subject/schema_digests.rs"
 
@@ -78,6 +81,36 @@ ACTOR = "01JC0GATEWAYF1XTVREACT0R00"
 BODY = "01JC0GATEWAYF1XTVREB0DY000"
 ENTITY = "01JC0GATEWAYF1XTVRES1GNA10"
 ULID_PATTERN = "[0-7][0-9A-HJKMNP-TV-Z]{25}"
+CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+# The Principal of the authorized compositions' fixture Local Principal document: 16 bytes 0x01.
+PRINCIPAL_BYTES = bytes([1]) * 16
+# The ADR-134 digest of each Gateway execution-mode profile's current revision: the head of its
+# rotation chain in `scripts/check_gateway_contract.py` (`--check` verifies the two agree).
+MODE_PROFILE_DIGESTS = {
+    "gateway-mode-air-gapped-v1":
+        "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb",
+    "gateway-mode-local-v1": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+}
+# The operations the fixture Local Principal is granted, sorted: what its Session discloses.
+PRINCIPAL_GRANTS = ["session.read", "timeline.create", "timeline.events.read"]
+# The operations the `authorized-consented` fixture Principal is granted (#309), sorted; its one
+# consent governs `timeline.create`.
+CONSENTED_GRANTS = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
+# The operations the `authorized-rooms` fixture Principal is granted (#303), sorted; its one
+# consent, export permitted, governs `timeline.create`, is named as a room's
+# `privacy_export_ref` and may be revoked.
+ROOM_GRANTS = [
+    "consent.revoke",
+    "scenario-room.create",
+    "scenario-room.derive",
+    "scenario-room.read",
+    "session.read",
+    "timeline.create",
+]
+# The single-participant governance record the `authorized-rooms` Principal document records.
+GOVERNANCE = "01JC0GATEWAYW90G0VERN00001"
+# The society participant of the fixture rooms, which the grant need not name.
+SOCIETY = "01JC0GATEWAYW90S0C1ETY0001"
 CURSOR_PATTERN = f"v1\\.[0-9a-f]{{64}}\\.{ULID_PATTERN}\\.[1-9][0-9]*"
 
 # The route of a request path (query removed) and the capability it needs (section "Routes").
@@ -88,19 +121,39 @@ ROUTE_CAPABILITY = {
     "events": "timeline.events.read",
     "signals": "timeline.signals.append",
     "actions": "world.action.v1.submit",
+    "session": "session.read",
+    "revoke": "consent.revoke",
+    "rooms": "scenario-room.create",
+    "revisions": "scenario-room.derive",
+    "revision": "scenario-room.read",
 }
 CAPABILITIES = tuple(sorted(ROUTE_CAPABILITY.values()))
+# The Events a `201` response of a route commits (requirements section 5): a room create or
+# derive appends its request claim and the revision.
+COMMITTED_EVENTS = {"signals": 1, "actions": 1, "revoke": 1, "rooms": 2, "revisions": 2}
 MAX_TIMELINES = 64  # README "Timeline bound"
 EVENT_LIMIT = 100  # README "Polling": limit defaults to and may not exceed 100
 
 
 def route_of(path: str) -> str | None:
     base = path.split("?", 1)[0]
-    fixed = {"/health": "health", "/v1/ledger": "ledger", "/v1/timelines": "create"}
+    fixed = {
+        "/health": "health",
+        "/v1/ledger": "ledger",
+        "/v1/timelines": "create",
+        "/v1/session": "session",
+        "/v1/me/consent-revocations": "revoke",
+    }
     if base in fixed:
         return fixed[base]
     match = re.fullmatch(r"/v1/timelines/([^/]+)/(events|signals|actions)", base)
-    return match.group(2) if match else None
+    if match:
+        return match.group(2)
+    if re.fullmatch(r"/v1/scenario-rooms/[^/]+/revisions", base):
+        return "revisions"
+    if re.fullmatch(r"/v1/scenario-rooms/[^/]+/revisions/[1-9][0-9]*", base):
+        return "revision"
+    return "rooms" if base == "/v1/scenario-rooms" else None
 
 
 # --- Deterministic CBOR (only what a `society.signal` payload uses) ---
@@ -153,7 +206,9 @@ class Exchange:
     actor: bool = False
     body: object = None
     has_body: bool = False
-    capture: bool = False
+    # The slot this exchange's response fills: `timeline` or `room` (its `id`) or `consent`
+    # (the `consent_ref` of its first consent).
+    capture: str | None = None
 
     def payload(self) -> dict:
         value: dict = {
@@ -166,8 +221,8 @@ class Exchange:
             value["actor"] = True
         if self.has_body:
             value["body"] = self.body
-        if self.capture:
-            value["capture"] = "timeline"
+        if self.capture is not None:
+            value["capture"] = self.capture
         return value
 
 
@@ -189,17 +244,350 @@ def observed(status: int, body: object) -> dict:
     return {"status": status, "body": body}
 
 
-def error(status: int) -> dict:
-    """The documented JSON error envelope; its message text is normalized away."""
-    return observed(status, json_body({"error": "<message>"}))
+def problem_titles() -> dict[str, str]:
+    registry = json.loads(PROBLEM_TYPES.read_text(encoding="utf-8"))
+    return {entry["code"]: entry["title"] for entry in registry["problem_types"]}
 
 
-NOT_ROUTED = observed(404, "non-json")
+def route_template(path: str) -> str:
+    """The problem `instance` of a routed request: its route template, never a run-local ID."""
+    base = path.split("?", 1)[0]
+    return re.sub(r"^/v1/timelines/[^/]+/", "/v1/timelines/{timeline_id}/", base)
+
+
+def problem(status: int, code: str, instance: str, retryable: bool = False) -> dict:
+    """An RFC 9457 problem of the v1 registry; its detail text is normalized away."""
+    return observed(
+        status,
+        json_body(
+            {
+                "code": code,
+                "detail": "<message>",
+                "instance": instance,
+                "retryable": retryable,
+                "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+                "status": status,
+                "title": problem_titles()[code],
+                "type": f"urn:pigloros:gateway:v1:problem:{code}",
+            }
+        ),
+    )
+
+
+def routed_problem(status: int, code: str, path: str) -> dict:
+    return problem(status, code, route_template(path))
+
+
+def not_routed(path: str) -> dict:
+    """The answer of a router that serves no such path: `instance` is the request path, whose
+    captured Timeline ID the normalization turns into `<ulid>`."""
+    return problem(404, "not-found-or-unavailable", path.replace("{timeline}", "<ulid>"))
+
+
+def ulid_text(data: bytes) -> str:
+    """The canonical Crockford base32 text of a 16-byte ULID."""
+    value = int.from_bytes(data, "big")
+    return "".join(CROCKFORD[(value >> (5 * (25 - index))) & 31] for index in range(26))
+
+
+def session_body(
+    mode_profile_id: str,
+    mode: str,
+    network: str,
+    grants: list[str] | None = None,
+    generation: int = 1,
+    consents: list[dict] | None = None,
+) -> dict:
+    """The `Session` the contract prescribes for the fixture Local Principal: by default
+    generation 1 (its one grant is issued at authority position 1 and binds no consent), binding
+    epoch 1, no operator network grant, and the provenance digest of the `Session` schema
+    description."""
+    principal = ulid_text(PRINCIPAL_BYTES)
+    digest = MODE_PROFILE_DIGESTS[mode_profile_id]
+    record = (
+        b"PiglorOS.GatewaySession.v1\x00"
+        + PRINCIPAL_BYTES
+        + generation.to_bytes(8, "big")
+        + digest.encode("ascii")
+        + (1).to_bytes(8, "big")
+    )
+    return {
+        "availability": {"state": "available", "withheld": []},
+        "consents": [] if consents is None else consents,
+        "contract": {"api_major": "v1", "contract_version": "1.0.0-draft"},
+        "execution_profile": {
+            "profile_kind": "epf1",
+            "reason": "not-installed",
+            "state": "unavailable",
+        },
+        "generation": generation,
+        "grants": PRINCIPAL_GRANTS if grants is None else grants,
+        "id": "<ulid>",
+        "mode_profile": {
+            "binding_epoch": 1,
+            "mode": mode,
+            "mode_profile_digest": digest,
+            "mode_profile_id": mode_profile_id,
+            "network": network,
+            "network_grants": [],
+            "profile_kind": "gateway-mode-v1",
+        },
+        "principal": {"entity_ids": [ACTOR], "principal_id": principal},
+        "provenance": {"digest": golden.blake3(record).hex(), "origin": "host-derived"},
+        "schema_id": "urn:pigloros:gateway:v1:schema:session",
+    }
+
+
+def session(expect: dict, actor: bool = True, capture: str | None = None) -> Exchange:
+    return Exchange("loopback", "GET", "/v1/session", expect, actor=actor, capture=capture)
+
+
+def consent_revocation_body(generation: int) -> dict:
+    """The `ConsentRevocation` the contract prescribes for the `authorized-consented` fixture
+    Principal's one consent, revoked at consent Timeline sequence 2 (its `generation`), under the
+    Local binding at epoch 1, with the provenance digest of the `ConsentRevocation` schema
+    description."""
+    digest = MODE_PROFILE_DIGESTS["gateway-mode-local-v1"]
+    record = (
+        b"PiglorOS.GatewayConsentRevocation.v1\x00"
+        + PRINCIPAL_BYTES
+        + generation.to_bytes(8, "big")
+        + digest.encode("ascii")
+        + (1).to_bytes(8, "big")
+    )
+    return {
+        "availability": {"state": "available", "withheld": []},
+        "consent_ref": "{consent}",
+        "execution_profile": {
+            "profile_kind": "epf1",
+            "reason": "not-installed",
+            "state": "unavailable",
+        },
+        "future_protected_work": "denied",
+        "generation": generation,
+        "id": "<ulid>",
+        "mode_profile": {
+            "binding_epoch": 1,
+            "mode": "local",
+            "mode_profile_digest": digest,
+            "mode_profile_id": "gateway-mode-local-v1",
+            "profile_kind": "gateway-mode-v1",
+        },
+        "provenance": {"digest": golden.blake3(record).hex(), "origin": "host-derived"},
+        "schema_id": "urn:pigloros:gateway:v1:schema:consent-revocation",
+        "state": "revoked",
+    }
+
+
+def revoke(expect: dict) -> Exchange:
+    """Revoke the consent the last `consent` capture named, as the fixture actor."""
+    return Exchange(
+        "loopback",
+        "POST",
+        "/v1/me/consent-revocations",
+        expect,
+        actor=True,
+        body={"consent_ref": "{consent}"},
+        has_body=True,
+    )
+
+
+ROOMS_PATH = "/v1/scenario-rooms"
+ROOM_REVISIONS_PATH = f"{ROOMS_PATH}/{{room}}/revisions"
+# The problem `instance` of the derive route: its route template.
+ROOM_REVISIONS_INSTANCE = f"{ROOMS_PATH}/{{room_id}}/revisions"
+ROOM_REVISION_SCHEMA = "urn:pigloros:gateway:v1:schema:scenario-room-revision"
+ROOM_PLUGIN = {"plugin_id": "gateway-world-actions", "version": "0.1.0"}
+# The Event types the reviewed host catalogue entry of the room plugin owns.
+ROOM_PLUGIN_EVENT_TYPES = ["world.action.v1"]
+CAPABILITY_SET_TAG = b"PiglorOS.ScenarioRoom.CapabilitySet.v1\x00"
+PLUGIN_COMPOSITION_TAG = b"PiglorOS.ScenarioRoom.PluginComposition.v1\x00"
+
+
+def framed(data: bytes) -> bytes:
+    return len(data).to_bytes(8, "little") + data
+
+
+def plugin_composition_hash() -> str:
+    """The ADR-041 amendment A4 hash of the fixture room's one plugin: its name, version and
+    the hash of its sorted, distinct capability (owned Event type) names."""
+    names = sorted(set(ROOM_PLUGIN_EVENT_TYPES))
+    capabilities = golden.blake3(
+        CAPABILITY_SET_TAG + len(names).to_bytes(8, "little") + b"".join(
+            framed(name.encode("ascii")) for name in names
+        )
+    )
+    return golden.blake3(
+        PLUGIN_COMPOSITION_TAG
+        + (1).to_bytes(8, "little")
+        + framed(ROOM_PLUGIN["plugin_id"].encode("ascii"))
+        + framed(ROOM_PLUGIN["version"].encode("ascii"))
+        + capabilities
+    ).hex()
+
+
+def room_rules(value_micro: int) -> list[dict]:
+    return [{"rule_id": "gateway-world-actions.nudge.scale", "value_micro": value_micro}]
+
+
+def room_descriptor(
+    value_micro: int,
+    privacy_export_ref: str = "{consent}",
+    governance_ref: str = GOVERNANCE,
+    persona: str = ACTOR,
+) -> dict:
+    """The fixture room's `ScenarioRoomInput`: one persona (by default the fixture actor) and
+    one society participant, the fixture plugin and one rule of it, the governance record (by
+    default the recorded one) and the consent (by default the last `consent` capture)."""
+    return {
+        "governance_ref": governance_ref,
+        "initial_conditions": [{"dimension": "trust", "entity_id": SOCIETY, "value_micro": 600000}],
+        "intervention_policy": 1,
+        "max_ticks": 600,
+        "participants": [
+            {"entity_id": persona, "kind": "persona"},
+            {"entity_id": SOCIETY, "kind": "society"},
+        ],
+        "plugins": [ROOM_PLUGIN],
+        "privacy_export_ref": privacy_export_ref,
+        "rules": room_rules(value_micro),
+        "schema_version": 1,
+        "scheduler_policy": 0,
+        "scheduler_seed": "04" * 32,
+        "tick_duration_ms": 100,
+    }
+
+
+def room_revision_body(revision: int, value_micro: int, seq: int) -> dict:
+    """The `ScenarioRoomRevision` the contract prescribes for a fixture room revision committed
+    at `seq` of its room Timeline, under the Local binding at epoch 1. It echoes the captured
+    room as its `id` and `room_id` and the captured consent as its `privacy_export_ref`; the
+    Timeline and Event IDs, the correlation ID, the descriptor hash and the provenance digest
+    (which covers the descriptor hash) are run-local and normalized."""
+    descriptor = room_descriptor(value_micro)
+    descriptor.update(
+        {
+            "correlation_id": "<correlation>",
+            "descriptor_hash": "<hash>",
+            "plugin_composition_hash": plugin_composition_hash(),
+            "revision": revision,
+            "room_id": "{room}",
+            "rule_set_hash": golden.blake3(jcs(room_rules(value_micro))).hex(),
+        }
+    )
+    return {
+        "availability": {"state": "available", "withheld": []},
+        "commit": {
+            "event_id": "<ulid>",
+            "event_schema_id": "room.revision.v1",
+            "next_cursor": "<cursor>",
+            "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+            "seq": seq,
+            "timeline_id": "<ulid>",
+        },
+        "descriptor": descriptor,
+        "execution_profile": {
+            "profile_kind": "epf1",
+            "reason": "not-installed",
+            "state": "unavailable",
+        },
+        "id": "{room}",
+        "mode_profile": {
+            "binding_epoch": 1,
+            "mode": "local",
+            "mode_profile_digest": MODE_PROFILE_DIGESTS["gateway-mode-local-v1"],
+            "mode_profile_id": "gateway-mode-local-v1",
+            "profile_kind": "gateway-mode-v1",
+        },
+        "parent_revision": None if revision == 1 else revision - 1,
+        "provenance": {"digest": "<hash>", "origin": "principal-authored"},
+        "revision": revision,
+        "schema_id": ROOM_REVISION_SCHEMA,
+    }
+
+
+def create_room(
+    expect: dict, capture: bool = False, value_micro: int = 250000, **descriptor: str
+) -> Exchange:
+    return Exchange(
+        "loopback",
+        "POST",
+        ROOMS_PATH,
+        expect,
+        actor=True,
+        body={"descriptor": room_descriptor(value_micro, **descriptor)},
+        has_body=True,
+        capture="room" if capture else None,
+    )
+
+
+def derive_room(expect: dict, value_micro: int, parent_revision: int = 1) -> Exchange:
+    return Exchange(
+        "loopback",
+        "POST",
+        ROOM_REVISIONS_PATH,
+        expect,
+        actor=True,
+        body={"descriptor": room_descriptor(value_micro), "parent_revision": parent_revision},
+        has_body=True,
+    )
+
+
+def room_session(*consents: str) -> Exchange:
+    """The `authorized-rooms` Principal's Session, capturing its consent: the capture is
+    observed with the slot it fills, so the consent reads `{consent}`."""
+    listed = [
+        {"consent_ref": "{consent}", "export_permitted": True, "state": state}
+        for state in consents
+    ]
+    body = session_body("gateway-mode-local-v1", "local", "denied", ROOM_GRANTS, 3, listed)
+    return session(observed(200, json_body(body)), capture="consent")
+
+
+def room_exchanges() -> list[Exchange]:
+    """#303: a room is created (`201`), answered with its original on an exact retry (`200`),
+    read back, and derived to revision 2, the third Event of its room Timeline after the
+    derive's request claim."""
+    created = room_revision_body(1, 250000, 1)
+    return [
+        room_session("granted"),
+        create_room(observed(201, json_body(created)), capture=True),
+        create_room(observed(200, json_body(created))),
+        Exchange(
+            "loopback",
+            "GET",
+            f"{ROOM_REVISIONS_PATH}/1",
+            observed(200, json_body(created)),
+            actor=True,
+        ),
+        derive_room(observed(201, json_body(room_revision_body(2, 500000, 3))), 500000),
+    ]
+
+
+def room_conflict_exchanges() -> list[Exchange]:
+    """#303: the sub-case's one idempotency key used for a different create is
+    `409 idempotency-conflict`; a derive repeated from the same parent hashes like the head and
+    answers it (`200`, the ADR-041 section 7 duplicate), and a different derive from that
+    non-head parent is `409 append-conflict`."""
+    derived = observed(200, json_body(room_revision_body(2, 500000, 3)))
+    return [
+        room_session("granted"),
+        create_room(observed(201, json_body(room_revision_body(1, 250000, 1))), capture=True),
+        create_room(routed_problem(409, "idempotency-conflict", ROOMS_PATH), value_micro=1),
+        derive_room(observed(201, json_body(room_revision_body(2, 500000, 3))), 500000),
+        derive_room(derived, 500000),
+        derive_room(problem(409, "append-conflict", ROOM_REVISIONS_INSTANCE), 750000),
+    ]
+
+
 REFUSED = {"refused": "capability-denied"}
 EMPTY_PAGE = observed(
     200, json_body({"events": [], "next_cursor": None, "next_from_seq": None})
 )
 TIMELINE_PATH = "/v1/timelines/{timeline}"
+EVENTS_PATH = f"{TIMELINE_PATH}/events"
+ACTIONS_PATH = f"{TIMELINE_PATH}/actions"
+SIGNALS_PATH = f"{TIMELINE_PATH}/signals"
 
 
 def health(router: str = "loopback") -> Exchange:
@@ -211,21 +599,25 @@ def ledger(router: str = "loopback") -> Exchange:
     return Exchange(router, "GET", "/v1/ledger", observed(200, json_body(view)))
 
 
-def create(name: str, capture: bool = True, expect: dict | None = None) -> Exchange:
+def create(
+    name: str, capture: bool = True, expect: dict | None = None, actor: bool = False
+) -> Exchange:
+    """Create a Timeline; on the `authorized` Gateway the fixture actor must send it (#1361)."""
     created = observed(201, json_body({"head": 0, "id": "<ulid>", "name": name}))
     return Exchange(
         "loopback",
         "POST",
         "/v1/timelines",
         created if expect is None else expect,
+        actor=actor,
         body={"name": name},
         has_body=True,
-        capture=capture,
+        capture="timeline" if capture else None,
     )
 
 
 def poll(expect: dict, query: str = "", actor: bool = False, router: str = "loopback") -> Exchange:
-    return Exchange(router, "GET", f"{TIMELINE_PATH}/events{query}", expect, actor=actor)
+    return Exchange(router, "GET", f"{EVENTS_PATH}{query}", expect, actor=actor)
 
 
 def signal_request(subject: str) -> dict:
@@ -253,7 +645,7 @@ def signal(subject: str, expect: dict, router: str = "loopback") -> Exchange:
     return Exchange(
         router,
         "POST",
-        f"{TIMELINE_PATH}/signals",
+        SIGNALS_PATH,
         expect,
         body=signal_request(subject),
         has_body=True,
@@ -285,7 +677,7 @@ def action(
         "payload": world_action([0.5, 0.25] if params is None else params),
     }
     return Exchange(
-        "loopback", "POST", f"{TIMELINE_PATH}/actions", expect, body=body, has_body=True
+        "loopback", "POST", ACTIONS_PATH, expect, body=body, has_body=True
     )
 
 
@@ -313,6 +705,73 @@ def positive_subcases() -> list[SubCase]:
             ],
         ),
         SubCase("pos.4", "the public Prediction Ledger JSON is empty", "open", [ledger()]),
+        SubCase(
+            "pos.5",
+            "the Local Principal's Session discloses its grants and the Local mode",
+            "authorized",
+            [
+                session(
+                    observed(
+                        200, json_body(session_body("gateway-mode-local-v1", "local", "denied"))
+                    )
+                )
+            ],
+        ),
+        SubCase(
+            "pos.6",
+            "on an Air-Gapped store the Session discloses the Air-Gapped mode and no network",
+            "authorized-air-gapped",
+            [
+                session(
+                    observed(
+                        200,
+                        json_body(
+                            session_body("gateway-mode-air-gapped-v1", "air-gapped", "absent")
+                        ),
+                    )
+                )
+            ],
+        ),
+        SubCase(
+            "pos.7",
+            "a revoked consent stops the operation it governs and is revoked exactly once",
+            "authorized-consented",
+            consent_revocation_exchanges(),
+        ),
+        SubCase(
+            "pos.8",
+            "a Scenario Room is created, retried, read and derived to its next revision",
+            "authorized-rooms",
+            room_exchanges(),
+        ),
+        SubCase(
+            "pos.9",
+            "a reused key and a stale parent conflict, and a repeated derive answers the head",
+            "authorized-rooms",
+            room_conflict_exchanges(),
+        ),
+    ]
+
+
+def consent_revocation_exchanges() -> list[Exchange]:
+    """#309: the consent governs Timeline creation until it is revoked; the revocation is
+    recorded once (`201`), answered with its original on a retry (`200`), and the Session then
+    discloses it revoked and no longer lists the operation."""
+    # The capturing Session is observed with the slot it fills, so the consent reads `{consent}`.
+    granted = [{"consent_ref": "{consent}", "export_permitted": False, "state": "granted"}]
+    revoked = [{"consent_ref": "{consent}", "export_permitted": False, "state": "revoked"}]
+    without_create = [grant for grant in CONSENTED_GRANTS if grant != "timeline.create"]
+    local = ("gateway-mode-local-v1", "local", "denied")
+    return [
+        session(
+            observed(200, json_body(session_body(*local, CONSENTED_GRANTS, 3, granted))),
+            capture="consent",
+        ),
+        create("pos-7", capture=False, actor=True),
+        revoke(observed(201, json_body(consent_revocation_body(2)))),
+        revoke(observed(200, json_body(consent_revocation_body(2)))),
+        create("pos-7", capture=False, actor=True, expect=routed_problem(403, "revoked", "/v1/timelines")),
+        session(observed(200, json_body(session_body(*local, without_create, 4, revoked)))),
     ]
 
 
@@ -322,13 +781,21 @@ def denied_subcases() -> list[SubCase]:
             "den.1",
             "an action without a host authorizer is unauthorized and commits nothing",
             "open",
-            [create("den-1"), action(error(401)), poll(EMPTY_PAGE)],
+            [
+                create("den-1"),
+                action(routed_problem(401, "unauthenticated", ACTIONS_PATH)),
+                poll(EMPTY_PAGE),
+            ],
         ),
         SubCase(
             "den.2",
             "an action the fixture authority does not grant is forbidden and commits nothing",
             "authorized",
-            [create("den-2"), action(error(403)), poll(EMPTY_PAGE, actor=True)],
+            [
+                create("den-2", actor=True),
+                action(routed_problem(403, "unauthorized", ACTIONS_PATH)),
+                poll(EMPTY_PAGE, actor=True),
+            ],
         ),
         SubCase(
             "den.3",
@@ -340,7 +807,49 @@ def denied_subcases() -> list[SubCase]:
             "den.4",
             "a read without the actor header on an authorized Gateway is unauthorized",
             "authorized",
-            [create("den-4"), poll(error(401))],
+            [create("den-4", actor=True), poll(routed_problem(401, "unauthenticated", EVENTS_PATH))],
+        ),
+        SubCase(
+            "den.5",
+            "a Session read without the actor header on an authorized Gateway is unauthenticated",
+            "authorized",
+            [session(routed_problem(401, "unauthenticated", "/v1/session"), actor=False)],
+        ),
+        SubCase(
+            "den.6",
+            "a Gateway without a host authorizer has no Principal and no Session to disclose",
+            "open",
+            [session(routed_problem(401, "unauthenticated", "/v1/session"))],
+        ),
+        SubCase(
+            "den.7",
+            "a room naming a consent the Principal does not hold is consent-invalid",
+            "authorized-rooms",
+            [
+                create_room(
+                    routed_problem(403, "consent-invalid", ROOMS_PATH),
+                    privacy_export_ref=BODY,
+                )
+            ],
+        ),
+        SubCase(
+            "den.8",
+            "a room naming a revoked consent is refused as revoked",
+            "authorized-rooms",
+            [
+                room_session("granted"),
+                revoke(observed(201, json_body(consent_revocation_body(2)))),
+                create_room(routed_problem(403, "revoked", ROOMS_PATH)),
+            ],
+        ),
+        SubCase(
+            "den.9",
+            "a room whose persona the grant does not cover is unauthorized",
+            "authorized-rooms",
+            [
+                room_session("granted"),
+                create_room(routed_problem(403, "unauthorized", ROOMS_PATH), persona=BODY),
+            ],
         ),
     ]
 
@@ -351,32 +860,64 @@ def malformed_subcases() -> list[SubCase]:
             "mal.1",
             "cursor together with from_seq is a bad query",
             "open",
-            [create("mal-1"), poll(error(400), "?from_seq=0&cursor=v1")],
+            [
+                create("mal-1"),
+                poll(routed_problem(400, "invalid-request", EVENTS_PATH), "?from_seq=0&cursor=v1"),
+            ],
         ),
         SubCase(
             "mal.2",
             "a page limit above 100 is a bad query",
             "open",
-            [create("mal-2"), poll(error(400), f"?limit={EVENT_LIMIT + 1}")],
+            [
+                create("mal-2"),
+                poll(routed_problem(400, "invalid-request", EVENTS_PATH), f"?limit={EVENT_LIMIT + 1}"),
+            ],
         ),
         SubCase(
             "mal.3",
             "a Timeline ID that is not a ULID is a bad ID",
             "open",
-            [Exchange("loopback", "GET", "/v1/timelines/not-a-timeline/events", error(400))],
+            [
+                Exchange(
+                    "loopback",
+                    "GET",
+                    "/v1/timelines/not-a-timeline/events",
+                    routed_problem(400, "invalid-request", "/v1/timelines/not-a-timeline/events"),
+                )
+            ],
         ),
         SubCase(
             "mal.4",
             "integer action params are an invalid typed payload and commit nothing",
             "authorized",
-            [create("mal-4"), action(error(422), params=[1, 2]), poll(EMPTY_PAGE, actor=True)],
+            [
+                create("mal-4", actor=True),
+                action(routed_problem(422, "admission-rejected", ACTIONS_PATH), params=[1, 2]),
+                poll(EMPTY_PAGE, actor=True),
+            ],
+        ),
+        SubCase(
+            "mal.5",
+            "a room naming a governance record the host does not record is rejected",
+            "authorized-rooms",
+            [
+                room_session("granted"),
+                create_room(
+                    routed_problem(422, "admission-rejected", ROOMS_PATH), governance_ref=BODY
+                ),
+            ],
         ),
     ]
 
 
 def resource_subcases() -> list[SubCase]:
     creates = [create(f"res-1-{index:02d}", capture=False) for index in range(1, MAX_TIMELINES + 1)]
-    over = create(f"res-1-{MAX_TIMELINES + 1}", capture=False, expect=error(429))
+    over = create(
+        f"res-1-{MAX_TIMELINES + 1}",
+        capture=False,
+        expect=routed_problem(429, "resource-limit-exceeded", "/v1/timelines"),
+    )
     return [
         SubCase(
             "res.1",
@@ -400,8 +941,8 @@ def redaction_subcases() -> list[SubCase]:
             [
                 create("del-1"),
                 signal(CANARY, observed(201, json_body(signal_view(CANARY, 1)))),
-                poll(NOT_ROUTED, router="spectator"),
-                signal(CANARY, NOT_ROUTED, router="spectator"),
+                poll(not_routed(EVENTS_PATH), router="spectator"),
+                signal(CANARY, not_routed(SIGNALS_PATH), router="spectator"),
                 health("spectator"),
                 ledger("spectator"),
                 poll(observed(200, json_body(page))),
@@ -418,8 +959,10 @@ def downgrade_subcases() -> list[SubCase]:
             "the legacy world.action event type is refused with no fallback",
             "authorized",
             [
-                create("dgr-1"),
-                action(error(400), event_type="world.action"),
+                create("dgr-1", actor=True),
+                action(
+                    routed_problem(400, "unsupported-version", ACTIONS_PATH), event_type="world.action"
+                ),
                 poll(EMPTY_PAGE, actor=True),
             ],
         ),
@@ -428,8 +971,10 @@ def downgrade_subcases() -> list[SubCase]:
             "the legacy world.action.submit capability is refused with no fallback",
             "authorized",
             [
-                create("dgr-2"),
-                action(error(403), capability="world.action.submit"),
+                create("dgr-2", actor=True),
+                action(
+                    routed_problem(403, "unauthorized", ACTIONS_PATH), capability="world.action.submit"
+                ),
                 poll(EMPTY_PAGE, actor=True),
             ],
         ),
@@ -616,7 +1161,7 @@ def family_schema(family: str) -> dict:
             "path": {"type": "string", "pattern": "^/[!-~]{0,255}$"},
             "actor": {"const": True},
             "body": {},
-            "capture": {"const": "timeline"},
+            "capture": {"enum": ["timeline", "consent", "room"]},
             "expect": {"$ref": "#/$defs/observation"},
         },
     }
@@ -627,7 +1172,15 @@ def family_schema(family: str) -> dict:
         "properties": {
             "id": {"type": "string", "pattern": f"^{ID_PREFIX[family]}\\.[0-9]+$"},
             "title": {"type": "string", "pattern": "^[ -~]{1,160}$"},
-            "composition": {"enum": ["open", "authorized"]},
+            "composition": {
+                "enum": [
+                    "open",
+                    "authorized",
+                    "authorized-air-gapped",
+                    "authorized-consented",
+                    "authorized-rooms",
+                ]
+            },
             "exchanges": {
                 "type": "array",
                 "minItems": 1,
@@ -782,19 +1335,52 @@ def check_signal_payloads() -> None:
         raise SystemExit("the shortest-float rule is broken")
 
 
+# The members whose ULID segments are permitted nondeterministic operational fields.
+ULID_KEYS = ("id", "instance", "consent_ref", "timeline_id", "event_id")
+# `n` lowercase hex digits, not all zero (the contract's hash and correlation ID patterns).
+NONZERO_HEX = "(?!0+$)[0-9a-f]{{{}}}"
+
+
+def substitute(value: object, captured: dict[str, str]) -> object:
+    """Every text value equal to a captured value becomes its slot literal (`{consent}`,
+    `{room}`), before the normalization, so an echo of a captured value is pinned."""
+    if isinstance(value, dict):
+        return {name: substitute(item, captured) for name, item in value.items()}
+    if isinstance(value, list):
+        return [substitute(item, captured) for item in value]
+    if isinstance(value, str):
+        return next((slot for slot, text in captured.items() if text == value), value)
+    return value
+
+
 def normalize(value: object, key: str | None = None) -> object:
     """The normalization of the requirements text, on a parsed JSON response value."""
     if isinstance(value, dict):
-        return {name: normalize(item, name) for name, item in value.items()}
+        members = {name: normalize(item, name) for name, item in value.items()}
+        provenance = members.get("provenance")
+        if (
+            members.get("schema_id") == ROOM_REVISION_SCHEMA
+            and isinstance(provenance, dict)
+            and isinstance(provenance.get("digest"), str)
+            and re.fullmatch(NONZERO_HEX.format(64), provenance["digest"])
+        ):
+            members["provenance"] = {**provenance, "digest": "<hash>"}
+        return members
     if isinstance(value, list):
         return [normalize(item) for item in value]
     if isinstance(value, str):
-        if key == "id" and re.fullmatch(ULID_PATTERN, value):
-            return "<ulid>"
         if key == "next_cursor" and re.fullmatch(CURSOR_PATTERN, value):
             return "<cursor>"
-        if key == "error":
+        if key == "detail":
             return "<message>"
+        if key in ULID_KEYS:
+            return "/".join(
+                "<ulid>" if re.fullmatch(ULID_PATTERN, part) else part for part in value.split("/")
+            )
+        if key == "correlation_id" and re.fullmatch(NONZERO_HEX.format(32), value):
+            return "<correlation>"
+        if key == "descriptor_hash" and re.fullmatch(NONZERO_HEX.format(64), value):
+            return "<hash>"
     return value
 
 
@@ -804,13 +1390,15 @@ def check_normalization() -> None:
         "events": [{"id": ulid, "entity": ulid, "seq": 1}],
         "next_cursor": f"v1.{'ab' * 32}.{ulid}.2",
         "next_from_seq": 2,
-        "error": "no such Timeline",
+        "detail": "no such Timeline",
+        "instance": f"/v1/timelines/{ulid}/events",
     }
     wanted = {
         "events": [{"id": "<ulid>", "entity": ulid, "seq": 1}],
         "next_cursor": "<cursor>",
         "next_from_seq": 2,
-        "error": "<message>",
+        "detail": "<message>",
+        "instance": "/v1/timelines/<ulid>/events",
     }
     if normalize(raw) != wanted:
         raise SystemExit("the normalization rules are broken")
@@ -820,9 +1408,91 @@ def check_normalization() -> None:
         "next_cursor": "v1.x",
     }:
         raise SystemExit("the normalization accepts a non-ULID")
-    for constant in (ACTOR, BODY, ENTITY):
+    room_id, consent = "01ARZ3NDEKTSV4RRFFQ69G5FAW", "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+    captured = {"{consent}": consent, "{room}": room_id}
+    room = {
+        "schema_id": ROOM_REVISION_SCHEMA,
+        "id": room_id,
+        "descriptor": {
+            "room_id": room_id,
+            "privacy_export_ref": consent,
+            "governance_ref": ulid,
+            "correlation_id": "5f" * 16,
+            "descriptor_hash": "ab" * 32,
+            "rule_set_hash": "ab" * 32,
+        },
+        "commit": {"timeline_id": ulid, "event_id": ulid},
+        "provenance": {"digest": "cd" * 32, "origin": "principal-authored"},
+    }
+    if normalize(substitute(room, captured)) != {
+        "schema_id": ROOM_REVISION_SCHEMA,
+        "id": "{room}",
+        "descriptor": {
+            "room_id": "{room}",
+            "privacy_export_ref": "{consent}",
+            "governance_ref": ulid,
+            "correlation_id": "<correlation>",
+            "descriptor_hash": "<hash>",
+            "rule_set_hash": "ab" * 32,
+        },
+        "commit": {"timeline_id": "<ulid>", "event_id": "<ulid>"},
+        "provenance": {"digest": "<hash>", "origin": "principal-authored"},
+    }:
+        raise SystemExit("the room normalization rules are broken")
+    # An echo of another room or consent, an all-zero or malformed hash or correlation ID,
+    # and a provenance digest outside a room revision stay raw.
+    for kept in (
+        {"room_id": ulid, "privacy_export_ref": ulid},
+        {"correlation_id": "0" * 32, "descriptor_hash": "0" * 64},
+        {"correlation_id": "5F" * 16, "descriptor_hash": "ab"},
+        {"schema_id": ROOM_REVISION_SCHEMA, "provenance": {"digest": "0" * 64}},
+        {"provenance": {"digest": "cd" * 32, "origin": "principal-authored"}},
+    ):
+        if normalize(substitute(kept, captured)) != kept:
+            raise SystemExit(f"the room normalization changes {kept}")
+    for constant in (ACTOR, BODY, ENTITY, ulid_text(PRINCIPAL_BYTES)):
         if not re.fullmatch(ULID_PATTERN, constant):
             raise SystemExit(f"{constant} is not a ULID")
+    if ulid_text(bytes(15) + bytes([33])) != "0" * 24 + "11":
+        raise SystemExit("the ULID text encoding is broken")
+
+
+def check_room_hashes() -> None:
+    """The fixture room's plugin composition and rule set hashes, derived here, are the ones
+    of the contract's golden `createScenarioRoom` example, which names the same plugin and
+    rule."""
+    example = json.loads(
+        (ROOT / "contracts/gateway/v1/examples/scenario-room-create.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    descriptor = example["response"]["body"]["descriptor"]
+    if descriptor["plugins"] != [ROOM_PLUGIN] or descriptor["rules"] != room_rules(250000):
+        raise SystemExit("the golden room example no longer names the fixture plugin and rule")
+    if descriptor["plugin_composition_hash"] != plugin_composition_hash():
+        raise SystemExit("the plugin composition hash is not the golden example's")
+    if descriptor["rule_set_hash"] != golden.blake3(jcs(room_rules(250000))).hex():
+        raise SystemExit("the rule set hash is not the golden example's")
+
+
+def rotation_chain_heads(checker: str) -> dict[str, str]:
+    """The head of each rotation chain the contract checker source declares."""
+    for node in ast.parse(checker).body:
+        if (
+            isinstance(node, ast.Assign)
+            and [getattr(target, "id", None) for target in node.targets]
+            == ["MODE_PROFILE_ROTATION_CHAINS"]
+        ):
+            chains = ast.literal_eval(node.value)
+            return {identifier: chain[-1] for identifier, chain in chains.items()}
+    raise SystemExit("the contract checker declares no MODE_PROFILE_ROTATION_CHAINS")
+
+
+def check_mode_profile_digests() -> None:
+    """The mode-profile digests are the heads of the contract checker's rotation chains."""
+    checker = (HERE / "check_gateway_contract.py").read_text(encoding="utf-8")
+    if rotation_chain_heads(checker) != MODE_PROFILE_DIGESTS:
+        raise SystemExit("the mode-profile digests are not the contract checker's chain heads")
 
 
 def provider() -> dict:
@@ -836,20 +1506,26 @@ def check_routes_and_usage() -> None:
         needed: set[str] = set()
         steps = events = 0
         for sub in SUBCASES[family]():
-            captured = False
+            captured = consent_captured = room_captured = False
             for exchange in sub.exchanges:
                 route = route_of(exchange.path)
                 if route is None:
                     raise SystemExit(f"{sub.id}: {exchange.path} is no Gateway route")
                 if "{timeline}" in exchange.path and not captured:
                     raise SystemExit(f"{sub.id}: a Timeline is used before it is captured")
-                captured = captured or exchange.capture
+                if "{consent}" in json.dumps(exchange.body) and not consent_captured:
+                    raise SystemExit(f"{sub.id}: a consent is used before it is captured")
+                if "{room}" in exchange.path and not room_captured:
+                    raise SystemExit(f"{sub.id}: a room is used before it is captured")
+                captured = captured or exchange.capture == "timeline"
+                room_captured = room_captured or exchange.capture == "room"
+                consent_captured = consent_captured or exchange.capture == "consent"
                 if exchange.expect == REFUSED:
                     continue
                 needed.add(ROUTE_CAPABILITY[route])
                 steps += 1
-                if exchange.expect.get("status") == 201 and route in ("signals", "actions"):
-                    events += 1
+                if exchange.expect.get("status") == 201:
+                    events += COMMITTED_EVENTS.get(route, 0)
             for exchange in sub.exchanges:
                 if exchange.expect == REFUSED and ROUTE_CAPABILITY[route_of(exchange.path)] in needed:
                     raise SystemExit(f"{sub.id}: a refused route's capability is held")
@@ -876,6 +1552,8 @@ def self_test() -> None:
     check_blake3_vectors()
     check_signal_payloads()
     check_normalization()
+    check_room_hashes()
+    check_mode_profile_digests()
     check_routes_and_usage()
     check_payload_schemas()
 

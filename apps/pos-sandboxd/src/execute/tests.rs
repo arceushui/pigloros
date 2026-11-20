@@ -31,6 +31,8 @@ use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
+mod adapter;
+mod cancellation;
 mod ownership;
 
 const HOST_SERVICE: &str = "piglor-host-service-v1";
@@ -77,7 +79,11 @@ enum AdapterScript {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     Start,
+    /// The verified start is no valid RQE1.
+    RequestedConfiguration,
     Bind,
+    Evidence,
+    HangEvidence,
     Kill,
     ReadCgroup,
     KillCgroup,
@@ -85,6 +91,8 @@ enum Fault {
     HangBind,
     HangKill,
     HangStop,
+    /// A kill or stop is acknowledged, but the unit's tasks linger.
+    Lingering,
 }
 
 type ExecCommands = Vec<(String, Vec<String>, bool)>;
@@ -103,6 +111,31 @@ struct FakeHost {
     polls: Arc<AtomicUsize>,
     cgroup_kills: Arc<AtomicUsize>,
     killed: Arc<AtomicBool>,
+    /// The `ActiveEnterTimestampMonotonic` reported, in nanoseconds; `None`
+    /// reports the time of the read.
+    activated: Option<u64>,
+    /// The adapter's use of its standard streams; `None` closes them at once.
+    stdio: Option<adapter::StdioScript>,
+    /// Set once the stdio adapter finished; until then the cgroup is busy.
+    adapter_done: Arc<AtomicBool>,
+    /// Set once an acknowledged kill or a stop ended the unit's tasks: the
+    /// cgroup is then empty, however many polls it had to see otherwise.
+    host_ended: Arc<AtomicBool>,
+    /// What the stdio adapter observed.
+    stdio_report: Arc<Mutex<adapter::StdioReport>>,
+    /// The releases the barrier made, seen by the stdio adapter.
+    released: Arc<Mutex<Vec<(String, Instant)>>>,
+    /// Descriptors held as systemd holds its duplicates of the unit ends.
+    systemd_held: Arc<Mutex<Vec<StdOwnedFd>>>,
+}
+
+const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
+
+/// `CLOCK_MONOTONIC` now, in nanoseconds.
+fn monotonic_now_ns() -> u64 {
+    let now = clock_gettime(ClockId::Monotonic);
+    u64::try_from(i128::from(now.tv_sec) * NANOSECONDS_PER_SECOND + i128::from(now.tv_nsec))
+        .unwrap_or_default()
 }
 
 impl FakeHost {
@@ -119,6 +152,13 @@ impl FakeHost {
             polls: Arc::default(),
             cgroup_kills: Arc::default(),
             killed: Arc::default(),
+            activated: None,
+            stdio: None,
+            adapter_done: Arc::default(),
+            host_ended: Arc::default(),
+            stdio_report: Arc::default(),
+            released: Arc::default(),
+            systemd_held: Arc::default(),
         }
     }
 
@@ -191,6 +231,14 @@ impl FakeHost {
         self.faults.contains(&fault)
     }
 
+    /// An acknowledged kill or a stop ends the unit's tasks, unless they
+    /// linger.
+    fn end_tasks(&self) {
+        if !self.faulty(Fault::Lingering) {
+            self.host_ended.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn observed(&self) -> Observed {
         self.observed
             .lock()
@@ -234,13 +282,28 @@ fn extra_descriptors(request: &TransientUnitRequest) -> &[(OwnedFd, String)] {
         .unwrap_or_default()
 }
 
+#[derive(Debug)]
 struct FakeCgroup {
+    directory: File,
     log: Log,
     polls: Arc<AtomicUsize>,
     kills: Arc<AtomicUsize>,
     empty_after: usize,
     fail_read: bool,
     fail_kill: bool,
+    /// No unit task remains once the stdio adapter finished.
+    adapter_done: Arc<AtomicBool>,
+    /// No unit task remains once a kill or stop ended them.
+    host_ended: Arc<AtomicBool>,
+}
+
+impl FakeCgroup {
+    /// Whether no unit task remains at poll `polls`: the adapter finished and
+    /// enough polls passed, or a kill or stop ended the tasks.
+    fn tasks_gone(&self, polls: usize) -> bool {
+        (polls > self.empty_after && self.adapter_done.load(Ordering::SeqCst))
+            || self.host_ended.load(Ordering::SeqCst)
+    }
 }
 
 impl UnitCgroup for FakeCgroup {
@@ -251,7 +314,7 @@ impl UnitCgroup for FakeCgroup {
         if self.fail_read {
             Err(Injected)
         } else {
-            Ok(polls > self.empty_after)
+            Ok(self.tasks_gone(polls))
         }
     }
 
@@ -264,6 +327,66 @@ impl UnitCgroup for FakeCgroup {
             Ok(())
         }
     }
+
+    fn identity(&self) -> (u64, u64) {
+        FAKE_CGROUP
+    }
+
+    fn directory(&self) -> BorrowedFd<'_> {
+        self.directory.as_fd()
+    }
+}
+
+/// The fake's start is its unit name; its RQE1 records that name as its
+/// one requested property, and an empty name is no valid RQE1.
+impl RequestedConfiguration for String {
+    fn requested_configuration_evidence(
+        &self,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<
+        pos_reference::sandbox_provider_protocol::RequestedConfigurationEvidence,
+        pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError,
+    > {
+        use pos_reference::sandbox_provider_protocol::{
+            DbusProperty, DbusValue, RequestedConfigurationEvidence,
+            RequestedConfigurationEvidenceFields, RequestedConfigurationStatus,
+            SandboxProviderProtocolError,
+        };
+        if self.is_empty() {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
+        let unit = DbusProperty {
+            name: "Description".to_owned(),
+            value: DbusValue::String(self.clone()),
+        };
+        let policy = DbusProperty {
+            name: "RootImagePolicy".to_owned(),
+            value: DbusValue::String(Self::new()),
+        };
+        RequestedConfigurationEvidence::new(&RequestedConfigurationEvidenceFields {
+            attempt_id,
+            agr1_digest,
+            status: RequestedConfigurationStatus::Verified,
+            requested: Some(vec![unit.clone()]),
+            readback: Some(vec![unit, policy]),
+        })
+    }
+}
+
+/// The device and inode every fake cgroup reports.
+const FAKE_CGROUP: (u64, u64) = (0x63, 0x67);
+
+impl FakeHost {
+    /// The fake's verified start: its unit name, or empty, which is the
+    /// fake's invalid RQE1.
+    fn started(&self, unit_name: &TransientServiceUnitName) -> String {
+        if self.faulty(Fault::RequestedConfiguration) {
+            String::new()
+        } else {
+            unit_name.as_str().to_owned()
+        }
+    }
 }
 
 impl UnitHost for FakeHost {
@@ -271,6 +394,7 @@ impl UnitHost for FakeHost {
     type Cgroup = FakeCgroup;
     type Error = Injected;
     type Killer = FakeKiller;
+    type Evidence = u64;
 
     fn killer(&self) -> FakeKiller {
         FakeKiller {
@@ -284,6 +408,7 @@ impl UnitHost for FakeHost {
         request: TransientUnitRequest,
     ) -> impl Future<Output = Result<String, Injected>> + Send {
         record(&self.log, "start");
+        self.run_stdio(&request);
         let adapter_end = self.observe(&request);
         let outcome = if self.faulty(Fault::Start) {
             Err(Injected)
@@ -291,7 +416,7 @@ impl UnitHost for FakeHost {
             if let Some(adapter_end) = adapter_end {
                 self.drive(adapter_end);
             }
-            Ok(unit_name.as_str().to_owned())
+            Ok(self.started(&unit_name))
         };
         let hang = self.faulty(Fault::HangStart);
         async move {
@@ -308,16 +433,40 @@ impl UnitHost for FakeHost {
         let outcome = if self.faulty(Fault::Bind) {
             Err(Injected)
         } else {
-            Ok(FakeCgroup {
-                log: Arc::clone(&self.log),
-                polls: Arc::clone(&self.polls),
-                kills: Arc::clone(&self.cgroup_kills),
-                empty_after: self.empty_after,
-                fail_read: self.faulty(Fault::ReadCgroup),
-                fail_kill: self.faulty(Fault::KillCgroup),
-            })
+            File::open("/")
+                .map_err(|_| Injected)
+                .map(|directory| FakeCgroup {
+                    directory,
+                    log: Arc::clone(&self.log),
+                    polls: Arc::clone(&self.polls),
+                    kills: Arc::clone(&self.cgroup_kills),
+                    empty_after: self.empty_after,
+                    fail_read: self.faulty(Fault::ReadCgroup),
+                    fail_kill: self.faulty(Fault::KillCgroup),
+                    adapter_done: Arc::clone(&self.adapter_done),
+                    host_ended: Arc::clone(&self.host_ended),
+                })
         };
         let hang = self.faulty(Fault::HangBind);
+        async move {
+            hang_if(hang).await;
+            outcome
+        }
+    }
+
+    fn release_evidence(
+        &self,
+        _started: &String,
+        _cgroup: &FakeCgroup,
+    ) -> impl Future<Output = Result<(u64, u64), Injected>> + Send {
+        let activated = self.activated.unwrap_or_else(monotonic_now_ns);
+        let outcome = if self.faulty(Fault::Evidence) {
+            Err(Injected)
+        } else {
+            // The evidence is the activation it was read with.
+            Ok((activated, activated))
+        };
+        let hang = self.faulty(Fault::HangEvidence);
         async move {
             hang_if(hang).await;
             outcome
@@ -329,6 +478,7 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "stop");
+        self.end_tasks();
         let hang = self.faulty(Fault::HangStop);
         async move {
             hang_if(hang).await;
@@ -345,6 +495,7 @@ impl UnitHost for FakeHost {
         let outcome = if self.faulty(Fault::Kill) {
             Err(Injected)
         } else {
+            self.end_tasks();
             Ok(())
         };
         let hang = self.faulty(Fault::HangKill);
@@ -385,21 +536,35 @@ enum BarrierFault {
 struct FakeBarrier {
     log: Log,
     released: Arc<Mutex<Vec<(String, Instant)>>>,
+    /// The RQE1 digest each release was handed.
+    requested: Arc<Mutex<Vec<[u8; 32]>>>,
     fault: BarrierFault,
+    /// Requested as the release completes, so supervision sees it first.
+    cancel_on_release: Option<Arc<AttemptCancel>>,
 }
 
 impl FakeBarrier {
+    /// Record the RQE1 digest a release was handed.
+    fn hand(&self, attempt: &ActiveAttempt) {
+        if let Ok(mut requested) = self.requested.lock() {
+            requested.push(attempt.requested_configuration_evidence());
+        }
+    }
+
     fn new(log: &Log) -> Self {
         Self {
             log: Arc::clone(log),
             released: Arc::default(),
+            requested: Arc::default(),
             fault: BarrierFault::None,
+            cancel_on_release: None,
         }
     }
 }
 
 impl LaunchBarrier for FakeBarrier {
     type Error = Injected;
+    type Evidence = usize;
 
     fn prepare(
         &mut self,
@@ -421,8 +586,11 @@ impl LaunchBarrier for FakeBarrier {
     fn release(
         &mut self,
         attempt: &ActiveAttempt,
+        cgroup: CgroupView<'_>,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "release");
+        assert_eq!(cgroup.identity(), FAKE_CGROUP);
+        self.hand(attempt);
         if let Ok(mut released) = self.released.lock() {
             released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
         }
@@ -432,13 +600,38 @@ impl LaunchBarrier for FakeBarrier {
             Ok(())
         };
         let hang = self.fault == BarrierFault::Hang;
-        async move {
-            if hang {
-                std::future::pending::<()>().await;
-            }
-            outcome
-        }
+        released(hang, self.cancel_on_release.clone(), outcome)
     }
+
+    fn evidence(&mut self) -> usize {
+        self.attempts()
+    }
+}
+
+impl FakeBarrier {
+    /// How many releases were attempted: the barrier's evidence.
+    fn attempts(&self) -> usize {
+        self.released
+            .lock()
+            .map(|released| released.len())
+            .unwrap_or_default()
+    }
+}
+
+/// A release that never ends when `hang`, and otherwise requests `cancel`
+/// as it completes.
+async fn released(
+    hang: bool,
+    cancel: Option<Arc<AttemptCancel>>,
+    outcome: Result<(), Injected>,
+) -> Result<(), Injected> {
+    if hang {
+        std::future::pending::<()>().await;
+    }
+    if let Some(cancel) = cancel {
+        cancel.cancel(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest);
+    }
+    outcome
 }
 
 struct LoopbackNetwork;
@@ -450,6 +643,7 @@ impl LocalNetworkPort for LoopbackNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Ok(EstablishedNetwork::new(attempt_id, LoopbackConnector))
     }
@@ -465,6 +659,7 @@ impl LocalNetworkPort for ForeignNetwork {
     fn establish(
         &self,
         _attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Ok(EstablishedNetwork::new(OTHER, LoopbackConnector))
     }
@@ -480,6 +675,7 @@ impl LocalNetworkPort for BrokenNetwork {
     fn establish(
         &self,
         _attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Err(Injected)
     }
@@ -517,6 +713,7 @@ impl LocalNetworkPort for TornDownNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<TornDownConnector>, Injected> {
         Ok(EstablishedNetwork::new(
             attempt_id,
@@ -527,7 +724,8 @@ impl LocalNetworkPort for TornDownNetwork {
     }
 }
 
-type Outcome = Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure>;
+type Outcome =
+    Result<AttemptExecution<String, FakeCgroup, u64>, ExecuteFailure<FakeCgroup, u64, String>>;
 
 fn root_for(
     log: &Log,
@@ -555,7 +753,9 @@ fn names(entries: &[&str]) -> Vec<String> {
     entries.iter().map(|entry| (*entry).to_owned()).collect()
 }
 
-fn failure<T>(result: Result<T, ExecuteFailure>) -> TestResult<ExecuteFailure> {
+fn failure<T>(
+    result: Result<T, ExecuteFailure<FakeCgroup, u64, String>>,
+) -> TestResult<ExecuteFailure<FakeCgroup, u64, String>> {
     result
         .err()
         .ok_or_else(|| "the execution unexpectedly succeeded".into())
@@ -567,6 +767,7 @@ struct Scenario {
     host: FakeHost,
     barrier: FakeBarrier,
     store: Arc<NetworkCaptureStore>,
+    cancel: AttemptCancel,
     _root: Option<tempfile::TempDir>,
 }
 
@@ -587,6 +788,7 @@ impl Scenario {
             barrier: FakeBarrier::new(&log),
             log,
             store: Arc::clone(store),
+            cancel: AttemptCancel::new(),
             _root: root,
         }
     }
@@ -608,6 +810,7 @@ impl Scenario {
                 .with_limits(crate::test_fixtures::execution_limits(watchdog_ms)),
             mode: plan,
             capture_store: Arc::clone(&self.store),
+            cancel: self.cancel.signal(),
         })
     }
 
@@ -658,7 +861,7 @@ impl Scenario {
             .await
     }
 
-    async fn fails(&mut self) -> TestResult<ExecuteFailure> {
+    async fn fails(&mut self) -> TestResult<ExecuteFailure<FakeCgroup, u64, String>> {
         let outcome = self.air_gapped().await?;
         failure(outcome)
     }
@@ -699,7 +902,7 @@ const UNUSED_ENDPOINT: SocketAddr =
 /// A finished Local attempt with its remote and adapter observations.
 struct LocalRun {
     scenario: Scenario,
-    execution: AttemptExecution<String, FakeCgroup>,
+    execution: AttemptExecution<String, FakeCgroup, u64>,
     plan: NetworkExchangePlan,
     remote: thread::JoinHandle<std::io::Result<Vec<u8>>>,
 }
@@ -780,8 +983,10 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
     let mut barrier = FakeBarrier::new(&log);
     let active = crate::test_fixtures::active()?;
     let released = Arc::clone(&barrier.released);
+    let handed = Arc::clone(&barrier.requested);
     assert_eq!(active.attempt_id(), ATTEMPT);
-    let _release = barrier.release(&active);
+    let directory = File::open("/")?;
+    let _release = barrier.release(&active, CgroupView::new(directory.as_fd(), FAKE_CGROUP));
     let seen = released.lock().map_err(|error| error.to_string())?.clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(
@@ -789,6 +994,34 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
         TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str()
     );
     assert!(seen[0].1 > Instant::now());
+    let requested = handed.lock().map_err(|error| error.to_string())?.clone();
+    assert_eq!(requested, vec![crate::test_fixtures::RQE1_DIGEST]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_barrier_is_handed_the_verified_start_as_rqe1() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    // Whatever the run's end, its release was handed the start's RQE1.
+    let _outcome = scenario
+        .run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped)
+        .await?;
+    let expected = TransientServiceUnitName::from_attempt_id(ATTEMPT)
+        .map_err(|error| error.to_string())
+        .and_then(|unit| {
+            unit.as_str()
+                .to_owned()
+                .requested_configuration_evidence(ATTEMPT, crate::test_fixtures::GRANT_DIGEST)
+                .map_err(|error| error.to_string())
+        })?
+        .digest();
+    let requested = scenario
+        .barrier
+        .requested
+        .lock()
+        .map(|requested| requested.clone())
+        .map_err(|error| error.to_string())?;
+    assert_eq!(requested, vec![expected]);
     Ok(())
 }
 
@@ -912,7 +1145,7 @@ async fn an_unencodable_launch_never_reaches_the_recheck() -> TestResult {
 
 async fn recheck_failure(
     substitute: impl FnOnce(&AdmittedAttempt) -> Result<CheckedRoot, ImageActivationError>,
-) -> TestResult<(Scenario, ExecuteFailure)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let mut scenario = Scenario::new()?;
     let job = scenario.job(
         ATTEMPT,
@@ -1009,7 +1242,9 @@ async fn the_same_ids_and_authority_cannot_substitute_limits_or_readback_policy(
 }
 
 /// Run an Air-Gapped attempt whose host fails with `faults`.
-async fn faulted(faults: &[Fault]) -> TestResult<(Scenario, ExecuteFailure)> {
+async fn faulted(
+    faults: &[Fault],
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
     let failed = scenario.fails().await?;
@@ -1023,6 +1258,7 @@ async fn a_unit_that_fails_to_start_is_killed() -> TestResult {
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(scenario.entries().ends_with(&names(&["kill", "stop"])));
     assert_eq!(scenario.cgroup_kills(), 0);
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1039,6 +1275,8 @@ async fn an_unacknowledged_kill_after_a_started_unit_is_reported_as_running() ->
     let (_scenario, failed) = faulted(&[Fault::Bind, Fault::Kill]).await?;
     assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
     assert_eq!(failed.unit, UnitState::KillFailed);
+    // The unit may still run, but no cgroup was bound to hand over.
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1049,6 +1287,8 @@ async fn a_unit_whose_cgroup_cannot_be_bound_is_killed_before_release() -> TestR
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(!scenario.entries().iter().any(|entry| entry == "release"));
     assert_eq!(scenario.cgroup_kills(), 0);
+    // No cgroup was bound, so none can be handed to terminal cleanup.
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1064,6 +1304,10 @@ async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult
     assert!(matches!(failed.error, ExecuteError::ReleaseTimeout));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(scenario.cgroup_kills(), 1);
+    // The bound cgroup that was killed is retained for the emptiness proof.
+    assert!(failed
+        .cgroup
+        .is_some_and(|retained| Arc::ptr_eq(&retained.kills, &scenario.host.cgroup_kills)));
     Ok(())
 }
 
@@ -1080,7 +1324,7 @@ fn release_fault(refuse_release: bool) -> BarrierFault {
 async fn timed_out(
     faults: &[Fault],
     refuse_release: bool,
-) -> TestResult<(Scenario, ExecuteFailure)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
     scenario.barrier.fault = release_fault(refuse_release);
@@ -1094,6 +1338,7 @@ async fn a_start_that_never_answers_is_cut_off_and_the_unit_killed() -> TestResu
     let (scenario, failed) = timed_out(&[Fault::HangStart], false).await?;
     assert!(matches!(failed.error, ExecuteError::HostTimeout));
     assert_eq!(failed.unit, UnitState::Killed);
+    assert!(failed.started.is_none());
     assert!(scenario
         .entries()
         .ends_with(&names(&["start", "kill", "stop"])));
@@ -1105,6 +1350,9 @@ async fn a_cgroup_bind_that_never_answers_is_cut_off_and_the_unit_killed() -> Te
     let (_scenario, failed) = timed_out(&[Fault::HangBind], false).await?;
     assert!(matches!(failed.error, ExecuteError::HostTimeout));
     assert_eq!(failed.unit, UnitState::Killed);
+    // The start completed, so it is known; no cgroup was bound.
+    assert!(failed.started.is_some());
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1113,6 +1361,8 @@ async fn a_kill_that_never_answers_is_reported_as_unacknowledged() -> TestResult
     let started = Instant::now();
     let (_scenario, failed) = timed_out(&[Fault::HangKill], true).await?;
     assert_eq!(failed.unit, UnitState::KillFailed);
+    // An unacknowledged kill still returns the bound cgroup for teardown.
+    assert!(failed.cgroup.is_some());
     assert!(started.elapsed() >= Duration::from_millis(100));
     Ok(())
 }
@@ -1216,6 +1466,7 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
     let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
+    assert!(failed.cgroup.is_some());
     assert_eq!(
         scenario.entries(),
         [
@@ -1237,7 +1488,7 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
 async fn local_failure<N: LocalNetworkPort + Sync>(
     network: &N,
     admission_attempt: [u8; 16],
-) -> TestResult<(Scenario, ExecuteFailure)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let plan = plan()?;
     let admission = crate::test_fixtures::admission(
         admission_attempt,
@@ -1298,7 +1549,7 @@ async fn a_network_that_cannot_be_established_never_submits_a_unit() -> TestResu
 async fn teardowns(
     configure: impl FnOnce(&mut Scenario),
     network_attempt: [u8; 16],
-) -> TestResult<(usize, ExecuteFailure)> {
+) -> TestResult<(usize, ExecuteFailure<FakeCgroup, u64, String>)> {
     let torn_down = Arc::new(AtomicUsize::new(0));
     let network = TornDownNetwork {
         torn_down: Arc::clone(&torn_down),
@@ -1382,7 +1633,9 @@ async fn an_unreadable_cgroup_terminates_the_unit() -> TestResult {
 }
 
 /// Run an Air-Gapped attempt whose cgroup never empties, under `faults`.
-async fn expired(faults: &[Fault]) -> TestResult<(Scenario, AttemptExecution<String, FakeCgroup>)> {
+async fn expired(
+    faults: &[Fault],
+) -> TestResult<(Scenario, AttemptExecution<String, FakeCgroup, u64>)> {
     let mut scenario = Scenario::new()?;
     scenario.host.empty_after = usize::MAX;
     scenario.host.faults.extend_from_slice(faults);
@@ -1461,6 +1714,7 @@ impl LocalNetworkPort for PanickingNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<PanickingConnector>, Injected> {
         Ok(EstablishedNetwork::new(attempt_id, PanickingConnector))
     }
@@ -1468,7 +1722,7 @@ impl LocalNetworkPort for PanickingNetwork {
 
 async fn protocol_violation(
     faults: &[Fault],
-) -> TestResult<(Scenario, AttemptExecution<String, FakeCgroup>)> {
+) -> TestResult<(Scenario, AttemptExecution<String, FakeCgroup, u64>)> {
     let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
     let mut scenario = Scenario::new()?;
     scenario.host.adapter = AdapterScript::ProtocolViolation;
@@ -1539,6 +1793,7 @@ impl LocalNetworkPort for KillAwareNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<KillAwareConnector>, Injected> {
         Ok(EstablishedNetwork::new(
             attempt_id,
@@ -1592,18 +1847,214 @@ async fn a_failed_proxy_task_terminates_the_unit() -> TestResult {
     assert!(matches!(failed.error, ExecuteError::Serve(_)));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(scenario.cgroup_kills(), 1);
+    assert!(failed.cgroup.is_some());
     Ok(())
 }
 
 #[test]
 fn the_failure_names_its_cause_and_the_unit_state() {
-    let failure = ExecuteFailure {
+    let failure = ExecuteFailure::<FakeCgroup> {
         error: ExecuteError::ModeMismatch,
         unit: UnitState::KillFailed,
+        cgroup: None,
+        evidence: None,
+        started: None,
     };
     assert_eq!(
         failure.to_string(),
         "execution failed with the unit KillFailed"
     );
     assert!(std::error::Error::source(&failure).is_some());
+}
+
+#[test]
+fn a_namespace_reaches_each_distinct_admitted_endpoint_once() -> TestResult {
+    let endpoint = |address: Vec<u8>, destination_port| NetworkCapability {
+        address,
+        destination_port,
+        ..capability(SocketAddr::from(([127, 0, 0, 1], 1)))
+    };
+    let ipv6 = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let admission = crate::test_fixtures::admission(
+        ATTEMPT,
+        grant_authority(),
+        [4, 5, 6],
+        vec![
+            (plan()?, endpoint(ipv6.to_vec(), 8443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+            // The same endpoint as an IPv4-mapped IPv6 address.
+            (
+                plan()?,
+                endpoint(
+                    vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 10],
+                    443,
+                ),
+            ),
+        ],
+    );
+    assert_eq!(
+        admitted_endpoints(&admission),
+        [
+            SocketAddr::from(([192, 0, 2, 10], 443)),
+            SocketAddr::from((ipv6, 8443)),
+        ]
+    );
+    Ok(())
+}
+
+/// The release-side evidence of ADR-069 R9 §4.6.5 and §4.6.6: what the host
+/// read after binding the cgroup, the watchdog deadline `D` anchored on the
+/// unit's activation, and the broker's escalation at `D + G`.
+mod release_evidence {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_execution_carries_the_evidence_read_before_its_release() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.activated = Some(monotonic_now_ns());
+        let execution = scenario.air_gapped().await??;
+        assert_eq!(Some(execution.evidence), scenario.host.activated);
+        // The barrier's own evidence stays with the barrier for its owner.
+        assert_eq!(scenario.barrier.evidence(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_refused_release_keeps_the_evidence_read_before_it() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.activated = Some(monotonic_now_ns());
+        scenario.barrier.fault = BarrierFault::Release;
+        let failed = scenario.fails().await?;
+        assert!(matches!(failed.error, ExecuteError::Barrier(_)));
+        assert_eq!(failed.evidence, scenario.host.activated);
+        assert!(failed.cgroup.is_some());
+        // The verified start travels with the failure, for the result read.
+        assert_eq!(
+            failed.started.as_deref(),
+            Some(TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_supervision_failure_keeps_the_evidence_read_before_the_release() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.faults.push(Fault::ReadCgroup);
+        let failed = scenario.fails().await?;
+        assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
+        assert!(failed.evidence.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unreadable_evidence_kills_the_unit_before_any_release() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.faults.push(Fault::Evidence);
+        let failed = scenario.fails().await?;
+        assert!(matches!(failed.error, ExecuteError::Evidence(_)));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(failed.cgroup.is_some());
+        assert!(failed.evidence.is_none());
+        assert!(failed.started.is_some());
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evidence_that_never_arrives_is_cut_off_and_the_unit_killed() -> TestResult {
+        let (scenario, failed) = timed_out(&[Fault::HangEvidence], false).await?;
+        assert!(matches!(failed.error, ExecuteError::HostTimeout));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_start_that_is_no_valid_rqe1_releases_nothing() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.faults.push(Fault::RequestedConfiguration);
+        let failed = scenario.fails().await?;
+        assert!(matches!(
+            failed.error,
+            ExecuteError::RequestedConfiguration(_)
+        ));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(failed.started.is_some());
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unrepresentable_watchdog_deadline_releases_nothing() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.activated = Some(u64::MAX);
+        let failed = scenario.fails().await?;
+        assert!(matches!(failed.error, ExecuteError::Activation));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        Ok(())
+    }
+
+    /// The deadline the barrier was given.
+    fn release_deadline(scenario: &Scenario) -> TestResult<Instant> {
+        let released = scenario.barrier.released.lock().map_err(|_| "poisoned")?;
+        Ok(released.first().ok_or("no release")?.1)
+    }
+
+    #[tokio::test]
+    async fn the_release_deadline_is_the_activation_plus_the_watchdog() -> TestResult {
+        // Activated ten seconds ago under a thirty-second watchdog: twenty
+        // seconds remain, however late the provider read the activation.
+        let mut scenario = Scenario::new()?;
+        let ten_seconds = 10 * NANOSECONDS_PER_SECOND;
+        scenario.host.activated =
+            Some(monotonic_now_ns().saturating_sub(u64::try_from(ten_seconds).unwrap_or_default()));
+        scenario.air_gapped().await??;
+        let left = release_deadline(&scenario)?.saturating_duration_since(Instant::now());
+        assert!(left <= Duration::from_secs(20));
+        assert!(left > Duration::from_secs(15));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_watchdog_deadline_already_past_reaches_the_barrier_as_past() -> TestResult {
+        // Activated a minute ago under a thirty-second watchdog: systemd has
+        // stopped the unit already. The barrier is handed that past deadline,
+        // which the production barrier refuses before receiving ReadyV1.
+        let mut scenario = Scenario::new()?;
+        let minute = 60 * NANOSECONDS_PER_SECOND;
+        scenario.host.activated =
+            Some(monotonic_now_ns().saturating_sub(u64::try_from(minute).unwrap_or_default()));
+        scenario.air_gapped().await??;
+        assert!(release_deadline(&scenario)? <= Instant::now());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_later_activation_moves_the_release_deadline_with_it() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        let hour = 3_600 * NANOSECONDS_PER_SECOND;
+        scenario.host.activated =
+            Some(monotonic_now_ns() + u64::try_from(hour).unwrap_or_default());
+        scenario.air_gapped().await??;
+        let left = release_deadline(&scenario)?.saturating_duration_since(Instant::now());
+        assert!(left > Duration::from_hours(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_broker_kills_only_a_grace_after_the_watchdog_deadline() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.empty_after = usize::MAX;
+        let started = Instant::now();
+        let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
+        let execution = tokio::time::timeout(Duration::from_secs(10), run).await???;
+        // systemd's RuntimeMaxUSec stops the unit at D; the broker waits G.
+        assert!(started.elapsed() >= Duration::from_millis(100) + ESCALATION_GRACE);
+        assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
+        Ok(())
+    }
 }

@@ -10,8 +10,8 @@ wiki ([#476](https://redmine.piglor.com/issues/476)).
 ```mermaid
 flowchart LR
     A["Open PR"] --> B["PR CI green"]
-    B --> C["Maintainer reviews<br/>the current commits"]
-    C --> D["Maintainer adds<br/>ready-to-merge"]
+    B --> C["Independent review<br/>of the current commits"]
+    C --> D["ready-to-merge<br/>label added"]
     D --> F["Trunk tests main + PRs ahead<br/>on a draft test PR"]
     F -- pass --> G["Trunk merges into main"]
     F -- fail --> H["PR removed with a comment;<br/>others re-tested without it"]
@@ -20,8 +20,11 @@ flowchart LR
 ## Merging a pull request
 
 1. Open the pull request against `main` and let its CI run.
-2. A maintainer reviews the changes, including their own.
-3. The maintainer adds the **`ready-to-merge`** label. That label is the only
+2. The changes get an independent review, re-run after every later change.
+   Agents working for the maintainer run that review themselves.
+3. Once the review is clean and CI is green, the maintainer — or an agent
+   acting on the maintainer's standing instruction — adds the
+   **`ready-to-merge`** label. That label is the only
    way into the queue; `/trunk merge` comments are switched off (see
    [Who can merge](#who-can-merge)). You may add it before CI finishes; Trunk
    waits until GitHub reports the pull request as mergeable.
@@ -36,15 +39,18 @@ Do **not**:
 - press GitHub's Merge button or call the merge API — the `main -> queue only`
   ruleset rejects it, and any merge outside the queue resets every queued
   test;
-- rebase or "Update branch" only because `main` moved — the queue already tests
-  on top of the latest `main`. Update a branch only to resolve a **merge
-  conflict**, which the queue cannot do for you;
+- rebase, amend or force-push a pushed branch. When you push a fix, first
+  `git fetch origin` and `git merge origin/main` so the pull request's CI sees
+  the same `main` the queue tests against; otherwise update a branch only to
+  resolve a **merge conflict**, which the queue cannot do for you;
 - cancel and re-submit a pull request whose test was reset — Trunk restarts it
   automatically and re-submitting moves it to the back of the queue.
 
 ## Who can merge
 
-Merging is a maintainer decision, not a CI check. Nothing in the repository's
+Merging is a maintainer decision, not a CI check. Agents that add the label
+act on the maintainer's standing instruction through the maintainer's own
+account, so they add no collaborator or bot. Nothing in the repository's
 workflows approves or blocks a pull request for its author; the queue entry
 point is restricted instead:
 
@@ -87,7 +93,7 @@ linked job log before changing anything.
 | "Waiting to enter queue" / **Not Ready** | The pull request's own required checks are red or pending, or it has merge conflicts | Fix or re-run the failing check; resolve conflicts by merging `main` into the branch |
 | Labelled pull request never enters the queue | Label enqueueing is off in Trunk, or the label name does not match | Check Trunk's label setting (see [Repository configuration](#repository-configuration)), then remove and re-add the label |
 | "target branch (`main`) was updated outside of the merge queue" | Something merged without the queue | Nothing; Trunk restarts the affected tests |
-| `cargo-crap` fails at "Resolve trusted cargo-crap baseline" right after `main` changed | `main`'s own CI has not yet uploaded the baseline for the new commit; Rust changes fail closed rather than self-baseline | Wait for `main`'s `ci` run to finish; Trunk re-tests, or remove and re-add the label afterwards |
+| `cargo-crap` fails at "Resolve trusted cargo-crap baseline" | Neither the base commit (after waiting up to 30 minutes for an unfinished `main` run) nor any of the 30 `main` commits before it has a trusted baseline; Rust changes fail closed rather than self-baseline | Wait for `main`'s `ci` run to publish one; Trunk re-tests, or remove and re-add the label afterwards |
 | "Waiting for tests to start on a bisection of its batch" | A batch failed and Trunk is isolating the culprit | Nothing; pull requests that pass re-enter the queue |
 | Every gate fails within seconds after a scope step error | GitHub's changed-file API was unavailable; the scope jobs fall back to the full gate set, so a repeat means a different problem | Read the scope job log |
 | `CodeQL (Rust)` reports "analyses from advanced configurations cannot be processed when the default setup is enabled" | CodeQL **default setup** was enabled for the repository | Settings → Advanced Security → CodeQL analysis → **Switch to advanced** |
@@ -111,7 +117,10 @@ these.
     to this bypass list lets merges skip the queue and reset it.
   - `Require Rust quality gates` — required checks `ci-gate`,
     `diff mutation testing`, `Trunk Code Quality` and `CodeQL (Rust)`;
-    "require branches to be up to date" stays **off**.
+    "require branches to be up to date" stays **off**. The intermediate
+    `preflight-gate`, `core-gate` and `standard-gate` jobs are not required
+    checks: each later CI stage waits for their underlying jobs directly, and
+    they only report stage verdicts to `ci-gate`.
   - `main` — pull request required (0 approvals), resolved conversations,
     linear history, CodeQL alerts block (code scanning rule). That rule needs
     an uploaded CodeQL analysis for every pull-request head, so the `codeql`

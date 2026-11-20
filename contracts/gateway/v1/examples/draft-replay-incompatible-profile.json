@@ -1,0 +1,30 @@
+{
+  "name": "draft-replay-incompatible-profile",
+  "operation_id": "createReplay",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-13",
+      "content-type": "application/json"
+    },
+    "body": {
+      "manifest_digest": "1010101010101010101010101010101010101010101010101010101010101010",
+      "reproducibility_class": "profile-recomputation",
+      "profile_id": "deterministic-air-gapped-v1",
+      "minimum_replay_claim": "exact"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:incompatible-profile",
+      "title": "Incompatible profile",
+      "status": 409,
+      "detail": "this deployment serves no Air-Gapped profile",
+      "instance": "/v1/replays",
+      "code": "incompatible-profile",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

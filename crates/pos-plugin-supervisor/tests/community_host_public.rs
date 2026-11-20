@@ -18,28 +18,29 @@ use std::time::Duration;
 use pos_core::{PipelineOutcomeV1, PluginId};
 use pos_plugin_publisher::test_support::{
     encoding::{Material, Spec as Coordinates, TICK, UTC},
-    release::Shape,
+    release::{FixtureContent, Shape},
     spy_registry::Call,
     world::{wall, Config, World as SignedWorld},
     BoxResult, ScriptedTrustedWallSourceV1,
 };
-use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
+use pos_plugin_release::{BundleAddressV1, ContentValidationV1, ReleaseSourceV1};
 use pos_plugin_supervisor::pass_harness::{
     initial, FailingPort, GatedSpec, LostPort, PanickingSource, RefusingPort, Source, StampedPort,
-    World as PassWorld,
+    StoreKind, World as PassWorld,
 };
 use pos_plugin_supervisor::test_support::{self, err};
 use pos_plugin_supervisor::{
     CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1,
-    CommunityPluginSubjectResultV1, InvocationContextSourceV1, ReceiptDispositionV1,
+    CommunityPluginSubjectResultV1, CommunityPluginSupervisorV1, InvocationContextSourceV1,
+    ReceiptDispositionV1,
 };
 use pos_runtime::community_plugin_host::{
-    gate_community_release_v1, AtomicCommitFailureV1, CommunityPassAuthorizationV1,
-    CommunityPassOutcomeV1, CommunityPassV1, CommunityPluginExpectationV1,
-    CommunityPluginHostErrorV1, CommunityPluginHostV1, CommunityPluginMemberV1,
-    CommunityPluginModeV1, CommunityPluginTrustMaterialV1, CommunityStageV1, HostFailureClassV1,
-    MemberPassV1, PassResultV1, PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
-    RevocationBasisV1, TrustDenialBasisV1,
+    gate_community_release_v1, AtomicCommitFailureV1, BundleContentReasonV1,
+    CommunityPassAuthorizationV1, CommunityPassOutcomeV1, CommunityPassV1,
+    CommunityPluginExpectationV1, CommunityPluginHostErrorV1, CommunityPluginHostV1,
+    CommunityPluginMemberV1, CommunityPluginModeV1, CommunityPluginTrustMaterialV1,
+    CommunityStageV1, HostFailureClassV1, MemberPassV1, PassResultV1, PluginTrustMaterialSourceV1,
+    PluginTrustMaterialUnavailableV1, RevocationBasisV1, TrustDenialBasisV1,
 };
 use pos_runtime::{PluginAvailabilityV1 as Availability, PluginRegistry, RuntimeError};
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1 as Reg;
@@ -194,6 +195,7 @@ fn trust_material(world: &SignedWorld, material: &Material) -> CommunityPluginTr
 /// What the rig keeps of one member.
 struct Part {
     handle: CommunityPluginHandleV1,
+    supervisor: CommunityPluginSupervisorV1,
     address: BundleAddressV1,
     swap: Swap,
     expected: CommunityPluginExpectationV1,
@@ -261,6 +263,7 @@ fn add_member(
     })?;
     Ok(Part {
         handle: built.handle,
+        supervisor: built.supervisor,
         address: published.address().clone(),
         swap,
         expected: built.expected,
@@ -274,12 +277,16 @@ impl Rig {
     }
 
     fn build(specs: &[Spec], clock: Option<Arc<AtomicU64>>) -> BoxResult<Self> {
+        Self::build_on(StoreKind::Memory, specs, clock)
+    }
+
+    fn build_on(kind: StoreKind, specs: &[Spec], clock: Option<Arc<AtomicU64>>) -> BoxResult<Self> {
         let mut signed = SignedWorld::with_config(Config {
             extra_plugin_ids: GRANTED,
             clock,
             ..Config::default()
         })?;
-        let mut pass = PassWorld::new(PROBE);
+        let mut pass = PassWorld::on(kind, PROBE);
         let material = trust_material(&signed, &signed.material()?);
         let refuse = Arc::new(AtomicBool::new(false));
         let mut parts = Vec::new();
@@ -558,6 +565,67 @@ fn a_gate_refusal_of_one_member_refuses_the_whole_pass() -> TestResult {
     let next = rig.run()?;
     assert_eq!(committed_events(&next), Some(3), "{next:?}");
     assert!(next.gates.iter().all(|entry| entry.gate.is_ok()));
+    Ok(())
+}
+
+/// Supply a signed malformed release while simulating a pre-rule registry result.
+fn use_historical_malformed_release(rig: &mut Rig) -> TestResult {
+    // Obtain the simulated historical result from the actual registry's valid
+    // admitted release; the spy supplies no signature or content proof.
+    let historical = rig.signed.evaluate_at(&rig.parts[0].address, UTC, TICK)??;
+    let mut content = FixtureContent::new(ALPHA.component);
+    content.corrupt_provenance();
+    let malformed = rig.signed.publish_with_content(ALPHA.shape(), &content)?;
+    rig.signed
+        .registry
+        .simulate_historical_evaluation(historical);
+    rig.parts[0].address = malformed.address().clone();
+    // A restarted composition can know the Plugin ID without pinning the old
+    // Driver identity; the gate must still reject before an offer or launch.
+    rig.parts[0].expected.release = None;
+    rig.restart()?;
+    Ok(())
+}
+
+/// A pre-rule registry result cannot make a signed malformed bundle launch in a pass.
+#[test]
+fn historical_admission_of_malformed_content_refuses_before_worker_launch() -> TestResult {
+    let mut rig = Rig::new(&[ALPHA])?;
+    use_historical_malformed_release(&mut rig)?;
+    let before = rig.handle(0).committed_state();
+    assert_eq!(rig.parts[0].supervisor.worker_launches(), 0);
+    let outcome = rig.run()?;
+    let refusal = Error::InvalidBundleContent {
+        reason: BundleContentReasonV1::Malformed,
+    };
+    assert!(is_refused(&outcome), "{outcome:?}");
+    assert_eq!(gate_errors(&outcome), [Some(refusal)]);
+    assert_eq!(
+        outcome.gates[0].content_validation,
+        ContentValidationV1::NotPerformed
+    );
+    assert_eq!(invocation_ids(&outcome), [None]);
+    assert_eq!(rig.parts[0].supervisor.worker_launches(), 0);
+    assert!(rig.nothing_launched());
+    assert!(rig.pass.events().is_empty());
+    assert_eq!(rig.handle(0).committed_state(), before);
+    assert!(rig.all_slots_empty());
+
+    let record = CommunityPluginSubjectOutcomeV1::assemble(
+        &outcome.gates[0],
+        TICK,
+        CommunityPluginModeV1::Local,
+        None,
+    );
+    assert_eq!(record.content_validation, ContentValidationV1::NotPerformed);
+    assert_eq!(
+        record.result,
+        CommunityPluginSubjectResultV1::Refused {
+            error: "InvalidBundleContent",
+            basis: Some("Malformed"),
+            class: "PreExecutionRejection",
+        }
+    );
     Ok(())
 }
 
@@ -860,19 +928,55 @@ fn lost_commit(rig: &mut Rig) -> BoxResult<CommunityPassOutcomeV1> {
 /// `recover_scheduled_pass`.
 #[test]
 fn a_lost_commit_is_in_doubt_and_keeps_the_staged_state() -> TestResult {
-    let mut rig = Rig::new(&[CHAIN_ALPHA, BETA])?;
+    for kind in [StoreKind::Memory, StoreKind::Sqlite] {
+        lost_commit_keeps_the_staged_state_on(kind)?;
+    }
+    Ok(())
+}
+
+fn lost_commit_keeps_the_staged_state_on(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::build_on(kind, &[CHAIN_ALPHA, BETA], None)?;
     let outcome = lost_commit(&mut rig)?;
     assert!(is_in_doubt(&outcome), "{outcome:?}");
     for handle in [rig.handle(0), rig.handle(1)] {
         assert_eq!(handle.committed_state(), initial());
         assert_eq!(dispositions(handle), [ReceiptDispositionV1::Staged]);
     }
-    assert!(rig.all_slots_empty());
+
+    let receipts = [rig.handle(0).receipts(), rig.handle(1).receipts()];
+    let trust_calls = rig.signed.registry.calls.borrow().len();
+    let mut clock = wall(UTC)?;
+    let retry = rig.run_clocked(&mut clock, TICK + 1)?;
+    assert_eq!(retry.tick, TICK + 1);
+    assert_eq!(retry.utc, None);
+    assert!(retry.gates.is_empty(), "{retry:?}");
+    let PassResultV1::Failed { host: None, error } = retry.result else {
+        return Err(format!("unexpected result: {:?}", retry.result).into());
+    };
+    assert!(matches!(*error, RuntimeError::PendingDriverStep));
+    assert_eq!(clock.remaining(), 1);
+    assert_eq!(rig.signed.registry.calls.borrow().len(), trust_calls);
+    for (index, before) in receipts.iter().enumerate() {
+        assert_eq!(&rig.handle(index).receipts(), before);
+        assert_eq!(rig.handle(index).committed_state(), initial());
+        assert_eq!(rig.registry_availability(index), AVAILABLE);
+    }
 
     let store = &mut *rig.pass.store;
     let recovered = rig.pass.registry.recover_scheduled_pass(store)?;
     assert_eq!(recovered.map(|r| r.committed_events().len()), Some(2));
     assert_eq!(rig.handle(0).committed_state().bytes, b"initial+");
+    for (index, before) in receipts.iter().enumerate() {
+        let mut expected = before.clone();
+        for receipt in &mut expected {
+            receipt.disposition = ReceiptDispositionV1::Committed;
+        }
+        assert_eq!(rig.handle(index).receipts(), expected);
+    }
+    let fresh = rig.run_clocked(&mut clock, TICK + 1)?;
+    assert_eq!(committed_events(&fresh), Some(2), "{fresh:?}");
+    assert_eq!(clock.remaining(), 0);
+    assert_eq!(rig.handle(0).committed_state().bytes, b"initial++");
     Ok(())
 }
 
@@ -1109,6 +1213,10 @@ fn an_occupied_slot_refuses_the_whole_pass() -> TestResult {
     let outcome = rig.run()?;
     assert!(is_refused(&outcome), "{outcome:?}");
     assert_eq!(gate_errors(&outcome), [None, Some(INVALID), None]);
+    assert!(outcome
+        .gates
+        .iter()
+        .all(|entry| entry.content_validation == ContentValidationV1::BasicPackageV1));
     assert_eq!(launch_failures(&outcome), [None, Some(INVALID), None]);
     // Nothing was launched or staged, and the earlier offer was dropped with the held one.
     assert!(rig.nothing_launched());

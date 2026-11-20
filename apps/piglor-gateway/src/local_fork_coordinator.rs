@@ -33,9 +33,10 @@ use crate::{
         ForkAdmissionSubmissionErrorV1, ForkAdmissionSubmissionV1, ForkAdmissionSubmitterV1,
         ForkClassifierRegistrationV1, ForkDeliveryMarkV1,
     },
+    host_timelines::HostTimelinesV1,
     local_fork_authentication::{
-        LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1,
-        ResolvedLocalAuthenticationV1,
+        AuthenticatedUnixPeerV1, LocalForkAuthenticationCredentialsV1,
+        LocalForkAuthenticationErrorV1, ResolvedLocalAuthenticationV1,
     },
     local_fork_listener::{
         read_completed_request, write_response, CompletedLocalForkAdmissionV1,
@@ -173,21 +174,32 @@ pub(super) struct LocalForkAdmissionCoordinatorV1 {
     host: ForkAdmissionHostRecordV1,
     session_identity: Hash,
     journal: Box<dyn LocalForkDeliveryJournalV1>,
+    /// The serve loop's stale-binding signal (ADR-134 §8).
+    stale: std::sync::Arc<crate::mode_profile::GatewayModeStaleSignalV1>,
+    /// The host Timelines of the store, which no Fork may name as its
+    /// parent (ADR-136 §4a).
+    host_timelines: HostTimelinesV1,
 }
 
 impl LocalForkAdmissionCoordinatorV1 {
-    /// Bind the listener-thread authority to its journal submissions.
+    /// Bind the listener-thread authority to its journal submissions, to
+    /// the serve loop's stale-binding signal and to the store's host
+    /// Timelines.
     pub(super) const fn new(
         credentials: LocalForkAuthenticationCredentialsV1,
         host: ForkAdmissionHostRecordV1,
         session_identity: Hash,
         journal: Box<dyn LocalForkDeliveryJournalV1>,
+        stale: std::sync::Arc<crate::mode_profile::GatewayModeStaleSignalV1>,
+        host_timelines: HostTimelinesV1,
     ) -> Self {
         Self {
             credentials,
             host,
             session_identity,
             journal,
+            stale,
+            host_timelines,
         }
     }
 
@@ -210,7 +222,17 @@ impl LocalForkAdmissionCoordinatorV1 {
             ) => return Ok(()),
         };
         let prepared = self.handle(completed);
-        self.write_prepared(&mut stream, &prepared)
+        let written = self.write_prepared(&mut stream, &prepared);
+        self.report_stale_binding(&prepared.response);
+        written
+    }
+
+    /// After answering a refusal of a stale mode binding, fire the serve
+    /// loop's signal: the Gateway stops and exits nonzero (ADR-134 §8).
+    fn report_stale_binding(&self, response: &LocalForkAdmissionResponseV1) {
+        if response.refused_stale_binding() {
+            self.stale.fire();
+        }
     }
 
     /// Process one complete peer-bound request. No public field becomes an
@@ -259,24 +281,43 @@ impl LocalForkAdmissionCoordinatorV1 {
         completed: CompletedLocalForkAdmissionV1,
         claim: ForkDeliveryClaimV1,
     ) -> PreparedDeliveryV1 {
-        let request = completed.request;
-        let authentication = match self
-            .credentials
-            .produce(completed.peer)
-            .and_then(|evidence| self.credentials.resolve(evidence))
-        {
-            Ok(authentication) => authentication,
-            Err(error) => return self.cancel_pending(claim, authentication_code(error)),
-        };
-        let command = match self.command(&request, &authentication) {
+        let command = match self.admitted_command(&completed.request, completed.peer) {
             Ok(command) => command,
-            Err(error) => return self.cancel_pending(claim, authentication_code(error)),
+            Err(code) => return self.cancel_pending(claim, code),
         };
         match execute_disposition(self.journal.execute(claim, &command)) {
             ExecuteDisposition::Release(result) => self.release_registered(claim, &result, true),
             ExecuteDisposition::Answer(code) => PreparedDeliveryV1::plain(reject(code)),
             ExecuteDisposition::CancelThenAnswer(code) => self.cancel_pending(claim, code),
         }
+    }
+
+    /// The authenticated FAC1 command of `request` from `peer`, or the code
+    /// that refuses it before any FAC1 runs.
+    ///
+    /// A host Timeline is no Fork parent (ADR-136 §4a, owner decision D10
+    /// on #1413): such a request is refused with the code of a parent the
+    /// store does not hold.
+    fn admitted_command(
+        &self,
+        request: &LocalForkAdmissionRequestV1,
+        peer: AuthenticatedUnixPeerV1,
+    ) -> Result<ForkAdmissionHostCommandV1, LocalForkAdmissionCodeV1> {
+        self.credentials
+            .produce(peer)
+            .and_then(|evidence| self.credentials.resolve(evidence))
+            .and_then(|authentication| self.command(request, &authentication))
+            .map_err(authentication_code)
+            .and_then(|command| {
+                if request
+                    .fork_parent()
+                    .is_some_and(|parent| self.host_timelines.contains(parent))
+                {
+                    Err(LocalForkAdmissionCodeV1::ParentChanged)
+                } else {
+                    Ok(command)
+                }
+            })
     }
 
     /// Definite failures before FAC1 cannot retain a live Pending claim.
@@ -596,30 +637,40 @@ const fn authentication_code(error: LocalForkAuthenticationErrorV1) -> LocalFork
     }
 }
 
-const fn authority_code(error: ForkAdmissionErrorV1) -> LocalForkAdmissionCodeV1 {
-    match error {
-        ForkAdmissionErrorV1::Unauthenticated => LocalForkAdmissionCodeV1::Unauthenticated,
-        ForkAdmissionErrorV1::PrincipalOwnerConflict | ForkAdmissionErrorV1::Conflict => {
-            LocalForkAdmissionCodeV1::Conflict
-        }
-        ForkAdmissionErrorV1::StaleFoldBoundary => LocalForkAdmissionCodeV1::StaleFoldBoundary,
-        ForkAdmissionErrorV1::ParentChanged => LocalForkAdmissionCodeV1::ParentChanged,
-        ForkAdmissionErrorV1::InvalidRequest => LocalForkAdmissionCodeV1::InvalidRequest,
-        ForkAdmissionErrorV1::CorruptAuthority
-        | ForkAdmissionErrorV1::HostAuthorityMismatch
-        | ForkAdmissionErrorV1::AuthorityClockUnavailable
-        | ForkAdmissionErrorV1::ClockRollback
-        | ForkAdmissionErrorV1::AuthorityUninitialized
-        | ForkAdmissionErrorV1::AuthorityAlreadyInitialized
-        | ForkAdmissionErrorV1::EntropyUnavailable
-        | ForkAdmissionErrorV1::ParentErasureContained
-        | ForkAdmissionErrorV1::ErasureContainmentUnavailable => {
-            LocalForkAdmissionCodeV1::AuthorityUnavailable
-        }
-        ForkAdmissionErrorV1::StorageIndeterminate | ForkAdmissionErrorV1::OperationMissing => {
-            LocalForkAdmissionCodeV1::Indeterminate
-        }
-    }
+/// The FARL1 code of each Fork-admission error, indexed by the error's
+/// explicit discriminant. Its length is the error count; the oracle test
+/// `every_fork_admission_error_routes_through_the_code_table` fails to
+/// compile until a new error is routed here.
+const AUTHORITY_CODES: [LocalForkAdmissionCodeV1; ForkAdmissionErrorV1::COUNT] = [
+    LocalForkAdmissionCodeV1::InvalidRequest,  // InvalidRequest
+    LocalForkAdmissionCodeV1::Unauthenticated, // Unauthenticated
+    LocalForkAdmissionCodeV1::Conflict,        // PrincipalOwnerConflict
+    LocalForkAdmissionCodeV1::StaleFoldBoundary, // StaleFoldBoundary
+    LocalForkAdmissionCodeV1::ParentChanged,   // ParentChanged
+    LocalForkAdmissionCodeV1::Conflict,        // Conflict
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // CorruptAuthority
+    LocalForkAdmissionCodeV1::Indeterminate,   // StorageIndeterminate
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // HostAuthorityMismatch
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // AuthorityClockUnavailable
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // ClockRollback
+    LocalForkAdmissionCodeV1::Indeterminate,   // OperationMissing
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // AuthorityUninitialized
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // AuthorityAlreadyInitialized
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // EntropyUnavailable
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // ParentErasureContained
+    LocalForkAdmissionCodeV1::AuthorityUnavailable, // ErasureContainmentUnavailable
+    LocalForkAdmissionCodeV1::ModeBindingStale, // ModeBindingStale
+];
+
+const _: () = assert!(AUTHORITY_CODES.len() == ForkAdmissionErrorV1::COUNT);
+
+/// The FARL1 code of `error`; an error past the table fails closed as
+/// `AuthorityUnavailable`.
+fn authority_code(error: ForkAdmissionErrorV1) -> LocalForkAdmissionCodeV1 {
+    AUTHORITY_CODES
+        .get(error as usize)
+        .copied()
+        .unwrap_or(LocalForkAdmissionCodeV1::AuthorityUnavailable)
 }
 
 #[cfg(test)]
@@ -921,6 +972,8 @@ mod tests {
                 host,
                 session.identity(),
                 Box::new(journal),
+                Arc::default(),
+                HostTimelinesV1::new(Some(test_erasure_host())),
             ),
             store,
             session,
@@ -1623,6 +1676,100 @@ mod tests {
         Ok(())
     }
 
+    /// The exhaustive oracle: a new Fork-admission error fails to compile
+    /// here until it is routed, and every error agrees with the table.
+    const fn oracle_code(error: ForkAdmissionErrorV1) -> LocalForkAdmissionCodeV1 {
+        match error {
+            ForkAdmissionErrorV1::InvalidRequest => LocalForkAdmissionCodeV1::InvalidRequest,
+            ForkAdmissionErrorV1::Unauthenticated => LocalForkAdmissionCodeV1::Unauthenticated,
+            ForkAdmissionErrorV1::PrincipalOwnerConflict | ForkAdmissionErrorV1::Conflict => {
+                LocalForkAdmissionCodeV1::Conflict
+            }
+            ForkAdmissionErrorV1::StaleFoldBoundary => LocalForkAdmissionCodeV1::StaleFoldBoundary,
+            ForkAdmissionErrorV1::ParentChanged => LocalForkAdmissionCodeV1::ParentChanged,
+            ForkAdmissionErrorV1::CorruptAuthority
+            | ForkAdmissionErrorV1::HostAuthorityMismatch
+            | ForkAdmissionErrorV1::AuthorityClockUnavailable
+            | ForkAdmissionErrorV1::ClockRollback
+            | ForkAdmissionErrorV1::AuthorityUninitialized
+            | ForkAdmissionErrorV1::AuthorityAlreadyInitialized
+            | ForkAdmissionErrorV1::EntropyUnavailable
+            | ForkAdmissionErrorV1::ParentErasureContained
+            | ForkAdmissionErrorV1::ErasureContainmentUnavailable => {
+                LocalForkAdmissionCodeV1::AuthorityUnavailable
+            }
+            ForkAdmissionErrorV1::StorageIndeterminate | ForkAdmissionErrorV1::OperationMissing => {
+                LocalForkAdmissionCodeV1::Indeterminate
+            }
+            ForkAdmissionErrorV1::ModeBindingStale => LocalForkAdmissionCodeV1::ModeBindingStale,
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_error(variant: ForkAdmissionErrorV1) -> Option<ForkAdmissionErrorV1> {
+        match variant {
+            ForkAdmissionErrorV1::InvalidRequest => Some(ForkAdmissionErrorV1::Unauthenticated),
+            ForkAdmissionErrorV1::Unauthenticated => {
+                Some(ForkAdmissionErrorV1::PrincipalOwnerConflict)
+            }
+            ForkAdmissionErrorV1::PrincipalOwnerConflict => {
+                Some(ForkAdmissionErrorV1::StaleFoldBoundary)
+            }
+            ForkAdmissionErrorV1::StaleFoldBoundary => Some(ForkAdmissionErrorV1::ParentChanged),
+            ForkAdmissionErrorV1::ParentChanged => Some(ForkAdmissionErrorV1::Conflict),
+            ForkAdmissionErrorV1::Conflict => Some(ForkAdmissionErrorV1::CorruptAuthority),
+            ForkAdmissionErrorV1::CorruptAuthority => {
+                Some(ForkAdmissionErrorV1::StorageIndeterminate)
+            }
+            ForkAdmissionErrorV1::StorageIndeterminate => {
+                Some(ForkAdmissionErrorV1::HostAuthorityMismatch)
+            }
+            ForkAdmissionErrorV1::HostAuthorityMismatch => {
+                Some(ForkAdmissionErrorV1::AuthorityClockUnavailable)
+            }
+            ForkAdmissionErrorV1::AuthorityClockUnavailable => {
+                Some(ForkAdmissionErrorV1::ClockRollback)
+            }
+            ForkAdmissionErrorV1::ClockRollback => Some(ForkAdmissionErrorV1::OperationMissing),
+            ForkAdmissionErrorV1::OperationMissing => {
+                Some(ForkAdmissionErrorV1::AuthorityUninitialized)
+            }
+            ForkAdmissionErrorV1::AuthorityUninitialized => {
+                Some(ForkAdmissionErrorV1::AuthorityAlreadyInitialized)
+            }
+            ForkAdmissionErrorV1::AuthorityAlreadyInitialized => {
+                Some(ForkAdmissionErrorV1::EntropyUnavailable)
+            }
+            ForkAdmissionErrorV1::EntropyUnavailable => {
+                Some(ForkAdmissionErrorV1::ParentErasureContained)
+            }
+            ForkAdmissionErrorV1::ParentErasureContained => {
+                Some(ForkAdmissionErrorV1::ErasureContainmentUnavailable)
+            }
+            ForkAdmissionErrorV1::ErasureContainmentUnavailable => {
+                Some(ForkAdmissionErrorV1::ModeBindingStale)
+            }
+            ForkAdmissionErrorV1::ModeBindingStale => None,
+        }
+    }
+
+    #[test]
+    fn every_fork_admission_error_routes_through_the_code_table() {
+        let mut walked = 0;
+        let mut last = ForkAdmissionErrorV1::InvalidRequest;
+        let mut current = Some(ForkAdmissionErrorV1::InvalidRequest);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(authority_code(variant), oracle_code(variant), "{variant:?}");
+            last = variant;
+            walked += 1;
+            current = next_error(variant);
+        }
+        assert_eq!(walked, ForkAdmissionErrorV1::COUNT);
+        assert_eq!(last as usize, ForkAdmissionErrorV1::COUNT - 1);
+    }
+
     #[test]
     fn closed_error_mappings_have_exact_wire_codes() {
         for (error, expected) in [
@@ -1694,6 +1841,10 @@ mod tests {
                 ForkAdmissionErrorV1::OperationMissing,
                 LocalForkAdmissionCodeV1::Indeterminate,
             ),
+            (
+                ForkAdmissionErrorV1::ModeBindingStale,
+                LocalForkAdmissionCodeV1::ModeBindingStale,
+            ),
         ] {
             assert_eq!(authority_code(error), expected);
         }
@@ -1754,6 +1905,95 @@ mod tests {
                 assert_eq!(response_code(&fixture.submit(request.clone(), 44)?), 6);
             }
         }
+        Ok(())
+    }
+
+    /// The Erasure Host Timeline of the coordinator fixtures.
+    const fn test_erasure_host() -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([0xe1; 16]))
+    }
+
+    /// A Fork request of `operation` on `parent` with the shape
+    /// `(descriptor, cut, attribution_required)`.
+    fn shaped_fork_request(
+        operation: u8,
+        parent_id: TimelineId,
+        (descriptor, cut, attribution_required): (u8, u64, bool),
+    ) -> LocalForkAdmissionRequestV1 {
+        LocalForkAdmissionRequestV1::Fork {
+            operation_id: Hash::from_bytes([operation; 32]),
+            parent_id,
+            cut,
+            descriptor_hash: Hash::from_bytes([descriptor; 32]),
+            composition_hash: Hash::from_bytes([operation; 32]),
+            attribution_required,
+            child_name: "host-child".to_owned(),
+        }
+    }
+
+    /// ADR-136 §4a and owner decision D10 on #1413: a Fork naming a host
+    /// Timeline as its parent is refused before any FAC1 runs, with the
+    /// response of a parent the store does not hold, byte for byte for
+    /// every request shape, and its claim is released. The host Timelines
+    /// exist in the store here, so only the host-Timeline check refuses
+    /// them; an ordinary parent with the same request reaches the FAC1 and
+    /// is held for its classifier (code 6).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_refuses_a_host_timeline_as_fork_parent() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        assert_eq!(response_code(&fixture.submit(bind_request(80), 80)?), 0);
+        let host_timelines = [
+            crate::local_principal::local_principal_consent_timeline(),
+            crate::local_principal::local_principal_authority_timeline(),
+            test_erasure_host(),
+        ];
+        for parent in host_timelines {
+            lock(&fixture.store).create_timeline_with_meta(pos_core::TimelineMeta {
+                id: parent,
+                mode: pos_core::TimelineMode::Live,
+                name: Some("host Timeline".to_owned()),
+                owner: None,
+                fork_point: None,
+            })?;
+        }
+        let ordinary = lock(&fixture.store).create_timeline("ordinary Fork parent")?;
+        let held = fixture.submit(shaped_fork_request(81, ordinary.id(), (40, 0, false)), 81)?;
+        assert_eq!(response_code(&held), 6);
+        // The cut beyond the parent head would be a stale fold boundary on a
+        // recorded parent. The code-4 expectation for an absent parent rests
+        // on the in-memory store's parent gate (`admitted_fork_parent_gate`)
+        // running before its cut check, so every shape answers code 4.
+        for (shape, base) in [((40, 0, false), 90), ((ACCEPTED_DESCRIPTOR, 7, true), 100)] {
+            let unknown =
+                fixture.submit(shaped_fork_request(base, TimelineId::new(), shape), base)?;
+            assert_eq!(response_code(&unknown), 4);
+            for (offset, parent) in (1..).zip(host_timelines) {
+                let operation = base + offset;
+                let request = completed(
+                    &fixture.coordinator,
+                    shaped_fork_request(operation, parent, shape),
+                    operation,
+                )?;
+                let tuple = delivery_tuple(&request)
+                    .map_err(|()| io::Error::other("fork request must produce a tuple"))?;
+                let refused = fixture.coordinator.handle(request);
+                assert_eq!(
+                    refused.response.to_canonical_cbor(),
+                    unknown.response.to_canonical_cbor()
+                );
+                assert!(refused.claim.is_none());
+                assert!(matches!(
+                    lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
+                    ForkDeliveryClaimOutcomeV1::Owner(_)
+                ));
+            }
+        }
+        let timelines = lock(&fixture.store).list_timelines()?;
+        assert!(timelines.iter().all(|timeline| timeline
+            .meta
+            .fork_point
+            .is_none_or(|(fork_parent, _)| !host_timelines.contains(&fork_parent))));
         Ok(())
     }
 

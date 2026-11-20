@@ -129,6 +129,9 @@ mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_lineage;
+mod gateway_mode_binding;
+mod gateway_revision;
+mod local_erasure;
 mod pipeline_admission;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry;
@@ -216,6 +219,9 @@ fn fail_next_visible_delete_for_test() {
 }
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
+///
+/// It is also the retained, non-durable store of a Memory community domain, whose Plugin
+/// trust registry is that profile's trust source (ADR-129 R6.5).
 pub struct MemoryStore {
     /// ADR-119 composition fallback registry state, keyed by `(scope, timeline)`.
     composition_fallback: composition_fallback_registry::MemoryCompositionFallbackStateV1,
@@ -270,6 +276,8 @@ pub struct MemoryStore {
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
     authority_state: AuthorityPersistenceStateV1,
+    /// Denial-evidence records in append order; record `n` has sequence `n + 1`.
+    authorization_denials: Vec<pos_core::AuthorizationDenialEvidenceV1>,
     /// Host-published ADR-021 admission fences keyed by Timeline.
     pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
     /// ADR-064 per-Fork counterfactual facts, generation, and artifacts.
@@ -333,12 +341,20 @@ pub struct MemoryStore {
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
     erasure_evidence: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    /// Record tag of every evidence object retained for the single-host
+    /// erasure authority (ADR-136 §4); only these are sweep candidates.
+    erasure_retained_objects: BTreeMap<ErasureReferenceV1, String>,
+    /// The write-once erasure store identity (ADR-136 §4).
+    erasure_store_identity: Option<Hash>,
     /// Exact immutable artifact bytes and ARD1 rows visible in each local owner catalog.
     artifact_registrations: BTreeMap<Hash, ArtifactRegistrationCatalogRowV1>,
     /// Unique immutable identity index for `(owner, class, artifact digest)`.
     artifact_registration_identities: BTreeMap<(OwnerIdV1, ErasureArtifactClassV1, Hash), Hash>,
     /// Immutable `(owner, MRM1 operation ID) -> root registration` index.
     artifact_registration_operations: BTreeMap<(OwnerIdV1, Hash), Hash>,
+    /// Append-only `(source Timeline, registration address)` bindings
+    /// (ADR-136 §2.6), written with the registration batch that names them.
+    artifact_registration_timelines: BTreeSet<(TimelineId, Hash)>,
     /// Current local manifest-owner generation and complete owned Timeline set.
     manifest_owner_admission_states: BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
     /// Immutable historical MCA1/MSB1/MSR1 rows and exact scoped native copies.
@@ -382,6 +398,11 @@ pub struct MemoryStore {
     erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryV1>,
     /// Complete prepared Fork proof retained for exact post-commit recovery.
     erasure_fork_recovery_proofs: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryProofV1>,
+    /// Process-local Gateway mode binding and this instance's attached epoch
+    /// (ADR-134 §8).
+    mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1,
+    /// Gateway-managed Preference and `OptionSpec` revisions (#304).
+    gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -710,6 +731,9 @@ struct TimelineState {
     timeline: Timeline,
     events: Vec<Event>,
     chain_head: Hash,
+    /// Gateway mode-binding epoch of each committed range of this segment
+    /// (ADR-134 §8). A Fork's inherited prefix keeps its parent's evidence.
+    commit_epochs: Vec<gateway_mode_binding::CommitEpochRangeV1>,
 }
 
 impl TimelineState {
@@ -718,6 +742,7 @@ impl TimelineState {
             timeline,
             events: Vec::new(),
             chain_head,
+            commit_epochs: Vec::new(),
         }
     }
 }
@@ -790,6 +815,7 @@ impl MemoryStore {
             erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
+            authorization_denials: Vec::new(),
             pipeline_admission_fences: HashMap::new(),
             counterfactual_forks: HashMap::new(),
             counterfactual_generation_floors: HashMap::new(),
@@ -822,9 +848,12 @@ impl MemoryStore {
             imported_fork_attributions: HashMap::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
+            erasure_retained_objects: BTreeMap::new(),
+            erasure_store_identity: None,
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
+            artifact_registration_timelines: BTreeSet::new(),
             manifest_owner_admission_states: BTreeMap::new(),
             manifest_owner_admission_snapshots: BTreeMap::new(),
             manifest_owner_admission_operations: BTreeMap::new(),
@@ -847,6 +876,8 @@ impl MemoryStore {
             erasure_recovery_errors: BTreeMap::new(),
             erasure_fork_admissions: BTreeMap::new(),
             erasure_fork_recovery_proofs: BTreeMap::new(),
+            mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1::default(),
+            gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1::default(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -922,14 +953,16 @@ impl MemoryStore {
         }
         let expires_at = checked_append_identity_expires_at(admitted_at)?;
         let event = {
-            let (timelines, event_ids, hasher, registry) = (
+            let (timelines, event_ids, hasher, registry, mode) = (
                 &mut self.timelines,
                 &mut self.event_ids,
                 &self.hasher,
                 self.key_registry.as_ref(),
+                self.mode_binding.append_mode(),
             );
             mutable_state(timelines, timeline).and_then(|state| {
-                let event = Self::append_one_to_state(state, draft, hasher.as_ref(), registry)?;
+                let event =
+                    Self::append_one_to_state(state, draft, hasher.as_ref(), registry, mode)?;
                 event_ids.insert(event.id);
                 Ok(event)
             })
@@ -1009,15 +1042,25 @@ impl MemoryStore {
         draft: &EventDraft,
         hasher: &dyn Hasher,
         registry: Option<&KeyRegistryStateV1>,
+        mode: gateway_mode_binding::MemoryModeAppendV1,
     ) -> Result<Event, CoreError> {
-        Self::prepare_one_for_state(state, draft, hasher, registry).map(|(event, chain_head)| {
-            Self::commit_prepared_to_state(state, event.clone(), chain_head);
-            event
-        })
+        Self::prepare_one_for_state(state, draft, hasher, registry)
+            .and_then(|prepared| mode.commit_epoch().map(|epoch| (prepared, epoch)))
+            .map(|((event, chain_head), epoch)| {
+                Self::commit_prepared_to_state(state, event.clone(), chain_head, epoch);
+                event
+            })
     }
 
-    /// Commit an Event previously prepared against this exact Timeline head.
-    fn commit_prepared_to_state(state: &mut TimelineState, event: Event, chain_head: Hash) {
+    /// Commit an Event previously prepared against this exact Timeline head,
+    /// with the Gateway mode-binding epoch the choke-point compare admitted.
+    fn commit_prepared_to_state(
+        state: &mut TimelineState,
+        event: Event,
+        chain_head: Hash,
+        epoch: Option<std::num::NonZeroU64>,
+    ) {
+        gateway_mode_binding::record_commit_epoch_in_state(state, epoch, event.seq, event.seq);
         state.chain_head = chain_head;
         state.timeline.head = event.seq;
         state.events.push(event);
@@ -1718,16 +1761,17 @@ impl MemoryStore {
                 )
             })
             .and_then(|()| {
-                let (timelines, hasher, registry) = (
+                let (timelines, hasher, registry, mode) = (
                     &mut self.timelines,
                     &self.hasher,
                     self.key_registry.as_ref(),
+                    self.mode_binding.append_mode(),
                 );
                 mutable_state(timelines, timeline).and_then(|state| {
                     drafts
                         .iter()
                         .map(|draft| {
-                            Self::append_one_to_state(state, draft, hasher.as_ref(), registry)
+                            Self::append_one_to_state(state, draft, hasher.as_ref(), registry, mode)
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })
@@ -2435,6 +2479,7 @@ impl MemoryStore {
             .classify_identity(&request.source)
             .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
         let hasher: &dyn Hasher = self.hasher.as_ref();
+        let mode = self.mode_binding.append_mode();
         // Every fallible step precedes the first mutation, matching SQLite's
         // all-or-nothing transaction.
         let (event, provenance) = self
@@ -2452,8 +2497,9 @@ impl MemoryStore {
                         Self::logical_event(prefix, local_event.clone())
                             .map(|event| (local_event, chain_head, event))
                     })
-                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
-                    .and_then(|(local_event, chain_head, event)| {
+                    .and_then(|prepared| mode.commit_epoch().map(|epoch| (prepared, epoch)))
+                    .map_err(|error| ForkEventAuthorityErrorV1::from(&error))
+                    .and_then(|((local_event, chain_head, event), epoch)| {
                         ForkClassifiedProvenanceV1::derive(
                             request,
                             table,
@@ -2467,7 +2513,7 @@ impl MemoryStore {
                         )
                         .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
                         .map(|provenance| {
-                            Self::commit_prepared_to_state(state, local_event, chain_head);
+                            Self::commit_prepared_to_state(state, local_event, chain_head, epoch);
                             (event, provenance)
                         })
                     })
@@ -3151,12 +3197,20 @@ impl MemoryStore {
         // operation graph. A rejected FAC1 must not leave a durable fence
         // mutation behind.
         let mut authority = self.fork_admission_authority;
+        // ADR-134 §8: a stale or unattached writer of a bound store commits
+        // no FAC1, for a Fork and a Principal-to-Owner binding alike.
+        let mode = self.mode_binding.append_mode();
         advance_wall_fence(
             &mut authority,
             self.fork_admission_authority_enabled,
             session,
         )
-        .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        .map_err(pos_core::ForkAdmissionErrorV1::from)
+        .and_then(|()| {
+            mode.commit_epoch()
+                .map(drop)
+                .map_err(|error| pos_core::ForkAdmissionErrorV1::from(&error))
+        })?;
         let (issued_at, expires_at) = match &verified {
             VerifiedForkAdmissionCommandV1::PrincipalOwner {
                 issued_at,
@@ -3722,6 +3776,50 @@ impl AuthorityPersistencePortV1 for MemoryStore {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.authority_state.resolve(leaf_grant_id)
     }
+
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        append_capped(
+            &mut self.authorization_denials,
+            *permit.evidence(),
+            pos_core::MAX_AUTHORIZATION_DENIAL_RECORDS,
+        )
+    }
+
+    fn load_authorization_denials(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        Ok(self
+            .authorization_denials
+            .iter()
+            .zip(1_u64..)
+            .skip(usize::try_from(after).unwrap_or(usize::MAX))
+            .take(limit.min(pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ))
+            .map(|(evidence, sequence)| (sequence, *evidence))
+            .collect())
+    }
+}
+
+/// Append one record unless `records` already holds `capacity`; a full log
+/// fails closed and never prunes.
+fn append_capped<T>(
+    records: &mut Vec<T>,
+    record: T,
+    capacity: u64,
+) -> Result<(), AuthorityPersistenceErrorV1> {
+    if u64::try_from(records.len()).unwrap_or(u64::MAX) >= capacity {
+        return Err(AuthorityPersistenceErrorV1::Unavailable);
+    }
+    records.push(record);
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -3834,6 +3932,65 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
             })?;
         self.erasure_inventory_generation = Some(snapshot.generation());
         Ok(snapshot)
+    }
+
+    fn erasure_authority_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+        self.local_erasure_authority_snapshot(limits)
+    }
+
+    fn retain_erasure_object(
+        &mut self,
+        canonical: &[u8],
+        max_bytes: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_retain(canonical, max_bytes)
+    }
+
+    fn commit_local_owner_effect(
+        &mut self,
+        prepared: pos_core::PreparedLocalOwnerEffectV1,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_commit_owner_effect(&prepared)
+    }
+
+    fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
+        Ok(self.local_erasure_store_identity())
+    }
+
+    fn init_erasure_store_identity(&mut self, id: Hash) -> Result<Hash, ErasureErrorV1> {
+        self.local_erasure_init_store_identity(id)
+    }
+
+    fn sweep_unreferenced_erasure_objects(
+        &mut self,
+        tags: &[&str],
+        keep: &[ErasureReferenceV1],
+        max: usize,
+    ) -> Result<usize, ErasureErrorV1> {
+        Ok(self.local_erasure_sweep(tags, keep, max))
+    }
+
+    fn retained_erasure_objects(
+        &mut self,
+        tag: &str,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+        self.local_erasure_retained(tag, max)
+    }
+
+    /// `MemoryStore` has no recipient-export publication path, so no
+    /// publication is ever visible and no `max` can be exceeded.
+    fn recipient_export_publications(
+        &mut self,
+        _timelines: &[TimelineId],
+        _max: usize,
+    ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
+        // Spelled as cargo-mutants' own replacement so that no equivalent
+        // mutant is generated for this constant body.
+        Ok(vec![])
     }
 }
 
@@ -4668,14 +4825,16 @@ impl GeoLocationAdmissionStore for MemoryStore {
         )
         .with_wall_time(admitted_at);
         let event = {
-            let (timelines, event_ids, hasher, registry) = (
+            let (timelines, event_ids, hasher, registry, mode) = (
                 &mut self.timelines,
                 &mut self.event_ids,
                 &self.hasher,
                 self.key_registry.as_ref(),
+                self.mode_binding.append_mode(),
             );
             mutable_state(timelines, timeline).and_then(|state| {
-                let event = Self::append_one_to_state(state, &draft, hasher.as_ref(), registry)?;
+                let event =
+                    Self::append_one_to_state(state, &draft, hasher.as_ref(), registry, mode)?;
                 event_ids.insert(event.id);
                 Ok(event)
             })?
@@ -4867,7 +5026,15 @@ impl GeographicAdmissionStore for MemoryStore {
             .meta
             .fork_point
             .map_or(0, |(_, fork)| fork.as_u64());
-        let origin_logical_seq = crate::checked_logical_head(inherited_prefix, event_seq.as_u64())?;
+        let (origin_logical_seq, commit_epoch) =
+            crate::checked_logical_head(inherited_prefix, event_seq.as_u64()).and_then(
+                |origin| {
+                    self.mode_binding
+                        .append_mode()
+                        .commit_epoch()
+                        .map(|epoch| (origin, epoch))
+                },
+            )?;
         let snapshot_id = AdmissionSnapshotId::new();
         let snapshot =
             AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);
@@ -4903,6 +5070,12 @@ impl GeographicAdmissionStore for MemoryStore {
         staged_state.timeline.head = event_seq;
         staged_state.chain_head = next_chain_head;
         staged_state.events.push(event.clone());
+        gateway_mode_binding::record_commit_epoch_in_state(
+            &mut staged_state,
+            commit_epoch,
+            event_seq,
+            event_seq,
+        );
         let link = GeographicCellLink {
             snapshot_id: snapshot_id.clone(),
             snapshot_hash,
@@ -5414,6 +5587,15 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
     }
 }
 
+/// A `MemoryStore` has no store file, and freed heap memory is not zeroed, so
+/// nothing can prove that deleted bytes are gone. The `local-replica`
+/// acknowledgement is therefore always negative (ADR-136 F1).
+impl pos_core::LocalReplicaResidualPortV1 for MemoryStore {
+    fn purge_local_replica_residue(&mut self) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ReplicaNegativeAcknowledgement)
+    }
+}
+
 impl EventStore for MemoryStore {
     fn commit_artifact_registration_batch(
         &mut self,
@@ -5437,6 +5619,19 @@ impl EventStore for MemoryStore {
             self,
             owner_id,
             registration_address,
+        )
+    }
+
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<
+        Vec<pos_core::ArtifactRegistrationCatalogRowV1>,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::artifact_registrations_for_timeline(
+            self, timeline, max,
         )
     }
 
@@ -6105,25 +6300,29 @@ impl EventStore for MemoryStore {
                 .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
                 .and_then(|()| {
                     if events.is_empty() {
-                        return Ok(());
+                        // An empty batch writes no Event, but a stale or
+                        // unattached writer is still refused (ADR-134 §8).
+                        return store.mode_binding.append_mode().commit_epoch().map(drop);
                     }
 
                     let mut timeline_state = store.state(timeline).timeline.clone();
                     let head = timeline_state.head;
+                    let mode = store.mode_binding.append_mode();
                     let mut ordered = pos_core::store::validate_committed_batch(
                         head,
                         events,
                         &mut |id| store.event_ids.contains(id),
                         &*store.hasher,
                     )?;
-                    crate::finalize_committed_origins(
+                    let commit_epoch = crate::finalize_committed_origins(
                         timeline,
                         timeline_state
                             .meta
                             .fork_point
                             .map_or(0, |(_, fork)| fork.as_u64()),
                         &mut ordered,
-                    )?;
+                    )
+                    .and_then(|()| mode.commit_epoch())?;
                     let mut new_head = head;
                     let mut previous_hash = store.chain_head(timeline);
                     for event in &ordered {
@@ -6138,6 +6337,12 @@ impl EventStore for MemoryStore {
 
                     store.event_ids.extend(ordered.iter().map(|event| event.id));
                     store.state_mut(timeline).map(|state| {
+                        gateway_mode_binding::record_commit_epoch_in_state(
+                            state,
+                            commit_epoch,
+                            head.next(),
+                            new_head,
+                        );
                         state.events.extend(ordered);
                         timeline_state.head = new_head;
                         state.timeline = timeline_state;
@@ -7706,6 +7911,7 @@ mod tests {
                 &make_draft(EntityId::new(), b"classified-suffix"),
                 hasher.as_ref(),
                 None,
+                gateway_mode_binding::MemoryGatewayModeStateV1::default().append_mode(),
             )?
         };
         let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
@@ -8483,7 +8689,14 @@ mod tests {
 
         let (timelines, hasher) = (&mut store.timelines, &store.hasher);
         let state = timelines.get_mut(&timeline.id()).test_ok();
-        assert!(MemoryStore::append_one_to_state(state, &draft, hasher.as_ref(), None).is_err());
+        assert!(MemoryStore::append_one_to_state(
+            state,
+            &draft,
+            hasher.as_ref(),
+            None,
+            gateway_mode_binding::MemoryGatewayModeStateV1::default().append_mode(),
+        )
+        .is_err());
         assert!(store
             .append_or_duplicate_with_limit_visible(
                 timeline.id(),
@@ -9581,6 +9794,96 @@ mod tests {
 
         assert!(store.admit(request).is_err());
         assert!(store.geographic_cell_dedup.contains_key(&fingerprint));
+    }
+
+    /// ADR-134 §8: a stale or unattached writer on a bound store admits no
+    /// geographic cell or `OwnTracks` location and records no evidence.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_stale_or_unattached_geographic_admission_commits_nothing() {
+        use pos_core::{
+            GatewayModeBindingHostV1, GatewayModeBindingPortV1, GatewayModeProfileRefV1,
+        };
+
+        let mut store = new_store();
+        let profile = GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [1; 32]).test_ok();
+        store
+            .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile))
+            .test_ok();
+        let cell_timeline = store.create_timeline("bound-geo-cell").test_ok().id();
+        let cell_entity = EntityId::new();
+        let draft = geo_cell_draft(
+            cell_timeline,
+            cell_entity,
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").test_ok(),
+            12,
+            "bound-geo-cell",
+            vec![cell_entity],
+            "private",
+            9,
+            1,
+            13,
+        );
+        let cell = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
+                b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
+            ))
+            .test_ok(),
+            pos_core::SourceTimeBucket::new(123),
+            GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
+            pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .test_ok();
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                cell.fence().draft().consent_record_id().clone(),
+                cell.fence().draft().consent_revision(),
+            ))
+            .test_ok();
+        store
+            .set_geo_cell_admission_fence(cell_timeline, cell_entity, cell.fence().clone())
+            .test_ok();
+        let location_timeline = store.create_timeline("bound-owntracks").test_ok().id();
+        let location_entity = EntityId::new();
+        pair_geographic_enrollment(
+            &mut store,
+            location_timeline,
+            location_entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
+        let location = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            location_timeline,
+            location_entity,
+            CanonicalBytes::from_static(b"bound-owntracks-location"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 10),
+            ([4; 32], [5; 32]),
+        ));
+        for attached in [None, std::num::NonZeroU64::new(2)] {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert!(matches!(
+                store.admit(cell.clone()),
+                Err(CoreError::ModeBindingStale)
+            ));
+            assert!(matches!(
+                store.admit_geo_location(location.clone()),
+                Err(CoreError::ModeBindingStale)
+            ));
+            assert!(store.state(cell_timeline).events.is_empty());
+            assert!(store.state(location_timeline).events.is_empty());
+            assert!(store.geographic_cell_dedup.is_empty());
+            assert!(store.geographic_admission_dedup.is_empty());
+            assert!(store.geographic_admission_snapshots.is_empty());
+            assert!(store.geographic_admission_links.is_empty());
+        }
+        store
+            .mode_binding
+            .attach_epoch_for_test(std::num::NonZeroU64::new(1));
+        assert!(store.admit(cell).test_ok().is_accepted());
+        store.admit_geo_location(location).test_ok();
+        assert_eq!(store.state(cell_timeline).events.len(), 1);
+        assert_eq!(store.state(location_timeline).events.len(), 1);
     }
 
     fn snapshot_id_snapshot(
@@ -12084,6 +12387,15 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
             batch.root_registration_address(),
         )?;
 
+        let bindings: Vec<_> = batch
+            .source_timeline()
+            .into_iter()
+            .flat_map(|timeline| rows.iter().map(move |(address, _, _)| (timeline, *address)))
+            .collect();
+        let has_new_bindings = bindings
+            .iter()
+            .any(|binding| !self.artifact_registration_timelines.contains(binding));
+        self.artifact_registration_timelines.extend(bindings);
         for (address_key, identity_key, row) in rows {
             self.artifact_registrations
                 .entry(address_key)
@@ -12095,7 +12407,7 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         self.artifact_registration_operations
             .entry(operation_key)
             .or_insert(root_registration_address);
-        Ok(if has_new_rows {
+        Ok(if has_new_rows || has_new_bindings {
             ArtifactRegistrationCommitOutcomeV1::Applied
         } else {
             ArtifactRegistrationCommitOutcomeV1::ExactRetry
@@ -12129,6 +12441,33 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         }
         self.validate_artifact_registration_closure(registration_address)?;
         Ok(Some(row.clone()))
+    }
+
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+        // The result is selected from the catalog rows themselves, so a
+        // binding can never name a missing row. The scan is linear in the
+        // catalog, which is acceptable for this in-process adapter.
+        let rows: Vec<&ArtifactRegistrationCatalogRowV1> = self
+            .artifact_registrations
+            .iter()
+            .filter_map(|(address, row)| {
+                self.artifact_registration_timelines
+                    .contains(&(timeline, *address))
+                    .then_some(row)
+            })
+            .take(max.saturating_add(1))
+            .collect();
+        if rows.len() > max {
+            return Err(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds);
+        }
+        crate::validate_bound_closures_once(&rows, |address| {
+            self.validate_artifact_registration_closure_visiting(address)
+        })
+        .map(|()| rows.into_iter().cloned().collect())
     }
 }
 
@@ -13508,6 +13847,15 @@ impl MemoryStore {
         &self,
         root: Hash,
     ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        self.validate_artifact_registration_closure_visiting(root)
+            .map(|_| ())
+    }
+
+    /// Validate the closure of `root` and return every address it visited.
+    fn validate_artifact_registration_closure_visiting(
+        &self,
+        root: Hash,
+    ) -> Result<BTreeSet<Hash>, ArtifactRegistrationPersistenceErrorV1> {
         let mut pending = vec![root];
         let mut seen = BTreeSet::new();
         let mut catalog_rows = Vec::new();
@@ -13539,9 +13887,7 @@ impl MemoryStore {
             .artifact_registrations
             .get(&root)
             .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-        if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
-            && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
-        {
+        if root_row.is_repro_manifest_root() {
             let root_record =
                 ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
                     .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
@@ -13556,7 +13902,7 @@ impl MemoryStore {
                 find_memory_root_transcript_bytes(catalog_rows.iter(), &root_record)?;
             self.validate_root_adapter_recording(&root_record, transcript_bytes)?;
         }
-        Ok(())
+        Ok(seen)
     }
 }
 
@@ -13958,6 +14304,17 @@ mod coverage_entrypoints {
                 ErasureReferenceV1::from_digest([18; 32]),
             );
         });
+    }
+
+    #[test]
+    fn denial_evidence_log_refuses_a_record_at_its_capacity_without_pruning() {
+        let mut records = vec![1_u8];
+        assert_eq!(
+            super::append_capped(&mut records, 2, 1),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(super::append_capped(&mut records, 2, 2), Ok(()));
+        assert_eq!(records, vec![1, 2]);
     }
 
     #[test]
@@ -14892,6 +15249,7 @@ mod coverage_entrypoints {
         let batch = prepare_artifact_registration_batch_v1(
             owner_id,
             root_address,
+            None,
             inputs,
             &MemoryCatalogOwnerVerifier,
         )?;
@@ -17111,6 +17469,99 @@ mod admitted_fork_deletion {
         );
         assert_eq!(sizes(&store), before);
         assert!(store.geographic_timelines.contains(&fork));
+        Ok(())
+    }
+
+    /// ADR-134 §8: a stale or unattached writer on a bound store appends no
+    /// classified Event and changes no map.
+    /// ADR-134 §8: a stale or unattached writer of a bound store commits no
+    /// FAC1, neither a Principal-to-Owner binding nor a Fork, and answers
+    /// `ModeBindingStale`; the attached writer then admits the Fork.
+    #[test]
+    fn a_stale_or_unattached_writer_commits_no_fac1() -> Fallible<()> {
+        use std::num::NonZeroU64;
+
+        use pos_core::{
+            ForkAdmissionErrorV1, ForkAdmissionOperationResultV1, GatewayModeBindingHostV1,
+            GatewayModeBindingPortV1, GatewayModeProfileRefV1,
+        };
+
+        let mut store = open()?;
+        let profile = GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [1; 32])
+            .map_err(|error| format!("{error:?}"))?;
+        store
+            .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile))
+            .map_err(|error| format!("{error:?}"))?;
+        let authority = Authority::open(&mut store)?;
+        let parent = store.create_timeline("stale-parent")?.id();
+        store.append(parent, &[draft(1, "factual"), draft(2, "factual")])?;
+        let before = sizes(&store);
+        let fence = format!("{:?}", store.fork_admission_authority);
+        for attached in [None, NonZeroU64::new(2)] {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert_eq!(
+                authority.bind_owner(&mut store, 0xc1)?.err(),
+                Some(ForkAdmissionErrorV1::ModeBindingStale)
+            );
+            assert_eq!(
+                authority.fork(&mut store, parent, 0xc2)?.err(),
+                Some(ForkAdmissionErrorV1::ModeBindingStale)
+            );
+            assert_eq!(sizes(&store), before);
+            assert_eq!(format!("{:?}", store.fork_admission_authority), fence);
+        }
+        store.mode_binding.attach_epoch_for_test(NonZeroU64::new(1));
+        assert!(matches!(
+            authority.fork(&mut store, parent, 0xc2)?,
+            Ok(ForkAdmissionOperationResultV1::Fork(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_or_unattached_classified_append_commits_nothing() -> Fallible<()> {
+        use std::num::NonZeroU64;
+
+        use pos_core::{
+            GatewayModeBindingHostV1, GatewayModeBindingPortV1, GatewayModeProfileRefV1,
+        };
+
+        use crate::{ForkEventAuthorityErrorV1, ForkEventProvenanceAuthorityPortV1};
+
+        let mut store = open()?;
+        let profile = GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [1; 32])
+            .map_err(|error| format!("{error:?}"))?;
+        store
+            .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile))
+            .map_err(|error| format!("{error:?}"))?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        let permit = authority.host_permit(&store, fork)?;
+        let before = sizes(&store);
+        let events = store.state(fork).events.clone();
+        for attached in [None, NonZeroU64::new(2)] {
+            store.mode_binding.attach_epoch_for_test(attached);
+            let appended = store.append_classified(
+                &authority.session,
+                &permit,
+                hash(0x71),
+                draft(30, TICK_KIND),
+            );
+            assert_eq!(
+                appended.map(drop),
+                Err(ForkEventAuthorityErrorV1::ModeBindingStale)
+            );
+            assert_eq!(sizes(&store), before);
+            assert_eq!(store.state(fork).events, events);
+        }
+        store.mode_binding.attach_epoch_for_test(NonZeroU64::new(1));
+        store.append_classified(
+            &authority.session,
+            &permit,
+            hash(0x71),
+            draft(30, TICK_KIND),
+        )?;
+        assert_eq!(store.state(fork).events.len(), events.len() + 1);
         Ok(())
     }
 }

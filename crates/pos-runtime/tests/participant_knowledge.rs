@@ -230,16 +230,18 @@ fn authorization_request(
     policy_revision: Hash,
     consent: ConsentGrantRefV1,
 ) -> AuthorizationRequestV1 {
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+    let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        AuthenticatedPrincipalDraftV1 {
             principal: ids.principal.clone(),
             adapter_id: "test-adapter".to_owned(),
             assurance: AssuranceLevelV1::try_new(1).test_ok(),
             issued_at: WallTime::from_micros(1),
             expires_at: WallTime::from_micros(100),
             binding_digest: hash_from_repeated_byte(5),
-        })
-        .test_ok();
+        },
+    )
+    .test_ok();
     AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
         authenticated,
         actor_entity_id: actor_id,
@@ -360,6 +362,7 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
     );
     let authentication_binding = request.authenticated().registry_binding_digest();
     let authority_registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![authentication_binding],
         vec![grant_binding],
@@ -686,6 +689,7 @@ fn current_authority(fixture: &Fixture) -> PersistedAuthorityV1 {
 
 fn registry_without_consent(fixture: &Fixture) -> AuthorityRegistrySnapshotV1 {
     AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         fixture.authority_registry.registry_digest(),
         vec![fixture.authentication_binding],
         vec![fixture.grant.binding_digest().test_ok()],
@@ -696,6 +700,7 @@ fn registry_without_consent(fixture: &Fixture) -> AuthorityRegistrySnapshotV1 {
 
 fn registry_without_capability(fixture: &Fixture) -> AuthorityRegistrySnapshotV1 {
     AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         fixture.authority_registry.registry_digest(),
         vec![fixture.authentication_binding],
         Vec::new(),
@@ -871,6 +876,7 @@ impl AdmissionStore {
         let root = admission_root_grant();
         let host = AuthorityPersistenceHostV1::new(
             &AuthorityRegistrySnapshotV1::try_new(
+                &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
                 hash_from_repeated_byte(45),
                 vec![hash_from_repeated_byte(46)],
                 vec![root.binding_digest().test_ok()],

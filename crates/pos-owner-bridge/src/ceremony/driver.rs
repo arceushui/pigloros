@@ -14,10 +14,11 @@
 //! | releasing                 | `RELEASING` observed, or `RELEASE_WINDOW`                      |
 //! | awaiting exit             | the browser exit, or `EXIT_WINDOW` (`CleanupTimeout`)          |
 //!
-//! The 300 s enrollment budget is enforced while a ceremony is opening, loading or posted; it
-//! ends at E4 verification, so it is not checked while the driver releases and waits for exit,
-//! and `next_wake` ignores it from then on.
+//! The 300 s enrollment budget is checked at the start of each opening, loading or posted step.
+//! A consuming step that starts within budget is not interrupted by its expiry (ADR-110 E5).
+//! The budget is not checked while releasing or awaiting exit, and `next_wake` ignores it then.
 
+use std::task::Poll;
 use std::time::Instant;
 
 use pos_owner_bridge_codec::{
@@ -106,6 +107,7 @@ pub enum Step {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
     Opening,
+    Navigating,
     AwaitingLoad { navigation: NavigationId },
     Posted { navigation: NavigationId },
     Releasing { since: Instant, state_live: bool },
@@ -176,6 +178,14 @@ impl CeremonyDriver {
         self.posts
     }
 
+    /// The first reply-state advance accepted from `EMPTY` on the owned pair.
+    /// Retained after request wiping and cleanup for native readiness evidence.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn first_receipt_at(&self) -> Option<Instant> {
+        self.first_past_empty
+    }
+
     /// Whether the request image is all zero.
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -217,7 +227,7 @@ impl CeremonyDriver {
         &self.slots.prf
     }
 
-    /// Advance the ceremony. Never blocks beyond the surface calls it makes.
+    /// Advance the ceremony without waiting for a surface completion.
     ///
     /// A host calls this from its timer and from each surface event until it returns
     /// `Finished`; after that it returns `Done`, which a host that loops must also stop on. A
@@ -230,8 +240,13 @@ impl CeremonyDriver {
             let error = self.bump_generation().err().unwrap_or(error);
             return self.fail(env, now, error);
         }
+        self.advance_phase(env, now)
+    }
+
+    fn advance_phase(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
         match self.phase {
             Phase::Opening => self.open(env, now),
+            Phase::Navigating => self.navigate(env, now),
             Phase::AwaitingLoad { navigation } => self.await_load(env, now, navigation),
             Phase::Posted { navigation } => self.posted(env, now, navigation),
             Phase::Releasing { since, state_live } => self.releasing(env, now, since, state_live),
@@ -260,7 +275,7 @@ impl CeremonyDriver {
     #[must_use]
     pub fn next_wake(&self) -> Option<Instant> {
         let phase = match self.phase {
-            Phase::Opening | Phase::AwaitingLoad { .. } => self.load_wake(),
+            Phase::Opening | Phase::Navigating | Phase::AwaitingLoad { .. } => self.load_wake(),
             Phase::Posted { .. } => self.posted_wake(),
             Phase::Releasing { since, .. } => Some(since + RELEASE_WINDOW),
             Phase::AwaitingExit { since } => Some(since + EXIT_WINDOW),
@@ -304,7 +319,7 @@ impl CeremonyDriver {
     const fn pre_release(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Opening | Phase::AwaitingLoad { .. } | Phase::Posted { .. }
+            Phase::Opening | Phase::Navigating | Phase::AwaitingLoad { .. } | Phase::Posted { .. }
         )
     }
 
@@ -352,7 +367,9 @@ impl CeremonyDriver {
     }
 
     const fn apply_loaded(&mut self, id: NavigationId) -> Option<BridgeError> {
-        if matches!(self.phase, Phase::AwaitingLoad { .. }) && self.loaded.is_none() {
+        if matches!(self.phase, Phase::Navigating | Phase::AwaitingLoad { .. })
+            && self.loaded.is_none()
+        {
             self.loaded = Some(id);
             None
         } else {
@@ -385,6 +402,25 @@ impl CeremonyDriver {
         self.readiness_failure(now)
     }
 
+    fn record_browser(
+        &mut self,
+        store: &mut dyn CleanupStore,
+        folder: &str,
+        identity: ProcessIdentity,
+    ) -> Result<(), BridgeError> {
+        // Retain the observed browser even when encoding or persistence fails.
+        // The record is owned only after the store's durability boundary succeeds.
+        self.identity = Some(identity);
+        cleanup_record_bytes(self.plan.ceremony_id, folder, &identity).and_then(|record| {
+            store
+                .write_record(&record)
+                .map_err(|_| CLEANUP_STORE_FAILED)
+                .map(|()| {
+                    self.record = Some(record);
+                })
+        })
+    }
+
     fn open(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
         if let Some(error) = self.pre_post_failure(now) {
             return self.fail(env, now, error);
@@ -395,29 +431,42 @@ impl CeremonyDriver {
             owner_window: self.plan.owner_window,
         };
         let identity = match env.surface.open(&spec) {
-            Ok(identity) => identity,
-            Err(error) => return self.fail(env, now, error.error()),
+            Poll::Pending => return Step::Pending,
+            Poll::Ready(Ok(identity)) => identity,
+            Poll::Ready(Err(error)) => {
+                let now = env.clock.now();
+                let error = self.pre_post_failure(now).unwrap_or_else(|| error.error());
+                return self.fail(env, now, error);
+            }
         };
-        self.identity = Some(identity);
-        let ceremony_id = self.plan.ceremony_id;
-        let record = match cleanup_record_bytes(ceremony_id, &spec.folder_name, &identity) {
-            Ok(record) => record,
-            Err(error) => return self.fail(env, now, error),
-        };
-        if env.store.write_record(&record).is_err() {
-            return self.fail(env, now, CLEANUP_STORE_FAILED);
+        if let Err(error) = self.record_browser(env.store, &spec.folder_name, identity) {
+            return self.fail(env, now, error);
         }
-        self.record = Some(record);
         if let Err(error) = env.loopback.probe_ipv6() {
             return self.fail(env, now, error);
         }
+        // Durable storage and the socket probe can consume time. Re-read the clock before navigation,
+        // after recording the observed browser so cleanup still owns its exit.
+        let now = env.clock.now();
+        if let Some(error) = self.pre_post_failure(now) {
+            return self.fail(env, now, error);
+        }
         env.loopback.begin_navigation();
+        self.phase = Phase::Navigating;
+        self.navigate(env, now)
+    }
+
+    fn navigate(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+        if let Some(error) = self.pre_post_failure(now) {
+            return self.fail(env, now, error);
+        }
         match env.surface.navigate() {
-            Ok(navigation) => {
+            Poll::Pending => Step::Pending,
+            Poll::Ready(Ok(navigation)) => {
                 self.phase = Phase::AwaitingLoad { navigation };
                 Step::Pending
             }
-            Err(error) => self.fail(env, now, error.error()),
+            Poll::Ready(Err(error)) => self.fail(env, now, error.error()),
         }
     }
 
@@ -444,7 +493,7 @@ impl CeremonyDriver {
         if self.served_settling(env.loopback.served(), now) {
             return Step::Pending;
         }
-        self.post_pair(env, now, navigation)
+        self.post_pair(env, navigation)
     }
 
     /// Whether a served count of zero may still be the benign race with the listener thread.
@@ -501,27 +550,42 @@ impl CeremonyDriver {
             .map_err(protocol_from_codec)
     }
 
-    fn post_pair(&mut self, env: &mut StepEnv<'_>, now: Instant, navigation: NavigationId) -> Step {
+    fn post_pair(&mut self, env: &mut StepEnv<'_>, navigation: NavigationId) -> Step {
+        // The probe or prior-pair retirement may have consumed the remaining budget.
+        let now = env.clock.now();
+        if let Some(error) = self.pre_post_failure(now) {
+            return self.fail(env, now, error);
+        }
         if let Err(error) = check_served(env.loopback.served()) {
+            let now = env.clock.now();
             return self.fail(env, now, error);
         }
         let reply_header = match self.write_request() {
             Ok(header) => header,
-            Err(error) => return self.fail(env, now, error),
+            Err(error) => {
+                let now = env.clock.now();
+                return self.fail(env, now, error);
+            }
         };
         if let Err(error) = env
             .surface
             .create_and_write(&self.slots.request, &reply_header)
         {
+            let now = env.clock.now();
             return self.fail(env, now, error.error());
         }
         self.buffers_live = true;
         self.reply_header = reply_header;
         self.known = ControlState::Empty;
+        self.post_written(env, navigation)
+    }
+
+    fn post_written(&mut self, env: &mut StepEnv<'_>, navigation: NavigationId) -> Step {
         // ADR-110 §5.5 step 3: the served count is read again immediately before the post, after
         // the buffers were written, so a completion that arrived meanwhile cannot be posted over.
         let served = env.loopback.served();
         if let Err(error) = check_served(served) {
+            let now = env.clock.now();
             return self.fail(env, now, error);
         }
         let guard = PostGuard {
@@ -529,7 +593,13 @@ impl CeremonyDriver {
             navigation_id: navigation,
             served_count: served.count,
         };
+        // Mapping creation and the final served check also run inside the original budget.
+        let now = env.clock.now();
+        if let Some(error) = self.pre_post_failure(now) {
+            return self.fail(env, now, error);
+        }
         if let Err(error) = env.surface.post(&guard) {
+            let now = env.clock.now();
             return self.fail(env, now, error.error());
         }
         self.posts += 1;
@@ -552,7 +622,7 @@ impl CeremonyDriver {
             return self.fail_unexpected(error, now);
         }
         match self.known {
-            ControlState::Ready => self.consume(env, now),
+            ControlState::Ready => self.consume(env),
             ControlState::Failed => self.fail(env, now, lifecycle(LifecycleCode::ClientFailed)),
             ControlState::Empty => self.await_receipt(env, now, navigation),
             _ => self.await_reply(env, now),
@@ -577,7 +647,9 @@ impl CeremonyDriver {
         if !reachable(self.known, observed) {
             return Err(UNEXPECTED_STATE);
         }
-        self.observe_advance(observed, now);
+        // Receipt is observed only after the state read completes. Keep the
+        // separate timing-mode CAS race on its existing timestamp semantics.
+        self.observe_advance(observed, env.clock.now());
         Ok(())
     }
 
@@ -630,7 +702,7 @@ impl CeremonyDriver {
                 };
                 Step::Pending
             }
-            Ok(Some(advanced)) => self.void_timing_failure(advanced, now),
+            Ok(Some(advanced)) => self.void_timing_failure(advanced, env.clock.now()),
             Err(error) => self.fail_unexpected(error, now),
         }
     }
@@ -647,7 +719,7 @@ impl CeremonyDriver {
         navigation: NavigationId,
     ) -> Step {
         match release_loop(env.surface, ControlState::Empty, ReleaseMode::Timing) {
-            Ok(Some(advanced)) => return self.void_timing_failure(advanced, now),
+            Ok(Some(advanced)) => return self.void_timing_failure(advanced, env.clock.now()),
             Err(error) => return self.fail_unexpected(error, now),
             Ok(None) => {}
         }
@@ -659,17 +731,14 @@ impl CeremonyDriver {
         if let Err(error) = self.bump_generation() {
             return self.fail(env, now, error);
         }
-        self.post_pair(env, now, navigation)
+        self.post_pair(env, navigation)
     }
 
-    fn consume(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
-        // ADR-110 §6: the interaction window ends at the CAS, so a READY first read after it
-        // is not consumed.
-        if self.interaction_over(now) {
-            return self.fail(env, now, lifecycle(LifecycleCode::InteractionTimeout));
-        }
-        if expired(now, self.plan.t0, CHALLENGE_TTL) {
-            return self.fail(env, now, lifecycle(LifecycleCode::ChallengeExpired));
+    fn consume(&mut self, env: &mut StepEnv<'_>) -> Step {
+        // Check the original bounds at the CAS, not at the preceding state read.
+        let now = env.clock.now();
+        if let Some(error) = self.consume_deadline_error(now) {
+            return self.fail(env, now, error);
         }
         let won = env
             .surface
@@ -679,9 +748,35 @@ impl CeremonyDriver {
             Ok(false) => return self.fail_unexpected(UNEXPECTED_STATE, now),
             Err(error) => return self.fail_unexpected(error.error(), now),
         }
+        // A successful CAS has consumed the reply even if the call spanned a
+        // deadline; retain that state for terminal cleanup, but do not verify.
+        let after_cas = env.clock.now();
+        if let Some(error) = self.consume_deadline_error(after_cas) {
+            return self.fail(env, after_cas, error);
+        }
         match self.verify_reply(env) {
-            Ok(verified) => self.finish_success(env, now, verified),
+            Ok(verified) => self.finish_verified(env, now, verified),
             Err(error) => self.fail(env, now, error),
+        }
+    }
+
+    fn finish_verified(&mut self, env: &mut StepEnv<'_>, now: Instant, verified: Verified) -> Step {
+        // A surface callback may be delivered reentrantly during the
+        // successful consume/verify step. It still precedes release.
+        if let Some(error) = self.drain_events(env.surface) {
+            let error = self.bump_generation().err().unwrap_or(error);
+            return self.fail(env, now, error);
+        }
+        self.finish_success(env, now, verified)
+    }
+
+    fn consume_deadline_error(&self, now: Instant) -> Option<BridgeError> {
+        if self.interaction_over(now) {
+            Some(lifecycle(LifecycleCode::InteractionTimeout))
+        } else if expired(now, self.plan.t0, CHALLENGE_TTL) {
+            Some(lifecycle(LifecycleCode::ChallengeExpired))
+        } else {
+            None
         }
     }
 
@@ -702,7 +797,8 @@ impl CeremonyDriver {
             .get(HEADER..HEADER + length)
             .unwrap_or_default();
         let verified = parse_and_verify(&self.plan, payload, &mut slots.prf)?;
-        if expired(env.clock.now(), self.plan.t0, CHALLENGE_TTL) {
+        let verified_at = env.clock.now();
+        if expired(verified_at, self.plan.t0, CHALLENGE_TTL) {
             return Err(lifecycle(LifecycleCode::ChallengeExpired));
         }
         slots.copy_a.wipe();
@@ -793,11 +889,13 @@ impl CeremonyDriver {
     }
 
     fn awaiting_exit(&mut self, env: &mut StepEnv<'_>, now: Instant, since: Instant) -> Step {
-        if self.exit_seen {
-            return self.complete(env);
-        }
+        // A matching exit first observed at/after the deadline can retire the
+        // quarantine, but cannot turn a missed caller deadline into success.
         if expired(now, since, EXIT_WINDOW) {
             return self.quarantine(QuarantineCode::CleanupTimeout);
+        }
+        if self.exit_seen {
+            return self.complete(env);
         }
         Step::Pending
     }

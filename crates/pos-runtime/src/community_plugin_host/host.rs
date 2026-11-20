@@ -11,7 +11,7 @@ use pos_core::{
     PluginId, Seq, TimelineId, TimelineMeta,
 };
 use pos_crypto::plugin_trust::verify_plugin_trust_v1;
-use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
+use pos_plugin_release::{BundleAddressV1, ContentValidationV1, ReleaseSourceV1};
 use pos_store::plugin_trust_registry::{
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
     TrustedUtcSecondV1,
@@ -115,7 +115,10 @@ pub struct CommunityPassRequestV1<'a> {
 }
 
 /// The verdict on one member: the gate's summary, or the error that refused it.
-type MemberVerdict = Result<GateSummaryV1, CommunityPluginHostErrorV1>;
+type MemberVerdict = (
+    Result<GateSummaryV1, CommunityPluginHostErrorV1>,
+    ContentValidationV1,
+);
 
 /// A member's summary and its one-shot authorization.
 type Cleared = (GateSummaryV1, CommunityPassAuthorizationV1);
@@ -197,8 +200,12 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     ///
     /// One trusted UTC second is sampled for the whole pass. A failed sample refuses every
     /// member; a gate refusal or a failed offer refuses the whole pass before anything is
-    /// staged. The pass is closed on every exit, a panic that unwinds out of a member included;
-    /// the registry is synced with every member after each pass that returns.
+    /// staged. Once a pass opens, it is closed on every exit, a panic that unwinds out of a
+    /// member included; the registry is synced with every member after each opened pass returns.
+    ///
+    /// An unfinished pass or poisoned Driver rejects the request before a pass opens: no clock
+    /// sample, member access, authorization, cleanup or sync occurs. The outcome has no UTC
+    /// sample or gate entries and preserves the registry's error and existing pass.
     pub fn run_pass(
         &mut self,
         registry: &mut PluginRegistry,
@@ -207,21 +214,31 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         request: CommunityPassRequestV1<'_>,
     ) -> CommunityPassOutcomeV1 {
         let tick = request.tick;
-        let utc = TrustedUtcSecondV1::from_source(wall).ok();
-        let guard = PassGuard::open(&self.members, utc, tick);
-        let (verdicts, result) = guard.pass().map_or_else(
-            || (refuse_all(&self.members), PassResultV1::Refused),
-            |pass| self.run_open(registry, trust, pass, request),
-        );
-        let mut entries = report(&self.members, verdicts);
-        drop(guard);
-        sync_all(&self.members, registry, &mut entries);
-        CommunityPassOutcomeV1 {
-            tick,
-            utc: utc.map(TrustedUtcSecondV1::as_i64),
-            gates: entries,
-            result,
-        }
+        registry.ensure_no_pending_step().map_or_else(
+            |error| CommunityPassOutcomeV1 {
+                tick,
+                utc: None,
+                gates: Vec::new(),
+                result: failed(error),
+            },
+            |()| {
+                let utc = TrustedUtcSecondV1::from_source(wall).ok();
+                let guard = PassGuard::open(&self.members, utc, tick);
+                let (verdicts, result) = guard.pass().map_or_else(
+                    || (refuse_all(&self.members), PassResultV1::Refused),
+                    |pass| self.run_open(registry, trust, pass, request),
+                );
+                let mut entries = report(&self.members, verdicts);
+                drop(guard);
+                sync_all(&self.members, registry, &mut entries);
+                CommunityPassOutcomeV1 {
+                    tick,
+                    utc: utc.map(TrustedUtcSecondV1::as_i64),
+                    gates: entries,
+                    result,
+                }
+            },
+        )
     }
 
     /// Adopt newer policy: close the pass of every member, then record `material` through the
@@ -258,7 +275,7 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
             Err(verdicts) => return (verdicts, PassResultV1::Refused),
         };
         let verdicts = offer_all(&self.members, cleared);
-        let result = if verdicts.iter().all(Result::is_ok) {
+        let result = if verdicts.iter().all(|(verdict, _)| verdict.is_ok()) {
             settle(stage_and_admit(registry, request))
         } else {
             PassResultV1::Refused
@@ -337,11 +354,20 @@ fn gate_member<M: CommunityPluginMemberV1>(
 /// The verdict of a gated member, recording the refusal of one that was refused. An
 /// authorization of a member that passed is dropped: the pass is refused as a whole.
 fn refuse<M: CommunityPluginMemberV1>(member: &M, attempt: GateAttempt) -> MemberVerdict {
-    note(member, attempt.map(|(summary, _authorization)| summary))
+    let verdict = attempt.map(|(summary, _authorization)| summary);
+    let content = verdict
+        .as_ref()
+        .map_or(ContentValidationV1::NotPerformed, |summary| {
+            summary.content_validation
+        });
+    (note(member, verdict), content)
 }
 
 /// `verdict`, after recording the refusal it carries, if any, for `member`.
-fn note<M: CommunityPluginMemberV1>(member: &M, verdict: MemberVerdict) -> MemberVerdict {
+fn note<M: CommunityPluginMemberV1>(
+    member: &M,
+    verdict: Result<GateSummaryV1, CommunityPluginHostErrorV1>,
+) -> Result<GateSummaryV1, CommunityPluginHostErrorV1> {
     if let Err(error) = &verdict {
         member.record_refusal(*error);
     }
@@ -354,7 +380,10 @@ fn refuse_all<M: CommunityPluginMemberV1>(roster: &[M]) -> Vec<MemberVerdict> {
         .iter()
         .map(|member| {
             member.record_refusal(TRUST_STATE_UNAVAILABLE);
-            Err(TRUST_STATE_UNAVAILABLE)
+            (
+                Err(TRUST_STATE_UNAVAILABLE),
+                ContentValidationV1::NotPerformed,
+            )
         })
         .collect()
 }
@@ -369,13 +398,14 @@ fn offer_all<M: CommunityPluginMemberV1>(
     let mut refused = false;
     let mut verdicts = Vec::with_capacity(cleared.len());
     for (member, (summary, authorization)) in roster.iter().zip(cleared) {
+        let content = summary.content_validation;
         let offered = if refused {
             Ok(())
         } else {
             member.offer_authorization(authorization)
         };
         refused = refused || offered.is_err();
-        verdicts.push(note(member, offered.map(|()| summary)));
+        verdicts.push((note(member, offered.map(|()| summary)), content));
     }
     verdicts
 }
@@ -438,10 +468,11 @@ fn report<M: CommunityPluginMemberV1>(
     roster
         .iter()
         .zip(verdicts)
-        .map(|(member, verdict)| MemberPassV1 {
+        .map(|(member, (verdict, content_validation))| MemberPassV1 {
             plugin: member.plugin(),
             expected_plugin_id: member.expectation().plugin_id.clone(),
             gate: verdict,
+            content_validation,
             invocation_id: member.pass_invocation_id(),
             launch_failure: member.pass_failure(),
             sync: Ok(()),

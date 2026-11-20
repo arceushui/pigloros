@@ -432,16 +432,7 @@ fn execution_projection(validated: ValidatedPmf1<'_>) -> PluginExecutionProjecti
 
 /// The ADR-061 ID grammar: `[a-z0-9][a-z0-9._/-]*`, 1-128 bytes.
 pub(crate) fn valid_id_text(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    value.len() <= MAX_ID_BYTES
-        && bytes
-            .next()
-            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
-        && bytes.all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
+    pos_core::community_lifecycle::is_valid_community_id_v1(value)
 }
 
 /// `<version core>[-<pre-release>]` from Semantic Versioning 2.0.0, without

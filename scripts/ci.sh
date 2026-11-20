@@ -22,6 +22,7 @@ bash "$ROOT/scripts/check-pinned-dependencies.sh"
 bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
 echo "==> CI workflow policy"
 python3 "$ROOT/scripts/test_ci_workflow_policy.py"
+python3 "$ROOT/scripts/test_affected_packages.py"
 python3 "$ROOT/scripts/test_deploy_workflow_policy.py"
 
 echo "==> advisory benchmark comparator"
@@ -50,6 +51,9 @@ python3 "$ROOT/scripts/generate_erasure_conformance_fixtures.py" --check
 
 echo "==> gateway conformance fixtures match their independent generator"
 python3 "$ROOT/scripts/generate_gateway_conformance_fixtures.py" --check
+python3 "$ROOT/scripts/check_gateway_contract.py"
+python3 "$ROOT/scripts/test_check_gateway_contract.py"
+python3 "$ROOT/scripts/test_air_gapped_seccomp_exec.py"
 
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check

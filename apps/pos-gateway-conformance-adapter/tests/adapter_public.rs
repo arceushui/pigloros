@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use pos_gateway_conformance_adapter::{
-    executor_declaration, exit_code, normalize_response_v1, run, AdapterRunErrorV1, ABI_MAJOR,
-    ABI_MINOR, CAPABILITY_IDS, CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID,
-    SUBCASE_MISMATCH,
+    executor_declaration, exit_code, normalize_response_v1, observation_v1, run,
+    substitute_captured_v1, AdapterRunErrorV1, ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS,
+    CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{
@@ -33,6 +33,33 @@ use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
 use serde_json::{json, Value};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Set only for a test re-executed inside the Air-Gapped test shape.
+const IN_AIR_GAPPED_NAMESPACE: &str = "PIGLOROS_AIR_GAPPED_TEST_NAMESPACE";
+
+/// Run `body` as the test `name` of this binary inside the ADR-135 §4 test
+/// shape (#1422): the `authorized-air-gapped` composition binds the
+/// Air-Gapped mode, whose `air-gapped-no-route` predicate holds only there.
+/// The parent re-executes this test binary under
+/// `scripts/air-gapped-namespace.sh` and requires the child to pass.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn in_air_gapped_namespace(name: &str, body: impl FnOnce() -> TestResult) -> TestResult {
+    if std::env::var_os(IN_AIR_GAPPED_NAMESPACE).is_some() {
+        return body();
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/air-gapped-namespace.sh");
+    let status = std::process::Command::new(script)
+        .arg(std::env::current_exe()?)
+        .args(["--exact", name, "--nocapture"])
+        .env(IN_AIR_GAPPED_NAMESPACE, "1")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{name} failed in the Air-Gapped test namespace: {status}").into())
+    }
+}
 
 const BINARY: &str = env!("CARGO_BIN_EXE_pos-gateway-conformance-adapter");
 const LAYER: &str = "gateway-client-conformance";
@@ -205,9 +232,18 @@ fn wanted_steps_and_events(attempt: &CaseAttempt) -> TestResult<(u64, u64)> {
             }
             steps += 1;
             let path = exchange["path"].as_str().ok_or("no path")?;
-            let commits = path.ends_with("/signals") || path.ends_with("/actions");
-            if commits && exchange["expect"]["status"] == json!(201) {
-                events += 1;
+            // A room create or derive appends its request claim and the revision.
+            let committed = if path == "/v1/scenario-rooms" || path.ends_with("/revisions") {
+                2
+            } else {
+                u64::from(
+                    path.ends_with("/signals")
+                        || path.ends_with("/actions")
+                        || path == "/v1/me/consent-revocations",
+                )
+            };
+            if exchange["expect"]["status"] == json!(201) {
+                events += committed;
             }
         }
     }
@@ -216,6 +252,13 @@ fn wanted_steps_and_events(attempt: &CaseAttempt) -> TestResult<(u64, u64)> {
 
 #[test]
 fn every_family_meets_its_oracle_identically_in_local_and_air_gapped() -> TestResult {
+    in_air_gapped_namespace(
+        "every_family_meets_its_oracle_identically_in_local_and_air_gapped",
+        every_family_meets_its_oracle_identically_in_local_and_air_gapped_body,
+    )
+}
+
+fn every_family_meets_its_oracle_identically_in_local_and_air_gapped_body() -> TestResult {
     for family in FAMILIES {
         let mut observed = Vec::new();
         for mode in MODES {
@@ -263,6 +306,13 @@ fn every_family_meets_its_oracle_identically_in_local_and_air_gapped() -> TestRe
 
 #[test]
 fn other_claim_layers_and_replay_or_fork_modes_are_unavailable() -> TestResult {
+    in_air_gapped_namespace(
+        "other_claim_layers_and_replay_or_fork_modes_are_unavailable",
+        other_claim_layers_and_replay_or_fork_modes_are_unavailable_body,
+    )
+}
+
+fn other_claim_layers_and_replay_or_fork_modes_are_unavailable_body() -> TestResult {
     let mut other_layer = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     other_layer.claim_layer = ClaimLayer::PluginConformance;
     let unavailable = SubjectObservation {
@@ -279,6 +329,13 @@ fn other_claim_layers_and_replay_or_fork_modes_are_unavailable() -> TestResult {
 
 #[test]
 fn a_schema_member_other_than_the_pinned_one_is_not_executed() -> TestResult {
+    in_air_gapped_namespace(
+        "a_schema_member_other_than_the_pinned_one_is_not_executed",
+        a_schema_member_other_than_the_pinned_one_is_not_executed_body,
+    )
+}
+
+fn a_schema_member_other_than_the_pinned_one_is_not_executed_body() -> TestResult {
     let mut foreign = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     foreign.schema = artifact(read(&format!(
         "providers/{LAYER}/schemas/denied.schema.json"
@@ -368,6 +425,12 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("unknown tail", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/t/forks");
         }),
+        case("nested Timeline", |p| {
+            first_exchange(p)["path"] = json!("/v1/timelines/a/b/events");
+        }),
+        case("session tail", |p| {
+            first_exchange(p)["path"] = json!("/v1/session/events");
+        }),
         case("spaced path", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/a b/events");
         }),
@@ -377,11 +440,28 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("slot before capture", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/{timeline}/events");
         }),
+        case("room before capture", |p| {
+            first_exchange(p)["path"] = json!("/v1/scenario-rooms/{room}/revisions");
+        }),
+        case("revision zero", |p| {
+            first_exchange(p)["path"] = json!("/v1/scenario-rooms/r/revisions/0");
+        }),
+        case("consent before capture", |p| {
+            first_exchange(p)["path"] = json!("/v1/me/consent-revocations");
+            first_exchange(p)["body"] = json!({"consent_ref": "{consent}"});
+        }),
     ]
 }
 
 #[test]
 fn payloads_outside_the_grammar_are_payload_invalid() -> TestResult {
+    in_air_gapped_namespace(
+        "payloads_outside_the_grammar_are_payload_invalid",
+        payloads_outside_the_grammar_are_payload_invalid_body,
+    )
+}
+
+fn payloads_outside_the_grammar_are_payload_invalid_body() -> TestResult {
     let base = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     let invalid = SubjectObservation {
         result: failure(PAYLOAD_INVALID),
@@ -399,6 +479,13 @@ fn payloads_outside_the_grammar_are_payload_invalid() -> TestResult {
 
 #[test]
 fn payloads_at_the_grammar_bounds_are_executed() -> TestResult {
+    in_air_gapped_namespace(
+        "payloads_at_the_grammar_bounds_are_executed",
+        payloads_at_the_grammar_bounds_are_executed_body,
+    )
+}
+
+fn payloads_at_the_grammar_bounds_are_executed_body() -> TestResult {
     let base = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     let at_bounds = with_payload(base, |p| {
         let exchange = json!({
@@ -429,6 +516,13 @@ fn payloads_at_the_grammar_bounds_are_executed() -> TestResult {
 
 #[test]
 fn a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch() -> TestResult {
+    in_air_gapped_namespace(
+        "a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch",
+        a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch_body,
+    )
+}
+
+fn a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch_body() -> TestResult {
     let base = attempt(FixtureFamily::Denied, ExecutionMode::Local)?;
     let mismatch = with_payload(base.clone(), |p| {
         p["subcases"][0]["exchanges"][1]["expect"]["status"] = json!(402);
@@ -461,6 +555,13 @@ fn a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch() -> TestResu
 
 #[test]
 fn a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle() -> TestResult {
+    in_air_gapped_namespace(
+        "a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle",
+        a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle_body,
+    )
+}
+
+fn a_canonical_record_reports_a_present_canary_and_differs_from_the_oracle_body() -> TestResult {
     let base = attempt(FixtureFamily::DeletionRedaction, ExecutionMode::Local)?;
     let canary = with_payload(base, |p| p["subcases"][0]["canary"] = json!("piglor.com"))?;
     let SubjectResult::Output(bytes) = observation(&canary)?.result else {
@@ -517,15 +618,85 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
         normalize_response_v1(json!({
             "events": [{"id": ulid, "entity": ulid, "seq": 1, "ok": true, "none": null}],
             "next_cursor": cursor(ulid, "10"),
-            "error": "anything",
+            "detail": "anything",
+            "instance": format!("/v1/timelines/{ulid}/not-a-ulid/events"),
+            "error": "kept",
             "name": ulid,
+            "consents": [{"consent_ref": ulid}, {"consent_ref": "not-a-ulid"}],
         })),
         json!({
             "events": [{"id": "<ulid>", "entity": ulid, "seq": 1, "ok": true, "none": null}],
             "next_cursor": "<cursor>",
-            "error": "<message>",
+            "detail": "<message>",
+            "instance": "/v1/timelines/<ulid>/not-a-ulid/events",
+            "error": "kept",
             "name": ulid,
+            "consents": [{"consent_ref": "<ulid>"}, {"consent_ref": "not-a-ulid"}],
         })
+    );
+}
+
+#[test]
+fn normalization_pins_captured_echoes_and_replaces_only_well_formed_room_hashes() {
+    let ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let room_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    let consent_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+    let captured = [("{consent}", consent_id), ("{room}", room_id)];
+    let schema = "urn:pigloros:gateway:v1:schema:scenario-room-revision";
+    let hash = "ab".repeat(32);
+    let normalized = |value: Value| normalize_response_v1(substitute_captured_v1(value, &captured));
+    assert_eq!(
+        normalized(json!({
+            "schema_id": schema,
+            "id": room_id,
+            "descriptor": {
+                "room_id": room_id,
+                "privacy_export_ref": consent_id,
+                "governance_ref": ulid,
+                "correlation_id": "5f".repeat(16),
+                "descriptor_hash": hash,
+                "rule_set_hash": hash,
+            },
+            "commit": {"timeline_id": ulid, "event_id": ulid, "seq": 1},
+            "provenance": {"digest": hash, "origin": "principal-authored"},
+        })),
+        json!({
+            "schema_id": schema,
+            "id": "{room}",
+            "descriptor": {
+                "room_id": "{room}",
+                "privacy_export_ref": "{consent}",
+                "governance_ref": ulid,
+                "correlation_id": "<correlation>",
+                "descriptor_hash": "<hash>",
+                "rule_set_hash": hash,
+            },
+            "commit": {"timeline_id": "<ulid>", "event_id": "<ulid>", "seq": 1},
+            "provenance": {"digest": "<hash>", "origin": "principal-authored"},
+        })
+    );
+    // An echo of another room or consent, an all-zero or malformed hash or correlation ID, and
+    // a provenance digest outside a room revision or that is no hash stay as they are.
+    for kept in [
+        json!({"room_id": ulid, "privacy_export_ref": ulid, "items": [ulid, 1]}),
+        json!({"correlation_id": "0".repeat(32), "descriptor_hash": "0".repeat(64)}),
+        json!({"correlation_id": "5F".repeat(16), "descriptor_hash": "AB".repeat(32)}),
+        json!({"correlation_id": "5f".repeat(17), "descriptor_hash": "ab".repeat(33)}),
+        json!({"correlation_id": "5g".repeat(16), "descriptor_hash": "ag".repeat(32)}),
+        json!({"provenance": {"digest": hash, "origin": "principal-authored"}}),
+        json!({"schema_id": "urn:other", "provenance": {"digest": hash}}),
+        json!({"schema_id": schema, "provenance": {"digest": "0".repeat(64)}}),
+        json!({"schema_id": schema, "provenance": {"digest": "ab".repeat(31)}}),
+        json!({"schema_id": schema, "provenance": {"digest": 1}}),
+        json!({"schema_id": schema, "provenance": {"origin": "principal-authored"}}),
+        json!({"schema_id": schema, "provenance": hash}),
+        json!({"schema_id": schema, "evidence": {"digest": hash}}),
+    ] {
+        assert_eq!(normalized(kept.clone()), kept, "{kept}");
+    }
+    assert_eq!(
+        substitute_captured_v1(json!([room_id, {"a": consent_id}, ulid, null]), &captured),
+        json!(["{room}", {"a": "{consent}"}, ulid, null])
     );
 }
 
@@ -583,6 +754,13 @@ impl Write for Closed {
 
 #[test]
 fn wire_and_output_faults_have_their_exit_codes() -> TestResult {
+    in_air_gapped_namespace(
+        "wire_and_output_faults_have_their_exit_codes",
+        wire_and_output_faults_have_their_exit_codes_body,
+    )
+}
+
+fn wire_and_output_faults_have_their_exit_codes_body() -> TestResult {
     assert_eq!(
         run(b"not EAI1".as_slice(), Vec::new()),
         Err(AdapterRunErrorV1::Wire)
@@ -628,6 +806,13 @@ fn spawn(input: &[u8]) -> TestResult<std::process::Output> {
 
 #[test]
 fn the_binary_runs_one_attempt_through_its_process_boundary() -> TestResult {
+    in_air_gapped_namespace(
+        "the_binary_runs_one_attempt_through_its_process_boundary",
+        the_binary_runs_one_attempt_through_its_process_boundary_body,
+    )
+}
+
+fn the_binary_runs_one_attempt_through_its_process_boundary_body() -> TestResult {
     let mut stream = Vec::new();
     write_attempt(
         &mut stream,
@@ -649,4 +834,19 @@ fn the_binary_runs_one_attempt_through_its_process_boundary() -> TestResult {
     write_attempt(&mut stream, &foreign)?;
     assert_eq!(spawn(&stream)?.status.code(), Some(3));
     Ok(())
+}
+
+#[test]
+fn an_observation_is_the_status_and_the_normalized_json_or_non_json_body() {
+    assert_eq!(
+        observation_v1(404, None),
+        json!({"status": 404, "body": "non-json"})
+    );
+    assert_eq!(
+        observation_v1(
+            400,
+            Some(json!({"detail": "bad", "code": "invalid-request"}))
+        ),
+        json!({"status": 400, "body": {"json": {"detail": "<message>", "code": "invalid-request"}}})
+    );
 }

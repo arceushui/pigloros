@@ -144,6 +144,15 @@ composes the attempt:
 The live dm-verity table is #444 evidence, not a runtime check. Lifecycle
 cleanup (#1199/#1200) and packaged-build conformance (#444) remain separate.
 
+With the `test-support` feature, the `packaged_conformance` module and the
+`pos-sandboxd-conformance` binary drive this path in the #444 QEMU evidence
+guest only (`deploy/nixos/qemu-evidence`). The binary stages the dev/test
+installation around one image, admits it, registers and prepares one attempt,
+and calls `activate_admitted_root`. While its standard input stays open, it
+holds the mounted root so the guest can record the live kernel state. It then
+detaches the root and removes the directory. The feature is never enabled in
+deployable builds.
+
 `/work`, the sole writable mount, is requested as
 `TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read
 back as a typed `a(ss)` value. A zero ceiling requests no mount at all, because
@@ -180,9 +189,13 @@ are ports, so the composition is exercised without systemd.
   planned endpoints against the admitted attempt and its launch policy, and
   the namespace's and the channel's attempt; the token carries the attempt it
   checked. The proxy serves on a blocking thread that the attempt watchdog
-  closes. The namespace, veth pair and nftables rules belong to a
-  separate ticket; `FailClosedLocalNetwork` establishes none and refuses every
-  connection.
+  closes. `NamespacedLocalNetwork` (#911) establishes the attempt's network
+  namespace, veth pair and nftables firewall for exactly the admitted
+  endpoints, in the lowest free slot of the installation's reserved range, and
+  reads it all back before it returns; its connector opens each connection
+  from a thread inside the namespace, and dropping it removes the namespace
+  and frees the slot. `FailClosedLocalNetwork` establishes none and refuses
+  every connection.
 - Replay: every captured exchange is resolved from the durable capture store
   before launch; a missing or mismatched capture is unavailable and nothing
   starts.
@@ -221,7 +234,7 @@ job cannot supply another independently validated allow-list.
 The attempt also retains the SPM1-selected runtime key ID and authenticated
 verifying key. The production barrier requires that ID from its signer and
 verifies the produced signature under the admitted key before sending any
-release; a safe but incorrect key file cannot authorize execution.
+release; a key other than the admitted one cannot authorize execution.
 `AdmittedAttempt` derives the launcher source, byte length, BLAKE3 digest and
 device/inode from the authenticated SIC1 role-11 provider executable. Neither
 the execute job nor barrier evidence can supply a separate path or digest.
@@ -256,7 +269,8 @@ readback-set digest itself (#443 owns the kernel observations and their
 digest, and the provider must supply an `ObservedReadback` before it can
 release), the adapter's mount and inode identity (the composition root
 supplies it in `BarrierEvidence`), the setting of the cancellation flag
-(#1199/#1200), adapter stdin and stdout transport, and the real Local namespace.
+(#1199/#1200), adapter stdin and stdout transport, and the host egress table
+and orphan sweep of the Local namespace (#911 slice 4).
 `AdmittedAttempt::check_local` binds an admission against the launch-policy
 view and the authority heads the attempt was admitted with; that the recheck
 closure belongs to the same admitted entry is the caller's contract
@@ -274,7 +288,7 @@ and manifests, because zbus receives system-bus descriptors without
 ## Launcher mode and release barrier (#441)
 
 The package now builds one binary, `pos-sandboxd`, whose mode is chosen by
-argv. The only mode is `launch-barrier <lpv1-hex>`: the ADR-069 Sandbox Release
+argv. One mode is `launch-barrier <lpv1-hex>`: the ADR-069 Sandbox Release
 Launcher, started by the provider as the transient unit's main process. It
 adopts the descriptors systemd passes (`sd-listen-fds`), validates their names,
 types, count, order and the absence of any other open descriptor, accepts the
@@ -292,7 +306,107 @@ test enforces it). CI builds the binary for `x86_64` and `aarch64`
 ADR-087 A.3 governs the daemon mode; the launcher's final exec creates no
 process.
 
+## Provider runtime mode (#1358)
+
+The other mode is `provider-runtime`, the provider daemon that the root
+selector starts as its runtime unit (ADR-069 R11 §5). Before any socket
+exists it binds its startup authority: SIC1, the `/proc/self/exe`
+self-binding, SPI1, the slot count and the runtime key. It then binds both
+SIC1 endpoints under the R11 §6 rules (no endpoint under
+`/run/pigloros/sandbox`, no pre-existing node, a UID 0 leaf of mode `0600`),
+sends `READY=1` as one datagram to `NOTIFY_SOCKET`, and serves in state
+`Starting`. `describe` gets the signed SDY1 of the startup authority; every
+other operation gets a signed SPE1 `11` once it passes validation precedence
+steps 1 to 6. A control connection is closed unanswered until the
+RCC1/RCU1 responder lands. Restart reconciliation, which opens admission, is
+the next #1358 slice. The mode reads no environment variable but
+`NOTIFY_SOCKET`.
+
 `release_after_ready` is the provider half: it accepts one `ReadyV1` only from
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
 held or observed evidence, rechecks current authority through the
-`ReleaseRecheck` port, and sends one `ReleaseV1` signed through `ReleaseSigner`.
+`ReleaseRecheck` port, and sends one `ReleaseV1` signed through
+`RuntimeAttestationSigner` and verified under the admitted runtime key before
+it is sent.
+
+## Local attempt namespaces (#911)
+
+The Local network is built in-process over netlink (owner decisions of
+2026-11-09): `netlink-packet-route`, `netlink-packet-netfilter` and
+`netlink-packet-core` encode and decode, rustix carries the sockets, and no
+process is created. Each attempt namespace is created by a dedicated thread
+that unshares its network namespace and is pinned by a bind mount under
+`/run/netns/piglor-<attempt>`; the veth pair is `piglor-h<slot>` on the host
+and `piglor-n<slot>` inside. The namespace holds one `inet piglor_attempt`
+table whose chains drop everything except TCP to the admitted endpoints,
+return traffic and neighbour discovery with the host end.
+
+Kernel requirements: network namespaces (`CONFIG_NET_NS`), veth
+(`CONFIG_VETH`), nf_tables with the `inet` family, the `meta`, `payload`,
+`bitwise`, `cmp`, `immediate` and `ct` expressions (`CONFIG_NF_TABLES`,
+`CONFIG_NF_TABLES_INET`, `CONFIG_NFT_CT`) and conntrack, and IPv6. The
+provider needs `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` and a writable `/run/netns`.
+The kernel should not create fallback tunnel devices in new namespaces
+(`net.core.fb_tunnels_only_for_init_net=1` when the `sit`, `ipip`, `gre` or
+`ip6_tunnel` modules are loaded), because the read-back accepts only the
+loopback and the attempt's veth end.
+
+Host egress (owner decisions of 2026-11-09 and 2026-11-10) is IPv4 only:
+an IPv6 endpoint is admitted only when it is an address of the host itself,
+and the provider changes no IPv6 setting. The provider owns one host table,
+`inet piglor_sandbox`: its `forward` chain (filter, policy accept, so other
+host traffic is untouched) jumps from each attempt's `piglor-h<slot>` end to
+that attempt's own chain, which accepts TCP to exactly its endpoints, and
+then drops anything else from any `piglor-h*` end; its `postrouting` chain
+(nat) masquerades exactly that traffic. IPv4 forwarding is turned on only for
+the devices attempt traffic enters by: each attempt's veth end and the device
+each off-host endpoint's replies return on, and only where it is off: a
+device that already forwards is never written to. The provider records each
+egress device it turns forwarding on for under
+`/run/pigloros/sandbox/egress-forwarding` before turning it on, and turns it
+back off when the last attempt using it leaves. The table and the forwarding
+are read back after every change. Restart reconciliation first restores every
+recorded device, and only then deletes the table, whose rule drops unmatched
+sandbox traffic, with the other orphaned state; if a device cannot be
+restored, the table stays and the sweep fails. The provider never reads another table for
+policy and never changes one.
+
+`NamespacedLocalNetwork::probe_egress` proves that forwarded sandbox traffic
+passes the host. Restart reconciliation (`reconcile_restart`, #1200) runs it
+through `LocalEgressProbe` while admission is still closed: after every
+attempt unit is gone, still-mounted roots are detached and the orphan sweep
+has removed the previous runtime's namespaces, veth ends, host table and
+recorded forwarding, and before the device proofs and the registry removal
+that let admission reopen. Any probe error, or a probe still running at the
+reconciliation deadline, keeps admission closed and keeps every record. A
+probe whose own attempt network could not be removed leaves the port
+quarantined and fails too, as does any probe while the port is quarantined.
+Only one probe runs at a time: a probe that outlives the deadline keeps
+running on the blocking pool, and every further probe fails until it ends.
+It takes the installation-configured `EgressProbe`: an IPv4 /30 and the
+target's port. `EgressProbe::new` refuses a network that is not a /30's
+network address, a /30 in `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16` or
+`224.0.0.0/3`, and port zero. It accepts any other range, including other
+special-purpose space such as `192.0.0.0/24` and the documentation and
+benchmarking ranges. The probe also refuses a /30 that overlaps the attempt
+range or any host address or route. The probe establishes a real attempt
+network for a reserved probe attempt whose one endpoint is a target
+namespace behind the host on its own veth pair (`piglor-t0`), connects, and
+requires the connection to arrive from the host's address, so forwarding and
+masquerade both work. Every failure is an error (ADR-069 §1: an absent or
+ineffective property closes admission). The probe removes everything it
+made, and the restart sweep removes `piglor-t0` and the probe's namespaces
+by name. Because its target sits behind a veth pair rather than the host's
+real uplink, a rule that drops only traffic leaving by one particular uplink
+is not detected; the requirement below still forbids it.
+
+Installation requirement: no other host firewall (Docker's, ufw's, an
+`iptables` FORWARD policy of DROP) may drop forwarded traffic from the
+`piglor-h*` ends to the authenticated endpoints or its replies. Host egress
+additionally needs nf_tables NAT (`CONFIG_NFT_NAT`, `CONFIG_NFT_MASQ`,
+`CONFIG_NF_NAT`).
+
+The privileged tests run in `scripts/run-isolated-with-net-admin-test.sh`,
+which adds exactly `NET_ADMIN` and `SYS_ADMIN` to an isolated container
+without network, and drops Docker's AppArmor profile only for the tests that
+pin namespaces.

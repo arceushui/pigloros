@@ -20,12 +20,17 @@ use pos_core::{
     trusted_clock::ScriptedTrustedWallSourceV1,
     OwnerIdV1,
 };
-use pos_crypto::plugin_manifest::PluginReleaseSignatureErrorV1;
+use pos_crypto::plugin_manifest::{
+    verify_plugin_release_signature_v1, PluginReleaseSignatureErrorV1,
+};
 use pos_crypto::plugin_trust::{PluginTrustErrorV1, ValidatedPluginManifestProjectionV1};
+use pos_plugin_content::{
+    validate_plugin_bundle_content_v1, PluginBundleContentArtifactV1, PluginBundleContentErrorV1,
+};
 use pos_plugin_publisher::test_support::{
     encoding::{Material, Spec, OTHER_OWNER, OWNER, SCOPE, TICK, UTC},
-    release::{make_draft, pmf1_digest, PrivateRoot, Shape, COMPONENT_BYTES},
-    world::{key_bytes, register, wall, World},
+    release::{make_draft, pmf1_digest, FixtureContent, PrivateRoot, Shape, COMPONENT_BYTES},
+    world::{activation, key_bytes, register, trusted_utc, wall, World},
     BoxResult,
 };
 use pos_plugin_publisher::{
@@ -37,7 +42,7 @@ use pos_plugin_release::{
 };
 use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustCommitOutcomeV1, PluginTrustPolicyRegistryErrorV1,
-    PluginTrustPolicyRegistryV1,
+    PluginTrustPolicyRegistryV1, TrustEvaluationPointV1,
 };
 
 type TestResult = BoxResult<()>;
@@ -78,6 +83,68 @@ const fn authorization_error(error: PluginTrustErrorV1) -> PluginReleaseInstallE
 // ---------------------------------------------------------------------------
 
 #[test]
+fn signed_malformed_content_refuses_before_time_or_registry() -> TestResult {
+    let mut world = World::new()?;
+    let shape = Shape::first();
+    let mut content = FixtureContent::new(shape.component);
+    content.corrupt_provenance();
+    let release = world.publish_with_content(shape, &content)?;
+    let material = world.material()?;
+    assert_refused_before_registry(
+        &mut world,
+        release.address(),
+        &material,
+        PluginReleaseInstallErrorV1::Content(PluginBundleContentErrorV1::Malformed {
+            artifact: PluginBundleContentArtifactV1::Provenance,
+        }),
+    )
+}
+
+#[test]
+fn registry_refuses_a_content_proof_from_another_verified_release() -> TestResult {
+    let mut world = World::new()?;
+    let first = world.publish(Shape::first())?;
+    let second = world.publish(Shape {
+        version: "2.0.0",
+        ..Shape::first()
+    })?;
+    let resigned = world.publish_with_signature(Shape::first(), [0; 64])?;
+    let bundle = world.store.read_verified(first.address())?;
+    let other = world.store.read_verified(second.address())?;
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let original_content = validate_plugin_bundle_content_v1(&bundle)?;
+    let content = validate_plugin_bundle_content_v1(&other)?;
+    let same_release = validate_plugin_bundle_content_v1(&world.store.read_verified(&resigned)?)?;
+    assert_eq!(
+        same_release.release_digest(),
+        original_content.release_digest()
+    );
+    assert_ne!(same_release.pmf1_digest(), original_content.pmf1_digest());
+    let material = world.material()?;
+    let authorization = material.evidence.authorize_release(&projection)?;
+    let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
+    let before = world.snapshot(&[original_content.pmf1_digest()])?;
+    let utc = trusted_utc(material.utc)?;
+    for substituted in [&content, &same_release] {
+        let result = world.registry.admit(
+            &world.anchor,
+            &material.tps1,
+            &material.evidence,
+            &projection,
+            (&signature, substituted),
+            TrustEvaluationPointV1::new(utc, TICK),
+            activation(world.timeline, 1),
+        );
+        assert_eq!(
+            result.err(),
+            Some(PluginTrustPolicyRegistryErrorV1::ContentProofMismatch)
+        );
+    }
+    assert_eq!(world.snapshot(&[original_content.pmf1_digest()])?, before);
+    Ok(())
+}
+
+#[test]
 fn installs_a_signed_release_and_returns_the_admission_and_execution_projection() -> TestResult {
     let mut world = World::new()?;
     let published = world.publish(Shape::first())?;
@@ -111,10 +178,10 @@ fn installs_a_signed_release_and_returns_the_admission_and_execution_projection(
     assert_eq!(signature.owner(), OwnerIdV1::new(OWNER)?);
     assert_eq!(signature.epoch(), 1);
     assert_eq!(signature.public_key(), key_bytes(&world.publisher));
-    // Content validation was explicitly not performed (#574).
+    // The installed closure passed the basic package checks.
     assert_eq!(
         installed.content_validation(),
-        ContentValidationV1::NotPerformed
+        ContentValidationV1::BasicPackageV1
     );
     // One admit call, at the sampled UTC second and the evidence's own Tick.
     let material = world.material()?;
@@ -403,7 +470,10 @@ fn a_release_with_a_bad_signature_is_refused_before_the_registry() -> TestResult
         &mut world.keys,
         &world.publisher,
         1,
-        &make_draft(Shape::first())?,
+        &make_draft(
+            Shape::first(),
+            &FixtureContent::new(Shape::first().component),
+        )?,
     )?
     .signature();
     let mut flipped = valid;
@@ -491,7 +561,8 @@ fn a_revoked_publisher_key_is_refused_before_signature_and_registry() -> TestRes
 fn an_unlisted_publisher_epoch_is_refused_before_signature_and_registry() -> TestResult {
     let mut world = World::new()?;
     let second = register(&mut world.keys, OWNER, 2)?;
-    let draft = make_draft(Shape::first())?;
+    let content = FixtureContent::new(Shape::first().component);
+    let draft = make_draft(Shape::first(), &content)?;
     let published = publish_plugin_release_v1(&mut world.keys, &second, 2, &draft, &world.store)?;
     let material = world.material()?;
     assert_refused_before_registry(
@@ -542,7 +613,8 @@ fn a_release_by_an_owner_without_the_grant_is_refused_before_the_registry() -> T
         owner: OTHER_OWNER,
         ..Shape::first()
     };
-    let draft = make_draft(shape)?;
+    let content = FixtureContent::new(shape.component);
+    let draft = make_draft(shape, &content)?;
     let published =
         publish_plugin_release_v1(&mut world.keys, &world.other, 1, &draft, &world.store)?;
     let material = world.material()?;
@@ -561,7 +633,8 @@ fn a_release_by_an_owner_without_the_grant_is_refused_before_the_registry() -> T
 #[test]
 fn a_pmf1_that_does_not_bind_its_component_is_refused_before_the_registry() -> TestResult {
     let mut world = World::new()?;
-    let draft = make_draft(Shape::first())?;
+    let content = FixtureContent::new(Shape::first().component);
+    let draft = make_draft(Shape::first(), &content)?;
     let pmf1 = draft.unsigned()?.with_signature(1, [0; 64])?;
     let mismatched = world.publish_raw(&pmf1, b"another component")?;
     let material = world.material()?;
@@ -636,7 +709,10 @@ fn an_unknown_address_is_refused_before_the_registry() -> TestResult {
         &mut world.keys,
         &world.publisher,
         1,
-        &make_draft(Shape::first())?,
+        &make_draft(
+            Shape::first(),
+            &FixtureContent::new(Shape::first().component),
+        )?,
         &other_store,
     )?;
     let material = world.material()?;

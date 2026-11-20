@@ -330,7 +330,10 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
         }
         pos_core::ErasureHostErrorV1::AuthorizationDenied
         | pos_core::ErasureHostErrorV1::Conflict
-        | pos_core::ErasureHostErrorV1::AdapterFailure => pos_core::CoreError::ArtifactUnavailable,
+        | pos_core::ErasureHostErrorV1::AdapterFailure
+        | pos_core::ErasureHostErrorV1::ModeBindingStale => {
+            pos_core::CoreError::ArtifactUnavailable
+        }
     }
 }
 
@@ -617,7 +620,10 @@ pub mod test_support {
             expires_at: WallTime::from_micros(expires_at),
             binding_digest: Hash::from_bytes([7; 32]),
         };
-        test_ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
+        test_ok(AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            draft,
+        ))
     }
 
     /// Spin-acquire [`EXECUTOR_SERIAL`], yielding between attempts, and return
@@ -978,6 +984,7 @@ mod tests {
             ErasureHostErrorV1::AuthorizationDenied,
             ErasureHostErrorV1::Conflict,
             ErasureHostErrorV1::AdapterFailure,
+            ErasureHostErrorV1::ModeBindingStale,
         ] {
             assert!(matches!(
                 host_error_to_core(host),

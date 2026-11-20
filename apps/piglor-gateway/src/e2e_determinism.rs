@@ -311,6 +311,9 @@ async fn request_http_with_actor(
     .test_ok()?
 }
 
+/// The next Gateway v1 idempotency key; every request carries a fresh one and reads ignore it.
+static NEXT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn request_http_blocking_with_actor(
     address: SocketAddr,
     method: &str,
@@ -324,6 +327,7 @@ fn request_http_blocking_with_actor(
     let actor_header = actor.map_or_else(String::new, |actor| {
         format!("x-piglor-actor-entity: {actor}\r\n")
     });
+    let key = NEXT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut stream = TcpStream::connect(address).test_ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -333,7 +337,7 @@ fn request_http_blocking_with_actor(
         .test_ok()?;
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{actor_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{actor_header}Idempotency-Key: e2e-{key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     )
     .test_ok()?;
@@ -433,16 +437,18 @@ fn gateway_authorization_for(
     actor: EntityId,
 ) -> Result<GatewayAuthorization, Box<dyn std::error::Error + Send + Sync>> {
     let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok()?;
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+    let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        AuthenticatedPrincipalDraftV1 {
             principal: principal.clone(),
             adapter_id: "fixture".to_owned(),
             assurance: AssuranceLevelV1::try_new(1).test_ok()?,
             issued_at: WallTime::from_micros(1),
             expires_at: WallTime::from_micros(u64::MAX),
             binding_digest: Hash::from_bytes([2; 32]),
-        })
-        .test_ok()?;
+        },
+    )
+    .test_ok()?;
     let authority_timeline = TimelineId::new();
     let registry_digest = Hash::from_bytes([3; 32]);
     let policy_revision = Hash::from_bytes([4; 32]);
@@ -483,6 +489,7 @@ fn gateway_authorization_for(
     })
     .test_ok()?;
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![authenticated.registry_binding_digest()],
         vec![grant.binding_digest().test_ok()?],
@@ -1228,7 +1235,7 @@ async fn gateway_shutdown_drains_an_empty_executor(
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
-    let gateway = Gateway::new_with_erasure_host(host)?;
+    let gateway = Gateway::unprotected_for_harness(host)?;
     gateway.shutdown().await.test_ok()?;
     drop(gateway);
     Ok(())

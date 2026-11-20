@@ -2,8 +2,9 @@
 
 `pos-experiment` is a simulation host for a durable PiglorOS Timeline. Its
 `multi-rate-demo` command proves deterministic 100 ms / 200 ms agent cadence.
-Run standalone Gateway and experiment processes sequentially against the same
-SQLite file; live concurrent commands must share one erasure host.
+It writes only SQLite files no Gateway has served: a Gateway binds its store to
+an execution mode, and a bound store refuses non-Gateway writers (ADR-134).
+Live concurrent commands must share one erasure host.
 Human action submission additionally requires a host-bound Gateway authority adapter
 and World body catalogue.
 
@@ -90,8 +91,16 @@ Local runner, not a capture adapter of any row.
 Every mode imports the Events it produced into that public seam. The host
 places the unauthorized value in a denied sibling Timeline of the seam store.
 Run-local identities are captured position-relative. `pos-ni-g-pub-subject` is
-the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
-`Missing` until slice N1b (#1284).
+the Local fresh-process subject of these rows.
+
+`non_interference_harness::g_archive` holds the `NI-ARCHIVE-009` capture adapter
+of slice N1b (#1284, wiki `ADR-127_Deterministic_Run_Evidence_Archive`). It uses
+the G-PUB subject and seam: the export is projected onto the RVA1 members
+(`pos_conformance::run_evidence_archive`), written by the RVA1 builder from
+value-named staging files in a value-dependent order and chunking, and imported
+by the independent reader `pos_reference::run_evidence_archive`. The six
+surfaces are byte-exact; the `Denial` variant also records an import refused for
+a wrong digest.
 
 `non_interference_harness::g_fork` holds the G-FORK capture adapter of slice N4
 (#1232, wiki `ADR-062_R8_NonInterference_Fork`) for `NI-FORK-008`, over the R6
@@ -156,25 +165,30 @@ participant Driver `beta` writes the fixture's hidden participant field into
 its factual Events after the cut; like the factual suffix it never reaches an
 artifact.
 
+`non_interference_harness::g_ops` (Linux only) holds the G-OPS capture adapters
+of slice N3 (#1231, wiki `ADR-062_R8_NonInterference_Operations`) for
+`NI-CACHE-002`, `NI-OBS-004`, `NI-TIME-005` and `NI-CRASH-012`:
+- The subject is an Experiment whose one Driver is a supervisor-backed community
+  Plugin Driver running the checked-in WAT guest `g_ops_guest.wat` in a fresh
+  `pos-ni-g-ops-worker` process.
+- The host places the unauthorized value in denied sibling work: cached sibling
+  decisions of a host `ErasureExecutionHostV1` authorization cache, a sibling
+  invocation's log message, declared-failure coordinate and trap, a support
+  archive name, and a wall-clock offset and watchdog margin.
+- Only the excluded bytes of each row's typed operational capture carry those
+  values. The support bundle, crash report and support archive are capture
+  records, not product features.
+
+`pos-ni-g-ops-subject` is the Local fresh-process subject of these rows.
+
 ## Sequential SQLite multi-rate demo
 
-Start the local-only Gateway with an explicit SQLite file:
-
-```bash
-cargo run -p piglor-gateway --locked -- \
-  serve 127.0.0.1:8080 /tmp/piglor-126.db
-```
-
-Create a Timeline and retain the returned `id`, then stop the Gateway before
-opening the experiment process:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/v1/timelines \
-  -H 'content-type: application/json' \
-  -d '{"name":"multi-rate-demo"}'
-```
-
-Point the experiment process at the same SQLite path and Timeline ID:
+The demo appends to an existing Timeline of an explicit SQLite file. The file
+must not be one a Gateway has served: the first `piglor-gateway serve` binds a
+store to its execution mode, and a bound store refuses every non-Gateway writer
+(ADR-134 §8), so the earlier Gateway-then-experiment sequence on one file is no
+longer supported. Point the experiment process at the SQLite path and Timeline
+ID:
 
 ```bash
 cargo run -p pos-experiment --locked -- \
@@ -188,21 +202,10 @@ Ticks and quantum must be non-zero; `--pace-ms 0` runs without sleeping. Pacing 
 slows terminal output—driver eligibility comes exclusively from the printed monotonic
 simulation nanoseconds, so machine speed does not change deterministic cadence.
 
-After the demo exits, restart the Gateway against that SQLite file to inspect
-the committed Timeline. The restarted host verifies the complete inventory
-before serving routes. It can then commit Society Signals:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/v1/timelines/<timeline-id>/signals \
-  -H 'content-type: application/json' \
-  -d '{"entity_id":"<society-entity-id>","dimension":"trust","value":0.75}'
-
-```
-
 Human actions use the [Gateway's versioned action contract](../piglor-gateway/README.md):
 `world.action.v1` with the exact `world.action.v1.submit` capability and typed WAC1 payload.
-The default Gateway process has no authority adapter and fails closed with `401` for
-action submission; a host must configure authenticated authority and known World bodies.
+An unprovisioned Gateway fails closed with `401` for every protected route, and actions stay
+refused until an installed World action catalogue exists (#461).
 
 Entity IDs are ULIDs generated by a PiglorOS client. Committed sequence order
 remains authoritative. If another process advances the file while a host is

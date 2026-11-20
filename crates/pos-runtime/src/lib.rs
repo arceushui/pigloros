@@ -31,13 +31,17 @@ pub mod composition_fallback;
 #[cfg(target_os = "linux")]
 pub mod counterfactual;
 pub mod driver;
+pub mod erasure_authority_view;
 pub mod erasure_host;
+#[cfg(target_os = "linux")]
+pub mod erasure_local_authority;
 pub mod error;
 pub mod measured_process_image;
 pub mod output_admission;
 pub mod recorder;
 pub mod registry;
 pub mod reviewed_policy;
+pub mod scenario_room;
 pub mod scheduled_admission_host;
 pub mod scheduler;
 pub mod schema;
@@ -46,6 +50,8 @@ pub mod trusted_clock;
 pub mod world_profile;
 pub mod world_replay;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use authorization_cache::AuthorizationCacheCountsV1;
 pub use authorization_cache::AuthorizationCacheKeyV1;
 pub use composition::{
     community_pin_v1, AdmittedCompositionV1, AdmittedManifestPolicySourceV1,
@@ -66,10 +72,27 @@ pub use driver::{
     ObservationView, ProjectionKey, RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput,
     TimelineHistorySegment,
 };
+pub use erasure_authority_view::{
+    ErasureAuthorityReadViewV1, ErasureRecordedScopeV1, ErasureViewListErrorV1,
+};
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
-    ErasureReadSenderV1,
+    ErasureReadSenderV1, LocalErasureSubmissionBindingV1, LocalErasureSubmissionV1,
+    LocalErasureSubmitErrorV1, LocalFreezePreparationV1,
+};
+#[cfg(target_os = "linux")]
+pub use erasure_local_authority::{
+    compiled_local_erasure_policy_v1, local_erasure_execution_binding_v1,
+    local_erasure_signer_rotation_v1, LocalErasureClassificationRowV1,
+    LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1, LocalErasureDriverV1,
+    LocalErasureExecutorV1, LocalErasureRotationRefusalV1, LocalErasureSignerRotationV1,
+    LocalErasureSignerV1, LocalErasureSigningRequestV1, LocalErasureStepV1, LocalErasureSweepV1,
+    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
+    LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_EXECUTOR_ID_V1,
+    LOCAL_ERASURE_EXECUTOR_VERSION_DIGEST_V1, LOCAL_ERASURE_EXECUTOR_VERSION_V1,
+    LOCAL_ERASURE_MAX_REPREPARE_V1, LOCAL_ERASURE_POLICY_REFERENCE_V1,
+    LOCAL_ERASURE_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
 };
 pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
 pub use measured_process_image::MeasuredProcessImageV1;
@@ -104,6 +127,14 @@ pub use reviewed_policy::{
     reviewed_retention_policy_hash_v1, ReviewedPolicyArtifactErrorV1,
     MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1, MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1,
     MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1,
+};
+pub use scenario_room::{
+    RoomCorrelationIdV1, RoomInitialConditionV1, RoomParticipantKindV1, RoomParticipantV1,
+    RoomPluginRefV1, RoomRuleV1, ScenarioRoomCatalogueV1, ScenarioRoomDescriptorV1,
+    ScenarioRoomErrorV1, ScenarioRoomFieldV1, ScenarioRoomInputV1, ScenarioRoomLimitV1,
+    MAX_ROOM_DESCRIPTOR_BYTES_V1, MAX_ROOM_INITIAL_CONDITIONS_V1, MAX_ROOM_PARTICIPANTS_V1,
+    MAX_ROOM_PLUGINS_V1, MAX_ROOM_RULES_V1, MAX_ROOM_SAFE_INTEGER_V1, MAX_ROOM_TICKS_V1,
+    SCENARIO_ROOM_SCHEMA_VERSION_V1,
 };
 #[cfg(feature = "local-admission-host")]
 pub use scheduled_admission_host::LocalScheduledAdmissionHostV1;

@@ -4,6 +4,84 @@
 //! then composes subject consent, capability scope, delegation, and revocation
 //! through [`AuthorityEvaluatorV1`]. This module selects no authentication
 //! provider, bearer-token format, or policy engine and performs no I/O.
+//!
+//! # Trust-root seal
+//!
+//! An [`AuthenticatedPrincipalResultV1`] and an
+//! [`AuthorityRegistrySnapshotV1`] are the trust roots the evaluator relies
+//! on (ADR-129 A5.9), so both are built only with an
+//! [`AuthorityTrustRootSealV1`]. The seal is constructible only through
+//! `AuthorityTrustRootSealV1::for_composition_root`, which exists only with
+//! this crate's `authority-trust-root` cargo feature. Only the trusted
+//! composition roots and the authentication adapters they install
+//! (`piglor-gateway`, `pos-experiment` and `pos-plugin-conformance-adapter`)
+//! enable that feature outside dev-dependencies, each mints the seal at one
+//! pinned site, and no crate but this one may re-export or return the seal; CI
+//! enforces all three with `scripts/check_authority_trust_root_seal.py`.
+//! Hosts and owners below them, such as the local scheduled-admission host
+//! and the `pos-store` community owner, never mint it: they take a seal from
+//! their caller.
+//!
+//! The seal cannot be forged, copied or defaulted:
+//!
+//! ```compile_fail,E0423
+//! let _seal = pos_core::AuthorityTrustRootSealV1(());
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn requires_default<T: Default>() {}
+//! requires_default::<pos_core::AuthorityTrustRootSealV1>();
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn requires_clone<T: Clone>() {}
+//! requires_clone::<pos_core::AuthorityTrustRootSealV1>();
+//! ```
+//!
+//! Neither trust root can be built without it:
+//!
+//! ```compile_fail,E0061
+//! use pos_core::{AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1};
+//! fn forge(draft: AuthenticatedPrincipalDraftV1) {
+//!     let _principal = AuthenticatedPrincipalResultV1::try_from_draft(draft);
+//! }
+//! ```
+//!
+//! ```compile_fail,E0061
+//! use pos_core::{AuthorityRegistrySnapshotV1, Hash};
+//! fn forge(digest: Hash, binding: Hash) {
+//!     let _registry =
+//!         AuthorityRegistrySnapshotV1::try_new(digest, vec![binding], vec![binding], vec![]);
+//! }
+//! ```
+//!
+//! Nor by a struct literal:
+//!
+//! ```compile_fail,E0451
+//! use pos_core::{AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1};
+//! fn forge(draft: AuthenticatedPrincipalDraftV1) -> AuthenticatedPrincipalResultV1 {
+//!     AuthenticatedPrincipalResultV1 {
+//!         principal: draft.principal,
+//!         adapter_id: draft.adapter_id,
+//!         assurance: draft.assurance,
+//!         issued_at: draft.issued_at,
+//!         expires_at: draft.expires_at,
+//!         binding_digest: draft.binding_digest,
+//!     }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use pos_core::{AuthorityRegistrySnapshotV1, Hash};
+//! fn forge(digest: Hash, binding: Hash) -> AuthorityRegistrySnapshotV1 {
+//!     AuthorityRegistrySnapshotV1 {
+//!         registry_digest: digest,
+//!         authentication_bindings: vec![binding],
+//!         capability_bindings: vec![binding],
+//!         consent_bindings: Vec::new(),
+//!     }
+//! }
+//! ```
 
 use std::{cmp::Ordering, io::Cursor};
 
@@ -25,8 +103,12 @@ pub use knowledge::{
 pub use persistence::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, AuthorityViewV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, PersistedAuthorityV1, MAX_PERSISTED_AUTHORITY_GRANTS,
+    AuthorityPersistenceStateV1, AuthorityViewV1, AuthorizationDenialEvidenceV1,
+    AuthorizationDenialPermitV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
+    AuthorizationDenialSuppressionV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    PersistedAuthorityV1, AUTHORIZATION_DENIAL_RECORD_BYTES,
+    AUTHORIZATION_DENIAL_SUPPRESSION_BYTES, MAX_AUTHORIZATION_DENIALS_PER_READ,
+    MAX_AUTHORIZATION_DENIAL_RECORDS, MAX_PERSISTED_AUTHORITY_GRANTS,
     MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
 
@@ -239,6 +321,32 @@ impl AssuranceLevelV1 {
     }
 }
 
+/// Capability held only by the trusted composition roots and what they
+/// install (ADR-129 A5.9, #1374).
+///
+/// The roots are `piglor-gateway`, `pos-experiment` and
+/// `pos-plugin-conformance-adapter`; the authentication adapters and owners
+/// they install take the seal from them.
+///
+/// [`AuthenticatedPrincipalResultV1::try_from_draft`] and
+/// [`AuthorityRegistrySnapshotV1::try_new`] require it, so same-process code
+/// outside the trusted boundary cannot build a principal or a registry that
+/// the evaluator trusts. It is constructible only with
+/// `Self::for_composition_root`, which exists only with this crate's
+/// `authority-trust-root` cargo feature; it is neither `Clone` nor `Default`.
+#[derive(Debug)]
+pub struct AuthorityTrustRootSealV1(());
+
+#[cfg(feature = "authority-trust-root")]
+impl AuthorityTrustRootSealV1 {
+    /// Mint the trust-root seal; available only to `authority-trust-root`
+    /// builds.
+    #[must_use]
+    pub const fn for_composition_root() -> Self {
+        Self(())
+    }
+}
+
 /// Unvalidated constructor fields for an authenticated-principal result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedPrincipalDraftV1 {
@@ -264,9 +372,15 @@ pub struct AuthenticatedPrincipalResultV1 {
 impl AuthenticatedPrincipalResultV1 {
     /// Validate adapter evidence without retaining credentials or bearer material.
     ///
+    /// Only the trusted boundary holding the [`AuthorityTrustRootSealV1`]
+    /// builds a result.
+    ///
     /// # Errors
     /// Returns a closed error for invalid text, interval, or identity fields.
-    pub fn try_from_draft(draft: AuthenticatedPrincipalDraftV1) -> Result<Self, AuthorityErrorV1> {
+    pub fn try_from_draft(
+        _seal: &AuthorityTrustRootSealV1,
+        draft: AuthenticatedPrincipalDraftV1,
+    ) -> Result<Self, AuthorityErrorV1> {
         validate_text(&draft.adapter_id)
             .and_then(|()| validate_wall_interval(draft.issued_at, draft.expires_at))
             .and_then(|()| validate_hash(draft.binding_digest))
@@ -389,9 +503,22 @@ pub struct AuthorityRegistrySnapshotV1 {
 impl AuthorityRegistrySnapshotV1 {
     /// Construct a canonical snapshot from records verified by the trusted host.
     ///
+    /// Only the trusted boundary holding the [`AuthorityTrustRootSealV1`]
+    /// builds a snapshot, so `registry_digest` cannot be forged by
+    /// same-process code.
+    ///
+    /// `registry_digest` is the authority catalogue's identity, a label, and is
+    /// deliberately not derived from the bindings. Every grant and request
+    /// carries it as `authority_registry_digest`, and the owner builds one
+    /// snapshot per request (ADR-129 revision 6 R6.2(5)) with that same digest
+    /// over different bindings. A digest derived from the bindings would
+    /// change with every request and break every grant's binding. The
+    /// digest over the bindings is CAP1's `capability_attestation_digest`.
+    ///
     /// # Errors
     /// Returns a closed error for zero, duplicate, unordered, or unbounded fields.
     pub fn try_new(
+        _seal: &AuthorityTrustRootSealV1,
         registry_digest: Hash,
         authentication_bindings: Vec<Hash>,
         capability_bindings: Vec<Hash>,
@@ -412,6 +539,15 @@ impl AuthorityRegistrySnapshotV1 {
     #[must_use]
     pub const fn registry_digest(&self) -> Hash {
         self.registry_digest
+    }
+
+    /// The strictly ordered capability-grant bindings this snapshot attests.
+    ///
+    /// Read-only: it cannot construct a grant, a snapshot or an
+    /// authentication result (ADR-129 R6.2(5)).
+    #[must_use]
+    pub fn capability_bindings(&self) -> &[Hash] {
+        &self.capability_bindings
     }
 
     fn trusts_authentication(&self, request: &AuthorizationRequestV1) -> bool {
@@ -1379,6 +1515,22 @@ impl AuthorizationOutcomeV1 {
     }
 }
 
+/// The evidence an `Expired` decision found outside its validity.
+///
+/// It is not part of the AUD1 record: the evaluator reports it beside the
+/// decision through [`AuthorityEvaluatorV1::authorize_with_expiry`], so a
+/// host can tell an expired authentication from an expired grant or consent
+/// without recomputing the evaluation order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorizationExpiryV1 {
+    /// The authenticated Principal evidence is outside its validity window.
+    AuthenticationEvidence,
+    /// A resolved consent grant is outside its validity window.
+    Consent,
+    /// A capability grant in the delegation chain is outside its positions.
+    Grant,
+}
+
 /// Host-owned immutable answer for one exact request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizationDecisionV1 {
@@ -1547,6 +1699,18 @@ impl AuthorityEvaluatorV1 {
         grant_chain: &DelegationChainV1,
         trusted_registry: &AuthorityRegistrySnapshotV1,
     ) -> AuthorizationDecisionV1 {
+        Self::authorize_with_expiry(request, grant_chain, trusted_registry).0
+    }
+
+    /// Evaluate like [`Self::authorize`] and also report which evidence an
+    /// `Expired` decision found outside its validity; `None` for every other
+    /// outcome.
+    #[must_use]
+    pub fn authorize_with_expiry(
+        request: &AuthorizationRequestV1,
+        grant_chain: &DelegationChainV1,
+        trusted_registry: &AuthorityRegistrySnapshotV1,
+    ) -> (AuthorizationDecisionV1, Option<AuthorizationExpiryV1>) {
         let mut evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
         let grant_chain_bindings = if evaluation.grant_evidence_is_trusted {
@@ -1607,7 +1771,7 @@ impl AuthorityEvaluatorV1 {
             decision_digest: Hash::zero(),
         };
         decision.decision_digest = decision_digest(&decision);
-        decision
+        (decision, evaluation.expiry)
     }
 }
 
@@ -1616,6 +1780,7 @@ struct AuthorizationEvaluationV1 {
     outcome: AuthorizationOutcomeV1,
     error: Option<AuthorityErrorV1>,
     grant_evidence_is_trusted: bool,
+    expiry: Option<AuthorizationExpiryV1>,
 }
 
 impl AuthorizationEvaluationV1 {
@@ -1624,6 +1789,7 @@ impl AuthorizationEvaluationV1 {
             outcome: AuthorizationOutcomeV1::Active,
             error: None,
             grant_evidence_is_trusted: true,
+            expiry: None,
         }
     }
 
@@ -1632,6 +1798,7 @@ impl AuthorizationEvaluationV1 {
             outcome,
             error,
             grant_evidence_is_trusted: false,
+            expiry: None,
         }
     }
 
@@ -1643,6 +1810,18 @@ impl AuthorizationEvaluationV1 {
             outcome,
             error,
             grant_evidence_is_trusted: true,
+            expiry: None,
+        }
+    }
+
+    /// An `Expired` answer naming the lapsed evidence; only a grant expiry
+    /// keeps the (trusted) grant evidence.
+    const fn expired(expiry: AuthorizationExpiryV1) -> Self {
+        Self {
+            outcome: AuthorizationOutcomeV1::Expired,
+            error: None,
+            grant_evidence_is_trusted: matches!(expiry, AuthorizationExpiryV1::Grant),
+            expiry: Some(expiry),
         }
     }
 }
@@ -1661,7 +1840,7 @@ fn authorization_evaluation(
     if request.at_time < request.authenticated.issued_at
         || request.at_time >= request.authenticated.expires_at
     {
-        return AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None);
+        return AuthorizationEvaluationV1::expired(AuthorizationExpiryV1::AuthenticationEvidence);
     }
     if !trusted_registry.trusts_consent(request) {
         return AuthorizationEvaluationV1::denied(
@@ -1729,10 +1908,9 @@ fn authorization_evaluation(
     }
     match validate_temporal_chain(request, grant_chain) {
         TemporalValidity::Valid => AuthorizationEvaluationV1::active(),
-        TemporalValidity::Expired => AuthorizationEvaluationV1::denied_with_trusted_grant(
-            AuthorizationOutcomeV1::Expired,
-            None,
-        ),
+        TemporalValidity::Expired => {
+            AuthorizationEvaluationV1::expired(AuthorizationExpiryV1::Grant)
+        }
         TemporalValidity::RevokedAtFence => AuthorizationEvaluationV1::denied_with_trusted_grant(
             AuthorizationOutcomeV1::RevokedAtFence,
             Some(AuthorityErrorV1::RevokedAtFence),
@@ -1824,7 +2002,7 @@ fn evaluate_consent_grant(
             Some(AuthorityErrorV1::ConsentMissing),
         )
     } else if request.at_time < grant.valid_from || request.at_time >= grant.valid_until {
-        AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None)
+        AuthorizationEvaluationV1::expired(AuthorizationExpiryV1::Consent)
     } else if grant.revocation_fence.is_some_and(|fence| {
         request
             .consent_at_position

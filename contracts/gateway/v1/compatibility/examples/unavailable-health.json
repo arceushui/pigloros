@@ -1,0 +1,19 @@
+{
+  "name": "unavailable-health",
+  "operation_id": "getHealth",
+  "request": {},
+  "request_valid": true,
+  "response": {
+    "status": 503,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:temporarily-unavailable",
+      "title": "Temporarily unavailable",
+      "status": 503,
+      "detail": "store executor or erasure host not ready",
+      "instance": "/health",
+      "code": "temporarily-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": true
+    }
+  }
+}

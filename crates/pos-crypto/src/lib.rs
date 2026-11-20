@@ -7,6 +7,7 @@
 
 pub mod canonical;
 pub mod chain;
+pub mod community_cipher;
 pub mod consent_v2;
 pub mod dsse;
 pub mod fork_attribution;
@@ -17,6 +18,7 @@ pub mod key_roles;
 pub mod plugin_execution;
 pub mod plugin_manifest;
 pub mod plugin_trust;
+pub mod preference_weights;
 pub mod recipient_export;
 pub mod recipient_key;
 pub mod signing;

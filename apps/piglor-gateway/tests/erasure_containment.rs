@@ -14,16 +14,16 @@ use pos_core::{
     ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceInputV1,
     ErasureFreezeAdmissionEvidenceV1, ErasureFreezeApplicabilityRowV1,
     ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
+    ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasureReceiptInputV1, ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
 };
 use pos_runtime::{
-    ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1, ErasureExecutionHostV1,
+    ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
+    ErasureExecutionHostV1,
 };
 use pos_store::StoreConfig;
 use std::collections::BTreeMap;
@@ -151,35 +151,61 @@ fn freeze_evidence_fixture(
 #[derive(Default)]
 struct HealthAuthority;
 
-impl ErasureFreezeAuthorizationVerifierV1 for HealthAuthority {
-    fn validate_freeze_authorization(
+impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
+    fn validate_freeze_authorization_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
         authorization.verify_admission_body_binding(admission)
     }
-}
 
-impl ErasureRecoveryAuthorizationVerifierV1 for HealthAuthority {
-    fn validate_scope_extension(
+    fn validate_scope_extension_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
-    fn validate_administrative_resolution(
+    fn validate_administrative_resolution_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
-}
 
-impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
+    fn validate_attempt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &pos_core::ErasureRequestV1,
+        _admission: &pos_core::ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_acknowledgement_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_receipt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _attempt: &pos_core::ErasureRetryAdmissionV1,
+        _receipt: &pos_core::ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
     fn verified_topology_observation(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -190,12 +216,17 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
         )))
     }
 
-    fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+    fn authenticate(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+    ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
     fn admit_authorization(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
@@ -207,6 +238,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_corrected_submission(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: &ErasureRequestV1,
         _correction: &ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -215,6 +247,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_atomic_freeze(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -266,6 +299,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
@@ -273,6 +307,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_fork_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
         _input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -281,6 +316,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn resolve_fork_child_scope(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _parent: TimelineId,
         _child: &pos_core::TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -289,6 +325,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn resolve_fork_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -305,6 +342,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_administrative_resolution(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
@@ -312,6 +350,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn dispatch_destruction(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
@@ -320,6 +359,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_attempt(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         admission: &pos_core::ErasureRetryAdmissionV1,
     ) -> Result<pos_core::ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
         Ok(pos_core::ErasureAttemptQuotaReservationV1::new(
@@ -330,12 +370,17 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_acknowledgement(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
-    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+    fn admit_receipt(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _input: &ErasureReceiptInputV1,
+    ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 }
@@ -359,8 +404,8 @@ async fn host_owned_gateway_covers_store_boundary(
         StoreConfig::Memory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
-    let gateway = Gateway::new_with_erasure_host(host)?;
-    let timeline = gateway.create_timeline("shared-gate").await?;
+    let gateway = Gateway::unprotected_for_harness(host)?;
+    let timeline = gateway.create_timeline("shared-gate", None).await?;
     assert!(gateway
         .read_events_page(&timeline.id().to_string(), 0, 1)
         .await?
@@ -415,7 +460,7 @@ async fn recovered_access_frozen_gateway_health_is_payload_free(
             .ok_or("recovered AccessFrozen state was not persisted")?;
         assert_eq!(history[0].lifecycle(), ErasureLifecycleV1::AccessFrozen);
     }
-    let gateway = Gateway::new_with_erasure_host(recovered)?;
+    let gateway = Gateway::unprotected_for_harness(recovered)?;
     let response = router(AppState {
         gateway: gateway.clone(),
         ledger_view: piglor_ledger::LedgerView::default(),
@@ -466,7 +511,7 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
         StoreConfig::Memory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
-    let geo_gateway = Gateway::new_with_erasure_host(geo_host)?;
+    let geo_gateway = Gateway::unprotected_for_harness(geo_host)?;
     geo_gateway.shutdown().await?;
     drop(geo_gateway);
 
@@ -482,11 +527,25 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
 
     assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
 
-    let owntracks_host = ErasureExecutionHostV1::open_gateway_verified_empty(
+    let mut owntracks_host = ErasureExecutionHostV1::open_gateway_verified_empty(
         StoreConfig::SqliteInMemory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
-    let owntracks_gateway = Gateway::new_with_owntracks_erasure_host(owntracks_host, &owner_key)?;
+    let mode = piglor_gateway::mode_profile::bind_gateway_mode_v1(
+        piglor_gateway::mode_profile::GatewayModeProfileIdV1::Local,
+        piglor_gateway::mode_profile::GatewayServeCompositionV1 {
+            tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8080)),
+            owntracks_owner_key: Some(owner_key_path),
+            fork_admission_socket: None,
+            ledger_source: None,
+            network_grants: std::collections::BTreeSet::from([
+                piglor_gateway::mode_profile::GatewayNetworkGrantV1::OwnTracks,
+            ]),
+        },
+        &mut owntracks_host,
+    )?;
+    let owntracks_gateway =
+        piglor_gateway::local_principal::local_gateway(owntracks_host, Some(&owner_key), &mode)?;
     owntracks_gateway.shutdown().await?;
     drop(owntracks_gateway);
     Ok(())

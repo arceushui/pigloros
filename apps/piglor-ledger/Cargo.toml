@@ -27,9 +27,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ulid = { workspace = true }
-libc = { workspace = true }
 rusqlite = { workspace = true }
 zeroize = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }

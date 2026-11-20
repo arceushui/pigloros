@@ -34,9 +34,9 @@ async fn gateway_reloads_durable_consent_before_revocation(
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
-    let first_gateway = Gateway::new_with_erasure_host(first_host)?;
+    let first_gateway = Gateway::unprotected_for_harness(first_host)?;
     let timeline = first_gateway
-        .create_timeline("consent-recovery")
+        .create_timeline("consent-recovery", None)
         .await
         .test_ok()?;
     let subject_id = EntityId::new();
@@ -63,7 +63,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
-    let recovered_gateway = Gateway::new_with_erasure_host(recovered_host)?;
+    let recovered_gateway = Gateway::unprotected_for_harness(recovered_host)?;
     let unknown_error = recovered_gateway
         .issue_consent_revocation(
             &timeline.id().to_string(),
@@ -109,9 +109,9 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
-    let gateway = Gateway::new_with_erasure_host(host)?;
+    let gateway = Gateway::unprotected_for_harness(host)?;
     let timeline = gateway
-        .create_timeline("geo-revocation-fence")
+        .create_timeline("geo-revocation-fence", None)
         .await
         .test_ok()?;
     let subject = EntityId::new();

@@ -1,5 +1,6 @@
 //! Deterministic CBOR writer and AES-256-GCM/HKDF primitives shared by the
-//! ADR-091/ADR-097 subject key wrap and subject ciphertext codecs.
+//! ADR-091/ADR-097 subject key wrap and subject ciphertext codecs, and the
+//! shortest-float writer of the ADR-097 B4 preference weights plaintext.
 
 use aes_gcm::{AeadInOut, Aes256Gcm, KeyInit};
 use hkdf::Hkdf;
@@ -51,6 +52,13 @@ pub(crate) fn byte_string(output: &mut Vec<u8>, bytes: &[u8]) {
 pub(crate) fn text(output: &mut Vec<u8>, value: &str) {
     head(output, 3, value.len() as u64);
     output.extend_from_slice(value.as_bytes());
+}
+
+/// Append `value` as the shortest float that holds it bit for bit.
+pub(crate) fn float(output: &mut Vec<u8>, value: f64) {
+    let (initial, width, argument) = crate::strict_cbor::shortest_float(value);
+    output.push(initial);
+    output.extend_from_slice(&argument.to_be_bytes()[8 - width..]);
 }
 
 /// `HKDF-SHA-256(IKM = ikm, salt, info = label || context, L = 32)`, or

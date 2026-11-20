@@ -23,15 +23,27 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   Its exchanges are raw HTTP requests through the Gateway's public `router` (loopback) and
   `spectator_router` (the non-loopback public listener), with no socket, so Local and Air-Gapped
   are the same execution.
-- The `authorized` composition is explicitly fixture-only: the nonproduction fixture
-  registration of the Gateway action registry (`piglor-gateway` feature `test-support`) and a
-  fixture authority that lets one actor read Timeline Events and grants no action. No production
-  authority is sourced from it (ADR-108). The crate exists only with its own `test-support`
-  feature for that reason.
-- Observations are normalized as the profile text states: ULID `id` members, cursors and error
-  messages become placeholders.
+- The `authorized` and `authorized-air-gapped` compositions are the production serve
+  composition (#1361): a fresh SQLite store is bound to the Local or the Air-Gapped execution
+  mode (ADR-134), a fixture Local Principal document, which lets one actor create Timelines, read
+  their Events and read its own Session (#1362) and grants no action, signal or network
+  capability, is provisioned into it, and the production `local_gateway` composition serves it
+  and requires it for every protected operation. No production authority is sourced from the
+  fixture document (ADR-108). The `authorized-consented` composition (#309) also grants
+  `consent.revoke` and binds one consent, provisioned through the production `provision_on_host`
+  path, that governs Timeline creation; an exchange that captures `consent` fills the `{consent}`
+  slot of later request bodies with the first `consent_ref` its Session lists. The
+  `authorized-rooms` composition (#303) may create, derive and read Scenario Rooms and revoke its
+  consent, records the
+  fixture governance record and binds one export-permitted consent; an exchange that captures
+  `room` fills the `{room}` slot of later paths with the room `id`.
+- Observations are normalized as the profile text states: a value equal to the captured consent
+  or room becomes `{consent}` or `{room}`, and ULID `id`, `consent_ref`, `timeline_id` and
+  `event_id` members, cursors, error messages, a room's correlation ID and descriptor hash, and
+  a room revision's provenance digest become placeholders.
 - Usage: one execution step per sent exchange, the response bytes as output bytes, one Event per
-  `201` signal or action response; the other counters are 0.
+  `201` signal, action or consent revocation response and two per `201` room creation or
+  derivation response (its request claim and revision); the other counters are 0.
 
 ## Fixtures and tests
 

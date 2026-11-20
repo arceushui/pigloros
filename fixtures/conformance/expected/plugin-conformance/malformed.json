@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-malformed",
   "family": "malformed",
-  "input_blake3_digest": "223401ae14534953e037f78c11ab17993c2f671044ef16d7fe5726617fba23c5",
+  "input_blake3_digest": "ce02ece4de4c097aacd396b0cb11e19fc403eb53295bd96fd314c9a561670926",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",

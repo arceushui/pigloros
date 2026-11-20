@@ -14,9 +14,10 @@ from the documented capture contract in
 The digests then follow the #181 capture profile and the harness result domain
 (`non_interference_fixtures.py`).
 
-NI-ARCHIVE-009 moved to slice N1b (#1284) and Air-Gapped stays non-executed until N7 (#1235):
-none of their cases is ever flipped. `scripts/generate_non_interference_fixtures.py` plugs this
-oracle into the evidence binder.
+NI-ARCHIVE-009 (slice N1b, #1284) shares this subject; its oracle is
+`generate_non_interference_g_archive_fixtures.py`. Air-Gapped stays non-executed until N7
+(#1235): none of its cases is ever flipped. `scripts/generate_non_interference_fixtures.py` plugs
+this oracle into the evidence binder.
 """
 
 from __future__ import annotations
@@ -76,7 +77,14 @@ ATTEMPT_OUTCOME = "admitted"
 PLUGIN_ID = (1 << 80) | 0x4750_5550
 PLUGIN_NAME = "ni-g-pub"
 DRIVER_NAME = "ni-g-pub.driver"
-PAGE_LIMIT_ERROR = b'{"error":"event poll limit must be between 1 and 100"}'
+# The Gateway v1 problem body of the over-limit page request (#1312): sorted keys, and the
+# matched route template as `instance`, so it carries no run-local identity.
+PAGE_LIMIT_ERROR = (
+    b'{"code":"invalid-request","detail":"event poll limit must be between 1 and 100",'
+    b'"instance":"/v1/timelines/{timeline_id}/events","retryable":false,'
+    b'"schema_id":"urn:pigloros:gateway:v1:schema:problem","status":400,'
+    b'"title":"Invalid request","type":"urn:pigloros:gateway:v1:problem:invalid-request"}'
+)
 
 
 # --- The subject ---

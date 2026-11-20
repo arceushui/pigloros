@@ -2,6 +2,9 @@
 .env
 *.pem
 *.key
+# #444 public dev/test root-hash key pairs (owner decision Q1, 2026-11-16):
+# test-domain keys that only the QEMU evidence kernel trusts.
+!deploy/nixos/dev-trust/*.key
 SQLCipher.db
 *.db
 **/__pycache__/

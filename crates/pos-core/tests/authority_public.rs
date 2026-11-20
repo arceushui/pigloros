@@ -1,12 +1,15 @@
 use ciborium::Value;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationOutcomeV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
-    ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, EntityId, Hash,
-    PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, DELEGATE_ACTION_V1,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
+    AuthorizationDenialEvidenceV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
+    AuthorizationDenialSuppressionV1, AuthorizationExpiryV1, AuthorizationOutcomeV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, CapabilityGrantDraftV1,
+    CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
+    DelegationChainV1, EntityId, Hash, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AUTHORIZATION_DENIAL_RECORD_BYTES, AUTHORIZATION_DENIAL_SUPPRESSION_BYTES, DELEGATE_ACTION_V1,
     MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SELECTORS,
     MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES,
     MAX_DECISION_RECORD_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
@@ -41,6 +44,7 @@ fn principal(value: u8) -> PrincipalRefV1 {
 
 fn authenticated(principal: PrincipalRefV1) -> AuthenticatedPrincipalResultV1 {
     ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         AuthenticatedPrincipalDraftV1 {
             principal,
             adapter_id: "test-passkey".to_owned(),
@@ -275,6 +279,7 @@ fn decision_for(
         _ => Vec::new(),
     };
     let trusted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![request.authenticated().registry_binding_digest()],
         capability_bindings,
@@ -286,7 +291,46 @@ fn decision_for(
         ok(AuthorizationDecisionV1::decode(&ok(decision.encode()))),
         decision
     );
+    let (reported, expiry) =
+        AuthorityEvaluatorV1::authorize_with_expiry(request, &chain, &trusted_registry);
+    assert_eq!(reported, decision);
+    assert_eq!(
+        expiry.is_some(),
+        decision.outcome() == AuthorizationOutcomeV1::Expired
+    );
     decision
+}
+
+/// The lapsed evidence the evaluator reports beside one decision.
+fn expiry_for(
+    request: &AuthorizationRequestV1,
+    chain: &[CapabilityGrantV1],
+) -> Option<AuthorizationExpiryV1> {
+    let decision = decision_for(request, chain);
+    let mut capability_bindings: Vec<_> = chain
+        .iter()
+        .map(|grant| ok(grant.binding_digest()))
+        .collect();
+    capability_bindings.sort_unstable();
+    let consent_bindings = match request.consent() {
+        ConsentEvidenceV1::Resolved { grants } => grants
+            .iter()
+            .map(ConsentGrantRefV1::binding_digest)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        hash(7),
+        vec![request.authenticated().registry_binding_digest()],
+        capability_bindings,
+        consent_bindings,
+    ));
+    let chain = ok(DelegationChainV1::try_from_grants(chain.to_vec()));
+    let (reported, expiry) =
+        AuthorityEvaluatorV1::authorize_with_expiry(request, &chain, &registry);
+    assert_eq!(reported, decision);
+    expiry
 }
 
 fn encode_value(value: &Value) -> CanonicalBytes {
@@ -416,17 +460,26 @@ fn principal_and_adapter_results_are_canonical_public_contracts() {
         binding_digest: Hash::zero(),
     };
     assert_eq!(
-        AuthenticatedPrincipalResultV1::try_from_draft(bad_adapter.clone()),
+        AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            bad_adapter.clone()
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     bad_adapter.adapter_id = "adapter".to_owned();
     assert_eq!(
-        AuthenticatedPrincipalResultV1::try_from_draft(bad_adapter.clone()),
+        AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            bad_adapter.clone()
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     bad_adapter.expires_at = WallTime::from_micros(11);
     assert_eq!(
-        AuthenticatedPrincipalResultV1::try_from_draft(bad_adapter),
+        AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            bad_adapter
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 }
@@ -526,6 +579,7 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
         draft
     }));
     let registry_without_capability = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![missing_request.authenticated().registry_binding_digest()],
         Vec::new(),
@@ -761,12 +815,18 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let current_request = request(principal_ref.clone(), actor);
     let grant = root_grant(principal_ref, vec![actor]);
     let untrusted = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![hash(6)],
         vec![hash(1)],
         vec![hash(8)],
     ));
     let chain = ok(DelegationChainV1::try_from_grants(vec![grant]));
+    let chain_bindings: Vec<_> = chain
+        .grants()
+        .iter()
+        .map(|grant| ok(grant.binding_digest()))
+        .collect();
     assert_eq!(untrusted.registry_digest(), hash(7));
     let decision = AuthorityEvaluatorV1::authorize(&current_request, &chain, &untrusted);
     assert_eq!(
@@ -795,13 +855,10 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let substituted_request = request(principal(2), actor);
     let original_binding = current_request.authenticated().registry_binding_digest();
     let substituted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![original_binding],
-        chain
-            .grants()
-            .iter()
-            .map(|grant| ok(grant.binding_digest()))
-            .collect(),
+        chain_bindings.clone(),
         vec![consent_grant().binding_digest()],
     ));
     let decision =
@@ -822,15 +879,12 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
         draft
     }));
     let registry_without_consent = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![untrusted_consent_request
             .authenticated()
             .registry_binding_digest()],
-        chain
-            .grants()
-            .iter()
-            .map(|grant| ok(grant.binding_digest()))
-            .collect(),
+        chain_bindings,
         Vec::new(),
     ));
     let decision = AuthorityEvaluatorV1::authorize(
@@ -845,6 +899,7 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let current_grant = root_grant(principal(1), vec![actor]);
     let current_chain = ok(DelegationChainV1::try_from_grants(vec![current_grant]));
     let missing_capability = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![current_request.authenticated().registry_binding_digest()],
         vec![hash(99)],
@@ -1564,6 +1619,7 @@ fn capability_and_registry_hash_sets_enforce_their_distinct_bounds() {
 
     let registry_bindings: Vec<_> = (1_u8..=128).map(hash).collect();
     assert!(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(200),
         vec![hash(200)],
         registry_bindings.clone(),
@@ -1574,6 +1630,7 @@ fn capability_and_registry_hash_sets_enforce_their_distinct_bounds() {
     oversized_registry.push(hash(129));
     assert_eq!(
         AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             hash(200),
             vec![hash(200)],
             oversized_registry,
@@ -2073,15 +2130,33 @@ fn malformed_requests_are_rejected_before_evaluation() {
 #[test]
 fn registry_snapshot_rejects_missing_or_zero_bindings() {
     assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(Hash::zero(), vec![hash(1)], vec![hash(2)], vec![]),
+        AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            Hash::zero(),
+            vec![hash(1)],
+            vec![hash(2)],
+            vec![]
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![], vec![], vec![]),
+        AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            hash(1),
+            vec![],
+            vec![],
+            vec![]
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![hash(2)], vec![], vec![Hash::zero()]),
+        AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            hash(1),
+            vec![hash(2)],
+            vec![],
+            vec![Hash::zero()]
+        ),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 }
@@ -2373,4 +2448,228 @@ fn ancestor_changes_invalidate_every_descendant() {
         .outcome(),
         AuthorizationOutcomeV1::ParentInvalid
     );
+}
+
+#[test]
+fn the_evaluator_names_the_evidence_an_expired_decision_found_lapsed() {
+    let principal = principal(1);
+    let actor = entity(10);
+
+    let mut draft = request_draft(authenticated(principal.clone()), actor);
+    draft.at_time = WallTime::from_micros(100);
+    assert_eq!(
+        expiry_for(&ok(AuthorizationRequestV1::try_from_draft(draft)), &[]),
+        Some(AuthorizationExpiryV1::AuthenticationEvidence)
+    );
+
+    let mut expired_consent = consent_draft_for(8, entity(99));
+    expired_consent.status = ConsentGrantStatusV1::Expired;
+    expired_consent.valid_until = WallTime::from_micros(50);
+    let mut draft = request_draft(authenticated(principal.clone()), entity(99));
+    draft.consent = ConsentEvidenceV1::Resolved {
+        grants: vec![ok(ConsentGrantRefV1::try_from_draft(expired_consent))],
+    };
+    assert_eq!(
+        expiry_for(&ok(AuthorizationRequestV1::try_from_draft(draft)), &[]),
+        Some(AuthorizationExpiryV1::Consent)
+    );
+
+    let mut expired_grant = grant_draft(
+        2,
+        principal.clone(),
+        AuthorityGranteeV1::Principal(principal.clone()),
+        scope(vec![actor], vec!["read"], None),
+    );
+    expired_grant.valid_until_position = Seq::from_u64(50);
+    assert_eq!(
+        expiry_for(
+            &request(principal.clone(), actor),
+            &[ok(CapabilityGrantV1::try_from_draft(expired_grant))]
+        ),
+        Some(AuthorizationExpiryV1::Grant)
+    );
+
+    let active = root_grant(principal.clone(), vec![actor]);
+    assert_eq!(
+        expiry_for(&request(principal, actor), std::slice::from_ref(&active)),
+        None
+    );
+}
+
+#[test]
+fn a_denial_record_binds_only_a_denied_decision_without_payload() {
+    let principal = principal(1);
+    let actor = entity(10);
+    let grant = root_grant(principal.clone(), vec![actor]);
+    let active = decision_for(
+        &request(principal.clone(), actor),
+        std::slice::from_ref(&grant),
+    );
+    assert!(active.is_allowed());
+    assert_eq!(
+        AuthorizationDenialRecordV1::from_decision(&active, hash(40)),
+        None
+    );
+
+    let denied = decision_for(
+        &request(principal, entity(11)),
+        std::slice::from_ref(&grant),
+    );
+    let record = AuthorizationDenialRecordV1::from_decision(&denied, hash(40));
+    let Some(record) = record else {
+        std::panic::resume_unwind(Box::new("a denied decision has a record"));
+    };
+    assert_eq!(record.request_digest(), denied.request_digest());
+    assert_eq!(record.operation_binding(), hash(40));
+    assert_eq!(record.outcome(), denied.outcome());
+    assert_eq!(record.error(), denied.error());
+
+    let fenced = AuthorizationDenialRecordV1::with_outcome(
+        &active,
+        hash(41),
+        AuthorizationOutcomeV1::RevokedAtFence,
+        Some(AuthorityErrorV1::RevokedAtFence),
+    );
+    let expired = AuthorizationDenialRecordV1::with_outcome(
+        &active,
+        hash(42),
+        AuthorizationOutcomeV1::Expired,
+        None,
+    );
+    for record in [Some(record), fenced, expired] {
+        let Some(record) = record else {
+            std::panic::resume_unwind(Box::new("a denied outcome has a record"));
+        };
+        let bytes = record.encode();
+        assert_eq!(bytes.len(), AUTHORIZATION_DENIAL_RECORD_BYTES);
+        assert_eq!(ok(AuthorizationDenialRecordV1::decode(&bytes)), record);
+    }
+
+    let valid = ok(expired.ok_or("expired record")).encode();
+    let mutate = |at: usize, value: u8| {
+        let mut bytes = valid;
+        bytes[at] = value;
+        bytes
+    };
+    let malformed: [&[u8]; 6] = [
+        &valid[..AUTHORIZATION_DENIAL_RECORD_BYTES - 1],
+        &mutate(0, b'X'),
+        &mutate(4, 2),
+        &mutate(69, 200),
+        &mutate(69, AuthorizationOutcomeV1::Active.code()),
+        &mutate(70, 200),
+    ];
+    for bytes in malformed {
+        assert_eq!(
+            AuthorizationDenialRecordV1::decode(bytes),
+            Err(pos_core::AuthorityPersistenceErrorV1::InvalidRecord)
+        );
+    }
+
+    let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        hash(7),
+        vec![hash(8)],
+        Vec::new(),
+        Vec::new(),
+    ));
+    let host = AuthorityPersistenceHostV1::new(&registry);
+    let denial = AuthorizationDenialEvidenceV1::Denial(ok(expired.ok_or("expired record")));
+    let permit = host.authorize_denial(denial);
+    assert_eq!(permit.persistence_binding(), host.persistence_binding());
+    assert_eq!(permit.evidence(), &denial);
+    assert_eq!(
+        ok(AuthorizationDenialEvidenceV1::decode(&denial.encode())),
+        denial
+    );
+}
+
+#[test]
+fn a_suppression_marker_counts_a_closed_window_without_naming_anyone() {
+    assert_eq!(
+        AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Host, 0),
+        None
+    );
+    for (scope, code) in [
+        (AuthorizationDenialScopeV1::Principal, 0_u8),
+        (AuthorizationDenialScopeV1::Host, 1),
+    ] {
+        let marker = ok(AuthorizationDenialSuppressionV1::try_new(scope, 513).ok_or("marker"));
+        assert_eq!(marker.scope(), scope);
+        assert_eq!(marker.suppressed(), 513);
+        let bytes = marker.encode();
+        assert_eq!(bytes.len(), AUTHORIZATION_DENIAL_SUPPRESSION_BYTES);
+        assert_eq!(&bytes[..4], b"ADS1");
+        assert_eq!(bytes[5], code);
+        assert_eq!(ok(AuthorizationDenialSuppressionV1::decode(&bytes)), marker);
+        let evidence = AuthorizationDenialEvidenceV1::Suppressed(marker);
+        assert_eq!(
+            ok(AuthorizationDenialEvidenceV1::decode(&evidence.encode())),
+            evidence
+        );
+    }
+    let valid = ok(AuthorizationDenialSuppressionV1::try_new(
+        AuthorizationDenialScopeV1::Principal,
+        1,
+    )
+    .ok_or("marker"))
+    .encode();
+    let mutate = |at: usize, value: u8| {
+        let mut bytes = valid;
+        bytes[at] = value;
+        bytes
+    };
+    let malformed: [&[u8]; 5] = [
+        &valid[..AUTHORIZATION_DENIAL_SUPPRESSION_BYTES - 1],
+        &mutate(0, b'X'),
+        &mutate(4, 2),
+        &mutate(5, 2),
+        &mutate(13, 0),
+    ];
+    for bytes in malformed {
+        assert_eq!(
+            AuthorizationDenialSuppressionV1::decode(bytes),
+            Err(pos_core::AuthorityPersistenceErrorV1::InvalidRecord)
+        );
+        assert_eq!(
+            AuthorizationDenialEvidenceV1::decode(bytes),
+            Err(pos_core::AuthorityPersistenceErrorV1::InvalidRecord)
+        );
+    }
+}
+
+#[test]
+fn consent_is_valid_from_its_first_instant_until_just_before_its_end() {
+    let principal = principal(1);
+    let actor = entity(10);
+    let grant = root_grant(principal.clone(), vec![actor]);
+    let at_time = request(principal.clone(), actor).at_time();
+    let valid = |valid_from: WallTime, valid_until: WallTime| {
+        let mut consent = consent_draft_for(8, actor);
+        consent.valid_from = valid_from;
+        consent.valid_until = valid_until;
+        let mut draft = request_draft(authenticated(principal.clone()), actor);
+        draft.consent = ConsentEvidenceV1::Resolved {
+            grants: vec![ok(ConsentGrantRefV1::try_from_draft(consent))],
+        };
+        let request = ok(AuthorizationRequestV1::try_from_draft(draft));
+        (
+            decision_for(&request, std::slice::from_ref(&grant)).outcome(),
+            expiry_for(&request, std::slice::from_ref(&grant)),
+        )
+    };
+    let micros = at_time.as_micros();
+    let at = WallTime::from_micros;
+    let active = (AuthorizationOutcomeV1::Active, None);
+    let expired = (
+        AuthorizationOutcomeV1::Expired,
+        Some(AuthorizationExpiryV1::Consent),
+    );
+    // The window starts at `valid_from` inclusive.
+    assert_eq!(valid(at(micros - 1), at(micros + 50)), active);
+    assert_eq!(valid(at_time, at(micros + 50)), active);
+    assert_eq!(valid(at(micros + 1), at(micros + 50)), expired);
+    // The window ends at `valid_until` exclusive.
+    assert_eq!(valid(at(micros - 1), at(micros + 1)), active);
+    assert_eq!(valid(at(micros - 1), at_time), expired);
 }

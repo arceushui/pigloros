@@ -3,6 +3,7 @@
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from check_subject_encryption_activation import check_source, violations
@@ -18,6 +19,30 @@ class ActivationPolicyTests(unittest.TestCase):
             self.assertEqual(check_source("crates/x/src/fixture.rs", GATE + surface), [])
             for prefix in ["", "// " + GATE, 'const DOC: &str = r#"' + GATE + '"#;\n', "fn prior() {}\n" + GATE, '#[cfg(any(test, feature = "test-support"))]\n', '#![allow(dead_code)]\n' + GATE, '#![cfg(target_os = "linux")]\n' + GATE]:
                 self.assertTrue(check_source("crates/x/src/fixture.rs", prefix + surface))
+
+    def test_adr_137_constructors_require_the_gate(self):
+        # ADR-137 G2: each constructor is confined to gated files; its type is not.
+        for name in [
+            "acquire_gateway_consent_lease",
+            "mint_owner_consent_v2_permit",
+            "destroy_subject_key",
+            "VolatileSubjectNonceLedgerV1",
+        ]:
+            for source in [
+                f"fn build() {{ owner::{name}(); }}",
+                f"fn build() {{ let f = owner::{name}; }}",
+                f"use owner::{name};",
+            ]:
+                self.assertTrue(check_source("crates/x/src/lib.rs", source), source)
+                self.assertEqual(check_source("crates/x/src/fixture.rs", GATE + source), [], source)
+                self.assertTrue(check_source("apps/x/src/main.rs", GATE + source), source)
+            for source in [f"use owner::{name} as Hidden;", f"use owner::r#{name};"]:
+                self.assertTrue(check_source("crates/x/src/fixture.rs", GATE + source), source)
+        # Word boundaries keep longer identifiers that merely contain a name clean.
+        for name in ["destroy_subject_key_v2", "my_destroy_subject_key", "xVolatileSubjectNonceLedgerV1"]:
+            self.assertEqual(check_source("crates/x/src/lib.rs", f"fn build() {{ {name}(); }}"), [], name)
+        for name in ["GatewayConsentLeaseV1", "OwnerConsentV2PermitV1", "ConsentLeaseGenerationV1"]:
+            self.assertEqual(check_source("crates/x/src/lib.rs", f"fn bind(_: {name}) {{}}"), [], name)
 
     def test_aliases_and_raw_names_do_not_hide_the_surface(self):
         for name in ["SubjectEncryptorLock", "EnrollmentPort", "UnlockPort"]:
@@ -81,6 +106,25 @@ class ActivationPolicyTests(unittest.TestCase):
             found = violations(root)
             self.assertEqual(len(found), 1)
             self.assertIn("crates/x/src/target/hidden.rs", found[0])
+
+
+    def test_prefilter_skips_only_files_without_a_guarded_name(self):
+        # scan and strip_comments only blank text, so a file whose raw bytes name no
+        # activation type or owner port cannot match after scanning: it is skipped.
+        import check_subject_encryption_activation as checker
+
+        scanned = []
+        original = checker.scan
+
+        def recording(text):
+            scanned.append(text)
+            return original(text)
+
+        with mock.patch.object(checker, "scan", recording):
+            self.assertEqual(check_source("crates/x/src/plain.rs", "// plain\nfn f() {}\n"), [])
+            self.assertEqual(scanned, [])
+            self.assertTrue(check_source("crates/x/src/lib.rs", OWNER))
+            self.assertEqual(scanned, [OWNER])
 
 
 if __name__ == "__main__":

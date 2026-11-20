@@ -9,8 +9,8 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
     blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
-    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields,
-    SandboxExecutionMode, SandboxProviderProtocolError,
+    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields, Rls1,
+    RuntimeSigned, SandboxExecutionMode, SandboxProviderProtocolError,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -104,9 +104,12 @@ fn signing_key() -> SigningKey {
 
 fn release() -> Result<ExecutionRelease, Box<dyn Error>> {
     let key = signing_key();
-    Ok(ExecutionRelease::sign(release_fields()?, |message| {
-        key.sign(message).to_bytes()
-    })?)
+    let record = ExecutionRelease::self_digested(release_fields()?)?;
+    let signature = key.sign(&record.signature_message()).to_bytes();
+    Ok(ExecutionRelease::new(
+        record.verify(signature, &key.verifying_key())?,
+        &key.verifying_key(),
+    )?)
 }
 
 #[test]
@@ -132,7 +135,7 @@ fn rdy1_matches_the_golden_vector_and_round_trips() -> TestResult {
 #[test]
 fn rls1_matches_the_golden_vector_verifies_and_round_trips() -> TestResult {
     let record = release()?;
-    assert_eq!(hex(&record.digest), RLS1_DIGEST);
+    assert_eq!(hex(&record.digest()), RLS1_DIGEST);
     let bytes = record.to_canonical_cbor()?;
     assert_eq!(hex(&bytes), RLS1_FULL);
     let decoded = ExecutionRelease::from_canonical_cbor(&bytes)?;
@@ -272,9 +275,47 @@ fn rls1_signer_rejects_every_zero_field_and_a_zero_signature() -> TestResult {
     for mutate in mutations {
         let mut fields = release_fields()?;
         mutate(&mut fields);
-        assert!(ExecutionRelease::sign(fields, |_| [1; 64]).is_err());
+        assert_eq!(
+            ExecutionRelease::self_digested(fields).map(|_| ()),
+            Err(SandboxProviderProtocolError::FieldOutOfBounds)
+        );
     }
-    assert!(ExecutionRelease::sign(release_fields()?, |_| [0; 64]).is_err());
+    // Only a signature that verifies under the key yields a signed RLS1.
+    let record = ExecutionRelease::self_digested(release_fields()?)?;
+    let key = signing_key();
+    for signature in [
+        [0; 64],
+        [1; 64],
+        SigningKey::from_bytes(&[43; 32])
+            .sign(&record.signature_message())
+            .to_bytes(),
+    ] {
+        assert_eq!(
+            record
+                .clone()
+                .verify(signature, &key.verifying_key())
+                .map(|_| ()),
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        );
+    }
+    let signature = key.sign(&record.signature_message()).to_bytes();
+    let verified = record.clone().verify(signature, &key.verifying_key())?;
+    assert_eq!(verified.record(), &record);
+    assert_eq!(verified.signature(), signature);
+    assert_eq!(verified.key(), &key.verifying_key());
+    assert_eq!(record.key_id(), "runtime-key");
+    // A signature that verified under another key is not the admitted
+    // key's release.
+    assert_eq!(
+        ExecutionRelease::new(
+            verified.clone(),
+            &SigningKey::from_bytes(&[43; 32]).verifying_key()
+        ),
+        Err(SandboxProviderProtocolError::SignatureInvalid)
+    );
+    let release = ExecutionRelease::new(verified, &key.verifying_key())?;
+    assert_eq!(release.digest(), record.digest());
+    release.verify_signature(&key.verifying_key())?;
     Ok(())
 }
 
@@ -521,5 +562,17 @@ fn blake3_digest_of_matches_the_official_empty_and_one_byte_vectors() -> TestRes
         hex(&blake3_digest_of(&[0_u8][..])?),
         "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"
     );
+    Ok(())
+}
+
+#[test]
+fn rls1_signature_message_is_the_r9_domain_and_its_self_digest() -> TestResult {
+    let record = ExecutionRelease::self_digested(release_fields()?)?;
+    let mut expected = b"PiglorOS.RLS1.Signature.v1\0".to_vec();
+    expected.extend(unhex(RLS1_DIGEST)?);
+    assert_eq!(record.signature_message(), expected);
+    assert_eq!(record.digest().to_vec(), unhex(RLS1_DIGEST)?);
+    assert_eq!(record.body(), &release_fields()?);
+    assert_eq!(<Rls1 as RuntimeSigned>::MAGIC, "RLS1");
     Ok(())
 }

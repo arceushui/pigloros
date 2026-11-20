@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Enforce ADR-110 E15's source boundary before subject-encryption activation.
 
-The inventory contains the activation type currently implemented. Extend it
-when another activation constructor lands; pure codecs and role enums are not
-activation types. References to these types stay in file-gated fixtures, so a
-function pointer, inferred return type or struct literal cannot hide a builder.
+`TYPES` lists the activation surface: the activation type `SubjectEncryptorLock`
+and the ADR-137 G2 activation constructors, three functions and one type.
+Extend it when another activation constructor lands; pure codecs, role enums and
+the lease, permit and generation types are not activation names. References to
+these names stay in file-gated fixtures, so a function pointer, inferred return
+type or struct literal cannot hide a builder.
 Existing protocol-test fakes are exempt from the non-fake
 port rule. The feature-graph checker separately excludes test-support from
 deployable graphs. This source check does not establish activation approval.
@@ -19,7 +21,15 @@ from pathlib import Path
 from check_owner_bridge_unsafe_policy import _group_end, scan
 from check_trusted_clock_port_impls import SKIPPED_PARTS, strip_comments
 
-TYPES = ("SubjectEncryptorLock",)
+# ADR-137 G2 adds four activation constructors. Their types (the lease, the
+# owner permit and the lease generation) stay out: ungated code must name them.
+TYPES = (
+    "SubjectEncryptorLock",
+    "acquire_gateway_consent_lease",
+    "mint_owner_consent_v2_permit",
+    "destroy_subject_key",
+    "VolatileSubjectNonceLedgerV1",
+)
 PORTS = ("EnrollmentPort", "UnlockPort")
 NAMES = "|".join((*TYPES, *PORTS))
 TYPE_NAMES = "|".join(TYPES)
@@ -39,6 +49,10 @@ REFERENCE = re.compile(r"\b(?:" + NAMES + r")\b")
 PORT_REFERENCE = re.compile(r"\b(?:" + "|".join(PORTS) + r")\b")
 MACRO = re.compile(r"\b\w+\s*!\s*([({\[])")
 TEST_ITEM = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:#\[[^\]]*\]\s*)*")
+# Equivalence of the prefilter: `scan` and `strip_comments` only blank text or turn
+# a raw identifier into underscores, so a name absent from the raw file is absent
+# from the scanned code, and every finding of `check_source` needs one of these names.
+GUARDS = (*TYPES, *PORTS)
 FAKES = {
     "crates/pos-owner-bridge/tests/protocol/main.rs": {"FakeEnrollment", "FakeUnlock"},
 }
@@ -67,6 +81,8 @@ def without_test_items(code: str) -> str:
 
 def check_source(relative: str, text: str) -> list[str]:
     """Check real tokens and the actual file-leading gate, not quoted examples."""
+    if not any(token in text for token in GUARDS):
+        return []
     scanned = scan(text)
     code = scanned.code
     errors = []

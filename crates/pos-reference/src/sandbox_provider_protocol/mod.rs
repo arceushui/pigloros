@@ -7,6 +7,7 @@ mod admission;
 mod audit;
 mod authority;
 mod codec;
+mod evidence;
 mod execution;
 mod launch;
 mod network;
@@ -14,6 +15,8 @@ mod operations;
 mod policy;
 mod revocation;
 mod revocation_update;
+mod signing;
+mod termination;
 mod trust;
 
 /// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.
@@ -50,7 +53,7 @@ pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
     AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, RevocationAcknowledgement,
-    RevocationUpdateRequest, SandboxRevocationUpdateError,
+    RevocationAcknowledgementFields, RevocationUpdateRequest, SandboxRevocationUpdateError,
 };
 
 pub(crate) fn attempt_values(attempts: &[[u8; 16]]) -> ciborium::value::Value {
@@ -82,17 +85,27 @@ pub use admission::{
     SandboxAdmissionError, SandboxImageProofError, SandboxProviderAdmissionInputs,
     SelectorGrantCommitment, VerifiedSandboxImageProof,
 };
-pub use audit::SandboxAuditRecord;
+pub use audit::{SandboxAuditRecord, SandboxAuditRecordFields};
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
     SandboxProviderManifest, SandboxSyscallSet, SignedImageManifest,
 };
+pub use evidence::{
+    AdmissionLedger, AttemptEvidence, AttemptEvidenceContext, AttemptResponse, BlockIdentity,
+    CgroupEmptyBasis, CgroupSources, CleanupRecord, DbusProperty, DbusValue, DeviceNumber,
+    EffectiveLimitRecord, KernelObservationEvidence, KernelObservationEvidenceFields,
+    KernelObservationStatus, LocalNetworkRecord, NamespaceIdentity, ObservedKernelState,
+    OutputCaptureRecord, RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields,
+    RootMount, TerminationEvidence, TerminationEvidenceFields, TransferRecord,
+};
 pub use execution::{
-    AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
-    PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
-    SandboxPayloadChunk, SandboxProviderError, SandboxProviderErrorCode, SandboxProviderReceipt,
-    SandboxProviderResult, SandboxTerminalOutcome,
+    AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, ExecuteAuthority,
+    NetworkExchangePlan, PayloadDescriptor, PayloadDirection, PayloadStreamValidator,
+    ReceiptAuthority, SandboxExecuteRequest, SandboxPayloadChunk, SandboxProviderError,
+    SandboxProviderErrorCode, SandboxProviderErrorFields, SandboxProviderReceipt,
+    SandboxProviderReceiptFields, SandboxProviderResult, SandboxProviderResultFields,
+    SandboxTerminalOutcome,
 };
 pub use launch::{
     blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
@@ -100,9 +113,20 @@ pub use launch::{
 };
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,
-    SandboxDescribeRequest, SandboxDescribeResponse, SandboxLocalError, SandboxLocalErrorCode,
-    SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
-    SandboxReconcileResponse,
+    SandboxDescribeRequest, SandboxDescribeResponse, SandboxDescribeResponseFields,
+    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
+    SandboxReconcileRequest, SandboxReconcileResponse,
+};
+pub use signing::{
+    Agr1, Rca1, Rls1, RuntimeSigned, Sau1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Verified,
+};
+pub use termination::{
+    attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
+    CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,
+    KernelObservationFacts, LaunchFailure, LocalNetworkTerminationCode, MainExitCode,
+    OutputCaptureFacts, RequestedConfigurationStatus, ServiceFacts, ServiceResultCode,
+    StartJobResult, TerminalCandidates, TerminalClassification, TerminalCode, TerminationFacts,
+    UnitIdentity, WorkMountFacts, WorkStatfsFacts, WATCHDOG_GRACE_NS,
 };
 
 /// Closed failures produced before a provider operation is trusted.

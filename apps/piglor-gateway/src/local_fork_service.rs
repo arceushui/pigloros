@@ -6,7 +6,6 @@ use std::{
     fs,
     future::Future,
     io,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -34,25 +33,104 @@ use crate::{
         open_fork_admission_session, reconcile_startup, LocalForkAdmissionCoordinatorV1,
     },
     local_fork_listener::bind_pathname_listener,
+    mode_profile::{
+        attach_offline_writer_v1, bind_gateway_mode_v1, GatewayModeBindingV1,
+        GatewayModeProfileIdV1, GatewayModeStoreLockV1, GatewayServeCompositionV1,
+    },
     router_for_addr,
     startup::{
-        announce_listening, open_recovered_erasure_host, stop_after_bind_failure,
-        GatewayHostStoreV1,
+        announce_listening, bound_router, open_recovered_erasure_host, shutdown_or_stale,
+        stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
     },
-    AppState, Gateway, LedgerWriteMode, OwnTracksOwnerKey,
+    AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 
 type ServeError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The private paths of one local Fork-admission deployment.
-#[derive(Clone, Copy, Debug)]
-pub struct LocalForkAdmissionPathsV1<'a> {
+/// The managed credentials of one local Fork-admission deployment (FACR1,
+/// FAHK1 and the FCP1 classifier profile), decoded before the database opens.
+struct LocalForkAdmissionCredentialsV1 {
+    credentials: LocalForkAuthenticationCredentialsV1,
+    profile: ForkClassifierProfileV1,
+}
+
+/// Load and validate the managed credentials in the validated systemd
+/// credential directory (ADR-107 r6 startup step 1).
+fn load_local_fork_admission_credentials(
+    credential_directory: &Path,
+) -> io::Result<LocalForkAdmissionCredentialsV1> {
+    managed_credentials(credential_directory).map(|(credentials, profile)| {
+        LocalForkAdmissionCredentialsV1 {
+            credentials,
+            profile,
+        }
+    })
+}
+
+/// One local Fork-admission deployment ready to serve: the recovered erasure
+/// host of its store, already bound to its execution mode, and the decoded
+/// managed credentials.
+struct LocalForkAdmissionStartV1 {
+    host: ErasureExecutionHostV1,
+    credentials: LocalForkAdmissionCredentialsV1,
+}
+
+/// One managed local Fork-admission deployment of `serve`.
+///
+/// Its TCP bind and its ADR-109 pathname socket are the composition's: the
+/// listeners bind only what the startup predicates verified.
+pub struct ManagedLocalForkAdmissionV1<'a> {
     /// The one `SQLite` database the HTTP Gateway and the listener share.
     pub sqlite_path: &'a str,
-    /// The ADR-109 pathname socket.
-    pub socket_path: &'a Path,
     /// The validated systemd credential directory.
     pub credential_directory: &'a Path,
+    /// The requested execution-mode profile.
+    pub profile: GatewayModeProfileIdV1,
+    /// The composition the startup predicates already accepted, with the
+    /// TCP bind and the Fork-admission socket.
+    pub composition: GatewayServeCompositionV1,
+    /// The `OwnTracks` owner key, when the deployment composes ingress.
+    pub owntracks_owner_key: Option<&'a OwnTracksOwnerKey>,
+    /// The curated ledger source.
+    pub ledger: LedgerConfig,
+}
+
+/// Serve a managed local Fork-admission deployment.
+///
+/// ADR-134 §4 order after the lock: decode the managed credentials before
+/// the database opens (ADR-107 r6), recover the host with the closed
+/// composition and bind it to its execution mode, load the ledger, then
+/// serve.
+///
+/// # Errors
+/// Returns the first credential, store, binding, ledger or serve error.
+pub async fn serve_managed_local_fork_admission(
+    deployment: ManagedLocalForkAdmissionV1<'_>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
+    let credentials = load_local_fork_admission_credentials(deployment.credential_directory)?;
+    let store = if deployment.owntracks_owner_key.is_some() {
+        GatewayHostStoreV1::OwnTracks
+    } else {
+        GatewayHostStoreV1::Standard
+    };
+    let mut host = open_recovered_erasure_host(
+        StoreConfig::Sqlite {
+            path: deployment.sqlite_path.to_owned(),
+        },
+        store,
+        &ErasureCoordinatorCompositionV1::closed(),
+    )?;
+    let mode = bind_gateway_mode_v1(deployment.profile, deployment.composition, &mut host)?;
+    let ledger = deployment.ledger.load(&piglor_ledger::today_utc())?;
+    serve_local_fork_admission(
+        LocalForkAdmissionStartV1 { host, credentials },
+        &mode,
+        deployment.owntracks_owner_key,
+        shutdown,
+        ledger,
+    )
+    .await
 }
 
 /// Running local Fork-admission listener owned by the Gateway process.
@@ -139,82 +217,99 @@ impl Drop for LocalForkAdmissionListenerV1 {
 /// # Errors
 /// Returns an error when the credentials are unavailable or invalid, or when
 /// the store cannot be opened or provisioned.
+///
+/// An offline writer (ADR-134 §8): it holds the store's shared mode lock and
+/// attaches the store's execution-mode binding before it writes, so an
+/// unbound store and a store `migrate-mode` holds are refused.
 pub fn provision_local_fork_admission_authority(
     sqlite_path: &str,
     credential_directory: &Path,
 ) -> io::Result<()> {
     let credentials = credentials(credential_directory)?;
-    provision_with_credentials(sqlite_path, &credentials)
+    provision_bound_store(sqlite_path, &credentials)
 }
 
-fn provision_with_credentials(
+/// Provision as an offline writer: under the shared mode lock, on a store
+/// whose binding the adapter attached.
+fn provision_bound_store(
     sqlite_path: &str,
     credentials: &LocalForkAuthenticationCredentialsV1,
 ) -> io::Result<()> {
-    let mut store = SqliteStore::open(sqlite_path).map_err(io::Error::other)?;
+    GatewayModeStoreLockV1::shared(sqlite_path)
+        .map_err(io::Error::other)
+        .and_then(|lock| {
+            let provisioned = SqliteStore::open(sqlite_path)
+                .map_err(io::Error::other)
+                .and_then(|mut store| {
+                    attach_offline_writer_v1(&mut store)
+                        .map_err(io::Error::other)
+                        .and_then(|_| provision_with_credentials(&mut store, credentials))
+                });
+            drop(lock);
+            provisioned
+        })
+}
+
+fn provision_with_credentials(
+    store: &mut SqliteStore,
+    credentials: &LocalForkAuthenticationCredentialsV1,
+) -> io::Result<()> {
     credentials
-        .provision_authority(&mut store)
+        .provision_authority(store)
         .map(|_| ())
         .map_err(io::Error::other)
 }
 
 /// Serve the HTTP Gateway and the local Fork-admission listener over the one
-/// erasure host of `paths.sqlite_path` (ADR-109 revision 9, Decision 1).
+/// erasure host of the deployment's store (ADR-109 revision 9, Decision 1).
 ///
 /// Startup fails closed in this order, and no listener binds before its
-/// last step: the three managed credentials (FACR1, FAHK1, and the FCP1
-/// classifier profile) are validated and decoded before the database opens;
-/// the host recovers a verified inventory with `composition`; the read-only
-/// FCP1 preflight and then the FAO1 open proof run on the host's own adapter;
-/// the journal is reconciled there; the host and the Fork-admission slot,
-/// which alone holds the session's permit issuer and the profile, move into
-/// one `StoreExecutor`; then TCP and, last, the Unix pathname socket bind
-/// (ADR-109 revision 12). Shutdown stops TCP, then the
-/// listener, then drains the executor. The binary passes the closed
-/// composition; no flag, environment variable, or credential selects another.
+/// last step: the caller decodes the three managed credentials (FACR1, FAHK1,
+/// and the FCP1 classifier profile) with
+/// [`load_local_fork_admission_credentials`] before the database opens, then
+/// recovers the host with the closed composition and binds it to its
+/// execution mode ([`crate::mode_profile::bind_gateway_mode_v1`], ADR-134
+/// §4); this function runs the read-only FCP1 preflight and then the FAO1
+/// open proof on the host's own adapter, reconciles the journal there, moves
+/// the host and the Fork-admission slot, which alone holds the session's
+/// permit issuer and the profile, into one `StoreExecutor`, and binds TCP
+/// and, last, the Unix pathname socket (ADR-109 revision 12). Fork admission
+/// therefore never runs unbound. Shutdown stops TCP, then the listener, then
+/// drains the executor; a stale-binding refusal stops it the same way and
+/// the call then fails.
 ///
 /// # Errors
-/// Returns the first startup, serve, listener, or executor shutdown error.
-pub async fn serve_local_fork_admission(
-    addr: SocketAddr,
-    paths: LocalForkAdmissionPathsV1<'_>,
+/// Returns the first startup, serve, listener, executor shutdown or stale
+/// binding error.
+async fn serve_local_fork_admission(
+    start: LocalForkAdmissionStartV1,
+    mode: &GatewayModeBindingV1,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-    composition: &ErasureCoordinatorCompositionV1,
     shutdown: impl Future<Output = ()> + Send + 'static,
     ledger: (LedgerView, LedgerWriteMode),
 ) -> Result<(), ServeError> {
-    let managed = managed_credentials(paths.credential_directory)?;
-    let started =
-        open_with_credentials(paths.sqlite_path, managed, owntracks_owner_key, composition)?;
-    serve_started(addr, started, paths.socket_path, shutdown, ledger).await
+    let started = open_with_credentials(
+        start.host,
+        (start.credentials.credentials, start.credentials.profile),
+        owntracks_owner_key,
+        mode,
+    )?;
+    serve_started(started, mode, shutdown, ledger).await
 }
 
-/// Startup steps 2 to 5: open the one host with `composition`, preflight the
-/// FCP1 profile and open the ADR-106 session on its adapter, reconcile the
-/// journal there, and move the host with its Fork-admission slot into the
-/// Gateway's `StoreExecutor`.
+/// Startup steps 2a to 5 on the recovered host: preflight the FCP1 profile
+/// and open the ADR-106 session on its adapter, reconcile the journal there,
+/// and move the host with its Fork-admission slot into the Gateway's
+/// `StoreExecutor`.
 fn open_with_credentials(
-    sqlite_path: &str,
+    mut host: ErasureExecutionHostV1,
     (credentials, profile): (
         LocalForkAuthenticationCredentialsV1,
         ForkClassifierProfileV1,
     ),
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-    composition: &ErasureCoordinatorCompositionV1,
+    mode: &GatewayModeBindingV1,
 ) -> io::Result<(Gateway, LocalForkAdmissionCoordinatorV1)> {
-    // Startup step 2: the one read-write adapter and erasure host of the store.
-    let store = if owntracks_owner_key.is_some() {
-        GatewayHostStoreV1::OwnTracks
-    } else {
-        GatewayHostStoreV1::Standard
-    };
-    let mut host = open_recovered_erasure_host(
-        StoreConfig::Sqlite {
-            path: sqlite_path.to_owned(),
-        },
-        store,
-        composition,
-    )?;
     let (session, issuer, record) = open_profiled_session(&mut host, &credentials, &profile)?;
     let tuples = host.reconcile_fork_delivery_journal(&session);
     reconcile_startup(
@@ -231,14 +326,25 @@ fn open_with_credentials(
         credentials.policy().clone(),
         profile.into_sources(),
     );
-    let (gateway, submitter) =
-        Gateway::new_with_fork_admission_erasure_host(host, owntracks_owner_key, slot)
-            .map_err(io::Error::other)?;
+    // D1 on #302: the Local Principal the store records protects every
+    // HTTP route of this Gateway; an unprovisioned store answers them `401`.
+    let (gateway, submitter) = crate::local_principal::load_host_local_principal(&mut host, mode)
+        .and_then(|authorization| {
+        Gateway::new_with_fork_admission_erasure_host(
+            host,
+            owntracks_owner_key,
+            slot,
+            authorization,
+        )
+        .map_err(io::Error::other)
+    })?;
     let coordinator = LocalForkAdmissionCoordinatorV1::new(
         credentials,
         record,
         session_identity,
         Box::new(submitter),
+        mode.stale_signal(),
+        gateway.host_timelines(),
     );
     Ok((gateway, coordinator))
 }
@@ -288,36 +394,45 @@ const fn preflight_error(error: ForkEventAuthorityErrorV1) -> LocalForkAuthentic
 /// in-flight request while the executor is still open, is asserted on the
 /// same two calls by the A8 test.
 async fn serve_started(
-    addr: SocketAddr,
     (gateway, coordinator): (Gateway, LocalForkAdmissionCoordinatorV1),
-    socket_path: &Path,
+    mode: &GatewayModeBindingV1,
     shutdown: impl Future<Output = ()> + Send + 'static,
     (ledger_view, ledger_write): (LedgerView, LedgerWriteMode),
 ) -> Result<(), ServeError> {
-    let app = router_for_addr(
-        addr,
-        AppState {
-            gateway: gateway.clone(),
-            ledger_view,
-            ledger_write,
-        },
+    let addr = mode.tcp_addr();
+    let app = bound_router(
+        router_for_addr(
+            addr,
+            AppState {
+                gateway: gateway.clone(),
+                ledger_view,
+                ledger_write,
+            },
+        ),
+        mode,
     );
     let tcp = match tokio::net::TcpListener::bind(addr).await {
         Ok(tcp) => tcp,
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
-    let listener = match start_listener(coordinator, socket_path) {
+    let socket_path = mode
+        .fork_admission_socket()
+        .ok_or_else(|| io::Error::other("the bound composition has no Fork-admission socket"));
+    let listener = match socket_path.and_then(|path| start_listener(coordinator, path)) {
         Ok(listener) => listener,
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
     announce_listening(addr);
-    let serve_result = axum::serve(tcp, app).with_graceful_shutdown(shutdown).await;
+    let serve_result = axum::serve(tcp, app)
+        .with_graceful_shutdown(shutdown_or_stale(shutdown, mode))
+        .await;
     let stop_result = listener.stop().await;
     let shutdown_result = gateway.shutdown().await.map_err(ServeError::from);
     serve_result
         .and(stop_result)
         .map_err(ServeError::from)
         .and(shutdown_result)
+        .and_then(|()| stale_binding_exit(mode).map_err(ServeError::from))
 }
 
 /// Bind the Unix pathname socket last and spawn the listener thread.
@@ -371,6 +486,73 @@ fn managed_credentials(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+
+    /// Open the recovered host of `path` and run startup steps 2a to 5.
+    fn open_at(
+        path: &str,
+        managed: (
+            LocalForkAuthenticationCredentialsV1,
+            ForkClassifierProfileV1,
+        ),
+        owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+        composition: &ErasureCoordinatorCompositionV1,
+    ) -> io::Result<(Gateway, LocalForkAdmissionCoordinatorV1)> {
+        let store = if owntracks_owner_key.is_some() {
+            GatewayHostStoreV1::OwnTracks
+        } else {
+            GatewayHostStoreV1::Standard
+        };
+        open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: path.to_owned(),
+            },
+            store,
+            composition,
+        )
+        .and_then(|host| {
+            let mode = test_mode();
+            open_with_credentials(
+                crate::mode_profile::test_attach_host(host, &mode),
+                managed,
+                owntracks_owner_key,
+                &mode,
+            )
+        })
+    }
+
+    /// The loopback Fork-admission composition of the managed deployment
+    /// over `socket`.
+    fn fork_composition(socket: &Path) -> GatewayServeCompositionV1 {
+        GatewayServeCompositionV1 {
+            tcp_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            owntracks_owner_key: None,
+            fork_admission_socket: Some(socket.to_path_buf()),
+            ledger_source: None,
+            network_grants: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// The first `serve` of an empty store binds it to the Local mode.
+    fn bind_world(world: &World) -> TestResult {
+        let mut host = open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: world.path()?.to_owned(),
+            },
+            GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        bind_gateway_mode_v1(
+            GatewayModeProfileIdV1::Local,
+            fork_composition(&world.socket),
+            &mut host,
+        )?;
+        Ok(())
+    }
+
+    fn test_mode() -> GatewayModeBindingV1 {
+        crate::mode_profile::test_binding(GatewayModeProfileIdV1::Local, [])
+    }
     use crate::{
         executor::{ForkAdmissionSubmissionErrorV1, ForkAdmissionSubmissionV1, StoreExecutor},
         local_fork_authentication::{
@@ -397,16 +579,18 @@ mod tests {
         ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceInputV1,
         ErasureFreezeAdmissionEvidenceV1, ErasureFreezeApplicabilityRowV1,
         ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
-        ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1,
-        ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-        ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
-        ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestInputV1,
-        ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
-        ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-        ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
-        EventStore as _, TimelineId, TimelineMeta,
+        ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+        ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+        ErasureReceiptInputV1, ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1,
+        ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+        ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+        ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, EventStore as _,
+        TimelineId, TimelineMeta,
     };
-    use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
+    use pos_runtime::{
+        ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1,
+        ErasureHostStatusV1,
+    };
     use rusqlite::{params, OptionalExtension as _};
     use std::{
         collections::BTreeMap,
@@ -678,12 +862,24 @@ mod tests {
     fn provisioned_world(parents: &[&str]) -> TestResult<(World, Vec<TimelineId>)> {
         let world = unprovisioned_world()?;
         let mut store = SqliteStore::open(world.path()?)?;
+        crate::mode_profile::bind_test_store(&mut store, GatewayModeProfileIdV1::Local)?;
         let parents = parents
             .iter()
             .map(|name| store.create_timeline(name).map(|timeline| timeline.id()))
             .collect::<Result<Vec<_>, _>>()?;
+        crate::local_principal::provision_local_principal(
+            &mut store,
+            &crate::local_principal::LocalPrincipalProvisionV1::try_new(
+                &pos_core::PrincipalRefV1::try_new([7; 16], "local")?,
+                [fork_test_actor()],
+                [
+                    crate::GatewayOperationV1::APPEND_SIGNAL,
+                    crate::GatewayOperationV1::READ_EVENTS,
+                ],
+            )?,
+        )?;
+        provision_with_credentials(&mut store, &current_peer_credentials()?)?;
         drop(store);
-        provision_with_credentials(world.path()?, &current_peer_credentials()?)?;
         Ok((world, parents))
     }
 
@@ -692,7 +888,7 @@ mod tests {
         composition: &ErasureCoordinatorCompositionV1,
     ) -> TestResult<(Gateway, LocalForkAdmissionListenerV1)> {
         let (gateway, coordinator) =
-            open_with_credentials(world.path()?, current_peer_managed()?, None, composition)?;
+            open_at(world.path()?, current_peer_managed()?, None, composition)?;
         let listener = start_listener(coordinator, &world.socket)?;
         Ok((gateway, listener))
     }
@@ -768,9 +964,18 @@ mod tests {
         Ok(status)
     }
 
+    /// The entity the Local Principal of every provisioned world acts as.
+    fn fork_test_actor() -> pos_core::EntityId {
+        pos_core::EntityId::from_ulid(ulid::Ulid::from_parts(1_361, 7))
+    }
+
     async fn read_status(gateway: &Gateway, timeline: TimelineId) -> TestResult<StatusCode> {
         let request = Request::builder()
             .uri(format!("/v1/timelines/{timeline}/events"))
+            .header(
+                crate::operation::ACTOR_ENTITY_HEADER,
+                fork_test_actor().to_string(),
+            )
             .body(Body::empty())?;
         let status = http(gateway, request).await?;
         Ok(status)
@@ -778,7 +983,7 @@ mod tests {
 
     async fn append_status(gateway: &Gateway, timeline: TimelineId) -> TestResult<StatusCode> {
         let body = serde_json::json!({
-            "entity_id": pos_core::EntityId::new().to_string(),
+            "entity_id": fork_test_actor().to_string(),
             "dimension": "trust",
             "value": 0.4,
         });
@@ -786,6 +991,10 @@ mod tests {
             .method("POST")
             .uri(format!("/v1/timelines/{timeline}/signals"))
             .header("content-type", "application/json")
+            .header(
+                crate::operation::ACTOR_ENTITY_HEADER,
+                fork_test_actor().to_string(),
+            )
             .body(Body::from(body.to_string()))?;
         let status = http(gateway, request).await?;
         Ok(status)
@@ -795,9 +1004,20 @@ mod tests {
         gateway: &Gateway,
         timeline: TimelineId,
     ) -> TestResult<Option<ErasureReferenceV1>> {
-        let timeline = timeline.to_string();
         let page = gateway
-            .read_events_page_at_generation(&timeline, 0, 1, None)
+            .read_events_page_authorized_at_generation(
+                &timeline.to_string(),
+                0,
+                1,
+                crate::GatewayAuthorizationRequest::read(
+                    fork_test_actor(),
+                    timeline,
+                    0,
+                    1,
+                    pos_core::WallTime::now(),
+                ),
+                None,
+            )
             .await?;
         Ok(page.inventory_generation)
     }
@@ -991,35 +1211,61 @@ mod tests {
         }
     }
 
-    impl ErasureFreezeAuthorizationVerifierV1 for ForkTestAuthority {
-        fn validate_freeze_authorization(
+    impl ErasureCoordinatorAuthorityV1 for ForkTestAuthority {
+        fn validate_freeze_authorization_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             admission: &ErasureFreezeAdmissionEvidenceV1,
             authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
             authorization.verify_admission_body_binding(admission)
         }
-    }
 
-    impl ErasureRecoveryAuthorizationVerifierV1 for ForkTestAuthority {
-        fn validate_scope_extension(
+        fn validate_scope_extension_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
-        fn validate_administrative_resolution(
+        fn validate_administrative_resolution_with_view(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
-    }
 
-    impl ErasureCoordinatorAuthorityV1 for ForkTestAuthority {
+        fn validate_attempt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &pos_core::ErasureRequestV1,
+            _admission: &pos_core::ErasureRetryAdmissionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn validate_acknowledgement_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn validate_receipt_with_view(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _attempt: &pos_core::ErasureRetryAdmissionV1,
+            _receipt: &pos_core::ErasureReceiptV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
         fn verified_topology_observation(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -1028,6 +1274,7 @@ mod tests {
 
         fn verified_topology_observation_for_candidate(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
             candidate: &TimelineMeta,
@@ -1036,12 +1283,17 @@ mod tests {
             self.observation(manifest_digest).map(Some)
         }
 
-        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        fn authenticate(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: &ErasureRequestV1,
+        ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
         fn admit_authorization(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _provenance: ErasureReferenceV1,
             decision: ErasureAuthorizationDecisionV1,
@@ -1053,6 +1305,7 @@ mod tests {
 
         fn admit_corrected_submission(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: &ErasureRequestV1,
             _correction: &ErasureCorrectionProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -1061,6 +1314,7 @@ mod tests {
 
         fn admit_atomic_freeze(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             request: ErasureReferenceV1,
             requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -1116,6 +1370,7 @@ mod tests {
 
         fn admit_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
@@ -1123,6 +1378,7 @@ mod tests {
 
         fn admit_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _extension: &ErasureScopeExtensionV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<(), ErasureErrorV1> {
@@ -1131,6 +1387,7 @@ mod tests {
 
         fn resolve_fork_child_scope(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -1139,6 +1396,7 @@ mod tests {
 
         fn resolve_fork_scope_extension(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             requirement: ErasureForkScopeRequirementV1,
             input: &ErasureForkAdmissionInputV1,
         ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -1155,6 +1413,7 @@ mod tests {
 
         fn admit_administrative_resolution(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
@@ -1162,6 +1421,7 @@ mod tests {
 
         fn dispatch_destruction(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _request: ErasureReferenceV1,
             _commands: &[ErasureDestructionCommandV1],
         ) -> Result<(), ErasureErrorV1> {
@@ -1170,6 +1430,7 @@ mod tests {
 
         fn admit_attempt(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             admission: &pos_core::ErasureRetryAdmissionV1,
         ) -> Result<pos_core::ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
             Ok(pos_core::ErasureAttemptQuotaReservationV1::new(
@@ -1180,12 +1441,17 @@ mod tests {
 
         fn admit_acknowledgement(
             &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
             _acknowledgement: &ErasureAcknowledgementProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
 
-        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        fn admit_receipt(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _input: &ErasureReceiptInputV1,
+        ) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
     }
@@ -1597,7 +1863,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_executor_answers_busy_without_journal_rows() -> TestResult {
         let (world, parents) = provisioned_world(&["a7 parent"])?;
-        let (gateway, coordinator) = open_with_credentials(
+        let (gateway, coordinator) = open_at(
             world.path()?,
             current_peer_managed()?,
             None,
@@ -1714,9 +1980,7 @@ mod tests {
         authorize_request(&world, &test_composition(&authority)?)?;
         let authority_before = authority_rows(&world)?;
         let graph_before = graph_rows(&world)?;
-        assert!(
-            open_with_credentials(world.path()?, current_peer_managed()?, None, &closed).is_err()
-        );
+        assert!(open_at(world.path()?, current_peer_managed()?, None, &closed).is_err());
         assert_eq!(authority_rows(&world)?, authority_before);
         assert_eq!(graph_rows(&world)?, graph_before);
 
@@ -1725,10 +1989,10 @@ mod tests {
             .path()
             .to_str()
             .ok_or("runtime path is not UTF-8")?;
-        assert!(open_with_credentials(unopenable, current_peer_managed()?, None, &closed).is_err());
+        assert!(open_at(unopenable, current_peer_managed()?, None, &closed).is_err());
 
         let unprovisioned = unprovisioned_world()?;
-        assert!(open_with_credentials(
+        assert!(open_at(
             unprovisioned.path()?,
             current_peer_managed()?,
             None,
@@ -1752,9 +2016,7 @@ mod tests {
             params![[51_u8; 32].as_slice(), [52_u8; 32].as_slice()],
         )?;
         drop(connection);
-        assert!(
-            open_with_credentials(corrupt.path()?, current_peer_managed()?, None, &closed).is_err()
-        );
+        assert!(open_at(corrupt.path()?, current_peer_managed()?, None, &closed).is_err());
         assert_eq!(delivery_state(&corrupt, 52)?, Some(0));
         for failed in [&world, &unprovisioned, &corrupt] {
             assert!(!failed.socket.exists());
@@ -1769,6 +2031,24 @@ mod tests {
     // -----------------------------------------------------------------
     // Credential, lifecycle, and framing boundaries.
     // -----------------------------------------------------------------
+
+    /// ADR-134 §8: provisioning is an offline writer. It refuses an unbound
+    /// store and a store `migrate-mode` holds, and never binds.
+    #[test]
+    fn provisioning_is_an_offline_writer_of_a_bound_store() -> TestResult {
+        let world = unprovisioned_world()?;
+        let credentials = protected_credential_directory(world.runtime.path())?;
+        protected_credentials(&credentials, [7; 32], [8; 32])?;
+        assert!(provision_local_fork_admission_authority(world.path()?, &credentials).is_err());
+        assert!(authority_rows(&world)?.is_empty());
+        bind_world(&world)?;
+        let migrating = GatewayModeStoreLockV1::exclusive(world.path()?)?;
+        assert!(provision_local_fork_admission_authority(world.path()?, &credentials).is_err());
+        drop(migrating);
+        provision_local_fork_admission_authority(world.path()?, &credentials)?;
+        assert!(!authority_rows(&world)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn provision_rejects_missing_protected_credentials() -> TestResult {
@@ -1819,26 +2099,24 @@ mod tests {
         Ok(())
     }
 
-    fn paths<'a>(
-        world: &'a World,
-        credentials: &'a Path,
-    ) -> io::Result<LocalForkAdmissionPathsV1<'a>> {
-        Ok(LocalForkAdmissionPathsV1 {
-            sqlite_path: world.path()?,
-            socket_path: &world.socket,
-            credential_directory: credentials,
-        })
-    }
-
+    /// The managed serve sequence of `main`, on the test world's paths.
     async fn serve_for_test(
-        paths: LocalForkAdmissionPathsV1<'_>,
+        world: &World,
+        credentials: &Path,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServeError> {
-        let addr = "127.0.0.1:0".parse()?;
-        let composition = ErasureCoordinatorCompositionV1::closed();
-        let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        serve_local_fork_admission(addr, paths, None, &composition, shutdown, ledger).await?;
-        Ok(())
+        serve_managed_local_fork_admission(
+            ManagedLocalForkAdmissionV1 {
+                sqlite_path: world.path()?,
+                credential_directory: credentials,
+                profile: GatewayModeProfileIdV1::Local,
+                composition: fork_composition(&world.socket),
+                owntracks_owner_key: None,
+                ledger: LedgerConfig::new(None, false),
+            },
+            shutdown,
+        )
+        .await
     }
 
     /// Step 1 and step 3: missing credentials fail before the database is
@@ -1848,16 +2126,14 @@ mod tests {
     ) -> TestResult {
         let world = unprovisioned_world()?;
         let missing = world.runtime.path().join("missing-credentials");
-        assert!(serve_for_test(paths(&world, &missing)?, async {})
-            .await
-            .is_err());
+        assert!(serve_for_test(&world, &missing, async {}).await.is_err());
         assert!(!world.database.exists());
         assert!(!world.socket.exists());
 
         let credentials = protected_credential_directory(world.runtime.path())?;
         let profile = profile_bytes(&[7])?;
         managed_credentials(&credentials, ([7; 32], [8; 32]), &profile)?;
-        assert!(serve_for_test(paths(&world, &credentials)?, async {})
+        assert!(serve_for_test(&world, &credentials, async {})
             .await
             .is_err());
         assert!(!world.socket.exists());
@@ -1870,7 +2146,7 @@ mod tests {
         install_profile(&credentials, &profile)?;
         for (adapter, host) in [([9; 32], [8; 32]), ([7; 32], [9; 32])] {
             protected_credentials(&credentials, adapter, host)?;
-            assert!(serve_for_test(paths(&world, &credentials)?, async {})
+            assert!(serve_for_test(&world, &credentials, async {})
                 .await
                 .is_err());
             assert!(!world.socket.exists());
@@ -1886,14 +2162,98 @@ mod tests {
         let world = unprovisioned_world()?;
         let credentials = protected_credential_directory(world.runtime.path())?;
         protected_credentials(&credentials, [7; 32], [8; 32])?;
+        bind_world(&world)?;
         provision_local_fork_admission_authority(world.path()?, &credentials)?;
         install_profile(&credentials, &profile_bytes(&[7])?)?;
         let socket = world.socket.clone();
-        serve_for_test(paths(&world, &credentials)?, async move {
+        serve_for_test(&world, &credentials, async move {
             assert!(socket.exists());
         })
         .await?;
         assert!(!world.socket.exists());
+        Ok(())
+    }
+
+    /// ADR-134 §8 on the Fork listener: after another process migrates the
+    /// served store, a Bind through the socket commits nothing and answers
+    /// FARL1 code 8, which fires the stale signal; the serve loop then stops
+    /// on its own, unlinks the socket, and fails.
+    #[tokio::test]
+    async fn a_cross_process_migration_stops_the_fork_listener() -> TestResult {
+        use pos_core::{
+            GatewayModeBindingHostV1, GatewayModeBindingPortV1 as _, GatewayModeProfileRefV1,
+        };
+        let (world, _) = provisioned_world(&[])?;
+        let mode = crate::mode_profile::test_binding_of(
+            GatewayModeProfileIdV1::Local,
+            fork_composition(&world.socket),
+        );
+        let host = open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: world.path()?.to_owned(),
+            },
+            GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        let started = open_with_credentials(
+            crate::mode_profile::test_attach_host(host, &mode),
+            current_peer_managed()?,
+            None,
+            &mode,
+        )?;
+        let path = world.path()?.to_owned();
+        let socket = world.socket.clone();
+        let client = async move {
+            for _ in 0..200 {
+                if socket.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            let mut other_process = SqliteStore::open(&path)?;
+            let local = other_process
+                .load_mode_binding()?
+                .ok_or("the serve bound the store")?;
+            let air_gapped =
+                GatewayModeProfileRefV1::try_new("gateway-mode-air-gapped-v1", [0x45; 32])?;
+            other_process.migrate_mode(
+                GatewayModeBindingHostV1::new()
+                    .authorize_migration(local.profile().clone(), air_gapped)?,
+            )?;
+            drop(other_process);
+            let response =
+                tokio::task::spawn_blocking(move || request(&socket, &bind_payload(81), false))
+                    .await??;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
+        };
+        let serve = serve_started(
+            started,
+            &mode,
+            std::future::pending(),
+            (LedgerView::default(), LedgerWriteMode::Disabled),
+        );
+        tokio::pin!(serve);
+        let response = tokio::select! {
+            served = &mut serve => {
+                return Err(format!("the serve ended before the client: {served:?}").into());
+            }
+            response = tokio::time::timeout(Duration::from_secs(30), client) => {
+                response.map_err(|_| "the listener never answered")??
+            }
+        };
+        assert_eq!(response, rejected(8));
+        let served = tokio::time::timeout(Duration::from_secs(40), serve)
+            .await
+            .map_err(|_| "the stale signal never ended the serve loop")?;
+        assert_eq!(
+            served.err().map(|error| error.to_string()).as_deref(),
+            Some("gateway mode binding is stale")
+        );
+        assert!(!world.socket.exists());
+        assert_eq!(
+            row_count(&world, "SELECT COUNT(*) FROM fork_admission_operations")?,
+            0
+        );
         Ok(())
     }
 
@@ -1903,7 +2263,7 @@ mod tests {
     async fn bind_failures_stop_what_was_started() -> TestResult {
         let (world, _) = provisioned_world(&[])?;
         let occupied = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let started = open_with_credentials(
+        let started = open_at(
             world.path()?,
             current_peer_managed()?,
             None,
@@ -1911,21 +2271,35 @@ mod tests {
         )?;
         let gateway = started.0.clone();
         let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        assert!(serve_started(
-            occupied.local_addr()?,
-            started,
-            &world.socket,
-            async {},
-            ledger
-        )
-        .await
-        .is_err());
+        let mut occupied_tcp = fork_composition(&world.socket);
+        occupied_tcp.tcp_addr = occupied.local_addr()?;
+        let mode =
+            crate::mode_profile::test_binding_of(GatewayModeProfileIdV1::Local, occupied_tcp);
+        assert!(serve_started(started, &mode, async {}, ledger)
+            .await
+            .is_err());
+        assert!(!gateway.is_ready());
+        drop(gateway);
+        assert!(!world.socket.exists());
+
+        // A binding without a Fork-admission socket never binds a listener.
+        let started = open_at(
+            world.path()?,
+            current_peer_managed()?,
+            None,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        let gateway = started.0.clone();
+        let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
+        assert!(serve_started(started, &test_mode(), async {}, ledger)
+            .await
+            .is_err());
         assert!(!gateway.is_ready());
         drop(gateway);
         assert!(!world.socket.exists());
 
         fs::set_permissions(world.runtime.path(), fs::Permissions::from_mode(0o777))?;
-        let started = open_with_credentials(
+        let started = open_at(
             world.path()?,
             current_peer_managed()?,
             None,
@@ -1933,15 +2307,13 @@ mod tests {
         )?;
         let gateway = started.0.clone();
         let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        assert!(serve_started(
-            "127.0.0.1:0".parse()?,
-            started,
-            &world.socket,
-            async {},
-            ledger
-        )
-        .await
-        .is_err());
+        let mode = crate::mode_profile::test_binding_of(
+            GatewayModeProfileIdV1::Local,
+            fork_composition(&world.socket),
+        );
+        assert!(serve_started(started, &mode, async {}, ledger)
+            .await
+            .is_err());
         assert!(!gateway.is_ready());
         drop(gateway);
         assert!(!world.socket.exists());
@@ -1954,7 +2326,7 @@ mod tests {
         let owner_key_path = world.runtime.path().join("owner.key");
         crate::owntracks::create_or_load_owner_key(&owner_key_path)?;
         let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
-        let (gateway, coordinator) = open_with_credentials(
+        let (gateway, coordinator) = open_at(
             world.path()?,
             current_peer_managed()?,
             Some(&owner_key),
@@ -2082,7 +2454,7 @@ mod tests {
         world: &World,
         descriptors: &[u8],
     ) -> TestResult<(Gateway, LocalForkAdmissionListenerV1)> {
-        let (gateway, coordinator) = open_with_credentials(
+        let (gateway, coordinator) = open_at(
             world.path()?,
             (current_peer_credentials()?, profile_from(descriptors)?),
             None,
@@ -2127,7 +2499,7 @@ mod tests {
         stop(&world, gateway, listener).await?;
 
         let authority_before = authority_rows(&world)?;
-        assert!(open_with_credentials(
+        assert!(open_at(
             world.path()?,
             (current_peer_credentials()?, profile_from(&[9])?),
             None,
@@ -2225,7 +2597,7 @@ mod tests {
             fs::set_permissions(&credentials, fs::Permissions::from_mode(0o700))?;
             write(credentials.as_path())?;
             assert!(
-                serve_for_test(paths(&world, &credentials)?, async {})
+                serve_for_test(&world, &credentials, async {})
                     .await
                     .is_err(),
                 "{name} must fail closed"

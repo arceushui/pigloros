@@ -35,10 +35,14 @@ fn summary() -> GateSummaryV1 {
 }
 
 fn member(gate: Result<GateSummaryV1, Error>, launch_failure: Option<Error>) -> MemberPassV1 {
+    let content_validation = gate
+        .as_ref()
+        .map_or(UNVALIDATED, |summary| summary.content_validation);
     MemberPassV1 {
         plugin: PluginId::new(),
         expected_plugin_id: "plugin-a".to_owned(),
         gate,
+        content_validation,
         invocation_id: Some([5; 16]),
         launch_failure,
         sync: Ok(()),
@@ -103,6 +107,30 @@ fn a_gate_error_is_refused_and_outranks_a_receipt_and_a_launch_failure() {
     assert_eq!(outcome.release_digest, None);
     assert_eq!(outcome.tps1_digest, None);
     assert_eq!(outcome.content_validation, UNVALIDATED);
+}
+
+#[test]
+fn a_successful_gate_keeps_its_content_fact_after_later_launch_failure() {
+    let mut gated = summary();
+    gated.content_validation = ContentValidationV1::BasicPackageV1;
+    let outcome = without_receipt(Ok(gated), Some(Error::WorkerCrashed));
+    assert_eq!(
+        outcome.content_validation,
+        ContentValidationV1::BasicPackageV1
+    );
+    assert!(matches!(outcome.result, Verdict::Failed { .. }));
+}
+
+#[test]
+fn a_failed_offer_keeps_the_successful_gates_content_fact() {
+    let mut entry = member(Err(Error::InvalidInvocation), None);
+    entry.content_validation = ContentValidationV1::BasicPackageV1;
+    let outcome = Outcome::assemble(&entry, 9, LOCAL, None);
+    assert_eq!(
+        outcome.content_validation,
+        ContentValidationV1::BasicPackageV1
+    );
+    assert!(matches!(outcome.result, Verdict::Refused { .. }));
 }
 
 #[test]

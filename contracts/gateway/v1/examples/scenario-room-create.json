@@ -1,0 +1,135 @@
+{
+  "name": "scenario-room-create",
+  "operation_id": "createScenarioRoom",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "descriptor": {
+        "schema_version": 1,
+        "tick_duration_ms": 100,
+        "max_ticks": 600,
+        "scheduler_seed": "0404040404040404040404040404040404040404040404040404040404040404",
+        "scheduler_policy": 0,
+        "intervention_policy": 1,
+        "plugins": [
+          {
+            "plugin_id": "gateway-world-actions",
+            "version": "0.1.0"
+          }
+        ],
+        "rules": [
+          {
+            "rule_id": "gateway-world-actions.nudge.scale",
+            "value_micro": 250000
+          }
+        ],
+        "participants": [
+          {
+            "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+            "kind": "persona"
+          },
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "kind": "society"
+          }
+        ],
+        "initial_conditions": [
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "dimension": "trust",
+            "value_micro": 600000
+          }
+        ],
+        "governance_ref": "01JC0GATEWAYW90G0VERN00001",
+        "privacy_export_ref": "01JC0GATEWAYW90PR1VACY0001"
+      }
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 201,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
+      "id": "01JC0GATEWAYW9R00M00000001",
+      "revision": 1,
+      "provenance": {
+        "digest": "83ad03ce7c2138a7efc3ab5b226faa53c2743fdcf9c024feb949ccfdad5d8c66",
+        "origin": "principal-authored"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "unavailable",
+        "reason": "not-installed"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "descriptor": {
+        "room_id": "01JC0GATEWAYW9R00M00000001",
+        "revision": 1,
+        "schema_version": 1,
+        "tick_duration_ms": 100,
+        "max_ticks": 600,
+        "scheduler_seed": "0404040404040404040404040404040404040404040404040404040404040404",
+        "scheduler_policy": 0,
+        "intervention_policy": 1,
+        "plugins": [
+          {
+            "plugin_id": "gateway-world-actions",
+            "version": "0.1.0"
+          }
+        ],
+        "rules": [
+          {
+            "rule_id": "gateway-world-actions.nudge.scale",
+            "value_micro": 250000
+          }
+        ],
+        "participants": [
+          {
+            "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+            "kind": "persona"
+          },
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "kind": "society"
+          }
+        ],
+        "initial_conditions": [
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "dimension": "trust",
+            "value_micro": 600000
+          }
+        ],
+        "governance_ref": "01JC0GATEWAYW90G0VERN00001",
+        "privacy_export_ref": "01JC0GATEWAYW90PR1VACY0001",
+        "correlation_id": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f",
+        "plugin_composition_hash": "361f956939882f237b9bedde8cfb696bafed4edc7102abc753100eeea2b28842",
+        "rule_set_hash": "662db7947def38f64a45aab6c97b07884d98182dadbd679caf5b8a42792926e3",
+        "descriptor_hash": "97c8ec0c470aed0605c585f36705f03109aabc7eb0c07fff786a8e1daf6021c3"
+      },
+      "parent_revision": null,
+      "commit": {
+        "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+        "event_id": "01JC0GATEWAYW9EVENT0000001",
+        "seq": 1,
+        "event_schema_id": "room.revision.v1",
+        "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.2"
+      }
+    }
+  }
+}

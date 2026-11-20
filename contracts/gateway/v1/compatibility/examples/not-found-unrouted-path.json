@@ -1,0 +1,22 @@
+{
+  "name": "not-found-unrouted-path",
+  "operation_id": null,
+  "request": {
+    "method": "GET",
+    "target": "/v1/no-such-route"
+  },
+  "request_valid": false,
+  "response": {
+    "status": 404,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
+      "title": "Not found or unavailable",
+      "status": 404,
+      "detail": "resource not found",
+      "instance": "/v1/no-such-route",
+      "code": "not-found-or-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

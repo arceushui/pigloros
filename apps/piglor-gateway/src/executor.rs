@@ -5,23 +5,27 @@
 //! dedicated OS thread.
 use crate::{
     authorization::{
-        GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
+        DenialEvidenceBatch, DenialEvidenceReceipt, GatewayAuthorization,
+        GatewayAuthorizationDecision, GatewayAuthorizationError,
     },
+    host_timelines::HostTimelinesV1,
     AdmittedAction, EventNotice,
 };
 use pos_core::{
     clock::WallTime,
     event::{Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
-    ids::TimelineId,
+    ids::{EntityId, TimelineId},
     store::{AppendDedupScope, EventReadBounds, EventStore, PurgeOutcome, SeqRange},
     timeline::Timeline,
-    ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
-    CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
+    AuthorityErrorV1, AuthorityPersistenceErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit,
+    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError, CorrelationId,
+    ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
-    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1,
-    OwnTracksIngressRateKeyV1, PersistedAuthorityV1, PreparedOwnTracksIngressV1, ProposedAction,
-    Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, GatewayRevisionErrorV1,
+    GatewayRevisionPortV1, Hash, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
+    PersistedAuthorityV1, PipelineOutcomeV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{
@@ -76,6 +80,8 @@ macro_rules! submit {
         }
     }};
 }
+
+pub mod scenario_room;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -151,6 +157,54 @@ mod lifecycle_coverage_tests {
         assert_eq!(final_state, LifecycleState::Closed);
     }
 
+    /// The exhaustive oracle of the host error table: a new host error fails
+    /// to compile here until it is routed.
+    fn oracle_core(error: ErasureHostErrorV1) -> CoreError {
+        match error {
+            ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
+                CoreError::ErasureContainmentUnavailable
+            }
+            ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
+            ErasureHostErrorV1::AuthorizationDenied
+            | ErasureHostErrorV1::Conflict
+            | ErasureHostErrorV1::AdapterFailure => crate::executor::host_command_rejected(),
+            ErasureHostErrorV1::ModeBindingStale => CoreError::ModeBindingStale,
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_host_error(variant: ErasureHostErrorV1) -> Option<ErasureHostErrorV1> {
+        match variant {
+            ErasureHostErrorV1::RecoveryUnavailable => Some(ErasureHostErrorV1::AccessFrozen),
+            ErasureHostErrorV1::AccessFrozen => Some(ErasureHostErrorV1::StaleGeneration),
+            ErasureHostErrorV1::StaleGeneration => Some(ErasureHostErrorV1::AuthorizationDenied),
+            ErasureHostErrorV1::AuthorizationDenied => Some(ErasureHostErrorV1::Conflict),
+            ErasureHostErrorV1::Conflict => Some(ErasureHostErrorV1::AdapterFailure),
+            ErasureHostErrorV1::AdapterFailure => Some(ErasureHostErrorV1::ModeBindingStale),
+            ErasureHostErrorV1::ModeBindingStale => None,
+        }
+    }
+
+    #[test]
+    fn every_host_error_routes_through_the_core_table() {
+        let mut walked = 0;
+        let mut last = ErasureHostErrorV1::RecoveryUnavailable;
+        let mut current = Some(ErasureHostErrorV1::RecoveryUnavailable);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(
+                format!("{:?}", host_error_to_core(variant)),
+                format!("{:?}", oracle_core(variant))
+            );
+            last = variant;
+            walked += 1;
+            current = next_host_error(variant);
+        }
+        assert_eq!(walked, ErasureHostErrorV1::COUNT);
+        assert_eq!(last as usize, ErasureHostErrorV1::COUNT - 1);
+    }
+
     #[test]
     fn test_gate_binding_and_host_error_mapping_cover_every_variant(
     ) -> Result<(), ErasureHostErrorV1> {
@@ -194,6 +248,10 @@ mod lifecycle_coverage_tests {
                 std::mem::discriminant(&CoreError::Storage(String::new())),
             );
         }
+        assert_eq!(
+            std::mem::discriminant(&host_error_to_core(ErasureHostErrorV1::ModeBindingStale)),
+            std::mem::discriminant(&CoreError::ModeBindingStale),
+        );
 
         assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
         Ok(())
@@ -229,6 +287,7 @@ mod lifecycle_coverage_tests {
                 global_permit,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "draining-queued-work".to_owned(),
                     reply,
                 },
@@ -378,12 +437,17 @@ enum Command {
     PendingAppendIdentityCleanup {
         reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
     },
+    /// Count client root Timelines; the host roots `host_roots` are left
+    /// out of the count.
     RootCount {
         maximum: usize,
+        host_roots: Vec<TimelineId>,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
     },
+    /// Create a root Timeline, owned by `owner` when one is given.
     Create {
         name: String,
+        owner: Option<EntityId>,
         reply: oneshot::Sender<Result<Timeline, StoreExecutorError>>,
     },
     Read {
@@ -410,7 +474,7 @@ enum Command {
     },
     AppendConsentRevocation {
         timeline: TimelineId,
-        revocation: ConsentRevokedV1,
+        revocation: (ConsentRevokedV1, Option<CorrelationId>),
         cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
@@ -735,18 +799,37 @@ impl ExecutorStore {
     }
 }
 
+/// The store error of each erasure host error, indexed by its stable code
+/// (`ErasureHostErrorV1::code`). The oracle test
+/// `every_host_error_routes_through_the_core_table` fails to compile until a
+/// new host error is routed here.
+const HOST_ERROR_TO_CORE: [fn() -> CoreError; ErasureHostErrorV1::COUNT] = [
+    host_containment_unavailable,
+    || CoreError::ErasureAccessFrozen,
+    host_containment_unavailable,
+    host_command_rejected,
+    host_command_rejected,
+    host_command_rejected,
+    || CoreError::ModeBindingStale,
+];
+
+const _: () = assert!(HOST_ERROR_TO_CORE.len() == ErasureHostErrorV1::COUNT);
+
+/// The store error of `error`; a host error past the table fails closed as
+/// unavailable containment.
 fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
-    match error {
-        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
-        ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
-            CoreError::ErasureContainmentUnavailable
-        }
-        ErasureHostErrorV1::AuthorizationDenied
-        | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
-            CoreError::Storage("erasure host command rejected".to_owned())
-        }
-    }
+    HOST_ERROR_TO_CORE
+        .get(error as usize)
+        .copied()
+        .unwrap_or(host_containment_unavailable)()
+}
+
+const fn host_containment_unavailable() -> CoreError {
+    CoreError::ErasureContainmentUnavailable
+}
+
+fn host_command_rejected() -> CoreError {
+    CoreError::Storage("erasure host command rejected".to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -983,6 +1066,9 @@ struct ExecutorControl {
     join_completion: watch::Sender<Option<JoinOutcome>>,
     command_deadline: Duration,
     shutdown_deadline: Duration,
+    /// The host Timelines of the owned store, read before the worker took
+    /// the host.
+    host_timelines: HostTimelinesV1,
 }
 
 pub(crate) struct CommandEnvelope {
@@ -1000,13 +1086,41 @@ pub(crate) struct StoreExecutor {
     control: Arc<ExecutorControl>,
 }
 
+/// A handle that does not keep its executor alive: a background task holds
+/// it so that a Gateway dropped without a shutdown releases the worker's
+/// command channel instead of waiting on the task.
+#[derive(Clone)]
+pub(crate) struct WeakStoreExecutor {
+    control: std::sync::Weak<ExecutorControl>,
+}
+
+impl WeakStoreExecutor {
+    /// The executor, while any strong handle still owns it.
+    pub(crate) fn upgrade(&self) -> Option<StoreExecutor> {
+        self.control
+            .upgrade()
+            .map(|control| StoreExecutor { control })
+    }
+}
+
 impl StoreExecutor {
+    /// A handle that does not keep this executor alive.
+    pub(crate) fn downgrade(&self) -> WeakStoreExecutor {
+        WeakStoreExecutor {
+            control: Arc::downgrade(&self.control),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new(mut store: Box<dyn EventStore>) -> Self {
         drop(
             store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
         );
-        Self::spawn(ExecutorStore::Generic(store), None)
+        Self::spawn(
+            ExecutorStore::Generic(store),
+            None,
+            HostTimelinesV1::new(None),
+        )
     }
 
     #[cfg(test)]
@@ -1015,29 +1129,46 @@ impl StoreExecutor {
         permit: ConsentAppendPermit,
     ) -> Self {
         drop(store.bind_consent_authority(permit));
-        Self::spawn(ExecutorStore::Generic(store), None)
+        Self::spawn(
+            ExecutorStore::Generic(store),
+            None,
+            HostTimelinesV1::new(None),
+        )
     }
 
     pub(crate) fn new_with_erasure_host(
-        mut host: ErasureExecutionHostV1,
+        host: ErasureExecutionHostV1,
         permit: ConsentAppendPermit,
     ) -> Result<Self, CoreError> {
-        host.bind_consent_authority(permit)
-            .map_err(host_error_to_core)?;
-        Ok(Self::spawn(ExecutorStore::Host(Box::new(host), None), None))
+        Self::bind_host(host, permit).map(|(host, host_timelines)| {
+            Self::spawn(ExecutorStore::Host(host, None), None, host_timelines)
+        })
     }
 
     pub(crate) fn new_with_owntracks_erasure_host(
-        mut host: ErasureExecutionHostV1,
+        host: ErasureExecutionHostV1,
         owner_key: [u8; 32],
         permit: ConsentAppendPermit,
     ) -> Result<Self, CoreError> {
+        Self::bind_host(host, permit).map(|(host, host_timelines)| {
+            Self::spawn(
+                ExecutorStore::Host(host, None),
+                Some(owner_key),
+                host_timelines,
+            )
+        })
+    }
+
+    /// Bind the Gateway's consent authority to `host` and read its host
+    /// Timelines, before the worker takes the host.
+    fn bind_host(
+        mut host: ErasureExecutionHostV1,
+        permit: ConsentAppendPermit,
+    ) -> Result<(Box<ErasureExecutionHostV1>, HostTimelinesV1), CoreError> {
         host.bind_consent_authority(permit)
-            .map_err(host_error_to_core)?;
-        Ok(Self::spawn(
-            ExecutorStore::Host(Box::new(host), None),
-            Some(owner_key),
-        ))
+            .and_then(|()| HostTimelinesV1::of_host(&mut host))
+            .map_err(host_error_to_core)
+            .map(|host_timelines| (Box::new(host), host_timelines))
     }
 
     #[cfg(test)]
@@ -1052,6 +1183,7 @@ impl StoreExecutor {
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store))),
             None,
+            HostTimelinesV1::new(None),
         )
     }
 
@@ -1068,13 +1200,19 @@ impl StoreExecutor {
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(store))),
             Some(owner_key),
+            HostTimelinesV1::new(None),
         )
     }
 
-    fn spawn(store: ExecutorStore, owntracks_owner_key: Option<[u8; 32]>) -> Self {
+    fn spawn(
+        store: ExecutorStore,
+        owntracks_owner_key: Option<[u8; 32]>,
+        host_timelines: HostTimelinesV1,
+    ) -> Self {
         Self::spawn_with_deadlines(
             store,
             owntracks_owner_key,
+            host_timelines,
             COMMAND_DEADLINE,
             SHUTDOWN_DEADLINE,
             #[cfg(test)]
@@ -1089,7 +1227,14 @@ impl StoreExecutor {
         shutdown_deadline: Duration,
     ) -> Self {
         store.bind_test_erasure_gate();
-        Self::spawn_with_deadlines(store, None, command_deadline, shutdown_deadline, None)
+        Self::spawn_with_deadlines(
+            store,
+            None,
+            HostTimelinesV1::new(None),
+            command_deadline,
+            shutdown_deadline,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -1101,6 +1246,7 @@ impl StoreExecutor {
         Self::spawn_with_deadlines(
             store,
             None,
+            HostTimelinesV1::new(None),
             Duration::from_secs(1),
             Duration::from_secs(1),
             Some(observer),
@@ -1110,6 +1256,7 @@ impl StoreExecutor {
     fn spawn_with_deadlines(
         store: ExecutorStore,
         owntracks_owner_key: Option<[u8; 32]>,
+        host_timelines: HostTimelinesV1,
         command_deadline: Duration,
         shutdown_deadline: Duration,
         #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
@@ -1130,6 +1277,7 @@ impl StoreExecutor {
             join_completion,
             command_deadline,
             shutdown_deadline,
+            host_timelines,
         });
         let worker_state = Arc::clone(&control.state);
         let worker_shutdown = Arc::clone(&control.shutdown);
@@ -1176,6 +1324,7 @@ impl StoreExecutor {
                 join_completion,
                 command_deadline,
                 shutdown_deadline,
+                host_timelines: HostTimelinesV1::new(None),
             }),
         }
     }
@@ -1472,6 +1621,54 @@ impl StoreExecutor {
             PurgeActionReceiptsCommand { limit, reply }
         )))
     }
+    /// Run one Gateway revision operation (#304) on the host's revision port.
+    pub(crate) async fn gateway_revision<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut dyn GatewayRevisionPortV1) -> RevisionResultV1<T> + Send + 'static,
+    ) -> Result<RevisionResultV1<T>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(RevisionCommand {
+            operation: Box::new(operation),
+            reply
+        })))
+    }
+    /// Durably record one batch of denial evidence in its own store command.
+    pub(crate) async fn record_denial_evidence(
+        &self,
+        authorization: Arc<GatewayAuthorization>,
+        batch: DenialEvidenceBatch,
+    ) -> Result<DenialEvidenceReceipt, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            DenialEvidenceCommand {
+                authorization,
+                batch,
+                reply
+            }
+        )))
+    }
+    /// Load the chain the host store records under `leaf_grant_id`, so the
+    /// authorizer can compare it with its pinned chain before a decision.
+    pub(crate) async fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            LoadAuthorityCommand {
+                leaf_grant_id,
+                reply
+            }
+        )))
+    }
+    /// The binding the commit `commit` (a Timeline and sequence) was
+    /// produced under, or with no commit the binding the next commit would
+    /// be produced under (ADR-134 §5).
+    pub(crate) async fn produced_under(
+        &self,
+        commit: Option<(TimelineId, Seq)>,
+    ) -> Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            ProducedUnderCommand { commit, reply }
+        )))
+    }
     pub(crate) async fn remove_append_identities_bounded(
         &self,
         scope: AppendDedupScope,
@@ -1509,11 +1706,26 @@ impl StoreExecutor {
             reply
         })
     }
-    pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
-        submit!(self, |reply| Command::RootCount { maximum, reply })
+    /// The host Timelines of the store this executor owns, read when it
+    /// took ownership of the host.
+    pub(crate) fn host_timelines(&self) -> HostTimelinesV1 {
+        self.control.host_timelines
     }
-    pub(crate) async fn create(&self, name: String) -> Result<Timeline, StoreExecutorError> {
-        submit!(self, |reply| Command::Create { name, reply })
+    /// Count the client root Timelines, leaving out the host Timelines.
+    pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
+        let host_roots = self.host_timelines().roots();
+        submit!(self, |reply| Command::RootCount {
+            maximum,
+            host_roots,
+            reply
+        })
+    }
+    pub(crate) async fn create(
+        &self,
+        name: String,
+        owner: Option<EntityId>,
+    ) -> Result<Timeline, StoreExecutorError> {
+        submit!(self, |reply| Command::Create { name, owner, reply })
     }
     pub(crate) async fn read(
         &self,
@@ -1601,7 +1813,7 @@ impl StoreExecutor {
     pub(crate) async fn append_consent_revocation(
         &self,
         timeline: TimelineId,
-        revocation: ConsentRevokedV1,
+        revocation: (ConsentRevokedV1, Option<CorrelationId>),
         cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
@@ -1645,18 +1857,19 @@ impl StoreExecutor {
     /// Fork-admission commands; the executor handle kept by the Gateway
     /// cannot construct them.
     pub(crate) fn new_with_fork_admission_host(
-        mut host: ErasureExecutionHostV1,
+        host: ErasureExecutionHostV1,
         owntracks_owner_key: Option<[u8; 32]>,
         permit: ConsentAppendPermit,
         slot: ForkAdmissionSlotV1,
     ) -> Result<(Self, ForkAdmissionSubmitterV1), CoreError> {
-        host.bind_consent_authority(permit)
-            .map_err(host_error_to_core)?;
-        let executor = Self::spawn(
-            ExecutorStore::Host(Box::new(host), Some(Box::new(slot))),
-            owntracks_owner_key,
-        );
-        Ok((executor.clone(), ForkAdmissionSubmitterV1 { executor }))
+        Self::bind_host(host, permit).map(|(host, host_timelines)| {
+            let executor = Self::spawn(
+                ExecutorStore::Host(host, Some(Box::new(slot))),
+                owntracks_owner_key,
+                host_timelines,
+            );
+            (executor.clone(), ForkAdmissionSubmitterV1 { executor })
+        })
     }
 
     /// Submit one Fork-admission command from a plain OS thread and block for
@@ -2187,6 +2400,150 @@ impl WorkerCommandV1 for PurgeActionReceiptsCommand {
             ),
         };
         drop(self.reply.send(result));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+/// Append one batch of denial evidence to the host's authority store.
+///
+/// It runs as its own Write-class command, after the caller released the
+/// commit fence, so an authority replacement never waits behind it. The
+/// receipt names exactly what committed; a host fault commits nothing. Only
+/// the test-only `Generic` and `Gateway` stores lack the authority ports;
+/// production always runs on `Host`.
+struct DenialEvidenceCommand {
+    authorization: Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+    reply: oneshot::Sender<Result<DenialEvidenceReceipt, StoreExecutorError>>,
+}
+
+impl WorkerCommandV1 for DenialEvidenceCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self {
+            authorization,
+            batch,
+            reply,
+        } = *self;
+        let receipt = match &mut state.store {
+            ExecutorStore::Host(host, _) => host
+                .command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| {
+                        authorization.record_denial(ports, &batch)
+                    })
+                })
+                .unwrap_or_default(),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                DenialEvidenceReceipt::default()
+            }
+        };
+        drop(reply.send(Ok(receipt)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+/// Read one recorded authority chain from the host's authority store.
+///
+/// Only the test-only `Generic` and `Gateway` stores lack the authority
+/// ports; they answer unavailable, so an authorizer bound to them fails
+/// closed.
+struct LoadAuthorityCommand {
+    leaf_grant_id: Hash,
+    reply: oneshot::Sender<
+        Result<Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>, StoreExecutorError>,
+    >,
+}
+
+impl WorkerCommandV1 for LoadAuthorityCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self {
+            leaf_grant_id,
+            reply,
+        } = *self;
+        let loaded = match &mut state.store {
+            ExecutorStore::Host(host, _) => host
+                .command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| ports.load_authority(leaf_grant_id))
+                })
+                .unwrap_or(Err(AuthorityPersistenceErrorV1::Unavailable)),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                Err(AuthorityPersistenceErrorV1::Unavailable)
+            }
+        };
+        drop(reply.send(Ok(loaded)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+struct ProducedUnderCommand {
+    commit: Option<(TimelineId, Seq)>,
+    reply: oneshot::Sender<
+        Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError>,
+    >,
+}
+
+impl WorkerCommandV1 for ProducedUnderCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self { commit, reply } = *self;
+        let produced = match &mut state.store {
+            ExecutorStore::Host(host, _) => {
+                crate::mode_profile::produced_under_v1(host.gateway_mode_binding(), commit)
+            }
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
+        };
+        drop(reply.send(Ok(produced)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+/// The result of one Gateway revision operation on the host store (#304).
+type RevisionResultV1<T> = Result<T, GatewayRevisionErrorV1>;
+
+/// One Gateway revision operation, run on the host's revision port.
+type RevisionOperationV1<T> =
+    Box<dyn FnOnce(&mut dyn GatewayRevisionPortV1) -> RevisionResultV1<T> + Send>;
+
+/// One boxed Gateway revision operation and its reply.
+///
+/// It runs as a Write-class command on the host's revision port, so a
+/// revision commit is linearised with every other store write. Only the
+/// test-only `Generic` and `Gateway` stores lack the port; they answer
+/// unavailable.
+struct RevisionCommand<T> {
+    operation: RevisionOperationV1<T>,
+    reply: oneshot::Sender<Result<RevisionResultV1<T>, StoreExecutorError>>,
+}
+
+impl<T: Send + 'static> WorkerCommandV1 for RevisionCommand<T> {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self { operation, reply } = *self;
+        let result = match &mut state.store {
+            ExecutorStore::Host(host, _) => host
+                .command_sender()
+                .and_then(|mut sender| sender.with_gateway_revisions(operation))
+                .unwrap_or(Err(GatewayRevisionErrorV1::Unavailable)),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                Err(GatewayRevisionErrorV1::Unavailable)
+            }
+        };
+        drop(reply.send(Ok(result)));
     }
 
     fn expire_unrun(self: Box<Self>) {
@@ -2732,10 +3089,16 @@ fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandE
         Command::PendingAppendIdentityCleanup { reply } => {
             execute_pending_append_identity_cleanup_command(state, reply);
         }
-        Command::RootCount { maximum, reply } => {
-            execute_root_count_command(state, maximum, reply);
+        Command::RootCount {
+            maximum,
+            host_roots,
+            reply,
+        } => {
+            execute_root_count_command(state, maximum, &host_roots, reply);
         }
-        Command::Create { name, reply } => execute_create_command(state, &name, reply),
+        Command::Create { name, owner, reply } => {
+            execute_create_command(state, &name, owner, reply);
+        }
         Command::Read {
             timeline,
             range,
@@ -2847,36 +3210,56 @@ fn execute_purge_command(
     );
 }
 
+/// Count the client root Timelines: the host counts every root except the
+/// host roots it records. A test store has no host Timelines to leave out.
 fn execute_root_count_command(
     state: &mut ExecutorState,
     maximum: usize,
+    host_roots: &[TimelineId],
     reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
 ) {
     send_store_result(
         reply,
         state.store.execute(
             |host| {
-                host.read_sender()
-                    .and_then(|mut sender| sender.root_timeline_count_bounded(maximum))
+                host.read_sender().and_then(|mut sender| {
+                    sender.client_root_timeline_count_bounded(maximum, host_roots)
+                })
             },
             |store| store.root_timeline_count_bounded(maximum),
         ),
     );
 }
 
+/// Create a root Timeline; the host records `owner` at creation (ADR-136
+/// §1). A test store has no owner seam, so it refuses an owned root rather
+/// than create it unowned.
 fn execute_create_command(
     state: &mut ExecutorState,
     name: &str,
+    owner: Option<EntityId>,
     reply: oneshot::Sender<Result<Timeline, StoreExecutorError>>,
 ) {
     send_store_result(
         reply,
         state.store.execute(
             |host| {
-                host.command_sender()
-                    .and_then(|mut sender| sender.create_timeline(name))
+                // Both arms borrow `sender` mutably, so this cannot be one
+                // `map_or_else` with two closures.
+                host.command_sender().and_then(|mut sender| match owner {
+                    Some(owner) => sender.create_owned_timeline(name, owner),
+                    None => sender.create_timeline(name),
+                })
             },
-            |store| store.create_timeline(name),
+            |store| {
+                if owner.is_some() {
+                    Err(CoreError::Storage(
+                        "a test store records no Timeline owner".to_owned(),
+                    ))
+                } else {
+                    store.create_timeline(name)
+                }
+            },
         ),
     );
 }
@@ -2959,7 +3342,7 @@ mod read_page_coverage_tests {
             } else {
                 StoreExecutor::new(Box::new(store))
             };
-            let Ok(timeline) = executor.create("read-page-coverage".to_owned()).await else {
+            let Ok(timeline) = executor.create("read-page-coverage".to_owned(), None).await else {
                 return Err("expected test Timeline creation".into());
             };
             let Ok(page) = executor
@@ -3093,7 +3476,7 @@ fn execute_host_action_admission(
     >,
 ) {
     let result = open_action_fence(host, context.timeline)
-        .and_then(|()| persisted_action_authority(host, context.authorization))
+        .and_then(|()| persisted_action_authority(host, context.authorization, context.decision))
         .and_then(|authority| {
             with_host_action_fence(host, context.timeline, |sender| {
                 reauthorize_action(context.authorization, context.decision).and_then(|decision| {
@@ -3114,7 +3497,7 @@ fn execute_host_action_admission(
                                 .with_scheduled_admission(|ports| admission.admit(ports))
                                 .map_err(host_action_error)
                                 .and_then(|admitted| {
-                                    admitted.map_err(ActionCommandError::Admission)
+                                    admitted.map_err(|error| commit_fence_refusal(&decision, error))
                                 })
                                 .and_then(|admitted| {
                                     committed_action(sender, context.timeline, &admitted)
@@ -3172,11 +3555,12 @@ fn refused_action_fence(
 fn persisted_action_authority(
     host: &mut ErasureExecutionHostV1,
     authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
 ) -> Result<(Hash, PersistedAuthorityV1), ActionCommandError> {
     host.command_sender()
         .and_then(|mut sender| {
             sender.with_scheduled_admission(|ports| {
-                action_admission::persist_authority(authorization, ports)
+                action_admission::persist_authority(authorization, decision, ports)
             })
         })
         .map_err(host_action_error)
@@ -3260,6 +3644,59 @@ fn retain_admitted_action_release(
         if !action.duplicate() {
             publish_action_notice(context.bus, context.timeline, action.event());
         }
+    }
+}
+
+/// Type a store refusal at the commit fence. A revocation or expiry the
+/// store composed from the persisted authority chain is a pending authority
+/// denial of the decision just rechecked; the Gateway records its evidence in
+/// a separate store command after it releases the commit fence. Every other
+/// refusal keeps its own error.
+fn commit_fence_refusal(
+    decision: &GatewayAuthorizationDecision,
+    error: HumanActionAdmissionErrorV1,
+) -> ActionCommandError {
+    match error {
+        HumanActionAdmissionErrorV1::NotAdmitted(outcome) => commit_fence_authority(&outcome)
+            .and_then(|(authority, safe_error)| {
+                GatewayAuthorization::deny_at_commit_fence(decision, authority, safe_error)
+            })
+            .map_or_else(
+                || ActionCommandError::Admission(HumanActionAdmissionErrorV1::NotAdmitted(outcome)),
+                |pending| {
+                    ActionCommandError::Authorization(GatewayAuthorizationError::Denied(pending))
+                },
+            ),
+        other => ActionCommandError::Admission(other),
+    }
+}
+
+/// The AUD1 outcome and safe-error code of a store outcome that denies the
+/// operation's authority; `None` for every other outcome. The match has no
+/// wildcard, so a new `PipelineOutcomeV1` variant fails to compile until it
+/// is classified here.
+pub(crate) const fn commit_fence_authority(
+    outcome: &PipelineOutcomeV1,
+) -> Option<(AuthorizationOutcomeV1, Option<AuthorityErrorV1>)> {
+    match outcome {
+        PipelineOutcomeV1::AuthorityRevoked => Some((
+            AuthorizationOutcomeV1::RevokedAtFence,
+            Some(AuthorityErrorV1::RevokedAtFence),
+        )),
+        PipelineOutcomeV1::AuthorityExpired => Some((AuthorizationOutcomeV1::Expired, None)),
+        PipelineOutcomeV1::PolicyIndeterminate
+        | PipelineOutcomeV1::Rejected
+        | PipelineOutcomeV1::InvalidObservation
+        | PipelineOutcomeV1::ResourceExhausted
+        | PipelineOutcomeV1::InvalidPluginResult
+        | PipelineOutcomeV1::InvalidProviderResult
+        | PipelineOutcomeV1::DomainConflict
+        | PipelineOutcomeV1::AdmissionConflict
+        | PipelineOutcomeV1::Committed(_)
+        | PipelineOutcomeV1::RecoveredDuplicate(_)
+        | PipelineOutcomeV1::InvalidDependencyDeclaration
+        | PipelineOutcomeV1::DependencySetExhausted
+        | PipelineOutcomeV1::ModeBindingStale => None,
     }
 }
 
@@ -3356,7 +3793,7 @@ fn execute_append_consent_revocation_command_from_command(
 fn execute_append_consent_revocation_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
-    revocation: &ConsentRevokedV1,
+    (revocation, correlation): &(ConsentRevokedV1, Option<CorrelationId>),
     cleanup_scope: AppendDedupScope,
     permit: ConsentAppendPermit,
     maximum: u64,
@@ -3376,11 +3813,13 @@ fn execute_append_consent_revocation_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            let drafts = [EventDraft::new(
+            let mut draft = EventDraft::new(
                 revocation.subject_id,
                 Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
                 payload,
-            )];
+            );
+            draft.correlation_id = *correlation;
+            let drafts = [draft];
             state.store.execute(
                 |host| {
                     host.command_sender().and_then(|mut sender| {
@@ -3896,7 +4335,7 @@ mod tests {
         execute_append_consent_revocation_command(
             &mut state,
             timeline,
-            &revocation,
+            &(revocation, None),
             AppendDedupScope::from_keyed_hash([0; 32]),
             authority.append_permit(),
             10,
@@ -3909,6 +4348,14 @@ mod tests {
                 if message == "consent revocation session disappeared after append"
         ));
         Ok(())
+    }
+
+    /// Whether a blocking store reported entry within ten seconds, so a
+    /// command that never reaches it fails instead of hanging.
+    fn entered(receiver: &std::sync::mpsc::Receiver<()>) -> bool {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_ok()
     }
 
     struct BlockingRootCountStore {
@@ -4140,7 +4587,7 @@ mod tests {
         executor.shutdown().await.test_ok()?;
         assert!(!executor.is_ready());
         assert!(matches!(
-            executor.create("after-shutdown".to_owned()).await,
+            executor.create("after-shutdown".to_owned(), None).await,
             Err(super::StoreExecutorError::Closed)
         ));
         assert!(matches!(
@@ -4161,6 +4608,24 @@ mod tests {
         );
     }
 
+    /// A test store has no owner seam: an owned root is refused, never
+    /// created unowned, and nothing is created.
+    #[tokio::test]
+    async fn a_test_store_refuses_an_owned_root(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        assert!(matches!(
+            executor
+                .create("owned".to_owned(), Some(EntityId::new()))
+                .await,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(_)))
+        ));
+        assert!(matches!(executor.root_count(1).await, Ok(0)));
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+        Ok(())
+    }
+
     async fn expired_queued_command_is_not_executed_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
@@ -4168,6 +4633,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "expired".to_owned(),
                     reply,
                 },
@@ -4182,7 +4648,7 @@ mod tests {
             result.await.test_ok()?,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
-        assert!(executor.create("fresh".to_owned()).await.is_ok());
+        assert!(executor.create("fresh".to_owned(), None).await.is_ok());
         executor.shutdown().await.test_ok()?;
         drop(executor);
 
@@ -4216,7 +4682,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4269,16 +4735,16 @@ mod tests {
         );
         let first = {
             let executor = executor.clone();
-            tokio::spawn(async move { executor.create("first".to_owned()).await })
+            tokio::spawn(async move { executor.create("first".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
 
         assert!(matches!(
-            executor.create("expired".to_owned()).await,
+            executor.create("expired".to_owned(), None).await,
             Err(super::StoreExecutorError::DeadlineExceeded)
         ));
         release_sender.send(()).test_ok()?;
@@ -4324,10 +4790,10 @@ mod tests {
         );
         let first = {
             let executor = executor.clone();
-            tokio::spawn(async move { executor.create("started".to_owned()).await })
+            tokio::spawn(async move { executor.create("started".to_owned(), None).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4422,6 +4888,29 @@ mod tests {
     }
 
     #[test]
+    fn expired_root_commands_reply() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::RootCount {
+                host_roots: Vec::new(),
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Create {
+                owner: None,
+                name: "expired".to_owned(),
+                reply,
+            },
+            receiver,
+        );
+    }
+
+    #[test]
     fn expired_store_commands_reply() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
@@ -4444,18 +4933,6 @@ mod tests {
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::PendingAppendIdentityCleanup { reply }, receiver);
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(Command::RootCount { maximum: 1, reply }, receiver);
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::Create {
-                name: "expired".to_owned(),
-                reply,
-            },
-            receiver,
-        );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
@@ -4539,6 +5016,81 @@ mod tests {
             })),
             receiver,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn expired_denial_evidence_command_replies_without_recording() {
+        let timeline = TimelineId::new();
+        let authorization = Arc::new(test_authorization_for(EntityId::new()));
+        let Err(crate::authorization::GatewayAuthorizationError::Denied(pending)) = authorization
+            .authorize(GatewayAuthorizationRequest::action(
+                EntityId::new(),
+                timeline,
+                "world.action.v1",
+                "world.action.v1.submit",
+                WallTime::now(),
+            ))
+        else {
+            std::panic::resume_unwind(Box::new("an unknown actor is denied"));
+        };
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::DenialEvidenceCommand {
+                batch: authorization.admit_denial_record(pending).test_value(),
+                authorization,
+                reply,
+            })),
+            receiver,
+        );
+    }
+
+    #[test]
+    fn expired_authority_load_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::LoadAuthorityCommand {
+                leaf_grant_id: pos_core::Hash::from_bytes([1; 32]),
+                reply,
+            })),
+            receiver,
+        );
+    }
+
+    #[test]
+    fn expired_produced_under_lookup_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::ProducedUnderCommand {
+                commit: Some((TimelineId::new(), pos_core::Seq::from_u64(1))),
+                reply,
+            })),
+            receiver,
+        );
+    }
+
+    #[test]
+    fn expired_gateway_revision_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        let operation: super::RevisionOperationV1<()> = Box::new(|_port| Ok(()));
+        assert_expired(
+            Command::Action(Box::new(super::RevisionCommand { operation, reply })),
+            receiver,
+        );
+    }
+
+    /// A store that is not the erasure host records no execution-mode
+    /// binding: neither the next commit nor a recorded one was produced
+    /// under any.
+    #[tokio::test]
+    async fn a_store_without_a_mode_binding_produces_under_none(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        for commit in [None, Some((TimelineId::new(), pos_core::Seq::from_u64(1)))] {
+            assert!(executor.produced_under(commit).await.test_ok()?.is_none());
+        }
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
         Ok(())
     }
 
@@ -4643,7 +5195,7 @@ mod tests {
         assert_expired(
             Command::AppendConsentRevocation {
                 timeline,
-                revocation,
+                revocation: (revocation, None),
                 cleanup_scope: AppendDedupScope::from_keyed_hash([0; 32]),
                 permit: authority.append_permit(),
                 maximum: 1,
@@ -4706,7 +5258,7 @@ mod tests {
                 executor
                     .append_consent_revocation(
                         timeline,
-                        revocation,
+                        (revocation, None),
                         cleanup_scope,
                         permit,
                         10,
@@ -4788,7 +5340,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4835,7 +5387,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4882,7 +5434,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4893,6 +5445,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "drained-write".to_owned(),
                     reply: create_reply,
                 },
@@ -4912,6 +5465,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit(
                 Command::Create {
+                    owner: None,
                     name: "rejected-after-draining".to_owned(),
                     reply: rejected_reply,
                 },
@@ -4961,7 +5515,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -4996,7 +5550,7 @@ mod tests {
         );
         assert!(!executor.is_ready());
         assert!(matches!(
-            executor.create("unhealthy".to_owned()).await,
+            executor.create("unhealthy".to_owned(), None).await,
             Err(super::StoreExecutorError::Unhealthy)
         ));
         assert!(matches!(
@@ -5097,7 +5651,7 @@ mod tests {
         let executor = super::StoreExecutor::from_sender_for_test(sender);
         drop(receiver);
         assert!(matches!(
-            executor.create("closed-channel".to_owned()).await,
+            executor.create("closed-channel".to_owned(), None).await,
             Err(super::StoreExecutorError::Closed)
         ));
 
@@ -5108,7 +5662,7 @@ mod tests {
             retryable_shutdown: false,
         };
         assert!(matches!(
-            executor.create("unhealthy".to_owned()).await,
+            executor.create("unhealthy".to_owned(), None).await,
             Err(super::StoreExecutorError::Unhealthy)
         ));
         assert!(matches!(
@@ -5149,6 +5703,7 @@ mod tests {
         assert!(executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "poisoned-state".to_owned(),
                     reply,
                 },
@@ -5218,6 +5773,7 @@ mod tests {
         assert!(executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "poisoned-ordinal".to_owned(),
                     reply,
                 },
@@ -5264,6 +5820,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "overflow".to_owned(),
                     reply,
                 },
@@ -5490,6 +6047,7 @@ mod tests {
                 global_permit: write_global,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "disconnected-write".to_owned(),
                     reply: write_reply,
                 },
@@ -5566,7 +6124,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5668,6 +6226,7 @@ mod tests {
                 global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "pending-unwind".to_owned(),
                     reply: pending_write_reply,
                 },
@@ -5765,6 +6324,7 @@ mod tests {
                 global_permit: global_budget.clone().try_acquire_owned().test_ok()?,
                 read_permit: None,
                 command: Command::Create {
+                    owner: None,
                     name: "channel-unwind".to_owned(),
                     reply: channel_reply,
                 },
@@ -5816,7 +6376,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -5854,6 +6414,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "reserved-write".to_owned(),
                     reply,
                 },
@@ -5972,6 +6533,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -5980,7 +6542,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6036,6 +6598,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6044,7 +6607,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6053,6 +6616,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "immediate-write".to_owned(),
                     reply: write_reply,
                 },
@@ -6115,6 +6679,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6123,7 +6688,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6154,6 +6719,7 @@ mod tests {
             executor
                 .try_submit(
                     Command::Create {
+                        owner: None,
                         name: "expired-priority".to_owned(),
                         reply,
                     },
@@ -6169,6 +6735,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "live-priority".to_owned(),
                     reply: write_reply,
                 },
@@ -6230,6 +6797,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6238,7 +6806,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6252,6 +6820,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "fair-write".to_owned(),
                     reply: create_reply,
                 },
@@ -6324,6 +6893,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6332,7 +6902,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6361,6 +6931,7 @@ mod tests {
         let write_ordinal = executor
             .try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "post-probe-write".to_owned(),
                     reply: write_reply,
                 },
@@ -6387,21 +6958,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!selected_before_write.contains(&write_ordinal));
         assert_eq!(write_burst_counters, vec![8]);
-        assert_eq!(
-            &operations.lock().test_ok()?[..10],
-            &[
-                "root_count",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "read",
-                "create",
-            ]
-        );
+        let expected = [["root_count"].as_slice(), &["read"; 8], &["create"]].concat();
+        assert_eq!(&operations.lock().test_ok()?[..10], expected.as_slice());
         executor.shutdown().await.test_ok()?;
 
         drop(executor);
@@ -6440,6 +6998,7 @@ mod tests {
         executor
             .try_submit(
                 Command::RootCount {
+                    host_roots: Vec::new(),
                     maximum: 1,
                     reply: root_reply,
                 },
@@ -6448,7 +7007,7 @@ mod tests {
             )
             .test_ok()?;
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6458,6 +7017,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "write-1".to_owned(),
                     reply: first_reply,
                 },
@@ -6470,6 +7030,7 @@ mod tests {
         executor
             .try_submit(
                 Command::Create {
+                    owner: None,
                     name: "write-2".to_owned(),
                     reply: second_reply,
                 },
@@ -6588,7 +7149,7 @@ mod tests {
             observer,
         ));
         let timeline = executor
-            .create("concurrent-appends".to_owned())
+            .create("concurrent-appends".to_owned(), None)
             .await
             .test_ok()?;
         let timeline_id = timeline.id();
@@ -6597,7 +7158,7 @@ mod tests {
             tokio::spawn(async move { executor.root_count(1).await })
         };
         tokio::task::spawn_blocking(move || {
-            assert!(entered_receiver.recv().is_ok());
+            assert!(entered(&entered_receiver));
         })
         .await
         .test_ok()?;
@@ -6821,6 +7382,7 @@ mod tests {
             let ordinal = executor
                 .try_submit_with_admission_for_test(
                     Command::Create {
+                        owner: None,
                         name: format!("global-{expected}"),
                         reply,
                     },
@@ -6834,6 +7396,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "global-saturated".to_owned(),
                     reply,
                 },
@@ -6850,6 +7413,7 @@ mod tests {
         let ordinal = executor
             .try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "after-global-saturation".to_owned(),
                     reply,
                 },
@@ -6888,6 +7452,7 @@ mod tests {
         assert!(matches!(
             executor.try_submit_with_admission_for_test(
                 Command::Create {
+                    owner: None,
                     name: "closed".to_owned(),
                     reply,
                 },
@@ -6926,7 +7491,7 @@ mod tests {
     async fn normal_completion_releases_admission_permits_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
-        assert!(executor.create("completed".to_owned()).await.is_ok());
+        assert!(executor.create("completed".to_owned(), None).await.is_ok());
         assert!(executor.timeline(TimelineId::new()).await.is_ok());
         tokio::time::timeout(Duration::from_secs(1), async {
             while executor.control.global_budget.available_permits() != super::QUEUE_CAPACITY

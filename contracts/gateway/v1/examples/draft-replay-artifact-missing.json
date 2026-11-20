@@ -1,0 +1,30 @@
+{
+  "name": "draft-replay-artifact-missing",
+  "operation_id": "createReplay",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-14",
+      "content-type": "application/json"
+    },
+    "body": {
+      "manifest_digest": "1010101010101010101010101010101010101010101010101010101010101010",
+      "reproducibility_class": "profile-recomputation",
+      "profile_id": "deterministic-local-v1",
+      "minimum_replay_claim": "structural-only"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 404,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:artifact-missing",
+      "title": "Artifact missing",
+      "status": 404,
+      "detail": "a closure artifact is absent",
+      "instance": "/v1/replays",
+      "code": "artifact-missing",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

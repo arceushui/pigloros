@@ -28,13 +28,16 @@ use pos_core::{
     CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventDraft, Hasher, Kind, OwnerIdV1,
     TimelineId,
 };
+use pos_crypto::plugin_execution::{DeterministicBudgetV1, PluginAbiRequirementV1};
 use pos_crypto::plugin_manifest::{
-    PluginReleaseSignatureFixtureV1, VerifiedPluginReleaseSignatureV1,
+    PluginArtifactInputV1, PluginReleaseDraftV1, PluginReleaseSignatureFixtureV1,
+    PluginSchemaInputV1, VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{
-    verify_plugin_trust_v1, PluginManifestProjectionFixtureV1, TrustedPluginRootAnchorV1,
-    ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+    verify_plugin_trust_v1, TrustedPluginRootAnchorV1, ValidatedPluginManifestProjectionV1,
+    VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_release::{build_oci_closure_v1, ReleaseClosureInputV1, VerifiedReleaseBundleV1};
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
 use pos_store::{
@@ -46,6 +49,7 @@ use pos_store::{
         RetainedReleaseDecisionV1, TrustEvaluationPointV1, TrustedUtcSecondV1,
     },
 };
+use sha2::{Digest as _, Sha256};
 
 pub use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1 as RegistryError;
 
@@ -627,7 +631,146 @@ pub struct ManifestSpec {
     pub not_after: i64,
 }
 
+fn content_artifact(bytes: &[u8]) -> PluginArtifactInputV1<'_> {
+    PluginArtifactInputV1 {
+        bytes,
+        sha256: Sha256::digest(bytes).into(),
+    }
+}
+
+fn content_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[usize::from(byte >> 4)]),
+                char::from(DIGITS[usize::from(byte & 15)]),
+            ]
+        })
+        .collect()
+}
+
+fn content_wit() -> Vec<u8> {
+    let source = b"package pigloros:plugin@0.1.0; world community-plugin {}";
+    let mut header = [0; 512];
+    header[..8].copy_from_slice(b"main.wit");
+    header[100..108].copy_from_slice(b"0000644\0");
+    header[108..116].copy_from_slice(b"0000000\0");
+    header[116..124].copy_from_slice(b"0000000\0");
+    header[124..136].copy_from_slice(format!("{:011o}\0", source.len()).as_bytes());
+    header[136..148].copy_from_slice(b"00000000000\0");
+    header[148..156].fill(b' ');
+    header[156] = b'0';
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    let checksum: usize = header.iter().map(|byte| usize::from(*byte)).sum();
+    header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+    let mut wit = header.to_vec();
+    wit.extend_from_slice(source);
+    wit.resize(2048, 0);
+    wit
+}
+
 impl ManifestSpec {
+    /// Construct an actual content-valid release closure for this fixture.
+    ///
+    /// # Errors
+    /// Returns the draft or OCI closure construction error.
+    pub fn content_bundle(&self) -> TestResult<VerifiedReleaseBundleV1> {
+        const COMPONENT: &[u8] = b"registry-fixture-component";
+        let wit = content_wit();
+        let digest = content_hex(&Sha256::digest(COMPONENT));
+        let provenance = serde_json::json!({
+            "_type":"https://in-toto.io/Statement/v1", "predicateType":"https://slsa.dev/provenance/v1",
+            "subject":[{"digest":{"sha256":digest.as_str()}}], "predicate":{
+                "buildDefinition":{"buildType":"https://pigloros.invalid/build", "externalParameters":{}},
+                "runDetails":{"builder":{"id":"https://pigloros.invalid/builder"}}
+            }
+        }).to_string().into_bytes();
+        let sbom = serde_json::json!({
+            "spdxVersion":"SPDX-2.3", "dataLicense":"CC0-1.0", "SPDXID":"SPDXRef-DOCUMENT",
+            "name":"registry fixture", "documentNamespace":"https://pigloros.invalid/spdx/registry",
+            "creationInfo":{"creators":["Tool: PiglorOS fixture"], "created":"2026-11-01T00:00:00Z"},
+            "documentDescribes":["SPDXRef-component"], "packages":[{
+                "SPDXID":"SPDXRef-component", "name":"component", "downloadLocation":"NOASSERTION",
+                "filesAnalyzed":false, "licenseConcluded":"MIT", "licenseDeclared":"MIT", "copyrightText":"NOASSERTION",
+                "checksums":[{"algorithm":"SHA256", "checksumValue":digest.as_str()}]
+            }]
+        }).to_string().into_bytes();
+        let previous = match self.previous {
+            Some(0x11) => Some(release_one().release_digest()?),
+            Some(0x12) => Some(release_two().release_digest()?),
+            Some(0x13) => Some(release_three().release_digest()?),
+            Some(other) => Some([other; 32]),
+            None => None,
+        };
+        let schema = b"true";
+        let licence = b"registry fixture licence";
+        let draft = PluginReleaseDraftV1 {
+            plugin_id: self.plugin_id.clone(),
+            release_version: format!("{}.0.0", self.release),
+            abi: PluginAbiRequirementV1 {
+                major: 0,
+                min_minor: 0,
+                max_minor: 0,
+                required_features: Vec::new(),
+            },
+            component: content_artifact(COMPONENT),
+            wit: content_artifact(&wit),
+            event_schemas: Vec::new(),
+            state_schema: PluginSchemaInputV1 {
+                id: 1,
+                version: 1,
+                artifact: content_artifact(schema),
+                max_bytes: 65_536,
+            },
+            configuration_schema: None,
+            capabilities: Vec::new(),
+            budget: DeterministicBudgetV1::MINIMA,
+            dependencies: Vec::new(),
+            provenance: content_artifact(&provenance),
+            sbom: content_artifact(&sbom),
+            licences: vec![content_artifact(licence)],
+            owner: OwnerIdV1::new(OWNER)?,
+            not_before: 0,
+            not_after: self.not_after,
+            previous_release_digest: previous,
+        };
+        let pmf1 = draft
+            .unsigned()?
+            .with_signature(self.epoch, [self.pmf1; 64])?;
+        Ok(build_oci_closure_v1(&ReleaseClosureInputV1 {
+            pmf1: &pmf1,
+            component: COMPONENT,
+            wit: &wit,
+            schemas: vec![schema],
+            provenance: &provenance,
+            sbom: &sbom,
+            licences: vec![licence],
+            migration_fixtures: Vec::new(),
+        })?)
+    }
+
+    /// The genuine trust projection of the content-valid closure.
+    ///
+    /// # Errors
+    /// Returns a closure or PMF1 validation error.
+    pub fn content_projection(&self) -> TestResult<ValidatedPluginManifestProjectionV1> {
+        Ok(ValidatedPluginManifestProjectionV1::from_verified_bundle(
+            &self.content_bundle()?,
+        )?)
+    }
+
+    /// The genuine basic-package proof for this closure.
+    ///
+    /// # Errors
+    /// Returns a closure or content validation error.
+    pub fn content_proof(&self) -> TestResult<pos_plugin_content::ValidatedPluginBundleContentV1> {
+        Ok(pos_plugin_content::validate_plugin_bundle_content_v1(
+            &self.content_bundle()?,
+        )?)
+    }
     /// A fixture value.
     #[must_use]
     pub fn new(plugin_id: &str, pmf1: u8, release: u8, previous: Option<u8>) -> Self {
@@ -646,20 +789,7 @@ impl ManifestSpec {
     /// # Errors
     /// Returns the fixture construction or registry error.
     pub fn projection(&self) -> TestResult<ValidatedPluginManifestProjectionV1> {
-        Ok(ValidatedPluginManifestProjectionV1::from(
-            PluginManifestProjectionFixtureV1 {
-                pmf1_digest: [self.pmf1; 32],
-                plugin_id: self.plugin_id.clone(),
-                owner: OwnerIdV1::new(OWNER)?,
-                role: 3,
-                epoch: self.epoch,
-                not_before: 0,
-                not_after: self.not_after,
-                release_digest: [self.release; 32],
-                previous_release_digest: self.previous.map(|previous| [previous; 32]),
-                descriptor_digests: vec![[0x30; 32], [0x33; 32]],
-            },
-        ))
+        self.content_projection()
     }
 
     /// The raw token fields bound to this projection.
@@ -669,16 +799,17 @@ impl ManifestSpec {
     /// # Errors
     /// Returns the fixture construction error.
     pub fn proof_fields(&self) -> TestResult<PluginReleaseSignatureFixtureV1> {
+        let content = self.content_proof()?;
         Ok(PluginReleaseSignatureFixtureV1 {
-            pmf1_digest: [self.pmf1; 32],
-            release_digest: [self.release; 32],
+            pmf1_digest: content.pmf1_digest(),
+            release_digest: content.release_digest(),
             owner: OwnerIdV1::new(OWNER)?,
             epoch: self.epoch,
             public_key: publisher_public(self.epoch),
         })
     }
 
-    /// The release proof bound to this projection (revision 7).
+    /// A synthetic test signature token bound to the genuine projection (revision 7).
     ///
     /// # Errors
     /// Returns the fixture construction error.
@@ -694,14 +825,17 @@ impl ManifestSpec {
     /// Returns the fixture construction error.
     pub fn mismatched_proofs(&self) -> TestResult<[VerifiedPluginReleaseSignatureV1; 3]> {
         let bound = self.proof_fields()?;
-        let other = !self.pmf1;
+        let mut other_pmf1 = bound.pmf1_digest;
+        other_pmf1[0] ^= 1;
+        let mut other_release = bound.release_digest;
+        other_release[0] ^= 1;
         Ok([
             PluginReleaseSignatureFixtureV1 {
-                pmf1_digest: [other; 32],
+                pmf1_digest: other_pmf1,
                 ..bound
             },
             PluginReleaseSignatureFixtureV1 {
-                release_digest: [!self.release; 32],
+                release_digest: other_release,
                 ..bound
             },
             PluginReleaseSignatureFixtureV1 {
@@ -712,16 +846,39 @@ impl ManifestSpec {
         .map(VerifiedPluginReleaseSignatureV1::from))
     }
 
-    /// A fixture value.
-    #[must_use]
-    pub const fn pmf1_digest(&self) -> [u8; 32] {
-        [self.pmf1; 32]
+    /// SHA-256 digests of the Component and WIT descriptors in this closure.
+    ///
+    /// # Errors
+    /// Returns a closure construction error or a missing fixture member.
+    pub fn descriptor_digests(&self) -> TestResult<[[u8; 32]; 2]> {
+        let bundle = self.content_bundle()?;
+        let digest = |name| -> TestResult<[u8; 32]> {
+            let bytes = bundle
+                .members()
+                .iter()
+                .zip(bundle.member_bytes())
+                .find(|(member, _)| member.member() == name)
+                .map(|(_, bytes)| bytes)
+                .ok_or("missing fixture member")?;
+            Ok(Sha256::digest(bytes).into())
+        };
+        Ok([digest("component")?, digest("wit")?])
     }
 
-    /// A fixture value.
-    #[must_use]
-    pub const fn release_digest(&self) -> [u8; 32] {
-        [self.release; 32]
+    /// The actual complete-PMF1 digest.
+    ///
+    /// # Errors
+    /// Returns the closure construction or projection error.
+    pub fn pmf1_digest(&self) -> TestResult<[u8; 32]> {
+        Ok(self.content_proof()?.pmf1_digest())
+    }
+
+    /// The actual release digest.
+    ///
+    /// # Errors
+    /// Returns the closure construction or projection error.
+    pub fn release_digest(&self) -> TestResult<[u8; 32]> {
+        Ok(self.content_proof()?.release_digest())
     }
 }
 
@@ -947,7 +1104,12 @@ impl<S: Backend> Harness<S> {
             &material.tps1,
             &material.evidence,
             &manifest.projection()?,
-            proof,
+            (
+                proof,
+                &pos_plugin_content::validate_plugin_bundle_content_v1(
+                    &manifest.content_bundle()?,
+                )?,
+            ),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation,
         ))
@@ -1011,7 +1173,10 @@ impl<S: Backend> Harness<S> {
             &material.tps1,
             &material.evidence,
             &target.projection()?,
-            proof,
+            (
+                proof,
+                &pos_plugin_content::validate_plugin_bundle_content_v1(&target.content_bundle()?)?,
+            ),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation,
         ))
@@ -1042,7 +1207,7 @@ impl<S: Backend> Harness<S> {
         for manifest in manifests {
             decisions.push(
                 self.store
-                    .retained_release_decision(scope, manifest.pmf1_digest())?,
+                    .retained_release_decision(scope, manifest.pmf1_digest()?)?,
             );
             active.push(self.store.active_release(scope, &manifest.plugin_id)?);
         }

@@ -91,7 +91,7 @@ const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 /// literal (`MEASURED_POSITIVE_USAGE`) at and one below its budget; keep the two in step.
 const POSITIVE_USAGE: ResourceUsage = ResourceUsage {
     memory_bytes: 1_179_648,
-    cpu_fuel: 42_604,
+    cpu_fuel: 42_610,
     host_calls: 6,
     event_count: 2,
     output_bytes: 16,
@@ -103,7 +103,7 @@ const POSITIVE_USAGE: ResourceUsage = ResourceUsage {
 /// The usage of `pos.1`, one committed pass of the Rust guest.
 const RUST_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
     memory_bytes: 1_179_648,
-    cpu_fuel: 21_238,
+    cpu_fuel: 21_241,
     host_calls: 3,
     event_count: 1,
     output_bytes: 8,
@@ -140,7 +140,7 @@ const NO_USAGE: ResourceUsage = ResourceUsage {
 /// Rust guest over the same 34-byte `del.1` observation, which costs more fuel than the 17-byte
 /// observation of `pos.1`; the two sub-cases measure the same.
 const DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
-    cpu_fuel: 21_510,
+    cpu_fuel: 21_513,
     ..RUST_ONE_PASS_USAGE
 };
 
@@ -323,7 +323,7 @@ impl SubCaseRunnerV1 for Spy {
             subcase.clone()
         };
         let mut port = SpyPort {
-            inner: EvaluationStepPortV1::new(self.program.clone()),
+            inner: EvaluationStepPortV1::new(self.program.clone(), &TEST_TRUST_ROOT),
             passes: Vec::new(),
             rollbacks: Vec::new(),
         };
@@ -982,7 +982,8 @@ fn r13_a_trap_under_an_absent_expectation_is_unavailable() -> TestResult {
 
 /// Assert that `run_with` does not execute `attempt`.
 fn assert_not_executed(attempt: &CaseAttempt) -> TestResult {
-    let runner = SupervisorRunnerV1::with_program(WORKER).ok_or("a relative program")?;
+    let runner =
+        SupervisorRunnerV1::with_program(WORKER, &TEST_TRUST_ROOT).ok_or("a relative program")?;
     let mut stream = Vec::new();
     write_attempt(&mut stream, attempt)?;
     let mut out = Vec::new();
@@ -1134,8 +1135,8 @@ fn r8_s9_a_launching_family_without_a_worker_is_unavailable() -> TestResult {
     // that holds no program, which is equivalent (R8-A6): the launch fails and the member is
     // `WorkerCrashed`, so the case is `Unavailable`.
     let missing = std::env::temp_dir().join(format!("pigloros-no-worker-{}", std::process::id()));
-    let runner =
-        SupervisorRunnerV1::with_program(missing).ok_or("the worker path must be absolute")?;
+    let runner = SupervisorRunnerV1::with_program(missing, &TEST_TRUST_ROOT)
+        .ok_or("the worker path must be absolute")?;
     for family in LAUNCHING_FAMILIES {
         let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
         let observation = observe_through(&runner, &attempt)?;
@@ -1227,7 +1228,7 @@ fn r8_s10_the_outcome_record_has_exactly_the_r7_h3_fields() -> TestResult {
     assert!(matches!(mode, CommunityPluginModeV1::Local));
     assert!(matches!(
         content_validation,
-        ContentValidationV1::NotPerformed
+        ContentValidationV1::BasicPackageV1
     ));
     assert!(matches!(result, Verdict::Committed { .. }));
     // The canonical record is CBOR with no key names; it also holds no such word.
@@ -1264,3 +1265,7 @@ fn r8_s11_a_refused_or_failed_pass_leaves_events_and_state_unchanged() -> TestRe
     assert!(changed >= 2, "{changed}");
     Ok(())
 }
+
+/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
+const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();

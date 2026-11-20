@@ -817,6 +817,22 @@ impl AuthorityPersistencePortV1 for SharedMemoryAdapter {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.store().load_authority(leaf_grant_id)
     }
+
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.store().record_authorization_denial(permit)
+    }
+
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        self.store().load_authorization_denials(from, limit)
+    }
 }
 
 fn assert_supplied_store_has_no_recovery_recipe(

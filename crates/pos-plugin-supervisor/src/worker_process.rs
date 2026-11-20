@@ -348,7 +348,7 @@ mod tests {
 
     fn request() -> WorkerRequestV1 {
         WorkerRequestV1 {
-            component: b"component".to_vec(),
+            component: b"component".to_vec().into(),
             negotiation: negotiated().to_transport(),
             watchdog_millis: 1_000,
             host_inputs: HostInputs { simulation_time: 9 },
@@ -382,7 +382,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(write_response(&mut out, &outcome), Ok(()));
         let encoded = encode_worker_response_v1(&outcome).unwrap_or_default();
-        assert_eq!(out[4..], encoded);
+        assert_eq!(&out[4..], encoded.as_slice());
         assert_eq!(
             out[..4],
             u32::try_from(encoded.len()).unwrap_or(0).to_be_bytes()

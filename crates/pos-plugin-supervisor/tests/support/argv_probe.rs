@@ -54,6 +54,6 @@ fn serve(call: &WorkerCallV1, recorded: &str) -> ExitCode {
         metering: METERING,
         operational_log: Vec::new(),
     }));
-    write_response(&mut std::io::stdout().lock(), &outcome)
-        .map_or_else(|_| ExitCode::from(WRITE_FAILED), |()| ExitCode::SUCCESS)
+    let written = write_response(&mut std::io::stdout().lock(), &outcome);
+    written.map_or_else(|_| ExitCode::from(WRITE_FAILED), |()| ExitCode::SUCCESS)
 }

@@ -12,11 +12,10 @@ use ciborium::value::Value;
 
 use super::codec::{
     array, bytes_value, decode_document, decode_text_list, digest32, encode, fixed_bytes, id16,
-    key_id, normalized_absolute_path, record_digest, require_signature, self_digested,
-    signature_message, signed, text_value, uint, uint_value, valid_key_id, verify_digest,
-    verify_signature,
+    key_id, normalized_absolute_path, record_digest, require_signature, self_digested, signed,
+    text_value, uint, uint_value, valid_key_id, verify_digest, verify_signature,
 };
-use super::{SandboxExecutionMode, SandboxProviderProtocolError};
+use super::{Rls1, SandboxExecutionMode, SandboxProviderProtocolError, SelfDigested, Verified};
 
 /// LPV1 is limited to 64 KiB before the provider-private hexadecimal encoding.
 const MAX_LAUNCH_PARAMETER_BYTES: usize = 64 * 1024;
@@ -33,7 +32,7 @@ pub struct FdIdentity {
 }
 
 impl FdIdentity {
-    fn decode(value: &Value) -> Result<Self, SandboxProviderProtocolError> {
+    pub(super) fn decode(value: &Value) -> Result<Self, SandboxProviderProtocolError> {
         let pair = array::<2>(value)?;
         Ok(Self {
             mount_id: uint(&pair[0])?,
@@ -41,11 +40,11 @@ impl FdIdentity {
         })
     }
 
-    fn value(self) -> Value {
+    pub(super) fn value(self) -> Value {
         Value::Array(vec![uint_value(self.mount_id), uint_value(self.inode)])
     }
 
-    const fn valid(self) -> bool {
+    pub(super) const fn valid(self) -> bool {
         self.inode != 0
     }
 }
@@ -412,37 +411,56 @@ pub struct ExecutionReleaseFields {
 /// Signed `ReleaseV1` (`RLS1`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRelease {
-    /// Signed body.
-    pub fields: ExecutionReleaseFields,
-    /// `RLS1` self-digest.
-    pub digest: [u8; 32],
+    fields: ExecutionReleaseFields,
+    digest: [u8; 32],
     signature: [u8; 64],
 }
 
 impl ExecutionRelease {
-    /// Compute the self-digest and sign it with a runtime-attestation signer.
-    ///
-    /// `sign` receives the exact domain-separated message
-    /// (`PiglorOS.RLS1.Signature.v1\0 || digest`) and returns the Ed25519
-    /// signature.
+    /// The signed body.
+    #[must_use]
+    pub const fn fields(&self) -> &ExecutionReleaseFields {
+        &self.fields
+    }
+
+    /// The `RLS1` self-digest.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an RLS1 (ADR-069 R9 §5).
     ///
     /// # Errors
-    /// Rejects zero identities, digests, deadline or an invalid key ID, and a
-    /// zero signature.
-    pub fn sign(
+    /// Rejects zero identities, digests, deadline or an invalid key ID.
+    pub fn self_digested(
         fields: ExecutionReleaseFields,
-        sign: impl FnOnce(&[u8]) -> [u8; 64],
-    ) -> Result<Self, SandboxProviderProtocolError> {
+    ) -> Result<SelfDigested<Rls1>, SandboxProviderProtocolError> {
         validate_release_fields(&fields)
             .and_then(|()| finish_self_digested("RLS1", &release_unsigned_value(&fields)))
-            .and_then(|(digest, _)| {
-                let signature = sign(&signature_message("RLS1", &digest));
-                require_signature(&signature).map(|()| Self {
-                    fields,
-                    digest,
-                    signature,
-                })
+            .map(|(digest, _)| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Rls1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, digest, signature) = verified.into_parts();
+            Ok(Self {
+                fields,
+                digest,
+                signature,
             })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        }
     }
 
     /// Exact canonical `RLS1` bytes.

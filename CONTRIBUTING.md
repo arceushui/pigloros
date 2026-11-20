@@ -42,7 +42,9 @@ git fetch origin main
 git worktree add ../pigloros-<task-name> -b <branch-name> origin/main
 cd ../pigloros-<task-name>
 
-# Enable the versioned pre-commit hook once per clone.
+# Enable the versioned pre-commit and pre-push hooks once per clone.
+# pre-commit: cargo fmt --check, full staged Trunk check, lockfile check and
+# targeted Clippy; pre-push: full Trunk check over the pushed commits.
 git config core.hooksPath .githooks
 
 rustup show active-toolchain
@@ -56,7 +58,7 @@ version control; for example, verify private files with:
 git check-ignore -- .secrets/ledger.key
 ```
 
-The local hook is an early feedback mechanism. It does not replace the
+The local hooks are an early feedback mechanism. They do not replace the
 hosted required checks.
 
 ## Make a focused change
@@ -135,6 +137,35 @@ stateDiagram-v2
     RustGates --> [*]: "ci-gate and required checks pass"
 ```
 
+### Affected-package scope (phase 1)
+
+A Rust-affecting pull request does not always run every package through the
+plain test and lint jobs. The same trusted-base scope job runs
+`scripts/affected_packages.py`, which maps every changed path (both sides of a
+rename) to the workspace member whose directory contains it and selects:
+
+- every changed member;
+- every member that depends on a selected member through any dependency kind
+  (normal, dev, build, target-specific, `workspace = true`);
+- every member whose Rust sources name a changed path or a selected member's
+  files (`include_bytes!`, `include_str!`, `CARGO_MANIFEST_DIR` joins, and
+  workspace-relative paths); a library-side reader also selects its dependents.
+
+`test-shard`, the doctests in `test`, `feature-matrix`, `clippy`, `rustdoc`,
+`asan-build` and `asan` then run with `-p` for exactly that set. Coverage,
+cargo-crap, mutation, CodeQL, Docker, conformance, `ledger-windows` and
+`owner-bridge-windows` keep their own scope.
+
+Any doubt runs the whole workspace (`--workspace`): a push to `main`, a manual
+run, a Trunk merge-queue test pull request (`trunk-merge/*`), failed change
+detection, a changed-file list that may be truncated (3000 files) or cannot be
+listed, a path outside every member that is not documentation (the root
+manifest, `Cargo.lock`, toolchain and Cargo configuration, scripts, fixtures,
+workflows, a new crate), or a resolver failure. Because every Cargo command
+runs with `--locked`, a change to the internal dependency graph also changes
+`Cargo.lock` and so runs everything. The merge queue therefore always tests
+the whole workspace before anything reaches `main`.
+
 ## Required CI sequence
 
 CI is deliberately staged. A broken pull request receives useful feedback
@@ -159,17 +190,28 @@ flowchart TD
 ### Stage 1: fast preflight
 
 Pull requests run Trunk in its native diff mode before Cargo-heavy work. The
-same stage validates pinned workflow dependencies and the Linux/non-Linux
-conformance boundaries.
+same stage validates pinned workflow dependencies, the repository's source and
+owner-bridge policy checks, and the Linux/non-Linux conformance boundaries.
+The policy checks run as three parallel jobs so each one stays well inside its
+10-minute limit: `pinned-dependencies` (supply-chain pins plus workflow, CI,
+vector and notice policy tests), `source-policies` (the source-confinement
+checkers) and `owner-bridge-policies` (the owner-bridge unsafe, lock,
+subject-encryption and Windows shim coverage checks). Rust-affecting changes
+and every non-pull-request event run all three, and the next stage and the
+`preflight-gate` reporter require each to pass.
 
 ```mermaid
 flowchart LR
     S["Trusted scope"] --> T["Trunk changed-file check"]
-    S --> P["Pinned workflow policy"]
+    S --> P["pinned-dependencies"]
+    S --> SP["source-policies"]
+    S --> OP["owner-bridge-policies"]
     S --> F["Conformance fixtures"]
     S --> N["Non-Linux boundary"]
-    T --> G["preflight-gate"]
+    T --> G["preflight pass rule"]
     P --> G
+    SP --> G
+    OP --> G
     F --> G
     N --> G
 ```
@@ -180,18 +222,24 @@ check.
 
 ### Stage 2: core quality gates
 
+Each stage waits for the previous stage's jobs directly. Its job condition
+repeats that stage's pass rule (the canonical expressions live in
+`scripts/ci_stage_policy.py`), so no stage waits in the runner queue for an
+aggregator job first. `preflight-gate`, `core-gate` and `standard-gate` apply
+the same rules, but only to report each stage's verdict to `ci-gate`.
+
 After preflight, the core jobs start together:
 
 ```mermaid
 flowchart TD
-    P["preflight-gate"] --> F["fmt"]
+    P["preflight pass rule"] --> F["fmt"]
     P --> T["test: doctests"]
     P --> M["feature-matrix"]
     P --> S["test-shard x3: nextest partitions"]
     P --> C["clippy"]
     P --> V["one coverage execution"]
     S --> A["test-shards: every test ran once"]
-    F --> G["core-gate"]
+    F --> G["core pass rule"]
     T --> G
     M --> G
     A --> G
@@ -239,26 +287,33 @@ flowchart LR
 
 ### Stage 3: normal checks
 
-`cargo-crap` starts only after every core job passes. Its success releases the
-normal checks. Audit, deny, and shear share one runner; browser parity replaces
-the completed WASM packaging job rather than adding another concurrent runner.
-CodeQL is called from this stage instead of starting independently on every PR.
-Documentation-only pull requests have no `cargo-crap` run, so CodeQL starts
-right after the scope job there; it is never skipped, because the `main`
-ruleset's code-scanning rule needs an analysis for every PR head.
+The complete core set passing releases the normal checks and, beside them, the
+lightweight `cargo-crap` analysis. `cargo-crap` also waits for the native
+Windows owner lane's LCOV; nothing else in this stage does, so a slow or failed
+Windows lane never delays or hides the normal checks. `ci-gate` requires
+`cargo-crap` directly. Audit, deny, and shear share one runner; browser parity
+replaces the completed WASM packaging job rather than adding another concurrent
+runner. CodeQL is called from this stage instead of starting independently on
+every PR. Rust pull requests start CodeQL once the core set passes;
+documentation-only pull requests start it after the scope job even if preflight
+fails. It is never skipped, because the `main` ruleset's code-scanning rule
+needs an analysis for every PR head.
 
 ```mermaid
 flowchart TD
-    CR["cargo-crap"] --> D["rustdoc"]
-    CR --> E["reference evaluator"]
-    CR --> B["conformance bundles"]
-    CR --> P["audit → deny → shear"]
-    CR --> X["Docker"]
-    CR --> W["WASM package"]
-    CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
-    CR --> AB["ASan archive build"]
+    CG["core pass rule"] --> D["rustdoc"]
+    CG --> E["reference evaluator"]
+    CG --> B["conformance bundles"]
+    CG --> P["audit → deny → shear"]
+    CG --> X["Docker"]
+    CG --> W["WASM package"]
+    CG --> Q["CodeQL (docs-only PRs start it after the scope job)"]
+    CG --> AB["ASan archive build"]
+    CG --> CR["cargo-crap"]
+    OW["owner-bridge-windows (native LCOV)"] --> CR
+    CR --> CI["ci-gate"]
     W --> BP["browser parity"]
-    D --> G["standard-gate"]
+    D --> G["standard pass rule"]
     E --> G
     B --> G
     P --> G
@@ -269,11 +324,13 @@ flowchart TD
 ```
 
 `modules-structure` and `depgraph` are reporting-only jobs. They run after a
-successful normal stage on `main`, not on pull requests.
+successful normal stage and `cargo-crap` on `main`, not on pull requests.
 
-### Stages 4 and 5: mutation, then ASan
+### Stages 4 and 5: mutation and ASan
 
-Mutation and ASan cannot begin until every cheaper blocking gate passes.
+Mutation and the ASan shards begin once the complete standard set passes (the
+rule `standard-gate` reports) and run beside each other; `ci-gate` requires
+both.
 Mutation is changed-line scoped and uses sixteen shards on at most eight
 concurrent runners. Each runner uses one mutation worker with one compiler job
 and four libtest harness threads. These four configured harness
@@ -290,20 +347,20 @@ both the shared baseline and every shard.
 
 ```mermaid
 flowchart TD
-    G["standard-gate"] --> R{"Mutation-relevant PR?"}
+    G["standard pass rule"] --> R{"Mutation-relevant PR?"}
     R -->|"no"| S["Successful skip"]
     R -->|"yes"| B["Full same-nightly mutation baseline"]
     B --> M["Sixteen changed-line shards, at most eight runners"]
     B --> MG["diff mutation testing"]
     M --> MG["diff mutation testing"]
-    S --> A["ASan"]
-    MG --> A
+    MG --> CI["ci-gate"]
+    S --> CI
 ```
 
-ASan tests remain final. Their instrumented build runs on one of the eight
+ASan tests run beside mutation. Their instrumented build runs on one of the eight
 normal-stage runners: `asan-build` compiles every workspace test target once
-with `cargo nextest archive` and uploads the archive, and `standard-gate` and
-`asan-gate` both require it. It compiles crates four at a time while
+with `cargo nextest archive` and uploads the archive, and the standard pass
+rule, `standard-gate` and `asan-gate` all require it. It compiles crates four at a time while
 `scripts/asan/serial-link.sh` admits one link at a time. Each shard downloads
 the archive and runs its tests without compiling. The archive is extracted
 into the workspace, so `target/` sits at the path compiled into
@@ -323,7 +380,7 @@ nextest, so LeakSanitizer checks each test on its own exit.
 
 ```mermaid
 flowchart LR
-    M["Mutation passed or skipped"] --> J{"Both succeeded"}
+    M["standard set passed"] --> J{"Both succeeded"}
     B["asan-build archive"] --> J
     J --> P1["bundle-public 1/2"]
     J --> P2["bundle-public 2/2"]
@@ -352,6 +409,8 @@ flowchart TD
     B1["preflight-gate"] --> G["ci-gate"]
     B2["core-gate"] --> G
     B3["standard-gate"] --> G
+    B6["cargo-crap"] --> G
+    B7["owner-bridge-windows (when in scope)"] --> G
     B4["diff mutation testing"] --> G
     B5["asan-gate"] --> G
     G --> M{"All required results are success?"}

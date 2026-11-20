@@ -143,11 +143,26 @@ mod cases {
         async fn kill(self, _unit: TransientServiceUnitName) {}
     }
 
+    /// The shutdown host never starts a unit, so it has no RQE1.
+    impl crate::RequestedConfiguration for () {
+        fn requested_configuration_evidence(
+            &self,
+            _attempt_id: [u8; 16],
+            _agr1_digest: [u8; 32],
+        ) -> Result<
+            pos_reference::sandbox_provider_protocol::RequestedConfigurationEvidence,
+            pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError,
+        > {
+            Err(pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError::InconsistentFields)
+        }
+    }
+
     impl UnitHost for Host {
         type Started = ();
         type Cgroup = BoundAttemptCgroup;
         type Error = std::io::Error;
         type Killer = UnusedKiller;
+        type Evidence = ();
 
         fn killer(&self) -> UnusedKiller {
             UnusedKiller
@@ -163,6 +178,16 @@ mod cases {
 
         async fn bind_cgroup(&self, _started: &()) -> Result<BoundAttemptCgroup, Self::Error> {
             Err(std::io::Error::other("shutdown must not rebind a cgroup"))
+        }
+
+        async fn release_evidence(
+            &self,
+            _started: &(),
+            _cgroup: &BoundAttemptCgroup,
+        ) -> Result<(u64, ()), Self::Error> {
+            Err(std::io::Error::other(
+                "shutdown must not read release evidence",
+            ))
         }
 
         async fn stop(&self, unit: TransientServiceUnitName) -> Result<(), Self::Error> {

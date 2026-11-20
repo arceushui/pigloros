@@ -9,8 +9,10 @@ bash scripts/check-pinned-dependencies.sh
 bash scripts/test-check-pinned-dependencies.sh
 ```
 
-The `pinned-dependencies` CI job runs the first command on every pull request
-and push. The second command is run locally and in CI to verify that the guard
+The `pinned-dependencies` CI job runs the first command on every
+Rust-affecting pull request and every push. Its source-confinement and
+owner-bridge policy checks run beside it in the parallel `source-policies` and
+`owner-bridge-policies` preflight jobs, and the core stage (and the `preflight-gate` reporter) requires all three. The second command is run locally and in CI to verify that the guard
 rejects floating, multiline, and malformed Action and image references. The
 offline checker validates reference syntax; it cannot prove that a 40-hex
 Action revision exists or is a commit in the upstream repository.
@@ -33,7 +35,11 @@ CI installs PyYAML 6.0.2 from
 `requirements-pinned-dependencies.txt` using `--require-hashes` and binary-only
 wheels under a commit-pinned Python setup Action and Python 3.12.11. The
 requirement records the SHA-256 hashes for the CPython 3.10 and 3.12 Linux
-x86-64 wheels. The checker also supports the repository host's distro-provided
+x86-64 wheels. The same file pins `jsonschema` 4.26.0 and its dependency closure
+(`attrs`, `jsonschema-specifications`, `referencing`, `rpds-py` and
+`typing-extensions`) for the JSON Schema 2020-12 validation of the Gateway v1
+contract (`scripts/check_gateway_contract.py`, #301); `rpds-py` records the
+CPython 3.12 Linux x86-64 and aarch64 wheel hashes. The checker also supports the repository host's distro-provided
 PyYAML 5.4.1; other versions fail closed until their behavior and artifact
 provenance are reviewed.
 
@@ -96,7 +102,7 @@ everything they link (#545, from the #539 licence review). The reusable
 workflow `.github/workflows/third-party-notices.yml` generates them as the
 `third-party-notices` artifact: `THIRD-PARTY-NOTICES.txt` plus the
 `third-party-notices.json` index. CI calls it on every Rust-affecting change,
-and `preflight-gate` requires it to pass.
+and the core stage (and the `preflight-gate` reporter) requires it to pass.
 
 The bundle covers:
 

@@ -4,7 +4,7 @@ A simulation world you join to preview your decisions.
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/arceushui/pigloros)
 
-> **Current stage:** Pre-product. The product MVP is not shipped yet. Wave 9 is the acceptance target: an independently built third-party client — with the first reference acceptance client being a real 3D client — must operate PiglorOS through documented Gateway contracts, using its own preferences/options and Timeline/Scenario Room inputs, receiving a decision preview, submitting actions, reading committed Events, and exercising Replay/Fork. The current Gateway is only a local-first foundation; its default process has create/poll routes but no host-bound authority adapter, and the public decision-preview, Replay/Fork, and live 3D contracts remain planned. The old hard-coded `pos-mvp` decision demo was removed and is not counted as an MVP. **Prediction Ledger** is already delivered (#58: public page, TOML curated tier + EventStore live tier, CLI, gateway write route, Docker/CI/CD).
+> **Current stage:** Pre-product. The product MVP is not shipped yet. Wave 9 is the acceptance target: an independently built third-party client — with the first reference acceptance client being a real 3D client — must operate PiglorOS through documented Gateway contracts, using its own preferences/options and Timeline/Scenario Room inputs, receiving a decision preview, submitting actions, reading committed Events, and exercising Replay/Fork. The current Gateway is only a local-first foundation; its default process has create/poll routes but no host-bound authority adapter. Its language-neutral [Gateway v1 contract](contracts/gateway/v1/README.md) describes the served routes and, as Draft operations not yet served, the decision-preview and Replay/Fork resource families; the live 3D client connection remains planned. The old hard-coded `pos-mvp` decision demo was removed and is not counted as an MVP. **Prediction Ledger** is already delivered (#58: public page, TOML curated tier + EventStore live tier, CLI, gateway write route, Docker/CI/CD).
 
 ## Getting started
 
@@ -19,10 +19,24 @@ timeline_id="$(curl -sS -X POST http://127.0.0.1:8080/v1/timelines \
   -H 'content-type: application/json' \
   -d '{"name":"client-owned-room"}' | jq -r '.id')"
 test -n "$timeline_id" && test "$timeline_id" != "null"
-curl -sS "http://127.0.0.1:8080/v1/timelines/$timeline_id/events?from_seq=0&limit=100"
+page="$(curl -sS "http://127.0.0.1:8080/v1/timelines/$timeline_id/events?from_seq=0&limit=100")"
+# Continue with the opaque cursor until next_from_seq is null (Timeline Order, never wall time).
+cursor="$(jq -r '.next_cursor // empty' <<<"$page")"
+if [ -n "$cursor" ]; then
+  curl -sS "http://127.0.0.1:8080/v1/timelines/$timeline_id/events?cursor=$cursor"
+fi
 
-# The action route requires an authenticated principal and capability; the
-# default local process intentionally fails closed. This smoke test is not the product client.
+# The action route requires an Idempotency-Key and an authenticated principal and
+# capability; the default local process intentionally fails closed with an RFC 9457
+# problem (`"code": "unauthenticated"`). Branch on `code`, never on `detail`.
+jq '.request.body' contracts/gateway/v1/examples/positive-submit-action.json |
+  curl -sS -X POST "http://127.0.0.1:8080/v1/timelines/$timeline_id/actions" \
+    -H 'content-type: application/json' -H 'Idempotency-Key: device-1-1' -d @-
+
+# An unsupported API major fails closed: 400 application/problem+json, code unsupported-version.
+curl -sS -X POST http://127.0.0.1:8080/v2/timelines \
+  -H 'content-type: application/json' -d '{"name":"x"}'
+# This smoke test is not the product client.
 
 # Optional: durable store + experiment via the CLI (`pos` binary)
 cargo run -p pos-cli --locked -- store init --path /tmp/piglor.db
@@ -73,8 +87,9 @@ the final filename itself is protected atomically with create-new semantics.
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.97.1**).
 
 ```bash
-# One-time per clone — enable the versioned pre-commit hook
-# (fmt, rust-test-policy, lockfile generation, and targeted Clippy):
+# One-time per clone — enable the versioned pre-commit and pre-push hooks
+# (pre-commit: cargo fmt, full staged Trunk check, lockfile check, targeted
+# Clippy; pre-push: full Trunk check over the pushed commits):
 git config core.hooksPath .githooks
 ```
 
@@ -94,7 +109,7 @@ pigloros/
   apps/
     pos-experiment/       # Wave 4 ✅ — experiment host: tick loop, StopCondition, Fork, library backtest
     pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge (timeline replay/snapshot/compare currently unavailable)
-    piglor-gateway/       # Wave 6 ✅ — local-first HTTP gateway (ADR-014 / #69)
+    piglor-gateway/       # Wave 6 ✅ — local-first HTTP gateway (ADR-014 / #69); v1 contract in contracts/gateway/v1
     piglor-ledger/         # Wave 4 ✅ — Prediction Ledger CLI + static renderer (ADR-017 / #58)
     piglor-world-client/  # Engineering-only 3D fixture shell; not Gateway-backed MVP evidence
   plugins/
@@ -171,7 +186,7 @@ CI runs the same tests through cargo-nextest (`cargo nextest run --workspace
 --include-ignored`, coverage via `cargo llvm-cov nextest`). The libtest commands
 above run the same tests locally without installing nextest.
 
-CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny** (all features), **cargo-shear**, **cargo-crap** (no existing-score regressions; new functions at most 30), **fmt**, **rustdoc** (`-D warnings`), **test** (cargo-nextest `--run-ignored all` + doctests with `--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io), plus pull-request diff mutation testing, scheduled fuzzing, ThreadSanitizer, and CodeQL. See `.github/workflows/` and [`CONTRIBUTING.md`](CONTRIBUTING.md). Pull requests run a changed-file Trunk preflight before `fmt`, `feature-matrix`, `test`, the three `test-shard` runners, `clippy`, and `coverage` start together. The required `feature-matrix` job runs both supported compile configurations, no-default-feature Memory vectors, and evaluator independence checks; the test shards run the complete workspace suite exactly once, with doctests retained in `test`. `cargo-crap` and the normal checks wait for that complete core set; mutation waits for every cheaper blocking check and proves a separate workspace baseline using the same pinned nightly and libtest arguments as its shards; ASan runs last. The main staged workflow is capped at eight concurrent heavy runners. The changed production diff is checked with `covgate` before the full workspace coverage floor. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job; its completed LCOV artifact feeds a separate visible `cargo-crap` check without a second instrumented build. Green `main` runs publish per-commit baseline artifacts, and the protected `ci-gate` requires every stage. When local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering either threshold.
+CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny** (all features), **cargo-shear**, **cargo-crap** (no existing-score regressions; new functions at most 30), **fmt**, **rustdoc** (`-D warnings`), **test** (cargo-nextest `--run-ignored all` + doctests with `--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io), plus pull-request diff mutation testing, scheduled fuzzing, ThreadSanitizer, and CodeQL. See `.github/workflows/` and [`CONTRIBUTING.md`](CONTRIBUTING.md). Pull requests run a changed-file Trunk preflight before `fmt`, `feature-matrix`, `test`, the three `test-shard` runners, `clippy`, and `coverage` start together. The required `feature-matrix` job runs both supported compile configurations, no-default-feature Memory vectors, and evaluator independence checks; the test shards run the complete workspace suite exactly once, with doctests retained in `test`. On a pull request whose changes stay inside workspace members, the test shards, doctests, `feature-matrix`, `clippy`, `rustdoc` and ASan cover only the members the change can affect; pushes to `main` and the merge queue always run the whole workspace (see [How CI chooses its scope](CONTRIBUTING.md#affected-package-scope-phase-1)). The normal checks wait for that complete core set directly (each stage repeats its gate's pass rule instead of queueing behind an aggregator job); `cargo-crap` starts as soon as hosted `coverage` (and the native Windows owner lane's LCOV, when that lane is in scope) succeeds, so `main` publishes its baseline early, and `ci-gate` requires both `core-gate` and `cargo-crap` directly; mutation waits for every normal check and proves a separate workspace baseline using the same pinned nightly and libtest arguments as its shards; the ASan shards run beside it as the last stage. The native Windows owner lane runs beside the core and standard stages, on pull requests only for Windows-owner changes and on every push to `main`. The main staged workflow is capped at eight concurrent heavy runners. The changed production diff is checked with `covgate` before the full workspace coverage floor. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job; its completed LCOV artifact feeds a separate visible `cargo-crap` check without a second instrumented build. `main` runs whose `cargo-crap` job succeeds publish per-commit baseline artifacts, and the protected `ci-gate` requires every stage. When local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering either threshold.
 
 Quality floor: **800+ tests · 0 failures · at least 99% line and 99% region coverage · no CRAP regressions · new-function CRAP ≤30 · clippy pedantic clean**
 
@@ -182,7 +197,7 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 | Gate | Tool | What it bans / enforces |
 |---|---|---|
 | `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
-| Local git hook | Versioned `.githooks/pre-commit` + Trunk **`rust-test-policy`** | Blocks a commit if the staged Rust policy fails |
+| Local git hooks | Versioned `.githooks/pre-commit` and `.githooks/pre-push` running the full **Trunk check** | Block a commit or push that adds an issue from any enabled Trunk linter or formatter (check-only, nothing rewritten) |
 | Runtime `#[ignore]` | CI `cargo nextest run --run-ignored all` (local `cargo test -- --include-ignored`) + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report no ignored or skipped test |
 | Change risk | pinned **cargo-crap** + `scripts/check_cargo_crap_report.py` | Existing scores cannot regress; new functions must score ≤30 |
 | Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
@@ -190,17 +205,21 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 #### Git hooks (local)
 
 Git does not activate repository hooks automatically on clone. Enable the
-versioned pre-commit hook once:
+versioned hooks once:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-The hook fails closed if Trunk is unavailable, then runs `rust-test-policy` on
-the staged files before its Cargo checks:
+Both hooks fail closed if Trunk is unavailable whenever there is something to
+check. Trunk's own git-hook actions are disabled in `.trunk/trunk.yaml` so that
+Trunk never repoints `core.hooksPath`.
 
-- **pre-commit:** `cargo fmt`, Trunk `rust-test-policy`, `Cargo.lock`
-  regeneration/staging after manifest changes, and targeted Clippy.
+- **pre-commit:** `cargo fmt --check`, the full Trunk check of the staged
+  changes (every enabled linter and formatter, check-only), a staged
+  `Cargo.lock` check after manifest changes, and targeted Clippy.
+- **pre-push:** the full Trunk check over the commits being pushed (check-only);
+  branch deletions and pushes with no new commits are skipped.
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions
 and code inside `#[cfg(test)]` modules. CI requires **at least 99% lines and 99% regions**.

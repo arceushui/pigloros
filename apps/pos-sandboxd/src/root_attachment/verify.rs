@@ -11,9 +11,9 @@ use super::observe::{BlockIdentity, LoopDevice, MountEntry, Node, Observations, 
 use crate::{ActivatedRootDirectory, ImageActivationError};
 
 /// `EROFS_SUPER_MAGIC_V1` (Linux `include/uapi/linux/magic.h`).
-const EROFS_MAGIC: u64 = 0xE0F5_E1E2;
+pub(super) const EROFS_MAGIC: u64 = 0xE0F5_E1E2;
 /// cryptsetup names every dm-verity device's UUID `CRYPT-VERITY-...`.
-const VERITY_UUID_PREFIX: &str = "CRYPT-VERITY-";
+pub(super) const VERITY_UUID_PREFIX: &str = "CRYPT-VERITY-";
 /// sysfs reports partition extents in 512-byte sectors.
 const SECTOR: u64 = 512;
 
@@ -63,6 +63,18 @@ impl VerifiedMountIdentity {
     pub(super) const fn devices(&self) -> [BlockIdentity; 2] {
         [self.mapper, self.loop_device]
     }
+
+    /// The mount, mapper and loop device as the kernel observation records
+    /// them; `None` for a device number outside the kernel's bounds.
+    pub(super) fn kernel_identity(&self) -> Option<crate::RootIdentity> {
+        let block =
+            |identity: BlockIdentity| crate::BlockDevice::of(identity.device, identity.diskseq);
+        block(self.mapper)
+            .zip(block(self.loop_device))
+            .map(|(mapper, loop_device)| {
+                crate::RootIdentity::new(self.mount.mount_id, mapper, loop_device)
+            })
+    }
 }
 
 impl Expected {
@@ -97,10 +109,14 @@ impl Expected {
                     && observed.parent_mount_id.is_some()
                     && observed.filesystem_magic == Some(EROFS_MAGIC)
                     && observed.read_only == Some(true)
-                    && observed
-                        .entry
-                        .as_ref()
-                        .is_some_and(|entry| self.entry_matches(entry, mount, observed))
+                    && observed.entry.as_ref().is_some_and(|entry| {
+                        private_root_entry(
+                            entry,
+                            mount,
+                            observed.parent_mount_id,
+                            &self.root_directory,
+                        )
+                    })
                     && observed.executable.is_some_and(|executable| {
                         executable.node.mount_id == mount.mount_id
                             && executable.blake3 == self.executable_digest
@@ -135,19 +151,6 @@ impl Expected {
                     })
             })
             .ok_or(ImageActivationError::EvidenceMismatch)
-    }
-
-    /// The private EROFS mount at exactly the attempt root, on the held parent.
-    fn entry_matches(&self, entry: &MountEntry, mount: &Node, observed: &Observations) -> bool {
-        Some(entry.parent_id) == observed.parent_mount_id
-            && entry.device == mount.device
-            && entry.root == "/"
-            && entry.mount_point == self.root_directory.as_str()
-            && entry.options.split(',').next() == Some("ro")
-            && entry.super_options.split(',').next() == Some("ro")
-            && entry.filesystem == "erofs"
-            // Any shared, master or propagate_from field is propagation.
-            && entry.optional.is_empty()
     }
 
     /// Exactly the root and root-verity partitions of one loop device that
@@ -227,4 +230,23 @@ fn sectors(start: u64, size: u64) -> Option<Extent> {
         .checked_mul(SECTOR)
         .zip(size.checked_mul(SECTOR))
         .map(|(start, length)| Extent { start, length })
+}
+
+/// The private, read-only EROFS mount of `mount`'s device at exactly
+/// `root_directory`, mounted on the mount `parent`.
+pub(super) fn private_root_entry(
+    entry: &MountEntry,
+    mount: &Node,
+    parent: Option<u64>,
+    root_directory: &ActivatedRootDirectory,
+) -> bool {
+    Some(entry.parent_id) == parent
+        && entry.device == mount.device
+        && entry.root == "/"
+        && entry.mount_point == root_directory.as_str()
+        && entry.options.split(',').next() == Some("ro")
+        && entry.super_options.split(',').next() == Some("ro")
+        && entry.filesystem == "erofs"
+        // Any shared, master or propagate_from field is propagation.
+        && entry.optional.is_empty()
 }

@@ -51,6 +51,7 @@ use super::ActionAttemptRequest;
 use crate::{
     authorization::{GatewayAuthorization, GatewayAuthorizationDecision},
     ingress_dedup_scope,
+    mode_profile::GatewayExecutionModeRevisionV1,
 };
 
 const DOMAIN: &[u8] = b"PiglorOS.GatewayHumanActionAdmission.v1\0";
@@ -139,22 +140,21 @@ impl GatewayActionAdmission<'_> {
             .iter()
             .map(pos_core::CapabilityGrantV1::policy_revision)
             .collect::<Vec<_>>();
-        let (registry, revocation_current) = self.authorization.execution_profile();
-        PipelineSecurityRevisionsV1::try_from_draft(PipelineSecurityRevisionsDraftV1 {
-            authority: pipeline_authority_revision_v1(authority),
-            consent: keyed(b"consent", &consent),
-            capability: keyed(b"capability", &hash_slices(&grant_ids)),
-            delegation: pipeline_delegation_revision_v1(authority),
-            policy: keyed(b"policy", &hash_slices(&policies)),
-            execution_profile: keyed(
-                b"execution-profile",
-                &[registry.as_bytes(), &[u8::from(revocation_current)]],
-            ),
-            erasure: pipeline_erasure_revision_v1(
-                self.registry
-                    .clone_erasure_gate()
-                    .and_then(|gate| gate.inventory_generation().ok()),
-            ),
+        let (registry, revocation_current, mode) = self.authorization.execution_profile();
+        execution_mode_revision(registry, revocation_current, mode).and_then(|execution_profile| {
+            PipelineSecurityRevisionsV1::try_from_draft(PipelineSecurityRevisionsDraftV1 {
+                authority: pipeline_authority_revision_v1(authority),
+                consent: keyed(b"consent", &consent),
+                capability: keyed(b"capability", &hash_slices(&grant_ids)),
+                delegation: pipeline_delegation_revision_v1(authority),
+                policy: keyed(b"policy", &hash_slices(&policies)),
+                execution_profile,
+                erasure: pipeline_erasure_revision_v1(
+                    self.registry
+                        .clone_erasure_gate()
+                        .and_then(|gate| gate.inventory_generation().ok()),
+                ),
+            })
         })
     }
 
@@ -244,8 +244,9 @@ impl GatewayActionAdmission<'_> {
     }
 }
 
-/// Persist the authority chain and every revocation record behind a decision
-/// in the admission store.
+/// Persist the authority chain the decision was decided on, its root chain or
+/// the chain of the consent governing it, and every revocation record behind
+/// it in the admission store.
 ///
 /// The host runs this in the same store command as the admission but before
 /// the Timeline's erasure fence opens, because authority persistence commits
@@ -253,11 +254,16 @@ impl GatewayActionAdmission<'_> {
 /// [`PipelineOutcomeV1::PolicyIndeterminate`].
 pub(super) fn persist_authority(
     authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
     ports: &mut dyn ScheduledAdmissionPortsV1,
 ) -> Result<(Hash, PersistedAuthorityV1), HumanActionAdmissionErrorV1> {
-    authorization.persist_authority(ports).map_err(|_| {
-        HumanActionAdmissionErrorV1::NotAdmitted(Box::new(PipelineOutcomeV1::PolicyIndeterminate))
-    })
+    authorization
+        .persist_authority(ports, decision)
+        .map_err(|_| {
+            HumanActionAdmissionErrorV1::NotAdmitted(Box::new(
+                PipelineOutcomeV1::PolicyIndeterminate,
+            ))
+        })
 }
 
 /// The only form in which a caller's idempotency key is retained.
@@ -268,6 +274,32 @@ pub(super) fn caller_key_digest(key: &str) -> Hash {
 /// A one-use caller key for a request that supplied none.
 fn fresh_caller_key() -> Hash {
     keyed(b"fresh-caller-key", &[&EntityId::new().inner().to_bytes()])
+}
+
+/// The ADR-134 §6 execution-profile security revision: the bound GMP1
+/// digest, the EPF1 field (explicit-absent until #461), the sorted operator
+/// grant tags, the pinned authority registry digest and the revocation
+/// freshness. An unbound composition has no execution mode, so its contract
+/// is incomplete and it admits nothing.
+fn execution_mode_revision(
+    registry: Hash,
+    revocation_current: bool,
+    mode: Option<&GatewayExecutionModeRevisionV1>,
+) -> Result<Hash, PipelineContractErrorV1> {
+    mode.map(|mode| {
+        let [mode_profile, epf1, grants] = mode.fields();
+        keyed(
+            b"execution-mode-profile",
+            &[
+                mode_profile,
+                epf1,
+                grants,
+                registry.as_bytes(),
+                &[u8::from(revocation_current)],
+            ],
+        )
+    })
+    .ok_or(PipelineContractErrorV1::Incomplete)
 }
 
 fn hash_slices(values: &[Hash]) -> Vec<&[u8]> {
@@ -288,4 +320,55 @@ fn keyed(label: &[u8], fields: &[&[u8]]) -> Hash {
         hasher.update(field);
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{execution_mode_revision, keyed};
+    use crate::mode_profile::{test_binding, GatewayModeProfileIdV1, GatewayNetworkGrantV1};
+    use pos_core::{Hash, PipelineContractErrorV1};
+
+    #[test]
+    fn the_execution_profile_revision_binds_the_bound_mode() {
+        let registry = Hash::from_bytes([7; 32]);
+        assert_eq!(
+            execution_mode_revision(registry, true, None),
+            Err(PipelineContractErrorV1::Incomplete)
+        );
+        let local = test_binding(GatewayModeProfileIdV1::Local, []).revision_input();
+        let granted = test_binding(
+            GatewayModeProfileIdV1::Local,
+            [GatewayNetworkGrantV1::OwnTracks],
+        )
+        .revision_input();
+        let air_gapped = test_binding(GatewayModeProfileIdV1::AirGapped, []).revision_input();
+        let revision = |mode, registry, current| {
+            execution_mode_revision(registry, current, Some(mode))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
+        };
+        let base = revision(&local, registry, true);
+        let [mode_profile, epf1, grants] = local.fields();
+        assert_eq!(
+            base,
+            keyed(
+                b"execution-mode-profile",
+                &[mode_profile, epf1, grants, &[7; 32], &[1]]
+            )
+        );
+        assert_eq!(epf1, [0x00]);
+        assert_ne!(
+            base,
+            keyed(b"execution-profile", &[&[7; 32], &[1]]),
+            "the label is domain-separated from the old placeholder"
+        );
+        for moved in [
+            revision(&air_gapped, registry, true),
+            revision(&granted, registry, true),
+            revision(&local, Hash::from_bytes([8; 32]), true),
+            revision(&local, registry, false),
+        ] {
+            assert_ne!(moved, base);
+        }
+    }
 }

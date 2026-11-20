@@ -33,7 +33,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 50] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -67,6 +67,9 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
     ("UMask", "u"),
     ("KillMode", "s"),
     ("SendSIGKILL", "b"),
+    ("StandardInput", "s"),
+    ("StandardOutput", "s"),
+    ("StandardError", "s"),
     ("MemoryMax", "t"),
     ("MemorySwapMax", "t"),
     ("TasksMax", "t"),
@@ -78,6 +81,9 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
     ("ExtraFileDescriptors", "a(hs)"),
     ("TemporaryFileSystem", "a(ss)"),
     ("ExecStart", "a(sasb)"),
+    ("StandardInputFileDescriptor", "h"),
+    ("StandardOutputFileDescriptor", "h"),
+    ("StandardErrorFileDescriptor", "h"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +107,8 @@ enum ObservedControl {
         whom: String,
         signal: i32,
     },
+    Ref(String),
+    Unref(String),
 }
 
 struct RecordingManager {
@@ -178,8 +186,29 @@ impl Default for ManagerBehavior {
     }
 }
 
+impl RecordingManager {
+    fn record(&self, call: ObservedControl) -> fdo::Result<()> {
+        self.behavior
+            .control_calls
+            .lock()
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?
+            .push(call);
+        Ok(())
+    }
+}
+
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl RecordingManager {
+    #[zbus(name = "RefUnit")]
+    fn ref_unit(&self, name: String) -> fdo::Result<()> {
+        self.record(ObservedControl::Ref(name))
+    }
+
+    #[zbus(name = "UnrefUnit")]
+    fn unref_unit(&self, name: String) -> fdo::Result<()> {
+        self.record(ObservedControl::Unref(name))
+    }
+
     #[zbus(name = "Subscribe")]
     fn subscribe(&self) -> fdo::Result<()> {
         if matches!(self.behavior.subscription, SubscriptionBehavior::Reject) {
@@ -439,6 +468,10 @@ struct RecordingService {
     fail_root_directory: bool,
     fail_root_image_policy: bool,
     fail_memory_max: bool,
+    /// `StandardInput`, `StandardOutput` and `StandardError`.
+    standard_streams: [&'static str; 3],
+    /// The three `Standard*FileDescriptorName` values, in the same order.
+    standard_descriptor_names: [&'static str; 3],
 }
 
 #[derive(Clone, Default)]
@@ -471,6 +504,8 @@ impl RecordingService {
             fail_root_directory: false,
             fail_root_image_policy: false,
             fail_memory_max: false,
+            standard_streams: ["null"; 3],
+            standard_descriptor_names: [""; 3],
         }
     }
 
@@ -690,6 +725,36 @@ impl RecordingService {
         self.fixed(true)
     }
 
+    #[zbus(property, name = "StandardInput")]
+    fn standard_input(&self) -> &'static str {
+        self.fixed(self.standard_streams[0])
+    }
+
+    #[zbus(property, name = "StandardOutput")]
+    fn standard_output(&self) -> &'static str {
+        self.fixed(self.standard_streams[1])
+    }
+
+    #[zbus(property, name = "StandardError")]
+    fn standard_error(&self) -> &'static str {
+        self.fixed(self.standard_streams[2])
+    }
+
+    #[zbus(property, name = "StandardInputFileDescriptorName")]
+    fn standard_input_file_descriptor_name(&self) -> &'static str {
+        self.fixed(self.standard_descriptor_names[0])
+    }
+
+    #[zbus(property, name = "StandardOutputFileDescriptorName")]
+    fn standard_output_file_descriptor_name(&self) -> &'static str {
+        self.fixed(self.standard_descriptor_names[1])
+    }
+
+    #[zbus(property, name = "StandardErrorFileDescriptorName")]
+    fn standard_error_file_descriptor_name(&self) -> &'static str {
+        self.fixed(self.standard_descriptor_names[2])
+    }
+
     #[zbus(property, name = "MemoryMax")]
     fn memory_max(&self) -> fdo::Result<u64> {
         self.record_read();
@@ -851,12 +916,24 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 44);
+    assert_eq!(verified.requested_readback().len(), 50);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
-        verified.requested_readback()[41].name(),
+        verified.requested_readback()[44].name(),
         "ExtraFileDescriptors"
     );
+    // The descriptor names are read back under the descriptors' own names.
+    for (index, name) in [
+        (47, "StandardInputFileDescriptor"),
+        (48, "StandardOutputFileDescriptor"),
+        (49, "StandardErrorFileDescriptor"),
+    ] {
+        assert_eq!(verified.requested_readback()[index].name(), name);
+        assert_eq!(
+            verified.requested_readback()[index].value(),
+            &crate::SystemdTransientUnitReadbackValue::String(String::new())
+        );
+    }
     assert_eq!(
         verified.manager_readback().property(),
         SystemdManagerReadbackOnlyProperty::RootImagePolicy
@@ -1039,6 +1116,46 @@ async fn unequal_typed_property_readback_fails_closed() -> Result<(), Box<dyn Er
         error,
         SystemdTransientUnitTransportError::Readback(TransientUnitRequestError::ReadbackMismatch)
     ));
+    Ok(())
+}
+
+/// Each standard stream and each descriptor name is read from its own
+/// property: one substituted value alone fails the readback.
+#[tokio::test]
+async fn each_standard_stream_is_read_back_from_its_own_property() -> Result<(), Box<dyn Error>> {
+    for (index, attempt) in (0..6).zip(0x40_u8..) {
+        let mut service = RecordingService::exact(expected_system_call_filter()?);
+        if index < 3 {
+            service.standard_streams[index] = "tty";
+        } else {
+            service.standard_descriptor_names[index - 3] = "substituted";
+        }
+        let (transport, _server) = transport(
+            Arc::new(Mutex::new(None)),
+            ManagerBehavior::default(),
+            service,
+        )
+        .await?;
+        let error = transport
+            .start(
+                TransientServiceUnitName::from_attempt_id([attempt; 16])?,
+                request(LaunchMode::Local {
+                    host_service: descriptor()?,
+                })?,
+            )
+            .await
+            .err()
+            .ok_or("a substituted standard stream was accepted")?;
+        assert!(
+            matches!(
+                error,
+                SystemdTransientUnitTransportError::Readback(
+                    TransientUnitRequestError::ReadbackMismatch
+                )
+            ),
+            "{index}: {error:?}"
+        );
+    }
     Ok(())
 }
 
@@ -1288,15 +1405,15 @@ async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), 
     let service = RecordingService::exact(expected_system_call_filter()?);
     let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let name = TransientServiceUnitName::from_attempt_id([0x20; 16])?;
-    let started = UnitHost::start(
-        &transport,
-        name.clone(),
-        request(LaunchMode::Local {
-            host_service: descriptor()?,
-        })?,
-    )
-    .await?;
+    let request = request(LaunchMode::Local {
+        host_service: descriptor()?,
+    })?;
+    let requested = request.requested_configuration();
+    let started = UnitHost::start(&transport, name.clone(), request).await?;
     assert_eq!(started.unit_name(), &name);
+    // RQE1's `requested` travels with the verified start.
+    assert!(!requested.is_empty());
+    assert_eq!(started.requested_configuration(), requested.as_slice());
     // The fixed cgroup mount has no such attempt cgroup.
     let error = UnitHost::bind_cgroup(&transport, &started)
         .await
@@ -1306,6 +1423,15 @@ async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), 
         error,
         SystemdTransientUnitTransportError::CgroupKernel(_)
     ));
+    // The unit was referenced before the bind, and released when it failed.
+    assert_eq!(
+        calls.lock().map_err(|error| error.to_string())?.as_slice(),
+        &[
+            ObservedControl::Ref(name.as_str().to_owned()),
+            ObservedControl::Unref(name.as_str().to_owned()),
+        ]
+    );
+    calls.lock().map_err(|error| error.to_string())?.clear();
     UnitHost::stop(&transport, name.clone()).await?;
     UnitHost::kill(&transport, name.clone()).await?;
     // The handle an execution falls back on when it is dropped kills, then stops.
@@ -1782,6 +1908,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         mode,
         descriptor()?,
         crate::test_fixtures::invocation()?,
+        crate::UnitStdio::for_test()?,
     );
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
     Ok(TransientUnitRequest::compile(inputs, filter, &limits))
@@ -1813,6 +1940,31 @@ fn value() -> SystemdTransientUnitValue {
     SystemdTransientUnitValue::Numeric(
         crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(1),
     )
+}
+
+/// A standard descriptor is sent once: a property whose descriptor was
+/// already moved into a submission cannot be encoded again.
+#[test]
+fn a_standard_descriptor_is_encoded_once() -> Result<(), Box<dyn Error>> {
+    let encoded = encode_property_with(
+        "StandardInputFileDescriptor",
+        SystemdTransientUnitValue::StandardDescriptor(Some(descriptor()?)),
+        OwnedVariant::try_from,
+    )?;
+    assert_eq!(encoded.0, "StandardInputFileDescriptor");
+    assert_eq!(encoded.1.value_signature().to_string(), "h");
+    let error = encode_property_with(
+        "StandardInputFileDescriptor",
+        SystemdTransientUnitValue::StandardDescriptor(None),
+        OwnedVariant::try_from,
+    );
+    assert!(matches!(
+        error,
+        Err(SystemdTransientUnitTransportError::Serialization(
+            zbus::Error::IncorrectType
+        ))
+    ));
+    Ok(())
 }
 
 #[test]

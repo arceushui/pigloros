@@ -49,16 +49,18 @@ struct PinnedAuthority {
 
 fn pinned_authority(actor: EntityId) -> PinnedAuthority {
     let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok();
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+    let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        AuthenticatedPrincipalDraftV1 {
             principal: principal.clone(),
             adapter_id: "fixture".to_owned(),
             assurance: AssuranceLevelV1::try_new(1).test_ok(),
             issued_at: WallTime::from_micros(1),
             expires_at: WallTime::from_micros(u64::MAX),
             binding_digest: Hash::from_bytes([2; 32]),
-        })
-        .test_ok();
+        },
+    )
+    .test_ok();
     let registry_digest = Hash::from_bytes([3; 32]);
     let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
         grant_id: Hash::from_bytes([5; 32]),
@@ -96,6 +98,7 @@ fn pinned_authority(actor: EntityId) -> PinnedAuthority {
     })
     .test_ok();
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![authenticated.registry_binding_digest()],
         vec![grant.binding_digest().test_ok()],
@@ -125,6 +128,25 @@ fn authorization(
         pinned.registry.clone(),
         revocation_state_current,
     )
+}
+
+/// Bind the host's store to the Local execution mode (ADR-134), as `serve`
+/// does before it composes a Gateway.
+fn bind_local_mode(
+    host: &mut ErasureExecutionHostV1,
+) -> piglor_gateway::mode_profile::GatewayModeBindingV1 {
+    piglor_gateway::mode_profile::bind_gateway_mode_v1(
+        piglor_gateway::mode_profile::GatewayModeProfileIdV1::Local,
+        piglor_gateway::mode_profile::GatewayServeCompositionV1 {
+            tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8080)),
+            owntracks_owner_key: None,
+            fork_admission_socket: None,
+            ledger_source: None,
+            network_grants: std::collections::BTreeSet::new(),
+        },
+        host,
+    )
+    .test_ok()
 }
 
 fn decide(authorization: &GatewayAuthorization, actor: EntityId) -> String {
@@ -241,16 +263,21 @@ pub fn first_party_has_no_privileged_route() -> Capture {
             capture.record(
                 store,
                 "authorized-composition",
-                composition(Gateway::new_with_erasure_host_and_authorization(
-                    host(authorized_store),
-                    [body],
-                    authorization(&pinned, local, true),
-                )),
+                composition({
+                    let mut authorized = host(authorized_store);
+                    let mode = bind_local_mode(&mut authorized);
+                    Gateway::new_with_erasure_host_and_authorization(
+                        authorized,
+                        [body],
+                        authorization(&pinned, local, true),
+                        &mode,
+                    )
+                }),
             );
 
-            let gateway = Gateway::new_with_erasure_host(host(unauthorized_store)).test_ok();
+            let gateway = Gateway::unprotected_for_harness(host(unauthorized_store)).test_ok();
             let timeline = gateway
-                .create_timeline("first-party")
+                .create_timeline("first-party", None)
                 .await
                 .test_ok()
                 .id()

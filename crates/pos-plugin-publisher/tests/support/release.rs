@@ -34,12 +34,89 @@ pub const COMPONENT_BYTES: &[u8] = b"\0asm component";
 pub const REAL_COMPONENT_BYTES: &[u8] = include_bytes!(
     "../../../../plugins/community/examples/compatibility-prototype/fixtures/rust-guest.wasm"
 );
-const WIT_BYTES: &[u8] = b"wit archive";
-const EVENT_SCHEMA: &[u8] = br#"{"$id":"event"}"#;
-const STATE_SCHEMA: &[u8] = br#"{"$id":"state"}"#;
-const PROVENANCE_BYTES: &[u8] = b"in-toto provenance";
-const SBOM_BYTES: &[u8] = b"spdx sbom";
+const WIT_SOURCE: &[u8] = include_bytes!("../../../../plugins/community/wit/pigloros-plugin.wit");
+const EVENT_SCHEMA: &[u8] = br#"{"$id":"https://pigloros.invalid/fixture/event"}"#;
+const STATE_SCHEMA: &[u8] = br#"{"$id":"https://pigloros.invalid/fixture/state"}"#;
 const LICENCE_BYTES: &[u8] = b"licence text";
+
+/// Owned, component-bound content used to construct a signed test release.
+pub struct FixtureContent {
+    wit: Vec<u8>,
+    provenance: Vec<u8>,
+    sbom: Vec<u8>,
+}
+
+impl FixtureContent {
+    /// Build offline basic-package metadata for the exact Component bytes.
+    #[must_use]
+    pub fn new(component: &[u8]) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let digest: String = sha256(component)
+            .iter()
+            .flat_map(|&byte| {
+                [
+                    char::from(HEX[usize::from(byte >> 4)]),
+                    char::from(HEX[usize::from(byte & 15)]),
+                ]
+            })
+            .collect();
+        let provenance = format!(
+            concat!(
+                r#"{{"_type":"https://in-toto.io/Statement/v1","#,
+                r#""predicateType":"https://slsa.dev/provenance/v1","#,
+                r#""subject":[{{"digest":{{"sha256":"{}"}}}}],"#,
+                r#""predicate":{{"buildDefinition":{{"buildType":"https://pigloros.invalid/build","#,
+                r#""externalParameters":{{}}}},"runDetails":{{"builder":{{"#,
+                r#""id":"https://pigloros.invalid/builder"}}}}}}}}"#,
+            ),
+            digest,
+        )
+        .into_bytes();
+        let sbom = format!(
+            concat!(
+                r#"{{"spdxVersion":"SPDX-2.3","dataLicense":"CC0-1.0","#,
+                r#""SPDXID":"SPDXRef-DOCUMENT","name":"test component","#,
+                r#""documentNamespace":"https://pigloros.invalid/spdx/test","#,
+                r#""creationInfo":{{"creators":["Tool: PiglorOS test fixture"],"#,
+                r#""created":"2026-11-01T00:00:00Z"}},"#,
+                r#""documentDescribes":["SPDXRef-component"],"packages":[{{"#,
+                r#""SPDXID":"SPDXRef-component","name":"component","#,
+                r#""downloadLocation":"NOASSERTION","filesAnalyzed":false,"#,
+                r#""licenseConcluded":"MIT","licenseDeclared":"MIT","#,
+                r#""copyrightText":"NOASSERTION","checksums":[{{"#,
+                r#""algorithm":"SHA256","checksumValue":"{}"}}]}}]}}"#,
+            ),
+            digest,
+        )
+        .into_bytes();
+        let mut header = [0; 512];
+        header[..8].copy_from_slice(b"main.wit");
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        header[124..136].copy_from_slice(format!("{:011o}\0", WIT_SOURCE.len()).as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: usize = header.iter().map(|byte| usize::from(*byte)).sum();
+        header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+        let mut wit = header.to_vec();
+        wit.extend_from_slice(WIT_SOURCE);
+        wit.resize(wit.len().next_multiple_of(512) + 1024, 0);
+        Self {
+            wit,
+            provenance,
+            sbom,
+        }
+    }
+
+    /// Replace the provenance with malformed bytes for refusal tests.
+    pub fn corrupt_provenance(&mut self) {
+        self.provenance = b"not JSON".to_vec();
+    }
+}
 
 /// A private temporary directory that holds one local OCI store and is removed
 /// on drop.
@@ -252,7 +329,7 @@ impl Shape {
 ///
 /// # Errors
 /// Returns the owner identifier error.
-pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
+pub fn make_draft(shape: Shape, content: &FixtureContent) -> BoxResult<PluginReleaseDraftV1<'_>> {
     Ok(PluginReleaseDraftV1 {
         plugin_id: shape.plugin_id.to_owned(),
         release_version: shape.version.to_owned(),
@@ -267,7 +344,7 @@ pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
             },
         },
         component: input(shape.component),
-        wit: input(WIT_BYTES),
+        wit: input(&content.wit),
         event_schemas: vec![schema(1, EVENT_SCHEMA)],
         state_schema: schema(2, STATE_SCHEMA),
         configuration_schema: None,
@@ -301,8 +378,8 @@ pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
             capability_ids: Vec::new(),
             class: 0,
         }],
-        provenance: input(PROVENANCE_BYTES),
-        sbom: input(SBOM_BYTES),
+        provenance: input(&content.provenance),
+        sbom: input(&content.sbom),
         licences: vec![input(LICENCE_BYTES)],
         owner: OwnerIdV1::new(shape.owner)?,
         not_before: shape.not_before,

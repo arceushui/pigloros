@@ -1,11 +1,13 @@
 //! Authentication of SIC1's pinned bootstrap authority.
 
 mod recovery_identity;
+mod resolve;
 mod update;
 
 pub use recovery_identity::{
     AdmittedProviderRuntime, InstallationRecoverySnapshot, ProviderRuntimeSlot,
 };
+pub use resolve::{AuthorityResolution, InstalledAuthorityObjects};
 pub use update::{CommittedInstallationUpdate, InstallationChallenge, ValidatedInstallationUpdate};
 
 use ed25519_dalek::VerifyingKey;
@@ -80,6 +82,33 @@ pub struct AuthenticatedSelectorBootstrap {
     trust: SandboxTrustSnapshot,
     revocation: SandboxRevocationSnapshot,
     policy: SandboxAdministratorPolicy,
+}
+
+/// One pending SIR1 that the selector rebuilt byte for byte from the
+/// installed objects (loaded in `update::pending_recovery`).
+///
+/// It is crate-private: `selector::recovery` turns it into the sealed
+/// `PendingRecoveryTarget`.
+#[derive(Debug)]
+pub(crate) struct VerifiedPendingRecovery {
+    /// Exact SIR1 self-digest.
+    pub(crate) sir1_digest: [u8; 32],
+    /// Digest of the rebuilt previous-provider binding.
+    pub(crate) previous_provider_binding_digest: [u8; 32],
+    /// The previous runtime's instance ID.
+    pub(crate) previous_runtime_instance_id: [u8; 16],
+    /// The previous runtime's lifecycle-scope ID.
+    pub(crate) previous_lifecycle_scope_id: [u8; 16],
+    /// The complete fenced attempt set of the previous runtime.
+    pub(crate) previous_live_attempt_ids: Vec<[u8; 16]>,
+    /// Recovery runtime, lifecycle-scope and endpoint IDs, in that order.
+    pub(crate) recovery_peer_slot: [[u8; 16]; 3],
+    /// Digest of the previous SIC1, the mode-1 challenge's installation.
+    pub(crate) previous_installation_digest: [u8; 32],
+    /// The committed RCU1's selector nonce, the mode-1 challenge's nonce.
+    pub(crate) selector_nonce: [u8; 16],
+    /// The exact SIU1 that committed this SIR1.
+    pub(crate) pending_update: Vec<u8>,
 }
 
 /// Root-selected provider released after full provider admission.
