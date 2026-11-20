@@ -610,9 +610,19 @@ async fn parallel_requests_of_one_subject_admit_one(mode: ServeMode) -> TestResu
     // No driver may take the admitted request to its receipt in between.
     driver.stop().await;
     let actor = actor()?;
+    // Each joined answer carries its error as a `String`: `tokio::join!`
+    // keeps the first output while it awaits the second, and a
+    // `Box<dyn Error>` there is not `Send` (`future_not_send`).
+    let shared = &served;
+    let answer = move |key: &'static str, scope: &'static str| async move {
+        shared
+            .request(actor, key, scope)
+            .await
+            .map_err(|error| error.to_string())
+    };
     let (first, second) = tokio::join!(
-        served.request(actor, "erasure-a", "private-subject-data"),
-        served.request(actor, "erasure-b", "consented-shared-data"),
+        answer("erasure-a", "private-subject-data"),
+        answer("erasure-b", "consented-shared-data"),
     );
     let mut answers = [first?, second?];
     answers.sort_by_key(|answer| answer.status.as_u16());

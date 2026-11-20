@@ -600,6 +600,8 @@ mod tests {
     use pos_core::ErasureInventoryPersistencePortV1 as _;
     use pos_store::sqlite::SqliteStore;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     /// Only the compositions with a fixture erasure bundle record an erasure identity.
     ///
     /// ADR-136 acceptance test 11 does not apply to the adapter: it never
@@ -609,9 +611,13 @@ mod tests {
     /// no ERQ1 to recover. The `authorized-erasure` compositions do record
     /// one; they compose through the `serve` loader, which refuses to start
     /// without the signer credential, so they hold the signer.
+    ///
+    /// It holds in any environment. On a networked host
+    /// `authorized-air-gapped` does not compose: `bind_gateway_mode_v1`
+    /// refuses it at predicate 6, `air-gapped-no-route`. The adapter's
+    /// existing namespace tests cover the case where it composes.
     #[test]
-    fn only_the_erasure_bundle_compositions_record_an_erasure_identity(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn only_the_erasure_bundle_compositions_record_an_erasure_identity() -> TestResult {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -633,7 +639,16 @@ mod tests {
                 let _context = runtime.enter();
                 compose(composition)
             };
-            let (gateway, store) = composed.ok_or("the composition is unavailable")?;
+            // `authorized-air-gapped` either does not compose (predicate 6
+            // refuses a networked host) or composes a store without an
+            // erasure identity; every other composition composes.
+            let Some((gateway, store)) = composed else {
+                assert!(
+                    composition == CompositionV2::AuthorizedAirGapped,
+                    "composition {index} is unavailable"
+                );
+                continue;
+            };
             runtime.block_on(gateway.shutdown())?;
             drop(gateway);
             let identity = match &store {
