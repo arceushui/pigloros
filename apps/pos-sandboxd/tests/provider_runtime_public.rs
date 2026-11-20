@@ -153,7 +153,8 @@ fn runtime_sources() -> TestResult<Vec<PathBuf>> {
 #[test]
 fn the_provider_runtime_reads_only_notify_socket_from_its_environment() -> TestResult {
     // R11 §10 invariant 2: the runtime reads `NOTIFY_SOCKET` and no other
-    // variable. Test modules live in `tests.rs` files and inline modules
+    // variable, and so does the recovery peer (R12 §5.5), through the same
+    // one read. Test modules live in `tests.rs` files and inline modules
     // after the production code.
     let mut reads = Vec::new();
     for path in runtime_sources()? {
@@ -169,6 +170,32 @@ fn the_provider_runtime_reads_only_notify_socket_from_its_environment() -> TestR
                 .map(|line| line.trim().to_owned()),
         );
     }
-    assert_eq!(reads, ["std::env::var_os(\"NOTIFY_SOCKET\").as_deref(),"]);
+    assert_eq!(reads, ["std::env::var_os(\"NOTIFY_SOCKET\")"]);
+    Ok(())
+}
+
+#[test]
+fn the_recovery_peer_mode_accepts_only_its_endpoint_id() -> TestResult {
+    // ADR-069 R12 §5.5: the argv is exactly `[recovery-peer, <32 lowercase
+    // hex endpoint ID>]`. Another ID is refused before anything is read or
+    // bound; another argv shape is a usage error.
+    for endpoint_id in ["", "0123456789ABCDEF0123456789ABCDEF", "../x"] {
+        let output = Command::new(BINARY)
+            .args(["recovery-peer", endpoint_id])
+            .output()?;
+        assert_eq!(output.status.code(), Some(1), "{endpoint_id:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr)?,
+            "pos-sandboxd: the recovery endpoint ID is not 32 lowercase hexadecimal digits\n"
+        );
+    }
+    for arguments in [
+        &["recovery-peer"][..],
+        &["recovery-peer", "0123456789abcdef0123456789abcdef", "extra"][..],
+    ] {
+        let output = Command::new(BINARY).args(arguments).output()?;
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(String::from_utf8(output.stderr)?.contains("recovery-peer <endpoint-id-hex>"));
+    }
     Ok(())
 }

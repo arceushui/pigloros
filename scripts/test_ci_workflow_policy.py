@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import hashlib
 import os
 import pathlib
@@ -17,6 +18,7 @@ import unittest
 
 import yaml
 
+import ci_stage_policy as stages
 import test_check_owner_runtime_custody_policy as custody_policy_tests
 import test_merge_owner_bridge_lcov as native_lcov_tests
 import owner_bridge_windows_workflow_policy as native_policy
@@ -50,10 +52,27 @@ CORE_CACHE_KEYS = {
 }
 CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
 CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
+# Phase-1 package scope: on a pull request these jobs build, lint and test only
+# the packages ci_change_scope resolved with scripts/affected_packages.py. Any
+# other event, and a missing output, selects the whole workspace.
+SCOPED_PACKAGES = (
+    "${{ github.event_name == 'pull_request' && "
+    "needs.ci_change_scope.outputs.rust_packages || '--workspace' }}"
+)
+SCOPED_DOC_PACKAGES = (
+    "${{ github.event_name == 'pull_request' && "
+    "needs.ci_change_scope.outputs.rust_doc_packages || '--workspace' }}"
+)
+SCOPED_PACKAGE_JOBS = frozenset(
+    {"feature-matrix", "test", "test-shard", "clippy", "rustdoc", "asan-build", "asan"}
+)
+READ_SCOPED_PACKAGES = 'read -ra packages <<<"${CARGO_PACKAGES}"\n'
 FEATURE_MATRIX_STEPS = (
     {
         "name": "cargo check (no default features)",
-        "run": "cargo check --workspace --all-targets --no-default-features --locked",
+        "env": {"CARGO_PACKAGES": SCOPED_PACKAGES},
+        "run": READ_SCOPED_PACKAGES
+        + 'cargo check "${packages[@]}" --all-targets --no-default-features --locked\n',
     },
     {
         "name": "Plugin trust registry Memory vectors (no default features)",
@@ -64,7 +83,9 @@ FEATURE_MATRIX_STEPS = (
     },
     {
         "name": "cargo check (all features, all targets)",
-        "run": "cargo check --workspace --all-targets --all-features --locked",
+        "env": {"CARGO_PACKAGES": SCOPED_PACKAGES},
+        "run": READ_SCOPED_PACKAGES
+        + 'cargo check "${packages[@]}" --all-targets --all-features --locked\n',
     },
     {
         "name": "Prove reference evaluator implementation independence",
@@ -77,21 +98,58 @@ FEATURE_MATRIX_STEPS = (
 )
 WORKSPACE_DOCTEST_STEP = {
     "name": "cargo test doctests (all features, ignored included)",
+    "env": {"CARGO_DOC_PACKAGES": SCOPED_DOC_PACKAGES},
     "run": "set -euo pipefail\n"
-    "cargo test --workspace --all-features --locked --doc -- --include-ignored "
+    'if [[ "${CARGO_DOC_PACKAGES}" == none ]]; then\n'
+    "  echo 'No affected package has a library target; no doctest is in scope.'\n"
+    "  exit 0\n"
+    "fi\n"
+    'read -ra packages <<<"${CARGO_DOC_PACKAGES}"\n'
+    'cargo test "${packages[@]}" --all-features --locked --doc -- --include-ignored '
     "2>&1 | tee /tmp/cargo-doctest.log\n",
+}
+WORKSPACE_DOCTEST_SUMMARY_STEP = {
+    "name": "Require no ignored test in the doctest summary",
+    "env": {"CARGO_DOC_PACKAGES": SCOPED_DOC_PACKAGES},
+    "run": "set -euo pipefail\n"
+    'if [[ "${CARGO_DOC_PACKAGES}" != none ]]; then\n'
+    "  bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-doctest.log\n"
+    "fi\n",
 }
 WORKSPACE_RUSTDOC_STEP = {
     "name": "cargo doc (warnings denied)",
-    "env": {"CARGO_INCREMENTAL": "0", "RUSTDOCFLAGS": "-D warnings"},
-    "run": "cargo doc --workspace --all-features --no-deps --locked",
+    "env": {
+        "CARGO_INCREMENTAL": "0",
+        "RUSTDOCFLAGS": "-D warnings",
+        "CARGO_PACKAGES": SCOPED_PACKAGES,
+    },
+    "run": READ_SCOPED_PACKAGES
+    + 'cargo doc "${packages[@]}" --all-features --no-deps --locked\n',
 }
-RUSTDOC_JOB_IF = (
-    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "needs.core-gate.result == 'success' && "
-    "(needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request') }}"
-)
+TEST_SHARD_STEP = {
+    "name": "cargo nextest partition (all features, ignored included)",
+    "env": {"SHARD": "${{ matrix.shard }}", "CARGO_PACKAGES": SCOPED_PACKAGES},
+    "run": "set -euo pipefail\n"
+    'log="${RUNNER_TEMP}/nextest-shard.log"\n'
+    + READ_SCOPED_PACKAGES
+    + "no_tests=fail\n"
+    'if [[ "${CARGO_PACKAGES}" != --workspace ]]; then\n'
+    "  no_tests=pass\n"
+    "fi\n"
+    "printf 'nextest partition: slice:%s/3\\n' \"${SHARD}\" >\"${log}\"\n"
+    'cargo nextest run "${packages[@]}" --all-features --locked \\\n'
+    "  --user-config-file none --ignore-default-filter \\\n"
+    '  --run-ignored all --no-fail-fast --no-tests="${no_tests}" \\\n'
+    '  --partition "slice:${SHARD}/3" 2>&1 | tee -a "${log}"\n',
+}
+CLIPPY_WORKSPACE_STEP = {
+    "name": "cargo clippy (workspace lint policy, pedantic, deny warnings)",
+    "env": {"CARGO_PACKAGES": SCOPED_PACKAGES},
+    "run": READ_SCOPED_PACKAGES
+    + 'cargo clippy "${packages[@]}" --all-features --all-targets --locked -- \\\n'
+    "  -D warnings -W clippy::pedantic\n",
+}
+RUSTDOC_JOB_IF = stages.CORE_STAGE_IF
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
 REQUIRED_PREFLIGHT_NEEDS = (
@@ -151,6 +209,10 @@ PREFLIGHT_POLICY_STEPS = {
         {
             "name": "Test CI workflow policy",
             "run": "python scripts/test_ci_workflow_policy.py",
+        },
+        {
+            "name": "Test the affected-package resolver",
+            "run": "python scripts/test_affected_packages.py",
         },
         {
             "name": "Test mutation workflow policy",
@@ -395,12 +457,65 @@ OWNER_WINDOWS_SCOPE_STEP = {
         'printf \'owner_windows=%s\\n\' "${scope}" >> "$GITHUB_OUTPUT"\n'
     ),
 }
-CORE_JOB_NEEDS = ["ci_change_scope", "preflight-gate"]
-CORE_JOB_IF = (
-    "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
-    "(needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request') }}"
-)
+RUST_PACKAGES_SCOPE_STEP = {
+    "name": "Resolve the affected Rust packages",
+    "id": "rust_packages",
+    "env": {
+        "EVENT_NAME": "${{ github.event_name }}",
+        "DETECTED": "${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.rust || '' }}",
+        "HEAD_REF": "${{ github.head_ref }}",
+        "CHANGED_FILES": "${{ github.event.pull_request.changed_files }}",
+        "PULL_NUMBER": "${{ github.event.pull_request.number }}",
+        "GH_TOKEN": "${{ github.token }}",
+    },
+    "run": (
+        'packages=--workspace\n'
+        'doc_packages=--workspace\n'
+        "selection='^(--workspace|-p [A-Za-z0-9_-]+( -p [A-Za-z0-9_-]+)*)$'\n"
+        'listing="${RUNNER_TEMP}/pull-request-files.jsonl"\n'
+        'if [[ "${EVENT_NAME}" != pull_request || "${DETECTED}" != true ]]; then\n'
+        "  echo 'Not a scoped pull request; running the whole workspace.'\n"
+        'elif [[ "${HEAD_REF}" == trunk-merge/* ]]; then\n'
+        "  echo 'Merge-queue test pull request; running the whole workspace.'\n"
+        'elif [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then\n'
+        "  echo '::warning::The changed-file list may be truncated; running the whole workspace.'\n"
+        'elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then\n'
+        "  echo '::warning::The pull request number is unavailable; running the whole workspace.'\n"
+        'elif ! gh api --method GET --paginate -f per_page=100 \\\n'
+        '  "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \\\n'
+        '  --jq \'.[] | {filename, previous_filename}\' >"${listing}"; then\n'
+        "  echo '::warning::Changed files could not be listed; running the whole workspace.'\n"
+        'elif ! resolved="$(python3 scripts/affected_packages.py \\\n'
+        '  --expected-files "$((10#${CHANGED_FILES}))" "${listing}")"; then\n'
+        "  echo '::warning::The affected packages could not be resolved; running the whole workspace.'\n"
+        'else\n'
+        '  mapfile -t lines <<<"${resolved}"\n'
+        '  candidate="${lines[0]-}"\n'
+        '  candidate="${candidate#rust_packages=}"\n'
+        '  doc_candidate="${lines[1]-}"\n'
+        '  doc_candidate="${doc_candidate#rust_doc_packages=}"\n'
+        '  if (( ${#lines[@]} == 2 )) \\\n'
+        '    && [[ "${lines[0]-}" == rust_packages=* && "${lines[1]-}" == rust_doc_packages=* ]] \\\n'
+        '    && [[ "${candidate}" =~ ${selection} ]] \\\n'
+        '    && [[ "${doc_candidate}" == none || "${doc_candidate}" =~ ${selection} ]] \\\n'
+        '    && [[ "${candidate}" != --workspace || "${doc_candidate}" == --workspace ]]; then\n'
+        '    packages="${candidate}"\n'
+        '    doc_packages="${doc_candidate}"\n'
+        '  else\n'
+        "    echo '::warning::The affected-package output is malformed; running the whole workspace.'\n"
+        '  fi\n'
+        'fi\n'
+        'printf \'Rust packages: %s\\nDoctest packages: %s\\n\' "${packages}" "${doc_packages}"\n'
+        'printf \'rust_packages=%s\\n\' "${packages}" >> "$GITHUB_OUTPUT"\n'
+        'printf \'rust_doc_packages=%s\\n\' "${doc_packages}" >> "$GITHUB_OUTPUT"\n'
+    ),
+}
+RUST_PACKAGES_OUTPUTS = {
+    "rust_packages": "${{ steps.rust_packages.outputs.rust_packages }}",
+    "rust_doc_packages": "${{ steps.rust_packages.outputs.rust_doc_packages }}",
+}
+CORE_JOB_NEEDS = stages.PREFLIGHT_STAGE_NEEDS
+CORE_JOB_IF = stages.PREFLIGHT_STAGE_IF
 
 
 def assert_core_sdk_headroom(workflow: dict) -> None:
@@ -712,7 +827,7 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
 STANDARD_STAGE_RUNNER_CAP = 8
 LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate"})
 CARGO_CRAP_CONSUMERS = ["ci-gate", "depgraph", "modules-structure"]
-# Heavy jobs released by core-gate. Browser parity follows WASM packaging on
+# Heavy jobs released by the complete core set. Browser parity follows WASM packaging on
 # the same budget. cargo-crap starts earlier, from coverage, and compiles
 # nothing (pinned binary, cargo metadata and LCOV parsing in a 10-minute budget,
 # plus a bounded idle wait for main's trusted baseline), and standard-gate and
@@ -736,19 +851,27 @@ def job_needs(job: dict) -> list[str]:
     return [needs] if isinstance(needs, str) else list(needs)
 
 
+def released_by(job: dict, gate: str) -> bool:
+    """A job waits for a stage when it needs the gate or every job the gate reads."""
+    needs = job_needs(job)
+    return gate in needs or set(stages.STAGE_GATES[gate]).issubset(needs)
+
+
 def assert_standard_stage_runner_cap(workflow: dict) -> None:
     """Keep the normal stage within its documented concurrent-runner cap."""
     jobs = workflow["jobs"]
     started = {
         name
         for name, job in jobs.items()
-        if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
+        if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS
+        and released_by(job, "core-gate")
+        and not released_by(job, "standard-gate")
     }
     crap = jobs.get("cargo-crap", {})
     if (
         "strategy" in crap
         or crap.get("timeout-minutes") != 70
-        or "core-gate" in job_needs(crap)
+        or released_by(crap, "core-gate")
         or "coverage" not in job_needs(crap)
     ):
         raise AssertionError("cargo-crap must stay one lightweight runner released by coverage")
@@ -765,6 +888,360 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     missing = sorted(started - set(gate_needs))
     if missing:
         raise AssertionError(f"standard-gate must wait for every standard-stage job: {missing}")
+
+
+# ── Stage prerequisites without gate hops ───────────────────────────────────
+# preflight-gate, core-gate and standard-gate only report to ci-gate. Every
+# later stage needs the gate's underlying jobs directly and repeats the gate's
+# pass rule as its condition. The reference below is the gate-hop wiring each
+# consumer replaces: the consumer must start in exactly the circumstances in
+# which it would start after waiting for the gate reporter, whose verdict is
+# taken by executing the gate's own result script.
+IN_SCOPE = (
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request')"
+)
+_PREFLIGHT_HOP = (
+    ["ci_change_scope", "preflight-gate"],
+    "${{ !cancelled() && needs.preflight-gate.result == 'success' && " + IN_SCOPE + " }}",
+)
+_CORE_HOP = (
+    ["ci_change_scope", "core-gate"],
+    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+    "needs.core-gate.result == 'success' && " + IN_SCOPE + " }}",
+)
+GATE_HOP_REFERENCE = {
+    **dict.fromkeys(
+        ("fmt", "feature-matrix", "test", "test-shard", "clippy", "static-launcher", "coverage"),
+        _PREFLIGHT_HOP,
+    ),
+    **dict.fromkeys(
+        ("rustdoc", "reference-evaluator-release", "audit", "asan-build", "world-client-wasm"),
+        _CORE_HOP,
+    ),
+    "materialize-conformance-bundles": (
+        ["ci_change_scope", "conformance-fixtures", "core-gate"],
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "needs.conformance-fixtures.result == 'success' && "
+        "needs.core-gate.result == 'success' && " + IN_SCOPE + " }}",
+    ),
+    "docker-build": (
+        ["ci_change_scope", "core-gate", "third-party-notices"],
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "needs.core-gate.result == 'success' && "
+        "needs.third-party-notices.result == 'success' && " + IN_SCOPE + " }}",
+    ),
+    "codeql": (
+        ["ci_change_scope", "core-gate"],
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "(needs.core-gate.result == 'success' || "
+        "needs.ci_change_scope.outputs.rust == 'false') }}",
+    ),
+    # No status function: GitHub adds an implicit success() of every need.
+    "mutation-checks": (
+        ["ci_change_scope", "standard-gate"],
+        "${{ github.event_name == 'pull_request' && "
+        "needs.ci_change_scope.outputs.rust == 'true' }}",
+    ),
+    "asan": (
+        ["ci_change_scope", "standard-gate", "asan-build"],
+        "${{ !cancelled() && needs.standard-gate.result == 'success' && "
+        "needs.asan-build.result == 'success' && " + IN_SCOPE + " }}",
+    ),
+    **dict.fromkeys(
+        ("modules-structure", "depgraph"),
+        (
+            ["standard-gate", "cargo-crap"],
+            "${{ github.event_name != 'pull_request' && "
+            "needs.standard-gate.result == 'success' && "
+            "needs.cargo-crap.result == 'success' }}",
+        ),
+    ),
+}
+JOB_RESULTS = ("success", "failure", "cancelled", "skipped")
+STATUS_FUNCTIONS = frozenset({"always", "cancelled", "success", "failure"})
+EXPRESSION_TOKEN = re.compile(
+    r"\s*(?:(?P<op>&&|\|\||==|!=|!|\(|\))|(?P<string>'(?:[^']|'')*')"
+    r"|(?P<call>[A-Za-z_]+)\(\)|(?P<ref>[A-Za-z_][A-Za-z0-9_.-]*))"
+)
+
+
+@functools.lru_cache(maxsize=None)
+def parse_condition(text: str) -> tuple:
+    """Parse the job-condition subset ci.yml uses into a small syntax tree."""
+    text = text.strip()
+    if not (text.startswith("${{") and text.endswith("}}")):
+        raise AssertionError(f"job condition must be one expression: {text!r}")
+    body = text[3:-2].strip()
+    tokens: list[tuple[str, str]] = []
+    position = 0
+    while position < len(body):
+        match = EXPRESSION_TOKEN.match(body, position)
+        if match is None or match.end() == position:
+            raise AssertionError(f"unsupported job condition syntax: {body[position:]!r}")
+        position = match.end()
+        kind = match.lastgroup
+        tokens.append((kind, match.group(kind)))
+    index = 0
+
+    def peek() -> str | None:
+        return tokens[index][1] if index < len(tokens) and tokens[index][0] == "op" else None
+
+    def take() -> tuple[str, str]:
+        nonlocal index
+        if index >= len(tokens):
+            raise AssertionError("job condition ends early")
+        index += 1
+        return tokens[index - 1]
+
+    def disjunction() -> tuple:
+        node = conjunction()
+        while peek() == "||":
+            take()
+            node = ("or", node, conjunction())
+        return node
+
+    def conjunction() -> tuple:
+        node = unary()
+        while peek() == "&&":
+            take()
+            node = ("and", node, unary())
+        return node
+
+    def unary() -> tuple:
+        if peek() == "!":
+            take()
+            return ("not", unary())
+        node = primary()
+        if peek() in ("==", "!="):
+            operator = take()[1]
+            node = ("eq" if operator == "==" else "ne", node, primary())
+        return node
+
+    def primary() -> tuple:
+        kind, value = take()
+        if kind == "op" and value == "(":
+            node = disjunction()
+            if take() != ("op", ")"):
+                raise AssertionError("unbalanced job condition")
+            return node
+        if kind == "string":
+            return ("string", value[1:-1].replace("''", "'"))
+        if kind == "call" and value in STATUS_FUNCTIONS:
+            return ("call", value)
+        if kind == "ref" and value in ("true", "false"):
+            return ("literal", value == "true")
+        if kind == "ref":
+            return ("ref", value)
+        raise AssertionError(f"unsupported job condition term: {value!r}")
+
+    tree = disjunction()
+    if index != len(tokens):
+        raise AssertionError("trailing job condition text")
+
+    def calls(node: tuple) -> bool:
+        return node[0] == "call" or any(
+            isinstance(part, tuple) and calls(part) for part in node[1:]
+        )
+
+    # GitHub adds success() to a job condition without a status function.
+    return tree if calls(tree) else ("and", ("call", "success"), tree)
+
+
+class Scenario:
+    """One combination of dependency results, Rust scope and event."""
+
+    def __init__(self, results: dict[str, str], *, rust: str, event: str,
+                 cancelled: bool = False, change: str = "every job passes") -> None:
+        self.results = results
+        self.rust = rust
+        self.event = event
+        self.cancelled = cancelled
+        self.change = change
+
+    def __str__(self) -> str:
+        state = ", workflow cancelled" if self.cancelled else ""
+        return f"{self.change} ({self.event}, rust={self.rust!r}{state})"
+
+
+def evaluate_condition(text: str, needs: list[str], scenario: Scenario,
+                       results: dict[str, str]) -> bool:
+    """Evaluate a job condition the way the Actions runner does for this subset."""
+
+    def value(node: tuple) -> object:
+        kind = node[0]
+        if kind == "and":
+            return truthy(value(node[1])) and truthy(value(node[2]))
+        if kind == "or":
+            return truthy(value(node[1])) or truthy(value(node[2]))
+        if kind == "not":
+            return not truthy(value(node[1]))
+        if kind in ("eq", "ne"):
+            left, right = value(node[1]), value(node[2])
+            if not isinstance(left, str) or not isinstance(right, str):
+                raise AssertionError("job conditions may compare only strings")
+            # Actions compares strings case-insensitively.
+            return (left.casefold() == right.casefold()) == (kind == "eq")
+        if kind in ("string", "literal"):
+            return node[1]
+        if kind == "call":
+            return {
+                "always": True,
+                "cancelled": scenario.cancelled,
+                "success": not scenario.cancelled
+                and all(results[need] == "success" for need in needs),
+                "failure": any(results[need] == "failure" for need in needs),
+            }[node[1]]
+        reference = node[1]
+        if reference == "github.event_name":
+            return scenario.event
+        parts = reference.split(".")
+        if len(parts) < 3 or parts[0] != "needs":
+            raise AssertionError(f"unsupported job condition reference: {reference}")
+        if parts[1] not in needs:
+            raise AssertionError(f"job condition reads undeclared {reference}")
+        if parts[2:] == ["result"]:
+            return results[parts[1]]
+        if parts[1:] == ["ci_change_scope", "outputs", "rust"]:
+            return scenario.rust
+        raise AssertionError(f"unsupported job condition reference: {reference}")
+
+    def truthy(item: object) -> bool:
+        return item is True or (isinstance(item, str) and item != "")
+
+    return truthy(value(parse_condition(text)))
+
+
+@functools.lru_cache(maxsize=None)
+def run_result_script(script: str, environment: tuple[tuple[str, str], ...]) -> bool:
+    completed = subprocess.run(["bash", "-c", script], env=dict(environment),
+                               capture_output=True, check=False)
+    return completed.returncode == 0
+
+
+GATE_ENV_REFERENCE = re.compile(r"\$\{\{ (needs\.([\w-]+)\.result|[\w.-]+) \}\}")
+
+
+def gate_results(jobs: dict, scenario: Scenario) -> dict[str, str]:
+    """Scenario results plus each gate reporter's verdict from its own script."""
+    results = dict(scenario.results)
+
+    def verdict(gate: str) -> str:
+        if gate in results:
+            return results[gate]
+        job = jobs[gate]
+        if job.get("if") != "${{ always() }}" or len(job.get("steps", [])) != 1:
+            raise AssertionError(f"{gate} must be one unconditional result check")
+        step = job["steps"][0]
+        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        for name, reference in step.get("env", {}).items():
+            match = GATE_ENV_REFERENCE.fullmatch(str(reference))
+            if match is None:
+                raise AssertionError(f"{gate} reads an unsupported value: {reference}")
+            if match.group(2) is not None:
+                if match.group(2) not in job_needs(job):
+                    raise AssertionError(f"{gate} reads undeclared {match.group(1)}")
+                needed = match.group(2)
+                if needed not in results and needed not in stages.STAGE_GATES:
+                    raise AssertionError(f"{gate} reads {needed}, which its stage omits")
+                environment[name] = verdict(needed)
+            elif match.group(1) == "needs.ci_change_scope.outputs.rust":
+                environment[name] = scenario.rust
+            elif match.group(1) == "github.event_name":
+                environment[name] = scenario.event
+            else:
+                raise AssertionError(f"{gate} reads an unsupported value: {reference}")
+        passed = run_result_script(step["run"], tuple(sorted(environment.items())))
+        results[gate] = "success" if passed else "failure"
+        return results[gate]
+
+    for gate in stages.STAGE_GATES:
+        if set(stages.STAGE_GATES[gate]).issubset(results):
+            verdict(gate)
+    return results
+
+
+def baseline_result(job: str, *, rust: str, event: str) -> str:
+    """The result each job reports in an all-green run of this scope."""
+    if job == "trunk-pr":
+        return "success" if event == "pull_request" else "skipped"
+    if job in stages.PREFLIGHT_SCOPED_JOBS:
+        return "success" if rust == "true" else "skipped"
+    if job in (*stages.CORE_JOBS, *stages.STANDARD_JOBS):
+        return "skipped" if rust == "false" else "success"
+    return "success"
+
+
+def stage_scenarios(needs: list[str]):
+    """Every all-green run plus each single dependency changed to another result."""
+    for event in ("pull_request", "push"):
+        for rust in ("true", "false"):
+            baseline = {job: baseline_result(job, rust=rust, event=event) for job in needs}
+            yield Scenario(dict(baseline), rust=rust, event=event)
+            yield Scenario(dict(baseline), rust=rust, event=event, cancelled=True)
+            for job in needs:
+                for result in JOB_RESULTS:
+                    if result == baseline[job]:
+                        continue
+                    changed = dict(baseline, **{job: result})
+                    change = f"{job} is {result}"
+                    yield Scenario(changed, rust=rust, event=event, change=change)
+                    if job == "ci_change_scope":
+                        # A scope job that did not succeed publishes no outputs.
+                        yield Scenario(changed, rust="", event=event, change=change)
+
+
+def assert_stage_consumer(jobs: dict, name: str) -> None:
+    """One stage consumer waits for exactly its gate's jobs and pass rule."""
+    gate, expected_needs, canonical = stages.STAGE_CONSUMERS[name]
+    job = jobs.get(name)
+    if not isinstance(job, dict):
+        raise AssertionError(f"ci.yml must define stage job {name}")
+    needs = job_needs(job)
+    for reporter in stages.GATE_REPORTERS:
+        if reporter in needs:
+            raise AssertionError(f"{name} must not wait for the {reporter} reporter")
+    missing = sorted(set(expected_needs) - set(needs))
+    if missing:
+        raise AssertionError(f"{name} must wait for every {gate} job: missing {missing}")
+    if needs != expected_needs:
+        raise AssertionError(f"{name} direct dependencies changed")
+    condition = job.get("if")
+    if not isinstance(condition, str) or not condition.startswith("${{ !cancelled() && "):
+        raise AssertionError(f"{name} must judge skipped dependencies explicitly")
+    reference_needs, reference = GATE_HOP_REFERENCE[name]
+    for scenario in stage_scenarios(needs):
+        results = gate_results(jobs, scenario)
+        starts = evaluate_condition(condition, needs, scenario, results)
+        expected = evaluate_condition(reference, reference_needs, scenario, results)
+        if starts and not expected:
+            raise AssertionError(f"{name} starts although {scenario}")
+        if expected and not starts:
+            raise AssertionError(f"{name} does not start although {scenario}")
+    if condition != canonical:
+        raise AssertionError(f"{name} must use the canonical {gate} stage condition")
+
+
+def assert_stage_graph(workflow: dict) -> None:
+    """Gate reporters sit beside the stages; consumers wait for the real jobs."""
+    jobs = workflow["jobs"]
+    for gate, reporters in stages.GATE_REPORTERS.items():
+        job = jobs.get(gate)
+        if not isinstance(job, dict):
+            raise AssertionError(f"ci.yml must define the {gate} reporter")
+        covered: set[str] = set()
+        for need in job_needs(job):
+            covered.update(stages.STAGE_GATES.get(need, [need]))
+        if covered != set(stages.STAGE_GATES[gate]):
+            raise AssertionError(f"{gate} must cover exactly its stage consumers' jobs")
+        waiting = sorted(name for name, other in jobs.items() if gate in job_needs(other))
+        if waiting != sorted(reporters):
+            raise AssertionError(
+                f"only {sorted(reporters)} may wait for {gate}; "
+                f"stage jobs must need its jobs directly: {waiting}"
+            )
+    for name in stages.STAGE_CONSUMERS:
+        assert_stage_consumer(jobs, name)
 
 
 # cargo-crap consumes the native LCOV and ci-gate requires both results. The
@@ -861,7 +1338,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
             if occurrences != [(owner, expected)]:
                 raise AssertionError(f"{owner} must run the exact required step once")
     rustdoc = jobs["rustdoc"]
-    if (rustdoc.get("needs") != ["ci_change_scope", "core-gate"]
+    if (rustdoc.get("needs") != stages.CORE_STAGE_NEEDS
             or rustdoc.get("if") != RUSTDOC_JOB_IF):
         raise AssertionError("rustdoc must retain its successful standard-stage prerequisites")
     if any(
@@ -887,6 +1364,64 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
 
 def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
     return any(scope_matches(path, patterns) for path in paths)
+
+
+def mentions_package_scope(value: object) -> bool:
+    return "rust_packages" in str(value) or "rust_doc_packages" in str(value)
+
+
+def assert_rust_package_scope(workflow: dict) -> None:
+    """Phase-1 package scope: resolved once, from the trusted base, fail-safe.
+
+    Only the plain test and lint jobs read it, only through the exact step
+    environment that ignores it outside pull requests and defaults a missing
+    value to the whole workspace.
+    """
+    jobs = workflow["jobs"]
+    scope = jobs["ci_change_scope"]
+    outputs = scope.get("outputs", {})
+    for key, value in RUST_PACKAGES_OUTPUTS.items():
+        if outputs.get(key) != value:
+            raise AssertionError("package scope must come only from its resolving step")
+    steps = scope["steps"]
+    if [step for step in steps if step.get("id") == "rust_packages"] != [RUST_PACKAGES_SCOPE_STEP]:
+        raise AssertionError("package scope must default to the whole workspace")
+    ids = [step.get("id") for step in steps]
+    if ids.index("rust_packages") < ids.index("scope"):
+        raise AssertionError("package scope must follow change detection")
+    for step in steps:
+        if step.get("id") != "rust_packages" and mentions_package_scope(step):
+            raise AssertionError("only the resolving step may produce the package scope")
+    expected_env = {"CARGO_PACKAGES": SCOPED_PACKAGES, "CARGO_DOC_PACKAGES": SCOPED_DOC_PACKAGES}
+    readers = set()
+    for name, job in jobs.items():
+        if name == "ci_change_scope":
+            continue
+        if mentions_package_scope({key: value for key, value in job.items() if key != "steps"}):
+            raise AssertionError(f"{name} may read the package scope only in a step environment")
+        for step in job.get("steps", []):
+            env = step.get("env", {})
+            if mentions_package_scope({key: value for key, value in step.items() if key != "env"}):
+                raise AssertionError(f"{name} may read the package scope only in a step environment")
+            for key, value in env.items():
+                if key in expected_env and value != expected_env[key]:
+                    raise AssertionError(f"{name} must default {key} to the whole workspace")
+                if key not in expected_env and mentions_package_scope(value):
+                    raise AssertionError(f"{name} may read the package scope only as {sorted(expected_env)}")
+                if key in expected_env:
+                    readers.add(name)
+    if readers != SCOPED_PACKAGE_JOBS:
+        raise AssertionError(
+            f"only the phase-1 jobs may use the package scope: {sorted(readers ^ SCOPED_PACKAGE_JOBS)}"
+        )
+    for owner, step in (
+        ("test", WORKSPACE_DOCTEST_SUMMARY_STEP),
+        ("test-shard", TEST_SHARD_STEP),
+        ("clippy", CLIPPY_WORKSPACE_STEP),
+    ):
+        if [candidate for candidate in jobs[owner]["steps"]
+                if candidate.get("name") == step["name"]] != [step]:
+            raise AssertionError(f"{owner} must run the exact scoped step")
 
 
 def assert_codeql_preparation_contract(workflow: dict) -> None:
@@ -1632,6 +2167,208 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                             .read_text(encoding="utf-8"), "generated\n",
                         )
 
+    def test_package_scope_is_trusted_and_defaults_to_the_workspace(self) -> None:
+        assert_rust_package_scope(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_package_scope_rejects_weakened_resolution_or_consumers(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+
+        def step(w: dict) -> dict:
+            return next(s for s in w["jobs"]["ci_change_scope"]["steps"]
+                        if s.get("id") == "rust_packages")
+
+        def env_of(job: str, name: str):
+            def find(w: dict) -> dict:
+                return next(s for s in w["jobs"][job]["steps"] if s.get("name") == name)["env"]
+            return find
+
+        shard_env = env_of("test-shard", TEST_SHARD_STEP["name"])
+        clippy_env = env_of("clippy", CLIPPY_WORKSPACE_STEP["name"])
+        doc_env = env_of("test", WORKSPACE_DOCTEST_SUMMARY_STEP["name"])
+        coverage_step = lambda w: next(  # noqa: E731
+            s for s in w["jobs"]["coverage"]["steps"] if "run" in s)
+        for label, change in (
+            ("output from paths-filter", lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                rust_packages="${{ steps.scope.outputs.rust_packages }}")),
+            ("output default narrowed", lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                rust_packages="${{ steps.rust_packages.outputs.rust_packages || '-p pos-core' }}")),
+            ("doc output dropped", lambda w: w["jobs"]["ci_change_scope"]["outputs"].pop(
+                "rust_doc_packages")),
+            ("step removed", lambda w: w["jobs"]["ci_change_scope"]["steps"].remove(step(w))),
+            ("step conditional", lambda w: step(w).update(**{"if": "always()"})),
+            ("step tolerant", lambda w: step(w).update(**{"continue-on-error": True})),
+            ("push scoped", lambda w: step(w)["env"].update(DETECTED="${{ steps.scope.outputs.rust }}")),
+            ("queue scoped", lambda w: step(w).update(run=step(w)["run"].replace(
+                "trunk-merge/*", "trunk-queue/*"))),
+            ("truncated list", lambda w: step(w).update(run=step(w)["run"].replace(
+                ">= 3000", "> 3000"))),
+            ("unchecked output", lambda w: step(w).update(run=step(w)["run"].replace(
+                '&& [[ "${candidate}" =~ ${selection} ]] \\\n', ""))),
+            ("default narrowed", lambda w: step(w).update(run=step(w)["run"].replace(
+                "packages=--workspace\n", "packages='-p pos-core'\n", 1))),
+            ("moved before detection", lambda w: w["jobs"]["ci_change_scope"]["steps"].insert(
+                1, w["jobs"]["ci_change_scope"]["steps"].pop(
+                    w["jobs"]["ci_change_scope"]["steps"].index(step(w))))),
+            ("second producer", lambda w: w["jobs"]["ci_change_scope"]["steps"].insert(
+                -1, {"name": "x", "run": "echo rust_packages=-p a >> \"$GITHUB_OUTPUT\""})),
+            ("scoped on push", lambda w: shard_env(w).update(
+                CARGO_PACKAGES="${{ needs.ci_change_scope.outputs.rust_packages }}")),
+            ("missing output narrowed", lambda w: clippy_env(w).update(
+                CARGO_PACKAGES="${{ github.event_name == 'pull_request' && "
+                "needs.ci_change_scope.outputs.rust_packages || '-p pos-core' }}")),
+            ("hard-coded selection", lambda w: clippy_env(w).update(CARGO_PACKAGES="-p pos-core")),
+            ("doc scope on push", lambda w: doc_env(w).update(
+                CARGO_DOC_PACKAGES="${{ needs.ci_change_scope.outputs.rust_doc_packages }}")),
+            ("phase-1 job unscoped", lambda w: shard_env(w).pop("CARGO_PACKAGES")),
+            ("scope in run text", lambda w: shard_env(w).update(
+                SCOPE="${{ needs.ci_change_scope.outputs.rust_packages }}")),
+            ("scope in job env", lambda w: w["jobs"]["test-shard"].update(
+                env={"CARGO_PACKAGES": SCOPED_PACKAGES})),
+            ("coverage scoped", lambda w: coverage_step(w).setdefault("env", {}).update(
+                CARGO_PACKAGES=SCOPED_PACKAGES)),
+            ("cargo-crap scoped", lambda w: w["jobs"]["cargo-crap"]["steps"][-1].setdefault(
+                "env", {}).update(CARGO_PACKAGES=SCOPED_PACKAGES)),
+            ("shard runs every package", lambda w: next(
+                s for s in w["jobs"]["test-shard"]["steps"]
+                if s.get("name") == TEST_SHARD_STEP["name"]).update(
+                run=TEST_SHARD_STEP["run"].replace('"${packages[@]}"', "--workspace"))),
+            ("shard passes empty workspace", lambda w: next(
+                s for s in w["jobs"]["test-shard"]["steps"]
+                if s.get("name") == TEST_SHARD_STEP["name"]).update(
+                run=TEST_SHARD_STEP["run"].replace("no_tests=fail", "no_tests=pass"))),
+            ("doctest summary skipped", lambda w: next(
+                s for s in w["jobs"]["test"]["steps"]
+                if s.get("name") == WORKSPACE_DOCTEST_SUMMARY_STEP["name"]).update(
+                run="true\n")),
+        ):
+            mutated = copy.deepcopy(workflow)
+            change(mutated)
+            with self.subTest(change=label), self.assertRaises(AssertionError):
+                assert_rust_package_scope(mutated)
+
+    def resolve_package_scope(
+        self, *, event: str = "pull_request", detected: str = "true",
+        head_ref: str = "feature/scope", changed: str = "1", number: str = "848",
+        gh_status: int = 0, listing: str | None = None, python_stub: str | None = None,
+        with_script: bool = True,
+    ) -> tuple[dict[str, str], list[str], str]:
+        """Run the resolving step against a small workspace with a fake gh."""
+        if listing is None:
+            listing = '{"filename":"crates/a/src/lib.rs","previous_filename":null}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for member, manifest in (
+                ("crates/a", '[package]\nname = "a"\n'),
+                ("crates/b", '[package]\nname = "b"\n[dependencies]\na = { path = "../a" }\n'),
+                ("apps/c", '[package]\nname = "c"\n[dev-dependencies]\nb = { path = "../../crates/b" }\n'),
+            ):
+                (root / member / "src").mkdir(parents=True)
+                (root / member / "Cargo.toml").write_text(manifest, encoding="utf-8")
+                entry = "main.rs" if member == "apps/c" else "lib.rs"
+                (root / member / "src" / entry).write_text("\n", encoding="utf-8")
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/*", "apps/c"]\n', encoding="utf-8")
+            (root / ".github").mkdir()
+            (root / ".github/rust-scope.yml").write_bytes(FILTER_PATH.read_bytes())
+            if with_script:
+                (root / "scripts").mkdir()
+                (root / "scripts/affected_packages.py").write_bytes(
+                    (ROOT / "scripts/affected_packages.py").read_bytes())
+            tools = root / "bin"
+            tools.mkdir()
+            calls = root / "gh-calls"
+            (tools / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\0\' "$@" >> "${GH_CALLS}"\n'
+                'printf \'%s\' "${GH_FAKE_OUTPUT}"\n'
+                'exit "${GH_FAKE_STATUS}"\n',
+                encoding="utf-8",
+            )
+            (tools / "gh").chmod(0o755)
+            if python_stub is not None:
+                (tools / "python3").write_text(
+                    "#!/usr/bin/env bash\n" + python_stub, encoding="utf-8")
+                (tools / "python3").chmod(0o755)
+            output = root / "output"
+            temp = root / "runner-temp"
+            temp.mkdir()
+            env = RUST_PACKAGES_SCOPE_STEP["env"]
+            self.assertEqual(set(env), {"EVENT_NAME", "DETECTED", "HEAD_REF", "CHANGED_FILES",
+                                        "PULL_NUMBER", "GH_TOKEN"})
+            completed = subprocess.run(
+                ["bash", "-e", "-c", RUST_PACKAGES_SCOPE_STEP["run"]], check=True,
+                capture_output=True, text=True, cwd=root,
+                env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
+                         EVENT_NAME=event, DETECTED=detected, HEAD_REF=head_ref,
+                         CHANGED_FILES=changed, PULL_NUMBER=number, RUNNER_TEMP=str(temp),
+                         GITHUB_REPOSITORY="owner/repository", GITHUB_OUTPUT=str(output),
+                         GH_CALLS=str(calls), GH_FAKE_STATUS=str(gh_status),
+                         GH_FAKE_OUTPUT=listing),
+            )
+            values = dict(
+                line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            arguments = calls.read_text(encoding="utf-8").split("\0")[:-1] if calls.exists() else []
+            return values, arguments, completed.stdout
+
+    FULL_SCOPE = {"rust_packages": "--workspace", "rust_doc_packages": "--workspace"}
+
+    def test_package_scope_selects_affected_members_on_a_pull_request(self) -> None:
+        values, calls, _ = self.resolve_package_scope()
+        self.assertEqual(values, {"rust_packages": "-p a -p b -p c",
+                                  "rust_doc_packages": "-p a -p b"})
+        self.assertEqual(calls, [
+            "api", "--method", "GET", "--paginate", "-f", "per_page=100",
+            "repos/owner/repository/pulls/848/files",
+            "--jq", ".[] | {filename, previous_filename}",
+        ])
+        values, _, _ = self.resolve_package_scope(
+            listing='{"filename":"apps/c/src/main.rs"}\n')
+        self.assertEqual(values, {"rust_packages": "-p c", "rust_doc_packages": "none"})
+
+    def test_package_scope_runs_the_workspace_whenever_unsure(self) -> None:
+        for label, overrides in (
+            ("push", {"event": "push"}),
+            ("dispatch", {"event": "workflow_dispatch"}),
+            ("failed detection", {"detected": ""}),
+            ("documentation only", {"detected": "false"}),
+            ("merge queue", {"head_ref": "trunk-merge/main/1"}),
+            ("api limit", {"changed": "3000"}),
+            ("zero-padded api limit", {"changed": "03000"}),
+            ("unknown count", {"changed": ""}),
+            ("malformed count", {"changed": "1; true"}),
+            ("count mismatch", {"changed": "2"}),
+            ("unknown pull request", {"number": ""}),
+            ("api failure", {"gh_status": 1}),
+            ("empty listing", {"listing": ""}),
+            ("root manifest", {"listing": '{"filename":"Cargo.toml"}\n'}),
+            ("lockfile", {"listing": '{"filename":"Cargo.lock"}\n'}),
+            ("rename out of a member", {"listing":
+                '{"filename":"crates/a/x.rs","previous_filename":"scripts/x.rs"}\n'}),
+            ("base without the script", {"with_script": False}),
+            ("script failure", {"python_stub": "exit 1\n"}),
+            ("one line", {"python_stub": "echo rust_packages=-p a\n"}),
+            ("extra line", {"python_stub":
+                "printf 'rust_packages=-p a\\nrust_doc_packages=-p a\\nx=y\\n'\n"}),
+            ("swapped lines", {"python_stub":
+                "printf 'rust_doc_packages=-p a\\nrust_packages=-p a\\n'\n"}),
+            ("injected arguments", {"python_stub":
+                "printf 'rust_packages=-p a --exclude b\\nrust_doc_packages=-p a\\n'\n"}),
+            ("shell text", {"python_stub":
+                "printf 'rust_packages=-p a;true\\nrust_doc_packages=-p a\\n'\n"}),
+            ("empty selection", {"python_stub":
+                "printf 'rust_packages=\\nrust_doc_packages=none\\n'\n"}),
+            ("workspace without doctests", {"python_stub":
+                "printf 'rust_packages=--workspace\\nrust_doc_packages=none\\n'\n"}),
+            ("malformed doc selection", {"python_stub":
+                "printf 'rust_packages=-p a\\nrust_doc_packages=-p\\n'\n"}),
+        ):
+            with self.subTest(label=label):
+                values, calls, _ = self.resolve_package_scope(**overrides)
+                self.assertEqual(values, self.FULL_SCOPE)
+                if label in ("push", "dispatch", "failed detection", "documentation only",
+                             "merge queue", "api limit", "zero-padded api limit"):
+                    self.assertEqual(calls, [])
+
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         scope = workflow["jobs"]["ci_change_scope"]
@@ -1660,11 +2397,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         # every PR head, so a Rust-scope skip would leave docs-only PRs unmergeable.
         workflow = load_workflow(CI_WORKFLOW_PATH)
         jobs = workflow["jobs"]
-        condition = " ".join(jobs["codeql"]["if"].split())
-        self.assertEqual(jobs["codeql"]["needs"], ["ci_change_scope", "core-gate"])
-        self.assertEqual(condition, "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-                         "(needs.core-gate.result == 'success' || "
-                         "needs.ci_change_scope.outputs.rust == 'false') }}")
+        condition = jobs["codeql"]["if"]
+        self.assertEqual(jobs["codeql"]["needs"], stages.CORE_STAGE_NEEDS)
+        self.assertEqual(condition, stages.CODEQL_IF)
+        self.assertTrue(condition.endswith(
+            "|| needs.ci_change_scope.outputs.rust == 'false') }}"))
         self.assertNotIn("cargo-crap", condition)
         required = jobs["codeql-required"]
         self.assertEqual(required["name"], "CodeQL (Rust)")
@@ -1763,6 +2500,17 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 90.0}),
             lambda w: w["jobs"]["owner-bridge-windows"].update(**{"if": "false"}),
             lambda w: w["jobs"]["owner-bridge-windows"]["steps"][0]["with"].update(**{"persist-credentials": 0}),
+            # The full 1,000-ceremony readiness soak must stay in the lane.
+            lambda w: w["jobs"].pop("readiness-soak"),
+            lambda w: w["jobs"]["readiness-soak"]["steps"][-1]["env"].update(
+                OWNER_BRIDGE_READINESS_RUNS_PER_WORKER="5"),
+            lambda w: w["jobs"]["readiness-soak"]["steps"][-1].update(**{"continue-on-error": True}),
+            lambda w: w["jobs"]["readiness-soak"]["steps"][-1].update(
+                run=w["jobs"]["readiness-soak"]["steps"][-1]["run"].replace(
+                    "--exact $test --nocapture", "--exact $test --nocapture --skip native")),
+            lambda w: next(s for s in w["jobs"]["owner-bridge-windows"]["steps"]
+                           if s.get("id") == "coverage")["env"].pop(
+                "OWNER_BRIDGE_READINESS_RUNS_PER_WORKER"),
         ):
             changed = copy.deepcopy(native); mutate(changed)
             with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
@@ -1899,11 +2647,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_asan_runs_beside_mutation_and_ci_gate_still_requires_both(self) -> None:
         jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
         asan = jobs["asan"]
-        self.assertEqual(asan["needs"], ["ci_change_scope", "standard-gate", "asan-build"])
+        self.assertEqual(asan["needs"], stages.STANDARD_STAGE_NEEDS)
         self.assertNotIn("mutation", asan["if"])
-        self.assertIn("needs.standard-gate.result == 'success'", asan["if"])
+        self.assertEqual(asan["if"], stages.ASAN_IF)
         self.assertIn("needs.asan-build.result == 'success'", asan["if"])
-        self.assertEqual(jobs["mutation-checks"]["needs"], ["ci_change_scope", "standard-gate"])
+        self.assertEqual(jobs["mutation-checks"]["needs"], stages.STANDARD_STAGE_NEEDS)
         for name in ("mutation-checks", "asan-gate"):
             self.assertIn(name, jobs["ci-gate"]["needs"])
         for mutation in ("failure", "cancelled", "skipped", ""):
@@ -2531,6 +3279,170 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, message):
                     assert_test_shards_gate(mutated)
 
+    def test_stage_jobs_wait_for_gate_jobs_directly(self) -> None:
+        assert_stage_graph(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_stage_graph_rejects_a_dropped_dependency(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for name, (gate, needs, _) in stages.STAGE_CONSUMERS.items():
+            for dropped in needs:
+                with self.subTest(job=name, dropped=dropped):
+                    mutated = copy.deepcopy(workflow)
+                    # Stage jobs share one aliased list; change only this job.
+                    mutated["jobs"][name]["needs"] = [n for n in needs if n != dropped]
+                    with self.assertRaisesRegex(
+                        AssertionError, f"{name} must wait for every {gate} job"
+                    ):
+                        assert_stage_consumer(mutated["jobs"], name)
+
+    def test_stage_graph_rejects_a_condition_accepting_a_bad_result(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        representatives: dict[str, str] = {}
+        for name, (_, _, condition) in stages.STAGE_CONSUMERS.items():
+            representatives.setdefault(condition, name)
+        self.assertEqual(len(representatives), 7)
+        for condition, name in representatives.items():
+            checked = re.findall(r"needs\.[\w-]+\.result == '(?:success|skipped)'", condition)
+            self.assertTrue(checked)
+            for check in sorted(set(checked)):
+                for accepted in ("failure", "cancelled"):
+                    with self.subTest(job=name, check=check, accepted=accepted):
+                        mutated = copy.deepcopy(workflow)
+                        mutated["jobs"][name]["if"] = condition.replace(
+                            check, check.split(" == ")[0] + f" != '{accepted}'"
+                        )
+                        # Some branches cannot run for some jobs (docker-build needs
+                        # successful notices, the main reports never run on pull
+                        # requests); there only the canonical text rejects a change.
+                        unreachable = "'skipped'" in check or (
+                            name == "modules-structure" and "trunk-pr" in check)
+                        message = (f"{name} (starts although|must use the canonical)"
+                                   if unreachable else f"{name} starts although")
+                        with self.assertRaisesRegex(AssertionError, message):
+                            assert_stage_consumer(mutated["jobs"], name)
+
+    def test_stage_graph_rejects_a_stage_started_early(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        hop_needs, hop_condition = GATE_HOP_REFERENCE["rustdoc"]
+        mutations = {
+            "mutation-checks must wait for every standard-gate job": lambda jobs: jobs[
+                "mutation-checks"
+            ].update(needs=list(stages.CORE_STAGE_NEEDS)),
+            "asan must wait for every standard-gate job": lambda jobs: jobs["asan"].update(
+                needs=[*stages.CORE_STAGE_NEEDS, "asan-build"]
+            ),
+            "rustdoc must wait for every core-gate job": lambda jobs: jobs["rustdoc"].update(
+                needs=list(stages.PREFLIGHT_STAGE_NEEDS), **{"if": stages.PREFLIGHT_STAGE_IF}
+            ),
+            "asan starts although codeql is failure": lambda jobs: jobs["asan"].update(
+                {"if": stages.CORE_STAGE_IF}
+            ),
+            "mutation-checks starts although": lambda jobs: jobs["mutation-checks"].update(
+                {"if": stages.MUTATION_IF.replace(stages.STANDARD_PASSED, stages.CORE_PASSED)}
+            ),
+            "depgraph starts although cargo-crap is": lambda jobs: jobs["depgraph"].update(
+                {"if": stages.MAIN_REPORT_IF.replace(
+                    " && needs.cargo-crap.result == 'success'", "")}
+            ),
+            "fmt starts although": lambda jobs: jobs["fmt"].update(
+                {"if": "${{ !cancelled() && " + IN_SCOPE + " }}"}
+            ),
+            "codeql does not start although": lambda jobs: jobs["codeql"].update(
+                {"if": stages.CORE_STAGE_IF}
+            ),
+            "only \\['ci-gate', 'standard-gate'\\] may wait for core-gate": lambda jobs: jobs[
+                "rustdoc"
+            ].update(needs=list(hop_needs), **{"if": hop_condition}),
+            "audit direct dependencies changed": lambda jobs: jobs["audit"].update(
+                needs=[*stages.CORE_STAGE_NEEDS, "cargo-crap"]
+            ),
+            "test must judge skipped dependencies explicitly": lambda jobs: jobs["test"].update(
+                {"if": stages.PREFLIGHT_STAGE_IF.replace("!cancelled() && ", "")}
+            ),
+            "fmt must use the canonical preflight-gate stage condition": lambda jobs: jobs[
+                "fmt"
+            ].update({"if": stages.PREFLIGHT_STAGE_IF.replace(
+                "!cancelled() && ", "!cancelled() && !cancelled() && ")}),
+            "standard-gate must cover exactly": lambda jobs: jobs["standard-gate"][
+                "needs"
+            ].remove("static-launcher"),
+            "core-gate must cover exactly": lambda jobs: jobs["core-gate"]["needs"].append(
+                "static-launcher"
+            ),
+        }
+        for message, mutate in mutations.items():
+            with self.subTest(message=message):
+                mutated = copy.deepcopy(workflow)
+                mutate(mutated["jobs"])
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_stage_graph(mutated)
+        mutated = copy.deepcopy(workflow)
+        mutated["jobs"]["rustdoc"]["needs"] = [*stages.CORE_STAGE_NEEDS, "core-gate"]
+        with self.assertRaisesRegex(
+            AssertionError, "rustdoc must not wait for the core-gate reporter"
+        ):
+            assert_stage_consumer(mutated["jobs"], "rustdoc")
+
+    def test_stage_condition_evaluator_follows_actions_semantics(self) -> None:
+        scenario = Scenario({"a": "skipped", "b": "success", "ci_change_scope": "success"},
+                            rust="True", event="push")
+        results = scenario.results
+        cases = {
+            "${{ needs.b.result == 'success' }}": False,  # implicit success()
+            "${{ always() && needs.b.result == 'SUCCESS' }}": True,
+            "${{ !cancelled() && (needs.a.result == 'skipped' || false) }}": True,
+            "${{ !cancelled() && needs.a.result != 'skipped' || true }}": True,
+            "${{ !cancelled() && !(needs.a.result == 'skipped') }}": False,
+            "${{ failure() || needs.ci_change_scope.outputs.rust == 'true' }}": True,
+            "${{ cancelled() || github.event_name == 'pull_request' }}": False,
+        }
+        needs = ["a", "b", "ci_change_scope"]
+        for condition, expected in cases.items():
+            with self.subTest(condition=condition):
+                self.assertEqual(
+                    evaluate_condition(condition, needs, scenario, results), expected
+                )
+        for condition in (
+            "needs.a.result == 'skipped'",
+            "${{ !cancelled() && needs.c.result == 'success' }}",
+            "${{ !cancelled() && needs.a.outputs.x == 'y' }}",
+            "${{ !cancelled() && env.X == 'y' }}",
+            "${{ !cancelled() && contains(needs.*.result, 'failure') }}",
+            "${{ !cancelled() && (needs.a.result == 'skipped' }}",
+            "${{ !cancelled() && needs.a.result == 'skipped' ) }}",
+            "${{ !cancelled() && needs.a.result == 'skipped' && }}",
+            "${{ !cancelled() == 'true' }}",
+            "${{ !cancelled() && true == 'true' }}",
+        ):
+            with self.subTest(condition=condition), self.assertRaises(AssertionError):
+                evaluate_condition(condition, needs, scenario, results)
+
+    def test_gate_reporters_read_only_supported_stage_results(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        scenario = next(stage_scenarios(stages.STANDARD_STAGE_NEEDS))
+        results = gate_results(workflow["jobs"], scenario)
+        for gate in stages.STAGE_GATES:
+            self.assertEqual(results[gate], "success")
+        for mutate, message in (
+            (lambda jobs: jobs["core-gate"].update({"if": "${{ success() }}"}),
+             "core-gate must be one unconditional result check"),
+            (lambda jobs: jobs["core-gate"]["steps"][0]["env"].update(X="${{ env.X }}"),
+             "core-gate reads an unsupported value"),
+            (lambda jobs: jobs["core-gate"]["steps"][0]["env"].update(X="literal"),
+             "core-gate reads an unsupported value"),
+            (lambda jobs: jobs["core-gate"]["steps"][0]["env"].update(
+                X="${{ needs.audit.result }}"), "core-gate reads undeclared needs.audit"),
+            (lambda jobs: (jobs["core-gate"]["needs"].append("cargo-crap"),
+                           jobs["core-gate"]["steps"][0]["env"].update(
+                               X="${{ needs.cargo-crap.result }}")),
+             "core-gate reads cargo-crap, which its stage omits"),
+        ):
+            with self.subTest(message=message):
+                mutated = copy.deepcopy(workflow)
+                mutate(mutated["jobs"])
+                with self.assertRaisesRegex(AssertionError, message):
+                    gate_results(mutated["jobs"], scenario)
+
     def test_standard_stage_stays_within_runner_cap(self) -> None:
         assert_standard_stage_runner_cap(load_workflow(CI_WORKFLOW_PATH))
 
@@ -2539,6 +3451,15 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "start exactly the counted jobs": lambda w: w["jobs"].update(
                 {
                     "ninth-heavy-job": {
+                        "needs": list(stages.CORE_STAGE_NEEDS),
+                        "runs-on": "ubuntu-24.04",
+                        "steps": [{"run": "true"}],
+                    }
+                }
+            ),
+            "standard stage must start exactly the counted jobs": lambda w: w["jobs"].update(
+                {
+                    "hop-heavy-job": {
                         "needs": ["ci_change_scope", "core-gate"],
                         "runs-on": "ubuntu-24.04",
                         "steps": [{"run": "true"}],
@@ -2560,6 +3481,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "lightweight runner released by coverage": lambda w: w["jobs"]["cargo-crap"][
                 "needs"
             ].append("core-gate"),
+            "runner released by coverage": lambda w: w["jobs"]["cargo-crap"].update(
+                needs=[*stages.CORE_STAGE_NEEDS, "owner-bridge-windows"]
+            ),
         }
         for message, mutate in mutations.items():
             with self.subTest(message=message):
@@ -2598,15 +3522,12 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_conformance_materialization_honors_rust_scope(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         materialization = workflow["jobs"]["materialize-conformance-bundles"]
-        self.assertIn("ci_change_scope", materialization["needs"])
-        self.assertEqual(
-            materialization["if"],
-            "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-            "needs.conformance-fixtures.result == 'success' && "
-            "needs.core-gate.result == 'success' && "
+        self.assertEqual(materialization["needs"], stages.CORE_STAGE_NEEDS)
+        self.assertEqual(materialization["if"], stages.CORE_STAGE_IF)
+        self.assertIn("needs.conformance-fixtures.result == 'success'", materialization["if"])
+        self.assertTrue(materialization["if"].endswith(
             "(needs.ci_change_scope.outputs.rust == 'true' || "
-            "github.event_name != 'pull_request') }}",
-        )
+            "github.event_name != 'pull_request') }}"))
 
 
 
@@ -2615,10 +3536,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
 # contract. Keep the executable recipe, its graph and its fan-in explicit so
 # changing the producer cannot silently turn acceptance evidence into a no-op.
 STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
- 'needs': ['ci_change_scope', 'preflight-gate'],
- 'if': "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
-       "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != "
-       "'pull_request') }}",
+ 'needs': stages.PREFLIGHT_STAGE_NEEDS,
+ 'if': stages.PREFLIGHT_STAGE_IF,
  'runs-on': 'ubuntu-24.04',
  'timeout-minutes': 45,
  'env': {'RUSTFLAGS': '-D warnings -C target-feature=+crt-static -C '

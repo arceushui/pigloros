@@ -154,8 +154,9 @@ mod tests {
     use std::error::Error;
 
     use pos_reference::sandbox_provider_protocol::{
-        SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxProviderError,
-        SandboxProviderErrorCode, SandboxProviderErrorFields,
+        RevocationAcknowledgement, RevocationAcknowledgementFields, SandboxDescribeResponse,
+        SandboxDescribeResponseFields, SandboxProviderError, SandboxProviderErrorCode,
+        SandboxProviderErrorFields, SandboxRevocationUpdateError,
     };
 
     use super::*;
@@ -285,6 +286,45 @@ mod tests {
             Err(RuntimeSignerError::KeyIdMismatch)
         ));
         let other = SandboxProviderError::self_digested(refusal("other"))?;
+        assert!(matches!(
+            sign_verified(&signer, admitted, other),
+            Err(RuntimeSignerError::KeyIdMismatch)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn revocation_acknowledgements_verify_only_under_the_key_id_they_name() -> TestResult {
+        let seed = *blake3::hash(b"PiglorOS.test.runtime-signer.RCA1").as_bytes();
+        let signer = signer(seed);
+        let public = SigningKey::from_bytes(&seed).verifying_key();
+        let admitted = AdmittedRuntimeKey::new("runtime", &public);
+        let acknowledgement = |key_id: &str| RevocationAcknowledgementFields {
+            request_id: [1; 16],
+            revocation_digest: [2; 32],
+            sir1_digest: [3; 32],
+            previous_provider_binding_digest: [4; 32],
+            cancelled_attempt_ids: vec![[5; 16]],
+            runtime_attestation_key_id: key_id.to_owned(),
+        };
+        // The record names the key ID of its fields, so it is signed for
+        // that admitted key and authenticates under that key ID only.
+        let record = RevocationAcknowledgement::self_digested(acknowledgement("runtime"))?;
+        assert_eq!(record.key_id(), "runtime");
+        let acknowledged =
+            RevocationAcknowledgement::new(sign_verified(&signer, admitted, record)?, &public)?;
+        let bytes = acknowledged.to_canonical_cbor()?;
+        assert_eq!(
+            RevocationAcknowledgement::authenticate(&bytes, "runtime", &public)?,
+            acknowledged
+        );
+        assert!(matches!(
+            RevocationAcknowledgement::authenticate(&bytes, "other", &public),
+            Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+        ));
+        // An RCA1 naming another key is not signed for the admitted one.
+        let other = RevocationAcknowledgement::self_digested(acknowledgement("other"))?;
+        assert_eq!(other.key_id(), "other");
         assert!(matches!(
             sign_verified(&signer, admitted, other),
             Err(RuntimeSignerError::KeyIdMismatch)
