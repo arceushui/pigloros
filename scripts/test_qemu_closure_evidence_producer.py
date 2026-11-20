@@ -981,7 +981,8 @@ esac
                                 capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GITHUB_SHA", result.stderr)
-        self.assertEqual(self.gh_calls(), [])
+        # The tip is read first; nothing is listed or deleted after the abort.
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL])
 
     def test_prune_does_nothing_for_a_rerun_of_an_older_commit(self):
         self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD)),
