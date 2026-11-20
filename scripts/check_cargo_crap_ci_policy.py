@@ -108,6 +108,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/local_erasure_provision/tests.rs",
     "src/local_erasure_composition/tests.rs",
     "src/erasure/tests.rs",
+    "src/erasure/tests/acceptance.rs",
     "src/mode_profile/tests.rs",
     "src/community/memory_domain/tests.rs",
     # The Windows owner bridge's #[cfg(test)] native harness; its fixtures
