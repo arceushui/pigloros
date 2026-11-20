@@ -29,6 +29,12 @@ use crate::selector::runtime_lifecycle::CgroupPath;
 const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 /// `CGROUP2_SUPER_MAGIC` from `linux/magic.h`.
 const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
+/// How the cgroup2 mount is opened: a directory, read-only, never through a
+/// symlink and never inherited. The flags are joined at compile time.
+const CGROUP_MOUNT_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NOFOLLOW);
 /// The recovery leaf's exact mode.
 const LEAF_MODE: u32 = 0o600;
 /// The retained recovery directory's exact mode.
@@ -157,7 +163,7 @@ impl RecoveryHost {
         openat2(
             rustix::fs::CWD,
             &self.cgroup_mount,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            CGROUP_MOUNT_FLAGS,
             Mode::empty(),
             ResolveFlags::NO_SYMLINKS,
         )

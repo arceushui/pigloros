@@ -26,8 +26,8 @@ const PEER_START_BOUND: Duration = Duration::from_secs(5);
 const EXCHANGE_BOUND: Duration = Duration::from_millis(100);
 /// The forced cleanup's absolute bound, from the end of the exchange.
 const CLEANUP_BOUND: Duration = Duration::from_secs(5);
-/// One control frame's bound: an RCA1 is at most 16 MiB.
-const FRAME_LIMIT: usize = 16 * 1024 * 1024;
+/// One control frame's bound: an RCA1 is at most 16 MiB, in bytes.
+const FRAME_LIMIT: usize = 16_777_216;
 
 /// The selector's proof that the one recovery peer answered and was cleaned.
 ///

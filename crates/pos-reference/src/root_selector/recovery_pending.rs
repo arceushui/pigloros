@@ -16,6 +16,7 @@ use std::io::Write as _;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -35,6 +36,9 @@ use crate::selector::SelectorBoundaryError;
 /// Reopens the installation for a new recovery operation.
 type InstallationOpener = Box<dyn Fn() -> Result<FixedInstallation, SelectorBoundaryError> + Send>;
 
+/// Where each closed failure kind is reported: standard error in production.
+type DiagnosticSink = Mutex<Box<dyn std::io::Write + Send>>;
+
 /// One pending transaction and how the selector serves it.
 pub(super) struct PendingRecovery {
     target: PendingRecoveryTarget,
@@ -43,6 +47,7 @@ pub(super) struct PendingRecovery {
     authority: ProviderTerminationAuthority<dyn ProviderLifecyclePort + Send + Sync>,
     opening: NormalOpen,
     evaluator: PathBuf,
+    diagnostics: DiagnosticSink,
 }
 
 impl PendingRecovery {
@@ -56,6 +61,7 @@ impl PendingRecovery {
             authority: opening.authority(),
             opening,
             evaluator: PathBuf::from(crate::selector::SANDBOX_SELECTOR_SOCKET),
+            diagnostics: Mutex::new(Box::new(std::io::stderr())),
         }
     }
 
@@ -108,7 +114,7 @@ impl PendingRecovery {
                     |stream| {
                         self.answer(stream)
                             .inspect_err(|error| {
-                                report("administrative connection closed", error);
+                                self.report("administrative connection closed", error);
                             })
                             .ok()
                     },
@@ -194,15 +200,21 @@ impl PendingRecovery {
                     Err(RecoveryError::Mismatch)
                 }
             })
-            .inspect_err(|error| report("recovery operation failed", error))
+            .inspect_err(|error| self.report("recovery operation failed", error))
             .map_err(SelectorBoundaryError::from)
     }
-}
 
-/// One line on standard error with the closed failure kind; it names no
-/// secret.
-fn report(what: &str, error: &impl std::fmt::Display) {
-    writeln!(std::io::stderr(), "pos-root-selector: {what}: {error}").ok();
+    /// One diagnostic line with the closed failure kind; it names no
+    /// secret. A sink that cannot be written changes nothing.
+    fn report(&self, what: &str, error: &impl std::fmt::Display) {
+        writeln!(
+            self.diagnostics
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            "pos-root-selector: {what}: {error}"
+        )
+        .ok();
+    }
 }
 
 #[cfg(test)]
@@ -235,10 +247,12 @@ mod tests {
     /// The selector's result, the challenge the client read, and its reply.
     type Exchanged = (Result<(), SelectorBoundaryError>, Vec<u8>, Vec<u8>);
 
-    /// A recovery directory and an empty cgroup2 stand-in for one test.
+    /// A recovery directory, an empty cgroup2 stand-in and the diagnostic
+    /// lines for one test.
     struct Directories {
         recovery: tempfile::TempDir,
         cgroups: tempfile::TempDir,
+        diagnostics: Captured,
     }
 
     impl Directories {
@@ -248,7 +262,33 @@ mod tests {
             Ok(Self {
                 recovery,
                 cgroups: tempfile::tempdir()?,
+                diagnostics: Captured::default(),
             })
+        }
+    }
+
+    /// The diagnostic lines a selector wrote, in place of standard error.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
+                .into_owned()
+        }
+    }
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -305,6 +345,7 @@ mod tests {
             authority: ProviderTerminationAuthority::new(port, host),
             opening,
             evaluator: directories.recovery.path().join("sandbox-provider.sock"),
+            diagnostics: Mutex::new(Box::new(directories.diagnostics.clone())),
         })
     }
 
@@ -428,6 +469,17 @@ mod tests {
         let mut reply = Vec::new();
         client.read_to_end(&mut reply)?;
         assert!(reply.is_empty());
+        // The failed operation and the closed connection are each reported
+        // by their closed kind.
+        assert_eq!(
+            directories.diagnostics.text(),
+            format!(
+                "pos-root-selector: recovery operation failed: {}\n\
+                 pos-root-selector: administrative connection closed: {}\n",
+                RecoveryError::Lifecycle(ProviderLifecycleError::Unavailable),
+                SelectorBoundaryError::SelectorUnavailable,
+            )
+        );
 
         fs::remove_file(&socket)?;
         assert!(recovery.serve_once(&listener).is_err());

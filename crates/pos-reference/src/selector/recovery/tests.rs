@@ -158,6 +158,18 @@ pub(crate) enum Call {
     Start(Instant),
 }
 
+/// The SIR1 identities one port request named, as the adapter read them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Named {
+    /// The previous runtime: provider ID, binary digest, runtime-instance,
+    /// lifecycle-scope and recovery lifecycle-scope IDs.
+    Previous(String, [u8; 32], [u8; 16], [u8; 16], [u8; 16]),
+    /// The recovery-peer slot's lifecycle-scope ID.
+    Slot([u8; 16]),
+    /// The peer start: slot scope, endpoint ID and binary digest.
+    Launch([u8; 16], [u8; 16], [u8; 32]),
+}
+
 /// How the fake adapter answers one operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Reply {
@@ -172,7 +184,7 @@ pub(crate) enum Reply {
     Refuse(ProviderLifecycleError),
     /// Reconciled attempts out of canonical order.
     Unsorted,
-    /// A reconciled attempt twice.
+    /// A reconciled attempt twice, adjacent: sorted but not unique.
     Duplicated,
     /// A reconciled attempt outside the previous-live set.
     Foreign,
@@ -236,6 +248,7 @@ pub(crate) struct PeerPort {
     clock: Arc<AtomicU64>,
     base: Instant,
     calls: Mutex<Vec<Call>>,
+    named: Mutex<Vec<Named>>,
     peer: Mutex<Option<(PathBuf, JoinHandle<()>)>>,
     /// The control group the last start reported: an honest cleanup names
     /// it, since the slot's unit is the started peer's.
@@ -254,6 +267,7 @@ impl PeerPort {
             clock: Arc::new(AtomicU64::new(0)),
             base: Instant::now(),
             calls: Mutex::new(Vec::new()),
+            named: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
             started: Mutex::new(None),
             control_group: crate::selector::runtime_lifecycle::process_control_group,
@@ -298,6 +312,20 @@ impl PeerPort {
     fn record(&self, call: Call) {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(call);
+        }
+    }
+
+    /// Every identity the requests named, in call order.
+    fn named(&self) -> Vec<Named> {
+        self.named
+            .lock()
+            .map(|named| named.clone())
+            .unwrap_or_default()
+    }
+
+    fn name(&self, named: Named) {
+        if let Ok(mut all) = self.named.lock() {
+            all.push(named);
         }
     }
 
@@ -363,6 +391,13 @@ impl ProviderLifecyclePort for PeerPort {
         deadline: Instant,
     ) -> Result<PreviousRuntimeObservation, ProviderLifecycleError> {
         self.record(Call::Terminate(deadline));
+        self.name(Named::Previous(
+            target.provider_id().to_owned(),
+            target.provider_binary_digest(),
+            target.runtime_instance_id(),
+            target.lifecycle_scope_id(),
+            target.recovery_lifecycle_scope_id(),
+        ));
         if self.terminations.fetch_add(1, Ordering::SeqCst) < self.script.refused_terminations {
             return Err(ProviderLifecycleError::Unavailable);
         }
@@ -381,7 +416,7 @@ impl ProviderLifecyclePort for PeerPort {
         let mut reconciled = target.previous_live_attempt_ids().to_vec();
         match reply {
             Reply::Unsorted => reconciled.reverse(),
-            Reply::Duplicated => reconciled.push(reconciled[0]),
+            Reply::Duplicated => reconciled.insert(0, reconciled[0]),
             Reply::Foreign => reconciled.push([0xff; 16]),
             _ => {}
         }
@@ -400,6 +435,7 @@ impl ProviderLifecyclePort for PeerPort {
         deadline: Instant,
     ) -> Result<RecoverySlotObservation, ProviderLifecycleError> {
         self.record(Call::Reconcile(deadline));
+        self.name(Named::Slot(target.recovery_lifecycle_scope_id()));
         self.stop_peer();
         let index = self.reconciles.fetch_add(1, Ordering::SeqCst);
         self.clock.fetch_add(
@@ -429,6 +465,11 @@ impl ProviderLifecyclePort for PeerPort {
         deadline: Instant,
     ) -> Result<RecoveryPeerObservation, ProviderLifecycleError> {
         self.record(Call::Start(deadline));
+        self.name(Named::Launch(
+            launch.slot().recovery_lifecycle_scope_id(),
+            launch.recovery_endpoint_id(),
+            launch.provider_binary().digest(),
+        ));
         let reply = self.script.start;
         if let Reply::Refuse(error) = reply {
             return Err(error);
@@ -537,12 +578,19 @@ fn serve_peer(listener: &UnixListener, behaviour: Peer, clock: &AtomicU64) {
 
 /// The digest of the recovery peer's executable: the fixture's provider
 /// binary, for this test process only.
+/// The fixture's previous provider binary.
+const PROVIDER_BINARY: &[u8] = b"exact provider binary";
+
+/// The fixture binary's digest for this process hashed at exactly the
+/// binary's SIR1 length, as `/proc/<pid>/exe` is hashed in production.
 pub(crate) fn peer_executable_digest(
     pid: NonZeroU64,
-    _length: u64,
+    length: u64,
 ) -> Result<[u8; 32], SelectorBoundaryError> {
-    if pid == own_pid() {
-        Ok(*blake3::hash(b"exact provider binary").as_bytes())
+    if pid == own_pid()
+        && usize::try_from(length).is_ok_and(|length| length == PROVIDER_BINARY.len())
+    {
+        Ok(*blake3::hash(PROVIDER_BINARY).as_bytes())
     } else {
         Err(SelectorBoundaryError::ArtifactInvalid)
     }
@@ -699,6 +747,38 @@ fn one_operation_terminates_exchanges_cleans_and_publishes_the_successor() -> Te
     );
     // A second operation on the completed transaction finds no SIR1.
     assert!(operation.target().is_err());
+    Ok(())
+}
+
+/// R12 §7.1 and §7.3: every port request names exactly the SIR1
+/// identities of the pending transaction: the previous provider's SPM1
+/// provider ID and binary digest, its runtime and scope IDs, and the
+/// recovery peer's scope and endpoint IDs.
+#[test]
+fn each_port_request_names_the_exact_sir1_identities() -> TestResult {
+    let operation = Operation::new(vec![[41; 16]], SuccessorRevocation::Nothing)?;
+    let target = operation.target()?;
+    let identity = target.identity();
+    let [_, scope, endpoint] = identity.recovery_peer_slot;
+    let digest = *blake3::hash(PROVIDER_BINARY).as_bytes();
+    let (result, port) = recover(&operation, Script::default())?;
+    result?;
+    assert_ne!(scope, endpoint);
+    assert_eq!(
+        port.named(),
+        vec![
+            Named::Previous(
+                "provider".to_owned(),
+                digest,
+                identity.previous_runtime_instance_id,
+                identity.previous_lifecycle_scope_id,
+                scope,
+            ),
+            Named::Slot(scope),
+            Named::Launch(scope, endpoint, digest),
+            Named::Slot(scope),
+        ]
+    );
     Ok(())
 }
 
