@@ -144,7 +144,7 @@ pub(super) const fn scope_fits(timelines: usize) -> bool {
 
 /// The ELP1 data class a request scope selects. ERQ1 of a Local request
 /// always names one of the two destruction-eligible classes.
-fn data_class(scope: ErasureScopeV1) -> ArtifactDataClassV1 {
+pub(super) fn data_class(scope: ErasureScopeV1) -> ArtifactDataClassV1 {
     if scope == ErasureScopeV1::PrivateSubjectData {
         ArtifactDataClassV1::PrivateSubjectData
     } else {

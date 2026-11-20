@@ -77,6 +77,15 @@ impl LocalForkAdmissionRequestV1 {
             Self::Bind { operation_id } | Self::Fork { operation_id, .. } => *operation_id,
         }
     }
+
+    /// The parent Timeline a Fork request names; a bind names none.
+    #[must_use]
+    pub(super) const fn fork_parent(&self) -> Option<TimelineId> {
+        match self {
+            Self::Bind { .. } => None,
+            Self::Fork { parent_id, .. } => Some(*parent_id),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -87,7 +87,7 @@ async fn fixture_with(
     body: EntityId,
 ) -> TestResult<Fixture> {
     let gateway = gateway_with_erasure_host_and_authorization(host, [body], authorization.clone())?;
-    let timeline = gateway.create_timeline("human-action").await?.id();
+    let timeline = gateway.create_timeline("human-action", None).await?.id();
     Ok(Fixture {
         gateway,
         authorization,
@@ -338,7 +338,7 @@ async fn domain_denial_and_a_missing_plugin_commit_nothing() -> TestResult {
         // owning Plugin fails closed instead of falling back.
         let actor = EntityId::new();
         let missing = missing_plugin_gateway(host(&StoreConfig::Memory)?, actor)?;
-        let missing_timeline = missing.create_timeline("missing-plugin").await?;
+        let missing_timeline = missing.create_timeline("missing-plugin", None).await?;
         let outcome = missing
             .submit_proposed_action(
                 &missing_timeline.id().to_string(),
@@ -655,7 +655,7 @@ async fn a_store_without_an_admission_port_has_no_human_action_path() -> TestRes
         [body],
         test_authorization_for(actor),
     );
-    let timeline = gateway.create_timeline("no-admission-port").await?;
+    let timeline = gateway.create_timeline("no-admission-port", None).await?;
 
     let outcome = gateway
         .submit_json_action(
@@ -1554,7 +1554,7 @@ async fn a_window_flush_the_store_refuses_retries_once_and_keeps_the_count() -> 
         [],
         authorization.clone(),
     );
-    let timeline = gateway.create_timeline("refused-flush").await?.id();
+    let timeline = gateway.create_timeline("refused-flush", None).await?.id();
     for _ in 0..=crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
         let outcome = gateway
             .read_events_page_authorized(
@@ -1751,7 +1751,7 @@ async fn a_window_timer_outliving_its_gateway_writes_nothing() -> TestResult {
         [],
         authorization.clone(),
     );
-    let timeline = gateway.create_timeline("dropped-gateway").await?.id();
+    let timeline = gateway.create_timeline("dropped-gateway", None).await?.id();
     for _ in 0..=crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
         assert!(gateway
             .read_events_page_authorized(
