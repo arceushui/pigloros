@@ -3278,14 +3278,19 @@ fn custody_directory() -> TestResult<(tempfile::TempDir, std::path::PathBuf)> {
 
 /// Publish one recipient export of the actor's `timeline` to `grantee`
 /// under the actor's export consent, and return its export id.
+///
+/// The returned custody directory must outlive every later publication: a
+/// dropped directory's inode can be reused, and the store would then see
+/// the next grantee's directory as already claimed.
 fn publish_export(
     store: &LocalStore,
     timeline: TimelineId,
     grantee: EntityId,
-) -> TestResult<[u8; 16]> {
-    let (_directory, private) = custody_directory()?;
+) -> TestResult<([u8; 16], tempfile::TempDir)> {
+    let (directory, private) = custody_directory()?;
     let owner = pos_store::sqlite::RecipientKeyOwnerV1::open(&private, grantee)?;
-    Ok(publish_export_as(store, timeline, actor(), grantee, &owner)?.0)
+    let export_id = publish_export_as(store, timeline, actor(), grantee, &owner)?.0;
+    Ok((export_id, directory))
 }
 
 /// Publish one recipient export of `subject`'s `timeline` to `grantee`.
@@ -3362,7 +3367,7 @@ fn publish_export_as(
 #[test]
 fn a_consented_freeze_covers_the_store_target_and_each_export_grantee() -> TestResult {
     let owned = OwnedStore::new()?;
-    let export_id = publish_export(&owned.store, owned.owned, other_actor())?;
+    let (export_id, _custody) = publish_export(&owned.store, owned.owned, other_actor())?;
     let (mut host, signed) = signed_freeze(
         &owned.store,
         2,
