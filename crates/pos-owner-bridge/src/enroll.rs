@@ -58,7 +58,8 @@ pub struct EnrollmentContext {
 /// It carries the enrollment context, the new credential's ID and the PRF
 /// input that the source and confirmation assertions evaluate. The ADR-091
 /// wrap binds all three (its HKDF info and AAD), so only the bridge builds
-/// this value (ADR-110 §10 refinement, Redmine #1481).
+/// this value (ADR-110 §10 refinement, Redmine #1481). The wrap's relying
+/// party is always `localhost`, the codec's fixed RP ID, so it is not carried.
 #[derive(Clone, Copy, Debug)]
 pub struct SealInputs<'a> {
     context: &'a EnrollmentContext,

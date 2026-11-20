@@ -72,6 +72,22 @@ fn a_create_without_a_prf_needs_a_restricted_assertion_as_the_source() -> TestRe
     assert_eq!(port.at_calls, [(2, 2), (3, 3)]);
     assert!(port.seal_prf.is_some());
     assert_eq!(port.seal_prf, port.confirm_prf);
+    // The restricted source assertion and the confirmation evaluate the PRF
+    // input the wrap is sealed over.
+    let (_, sealed_input, _) = port.sealed_over.clone().ok_or("nothing was sealed")?;
+    let requested: Vec<_> = rig
+        .surface
+        .log()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            LogEntry::PageWebAuthn { prf_input, .. } => Some(prf_input),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requested.len(), 3);
+    for input in requested {
+        assert_eq!(input.as_slice(), sealed_input.as_bytes().as_slice());
+    }
     let committed = port.committed.ok_or("nothing was committed")?;
     assert_eq!(committed.binding().boxed()?.sign_count(), 2);
     Ok(())
