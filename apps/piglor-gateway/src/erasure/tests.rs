@@ -1117,5 +1117,6 @@ in_every_serve_mode!(
     a_subject_past_its_quota_is_refused_for_good,
 );
 
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod acceptance;
