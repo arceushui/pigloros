@@ -142,7 +142,8 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
             .any(|path| path.ends_with("image_activator/socket.rs")),
         "the scan must include the mountfsd transport"
     );
-    // The R11 provider installation modules (#1358) are provider code too.
+    // The R11 provider installation modules (#1358) and the R12 recovery
+    // peer (#349, I16) are provider code too.
     for module in [
         "provider_installation.rs",
         "provider_installation/codec.rs",
@@ -151,6 +152,7 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
         "provider_runtime/endpoint.rs",
         "provider_runtime/notify.rs",
         "provider_runtime/reconcile.rs",
+        "provider_runtime/recovery_peer.rs",
         "provider_runtime/revocation.rs",
         "provider_runtime/serving.rs",
     ] {

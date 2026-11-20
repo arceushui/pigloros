@@ -405,7 +405,7 @@ async fn host_owned_gateway_covers_store_boundary(
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
     let gateway = Gateway::unprotected_for_harness(host)?;
-    let timeline = gateway.create_timeline("shared-gate").await?;
+    let timeline = gateway.create_timeline("shared-gate", None).await?;
     assert!(gateway
         .read_events_page(&timeline.id().to_string(), 0, 1)
         .await?

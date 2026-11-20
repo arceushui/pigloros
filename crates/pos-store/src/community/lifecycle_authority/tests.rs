@@ -16,7 +16,7 @@ use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
     ForkAuthenticationPolicyV1,
 };
-use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
+use pos_core::trusted_clock::{ScriptedTrustedWallSourceV1, SystemGuardMonotonicSourceV1};
 use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1, CapabilityGrantDraftV1,
@@ -32,6 +32,7 @@ use super::{
 };
 use crate::community::MemoryCommunityDomainV1;
 use crate::memory::MemoryStore;
+use crate::trusted_clock::MemoryTrustedClockAuthorityV1;
 
 type Fallible<T> = Result<T, Box<dyn StdError>>;
 
@@ -115,7 +116,8 @@ fn a_revocation_after_a_successful_call_refuses_the_same_call() -> Fallible<()> 
     let mut store = MemoryStore::new();
     store.bind_authority_persistence(host.persistence_binding())?;
     store.issue_capability_grant(host.authorize_grant(&leaf)?, &leaf)?;
-    let mut domain = MemoryCommunityDomainV1::new(store, [0x5a; 16])?;
+    let mut domain =
+        MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
 
     let key = ForkAuthenticationAdapterSigningKeyV1::from_seed(SEED)?;
     let policy = ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
@@ -168,8 +170,9 @@ fn a_revocation_after_a_successful_call_refuses_the_same_call() -> Fallible<()> 
             store_incarnation: [0x5a; 16],
         },
         ScriptedTrustedWallSourceV1::from_micros([500]),
+        SystemGuardMonotonicSourceV1,
     )?;
-    let call = authority.authenticate(&credential, request)?;
+    let call = authority.authenticate(&credential, request, &mut domain)?;
     assert!(authority
         .authorize_administrative(&call, &domain, leaf.grant_id())
         .is_ok());

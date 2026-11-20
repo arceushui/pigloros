@@ -55,7 +55,7 @@ use pos_reference::sandbox_provider_protocol::{
     CancelSource, LaunchFailure, LocalNetworkAdmission, LocalNetworkTermination,
     NetworkCaptureStore, NetworkCaptureStoreError, NetworkEndpointConnector, NetworkExchangePlan,
     NetworkExchangeTranscript, ReplayedNetworkExchange, SandboxExecutionMode,
-    SandboxProviderProtocolError, WATCHDOG_GRACE_NS,
+    SandboxProviderProtocolError, StartJobResult, WATCHDOG_GRACE_NS,
 };
 use rustix::time::{clock_gettime, ClockId};
 use tokio::sync::watch;
@@ -66,8 +66,9 @@ use crate::{
     ActiveAttempt, AdapterIo, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
     LocalNetworkPort, LocalProxyBindError, OutputReservationRefused, RequestedConfiguration,
-    ServeError, ServedProxy, StdioChannelError, TransientServiceUnitName,
-    TransientUnitLaunchInputs, TransientUnitRequest, UnitStdio,
+    RequestedConfigurationProperty, ServeError, ServedProxy, StdioChannelError,
+    SystemdTransientUnitReadback, TransientServiceUnitName, TransientUnitLaunchInputs,
+    TransientUnitRequest, UnitStdio,
 };
 
 /// The least time a terminating host call is given, however short the
@@ -107,6 +108,10 @@ pub trait UnitHost {
 
     /// A handle for `SubmissionGuard`'s best-effort kill.
     fn killer(&self) -> Self::Killer;
+
+    /// What a start that failed with `error` observed: systemd's start-job
+    /// result and the requested-state readback the verifier rejected.
+    fn start_failure(error: &Self::Error) -> StartFailure;
 
     /// Submit the compiled request and verify its requested state.
     fn start(
@@ -340,6 +345,45 @@ pub struct ExecuteJob {
     pub cancel: CancelSignal,
 }
 
+/// What a start that failed observed (ADR-069 R9 §4.3 and §4.6.1).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StartFailure {
+    /// systemd's start-job result, once the job's `JobRemoved` was matched:
+    /// TME1 `start-job-result`. `None` when no result was observed, or
+    /// systemd named one R9 does not know; that is missing evidence (owner
+    /// reading G1, Redmine #443 journal 22723).
+    pub job: Option<StartJobResult>,
+    /// The complete requested-state readback the verifier rejected: RQE1
+    /// status 2. `None` when the readback could not be obtained.
+    pub readback: Option<Vec<SystemdTransientUnitReadback>>,
+}
+
+/// A unit start that was requested and not verified: TME1 progress 1 with
+/// its `start-job-result`, and RQE1 status 2 or 3 with the requested
+/// properties (ADR-069 R9 §4.3).
+#[derive(Debug, thiserror::Error)]
+#[error("the unit's start was not verified")]
+pub struct UnverifiedStart {
+    requested: Vec<RequestedConfigurationProperty>,
+    observed: StartFailure,
+    #[source]
+    cause: Box<dyn Error + Send + Sync>,
+}
+
+impl UnverifiedStart {
+    /// The properties submitted to `StartTransientUnit`: RQE1 `requested`.
+    #[must_use]
+    pub fn requested(&self) -> &[RequestedConfigurationProperty] {
+        &self.requested
+    }
+
+    /// What the failed start observed.
+    #[must_use]
+    pub const fn observed(&self) -> &StartFailure {
+        &self.observed
+    }
+}
+
 /// Why an execution could not start or continue.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
@@ -377,6 +421,9 @@ pub enum ExecuteError {
     /// A systemd operation did not finish within its bound.
     #[error("a systemd operation did not finish within its bound")]
     HostTimeout,
+    /// The unit's start was requested and not verified in time.
+    #[error(transparent)]
+    Start(Box<UnverifiedStart>),
     /// The FD 3 socket pair could not be created.
     #[error("the host-service channel could not be created")]
     HostService(#[source] io::Error),
@@ -406,9 +453,6 @@ pub enum ExecuteError {
     /// The rechecked root is not this attempt's root.
     #[error("the rechecked root belongs to another attempt")]
     RootIdentity,
-    /// A systemd unit operation failed.
-    #[error("a systemd unit operation failed")]
-    Unit(#[source] Box<dyn Error + Send + Sync>),
     /// The attempt cgroup could not be observed.
     #[error("the attempt cgroup could not be observed")]
     Cgroup(#[source] Box<dyn Error + Send + Sync>),
@@ -422,14 +466,44 @@ pub enum ExecuteError {
 
 impl ExecuteError {
     /// TME1 `launch-failure` of an execution refused before its unit start
-    /// for its output reservation (3 or 5) or its standard channels (4),
-    /// ADR-069 R10 §4.7 and §4.1. `None` for every other error: the terminal
-    /// records give those their own codes.
+    /// by the recheck immediately before it (1), for its output reservation
+    /// (3 or 5) or its standard channels (4), ADR-069 R9 §4.6.1 and R10
+    /// §4.7 and §4.1, or whose unit could not be pinned (2, R9 §4.6.7).
+    /// `None` for every other error: the terminal records give those their
+    /// own codes.
     #[must_use]
     pub fn launch_failure(&self) -> Option<LaunchFailure> {
+        self.pre_start_refusal().or_else(|| self.unpinned_unit())
+    }
+
+    /// The launch failure of an execution refused before its unit start
+    /// (1, 3, 4 or 5).
+    fn pre_start_refusal(&self) -> Option<LaunchFailure> {
         match self {
+            Self::Recheck(_) | Self::RootIdentity => Some(LaunchFailure::PreStartRecheckFailed),
             Self::OutputReservation(refused) => Some(LaunchFailure::from(*refused)),
             Self::StdioChannel(_) => Some(LaunchFailure::StdioChannelFailed),
+            _ => None,
+        }
+    }
+
+    /// The launch failure of an execution whose unit could not be pinned
+    /// (2).
+    fn unpinned_unit(&self) -> Option<LaunchFailure> {
+        let Self::Cgroup(source) = self else {
+            return None;
+        };
+        source
+            .downcast_ref::<crate::SystemdTransientUnitTransportError>()
+            .and_then(crate::SystemdTransientUnitTransportError::unit_ref_failure)
+    }
+
+    /// The start that was requested and not verified, if this is why the
+    /// execution failed.
+    #[must_use]
+    pub fn unverified_start(&self) -> Option<&UnverifiedStart> {
+        match self {
+            Self::Start(start) => Some(start),
             _ => None,
         }
     }
@@ -936,17 +1010,38 @@ async fn submit<H>(
 where
     H: UnitHost + Sync,
 {
-    let started = match until(bounds.deadline, host.start(unit.clone(), request)).await {
-        Some(Ok(started)) => started,
-        Some(Err(error)) => {
-            let error = ExecuteError::Unit(Box::new(error));
-            return Err(abort(host, unit, None, error, Submission::Unconfirmed, bounds).await);
-        }
-        None => {
-            let error = ExecuteError::HostTimeout;
-            return Err(abort(host, unit, None, error, Submission::Unconfirmed, bounds).await);
-        }
+    // RQE1 `requested` of a start that is not verified (R9 §4.3).
+    let requested = request.requested_configuration();
+    let (observed, cause) = match until(bounds.deadline, host.start(unit.clone(), request)).await {
+        Some(Ok(started)) => return bind(host, unit, started, bounds).await,
+        Some(Err(error)) => (
+            H::start_failure(&error),
+            Box::new(error) as Box<dyn Error + Send + Sync>,
+        ),
+        None => (
+            StartFailure::default(),
+            Box::new(ExecuteError::HostTimeout) as Box<dyn Error + Send + Sync>,
+        ),
     };
+    let error = ExecuteError::Start(Box::new(UnverifiedStart {
+        requested,
+        observed,
+        cause,
+    }));
+    Err(abort(host, unit, None, error, Submission::Unconfirmed, bounds).await)
+}
+
+/// Bind the verified start's cgroup before the attempt deadline. A failure
+/// kills the unit.
+async fn bind<H>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    started: H::Started,
+    bounds: Bounds,
+) -> Result<(H::Started, H::Cgroup), Failure<H>>
+where
+    H: UnitHost + Sync,
+{
     let bound = until(bounds.deadline, host.bind_cgroup(&started)).await;
     match bound {
         Some(Ok(cgroup)) => Ok((started, cgroup)),

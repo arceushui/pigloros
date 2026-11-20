@@ -1,10 +1,14 @@
 //! Every provider ending and unit result keeps its closed R9 code.
 
 use pos_reference::sandbox_provider_protocol::{
-    EndingCode, LaunchFailure, MainExitCode, ServiceResultCode,
+    CgroupEmptyBasis, EndingCode, LaunchFailure, MainExitCode, ServiceFacts, ServiceResultCode,
 };
 
-use crate::{AttemptEnding, OutputReservationRefused, SystemdMainExit, SystemdServiceResult};
+use crate::{
+    AttemptCgroupEmptyBasis, AttemptEnding, OutputReservationRefused, SystemdMainExit,
+    SystemdServiceResult, SystemdUnitResultObservation, SystemdVerifiedStart,
+    TransientServiceUnitName,
+};
 
 #[test]
 fn a_refused_output_reservation_keeps_its_launch_failure() {
@@ -99,4 +103,73 @@ fn every_main_exit_keeps_its_exec_main_code() {
     for (main, code) in cases {
         assert_eq!(MainExitCode::from(main), code);
     }
+}
+
+#[test]
+fn the_service_facts_carry_the_status_or_signal_of_the_main_exit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let started = SystemdVerifiedStart::for_test(
+        TransientServiceUnitName::from_attempt_id([7; 16])?,
+        "/org/freedesktop/systemd1/unit/attempt",
+    )?;
+    // `ExecMainCode` 0..=3 with the `Result` each is consistent with: no
+    // recorded exit has status 0.
+    let cases = [
+        (
+            "start-limit-hit",
+            0,
+            0,
+            ServiceResultCode::StartLimitHit,
+            MainExitCode::NotExited,
+            0,
+        ),
+        (
+            "exit-code",
+            1,
+            3,
+            ServiceResultCode::ExitCode,
+            MainExitCode::Exited,
+            3,
+        ),
+        (
+            "signal",
+            2,
+            9,
+            ServiceResultCode::Signal,
+            MainExitCode::Killed,
+            9,
+        ),
+        (
+            "core-dump",
+            3,
+            11,
+            ServiceResultCode::CoreDump,
+            MainExitCode::Dumped,
+            11,
+        ),
+    ];
+    for (result, code, status, expected_result, expected_code, expected_status) in cases {
+        let observation = SystemdUnitResultObservation::for_test(&started, result, code, status)?;
+        assert_eq!(
+            ServiceFacts::from(&observation),
+            ServiceFacts {
+                result: expected_result,
+                exec_main_code: expected_code,
+                exec_main_status: expected_status,
+            }
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn every_cgroup_empty_basis_keeps_its_tme1_code() {
+    assert_eq!(
+        CgroupEmptyBasis::from(AttemptCgroupEmptyBasis::Events),
+        CgroupEmptyBasis::Events
+    );
+    assert_eq!(
+        CgroupEmptyBasis::from(AttemptCgroupEmptyBasis::Deleted),
+        CgroupEmptyBasis::Deleted
+    );
 }

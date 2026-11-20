@@ -340,6 +340,10 @@ mod cases {
             [self.id ^ 0xa5; 32]
         }
 
+        fn admission(&self) -> AttemptAdmission {
+            crate::test_fixtures::attempt_admission([self.id ^ 0xa5; 32])
+        }
+
         fn prepare(
             &self,
             planned: CommittedPlannedAttempt,

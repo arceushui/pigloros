@@ -18,6 +18,10 @@ pub mod deployment_trust;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
 pub mod executor;
+// Public so its crate-only items satisfy both `unreachable_pub` and
+// `clippy::redundant_pub_crate`: in a private module `pub(crate)` trips the
+// latter and `pub` the former.
+pub mod host_timelines;
 mod http;
 pub mod ledger_config;
 #[cfg(target_os = "linux")]
@@ -1054,7 +1058,7 @@ mod coverage_tests {
             .await
             .test_ok();
         gateway
-            .create_timeline("owntracks-generic-event-store")
+            .create_timeline("owntracks-generic-event-store", None)
             .await
             .test_ok();
         let mut notices = gateway.subscribe();
@@ -1098,7 +1102,7 @@ mod coverage_tests {
         let gateway = Gateway::new_with_geo_location_admission(MemoryStore::default());
 
         let created = gateway
-            .create_timeline("privileged-generic-command")
+            .create_timeline("privileged-generic-command", None)
             .await
             .test_ok();
 
@@ -2950,20 +2954,53 @@ impl Gateway {
             .map_err(GatewayError::from)
     }
 
-    /// Create a root Timeline.
+    /// Create a root Timeline, owned by `owner` when one is given.
     ///
-    /// Forks and imported child Timelines do not consume the root-Timeline ceiling.
+    /// The owner is recorded at creation (ADR-136 §1). It is only ever the
+    /// actor a decision admitted ([`operation::AdmittedActorV1`]): a
+    /// protected composition passes it, and an unprotected one creates an
+    /// unowned root. Forks, imported child
+    /// Timelines and the host Timelines (the Consent Timeline, the
+    /// authority Timeline and the Erasure Host Timeline) do not consume the
+    /// root-Timeline ceiling.
     ///
     /// # Errors
     /// Returns [`GatewayError::Store`] on backend failure.
-    pub async fn create_timeline(&self, name: &str) -> Result<Timeline, GatewayError> {
+    pub async fn create_timeline(
+        &self,
+        name: &str,
+        owner: Option<operation::AdmittedActorV1>,
+    ) -> Result<Timeline, GatewayError> {
         let root_count = self.store.root_count(self.limits.max_timelines).await?;
         if root_count >= self.limits.max_timelines {
             return Err(GatewayError::TimelineLimitReached {
                 maximum: self.limits.max_timelines,
             });
         }
-        Ok(self.store.create(name.to_owned()).await?)
+        Ok(self
+            .store
+            .create(
+                name.to_owned(),
+                owner.map(operation::AdmittedActorV1::entity_id),
+            )
+            .await?)
+    }
+
+    /// The host Timelines of this Gateway's store.
+    pub(crate) fn host_timelines(&self) -> host_timelines::HostTimelinesV1 {
+        self.store.host_timelines()
+    }
+
+    /// `timeline`, unless it is a host Timeline (#309, ADR-136 §4a): only
+    /// the host's own seams read or append one, so a client append, read or
+    /// action naming it is `404 not-found-or-unavailable`, exactly as for a
+    /// Timeline the store does not hold.
+    fn client_timeline(&self, timeline: TimelineId) -> Result<TimelineId, GatewayError> {
+        if self.host_timelines().contains(timeline) {
+            Err(GatewayError::ResourceUnavailable)
+        } else {
+            Ok(timeline)
+        }
     }
 
     /// Append one Gateway-owned consent grant and issue its enforcement token.
@@ -3197,7 +3234,8 @@ impl Gateway {
                 maximum: MAX_EVENTS_PER_POLL,
             });
         }
-        let id = parse_timeline_id(timeline_id).and_then(client_timeline)?;
+        let id =
+            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
         // A cursor is derived only from visible Events. Scan in bounded chunks
         // so protected Events cannot hide later public Events in the same page.
         let mut next_seq = from_seq.max(1);
@@ -3421,7 +3459,8 @@ impl Gateway {
                 ActionRejected::UnknownEventType,
             ));
         }
-        let timeline = parse_timeline_id(timeline_id)?;
+        let timeline =
+            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
         let entity = parse_entity_id(entity_id)?;
         let bytes = json_to_cbor(payload);
         let draft = EventDraft::new(entity, Kind::new(EVENT_TYPE_ACTION), bytes);
@@ -3459,7 +3498,9 @@ impl Gateway {
         request: HumanActionRequest<'_>,
         authorization: Arc<GatewayAuthorization>,
     ) -> Result<AdmittedAction, GatewayError> {
-        let timeline = match parse_timeline_id(request.timeline_id).and_then(client_timeline) {
+        let timeline = match parse_timeline_id(request.timeline_id)
+            .and_then(|timeline| self.client_timeline(timeline))
+        {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
@@ -3736,7 +3777,8 @@ impl Gateway {
         entity_id: &str,
         signal: &SocietySignal,
     ) -> Result<Event, GatewayError> {
-        let timeline = parse_timeline_id(timeline_id).and_then(client_timeline)?;
+        let timeline =
+            parse_timeline_id(timeline_id).and_then(|timeline| self.client_timeline(timeline))?;
         let entity = parse_entity_id(entity_id)?;
         let draft = draft_signal(entity, signal);
         debug_assert_eq!(draft.event_type.as_str(), EVENT_TYPE_SIGNAL);
@@ -3745,6 +3787,10 @@ impl Gateway {
 
     /// The owned-Event ceiling uses this Timeline's store head. Logical Events
     /// inherited by a Fork are readable but do not consume the Fork's ceiling.
+    ///
+    /// `timeline` is never taken from a client as is: every caller passes it
+    /// through [`Self::client_timeline`] first, so no client append reaches
+    /// a host Timeline.
     async fn append_draft(
         &self,
         timeline: TimelineId,
@@ -4110,17 +4156,6 @@ fn encode_gateway_actuator_params(
         })
 }
 
-/// `timeline`, unless it is the Local Principal's consent Timeline (#309):
-/// only the host's consent seams read or append it, so a client append, read
-/// or action naming it is `404 not-found-or-unavailable`.
-fn client_timeline(timeline: TimelineId) -> Result<TimelineId, GatewayError> {
-    if timeline == local_principal::local_principal_consent_timeline() {
-        Err(GatewayError::ResourceUnavailable)
-    } else {
-        Ok(timeline)
-    }
-}
-
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
     Ulid::from_string(s)
         .map(TimelineId::from_ulid)
@@ -4395,7 +4430,7 @@ mod tests {
         let gateway = Gateway::unprotected_for_harness(host).test_ok();
 
         assert!(!gateway.has_authorization());
-        let timeline = gateway.create_timeline("foundation").await.test_ok();
+        let timeline = gateway.create_timeline("foundation", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let page = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
         assert!(page.events.is_empty());
@@ -4771,6 +4806,30 @@ mod tests {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
     }
 
+    /// No client append, through any seam, reaches a host Timeline
+    /// (ADR-136 §4a): an action naming one is refused before the store.
+    #[tokio::test]
+    async fn an_action_append_never_reaches_a_host_timeline() {
+        let gateway = memory_gw();
+        for host_timeline in [
+            local_principal::local_principal_consent_timeline(),
+            local_principal::local_principal_authority_timeline(),
+        ] {
+            assert!(matches!(
+                gateway
+                    .append_action(
+                        &host_timeline.to_string(),
+                        &EntityId::new().to_string(),
+                        EVENT_TYPE_ACTION,
+                        &serde_json::json!({}),
+                    )
+                    .await,
+                Err(GatewayError::ResourceUnavailable)
+            ));
+        }
+        drop(gateway);
+    }
+
     fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
         ConsentGrantedV1 {
             subject_id,
@@ -4982,7 +5041,10 @@ mod tests {
             authorization,
         )
         .test_ok();
-        let timeline = gateway.create_timeline("authority-action").await.test_ok();
+        let timeline = gateway
+            .create_timeline("authority-action", None)
+            .await
+            .test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
             "body_entity_id": body,
@@ -5060,7 +5122,10 @@ mod tests {
         let gateway =
             super::gateway_with_erasure_host_and_authorization(host, [body], authorization)
                 .test_ok();
-        let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
+        let timeline = gateway
+            .create_timeline("host-owned-action", None)
+            .await
+            .test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
             "body_entity_id": body,
@@ -5144,7 +5209,7 @@ mod tests {
             super::gateway_with_erasure_host_and_authorization(host, [body], authorization)
                 .test_ok();
         let timeline = gateway
-            .create_timeline("host-authority-commit-recheck")
+            .create_timeline("host-authority-commit-recheck", None)
             .await
             .test_ok();
         let payload = serde_json::json!({
@@ -5198,7 +5263,7 @@ mod tests {
         )
         .test_ok();
         let timeline = gateway
-            .create_timeline("action-event-ceiling")
+            .create_timeline("action-event-ceiling", None)
             .await
             .test_ok();
         let payload = serde_json::json!({
@@ -5428,7 +5493,7 @@ mod tests {
         )
         .test_ok();
         let timeline = gateway
-            .create_timeline("authority-action-boundaries")
+            .create_timeline("authority-action-boundaries", None)
             .await
             .test_ok();
         let timeline_id = timeline.id().to_string();
@@ -5486,7 +5551,10 @@ mod tests {
             [],
             authorization,
         );
-        let timeline = gateway.create_timeline("authority-read").await.test_ok();
+        let timeline = gateway
+            .create_timeline("authority-read", None)
+            .await
+            .test_ok();
         let unguarded_page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
@@ -5559,7 +5627,7 @@ mod tests {
             crate::authorization::test_authorization_for(actor),
         );
         let timeline = gateway
-            .create_timeline("authorized-public-cursor")
+            .create_timeline("authorized-public-cursor", None)
             .await
             .test_ok();
         let id = timeline.id().to_string();
@@ -5623,7 +5691,7 @@ mod tests {
         .test_ok();
         let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let timeline = gateway
-            .create_timeline("generationless-cursor")
+            .create_timeline("generationless-cursor", None)
             .await
             .test_ok();
         // A cursor issued by an unhosted Gateway cannot continue under a host.
@@ -5683,7 +5751,10 @@ mod tests {
             [],
             crate::authorization::test_expired_authorization_for(actor),
         );
-        let timeline = gateway.create_timeline("expired-read").await.test_ok();
+        let timeline = gateway
+            .create_timeline("expired-read", None)
+            .await
+            .test_ok();
         let request =
             GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::from_micros(1));
         let error = gateway
@@ -5789,7 +5860,7 @@ mod tests {
             crate::authorization::test_authorization_unavailable_for(actor),
         );
         let timeline = gateway
-            .create_timeline("authority-unavailable")
+            .create_timeline("authority-unavailable", None)
             .await
             .test_ok();
         let error = gateway
@@ -6131,7 +6202,7 @@ mod tests {
             Gateway::with_executor_for_test(executor::StoreExecutor::from_sender_for_test(tx));
 
         assert!(matches!(
-            gateway.create_timeline("closed").await,
+            gateway.create_timeline("closed", None).await,
             Err(GatewayError::StoreExecutorClosed)
         ));
         assert!(matches!(
@@ -6154,7 +6225,7 @@ mod tests {
             Gateway::with_executor_for_test(executor::StoreExecutor::from_sender_for_test(tx));
 
         assert!(matches!(
-            gateway.create_timeline("closed-queue").await,
+            gateway.create_timeline("closed-queue", None).await,
             Err(GatewayError::StoreExecutorClosed)
         ));
         drop(gateway);
@@ -6228,7 +6299,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn create_timeline_and_append_action_roundtrip() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").await.test_ok();
+        let tl = gw.create_timeline("demo", None).await.test_ok();
         let entity = EntityId::new().to_string();
         let event = gw
             .append_action(
@@ -6254,7 +6325,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_issues_only_canonical_consent_events_at_the_bound_sequence() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("consent-host").await.test_ok();
+        let timeline = gateway
+            .create_timeline("consent-host", None)
+            .await
+            .test_ok();
         let mut notices = gateway.subscribe();
         let grant = consent_grant(EntityId::new(), 1);
 
@@ -6355,7 +6429,7 @@ mod tests {
         )
         .test_ok();
         let timeline = gateway
-            .create_timeline("consent-dedup-cleanup")
+            .create_timeline("consent-dedup-cleanup", None)
             .await
             .test_ok();
         let timeline_id = timeline.id().to_string();
@@ -6501,7 +6575,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_rejects_a_consent_grant_with_a_stale_sequence_before_append() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("consent-sequence").await.test_ok();
+        let timeline = gateway
+            .create_timeline("consent-sequence", None)
+            .await
+            .test_ok();
         let error = gateway
             .issue_consent_grant(
                 &timeline.id().to_string(),
@@ -6524,7 +6601,7 @@ mod tests {
             mode: ScriptMode::FailAppend,
         }));
         let timeline = gateway
-            .create_timeline("consent-grant-append-error")
+            .create_timeline("consent-grant-append-error", None)
             .await
             .test_ok();
         let error = gateway
@@ -6553,7 +6630,7 @@ mod tests {
             },
         );
         let timeline = gateway
-            .create_timeline("consent-grant-errors")
+            .create_timeline("consent-grant-errors", None)
             .await
             .test_ok();
         let subject = EntityId::new();
@@ -6592,7 +6669,7 @@ mod tests {
             },
         );
         let timeline = gateway
-            .create_timeline("consent-revocation-test")
+            .create_timeline("consent-revocation-test", None)
             .await
             .test_ok();
         let (grant_event, token) = gateway
@@ -6616,7 +6693,7 @@ mod tests {
             },
         );
         let timeline = gateway
-            .create_timeline("consent-revocation-unknown")
+            .create_timeline("consent-revocation-unknown", None)
             .await
             .test_ok();
         let unknown = ConsentRevokedV1 {
@@ -6714,7 +6791,11 @@ mod tests {
     #[tokio::test]
     async fn consent_history_lock_is_shared_by_gateway_clones() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("consent-lock").await.test_ok().id();
+        let timeline = gateway
+            .create_timeline("consent-lock", None)
+            .await
+            .test_ok()
+            .id();
         let guard = gateway.lock_consent_timeline(timeline).await;
         let clone = gateway.clone();
         let grant_task = tokio::spawn(async move {
@@ -6738,7 +6819,7 @@ mod tests {
             mode: ScriptMode::FailConsentRevocationAppend,
         }));
         let timeline = gateway
-            .create_timeline("consent-revocation-append-error")
+            .create_timeline("consent-revocation-append-error", None)
             .await
             .test_ok();
         let (_, token) = gateway
@@ -6808,8 +6889,14 @@ mod tests {
                 max_events_per_timeline: 2,
             },
         );
-        timeline_limited.create_timeline("one").await.test_ok();
-        let err = timeline_limited.create_timeline("two").await.test_err();
+        timeline_limited
+            .create_timeline("one", None)
+            .await
+            .test_ok();
+        let err = timeline_limited
+            .create_timeline("two", None)
+            .await
+            .test_err();
         assert!(matches!(
             err,
             GatewayError::TimelineLimitReached { maximum: 1 }
@@ -6822,7 +6909,10 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = event_limited.create_timeline("events").await.test_ok();
+        let timeline = event_limited
+            .create_timeline("events", None)
+            .await
+            .test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         event_limited
@@ -6868,8 +6958,8 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        gateway.create_timeline("second-root").await.test_ok();
-        let error = gateway.create_timeline("third-root").await.test_err();
+        gateway.create_timeline("second-root", None).await.test_ok();
+        let error = gateway.create_timeline("third-root", None).await.test_err();
         assert!(matches!(
             error,
             GatewayError::TimelineLimitReached { maximum: 2 }
@@ -6883,7 +6973,7 @@ mod tests {
         let gateway = Gateway::new(Box::new(ScriptedStore {
             mode: ScriptMode::RejectListUse,
         }));
-        gateway.create_timeline("root").await.test_ok();
+        gateway.create_timeline("root", None).await.test_ok();
         drop(gateway);
     }
 
@@ -6974,7 +7064,7 @@ mod tests {
                 max_events_per_timeline: 1,
             },
         );
-        let timeline = gateway.create_timeline("sqlite").await.test_ok();
+        let timeline = gateway.create_timeline("sqlite", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         let first = gateway.clone();
@@ -7265,7 +7355,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn gateway_rejects_payloads_that_cannot_fit_bounded_responses() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("payload").await.test_ok();
+        let timeline = gateway.create_timeline("payload", None).await.test_ok();
         let payload = serde_json::json!({"data": "x".repeat(MAX_EVENT_PAYLOAD_BYTES)});
         let error = gateway
             .append_action(
@@ -7416,7 +7506,10 @@ mod tests {
         }
         let payload = boundary.test_ok();
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("cursor-boundary").await.test_ok();
+        let timeline = gateway
+            .create_timeline("cursor-boundary", None)
+            .await
+            .test_ok();
         let error = gateway
             .append_action(
                 &timeline.id().to_string(),
@@ -7454,7 +7547,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_rejects_zero_limit() {
         let gw = memory_gw();
-        let timeline = gw.create_timeline("zero").await.test_ok();
+        let timeline = gw.create_timeline("zero", None).await.test_ok();
         let err = gw
             .read_events_page(&timeline.id().to_string(), 0, 0)
             .await
@@ -7472,7 +7565,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn empty_event_page_has_no_cursor() {
         let gw = memory_gw();
-        let timeline = gw.create_timeline("empty").await.test_ok();
+        let timeline = gw.create_timeline("empty", None).await.test_ok();
         let page = gw
             .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
@@ -7486,7 +7579,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_page_cursor_is_first_omitted_sequence_and_none_at_exhaustion() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("cursor").await.test_ok();
+        let timeline = gateway.create_timeline("cursor", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let entity_id = EntityId::new().to_string();
         for value in 0..2 {
@@ -7515,7 +7608,7 @@ mod tests {
     #[tokio::test]
     async fn event_pages_filter_protected_events_before_deriving_cursors() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("mixed-scope").await.test_ok();
+        let timeline = gateway.create_timeline("mixed-scope", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let drafts = [
             EVENT_TYPE_ACTION,
@@ -7571,7 +7664,7 @@ mod tests {
     async fn event_pages_bound_protected_scans_and_resume_at_public_events() {
         let gateway = memory_gw();
         let timeline = gateway
-            .create_timeline("protected-scan-cap")
+            .create_timeline("protected-scan-cap", None)
             .await
             .test_ok();
         let mut drafts = (0..1_000)
@@ -7614,7 +7707,7 @@ mod tests {
     async fn a_full_page_filled_by_one_scan_chunk_still_finds_the_next_public_event() {
         let gateway = memory_gw();
         let timeline = gateway
-            .create_timeline("protected-chunk-boundary")
+            .create_timeline("protected-chunk-boundary", None)
             .await
             .test_ok();
         let draft = |kind: &str| {
@@ -7653,7 +7746,7 @@ mod tests {
     #[allow(deprecated)]
     async fn public_page_api_and_compatibility_shim_remain_bounded() {
         let gateway = memory_gw();
-        let timeline = gateway.create_timeline("public-api").await.test_ok();
+        let timeline = gateway.create_timeline("public-api", None).await.test_ok();
         let drafts: Vec<_> = (0..=MAX_EVENTS_PER_POLL)
             .map(|_| {
                 EventDraft::new(
@@ -7753,7 +7846,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn append_action_rejects_other_types() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("demo").await.test_ok();
+        let tl = gw.create_timeline("demo", None).await.test_ok();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -7775,7 +7868,7 @@ mod tests {
     async fn append_signal_and_bus_notice() {
         let gw = memory_gw();
         let mut rx = gw.subscribe();
-        let tl = gw.create_timeline("society").await.test_ok();
+        let tl = gw.create_timeline("society", None).await.test_ok();
         let signal = SocietySignal {
             dimension: SocietyDimension::Trust,
             value: 0.8,
@@ -7808,7 +7901,7 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(err, GatewayError::InvalidId(_)));
-        let tl = gw.create_timeline("ids").await.test_ok();
+        let tl = gw.create_timeline("ids", None).await.test_ok();
         let err = gw
             .append_action(
                 &tl.id().to_string(),
@@ -7909,7 +8002,7 @@ mod tests {
             authorization_required: false,
         };
         assert!(matches!(
-            fail_create.create_timeline("x").await,
+            fail_create.create_timeline("x", None).await,
             Err(GatewayError::Store(_))
         ));
 
@@ -7928,7 +8021,7 @@ mod tests {
             authorization_required: false,
         };
         assert!(matches!(
-            fail_list.create_timeline("x").await,
+            fail_list.create_timeline("x", None).await,
             Err(GatewayError::Store(_))
         ));
         drop(fail_create);
@@ -8017,7 +8110,7 @@ mod tests {
             authorization: None,
             authorization_required: false,
         };
-        let tl = empty_append.create_timeline("e").await.test_ok();
+        let tl = empty_append.create_timeline("e", None).await.test_ok();
         let err = empty_append
             .append_action(
                 &tl.id().to_string(),
@@ -8068,7 +8161,7 @@ mod tests {
             authorization: None,
             authorization_required: false,
         };
-        let tl = fail_append.create_timeline("a").await.test_ok();
+        let tl = fail_append.create_timeline("a", None).await.test_ok();
         let err = fail_append
             .append_action(
                 &tl.id().to_string(),
@@ -8167,7 +8260,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn event_view_and_hex() {
         let gw = memory_gw();
-        let tl = gw.create_timeline("x").await.test_ok();
+        let tl = gw.create_timeline("x", None).await.test_ok();
         let event = gw
             .append_action(
                 &tl.id().to_string(),
@@ -8227,7 +8320,7 @@ mod tests {
 
         let gw = Gateway::with_bus_capacity(open_store(StoreConfig::Memory).test_ok(), 2);
         let mut rx = gw.subscribe();
-        let tl = gw.create_timeline("lag").await.test_ok();
+        let tl = gw.create_timeline("lag", None).await.test_ok();
         let entity = EntityId::new().to_string();
         let id = tl.id().to_string();
         for _ in 0..3 {
@@ -8286,7 +8379,7 @@ mod tests {
             crate::authorization::test_authorization_for(actor),
         )
         .test_ok();
-        let timeline = gateway.create_timeline("raw-actions").await.test_ok();
+        let timeline = gateway.create_timeline("raw-actions", None).await.test_ok();
         let timeline_id = timeline.id().to_string();
         let canonical = WorldActionV1 {
             actor_entity_id: actor,
@@ -8388,7 +8481,7 @@ mod tests {
             crate::authorization::test_authorization_for(actor),
         )
         .test_ok();
-        let tl = gw.create_timeline("actions").await.test_ok();
+        let tl = gw.create_timeline("actions", None).await.test_ok();
         let action = WorldActionV1 {
             actor_entity_id: actor,
             body_entity_id: body,
@@ -8489,7 +8582,7 @@ mod coverage_entrypoints {
         )?;
         let gateway = Gateway::unprotected_for_harness(host)?;
         assert_eq!(gateway.erasure_status().await?, ErasureHostStatusV1::Ready);
-        let timeline = gateway.create_timeline("host-owned-gateway").await?;
+        let timeline = gateway.create_timeline("host-owned-gateway", None).await?;
         let entity = EntityId::new();
         gateway
             .append_action(

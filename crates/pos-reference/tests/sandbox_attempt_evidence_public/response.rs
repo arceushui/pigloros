@@ -501,10 +501,12 @@ fn rule_6_the_release_binds_koe1_and_exists_exactly_when_spr1_names_it() -> Test
     extra.present_release = Some(true);
     unstarted(&extra)?.rejects("a ReleaseV1 for an attempt never released");
     // KOE1 status 2: the observation failed, which selects code 2, so no
-    // ReleaseV1 may bind it.
+    // ReleaseV1 may bind it. It opened no `/work`, so `work-after` is null
+    // (owner decision 2026-11-19).
     let failed = Fixture::released(TME1_A)?
         .koe1(&[4], integer(2))?
         .koe1(&[7], Value::Null)?
+        .tme1(&[21], Value::Null)?
         .tme1(&[26], integer(2))?;
     build(failed, &Plan::new(&[11, 12, 2], 4))?
         .rejects("a ReleaseV1 binding a KOE1 whose observation failed");

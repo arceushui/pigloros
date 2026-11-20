@@ -513,6 +513,26 @@ impl AdapterIo {
         self.output
     }
 
+    /// The feed `input` and a capture of `bytes` that stopped at the
+    /// ceiling or at the end of the stream, for the terminal records' tests.
+    #[cfg(test)]
+    pub(crate) fn for_test_capture(
+        input: TransferRecord,
+        bytes: Vec<u8>,
+        ceiling: bool,
+        charge: StagingCharge,
+    ) -> Self {
+        let stop = if ceiling {
+            CaptureStop::Ceiling
+        } else {
+            CaptureStop::EndOfStream
+        };
+        Self {
+            input,
+            output: Captured { bytes, stop }.fenced(charge),
+        }
+    }
+
     /// A feed of one byte and an empty capture, for lifecycle tests.
     #[cfg(test)]
     pub(crate) fn for_test(charge: StagingCharge) -> Self {
