@@ -5,7 +5,8 @@
 use std::error::Error;
 
 use pos_reference::sandbox_provider_protocol::{
-    AttemptProgressCode, BarrierFailure, CancelSource, CleanupResult, Contradiction,
+    AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, AttemptProgressCode, BarrierFailure,
+    CancelSource, CleanupResult, Contradiction, ExecutionRelease, ExecutionReleaseFields,
     KernelObservationStatus, LaunchFailure, LocalNetworkSession, LocalNetworkTermination,
     RequestedConfigurationStatus, SandboxExecutionMode, SandboxLimit, SandboxTerminalOutcome,
     StartJobResult, TerminalCode, TransferRecord, WATCHDOG_GRACE_NS,
@@ -78,7 +79,107 @@ const fn input(complete: bool) -> TransferRecord {
 }
 
 fn admission(mode: SandboxExecutionMode, input: Option<TransferRecord>) -> AttemptAdmission {
-    AttemptAdmission::new(IssuedGrant::fixture(AGR1, limits(), mode), input)
+    admission_of(None, mode, input)
+}
+
+/// The admission under `grant`'s AGR1, or under filler AGR1 bytes of
+/// digest [`AGR1`] that no verifier accepts.
+fn admission_of(
+    grant: Option<&SignedGrant>,
+    mode: SandboxExecutionMode,
+    input: Option<TransferRecord>,
+) -> AttemptAdmission {
+    let issued = grant.map_or_else(
+        || IssuedGrant::fixture(AGR1, limits(), mode),
+        |signed| {
+            IssuedGrant::fixture(signed.grant.grant_digest(), limits(), mode)
+                .with_bytes(&signed.bytes)
+        },
+    );
+    AttemptAdmission::new(issued, input)
+}
+
+/// The runtime-attestation key ID the test signer holds.
+const KEY_ID: &str = "runtime";
+
+fn signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[42; 32])
+}
+
+fn signer() -> crate::KeyFileRuntimeSigner {
+    crate::KeyFileRuntimeSigner::from_signing_key(signing_key(), KEY_ID.to_owned())
+}
+
+/// A signed AGR1 of the test attempt and its exact bytes.
+struct SignedGrant {
+    grant: AdmissionGrant,
+    bytes: Vec<u8>,
+}
+
+/// The AGR1 of the test attempt under ELM1 `[0xe1; 32]`, the digest
+/// `IssuedGrant::fixture` names, signed by the test key.
+fn signed_grant() -> TestResult<SignedGrant> {
+    let digest = |byte| [byte; 32];
+    let fields = AdmissionGrantFields {
+        request_id: [0x31; 16],
+        attempt_id: ATTEMPT,
+        authority: AdmissionAuthority {
+            evr1_digest: digest(0x41),
+            fixture_contract_digest: digest(0x42),
+            fixture_digest: digest(0x43),
+            execution_profile_digest: digest(0x44),
+            lps1_digest: digest(0x45),
+            sim1_digest: digest(0x46),
+            apt1_digest: digest(0x47),
+            trs1_digest: digest(0x48),
+            rvs1_digest: digest(0x49),
+            spm1_digest: digest(0x4a),
+            pcf1_digest: digest(0x4b),
+            pcr1_digest: digest(0x4c),
+            hcp1_digest: digest(0x4d),
+        },
+        trust_epoch: 1,
+        revocation_epoch: 2,
+        policy_epoch: 3,
+        elm1_digest: digest(0xe1),
+        input_digest: digest(0x51),
+        exchange_plan_digests: Vec::new(),
+        expected_launch_policy_digest: digest(0x45),
+        expected_readback_set_digest: digest(0x52),
+        runtime_attestation_key_id: KEY_ID.to_owned(),
+    };
+    let public = signing_key().verifying_key();
+    let admitted = crate::AdmittedRuntimeKey::new(KEY_ID, &public);
+    let verified =
+        crate::sign_verified(&signer(), admitted, AdmissionGrant::self_digested(fields)?)?;
+    let grant = AdmissionGrant::new(verified, &public)?;
+    let bytes = grant.to_canonical_cbor()?;
+    Ok(SignedGrant { grant, bytes })
+}
+
+/// The `ReleaseV1` the test key signs for `grant`, bound to `koe1`.
+fn signed_release(grant: &AdmissionGrant, koe1: [u8; 32]) -> TestResult<ExecutionRelease> {
+    let public = signing_key().verifying_key();
+    let admitted = crate::AdmittedRuntimeKey::new(KEY_ID, &public);
+    Ok(crate::issue_release(
+        &signer(),
+        admitted,
+        ExecutionReleaseFields {
+            attempt_id: ATTEMPT,
+            nonce: [0x61; 32],
+            ready1_digest: READY1,
+            trs1_digest: grant.authority.trs1_digest,
+            rvs1_digest: grant.authority.rvs1_digest,
+            apt1_digest: grant.authority.apt1_digest,
+            trust_epoch: grant.trust_epoch,
+            revocation_epoch: grant.revocation_epoch,
+            policy_epoch: grant.policy_epoch,
+            expected_readback_digest: [0x62; 32],
+            observed_readback_digest: koe1,
+            deadline_monotonic_ns: D,
+            runtime_attestation_key_id: KEY_ID.to_owned(),
+        },
+    )?)
 }
 
 /// The four limit-event sources with these counters.
@@ -128,6 +229,9 @@ struct Released {
     cancel: Option<CancelSource>,
     proved: bool,
     cleaned_at: Option<u64>,
+    /// The signed AGR1, under which `ReleaseV1` is signed too; `None` for
+    /// filler AGR1 bytes and no `ReleaseV1`.
+    grant: Option<SignedGrant>,
 }
 
 impl Default for Released {
@@ -149,6 +253,7 @@ impl Default for Released {
             cancel: None,
             proved: true,
             cleaned_at: Some(CLEANED_AT),
+            grant: None,
         }
     }
 }
@@ -174,17 +279,32 @@ fn observation(work: Option<(u64, u64)>) -> KernelObservation {
 }
 
 /// The release phase: a frozen status-0 KOE1 bound to the fake start's
-/// RQE1.
+/// RQE1, and no `ReleaseV1`.
 fn release(work: Option<(u64, u64)>) -> TestResult<ReleaseOutcome> {
+    release_of(None, work, false)
+}
+
+/// The release phase under `grant`: KOE1 binds its AGR1, and the
+/// `ReleaseV1` it signs was sent if `send`.
+fn release_of(
+    grant: Option<&SignedGrant>,
+    work: Option<(u64, u64)>,
+    send: bool,
+) -> TestResult<ReleaseOutcome> {
+    let agr1 = grant.map_or(AGR1, |signed| signed.grant.grant_digest());
     let requested =
-        crate::RequestedConfiguration::requested_configuration_evidence(&start(), ATTEMPT, AGR1)?;
+        crate::RequestedConfiguration::requested_configuration_evidence(&start(), ATTEMPT, agr1)?;
     let observation = observation(work);
     let koe1 =
-        crate::observation_evidence(ATTEMPT, AGR1, READY1, requested.digest(), &observation)?;
+        crate::observation_evidence(ATTEMPT, agr1, READY1, requested.digest(), &observation)?;
+    let release = grant
+        .filter(|_| send)
+        .map(|signed| signed_release(&signed.grant, koe1.digest()))
+        .transpose()?;
     Ok(ReleaseOutcome::new(
         Some(READY1),
         Some((ObservedUnit::new(&observation), koe1)),
-        None,
+        release,
     ))
 }
 
@@ -270,12 +390,20 @@ impl Released {
             started: start(),
             ending: self.ending,
             network: self.network,
-            evidence: evidence(release(self.work)?, self.baseline, terminal)?,
+            evidence: evidence(
+                release_of(self.grant.as_ref(), self.work, true)?,
+                self.baseline,
+                terminal,
+            )?,
             adapter,
         };
         Ok(EndedAttempt::for_test(
             ATTEMPT,
-            admission(SandboxExecutionMode::AirGapped, self.input),
+            admission_of(
+                self.grant.as_ref(),
+                SandboxExecutionMode::AirGapped,
+                self.input,
+            ),
             self.cancel,
             progress,
             (cleanup(self.proved)?, self.cleaned_at),
@@ -1073,5 +1201,12 @@ fn a_failure_after_the_release_is_a_provider_fault() -> TestResult {
         (cleanup(true)?, Some(CLEANED_AT)),
     );
     assert!(matches!(ended.records(), Err(EvidenceFault::Record(_))));
+    // No response is emitted either.
+    assert!(matches!(
+        ended.signed_response(&signer, crate::AdmittedRuntimeKey::new("runtime", &public)),
+        Err(super::ResponseFault::Evidence(EvidenceFault::Record(_)))
+    ));
     Ok(())
 }
+
+mod response;
