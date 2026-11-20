@@ -377,7 +377,7 @@ where
     S: ErasureInventoryPersistencePortV1 + ?Sized,
 {
     store
-        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum(), &[])
         .is_ok_and(|snapshot| {
             snapshot.inventory().request_heads().is_empty()
                 || store
@@ -414,7 +414,7 @@ where
     S: ErasureInventoryPersistencePortV1 + ErasurePersistencePortV1 + ?Sized,
 {
     store
-        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum(), &[])
         .ok()
         .and_then(|snapshot| {
             snapshot
