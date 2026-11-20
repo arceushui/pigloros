@@ -1,6 +1,6 @@
 //! Manager operations on the selector-owned provider units (ADR-069 R11 §5.0,
 //! R12 §7.2): listing a unit family, stopping one listed unit, and starting
-//! one runtime unit.
+//! one runtime or recovery-peer unit.
 
 use std::collections::BTreeSet;
 
@@ -14,7 +14,7 @@ use super::{
     SystemdTransientUnitTransport, SystemdTransientUnitTransportError, TransientServiceUnitName,
     START_JOB_MODE, UNIT_SUFFIX,
 };
-use crate::provider_lifecycle::ProviderRuntimeUnitRequest;
+use crate::provider_lifecycle::ProviderUnitRequest;
 use crate::provider_lifecycle::{
     CgroupRootSource, ProviderUnit, ProviderUnitFamily, StartedProviderUnit,
 };
@@ -109,22 +109,22 @@ impl SystemdTransientUnitTransport {
         }
     }
 
-    /// Start one runtime unit with exactly `request`'s properties, wait for its
-    /// start job to end `done`, and read its `MainPID` and `ControlGroup` over
-    /// the same connection.
+    /// Start one runtime or recovery-peer unit with exactly `request`'s
+    /// properties, wait for its start job to end `done`, and read its
+    /// `MainPID` and `ControlGroup` over the same connection.
     ///
     /// The job signal is subscribed before the start, so an immediately
     /// completed job cannot race the observer. Under `Type=notify`, `done`
-    /// follows the daemon's `READY=1`.
+    /// follows the daemon's or the peer's `READY=1`.
     ///
     /// # Errors
     /// Rejects a refused start, a job that ends otherwise than `done`, a
     /// completion that names another unit, and a unit that is not the same
     /// object after its properties were read.
-    pub(crate) async fn start_provider_runtime_unit(
+    pub(crate) async fn start_provider_unit(
         &self,
         name: &TransientServiceUnitName,
-        request: &ProviderRuntimeUnitRequest,
+        request: &ProviderUnitRequest,
     ) -> UnitsResult<StartedProviderUnit> {
         self.start_runtime_with(
             ManagerProxy::new(&self.connection).await,
@@ -134,7 +134,7 @@ impl SystemdTransientUnitTransport {
         .await
     }
 
-    /// [`Self::start_provider_runtime_unit`] over an already constructed proxy
+    /// [`Self::start_provider_unit`] over an already constructed proxy
     /// and property bundle.
     pub(crate) async fn start_runtime_with(
         &self,
