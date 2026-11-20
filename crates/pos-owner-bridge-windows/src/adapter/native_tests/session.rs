@@ -30,7 +30,7 @@ pub(super) struct Session<'a> {
     retirement_bound: Duration,
     // Ends the process once the bound passes: no owner may be released under a
     // live browser, and a hung test would otherwise hold the step to its timeout.
-    abandon: fn(),
+    abandon: fn() -> !,
 }
 
 impl<'a> Session<'a> {
@@ -149,7 +149,6 @@ impl Drop for Session<'_> {
             if started.elapsed() >= self.retirement_bound {
                 self.report_stalled_retirement();
                 (self.abandon)();
-                break;
             }
             self.pump_retaining();
         }
@@ -362,8 +361,10 @@ mod tests {
         thread_local! {
             static ABANDONED: Cell<bool> = const { Cell::new(false) };
         }
-        fn record() {
+        fn record() -> ! {
             ABANDONED.with(|abandoned| abandoned.set(true));
+            // Stands in for the abort: the drop ends here, as the process would.
+            std::panic::resume_unwind(Box::new("abandoned stalled retirement"))
         }
         let native = Factory::new(Creation::Ready, FakeClock::start());
         let events = Rc::new(Events::default());
@@ -377,8 +378,9 @@ mod tests {
         });
         let error = session.as_ref().err();
         assert!(session.is_ok(), "session creation: {error:?}");
-        // No exit event ever arrives; the drop must still return.
-        drop(session);
+        // No exit event ever arrives; the drop must still end, through `abandon`.
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(session)));
+        assert!(dropped.is_err());
         assert!(ABANDONED.with(Cell::get));
         let calls = native.calls.borrow();
         assert!(calls.contains(&"close_controller"));
