@@ -58,8 +58,14 @@ fn export_of(owner: Option<EntityId>) -> TestResult<TimelineExport> {
 /// Seed the store at `path` with an unowned root and three imports that
 /// keep their exported owner (owner decision of 2026-11-20: ownership
 /// follows the data).
+///
+/// The store is bound to the Local mode, so an unattached writer would be
+/// refused `ModeBindingStale` (ADR-134 §8): the seed attaches as the
+/// offline writer, as `provision-local-erasure` does.
 fn seed(path: &str) -> TestResult<Seeded> {
     let mut store = SqliteStore::open(path)?;
+    crate::mode_profile::attach_offline_writer_v1(&mut store)
+        .map_err(|error| format!("{error:?}"))?;
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let unowned = store
         .create_timeline_with_meta(TimelineMeta::root("unowned"))?
