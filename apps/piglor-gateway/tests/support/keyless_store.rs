@@ -53,7 +53,7 @@ fn principal() -> TestResult<PrincipalRefV1> {
 }
 
 /// The fixture actor, whose subject the held request erases.
-fn actor() -> EntityId {
+const fn actor() -> EntityId {
     EntityId::from_ulid(ulid::Ulid::from_bytes([0x32; 16]))
 }
 

@@ -22,7 +22,7 @@ use pos_runtime::{
 use signing::TestResult;
 
 /// Whether `host` reads the state of `store`'s request.
-fn reads_request(mut host: ErasureExecutionHostV1, store: &KeylessStore) -> TestResult<bool> {
+fn reads_request(host: &mut ErasureExecutionHostV1, store: &KeylessStore) -> TestResult<bool> {
     Ok(host.read_sender()?.erasure_state(store.request)?.is_some())
 }
 
@@ -46,10 +46,11 @@ fn the_closed_composition_cannot_recover_a_store_that_holds_a_request() -> TestR
 fn valid_credentials_recover_the_store_and_its_request() -> TestResult {
     let store = KeylessStore::new()?;
     let source = store.valid_source("valid")?;
-    let host = LocalErasureRecoveryV1::open_host(store.config(), &source)?;
-    assert!(reads_request(host, &store)?);
-    let host = LocalErasureRecoveryV1::open_read_only_host(&store.path, &source)?;
-    assert!(reads_request(host, &store)?);
+    let mut host = LocalErasureRecoveryV1::open_host(store.config(), &source)?;
+    assert!(reads_request(&mut host, &store)?);
+    drop(host);
+    let mut host = LocalErasureRecoveryV1::open_read_only_host(&store.path, &source)?;
+    assert!(reads_request(&mut host, &store)?);
     Ok(())
 }
 
