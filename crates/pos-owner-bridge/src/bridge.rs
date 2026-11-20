@@ -18,7 +18,8 @@ use crate::ceremony::plan::{
 use crate::{
     BindingUpdate, BridgeError, BridgeStatus, CeremonyHost, CeremonyReply, CleanupStore,
     ConfirmedBinding, EnrollmentContext, EnrollmentPort, MonotonicClock, PrfOutput, ProcessProbe,
-    QuarantineCode, RejectedCode, RootFingerprint, SecureRandom, UnavailableCode, UnlockPort,
+    QuarantineCode, RejectedCode, RootFingerprint, SealInputs, SecureRandom, UnavailableCode,
+    UnlockPort,
 };
 
 /// The failure when the slots are not in the bridge's hands: a host dropped the driver.
@@ -425,7 +426,14 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         let stored = self.source_prf(&created, budget)?;
         let (candidate, sealed) = self
             .with_slots(|slots| {
-                let sealed = port.seal_candidate(PrfOutput::new(&slots.create_prf), context);
+                let sealed = port.seal_candidate(
+                    PrfOutput::new(&slots.create_prf),
+                    SealInputs::new(
+                        context,
+                        &created.registration.credential_id,
+                        created.prf_input,
+                    ),
+                );
                 slots.create_prf.fill(0);
                 sealed
             })?
