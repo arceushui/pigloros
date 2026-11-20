@@ -2,8 +2,8 @@
 
 This table maps each bullet of the ADR-136 acceptance tests (Redmine #1414) to
 the public-seam tests that cover it. Slice C6a (#1469) covers tests 1 to 7 at
-the runtime seams. Slices C6b and C6c add tests 8 to 11 in the section at the
-end.
+the runtime seams. Slice C6b (#1470) adds tests 8 to 10 and the Gateway parts
+of test 2. Slice C6c adds test 11.
 
 ## Paths
 
@@ -15,6 +15,10 @@ end.
 | `LEA` | `crates/pos-store/tests/local_erasure_adapter_public.rs` |
 | `LER` | `crates/pos-core/tests/local_erasure_records_public.rs` |
 | `GW` | `apps/piglor-gateway/src` (in-crate tests) |
+| `E` | `apps/piglor-gateway/src/erasure/tests.rs`, the served-router tests of `requestErasure` and `getErasure` |
+| `EA` | `apps/piglor-gateway/src/erasure/tests/acceptance.rs`, the module `erasure::tests::acceptance` (C6b) |
+| `FS` | `apps/piglor-gateway/src/local_fork_service.rs` (in-crate tests, real Unix socket) |
+| `LP` | `apps/piglor-gateway/src/local_principal.rs` (in-crate tests) |
 
 ## Adapters
 
@@ -71,6 +75,21 @@ other `LEC` test.
   through admission; #1425 added the recovery hooks the ADR names (attempt,
   owner result and receipt evidence).
 
+- **`q_subject < 1` (test 8):** a composition whose `q_subject` would be
+  below 1 cannot be built. The compile-time assertion D11 in
+  `crates/pos-runtime/src/erasure_local_authority/policy.rs` refuses it, so no
+  served test can reach it.
+- **pos-cli plain submission past the quota (test 8):** pos-cli exposes no
+  plain `submit_erasure_request`. The authority refuses such a submission with
+  `ErasureErrorV1::PolicyConflict`, which `erasure_error_host_error` maps to
+  `ErasureHostErrorV1::Conflict`, at the runtime seam.
+- **Field-level unavailable reporting (test 10):** ADR-060 (wiki v52 :139)
+  says the evaluator "reports unavailable fields and the ReplayClaim". The
+  public offline evaluator, `ReplayClaimEvaluatorV1`, reports per artifact
+  (class, digest, from and to claim, redaction state, authoritative use). It
+  has no field-level output, and the Gateway has no subject-export route.
+  Test 10 is therefore covered at artifact level through the runtime seam.
+
 ## Test 1: lifecycle bytes
 
 | Bullet | Test | Adapters | Note |
@@ -83,14 +102,14 @@ other `LEC` test.
 
 | Bullet | Test | Adapters | Note |
 |---|---|---|---|
-| An actor-created Timeline is affected. Another actor's Timeline, an unowned Timeline and an imported Timeline are not. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_signed_private_freeze_commits_the_subject_closure` | both; `SQLite` | Deviation (errata): ADR says imported = unaffected; ownership follows the data (owner 2026-11-20). The ACC test imports with `import_timeline_with_id`: the actor's own Timeline is affected; another owner's and an unowned one are not. |
-| A Fork of the actor's Timeline made by another actor inherits the actor as owner and is affected. The actor's Fork of another subject's Timeline is not affected. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not` | both; `SQLite` | The runtime host's `fork_timeline` does not take the forking actor, and a child always inherits its parent's owner. So any host Fork stands for a Fork "made by another actor". The Gateway attribution belongs to C6b. |
-| A Memory host without an authorizer creates unowned Timelines | `EHP::an_owned_root_records_its_owner_at_creation` | both | Runtime part only: `create_timeline` records no owner. The Gateway composition without an authorizer belongs to C6b. |
+| An actor-created Timeline is affected. Another actor's Timeline, an unowned Timeline and an imported Timeline are not. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_signed_private_freeze_commits_the_subject_closure`; `EA::the_served_partition_freezes_only_the_actors_lineage` | both; `SQLite`; `SQLite` | Deviation (errata): ADR says imported = unaffected; ownership follows the data (owner 2026-11-20). The ACC test imports with `import_timeline_with_id`: the actor's own Timeline is affected; another owner's and an unowned one are not. The EA test seeds the same imports and an unowned root into a served store: after the actor's erasure the actor's root and own import answer `403 deleted`, and every other one stays readable through the router. |
+| A Fork of the actor's Timeline made by another actor inherits the actor as owner and is affected. The actor's Fork of another subject's Timeline is not affected. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not` | both; `SQLite` | The runtime host's `fork_timeline` does not take the forking actor, and a child always inherits its parent's owner. So any host Fork stands for a Fork "made by another actor". Not covered at the Gateway: the managed Fork admission service records no forking actor either, and a served Local erasure world with the Fork listener is C6c's managed-mode suite (test 11). |
+| A Memory host without an authorizer creates unowned Timelines | `EHP::an_owned_root_records_its_owner_at_creation`; `LP::a_created_root_is_owned_by_its_admitted_actor` | both; Memory | The LP test is the Gateway part: an unprotected Gateway (no authorizer) creates an unowned root through `POST /v1/timelines`. |
 | An existing descendant | `LEC::a_signed_private_freeze_commits_the_subject_closure` | `SQLite` | Write behind the host. |
 | A future Fork | `LEC::identified_forks_extend_a_frozen_scope_across_restart_and_rotation` | `SQLite` | Restart and bundle rotation. |
-| A Fork admitted between the freeze and the first ERSE1 | `ACC::a_fork_admitted_after_freeze_is_the_first_extension_of_the_frozen_scope` | both | Covered end to end at the runtime host seam. The Gateway Fork admission service belongs to C6b. |
-| The consent-subject actor's erasure leaves the Consent Timeline and the Erasure Host Timeline unaffected and available | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage` | both | Runtime part: a root opened with `open_root_timeline`, as the Gateway opens its Consent Timeline, and the Erasure Host Timeline both stay readable. The Gateway Consent Timeline with its consent Events belongs to C6b. |
-| Every client route answers 404 for the Erasure Host Timeline, and creating it does not consume the root-Timeline ceiling | `GW/local_principal.rs::host_timelines_are_hidden_from_clients_and_outside_the_ceiling`; `GW/local_fork_coordinator.rs::coordinator_refuses_a_host_timeline_as_fork_parent`; `EHP::a_client_root_count_leaves_out_recorded_host_roots` | `SQLite`; both | The Gateway routes are C6b's to extend. |
+| A Fork admitted between the freeze and the first ERSE1 | `ACC::a_fork_admitted_after_freeze_is_the_first_extension_of_the_frozen_scope` | both | Covered end to end at the runtime host seam. The Gateway Fork admission service runs the same host command (`fork_timeline_identified`); a served run is C6c's managed-mode suite (test 11). |
+| The consent-subject actor's erasure leaves the Consent Timeline and the Erasure Host Timeline unaffected and available | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `EA::a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines` | both; `SQLite` | The EA test is the Gateway part: the consent-subject actor revokes its consent and is erased; the closure holds only its root, the Session still reads the revoked consent from the Consent Timeline, the revocation's exact retry answers its original bytes, and the store holds both host Timelines unfrozen. |
+| Every client route answers 404 for the Erasure Host Timeline, and creating it does not consume the root-Timeline ceiling | `LP::host_timelines_are_hidden_from_clients_and_outside_the_ceiling`; `GW/local_fork_coordinator.rs::coordinator_refuses_a_host_timeline_as_fork_parent`; `FS::listener_refuses_the_erasure_host_timeline_as_a_fork_parent`; `EHP::a_client_root_count_leaves_out_recorded_host_roots` | `SQLite`; Memory; `SQLite`; both | Read, signal and action routes answer the 404 of an unknown Timeline (LP). The Fork-parent route is the Unix socket, not HTTP: the FS test sends a FAL1 Fork naming the recorded Erasure Host Timeline through the served listener and gets code 4 (`ParentChanged`), the code of a parent the store does not hold, with no write; the coordinator test shows the bytes equal an unknown parent's. |
 | A new owned root created after the freeze, and its Forks, stay unaffected for that request | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage` | both | |
 | An affected Timeline deleted after the freeze: the partition still verifies | `LEC::no_timeline_is_deletable_under_the_host_and_the_partition_survives` | `SQLite` | Deviation: deletion is refused under the host. The test reopens a fail-closed `SQLite` binding. |
 | An actor with keys and no owned Timeline gets an ERSC1 that carries the anchor only | `LEC::an_anchor_only_scope_freezes_and_recovers` | `SQLite` | Restart. |
@@ -191,15 +210,78 @@ Moved onto the two-adapter `Fixture` in C6a: `a_local_submission_is_derived_idem
 
 The composition tests of test 6 (`a_root_signed_bundle_that_matches_the_binary_and_store_composes` to `a_signer_owner_id_that_is_no_key_registry_owner_is_a_mismatch`) compose over a `MemoryStore`; composition does not open a host.
 
-## Tests 8 to 11 (placeholder for C6b and C6c)
+## Test 8: the Gateway
 
-<!-- C6b and C6c add rows here for tests 8 (Gateway), 9 (getErasure
-and golden checks), 10 (export, erasure, offline evaluator) and 11
-(recovery by every consumer, managed Local Fork admission, Air-Gapped). -->
+Every Gateway test serves a `SQLite` store: the Local erasure authority is
+served only over `SQLite`.
 
 | Bullet | Test | Adapters | Note |
 |---|---|---|---|
-| *Test 8: to be filled by C6b* | | | |
-| *Test 9: to be filled by C6b* | | | |
-| *Test 10: to be filled by C6c* | `LEC::an_export_after_the_erasure_reports_its_unavailable_artifact` exists | | |
-| *Test 11: to be filled by C6c* | | | |
+| A missing Idempotency-Key gives 400; an exact retry returns the same 202 and `erasure_id`; the same key with another `scope` gives `409 idempotency-conflict` | `E::an_exact_retry_answers_the_same_receipt_bytes` | `SQLite` | Also after a restart. |
+| The exact retry after an ELP1 change (new release) | `LEC::a_submission_binds_its_bundle_and_mode_and_a_replay_keeps_them`; `E::an_exact_retry_answers_the_same_receipt_bytes`; `E::a_crash_left_admission_binds_the_resubmission` | `SQLite` | The 202 is a function of the retained ERQ1 and ELADM1 alone (D5), so a retry answers the pinned policy, bundle and mode profile, never the current ones. The ELP1 is compiled into the binary, so no test can serve one store under two ELP1s; the LEC test replays under another mode binding, and the E crash-left test answers a binding the Gateway does not compile. |
+| The exact retry after a root-chain advance | `LEC::a_root_grant_revocation_leaves_older_requests_authorized`; `LEC::a_replay_is_answered_only_to_an_authorized_caller` | `SQLite` | Not covered at the Gateway: no Gateway route writes the root chain (only provisioning does), and the runtime tests advance it behind the host. A replay while the grant still authorizes the actor answers the original state; once the grant is revoked, the retry is refused as unauthorized (the Gateway's own decision is then `403`). |
+| An `erasure.read`-only grant is refused on `requestErasure` (403), and an `erasure.request`-only grant gets 404 on `getErasure` | `E::each_erasure_operation_needs_its_own_grant` | `SQLite` | |
+| Two parallel submissions with different keys and classes give one 202 and one `429 resource-limit-exceeded` | `E::parallel_requests_of_one_subject_admit_one` | `SQLite` | No `Retry-After`. |
+| Resubmission after `partial-failure` gives 202 | `E::each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next` | `SQLite` | |
+| With `A` actors, the `q_subject`th request gives 202 and the next `409 erasure-quota-exhausted` | `E::a_subject_past_its_quota_is_refused_for_good`; `LEC::the_subject_quota_admits_exactly_its_share`; `LEC::the_quota_is_shared_by_the_principals_actors` | `SQLite`; both; both | Lowered, test-only limits (D11): 514 request heads, two actors, `q_subject = 1`. |
+| Every actor's quota used up, then a restart: recovery succeeds and the total stays at most `maximum_requests - reserve` | `EA::every_actors_used_quota_holds_across_a_restart` | `SQLite` | Both actors use their one request; after the restart each projection reads, each exact retry answers its original bytes, and each next request is `409`, so the store holds exactly `514 - 512 = 2` requests. |
+| Composition with `q_subject < 1` refuses to serve `erasure.*` | none | | Deviation: refused at compile time by the D11 assertion in `policy.rs`; no composition can reach it. |
+| pos-cli's plain `submit_erasure_request` past the quota is refused (`PolicyConflict`); a corrected submission is refused | `LEC::a_plain_submission_cannot_bypass_the_subject_checks`; `LEC::a_receipt_needs_an_active_attempt_and_correction_and_resolution_are_refused` | both | Deviation: pos-cli has no plain submit. The authority's `PolicyConflict` is mapped to `ErasureHostErrorV1::Conflict` by `erasure_error_host_error`. |
+| A reaches `partial-failure`, B runs its own attempt 0, and A's retry is refused until B is no longer pre-terminal and has no active attempt | `LEC::a_partial_failure_retries_only_while_its_subject_is_free` | `SQLite` | Not covered at the Gateway: a retry is driver-internal (no route starts one), and a served driver retries only a transient negative, which needs the held-reader fixture behind the host. The Gateway's `429` while B holds the subject is `E::parallel_requests_of_one_subject_admit_one`. |
+| After a TPS1 revocation of the signer, a request pinned to the old bundle does not block resubmission, and a `partial-failure` request retries under the new bundle without a new submission | `LEC::a_revoked_pinned_bundle_signs_nothing_and_frees_its_subject`; `LEC::a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject`; `LEC::a_retry_pins_only_the_frozen_bundle_and_completes_at_its_reached_position`; `LEC::a_retry_recovers_on_its_retained_frozen_bundle_after_a_rotation` | `SQLite` | Not covered at the Gateway: it needs a second deployment trust state that revokes the signer, a compromise re-provisioning and a transient negative in one served world. The provisioning half is `GW/local_erasure_provision::a_new_signer_key_is_registered_only_as_the_tps1_allows`. |
+| A root-chain revocation after submission does not break recovery or retries | `LEC::a_root_grant_revocation_leaves_older_requests_authorized` | `SQLite` | Not covered at the Gateway: no Gateway route revokes the root grant. |
+| No grant gives 403 | `E::each_erasure_operation_needs_its_own_grant`; `E::a_retained_only_scope_is_refused_after_the_decision` | `SQLite` | |
+| Revoked consent still gives 202 | `EA::a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines`; `E::both_erasure_operations_are_consent_exempt` | `SQLite`; none | The EA test revokes the actor's consent through `POST /v1/me/consent-revocations`, sees the governed Timeline creation refused `403 revoked`, and then gets `202`. |
+| A retained-only scope gives `400 erasure-scope-retained` | `E::a_retained_only_scope_is_refused_after_the_decision` | `SQLite` | After the decision. |
+| `400 erasure-scope-too-large` at submit (test 3b) | `LEC::the_closure_bound_is_exact_at_submit_and_freeze`; `E::every_submit_refusal_has_its_answer` | both; none | The runtime gives `ScopeTooLarge`; the Gateway maps it to `400 erasure-scope-too-large`. A served test would need 4,095 seeded Timelines. |
+
+## Test 9: `getErasure` and the golden check
+
+| Bullet | Test | Adapters | Note |
+|---|---|---|---|
+| Byte-identical 404s for an unknown id, another subject's id and a missing grant | `E::get_erasure_answers_one_not_found`; `E::each_erasure_operation_needs_its_own_grant` | `SQLite` | Also past the denial-record bound. |
+| No topology, digest or owner value appears in responses | `EA::the_served_partition_freezes_only_the_actors_lineage`; `E::get_erasure_answers_one_not_found` | `SQLite` | The EA golden check scans every erasure answer of a lifecycle (the 202, its retry, every projection, the `409`, the subject's read and both 404s), headers included. Every 64-hex token must be a declared digest (key digest, policy, bundle, mode profile) or the body's own `provenance.digest`; every ULID token must be an `erasure_id` the request named; no signer owner or `subject:` owner appears. So no Timeline, actor, owner, store identity or other state digest does. |
+| ... nor in logs | `GW/local_erasure_composition.rs::a_wake_reports_only_a_changed_deferred_count` | none | The Gateway has no in-test log capture seam: it writes straight to process stderr (`announce!`). The erasure paths write one line, the driver's deferred count, which is payload-free by construction and tested as a string. |
+| ... nor in metrics | none | | piglor-gateway exports no metrics; there is nothing to check. |
+| `generation` never decreases | `E::each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next`; `EA::the_served_partition_freezes_only_the_actors_lineage`; `LEC::the_projection_follows_a_driven_request` | `SQLite` | |
+| Claim strength never increases | `EA::the_served_partition_freezes_only_the_actors_lineage`; `EA::a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines` | `SQLite` | `assert_monotonic` checks each observed projection against the previous one with `ErasureReplayClaimV1::weakened_to`. |
+
+## Test 10: export, erasure and the offline evaluator
+
+| Bullet | Test | Adapters | Note |
+|---|---|---|---|
+| A subject-scoped export, then erasure, then the post-erasure export through the public offline evaluator, which reports the unavailable artifact and the weakened claim | `LEC::an_export_after_the_erasure_reports_its_unavailable_artifact` | `SQLite` | Recipient-export catalog exception. Deviation: artifact level, not field level, and through the runtime seam, not the Gateway (see the deviations). |
+
+## Conformance cases
+
+The Gateway client conformance layer has erasure cases `pos.10`, `den.10`,
+`den.11`, `den.12`, `res.2` and `mal.6`. C6b adds none for
+`erasure-quota-exhausted` or `erasure-scope-too-large`, because each needs a
+new adapter composition:
+
+- `erasure-quota-exhausted` needs a composition (say
+  `authorized-erasure-exhausted`) whose host is opened with test-only lowered
+  limits (`ErasureRecoveryLimitsV1::from_maximum_requests(514)`, one actor)
+  and whose actor already holds settled requests. That means a new
+  `Composition` variant in
+  `apps/pos-gateway-conformance-adapter/src/subject/payload.rs`, its store
+  set-up in `subject/erasure_fixture.rs` (submit and settle the requests
+  before the Gateway serves, as `authorized-erasure-held` submits one), and a
+  production-limit question: a conformance subject serving lowered limits is
+  not the served binary.
+- `erasure-scope-too-large` needs a composition whose actor owns 4,095 roots
+  before the Gateway serves; the client root ceiling refuses that through
+  the router.
+- Then `scripts/generate_gateway_conformance_fixtures.py` gets the sub-cases
+  (`resource_subcases`), the requirements text
+  (`fixtures/conformance/profiles/gateway-client-conformance/normative-requirements.md`)
+  names the compositions, and `python3
+  scripts/generate_gateway_conformance_fixtures.py` regenerates the payloads,
+  oracles and evidence records. `scripts/check_gateway_contract.py --freeze`
+  is not needed: both problem codes are already in the frozen registry.
+  The adapter changes need cargo to verify.
+
+## Test 11 (placeholder for C6c)
+
+<!-- C6c adds rows here for test 11 (recovery by every consumer, managed
+Local Fork admission, Air-Gapped). -->
