@@ -6,19 +6,19 @@ use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
     local_erasure_owner_ref_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
     ArtifactDataClassV1, EntityId, ErasureArtifactClassV1, ErasureErrorV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRetainedObjectV1, LocalErasureArtifactDispositionV1,
-    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    LocalErasureCacheGenerationV1, LocalErasureClassificationV1, LocalErasureDisclosureV1,
-    LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1, LocalErasureLineageRuleV1,
-    LocalErasureNegativeResultV1, LocalErasureOwnerResultV1, LocalErasureOwnerRowV1,
-    LocalErasurePolicyV1, LocalErasureRecipientExportWithdrawalV1, LocalErasureRedactionV1,
-    LocalErasureRejectionV1, LocalErasureReplicaPurgeV1, LocalErasureSelectorV1,
-    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
-    LocalErasureTrustAnchorV1, LocalOwnerEffectV1, LocalOwnerResultBindingV1, OwnerIdV1,
-    PreparedLocalOwnerEffectV1, RecipientExportWithdrawalBindingV1, TimelineId,
-    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
-    LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
-    LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    ErasureReplayClaimV1, ErasureRetainedObjectV1, LocalErasureAdmissionV1,
+    LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1,
+    LocalErasureBundleV1, LocalErasureCacheGenerationV1, LocalErasureClassificationV1,
+    LocalErasureDisclosureV1, LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1,
+    LocalErasureLineageRuleV1, LocalErasureNegativeResultV1, LocalErasureOwnerResultV1,
+    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRecipientExportWithdrawalV1,
+    LocalErasureRedactionV1, LocalErasureRejectionV1, LocalErasureReplicaPurgeV1,
+    LocalErasureSelectorV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1,
+    LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1, LocalOwnerEffectV1,
+    LocalOwnerResultBindingV1, OwnerIdV1, PreparedLocalOwnerEffectV1,
+    RecipientExportWithdrawalBindingV1, TimelineId, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
 };
 use ulid::Ulid;
 
@@ -1997,6 +1997,68 @@ fn a_negative_effect_is_bound_only_by_its_matching_elo1() -> TestResult {
             bound
         ),
         Err(ErasureErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+/// ELADM1 (owner decision D5 on #1413): round trip, golden bytes and
+/// address, and an epoch of zero refused on both encode and decode.
+#[test]
+fn the_submission_binding_record_round_trips_and_needs_an_epoch() -> TestResult {
+    let admission = LocalErasureAdmissionV1 {
+        request: reference(61),
+        trust: reference(62),
+        mode_profile: reference(63),
+        binding_epoch: 300,
+    };
+    assert_codec(
+        &admission,
+        LocalErasureAdmissionV1::to_canonical_cbor,
+        LocalErasureAdmissionV1::from_canonical_cbor,
+        LocalErasureAdmissionV1::reference,
+    )?;
+    assert_golden(
+        &admission,
+        "ELADM1",
+        &Cbor::default()
+            .record("ELADM1", 4)
+            .bytes(&[61; 32])
+            .bytes(&[62; 32])
+            .bytes(&[63; 32])
+            .uint(300)
+            .0,
+        LocalErasureAdmissionV1::to_canonical_cbor,
+        LocalErasureAdmissionV1::from_canonical_cbor,
+        LocalErasureAdmissionV1::reference,
+    )?;
+    // The first epoch is admitted; epoch 0 is no binding.
+    let first = LocalErasureAdmissionV1 {
+        binding_epoch: 1,
+        ..admission
+    };
+    assert_eq!(
+        LocalErasureAdmissionV1::from_canonical_cbor(&first.to_canonical_cbor()?)?,
+        first
+    );
+    let unbound = LocalErasureAdmissionV1 {
+        binding_epoch: 0,
+        ..admission
+    };
+    assert_eq!(
+        unbound.to_canonical_cbor(),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(unbound.reference(), Err(ErasureErrorV1::ScopeInvalid));
+    let golden = Cbor::default()
+        .record("ELADM1", 4)
+        .bytes(&[61; 32])
+        .bytes(&[62; 32])
+        .bytes(&[63; 32])
+        .uint(0)
+        .0;
+    assert_eq!(
+        LocalErasureAdmissionV1::from_canonical_cbor(&golden),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }

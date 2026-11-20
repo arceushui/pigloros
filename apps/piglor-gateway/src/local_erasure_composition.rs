@@ -32,9 +32,9 @@
 //! runs the startup sweep ([`LocalErasureDriverV1::sweep`]) once; a skipped
 //! sweep never fails startup. [`LocalErasureDriverTaskV1`] then drives the
 //! lifecycle: once at startup, on every [`LOCAL_ERASURE_DRIVER_TICK`], and
-//! whenever [`LocalErasureTriggerV1::admitted`] reports a new admission (the
-//! erasure admission route of the next slice calls it; until then only the
-//! startup run and the tick wake the driver). Each wake submits one driver step per store
+//! whenever [`LocalErasureTriggerV1::admitted`] reports a new admission:
+//! the spawned task hands its trigger to the Gateway, whose
+//! `requestErasure` route calls it after every `202`. Each wake submits one driver step per store
 //! command until no request has a step due, so every other Gateway command
 //! interleaves between two steps, and reports on standard error how many
 //! requests had a step fail, whenever that count changes.
@@ -414,7 +414,11 @@ impl LocalErasureDriverTaskV1 {
     }
 
     /// [`Self::spawn`] with the tick `every`.
-    fn spawn_every(gateway: &Gateway, started: LocalErasureStartV1, every: Duration) -> Self {
+    pub(crate) fn spawn_every(
+        gateway: &Gateway,
+        started: LocalErasureStartV1,
+        every: Duration,
+    ) -> Self {
         Self {
             running: started.started.map(|(driver, _)| {
                 let wake = Arc::new(Notify::new());
@@ -424,7 +428,9 @@ impl LocalErasureDriverTaskV1 {
                     Arc::clone(&wake),
                     every,
                 ));
-                (LocalErasureTriggerV1(wake), task)
+                let trigger = LocalErasureTriggerV1(wake);
+                gateway.bind_local_erasure_trigger(trigger.clone());
+                (trigger, task)
             }),
         }
     }
@@ -503,4 +509,4 @@ fn deferred_report(deferred: usize, previous: usize) -> Option<String> {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
+pub mod tests;

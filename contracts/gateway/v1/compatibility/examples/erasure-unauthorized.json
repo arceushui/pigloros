@@ -1,0 +1,29 @@
+{
+  "name": "erasure-unauthorized",
+  "operation_id": "requestErasure",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-25",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "scope": "private-subject-data",
+      "impact_acknowledged": true
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 403,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unauthorized",
+      "title": "Unauthorized",
+      "status": 403,
+      "detail": "authorization denied",
+      "instance": "/v1/me/erasures",
+      "code": "unauthorized",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

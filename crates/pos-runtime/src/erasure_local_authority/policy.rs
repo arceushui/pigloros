@@ -26,6 +26,19 @@ pub const LOCAL_ERASURE_QUOTA_ATTEMPTS_V1: u64 = 64;
 /// corrected submission.
 pub const LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1: u64 = 512;
 
+// The per-subject lifetime quota `q_subject = floor((maximum_requests -
+// reserve) / A)` is at least 1 for every Local Principal: `A` is at most the
+// 32 actors a grant scope holds, so the compiled store limit gives at least
+// 112. A composition therefore never meets `q_subject < 1`, and the refusal
+// ADR-136 §6 names for it is this compile-time assertion instead (owner
+// decision D11 of 2026-11-18 on #1413). Tests exercise the quota with
+// lowered, test-only limits.
+const _: () = assert!(
+    (pos_core::ERASURE_MAX_INVENTORY_REQUESTS as u64 - LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1)
+        / pos_core::MAX_AUTHORITY_SCOPE_MEMBERS as u64
+        >= 1
+);
+
 /// Re-prepares of one lifecycle step before the driver defers it.
 pub const LOCAL_ERASURE_MAX_REPREPARE_V1: u64 = 3;
 

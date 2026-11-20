@@ -440,6 +440,9 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("slot before capture", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/{timeline}/events");
         }),
+        case("erasure before capture", |p| {
+            first_exchange(p)["path"] = json!("/v1/me/erasures/{erasure}");
+        }),
         case("room before capture", |p| {
             first_exchange(p)["path"] = json!("/v1/scenario-rooms/{room}/revisions");
         }),
