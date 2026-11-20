@@ -362,10 +362,10 @@ fn a_retry_checks_the_retained_principal_and_evidence() -> TestResult {
     let rows = roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
     let receipt = case.initialize(&profile, OPERATION)??;
-    let tampers: [(Tamper, Option<Error>); 5] = [
+    let tampers: [(Tamper, Error); 5] = [
         (
             |original| original.leaf_grant_id = METADATA_LEAF,
-            Some(Error::Conflict),
+            Error::Conflict,
         ),
         (
             |original| {
@@ -376,22 +376,22 @@ fn a_retry_checks_the_retained_principal_and_evidence() -> TestResult {
                         digest: [9; 32],
                     });
             },
-            Some(Error::Conflict),
+            Error::Conflict,
         ),
         (
             |original| original.leaf_grant_id = Hash::from_bytes([0x77; 32]),
-            Some(Error::EvidenceUnavailable),
+            Error::EvidenceUnavailable,
         ),
         (
             |original| {
                 let last = original.records.len() - 1;
                 original.records.swap(0, last);
             },
-            None,
+            Error::EvidenceUnavailable,
         ),
         (
             |original| original.records.clear(),
-            Some(Error::EvidenceUnavailable),
+            Error::EvidenceUnavailable,
         ),
     ];
     for (tamper, expected) in tampers {
@@ -400,13 +400,7 @@ fn a_retry_checks_the_retained_principal_and_evidence() -> TestResult {
         let leaf = original.leaf_grant_id;
         let source = original.initial_source;
         tamper(original);
-        let refused = case
-            .initialize(&profile, OPERATION)?
-            .err()
-            .ok_or("a tampered retry must be refused")?;
-        if let Some(expected) = expected {
-            assert_eq!(refused, expected);
-        }
+        assert_eq!(case.initialize(&profile, OPERATION)?.err(), Some(expected));
         let original = case.retained()?;
         original.records = records;
         original.leaf_grant_id = leaf;
@@ -426,6 +420,27 @@ fn a_retry_checks_the_retained_principal_and_evidence() -> TestResult {
         Some(Error::EvidenceUnavailable)
     );
     case.retained()?.admissions[0] = admission;
+    assert_eq!(case.initialize(&profile, OPERATION)??, receipt);
+
+    // Review L2 on #1301: one unresolved ARD1 among the ten is enough,
+    // wherever it sits, while every other still resolves.
+    let count = case.retained()?.admissions.len();
+    for index in [1, count / 2, count - 1] {
+        let original = case.retained()?;
+        let input = *original.admissions[index].as_input();
+        let admission = std::mem::replace(
+            &mut original.admissions[index],
+            CommunityArtifactAdmissionV1::new(CommunityArtifactAdmissionInputV1 {
+                registration_address: Hash::from_bytes([0x79; 32]),
+                ..input
+            })?,
+        );
+        assert_eq!(
+            case.initialize(&profile, OPERATION)?.err(),
+            Some(Error::EvidenceUnavailable)
+        );
+        case.retained()?.admissions[index] = admission;
+    }
     assert_eq!(case.initialize(&profile, OPERATION)??, receipt);
 
     // The current CSI1 is sealed by the metadata key, so without it nothing

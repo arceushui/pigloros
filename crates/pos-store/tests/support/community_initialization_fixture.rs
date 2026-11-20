@@ -887,7 +887,8 @@ pub struct Bootstrapped {
 
 impl Bootstrapped {
     /// Bootstrap a domain whose `release_one` is active when `admit`, and
-    /// whose store holds the [`target`] Timeline when `timeline`.
+    /// whose store holds the [`target`] Timeline when `timeline`, under an
+    /// NMP1 with the [`HORIZON`] metadata horizon.
     ///
     /// # Errors
     /// Returns the fixture construction or bootstrap error.
@@ -896,6 +897,21 @@ impl Bootstrapped {
         roster: &Roster,
         admit: bool,
         timeline: bool,
+    ) -> Fallible<Self> {
+        Self::until(seal, roster, admit, timeline, HORIZON)
+    }
+
+    /// [`Bootstrapped::new`] under an NMP1 with metadata horizon
+    /// `metadata_horizon`.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or bootstrap error.
+    pub fn until(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+        admit: bool,
+        timeline: bool,
+        metadata_horizon: u64,
     ) -> Fallible<Self> {
         let (mut store, harness) = trusted_store(admit)?;
         if timeline {
@@ -922,7 +938,7 @@ impl Bootstrapped {
             metadata_owner_registry_binding: metadata_principal(seal)?.registry_binding_digest(),
             metadata_authority_leaf_grant: METADATA_LEAF,
             compiled_schema_catalogue_digest: hash(0x65),
-            metadata_not_after_micros: HORIZON,
+            metadata_not_after_micros: metadata_horizon,
         })?;
         let mut metadata = metadata_authority(seal, registry, 64)?;
         let opened = world.domain.open(

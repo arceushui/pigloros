@@ -444,6 +444,33 @@ fn the_generation_horizon_must_outlive_the_decision_bound() -> TestResult {
     Ok(())
 }
 
+/// Owner decision on #560, 2026-11-20: the decision bound must also not
+/// pass the NMP1 metadata horizon every CMB1, CMS1 and successor CSI1
+/// carries. With the generation horizon far later, one microsecond short of
+/// the bound is `EvidenceExpired` and exactly the bound initializes.
+#[test]
+fn the_metadata_horizon_must_outlive_the_decision_bound() -> TestResult {
+    let roster = Roster::release_one()?;
+    for (metadata_horizon, expired) in [(EXPIRES - 1, true), (EXPIRES, false)] {
+        let mut domain = Bootstrapped::until(&SEAL, &roster, true, true, metadata_horizon)?;
+        let rows = roster.rows()?;
+        let profile = profile_until(&rows, HORIZON, hash(1), domain.world.catalogue)?;
+        let outcome = call(
+            &mut domain,
+            &roster,
+            &profile,
+            form(&profile, target(), OPERATION),
+            GRANTED,
+        )?;
+        if expired {
+            assert_eq!(outcome.err(), Some(Error::EvidenceExpired));
+        } else {
+            assert_eq!(outcome?.generation(), GENERATION);
+        }
+    }
+    Ok(())
+}
+
 /// A5.4 and owner decision on #560, 2026-11-20, item 1: the final writer
 /// refuses at or after the decision bound, measured as `t_r` plus the guard
 /// monotonic time since the guard start, and on a monotonic rollback; the

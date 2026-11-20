@@ -11,8 +11,10 @@
 //!    (12);
 //! 3. with the metadata-service `inspect` decision, the retry lookup by
 //!    `(T, operation_id)` (A5.3(5)), `StaleGeneration` once `anchor_G` is
-//!    consumed (R6.3(3)), and the evidence horizon: every CPN1, CIS1 and
-//!    CSR1 must outlive the call's decision bound (`EvidenceExpired`);
+//!    consumed (R6.3(3)), and the evidence horizons: every CPN1, CIS1 and
+//!    CSR1 under the generation horizon and every metadata record under the
+//!    metadata horizon must outlive the call's decision bound
+//!    (`EvidenceExpired`);
 //! 4. for the new effect, the metadata-service `write` decision, one
 //!    initializer `read` decision per distinct initializer (R6.1(5)) and
 //!    one member `execute` decision per roster member (A5.2(3)), each 12;
@@ -301,7 +303,8 @@ impl MemoryCommunityDomainV1 {
     /// `anchor_T` and a writer at or after the decision bound; `Conflict`
     /// for a retry with other bound content or by another principal;
     /// `StaleGeneration` once `anchor_G` is consumed; `EvidenceExpired` when
-    /// the decision bound is after the generation horizon; `AdmissionDenied`
+    /// the decision bound is after the generation or the metadata horizon,
+    /// whichever ends first; `AdmissionDenied`
     /// for a refused trust row; and the planner, graph, extractor and codec
     /// refusals.
     pub fn initialize(
@@ -364,7 +367,11 @@ impl MemoryCommunityDomainV1 {
             selection,
             selection_address,
         };
-        if authenticated.decision_bound().as_micros() > operation.generation_horizon() {
+        if authenticated.decision_bound().as_micros()
+            > operation
+                .generation_horizon()
+                .min(operation.metadata_horizon())
+        {
             return Err(Error::EvidenceExpired);
         }
         let decisions = self.decisions(
@@ -461,7 +468,13 @@ impl MemoryCommunityDomainV1 {
             .zip(original.records.last())
             .ok_or(Error::EvidenceUnavailable)
             .and_then(|(key, sealed)| key.open(sealed))
-            .and_then(CommunityInitializationReceiptV1::from_generation_admission)
+            .and_then(|opened| {
+                // A retained record that no longer decodes as the CGA1 is
+                // retained evidence that does not resolve, not a caller
+                // encoding error.
+                CommunityInitializationReceiptV1::from_generation_admission(opened)
+                    .map_err(|_| Error::EvidenceUnavailable)
+            })
             .and_then(|receipt| {
                 community_catalogue_owner_v1(receipt.timeline, receipt.generation).and_then(
                     |owner| {
@@ -786,8 +799,11 @@ impl MemoryCommunityDomainV1 {
         let profile = context.installation.profile;
         self.store
             .logical_head(operation.timeline())
-            .ok()
-            .ok_or(Error::EvidenceUnavailable)
+            // Fail closed: an absent `anchor_T` (`TimelineNotFound`), an
+            // erasure-fenced one and a storage-integrity failure are each
+            // unavailable evidence (12). They share that one outcome, so no
+            // separate arm per `CoreError` would differ.
+            .map_err(|_| Error::EvidenceUnavailable)
             .and_then(|event_logical_head| {
                 CommunityInitializationRequestV1::from_canonical_cbor(records.request()).and_then(
                     |request| {

@@ -558,7 +558,8 @@ fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
 
 /// Check the cross-record shape (note 22661, items 2 and 3): every node
 /// shares one producer ordinal at a distinct node ordinal; each
-/// `StateRevision` node's `InitialState` input is exactly the cited node
+/// `StateRevision` node's CSC1 is its CSR1's own CSC1 and its
+/// `InitialState` input is exactly the cited node
 /// and cites the CIS1 its CSR1 names; each CSR1 names its CIS1's member;
 /// and the CSR1 members are exactly the CSH1 members.
 ///
@@ -579,11 +580,16 @@ fn check_shape(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> Re
     let mut linked = true;
     for (record, children) in extracted.iter().zip(edges) {
         match (record.node, children.as_slice()) {
-            (Some((CommunityNativeNodeKindV1::StateRevision, _)), [revision, _, initial]) => {
-                // The resolved node is exactly the cited one, coordinates
+            (Some((CommunityNativeNodeKindV1::StateRevision, _)), [revision, state, initial]) => {
+                // The node's CSC1 is the very record its CSR1 lists, not
+                // another member's CSC1 of the same logical State, and the
+                // resolved node is exactly the cited one, coordinates
                 // included, not just a node with the cited digest.
-                linked &= extracted[*initial].producer == extracted[*revision].producer
-                    && extracted[*initial].node.map(|(_, reference)| reference) == record.cited;
+                linked &= (
+                    edges[*revision].first(),
+                    extracted[*initial].producer,
+                    extracted[*initial].node.map(|(_, reference)| reference),
+                ) == (Some(state), extracted[*revision].producer, record.cited);
             }
             (None, [_, producer]) => {
                 linked &=

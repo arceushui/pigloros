@@ -1287,12 +1287,30 @@ struct PairMember {
     initial: ProtectedNode,
 }
 
-/// The plain CSC1, CIS1 and CSR1 of the member in `slot`.
+/// How [`forge_pair`] forges its two-member graph.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pairing {
+    /// Two distinct members over distinct States.
+    Distinct,
+    /// Each `StateRevision` cites the other member's `InitialState` digest
+    /// at its own `InitialState`'s ordinal.
+    Swap,
+    /// Both members' CIS1 and CSR1 name one member.
+    SameMember,
+    /// Two distinct members each protect their own CSC1 of one State.
+    SharedState,
+    /// As [`Pairing::SharedState`], but the slot-0 `StateRevision` node
+    /// lists the slot-1 member's CSC1 while its CSR1 lists its own.
+    CrossState,
+}
+
+/// The plain CSC1, CIS1 and CSR1 of the member in `slot`, over the State
+/// with tag `tag`.
 fn pair_plain(
-    slot: u16,
+    tag: u8,
     member: Hash,
 ) -> Fallible<(Vec<u8>, CommunityInitializationProducerV1, Vec<u8>)> {
-    let state_bytes = state(&[b'a' + u8::try_from(slot)?])?;
+    let state_bytes = state(&[tag])?;
     let initializer = producer(&state_bytes, hash(4), member)?;
     let revision_bytes = revision(Revision {
         origin: INITIALIZATION,
@@ -1351,8 +1369,9 @@ fn pair_member(
     key: &mut CommunityArtifactProtectorV1,
     slot: u16,
     member: Hash,
+    tag: u8,
 ) -> Fallible<PairMember> {
-    let (state_bytes, initializer, revision_bytes) = pair_plain(slot, member)?;
+    let (state_bytes, initializer, revision_bytes) = pair_plain(tag, member)?;
     let [state, producer, revision] =
         pair_records(key, &state_bytes, &initializer, &revision_bytes)?;
     let initial = pair_initial(key, slot, initializer.digest(), &producer)?;
@@ -1368,24 +1387,38 @@ fn pair_member(
 fn pair_members(
     key: &mut CommunityArtifactProtectorV1,
     members: [Hash; 2],
+    pairing: Pairing,
 ) -> Fallible<Vec<PairMember>> {
+    let shared = matches!(pairing, Pairing::SharedState | Pairing::CrossState);
     let mut pair = Vec::new();
     for slot in 0..2_u16 {
-        pair.push(pair_member(key, slot, members[usize::from(slot)])?);
+        let tag = b'a' + if shared { 0 } else { u8::try_from(slot)? };
+        pair.push(pair_member(key, slot, members[usize::from(slot)], tag)?);
     }
     Ok(pair)
 }
 
 /// The protected `StateRevision` node of the member in `slot`, citing the
-/// other member's `InitialState` digest at its own ordinal with `swap`.
+/// other member's `InitialState` digest at its own ordinal for
+/// [`Pairing::Swap`] and listing the other member's CSC1 from slot 0 for
+/// [`Pairing::CrossState`].
 fn pair_revision_node(
     key: &mut CommunityArtifactProtectorV1,
-    swap: bool,
+    pairing: Pairing,
     pair: &[PairMember],
     slot: usize,
 ) -> Fallible<ProtectedNode> {
-    let target = if swap { 1 - slot } else { slot };
+    let target = if pairing == Pairing::Swap {
+        1 - slot
+    } else {
+        slot
+    };
     let member = &pair[slot];
+    let state = if pairing == Pairing::CrossState && slot == 0 {
+        &pair[1].state
+    } else {
+        &member.state
+    };
     let cited = CommunityNativeNodeReferenceV1 {
         node_ordinal: member.initial.1.node_ordinal,
         ..pair[target].initial.1
@@ -1402,7 +1435,7 @@ fn pair_revision_node(
             key,
             Kind::ExecutionProvenance,
             &bytes,
-            &[&member.revision, &member.state, &pair[target].initial.0],
+            &[&member.revision, state, &pair[target].initial.0],
         )?,
         reference,
     ))
@@ -1410,12 +1443,12 @@ fn pair_revision_node(
 
 fn pair_revision_nodes(
     key: &mut CommunityArtifactProtectorV1,
-    swap: bool,
+    pairing: Pairing,
     pair: &[PairMember],
 ) -> Fallible<Vec<ProtectedNode>> {
     let mut revision_nodes = Vec::new();
     for slot in 0..pair.len() {
-        revision_nodes.push(pair_revision_node(key, swap, pair, slot)?);
+        revision_nodes.push(pair_revision_node(key, pairing, pair, slot)?);
     }
     Ok(revision_nodes)
 }
@@ -1449,19 +1482,16 @@ fn prepare_pair(
     prepare(&records, &head_members, &roots, key)
 }
 
-/// Forge a two-member graph, slots 0 and 1. With `swap`, each
-/// `StateRevision` cites the other member's `InitialState` digest at its
-/// own `InitialState`'s ordinal. With `same_member`, both members' CIS1 and
-/// CSR1 name one member.
-fn forge_pair(swap: bool, same_member: bool) -> Fallible<Result<(), Error>> {
+/// Forge a two-member graph, slots 0 and 1, as `pairing` describes.
+fn forge_pair(pairing: Pairing) -> Fallible<Result<(), Error>> {
     let mut key = protector(GENERATION)?;
-    let members = if same_member {
+    let members = if pairing == Pairing::SameMember {
         [MEMBER, MEMBER]
     } else {
         [MEMBER, hash(6)]
     };
-    let pair = pair_members(&mut key, members)?;
-    let revision_nodes = pair_revision_nodes(&mut key, swap, &pair)?;
+    let pair = pair_members(&mut key, members, pairing)?;
+    let revision_nodes = pair_revision_nodes(&mut key, pairing, &pair)?;
     prepare_pair(&key, members, &pair, &revision_nodes)
 }
 
@@ -1469,13 +1499,24 @@ fn forge_pair(swap: bool, same_member: bool) -> Fallible<Result<(), Error>> {
 /// `InitialState` nodes or share one member binding.
 #[test]
 fn two_members_cannot_swap_initial_nodes_or_share_a_member() -> TestResult {
-    assert_eq!(forge_pair(false, false)?, Ok(()));
+    assert_eq!(forge_pair(Pairing::Distinct)?, Ok(()));
     // The swap is also refused by the existing producer check: each swapped
     // `InitialState` cites the other member's CIS1. It therefore does not
     // isolate the full-reference comparison; the single-member mis-cite case
     // (`revision_ordinal: 3, cited_ordinal: Some(2)`) in
     // `every_node_shape_violation_is_refused` is the one that guards it.
-    assert_eq!(forge_pair(true, false)?, Err(Error::InvalidBinding));
-    assert_eq!(forge_pair(false, true)?, Err(Error::InvalidBinding));
+    assert_eq!(forge_pair(Pairing::Swap)?, Err(Error::InvalidBinding));
+    assert_eq!(forge_pair(Pairing::SameMember)?, Err(Error::InvalidBinding));
+    Ok(())
+}
+
+/// Review M1 on #1301: when two members each protect their own CSC1 of one
+/// State, a `StateRevision` node must still list the very CSC1 its CSR1
+/// lists. Listing the other member's same-logical CSC1 resolves, but is
+/// refused at the shape check.
+#[test]
+fn a_revision_node_cannot_list_another_members_shared_state() -> TestResult {
+    assert_eq!(forge_pair(Pairing::SharedState)?, Ok(()));
+    assert_eq!(forge_pair(Pairing::CrossState)?, Err(Error::InvalidBinding));
     Ok(())
 }
