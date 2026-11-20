@@ -33,10 +33,17 @@
 //! with no retry. If that thread cannot be spawned, the runtime stays
 //! `Starting` for the life of the process, which answers exactly as
 //! `ReconcileFailed` does: admission never opens.
+//!
+//! The `recovery-peer` mode (`recovery_peer`, ADR-069 R12 §5) answers one
+//! RCC1/RCU1 exchange of a pending SIR1 with the same revocation responder,
+//! and then exits.
 
 mod endpoint;
 mod notify;
 mod reconcile;
+// `pub` only so its `pub(crate)` items pass Clippy's `redundant_pub_crate`;
+// nothing in it is public.
+pub mod recovery_peer;
 mod revocation;
 mod serving;
 #[cfg(test)]
@@ -183,8 +190,14 @@ pub(crate) fn serve_provider_runtime() -> ProviderRuntimeError {
     serve_with(
         start_runtime_authority,
         reconcile::prepare_host,
-        std::env::var_os("NOTIFY_SOCKET").as_deref(),
+        notify_socket().as_deref(),
     )
+}
+
+/// The service manager's notification socket, the one environment variable
+/// a provider mode reads (R11 §9).
+fn notify_socket() -> Option<std::ffi::OsString> {
+    std::env::var_os("NOTIFY_SOCKET")
 }
 
 /// The mode against the startup authority that `start` binds, with the
