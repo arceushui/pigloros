@@ -146,6 +146,7 @@ impl FakeHost {
         let report = Arc::clone(&self.stdio_report);
         let released = Arc::clone(&self.released);
         let kept = Arc::clone(&self.systemd_held);
+        let stdout = Arc::clone(&self.adapter_stdout);
         let reads_input = script.input == InputUse::Read;
         let adapter = move || {
             let identities = (identity(&input), identity(&output));
@@ -183,8 +184,8 @@ impl FakeHost {
                 report.input = read;
             }
             if script.never_finish {
-                if let Ok(mut kept) = kept.lock() {
-                    kept.push(StdOwnedFd::from(output));
+                if let Ok(mut stdout) = stdout.lock() {
+                    *stdout = Some(StdOwnedFd::from(output));
                 }
                 return;
             }
@@ -426,6 +427,10 @@ struct Ending {
     faults: &'static [Fault],
     /// Cancel the attempt as it is released.
     cancel: bool,
+    /// Report an activation so long ago that the watchdog's `D + G` has
+    /// passed when the release arrives: the supervision ends at its first
+    /// poll, as on a host that stalled the provider after the release.
+    late: bool,
 }
 
 /// What a hung Local adapter does on FD 3.
@@ -451,6 +456,10 @@ impl Ending {
             ..StdioScript::default()
         });
         scenario.host.faults.extend_from_slice(self.faults);
+        if self.late {
+            let stalled = u64::try_from(2 * NANOSECONDS_PER_SECOND).unwrap_or_default();
+            scenario.host.activated = Some(monotonic_now_ns().saturating_sub(stalled));
+        }
         if self.cancel {
             scenario.barrier.cancel_on_release = Some(Arc::new(AttemptCancel::new()));
         }
@@ -586,6 +595,7 @@ async fn every_unacknowledged_kill_aborts_the_capture() -> TestResult {
         local: Some(Fd3::Silent),
         faults: &[Fault::Kill],
         cancel: true,
+        ..Ending::default()
     };
     assert_eq!(
         captured_at(
@@ -595,6 +605,17 @@ async fn every_unacknowledged_kill_aborts_the_capture() -> TestResult {
             }
         )
         .await?,
+        ABORTED
+    );
+    // The supervision ends at its first poll, before the capture was ever
+    // told the channel is readable; the kill answers once the queued output
+    // was read, so the abort keeps it.
+    let late = Ending {
+        late: true,
+        ..unkilled
+    };
+    assert_eq!(
+        captured_at(late, AttemptEnding::WatchdogKillFailed).await?,
         ABORTED
     );
     Ok(())

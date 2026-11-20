@@ -127,6 +127,8 @@ struct FakeHost {
     released: Arc<Mutex<Vec<(String, Instant)>>>,
     /// Descriptors held as systemd holds its duplicates of the unit ends.
     systemd_held: Arc<Mutex<Vec<StdOwnedFd>>>,
+    /// The stdout write end a never-finishing stdio adapter keeps open.
+    adapter_stdout: Arc<Mutex<Option<StdOwnedFd>>>,
 }
 
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
@@ -159,6 +161,7 @@ impl FakeHost {
             stdio_report: Arc::default(),
             released: Arc::default(),
             systemd_held: Arc::default(),
+            adapter_stdout: Arc::default(),
         }
     }
 
@@ -507,11 +510,35 @@ impl UnitHost for FakeHost {
             Ok(())
         };
         let hang = self.faulty(Fault::HangKill);
+        let stdout = Arc::clone(&self.adapter_stdout);
         async move {
+            output_read(&stdout).await;
             hang_if(hang).await;
             outcome
         }
     }
+}
+
+/// Until the provider read every byte the stdio adapter queued on `stdout`.
+///
+/// A kill answers only then, so the ending it leads to never overtakes the
+/// capture's first read, however late the supervision was first polled. Each
+/// yield lets the runtime poll its I/O driver, which reports the channel
+/// readable to the capture; the termination call bounds the wait.
+async fn output_read(stdout: &Mutex<Option<StdOwnedFd>>) {
+    while queued(stdout) > 0 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The bytes queued on `stdout`, if it is held.
+fn queued(stdout: &Mutex<Option<StdOwnedFd>>) -> u64 {
+    stdout
+        .lock()
+        .ok()
+        .and_then(|held| held.as_ref().map(rustix::io::ioctl_fionread))
+        .and_then(Result::ok)
+        .unwrap_or_default()
 }
 
 /// Never finishes when `hang` is set.
