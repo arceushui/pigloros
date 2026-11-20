@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
+import io
 import os
 import struct
 import sys
@@ -100,7 +102,10 @@ class OpenAs(unittest.TestCase):
 class Main(unittest.TestCase):
     @unittest.skipIf(os.geteuid() == 0, "the refusal is for non-root callers")
     def test_a_non_root_run_is_refused_before_touching_uhid(self) -> None:
-        self.assertEqual(ug1.main(), 2)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            self.assertEqual(ug1.main(), 2)
+        self.assertEqual(captured.getvalue(), "UG1 must run as root through sudo\n")
 
 
 if __name__ == "__main__":
