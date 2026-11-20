@@ -3,7 +3,7 @@
 
 use pos_reference::sandbox_provider_protocol::{
     AttemptEvidence, CancelSource, SandboxAuditRecord, SandboxProviderResult,
-    SandboxTerminalOutcome,
+    SandboxTerminalOutcome, TerminalCode, TransferRecord,
 };
 
 use super::{
@@ -11,21 +11,23 @@ use super::{
     terminal, Released, SignedGrant, TestResult, ATTEMPT, CLEANED_AT, KEY_ID,
 };
 use crate::{
-    AdmittedRuntimeKey, AttemptProgress, EndedAttempt, ExecuteError, KeyFileRuntimeSigner,
-    ResponseFault, RetainedResponse, RuntimeSignerError, UnitState,
+    AdmittedRuntimeKey, AttemptProgress, EndedAttempt, EvidenceFault, ExecuteError,
+    KeyFileRuntimeSigner, ResponseFault, RetainedResponse, RuntimeSignerError, UnitState,
 };
 
 /// The negative-probe digest `IssuedGrant::fixture` admits (HCP1 ordinal 7).
 const NEGATIVE_PROBE: [u8; 32] = [0x97; 32];
 
-fn sign(ended: &EndedAttempt<String>) -> Result<RetainedResponse, ResponseFault> {
+pub(super) fn sign(ended: &EndedAttempt<String>) -> Result<RetainedResponse, ResponseFault> {
     let public = signing_key().verifying_key();
     ended.signed_response(&signer(), AdmittedRuntimeKey::new(KEY_ID, &public))
 }
 
 /// Authenticate `retained` with the verifier every selector and auditor
 /// runs, and return its SPY1 and the event codes of its SAU1 chain.
-fn verified(retained: &RetainedResponse) -> TestResult<(SandboxProviderResult, Vec<u8>)> {
+pub(super) fn verified(
+    retained: &RetainedResponse,
+) -> TestResult<(SandboxProviderResult, Vec<u8>)> {
     let records = retained.records();
     AttemptEvidence::fixture(
         records.requested().clone(),
@@ -227,3 +229,114 @@ fn every_fault_emits_nothing() -> TestResult {
     ));
     Ok(())
 }
+
+/// An output transfer that stopped after 10 of the 70 bytes.
+pub(super) const fn timed_out_transfer() -> TransferRecord {
+    TransferRecord {
+        start: 3_000_000_000_000,
+        deadline: 3_002_000_000_000,
+        finish: 3_002_000_000_000,
+        expected_bytes: 70,
+        accepted_bytes: 10,
+        complete: false,
+    }
+}
+
+/// R9 §4.7: the successor copies the stored TME1 but for its output
+/// transfer, predecessor and code, and SAU1 event 10, SPR1 and SPY1 follow.
+#[test]
+fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
+    let first = sign(
+        &Released {
+            grant: Some(signed_grant()?),
+            ..Released::default()
+        }
+        .ended()?,
+    )?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let successor = first.successor(timed_out_transfer(), &signer(), admitted)?;
+    let (result, events) = verified(&successor)?;
+    assert_eq!(events, [11, 12, 10]);
+    assert_eq!(
+        result.outcome,
+        SandboxTerminalOutcome::UnavailableAfterAdmission
+    );
+    let (stored, reissued) = (
+        first.records().termination(),
+        successor.records().termination(),
+    );
+    assert_eq!(
+        reissued.fields().previous_tme1_digest,
+        Some(stored.digest())
+    );
+    assert_eq!(
+        reissued.fields().output_transfer,
+        Some(timed_out_transfer())
+    );
+    assert_eq!(
+        reissued.fields().terminal_code,
+        Some(TerminalCode::ProtocolFailure)
+    );
+    assert_eq!(reissued.fields().cleanup, stored.fields().cleanup);
+    assert_eq!(successor.response().audit[..2], first.response().audit[..]);
+    assert_eq!(successor.response().release, first.response().release);
+    // At most one successor, only of a Completed response, only for an
+    // incomplete transfer; an unordered transfer is refused by TME1.
+    let complete = TransferRecord {
+        accepted_bytes: 70,
+        complete: true,
+        ..timed_out_transfer()
+    };
+    let unordered = TransferRecord {
+        finish: 1,
+        ..timed_out_transfer()
+    };
+    let failed = sign(
+        &Released {
+            grant: Some(signed_grant()?),
+            service: None,
+            ..Released::default()
+        }
+        .ended()?,
+    )?;
+    for (response, transfer) in [
+        (&successor, timed_out_transfer()),
+        (&first, complete),
+        (&failed, timed_out_transfer()),
+    ] {
+        assert!(matches!(
+            response.successor(transfer, &signer(), admitted),
+            Err(ResponseFault::Evidence(EvidenceFault::NotReissuable))
+        ));
+    }
+    assert!(matches!(
+        first.successor(unordered, &signer(), admitted),
+        Err(ResponseFault::Evidence(EvidenceFault::Record(_)))
+    ));
+    // The transfer must carry the retained 70 bytes and start after the
+    // cleanup finished.
+    let shorter = TransferRecord {
+        expected_bytes: 69,
+        ..timed_out_transfer()
+    };
+    let early = TransferRecord {
+        start: CLEANED_AT - 1,
+        ..timed_out_transfer()
+    };
+    for transfer in [shorter, early] {
+        assert!(matches!(
+            first.successor(transfer, &signer(), admitted),
+            Err(ResponseFault::Evidence(EvidenceFault::UnboundTransfer))
+        ));
+    }
+    // A transfer that starts exactly when the cleanup finished is bound.
+    let at_cleanup = TransferRecord {
+        start: CLEANED_AT,
+        ..timed_out_transfer()
+    };
+    verified(&first.successor(at_cleanup, &signer(), admitted)?)?;
+    Ok(())
+}
+
+mod retention;
