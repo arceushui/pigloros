@@ -70,8 +70,10 @@ pub enum SubjectKeyArtifactSlot {
 ///
 /// Values exist only for an owner of `subject:` plus 32 lowercase hex digits
 /// and an epoch of at least one. The rendered epoch is canonical decimal, so
-/// parsing accepts exactly the names this type renders. A name is not proof
-/// that a file holds that identity: the D2 inventory still parses every file.
+/// parsing accepts exactly the names this type can render. Building refuses
+/// the nil owner, but parsing still yields it so a stray nil-owner file is
+/// refused rather than ignored. A name is not proof that a file holds that
+/// identity: the D2 inventory still parses every file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubjectKeyArtifactName {
     kind: SubjectKeyArtifactKind,
@@ -83,18 +85,23 @@ impl SubjectKeyArtifactName {
     /// Build the reserved name for an owner id and a positive epoch.
     ///
     /// Returns `None` unless `owner_id` is `subject:` followed by exactly 32
-    /// lowercase hex digits and `epoch` is not zero.
+    /// lowercase hex digits of a non-nil subject and `epoch` is not zero.
+    /// Parsing still classifies a nil owner's name as reserved, so a stray
+    /// one is refused rather than ignored.
     #[must_use]
     pub fn new(kind: SubjectKeyArtifactKind, owner_id: &str, epoch: u64) -> Option<Self> {
         owner_id
             .strip_prefix(OWNER_PREFIX)
+            .filter(|owner_hex| owner_hex.bytes().any(|digit| digit != b'0'))
             .and_then(|owner_hex| Self::checked(kind, owner_hex, epoch))
     }
 
     /// Classify a directory entry name as a P4 reserved name.
     ///
     /// Returns `None` for every other name, including non-UTF-8 names and
-    /// non-canonical spellings such as a leading zero in the epoch.
+    /// non-canonical spellings such as a leading zero in the epoch. A nil
+    /// owner's name is still classified as reserved, although
+    /// [`Self::new`] never builds one.
     #[must_use]
     pub fn parse(name: &[u8]) -> Option<(Self, SubjectKeyArtifactSlot)> {
         std::str::from_utf8(name).ok().and_then(|name| {
