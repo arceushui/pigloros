@@ -55,7 +55,7 @@ pub const LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME: &str =
 
 /// The largest bundle or bundle-signature credential accepted: the ELB1
 /// record bound, 64 KiB.
-pub const MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES: usize = 64 * 1024;
+pub const MAX_LOCAL_ERASURE_BUNDLE_CREDENTIAL_BYTES: usize = 65_536;
 
 /// The three credentials a key-less root's credential directory holds,
 /// sorted.

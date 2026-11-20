@@ -5959,7 +5959,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
- "libc",
  "pos-conformance",
  "pos-core",
  "pos-crypto",
