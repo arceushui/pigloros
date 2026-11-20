@@ -595,7 +595,59 @@ async fn exchange_all(
 
 #[cfg(test)]
 mod tests {
-    use super::ScratchStore;
+    use super::{compose, ScratchStore};
+    use crate::subject::payload::CompositionV2;
+    use pos_core::ErasureInventoryPersistencePortV1 as _;
+    use pos_store::sqlite::SqliteStore;
+
+    /// ADR-136 acceptance test 11 does not apply to the adapter (D21).
+    ///
+    /// None of its hosts recovers a store that holds ERQ1 records without a
+    /// private key. Every composition without a fixture erasure bundle
+    /// serves a store that records no erasure identity under the closed
+    /// composition, so it holds no ERQ1 to recover; only the
+    /// `authorized-erasure` compositions record one, and they compose the
+    /// Local erasure authority with its signer credential.
+    #[test]
+    fn only_the_erasure_compositions_record_an_erasure_identity(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        for (index, composition) in [
+            CompositionV2::Open,
+            CompositionV2::Authorized,
+            CompositionV2::AuthorizedAirGapped,
+            CompositionV2::AuthorizedConsented,
+            CompositionV2::AuthorizedRooms,
+            CompositionV2::AuthorizedErasure,
+            CompositionV2::AuthorizedErasureHeld,
+            CompositionV2::AuthorizedErasureExpired,
+            CompositionV2::AuthorizedErasureClosed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let composed = {
+                let _context = runtime.enter();
+                compose(composition)
+            };
+            let (gateway, store) = composed.ok_or("the composition is unavailable")?;
+            runtime.block_on(gateway.shutdown())?;
+            drop(gateway);
+            let identity = match &store {
+                Some(store) => SqliteStore::open(&store.path_text())?.erasure_store_identity()?,
+                None => None,
+            };
+            assert_eq!(
+                identity.is_some(),
+                composition.erasure_bundle_expiry().is_some(),
+                "composition {index}"
+            );
+            drop(store);
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_scratch_store_removes_its_files() -> Result<(), Box<dyn std::error::Error>> {
