@@ -20,8 +20,8 @@ use pos_reference::sandbox_provider_protocol::TransferRecord;
 
 use super::{lock, AttemptLifecycle, AttemptLifecycleError, Slot};
 use crate::{
-    AdmittedRuntimeKey, EndedAttempt, RequestedConfiguration, ResponseFault, RetainedResponse,
-    RuntimeAttestationSigner,
+    AdmittedRuntimeKey, EndedAttempt, EvidenceFault, RequestedConfiguration, ResponseFault,
+    RetainedResponse, RuntimeAttestationSigner,
 };
 
 /// The terminal response an ended attempt holds.
@@ -102,37 +102,41 @@ impl<I> AttemptLifecycle<I> {
     /// Re-issue the retained Completed response of the attempt after its
     /// output transfer timed out (R9 §4.7), and retain the successor in its
     /// place. `transfer` must carry the retained output and start after the
-    /// cleanup finished.
+    /// cleanup finished; it is `None` when a time of the output transfer
+    /// could not be read.
     ///
-    /// A successor that cannot be signed is a provider fault (R9 §5): the
-    /// stored response is replaced by a fault and stays unavailable. Of two
-    /// concurrent re-issues, the first to store wins, and the other returns
-    /// the winner's successor.
+    /// A successor that cannot be signed, or whose `output-transfer` time
+    /// could not be read (R9 Amendment 1 change F), is a provider fault (R9
+    /// §5): the stored response is replaced by a fault and stays
+    /// unavailable. Of two concurrent re-issues, the first to store wins,
+    /// and the other returns the winner's successor.
     ///
     /// # Errors
     /// Those of [`AttemptLifecycle::terminal_response`];
     /// [`AttemptLifecycleError::Response`] with
     /// [`ResponseFault::Evidence`] for a response that cannot be re-issued
-    /// with `transfer`, which keeps the retained response; and with
-    /// [`ResponseFault::Sign`] for a successor that cannot be signed, a
-    /// provider fault that quarantines the lifecycle.
+    /// with `transfer`, which keeps the retained response, unless the fault
+    /// is [`EvidenceFault::Clock`]; and with [`ResponseFault::Sign`] for a
+    /// successor that cannot be signed. A clock or signing fault quarantines
+    /// the lifecycle.
     pub fn reissue_response<R: RuntimeAttestationSigner>(
         &self,
         attempt_id: [u8; 16],
         agr1_digest: [u8; 32],
-        transfer: TransferRecord,
+        transfer: Option<TransferRecord>,
         signer: &R,
         admitted: AdmittedRuntimeKey<'_>,
     ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
         let stored = self.terminal_response(attempt_id, agr1_digest)?;
-        match stored.successor(transfer, signer, admitted) {
-            Err(ResponseFault::Evidence(refused)) => Err(ResponseFault::Evidence(refused).into()),
-            successor => self.store(
-                (attempt_id, agr1_digest),
-                Some(&stored),
-                successor.map(Arc::new),
-            ),
-        }
+        split_refusal(stored.successor(transfer, signer, admitted))
+            .map_err(AttemptLifecycleError::from)
+            .and_then(|successor| {
+                self.store(
+                    (attempt_id, agr1_digest),
+                    Some(&stored),
+                    successor.map(Arc::new),
+                )
+            })
     }
 
     /// Retain `signed` for the ended attempt of `grant` whose response is
@@ -176,6 +180,21 @@ impl<I> AttemptLifecycle<I> {
             self.quarantine();
         }
         signed.map_err(Into::into)
+    }
+}
+
+/// A re-issue refusal that keeps the retained response, or the successor or
+/// fault to store in its place: every evidence refusal keeps it, except an
+/// `output-transfer` time the clock could not report, a provider fault (R9
+/// Amendment 1 change F).
+fn split_refusal(
+    successor: Result<RetainedResponse, ResponseFault>,
+) -> Result<Result<RetainedResponse, ResponseFault>, ResponseFault> {
+    match successor {
+        Err(ResponseFault::Evidence(refused)) if !matches!(refused, EvidenceFault::Clock) => {
+            Err(ResponseFault::Evidence(refused))
+        }
+        successor => Ok(successor),
     }
 }
 
