@@ -165,7 +165,7 @@ fn item_count_bound_is_exact_and_never_empty() -> TestResult {
 }
 
 #[test]
-fn guest_index_is_at_most_63_and_nondecreasing() -> TestResult {
+fn guest_index_is_at_most_63_and_repeats_so_one_guest_may_add_several_items() -> TestResult {
     assert_eq!(MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1, 63);
     check(&[row(63, b"c", &[])], None)?;
     check(&[row(64, b"c", &[])], Some(Error::BoundsExceeded))?;
@@ -191,6 +191,20 @@ fn resolved_digests_are_bounded_nonzero_and_strictly_ascending() -> TestResult {
         check(&[row(0, b"c", &invalid)], Some(Error::InvalidBinding))?;
     }
     Ok(())
+}
+
+#[test]
+fn item_bound_violations_take_precedence_over_ordering_violations() -> TestResult {
+    let mut unordered = ascending(4097);
+    unordered.swap(0, 1);
+    let swapped = [hash(8), hash(7)];
+    // One item each: an index over 63 with descending digests, and a
+    // decreasing index with 4,097 unordered digests.
+    check(&[row(64, b"c", &swapped)], Some(Error::BoundsExceeded))?;
+    check(
+        &[row(9, b"c", &[]), row(0, b"d", &unordered)],
+        Some(Error::BoundsExceeded),
+    )
 }
 
 #[test]
