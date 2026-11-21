@@ -1529,6 +1529,36 @@ fn sorted_set<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
     values
 }
 
+/// Test-only: record an erasure store identity in the store at `path` and
+/// open its Erasure Host Timeline, as `provision-local-erasure` does.
+///
+/// Shared by these tests and the Fork-admission listener tests. It sits at
+/// module level so `pub(crate)` satisfies `clippy::redundant_pub_crate`.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn provision_erasure_host_timeline(
+    path: &str,
+) -> Result<pos_core::TimelineId, Box<dyn std::error::Error + Send + Sync>> {
+    let identity = Hash::from_bytes([0x5e; 32]);
+    pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
+        &mut pos_store::sqlite::SqliteStore::open(path)?,
+        identity,
+    )?;
+    let erasure_host = pos_core::local_erasure_host_timeline_v1(
+        pos_core::ErasureReferenceV1::from_digest(*identity.as_bytes()),
+    )?;
+    crate::startup::open_recovered_erasure_host(
+        pos_store::StoreConfig::Sqlite {
+            path: path.to_owned(),
+        },
+        crate::startup::GatewayHostStoreV1::Standard,
+        &pos_runtime::ErasureCoordinatorCompositionV1::closed(),
+    )?
+    .command_sender()?
+    .open_root_timeline(erasure_host, "erasure host")?;
+    Ok(erasure_host)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -3623,23 +3653,6 @@ mod tests {
         gateway.shutdown().await?;
         drop(gateway);
         Ok(())
-    }
-
-    /// Record an erasure store identity in the store at `path` and open its
-    /// Erasure Host Timeline, as `provision-local-erasure` does.
-    fn provision_erasure_host_timeline(path: &str) -> TestResult<TimelineId> {
-        let identity = Hash::from_bytes([0x5e; 32]);
-        pos_core::ErasureInventoryPersistencePortV1::init_erasure_store_identity(
-            &mut SqliteStore::open(path)?,
-            identity,
-        )?;
-        let erasure_host = pos_core::local_erasure_host_timeline_v1(
-            pos_core::ErasureReferenceV1::from_digest(*identity.as_bytes()),
-        )?;
-        sqlite_host(path)?
-            .command_sender()?
-            .open_root_timeline(erasure_host, "erasure host")?;
-        Ok(erasure_host)
     }
 
     /// ADR-136 §4a: no client seam reaches the Erasure Host Timeline or
