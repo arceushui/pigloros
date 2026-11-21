@@ -18,6 +18,12 @@ pub fn mint_owner_consent_v2_permit() -> Result<OwnerConsentV2PermitV1, CoreErro
     mint_with(getrandom::fill)
 }
 
+/// A fresh permit for unit tests in files that must not name the mint.
+#[cfg(test)]
+pub(crate) fn fresh_permit() -> Result<OwnerConsentV2PermitV1, CoreError> {
+    mint_owner_consent_v2_permit()
+}
+
 fn mint_with(fill: Entropy) -> Result<OwnerConsentV2PermitV1, CoreError> {
     let mut nonce = [0; 32];
     fill(&mut nonce)
