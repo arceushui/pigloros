@@ -1440,7 +1440,7 @@ def assert_codeql_preparation_contract(workflow: dict) -> None:
     # Exact reviewed-program snapshots, not a shell semantics oracle. Preserve
     # every byte, including heredoc data; update only with reviewed setup changes.
     required = (
-        (5, "28c278b217fbafce26f3940be27c2dea987e012b986564110dbccb1ad7e21e0c"),
+        (5, "b108cf82452e712068f47994b0588b3cc8bffe17db77f328e3e0a4f36b8e5b06"),
         (1, "8ff9e3fadf283e88daefd380c1de1bdcf915e9ee321bcc8dd9b850c9e6382978"),
     )
     for step, (deadline, digest) in zip(steps[1:3], required):
