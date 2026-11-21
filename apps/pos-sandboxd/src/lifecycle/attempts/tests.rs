@@ -1785,7 +1785,8 @@ mod cases {
     }
 
     /// A cancellation of an attempt awaiting its input is recorded by its
-    /// ending, which commits nothing.
+    /// ending, which commits nothing: the first source wins and stays TME1
+    /// `cancel-source` when the input then fails (#443 journal 22319).
     #[tokio::test(start_paused = true)]
     async fn a_cancellation_awaiting_input_is_recorded_by_its_ending() -> TestResult {
         let runtime = Runtime::new()?;
@@ -1797,6 +1798,8 @@ mod cases {
                 SandboxCancellationResult::CancelledAndCleaned
             );
         }
+        // A later revocation does not replace the first source.
+        lifecycle.fence_and_snapshot().await?;
         let ended: EndedAttempt<()> = lifecycle.record_failed(&FakeFailed(1))?;
         assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
         assert!(matches!(ended.cleanup(), Ok(None)));

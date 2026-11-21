@@ -513,6 +513,8 @@ impl BarrierError {
     #[must_use]
     pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
         match self {
+            // Owner decision 2026-11-15 (#443 journal 22319): before
+            // ReadyV1, identity failures, the adapter's among them, map to 0.
             Self::Identity(_)
             | Self::LauncherIdentity
             | Self::AdapterIdentity(_)
