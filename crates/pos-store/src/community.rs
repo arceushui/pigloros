@@ -17,6 +17,7 @@ mod lifecycle_authority;
 mod memory_domain;
 mod metadata_authority;
 mod native_graph;
+mod observation;
 mod planner;
 mod private_hash;
 mod protection;
@@ -48,6 +49,13 @@ pub use metadata_authority::{
 pub use native_graph::{
     CommunityAssembledRecordV1, CommunityInitializationGraphInputV1,
     CommunityInitializationGraphV1, CommunityInitializationMemberV1,
+};
+pub use observation::{
+    prepare_community_observation_v1, CommunityObservationBindingsV1,
+    CommunityObservationConsumerV1, CommunityObservationEventV1,
+    CommunityObservationInstallationV1, CommunityObservationMaterializationInputV1,
+    CommunityObservationMaterializationV1, CommunityObservationPassV1,
+    CommunityObservationRecordsV1, CommunityObservationSourcesV1,
 };
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
