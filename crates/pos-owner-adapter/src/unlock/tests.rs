@@ -21,11 +21,8 @@ fn a_poisoned_binding_mutex_refuses_and_runs_no_update() {
     let poisoned = thread::scope(|scope| {
         scope
             .spawn(|| {
-                let held = mutex.lock();
-                if held.is_ok() {
-                    panic::resume_unwind(Box::new("poison the binding mutex"));
-                }
-                drop(held);
+                let _held = mutex.lock();
+                panic::resume_unwind(Box::new("poison the binding mutex"));
             })
             .join()
     });
