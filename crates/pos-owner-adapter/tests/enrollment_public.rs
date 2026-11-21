@@ -840,7 +840,8 @@ fn a_failed_wrap_or_binding_write_stops_before_the_ledger_row() -> TestResult {
         );
         assert_eq!(fixture.names()?, staged_names);
         assert!(fixture.ledger_rows()?.is_empty());
-        // The staging record stays for ADR-137 P5 recovery.
+        // The staging record stays for ADR-137 P5 recovery (immediate
+        // deletion is planned in #1487).
         assert_eq!(staged(&store.inner), [(owner(SUBJECT), 1)]);
     }
     Ok(())

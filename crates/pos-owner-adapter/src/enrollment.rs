@@ -18,9 +18,9 @@
 //!
 //! A commit that fails after its P3a staging record leaves that record and
 //! whatever it staged (wrap, binding, SNL1 row) in place. ADR-137 P5 orphan
-//! recovery is the cleanup path for them; this crate does not yet run the
-//! immediate P5 deletion that P3 asks for after a definite failure, which
-//! awaits an owner decision.
+//! recovery is the cleanup path for them. The immediate P5 deletion that P3
+//! asks for after a definite failure is planned in #1487; until then P5
+//! recovery is the only cleanup.
 //!
 //! Known limitation: the pos-crypto key types take the root and the PRF
 //! output as by-value `[u8; 32]` arrays, so each passes through a stack
@@ -100,15 +100,19 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
     /// session/inventory lock is taken before anything is read. The epoch is
     /// the smallest one strictly above the store's P1 ceiling, every epoch a
     /// `subject-keys.v1` artifact names for the owner, and every epoch of the
-    /// owner's SNL1 rows (ADR-137 P3 step 2). `random` later draws the root,
-    /// the salts and the wrap nonce.
+    /// owner's SNL1 rows (ADR-137 P3 step 2). Step 2 also dry-runs step 5: the
+    /// ledger must have room for this epoch's row. `random` later draws the
+    /// root, the salts and the wrap nonce.
     ///
     /// # Errors
     /// Returns `Owner(Registry)` for the nil subject, an unrecognized or
-    /// unreadable artifact inventory, a missing or invalid SNL1 ledger, or no
-    /// epoch above the ceiling; the store's own refusal as `Owner`; and the
-    /// lock's `Unavailable(InterfaceUnavailable)` while any other holder of
-    /// the owner's session lock remains.
+    /// unreadable artifact inventory, a missing or invalid SNL1 ledger, a
+    /// ledger without room for this epoch's row, or no epoch above the
+    /// ceiling. The room probe is conservative: it uses the widest store-file
+    /// identity, so it may refuse a ledger with up to 16 bytes of headroom
+    /// that the real row would fit. Also returns the store's own refusal as
+    /// `Owner`, and the lock's `Unavailable(InterfaceUnavailable)` while any
+    /// other holder of the owner's session lock remains.
     pub fn open(
         lock: &'lock SubjectEncryptorLock,
         subject_id: SubjectId,
@@ -192,8 +196,10 @@ impl<'lock, S: EnrollmentStore, R: SecureRandom> OwnerEnrollmentAdapter<'lock, S
     /// P3 step 5: re-read the ledger under the held lock, add the new row
     /// through one checked ledger replacement, then read it back.
     ///
-    /// The step 2 dry run already proved that the row fits; it can fail here
-    /// only if the ledger changed outside this process's lifetime lock.
+    /// The step 2 dry run already proved that the row fits, so the row-fit
+    /// refusal is ruled out here unless the ledger changed outside this
+    /// process's lifetime lock. A real write or read-back failure still
+    /// returns `DurableWrite`.
     fn stage_ledger_row(&self, row: SubjectNonceLedgerRowV1) -> Result<(), OwnerError> {
         read_ledger(self.lock)
             .and_then(|ledger| with_row(&ledger, row))
@@ -254,8 +260,12 @@ impl<S: EnrollmentStore, R: SecureRandom> EnrollmentPort for OwnerEnrollmentAdap
     /// The binding must name this adapter's owner, subject and epoch and the
     /// wrap's credential, and the wrap this subject and epoch. Then one
     /// inventory pass repeats the unbound check and P3 step 2 must yield the
-    /// opened epoch again. Steps 3 to 6 follow: the staging record, the wrap,
-    /// the binding, the SNL1 row with both counters at 1, and registration.
+    /// opened epoch again, including its step 5 dry run: a ledger without room
+    /// for the row refuses with `Registry` before anything is staged. The
+    /// probe is conservative: it uses the widest store-file identity, so it
+    /// may refuse a ledger with up to 16 bytes of headroom that the real row
+    /// would fit. Steps 3 to 6 follow: the staging record, the wrap, the
+    /// binding, the SNL1 row with both counters at 1, and registration.
     fn commit(
         &mut self,
         candidate: EnrollmentCandidate,
@@ -376,7 +386,7 @@ fn next_epoch(
 ) -> Result<u64, OwnerError> {
     let registry = store.registry_epoch_ceiling(owner_id, subject)?;
     let ledger = read_ledger(lock).ok_or(REGISTRY)?;
-    let rows = ledger
+    let ledger_ceiling = ledger
         .rows()
         .filter(|row| row.owner_id == owner_id)
         .map(|row| row.epoch)
@@ -384,7 +394,7 @@ fn next_epoch(
         .unwrap_or_default();
     registry
         .max(inventory.epoch_ceiling(owner_id))
-        .max(rows)
+        .max(ledger_ceiling)
         .checked_add(1)
         .filter(|epoch| {
             let probe = SubjectNonceLedgerRowV1 {
