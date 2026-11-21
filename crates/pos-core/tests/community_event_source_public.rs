@@ -76,7 +76,7 @@ fn keys(count: u64) -> Fallible<Vec<ArtifactKeyDependencyV1>> {
         .collect()
 }
 
-const fn input(keys: Vec<ArtifactKeyDependencyV1>) -> Input<'static> {
+const fn input<'a>(keys: Vec<ArtifactKeyDependencyV1>) -> Input<'a> {
     Input {
         timeline: timeline(),
         logical_seq: 3,
@@ -241,9 +241,8 @@ fn schema_rule_texts_are_bounded_and_the_extractor_rule_follows_the_id_grammar()
     assert_eq!(MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1, 128);
     let long = "a".repeat(128);
     let over = "a".repeat(129);
-    let long: &'static str = Box::leak(long.into_boxed_str());
-    let over: &'static str = Box::leak(over.into_boxed_str());
-    let with = |rule: Rule<'static>| {
+    let (long, over) = (long.as_str(), over.as_str());
+    let with = |rule: Rule<'_>| {
         let mut changed = input(Vec::new());
         changed.source_schema_rule = rule;
         Source::new(changed).map(|source| source.to_canonical_cbor().len())

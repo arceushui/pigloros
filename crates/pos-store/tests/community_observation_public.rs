@@ -84,13 +84,13 @@ const fn id(timeline: TimelineId) -> [u8; 16] {
 }
 
 /// One installed profile and catalogue for every case.
-struct Installed {
+struct Installed<'r> {
     implementation: ImplementationKeyV1,
-    rules: Vec<CommunitySourceSchemaRuleV1<'static>>,
+    rules: Vec<CommunitySourceSchemaRuleV1<'r>>,
 }
 
-impl Installed {
-    fn new(rules: Vec<CommunitySourceSchemaRuleV1<'static>>) -> Fallible<Self> {
+impl<'r> Installed<'r> {
+    fn new(rules: Vec<CommunitySourceSchemaRuleV1<'r>>) -> Fallible<Self> {
         Ok(Self {
             implementation: ImplementationKeyV1::new("plugin-a".into(), "host-v1".into(), hash(3))?,
             rules,
@@ -267,7 +267,7 @@ const fn pass() -> CommunityObservationPassV1 {
 
 fn prepare(
     history: &History,
-    installed: &Installed,
+    installed: &Installed<'_>,
     input: CommunityObservationMaterializationInputV1,
 ) -> Fallible<Result<CommunityObservationSourcesV1, Error>> {
     let catalogue = installed.catalogue()?;
@@ -798,7 +798,8 @@ fn history_reads_are_bounded_by_the_owner_read_bounds_and_fork_depth() -> TestRe
         prepare(&over, &installed, honest(&over, over.root))?.err(),
         Some(Error::CapacityExhausted)
     );
-    let long: &'static str = Box::leak("t".repeat(128).into_boxed_str());
+    let long_text = "t".repeat(128);
+    let long = long_text.as_str();
     let long_rule = Installed::new(vec![CommunitySourceSchemaRuleV1 {
         event_type: long,
         ..RULE
