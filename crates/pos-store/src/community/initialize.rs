@@ -51,8 +51,8 @@ use pos_core::{
 use zeroize::Zeroizing;
 
 use super::extractor::{
-    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
-    CommunityArtifactRecordInputV1,
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1,
+    CommunityArtifactBatchInputV1, CommunityArtifactBatchV1, CommunityArtifactRecordInputV1,
 };
 use super::initializer::CommunityInitializerOwnerV1;
 use super::lifecycle_authority::{
@@ -1069,7 +1069,7 @@ fn batch(
     CommunityInitializationRequestV1::from_canonical_cbor(records.request()).and_then(|request| {
         prepare_community_artifact_batch_v1(
             operation.seal,
-            CommunityArtifactBatchInputV1 {
+            CommunityArtifactBatchFormV1::Closure(CommunityArtifactBatchInputV1 {
                 store_incarnation: operation.context.installation.store_incarnation,
                 profile_digest: operation.context.installation.profile.digest(),
                 operation_id: operation.call.form.operation_id,
@@ -1080,7 +1080,7 @@ fn batch(
                 selected_head: graph.selected_head(),
                 current_head: None,
                 expected_prior_head: None,
-            },
+            }),
             &[protector],
         )
     })

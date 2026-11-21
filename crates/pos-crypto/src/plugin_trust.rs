@@ -402,6 +402,12 @@ impl ValidatedPluginManifestProjectionV1 {
         plugin_manifest::project_verified_bundle(bundle)
     }
 
+    /// BLAKE3-256 of the complete canonical PMF1 bytes the projection binds.
+    #[must_use]
+    pub const fn pmf1_digest(&self) -> [u8; 32] {
+        self.pmf1_digest
+    }
+
     fn is_complete(&self) -> bool {
         self.role == 3
             && self.epoch != 0
