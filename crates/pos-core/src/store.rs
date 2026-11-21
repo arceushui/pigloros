@@ -22,7 +22,7 @@
 
 use crate::{
     clock::{Seq, WallTime},
-    consent::ConsentAppendPermit,
+    consent::{ConsentAppendPermit, OwnerConsentV2PermitV1},
     crypto::Hash,
     error::CoreError,
     event::{CanonicalBytes, Event, EventDraft},
@@ -549,6 +549,26 @@ pub trait EventStore: Send {
     /// Returns a binding error when the adapter rejects the supplied authority.
     fn bind_consent_authority(&mut self, _permit: ConsentAppendPermit) -> Result<(), CoreError> {
         Ok(())
+    }
+
+    /// Bind this adapter to the owner process's V2 consent permit (ADR-137
+    /// L8; ADR-097 B1 as amended by ADR-137).
+    ///
+    /// The owner composition root binds it before any consumer gets a handle.
+    /// Concrete adapters accept the same permit again, refuse a different
+    /// one, and refuse it while a Gateway [`ConsentAppendPermit`] is bound.
+    /// The default fails closed: an adapter that does not implement the
+    /// binding cannot carry owner V2 consent.
+    ///
+    /// # Errors
+    /// Returns a binding error when the adapter rejects the supplied permit.
+    fn bind_owner_consent_v2_permit(
+        &mut self,
+        _permit: OwnerConsentV2PermitV1,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Storage(
+            "EventStore does not implement the owner consent permit binding".to_owned(),
+        ))
     }
 
     /// Create a new root timeline with the given name.
@@ -2709,6 +2729,21 @@ mod tests {
         };
         let mut store = TrivialStore::new();
         assert!(import_timeline(&mut store, export).is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn the_default_owner_consent_permit_binding_fails_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = FlakyStore::new(FlakyMode::Healthy);
+        let error = store
+            .bind_owner_consent_v2_permit(crate::owner_consent_v2_permit::fresh_permit()?)
+            .test_err()?;
+        assert_eq!(
+            error.to_string(),
+            "storage error: EventStore does not implement the owner consent permit binding"
+        );
+        Ok(())
     }
 
     #[test]

@@ -7,9 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# Enables explicitly named containment fixtures for downstream test targets.
+# Enables explicitly named containment fixtures for downstream test targets,
+# and `mint_owner_consent_v2_permit` with its randomness source (ADR-137 G2).
 # This feature is intentionally off in production dependency graphs.
-test-support = []
+test-support = ["dep:getrandom"]
 # Mints `CounterfactualAdapterSealV1`, which builds ADR-064 counterfactual
 # commit evidence. Only `pos-store` (the Memory and SQLite adapters) may enable
 # it outside dev-dependencies; scripts/check_counterfactual_adapter_seal.py
@@ -41,8 +42,10 @@ ulid = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+getrandom = { workspace = true, optional = true }
 
 [dev-dependencies]
+getrandom = { workspace = true }
 proptest = { workspace = true }
 sha2 = { workspace = true }
 
