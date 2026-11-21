@@ -400,8 +400,13 @@ fn oracle_watchdog_reached(facts: &TerminationFacts) -> bool {
 fn oracle_code_two(facts: &TerminationFacts, contradiction: Option<u8>) -> bool {
     let result = code_of(facts.service, |service| service.result as u8);
     let ending = code_of(facts.ending, |ending| ending as u8);
+    // A zero (absent) `D` is no deadline to time out before (R9 Amendment 1
+    // change G).
     let enforcement = (in_set(ending, &[1, 2, 6, 7]) && result != Some(3))
-        || (result == Some(3) && facts.terminal.is_some() && !oracle_watchdog_reached(facts));
+        || (result == Some(3)
+            && facts.terminal.is_some()
+            && facts.watchdog_deadline.is_some()
+            && !oracle_watchdog_reached(facts));
     contradiction.is_some()
         || facts.cleanup as u8 == 1
         || in_set(
@@ -720,7 +725,7 @@ fn every_unit_phase_value_and_watchdog_class_is_placed_exactly_once() {
             dimension(&services, |facts, value| facts.service = value),
             dimension(&ENDINGS, |facts, value| facts.ending = value),
             // The watchdog agreement: at `D - G` exactly, one below it, or
-            // `D` unreadable.
+            // `D` zero (unreadable or not read).
             dimension(&[Some(true), Some(false), None], |facts, reached| {
                 facts.watchdog_deadline = reached
                     .and_then(|reached| NonZeroU64::new(TERMINAL_AT + GRACE + u64::from(!reached)));
@@ -1597,6 +1602,87 @@ fn an_unreadable_activation_is_missing_evidence_once_a_unit_exists() {
     check(&revoked);
     assert!(!revoked.classify().quarantined());
     assert_eq!(revoked.classify().code(), Some(TerminalCode::Cancelled));
+}
+
+// R9 Amendment 1 change G: a zero `watchdog-deadline` is missing evidence
+// only after a done start job with `unit` present; otherwise it selects no
+// code of its own, and it is never an enforcement disagreement.
+#[test]
+fn a_zero_watchdog_deadline_is_missing_evidence_only_after_a_done_start_with_a_unit() {
+    let started = |start_job| TerminationFacts {
+        progress: AttemptProgressCode::StartedNotReleased,
+        start_job: Some(start_job),
+        watchdog_deadline: None,
+        service: None,
+        ending: None,
+        output_capture: None,
+        adapter_input_complete: None,
+        ..completed()
+    };
+    // A failed start job: `D` was not read, and the zero keeps code 10.
+    let failed = started(StartJobResult::Failed);
+    check(&failed);
+    let classification = failed.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::ProtocolFailure));
+    assert!(!classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+    assert!(!classification.quarantined());
+    // A done start job with `unit` present: an unreadable `D` is code 2.
+    let done = started(StartJobResult::Done);
+    check(&done);
+    let classification = done.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::CleanupFailed));
+    assert!(classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+    assert!(classification.quarantined());
+    // A done start job whose readback failed before any cgroup was bound:
+    // `unit` is null, `D` was not read, and the RQE1 status keeps code 10.
+    for requested in [
+        RequestedConfigurationStatus::Mismatch,
+        RequestedConfigurationStatus::ReadbackUnavailable,
+    ] {
+        let unbound = TerminationFacts {
+            unit: None,
+            baseline: None,
+            terminal: None,
+            work_after: None,
+            requested,
+            observed: KernelObservationFacts::NotReached,
+            ..started(StartJobResult::Done)
+        };
+        check(&unbound);
+        let classification = unbound.classify();
+        assert_eq!(classification.code(), Some(TerminalCode::ProtocolFailure));
+        assert!(!classification
+            .candidates()
+            .contains(TerminalCode::CleanupFailed));
+        assert!(!classification.quarantined());
+    }
+    // A systemd timeout with a terminal snapshot and a zero `D` is no
+    // enforcement disagreement: after a failed start job nothing is code 2.
+    let timed_out_failed = TerminationFacts {
+        service: Some(service(ServiceResultCode::Timeout, MainExitCode::Killed, 9)),
+        ..started(StartJobResult::Failed)
+    };
+    check(&timed_out_failed);
+    let classification = timed_out_failed.classify();
+    assert!(!classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+    assert!(!classification.candidates().contains(TerminalCode::Watchdog));
+    assert!(!classification.quarantined());
+    // The same timeout with a nonzero `D` below `D - G` is one.
+    let disagreeing = TerminationFacts {
+        watchdog_deadline: NonZeroU64::new(TERMINAL_AT + GRACE + 1),
+        ..timed_out_failed
+    };
+    check(&disagreeing);
+    assert!(disagreeing
+        .classify()
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
 }
 
 /// Make the terminal snapshot contradict the baseline: 0 none, 1 identity,

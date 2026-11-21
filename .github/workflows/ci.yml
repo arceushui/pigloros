@@ -655,7 +655,7 @@ jobs:
           git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" remote add origin https://github.com/systemd/systemd.git
           git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" fetch --depth=2 origin f1d0952a125b96b7ab2f1ff29a87448ade8ac29b
           git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" checkout --detach FETCH_HEAD
-          curl --fail --location --retry 3 --max-time 60 \
+          curl --fail --location --retry 3 --retry-all-errors --max-time 60 \
             https://github.com/seccomp/libseccomp/releases/download/v2.6.1/libseccomp-2.6.1.tar.gz \
             --output "$SYSTEMD_SCS1_LIBSECCOMP_ARCHIVE"
       - name: Reproduce production SCS1 and exercise materializer rejection boundaries
@@ -1290,6 +1290,8 @@ jobs:
           --exclude 'src/erasure/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/community/memory_domain/tests.rs'
+          --exclude 'src/community/initialize/tests.rs'
+          --exclude 'src/community/extractor/tests.rs'
           --exclude 'src/attempt_records/tests/**'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'
@@ -1355,6 +1357,8 @@ jobs:
           --exclude 'src/erasure/tests.rs'
           --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/community/memory_domain/tests.rs'
+          --exclude 'src/community/initialize/tests.rs'
+          --exclude 'src/community/extractor/tests.rs'
           --exclude 'src/attempt_records/tests/**'
           --exclude 'src/adapter/native_tests.rs'
           --exclude 'src/adapter/native_tests/**'

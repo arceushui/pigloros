@@ -29,7 +29,6 @@ use pos_reference::{
 use rustix::fs::{fcntl_getfl, fcntl_setfl, fstat, makedev, open, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use rustix::pipe::{pipe_with, PipeFlags};
-use rustix::time::{clock_gettime, ClockId};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::unix::pipe::{Receiver, Sender};
 use tokio::sync::watch;
@@ -162,14 +161,9 @@ fn nonblocking(descriptor: &StdOwnedFd) -> Result<(), Errno> {
     fcntl_getfl(descriptor).and_then(|flags| fcntl_setfl(descriptor, flags.union(OFlags::NONBLOCK)))
 }
 
-/// `CLOCK_MONOTONIC` now, in nanoseconds.
-pub(crate) fn monotonic_now_ns() -> u64 {
-    let now = clock_gettime(ClockId::Monotonic);
-    u64::try_from(now.tv_sec)
-        .unwrap_or_default()
-        .saturating_mul(1_000_000_000)
-        .saturating_add(u64::try_from(now.tv_nsec).unwrap_or_default())
-}
+/// The provider's `CLOCK_MONOTONIC` reader, in nanoseconds: an error for a
+/// failed read, a negative component or a sum above `u64::MAX`.
+type MonotonicClock = fn() -> io::Result<u64>;
 
 /// Everything the feed and the capture of one attempt need once the
 /// adapter is released.
@@ -182,6 +176,8 @@ pub(crate) struct AdapterChannels {
     /// ELM1\[16\] in milliseconds: the feed's window.
     input_window_ms: u64,
     charge: StagingCharge,
+    /// The clock the `adapter-input` times are read from.
+    clock: MonotonicClock,
 }
 
 impl AdapterChannels {
@@ -198,6 +194,7 @@ impl AdapterChannels {
             output_limit,
             input_window_ms,
             charge,
+            clock: crate::launcher::clock::monotonic_ns,
         }
     }
 
@@ -206,6 +203,11 @@ impl AdapterChannels {
     /// reports the execute path's ending: `Some(true)` when it observed the
     /// cgroup empty, which drains the stdout channel, and `Some(false)`
     /// otherwise, which aborts the capture.
+    ///
+    /// A clock that cannot report the feed's start or finish is a provider
+    /// fault (R9 Amendment 1 change F): an unreadable start never starts the
+    /// feed and closes its write end, and either leaves `adapter-input`
+    /// unreadable, never a substitute time.
     pub(crate) async fn run(self, ended: watch::Receiver<Option<bool>>) -> AdapterIo {
         let Self {
             provider,
@@ -213,33 +215,68 @@ impl AdapterChannels {
             output_limit,
             input_window_ms,
             charge,
+            clock,
         } = self;
         let window_start = tokio::time::Instant::now();
-        let start = monotonic_now_ns();
+        let start = clock().ok();
         let window = Duration::from_millis(input_window_ms);
         let deadline = window_start.checked_add(window);
-        let fed = feed(
+        let fed = timed_feed(
             provider.input,
             &payload,
+            start.is_some(),
             deadline,
             ended_signal(ended.clone()),
+            clock,
         );
         let captured = capture(provider.output, output_limit, ended_signal(ended));
         let ((accepted, finish), captured) = join(fed, captured).await;
-        let expected = payload.input_len();
-        let deadline =
-            start.saturating_add(input_window_ms.saturating_mul(NANOSECONDS_PER_MILLISECOND));
         AdapterIo {
-            input: TransferRecord {
-                start,
-                deadline,
-                finish,
-                expected_bytes: expected,
-                accepted_bytes: accepted,
-                complete: accepted == expected && finish <= deadline,
-            },
+            input: start
+                .zip(finish)
+                .map(|times| feed_record(times, input_window_ms, payload.input_len(), accepted)),
             output: captured.fenced(charge),
         }
+    }
+}
+
+/// The stdin feed once its start was `timed`, and when it stopped by
+/// `clock`. A feed whose start could not be timed never starts: its write
+/// end is closed at once (R9 Amendment 1 change F).
+async fn timed_feed(
+    channel: StdOwnedFd,
+    payload: &Arc<dyn AttemptPayload>,
+    timed: bool,
+    deadline: Option<tokio::time::Instant>,
+    ended: impl Future<Output = bool> + Send,
+    clock: MonotonicClock,
+) -> (u64, Option<u64>) {
+    let accepted = if timed {
+        feed(channel, payload, deadline, ended).await
+    } else {
+        drop(channel);
+        0
+    };
+    (accepted, clock().ok())
+}
+
+/// TME1 `adapter-input` of a feed that accepted `accepted` of `expected`
+/// bytes between its `start` and `finish` times, under a window of
+/// `window_ms`.
+const fn feed_record(
+    (start, finish): (u64, u64),
+    window_ms: u64,
+    expected: u64,
+    accepted: u64,
+) -> TransferRecord {
+    let deadline = start.saturating_add(window_ms.saturating_mul(NANOSECONDS_PER_MILLISECOND));
+    TransferRecord {
+        start,
+        deadline,
+        finish,
+        expected_bytes: expected,
+        accepted_bytes: accepted,
+        complete: accepted == expected && finish <= deadline,
     }
 }
 
@@ -254,13 +291,13 @@ async fn ended_signal(mut ended: watch::Receiver<Option<bool>>) -> bool {
 
 /// Write the verified input to the stdin channel until every byte was
 /// accepted, a write failed, the window closed or the execute path ended;
-/// then close the channel. The accepted bytes and when the feed stopped.
+/// then close the channel. The accepted bytes.
 async fn feed(
     channel: StdOwnedFd,
     payload: &Arc<dyn AttemptPayload>,
     deadline: Option<tokio::time::Instant>,
     ended: impl Future<Output = bool> + Send,
-) -> (u64, u64) {
+) -> u64 {
     let mut accepted = 0;
     // A window already closed, as a zero ELM1[16] is, writes nothing.
     let open = deadline.is_none_or(|deadline| deadline > tokio::time::Instant::now());
@@ -279,7 +316,7 @@ async fn feed(
         )
         .await;
     }
-    (accepted, monotonic_now_ns())
+    accepted
 }
 
 /// Write every input byte, counting what the kernel pipe accepted. The
@@ -490,14 +527,16 @@ fn framed(bytes: &[u8]) -> bool {
 /// TME1 `adapter-input` and `output-capture`.
 #[derive(Debug)]
 pub struct AdapterIo {
-    input: TransferRecord,
+    input: Option<TransferRecord>,
     output: FencedOutput,
 }
 
 impl AdapterIo {
-    /// TME1 `adapter-input`: the stdin feed under ELM1 ID 16.
+    /// TME1 `adapter-input`: the stdin feed under ELM1 ID 16; `None` when
+    /// the clock could not report its start or finish, a provider fault
+    /// (R9 Amendment 1 change F).
     #[must_use]
-    pub const fn input(&self) -> TransferRecord {
+    pub const fn input(&self) -> Option<TransferRecord> {
         self.input
     }
 
@@ -517,7 +556,7 @@ impl AdapterIo {
     /// ceiling or at the end of the stream, for the terminal records' tests.
     #[cfg(test)]
     pub(crate) fn for_test_capture(
-        input: TransferRecord,
+        input: Option<TransferRecord>,
         bytes: Vec<u8>,
         ceiling: bool,
         charge: StagingCharge,
@@ -537,14 +576,14 @@ impl AdapterIo {
     #[cfg(test)]
     pub(crate) fn for_test(charge: StagingCharge) -> Self {
         Self {
-            input: TransferRecord {
+            input: Some(TransferRecord {
                 start: 1,
                 deadline: 2,
                 finish: 2,
                 expected_bytes: 1,
                 accepted_bytes: 1,
                 complete: true,
-            },
+            }),
             output: Captured {
                 bytes: Vec::new(),
                 stop: CaptureStop::EndOfStream,
