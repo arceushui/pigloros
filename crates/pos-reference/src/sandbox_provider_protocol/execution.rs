@@ -107,36 +107,42 @@ impl SandboxPayloadChunk {
         chunk.validate(fields).map(|()| chunk)
     }
 
-    /// The canonical SBC1 records of one output payload (ADR-069 §4): its
-    /// `bytes` in contiguous 1 MiB chunks from index and offset zero, each
-    /// bound to `parent_digest`, the SPY1 self-digest, and to the request
-    /// and attempt. An empty payload has no records.
+    /// The size of every SBC1 chunk but a payload's final one (ADR-069 §4).
+    pub const CHUNK_BYTES: usize = PAYLOAD_CHUNK_BYTES;
+
+    /// The canonical SBC1 record at `index` of one output payload (ADR-069
+    /// §4): `bytes`, at offset `index` times [`Self::CHUNK_BYTES`], bound to
+    /// `parent_digest`, the SPY1 self-digest, and to the request and
+    /// attempt. A payload's chunks are contiguous from index zero, and each
+    /// but the final one is exactly [`Self::CHUNK_BYTES`] long; an empty
+    /// payload has no records.
     ///
     /// # Errors
-    /// Refuses a zero parent digest and a payload of more than 128 chunks.
-    pub fn output_records(
+    /// Refuses a zero parent digest, empty or oversized bytes, and an index
+    /// of 128 or more.
+    pub fn output_record(
         parent_digest: [u8; 32],
         request_id: [u8; 16],
         attempt_id: [u8; 16],
-        bytes: &[u8],
-    ) -> Result<Vec<Vec<u8>>, SandboxProviderProtocolError> {
-        bytes
-            .chunks(PAYLOAD_CHUNK_BYTES)
-            .zip(0_u64..)
-            .map(|(chunk, index)| {
+        index: u64,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        index
+            .checked_mul(PAYLOAD_CHUNK_BYTES as u64)
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+            .and_then(|offset| {
                 Self {
                     parent_digest,
                     request_id,
                     attempt_id,
                     direction: PayloadDirection::Output,
                     index,
-                    offset: index * PAYLOAD_CHUNK_BYTES as u64,
-                    bytes: chunk.to_vec(),
+                    offset,
+                    bytes,
                     chunk_digest: [0; 32],
                 }
                 .encoded()
             })
-            .collect()
     }
 
     /// Self-digest this chunk, validate it and encode it.

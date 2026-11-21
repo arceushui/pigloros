@@ -324,7 +324,7 @@ pub use execute::{
     StartFailure, UnitCgroup, UnitHost, UnitKiller, UnitState, UnverifiedStart,
 };
 #[cfg(target_os = "linux")]
-pub use kernel_observation::{observation_evidence, observe_adapter};
+pub use kernel_observation::{observation_evidence, MainProcess};
 #[cfg(target_os = "linux")]
 pub use kernel_observation::{
     BlockDevice, CgroupView, DeviceNumber, KernelIdentity, KernelObservation,
@@ -334,9 +334,9 @@ pub use kernel_observation::{
 #[cfg(target_os = "linux")]
 pub use lifecycle::{
     finish_attempt, AttemptCleanup, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch,
-    AttemptLifecycle, AttemptLifecycleError, AttemptProgress, BarrierFactory, CleanupBudget,
-    EndedAttempt, ExchangeClaim, GrantWrite, LiveAttemptIdentity, LiveAttemptSnapshot,
-    OwnedAttempt, ReconciledAttempt, RootRecheck, SystemdAttemptSteps,
+    AttemptLifecycle, AttemptLifecycleError, AttemptProgress, AwaitedInput, BarrierFactory,
+    CleanupBudget, EndedAttempt, ExchangeClaim, GrantWrite, LiveAttemptIdentity,
+    LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, RootRecheck, SystemdAttemptSteps,
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{

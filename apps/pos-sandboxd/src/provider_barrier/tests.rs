@@ -1215,7 +1215,7 @@ fn the_release_window_is_the_time_left_on_the_monotonic_clock() -> TestResult {
 async fn a_recheck_resumed_after_the_original_deadline_cannot_release() -> TestResult {
     let (barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-    let held = hold_launcher(own_pid(), attempt.launcher())?;
+    let held = hold_launcher(File::open("/proc/self/exe")?, attempt.launcher())?;
     let bounded = Bounded {
         check: &barrier.check,
         admitted: &attempt,
@@ -1486,7 +1486,7 @@ mod kernel_observation {
     fn an_unreadable_executable_is_a_changed_unit_only_for_another_main_pid() -> TestResult {
         let (barrier, attempt) =
             barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-        let held = hold_launcher(own_pid(), attempt.launcher())?;
+        let held = hold_launcher(File::open("/proc/self/exe")?, attempt.launcher())?;
         let bounded = Bounded {
             check: &barrier.check,
             admitted: &attempt,

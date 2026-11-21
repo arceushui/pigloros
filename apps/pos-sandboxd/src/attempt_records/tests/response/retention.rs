@@ -546,3 +546,99 @@ async fn a_repeat_of_a_faulted_response_is_refused() -> TestResult {
     ));
     Ok(())
 }
+
+/// The retained output stays charged while it is retained, also while a
+/// joined repeat holds it, and is released at reconcile (ADR-069 R11
+/// Amendment 1, item P12).
+#[tokio::test]
+async fn retained_output_stays_charged_until_reconcile() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    let output = crate::StagingLedger::new(StagingLimits {
+        aggregate_bytes: 1024,
+    });
+    let ended = Released {
+        grant: Some(grant),
+        output_ledger: Some(output.clone()),
+        ..Released::default()
+    }
+    .ended()?;
+    let public = signing_key().verifying_key();
+    let retained =
+        lifecycle.retain_response(ended, &signer(), AdmittedRuntimeKey::new(KEY_ID, &public))?;
+    assert_eq!(output.usage().reserved_bytes, 70);
+    drop(retained);
+    let joined = lifecycle
+        .join(ATTEMPT, REQUEST)
+        .await?
+        .ok_or("no response")?;
+    assert_eq!(output.usage().reserved_bytes, 70);
+    drop(joined);
+    assert_eq!(output.usage().reserved_bytes, 70);
+    lifecycle.reconcile(&reconcile(digest))?;
+    assert_eq!(output.usage().reserved_bytes, 0);
+    Ok(())
+}
+
+/// A re-issued successor retains no output, so the charge ends with the
+/// first response; a connection still writing its frames keeps them, and
+/// their charge, until it is done.
+#[test]
+fn a_reissue_releases_the_output_once_its_frames_are_written() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    let output = crate::StagingLedger::new(StagingLimits {
+        aggregate_bytes: 1024,
+    });
+    let ended = Released {
+        grant: Some(grant),
+        output_ledger: Some(output.clone()),
+        ..Released::default()
+    }
+    .ended()?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let serving = lifecycle.retain_response(ended, &signer(), admitted)?;
+    let frames = serving.frames().map(<[u8]>::to_vec).collect::<Vec<_>>();
+    lifecycle.reissue_response(
+        ATTEMPT,
+        digest,
+        Some(timed_out_transfer()),
+        &signer(),
+        admitted,
+    )?;
+    // The connection writing the first response still holds its frames.
+    assert_eq!(output.usage().reserved_bytes, 70);
+    assert_eq!(
+        serving.frames().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+        frames
+    );
+    drop(serving);
+    assert_eq!(output.usage().reserved_bytes, 0);
+    Ok(())
+}
+
+/// A response already retained is returned without signing anything again.
+#[test]
+fn a_retained_response_is_never_signed_again() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let digest = signed_grant()?.grant.grant_digest();
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let retained = lifecycle.retain_response(completed()?, &signer(), admitted)?;
+    // A signer that could not sign is never asked.
+    let foreign = KeyFileRuntimeSigner::from_signing_key(
+        ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+        KEY_ID.to_owned(),
+    );
+    assert!(Arc::ptr_eq(
+        &lifecycle.retain_response(completed()?, &foreign, admitted)?,
+        &retained
+    ));
+    Ok(())
+}

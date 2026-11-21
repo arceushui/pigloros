@@ -656,18 +656,38 @@ impl ReleasedOutput {
 
     /// The output SBC1 records of a Completed response whose SPY1 digests to
     /// `parent_digest`, still under the output reservation (ADR-069 §4).
+    ///
+    /// The records are built from the last chunk back while the captured
+    /// bytes are consumed and shrunk, so the capture and its records are
+    /// never both held whole.
     pub(crate) fn into_records(
         self,
         parent_digest: [u8; 32],
         request_id: [u8; 16],
         attempt_id: [u8; 16],
     ) -> Result<RetainedOutput, SandboxProviderProtocolError> {
-        SandboxPayloadChunk::output_records(parent_digest, request_id, attempt_id, &self.bytes).map(
-            |records| RetainedOutput {
-                records,
-                _charge: self.charge,
-            },
-        )
+        let mut bytes = self.bytes;
+        (0..bytes.len().div_ceil(SandboxPayloadChunk::CHUNK_BYTES))
+            .rev()
+            .map(|index| {
+                let chunk = bytes.split_off(index * SandboxPayloadChunk::CHUNK_BYTES);
+                bytes.shrink_to_fit();
+                SandboxPayloadChunk::output_record(
+                    parent_digest,
+                    request_id,
+                    attempt_id,
+                    index as u64,
+                    chunk,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|mut records| {
+                records.reverse();
+                RetainedOutput {
+                    records,
+                    _charge: self.charge,
+                }
+            })
     }
 }
 
@@ -676,7 +696,12 @@ impl ReleasedOutput {
 ///
 /// The ELM1\[8\] output charge stays held for as long as the records are
 /// retained, so retained output is never uncharged (ADR-069 R11 Amendment 1,
-/// item P12, which extends the R10 §4.7 charge lifetime to reconcile).
+/// item P12, which extends the R10 §4.7 charge lifetime to reconcile). It is
+/// charged while retained and released at reconcile, at the tombstone, or at
+/// a re-issue, whose successor is not Completed and so retains no output
+/// (R9 §4.7). A connection still writing the frames holds its own
+/// `Arc<RetainedResponse>`, and with it the records and their charge, until
+/// it is done.
 #[derive(Debug)]
 pub(crate) struct RetainedOutput {
     records: Vec<Vec<u8>>,

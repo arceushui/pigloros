@@ -470,7 +470,8 @@ fn a_process_list_matches_whole_lines_only() -> TestResult {
 
 /// The adapter is identified beneath the anchored `/proc/<MainPID>/root`,
 /// so in the main process's own mount namespace, and resolved as the
-/// launcher resolves it: beneath that root, never through a symlink.
+/// launcher resolves it: beneath that root, never through a symlink or a
+/// magic link.
 #[test]
 fn the_adapter_is_observed_beneath_the_unit_root() -> TestResult {
     let executable = std::env::current_exe()?;
@@ -481,8 +482,9 @@ fn the_adapter_is_observed_beneath_the_unit_root() -> TestResult {
         AtFlags::empty(),
         StatxFlags::INO.union(StatxFlags::MNT_ID),
     )?;
+    let process = MainProcess::open(own_pid())?;
     assert_eq!(
-        observe_adapter(own_pid(), path)?,
+        process.adapter(path)?,
         FdIdentity {
             mount_id: expected.stx_mnt_id,
             inode: expected.stx_ino,
@@ -490,9 +492,11 @@ fn the_adapter_is_observed_beneath_the_unit_root() -> TestResult {
     );
     // The leading slash is the unit root's own.
     assert_eq!(
-        observe_adapter(own_pid(), path.trim_start_matches('/'))?,
-        observe_adapter(own_pid(), path)?
+        process.adapter(path.trim_start_matches('/'))?,
+        process.adapter(path)?
     );
+    // The executable is read through the same anchor.
+    assert_eq!(process.executable()?.metadata()?.ino(), expected.stx_ino);
     let directory = tempfile::tempdir()?;
     let link = directory.path().join("adapter");
     std::os::unix::fs::symlink(&executable, &link)?;
@@ -500,27 +504,51 @@ fn the_adapter_is_observed_beneath_the_unit_root() -> TestResult {
         link.to_str().ok_or("path")?.to_owned(),
         format!("{}/missing", directory.path().to_str().ok_or("path")?),
         "../../etc/passwd".to_owned(),
+        // A magic link beneath the root.
+        format!("/proc/{}/exe", own_pid()),
     ] {
         assert!(matches!(
-            observe_adapter(own_pid(), &refused),
+            process.adapter(&refused),
             Err(KernelObservationError::Adapter)
         ));
     }
     Ok(())
 }
 
-/// The adapter is observed only through a procfs directory of a live
-/// process.
+/// Only an identity that carries its mount ID is an adapter identity.
 #[test]
-fn the_adapter_of_an_unanchored_or_exited_process_is_not_observed() -> TestResult {
+fn an_identity_without_a_mount_id_is_refused() {
+    let mount = StatxFlags::INO.union(StatxFlags::MNT_ID).bits();
+    assert_eq!(
+        fd_identity(mount, 5, 6),
+        Some(FdIdentity {
+            mount_id: 5,
+            inode: 6
+        })
+    );
+    assert_eq!(fd_identity(StatxFlags::INO.bits(), 5, 6), None);
+}
+
+/// The adapter is read only while the process is alive, before and after.
+#[test]
+fn the_adapter_of_an_exited_process_is_not_observed() -> TestResult {
     let executable = std::env::current_exe()?;
     let path = executable.to_str().ok_or("path")?;
-    let fake = tempfile::tempdir()?;
-    std::fs::create_dir(fake.path().join(own_pid().to_string()))?;
+    let anchor = ProcessAnchor::open("/proc", own_pid())?;
+    let calls = std::cell::Cell::new(0);
+    let exits_after_the_read = |_: BorrowedFd<'_>| {
+        calls.set(calls.get() + 1);
+        if calls.get() > 1 {
+            Err(KernelObservationError::Exited)
+        } else {
+            Ok(())
+        }
+    };
     assert!(matches!(
-        observe_adapter_in(fake.path().to_str().ok_or("path")?, own_pid(), path),
-        Err(KernelObservationError::NotProcfs)
+        adapter_of(&anchor, path, &exits_after_the_read),
+        Err(KernelObservationError::Exited)
     ));
+    assert_eq!(calls.get(), 2);
     let mut child = short_lived()?;
     let pid = child.id();
     let pidfd = pidfd_open(
@@ -528,10 +556,16 @@ fn the_adapter_of_an_unanchored_or_exited_process_is_not_observed() -> TestResul
         PidfdFlags::empty(),
     )?;
     exited(&pidfd)?;
-    // Not reaped yet: its procdir still exists, but it is not alive.
+    // Not reaped yet: its procdir still exists, but it is not alive, and
+    // it has no executable any more.
+    let process = MainProcess::open(pid)?;
     assert!(matches!(
-        observe_adapter(pid, path),
+        process.adapter(path),
         Err(KernelObservationError::Exited)
+    ));
+    assert!(matches!(
+        process.executable(),
+        Err(KernelObservationError::Executable)
     ));
     child.wait()?;
     Ok(())

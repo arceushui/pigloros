@@ -57,9 +57,8 @@ const READ: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC);
 const PATH: OFlags = OFlags::PATH.union(OFlags::CLOEXEC);
 /// The launcher's own resolution of the adapter path: beneath the root,
 /// without any symlink or magic link (`launcher::adapter`).
-const ADAPTER_RESOLVE: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_MAGICLINKS);
+/// `RESOLVE_NO_SYMLINKS` implies `RESOLVE_NO_MAGICLINKS` (openat2(2)).
+const ADAPTER_RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 
 /// A kernel device number as `major:minor`, never a raw `st_dev`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -789,6 +788,13 @@ fn launcher(procdir: BorrowedFd<'_>) -> Result<FdIdentity, KernelObservationErro
     .ok_or(KernelObservationError::Executable)
 }
 
+/// The mount ID and inode `statx` reported, if it reported the mount ID.
+fn fd_identity(mask: u32, mount_id: u64, inode: u64) -> Option<FdIdentity> {
+    StatxFlags::from_bits_retain(mask)
+        .contains(StatxFlags::MNT_ID)
+        .then_some(FdIdentity { mount_id, inode })
+}
+
 /// The mount ID and inode of `adapter_path` beneath the target of `root`.
 ///
 /// `root` is a magic link, so it is followed (never `NOFOLLOW`), and its
@@ -814,7 +820,6 @@ fn adapter(
             ADAPTER_RESOLVE,
         )
     })
-    .ok()
     .and_then(|adapter| {
         statx(
             adapter,
@@ -822,46 +827,63 @@ fn adapter(
             AtFlags::EMPTY_PATH,
             StatxFlags::INO.union(StatxFlags::MNT_ID),
         )
-        .ok()
     })
-    .filter(|status| StatxFlags::from_bits_retain(status.stx_mask).contains(StatxFlags::MNT_ID))
-    .map(|status| FdIdentity {
-        mount_id: status.stx_mnt_id,
-        inode: status.stx_ino,
-    })
+    .ok()
+    .and_then(|status| fd_identity(status.stx_mask, status.stx_mnt_id, status.stx_ino))
     .ok_or(KernelObservationError::Adapter)
 }
 
-/// Observe the adapter of a started unit whose manager reports `main_pid`.
-///
-/// The result is its mount ID and inode at `adapter_path` beneath the
-/// unit's root, as `ReadyV1` binds them (owner decision 2026-11-21, #443
-/// slice 9).
-///
-/// It follows the R9 §4.4 procedure: the process is anchored with a pidfd
-/// and a `/proc/<MainPID>` directory proved to be procfs, and the adapter is
-/// read through that directory while the pidfd shows the process alive.
-///
-/// # Errors
-/// A failed anchor, an exited process, or an adapter that cannot be
-/// identified beneath the unit's root.
-pub fn observe_adapter(
-    main_pid: u32,
+/// The adapter beneath the root of `anchor`'s process, read while `alive`
+/// shows that process alive before and after.
+fn adapter_of(
+    anchor: &ProcessAnchor,
     adapter_path: &str,
+    alive: &dyn Fn(BorrowedFd<'_>) -> Result<(), KernelObservationError>,
 ) -> Result<FdIdentity, KernelObservationError> {
-    observe_adapter_in(PROC_PATHS.proc, main_pid, adapter_path)
+    alive(anchor.pidfd.as_fd())
+        .and_then(|()| adapter(anchor.procdir.as_fd(), adapter_path))
+        .and_then(|identity| alive(anchor.pidfd.as_fd()).map(|()| identity))
 }
 
-fn observe_adapter_in(
-    proc: &str,
-    main_pid: u32,
-    adapter_path: &str,
-) -> Result<FdIdentity, KernelObservationError> {
-    ProcessAnchor::open(proc, main_pid).and_then(|anchor| {
-        alive(anchor.pidfd.as_fd())
-            .and_then(|()| adapter(anchor.procdir.as_fd(), adapter_path))
-            .and_then(|identity| alive(anchor.pidfd.as_fd()).map(|()| identity))
-    })
+/// The main process of a started unit, anchored by the R9 §4.4 procedure:
+/// a pidfd and a `/proc/<MainPID>` directory proved to be procfs.
+///
+/// The release barrier reads the launcher's executable and the adapter
+/// through this one anchor, so both describe the same process.
+pub struct MainProcess {
+    anchor: ProcessAnchor,
+}
+
+impl MainProcess {
+    /// Anchor the process the manager reports as `main_pid`.
+    ///
+    /// # Errors
+    /// A failed `pidfd_open`, or a process directory that cannot be opened
+    /// or is not on procfs.
+    pub fn open(main_pid: u32) -> Result<Self, KernelObservationError> {
+        ProcessAnchor::open(PROC_PATHS.proc, main_pid).map(|anchor| Self { anchor })
+    }
+
+    /// The target of the process's `exe`, opened for reading.
+    ///
+    /// # Errors
+    /// [`KernelObservationError::Executable`] when it cannot be opened.
+    pub fn executable(&self) -> Result<File, KernelObservationError> {
+        openat(self.anchor.procdir.as_fd(), "exe", READ, Mode::empty())
+            .map(File::from)
+            .map_err(|_| KernelObservationError::Executable)
+    }
+
+    /// The adapter's mount ID and inode at `adapter_path` beneath the unit's
+    /// root, as `ReadyV1` binds them (owner decision 2026-11-21, #443
+    /// slice 9), read while the pidfd shows the process alive.
+    ///
+    /// # Errors
+    /// An exited process, or an adapter that cannot be identified beneath
+    /// the unit's root.
+    pub fn adapter(&self, adapter_path: &str) -> Result<FdIdentity, KernelObservationError> {
+        adapter_of(&self.anchor, adapter_path, &alive)
+    }
 }
 
 /// The mount ID and capacity of a held `/work` handle.

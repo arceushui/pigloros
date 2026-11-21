@@ -10,14 +10,23 @@
 //! If the write then fails, the converted slot is removed. An exact repeat
 //! waits on the claim or the converted slot through
 //! [`AttemptLifecycle::join`]: when either is removed it re-enters the port
-//! at step 7 as a new exchange.
+//! at step 7 as a new exchange. A claim released, voided or whose write
+//! failed admitted nothing, so its request ID is free again; after AGR1 the
+//! request ID stays known for as long as the attempt or its tombstone.
+//!
+//! Once AGR1 was written the exchange owes the attempt its input: an
+//! [`AwaitedInput`] is consumed by the admission or the failed input, and an
+//! exchange that ends without either leaves a provider fault, never an
+//! orphaned slot.
 
 use std::sync::atomic::Ordering;
 
 use tokio::sync::watch;
 
-use super::{lock, AttemptLifecycle, AttemptLifecycleError, Slot, MAX_LIVE_ATTEMPTS};
-use crate::VerifiedStagedInput;
+use pos_reference::provider_admission::execution::FailedInput;
+
+use super::{lock, AttemptLifecycle, AttemptLifecycleError, OwnedAttempt, Slot, MAX_LIVE_ATTEMPTS};
+use crate::{EndedAttempt, SystemdVerifiedStart, VerifiedStagedInput};
 
 /// One exchange's claim of its attempt before AGR1.
 ///
@@ -38,8 +47,23 @@ pub struct GrantWrite<'l, I = VerifiedStagedInput> {
     held: Held<'l, I>,
 }
 
-/// The slot one claim or grant write holds, removed on drop unless
-/// released.
+/// A granted attempt whose AGR1 was completely written, awaiting its
+/// input.
+///
+/// Its admission or its failed input consumes it. Dropping it otherwise
+/// means the exchange ended owing the attempt its stored response: the
+/// attempt is recorded as ended with nothing committed and no response,
+/// a provider fault that quarantines the lifecycle (R9 §5), so the slot is
+/// never left counting toward the cap with its repeats waiting.
+#[derive(Debug)]
+pub struct AwaitedInput<'l, I = VerifiedStagedInput> {
+    lifecycle: &'l AttemptLifecycle<I>,
+    attempt_id: [u8; 16],
+    armed: bool,
+}
+
+/// The slot one claim or grant write holds, released on drop unless it was
+/// passed on.
 #[derive(Debug)]
 struct Held<'l, I> {
     lifecycle: &'l AttemptLifecycle<I>,
@@ -51,17 +75,25 @@ impl<I> Drop for Held<'_, I> {
     fn drop(&mut self) {
         if self.armed {
             let mut attempts = lock(&self.lifecycle.attempts);
-            // Only this exchange converts its claim, and after a fence no
-            // other exchange can claim the attempt, so a claimed or granted
-            // slot is this one's.
-            let ours = matches!(
-                attempts.get(&self.attempt_id),
-                Some(Slot::Claimed { .. } | Slot::Granted { .. })
-            );
-            let removed = ours.then(|| attempts.remove(self.attempt_id));
+            let released = attempts.release(self.attempt_id);
             drop(attempts);
             // Its waiters are woken outside the attempts lock.
-            drop(removed);
+            drop(released);
+        }
+    }
+}
+
+impl<I> Drop for AwaitedInput<'_, I> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut attempts = lock(&self.lifecycle.attempts);
+            let abandoned = attempts.abandon(self.attempt_id);
+            drop(attempts);
+            if abandoned.is_some() {
+                self.lifecycle.quarantine();
+            }
+            // Its waiters are woken outside the attempts lock.
+            drop(abandoned);
         }
     }
 }
@@ -117,6 +149,7 @@ impl<I> AttemptLifecycle<I> {
         attempts.requests.insert(request_id, request_digest);
         let claimed = Slot::Claimed {
             request: request_digest,
+            request_id,
             changed: watch::channel(false).0,
         };
         attempts.set(attempt_id, claimed);
@@ -146,13 +179,18 @@ impl<'l, I> ExchangeClaim<'l, I> {
     ) -> Result<GrantWrite<'l, I>, AttemptLifecycleError> {
         let lifecycle = self.held.lifecycle;
         let mut attempts = lock(&lifecycle.attempts);
-        let request = match attempts.get(&self.held.attempt_id) {
-            Some(Slot::Claimed { request, .. }) => *request,
+        let (request, request_id) = match attempts.get(&self.held.attempt_id) {
+            Some(Slot::Claimed {
+                request,
+                request_id,
+                ..
+            }) => (*request, *request_id),
             _ => return Err(AttemptLifecycleError::Fenced),
         };
         let granted = Slot::Granted {
             grant: grant_digest,
             request,
+            request_id,
             cancel: None,
             changed: watch::channel(false).0,
         };
@@ -170,11 +208,93 @@ impl<'l, I> ExchangeClaim<'l, I> {
     }
 }
 
-impl<I> GrantWrite<'_, I> {
+impl<'l, I> GrantWrite<'l, I> {
     /// The AGR1 was completely written: the attempt is admitted, and its
     /// input is awaited.
-    pub fn written(mut self) {
+    #[must_use = "a dropped awaited input is a provider fault"]
+    pub fn written(mut self) -> AwaitedInput<'l, I> {
         self.held.armed = false;
+        AwaitedInput {
+            lifecycle: self.held.lifecycle,
+            attempt_id: self.held.attempt_id,
+            armed: true,
+        }
+    }
+}
+
+impl<'l, I> AwaitedInput<'l, I> {
+    /// Settle the obligation with `settled`; a refusal leaves it owed.
+    fn settle<T>(
+        mut self,
+        settled: impl FnOnce(&'l AttemptLifecycle<I>) -> Result<T, AttemptLifecycleError>,
+    ) -> Result<T, AttemptLifecycleError> {
+        let settled = settled(self.lifecycle);
+        self.armed = settled.is_err();
+        settled
+    }
+}
+
+impl<'l, I> AwaitedInput<'l, I> {
+    /// Take exclusive ownership of the attempt `input` admitted.
+    pub(super) fn admit_owned(self, input: I) -> Result<OwnedAttempt<'l, I>, AttemptLifecycleError>
+    where
+        I: super::AdmittedInput,
+    {
+        self.settle(|lifecycle| lifecycle.admit_input(input))
+    }
+
+    /// Record the attempt `failed` names as ended by its failed input.
+    pub(super) fn record_failed_admission<S, F: super::FailedAdmission>(
+        self,
+        failed: &F,
+    ) -> Result<EndedAttempt<S>, AttemptLifecycleError> {
+        self.settle(|lifecycle| lifecycle.record_failed(failed))
+    }
+}
+
+impl<'l> AwaitedInput<'l> {
+    /// Take exclusive ownership of the attempt `input` admitted.
+    ///
+    /// The lifecycle keeps the admission, and its staging reservation, until
+    /// the attempt is withdrawn before it started, its run is dropped part-way
+    /// (after the lifecycle was quarantined), or it is reconciled after it
+    /// ended clean. An attempt that ended with its cleanup unproved keeps it:
+    /// its reconcile reports [`AttemptLifecycleError::CleanupFailed`]. A
+    /// fence or cancellation since the conversion never refuses it: its run
+    /// records the cancelled ending with nothing committed (ADR-069 R11
+    /// Amendment 1, item P8).
+    ///
+    /// # Errors
+    /// [`AttemptLifecycleError::GrantMismatch`] when `input` was admitted
+    /// under another AGR1, and [`AttemptLifecycleError::UnknownAttempt`]
+    /// for another attempt. The refused input is dropped, releasing its
+    /// reservation, and the awaited attempt is left owed: a provider fault.
+    pub fn admit(
+        self,
+        input: VerifiedStagedInput,
+    ) -> Result<OwnedAttempt<'l>, AttemptLifecycleError> {
+        self.admit_owned(input)
+    }
+
+    /// Record the attempt whose input failed after its AGR1 was sent.
+    ///
+    /// The attempt is admitted, so it is never relaunched and ends in a
+    /// stored `UnavailableAfterAdmission`, not in SPE1 (ADR-069 §4). It
+    /// ended with nothing committed: no intent, directory, root or unit, and
+    /// its staging reservation was already released. It stays known until it
+    /// is reconciled; a cancellation reports it already terminal. It is not
+    /// part of a recovery snapshot, since it left nothing to recover. A
+    /// fence since the conversion never refuses it, and the first
+    /// cancellation requested meanwhile is its TME1 `cancel-source` (owner
+    /// decision 2026-11-15, Redmine #443 journal 22319).
+    ///
+    /// # Errors
+    /// Those of [`Self::admit`].
+    pub fn record_failed_input(
+        self,
+        failed: &FailedInput,
+    ) -> Result<EndedAttempt<SystemdVerifiedStart>, AttemptLifecycleError> {
+        self.record_failed_admission(failed)
     }
 }
 
@@ -190,7 +310,11 @@ impl<I> AttemptLifecycle<I> {
     ) -> Result<(), AttemptLifecycleError> {
         self.claim(attempt_id, attempt_id, [0x5d; 32])
             .and_then(|claim| claim.convert(grant))
-            .map(GrantWrite::written)
+            .map(|write| {
+                let mut awaited = write.written();
+                // The test admits or records the attempt itself.
+                awaited.armed = false;
+            })
     }
 
     /// [`Self::admit_input`] after the AGR1 of `input` was granted.
@@ -207,13 +331,23 @@ impl<I> AttemptLifecycle<I> {
 }
 
 #[cfg(test)]
+impl<I> AttemptLifecycle<I> {
+    /// The request IDs this runtime still knows, with their SPX1 digests.
+    pub(super) fn lock_requests(&self) -> std::collections::BTreeMap<[u8; 16], [u8; 32]> {
+        lock(&self.attempts).requests.clone()
+    }
+}
+
+#[cfg(test)]
 impl AttemptLifecycle {
-    /// [`Self::record_failed_input`] after the AGR1 of `failed` was granted.
+    /// [`AwaitedInput::record_failed_input`] after the AGR1 of `failed` was
+    /// granted.
     pub(crate) fn failed_granted(
         &self,
-        failed: &pos_reference::provider_admission::execution::FailedInput,
-    ) -> Result<crate::EndedAttempt<crate::SystemdVerifiedStart>, AttemptLifecycleError> {
-        self.granted_for_test(failed.attempt_id(), failed.grant().digest())
-            .and_then(|()| self.record_failed_input(failed))
+        failed: &FailedInput,
+    ) -> Result<EndedAttempt<SystemdVerifiedStart>, AttemptLifecycleError> {
+        self.claim(failed.attempt_id(), failed.attempt_id(), [0x5d; 32])
+            .and_then(|claim| claim.convert(failed.grant().digest()))
+            .and_then(|write| write.written().record_failed_input(failed))
     }
 }

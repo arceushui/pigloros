@@ -902,6 +902,7 @@ enum Slot<I> {
     /// the repeats waiting on it when the slot is converted or removed.
     Claimed {
         request: [u8; 32],
+        request_id: [u8; 16],
         changed: watch::Sender<bool>,
     },
     /// Converted from a claim as the last check before its AGR1 write: the
@@ -910,6 +911,7 @@ enum Slot<I> {
     Granted {
         grant: [u8; 32],
         request: [u8; 32],
+        request_id: [u8; 16],
         cancel: Option<CancelSource>,
         changed: watch::Sender<bool>,
     },
@@ -1027,6 +1029,42 @@ impl<I> Table<I> {
         removed
     }
 
+    /// Release the claimed or granted slot of `attempt_id` before its
+    /// attempt was admitted, and free its request ID; the slot it removed,
+    /// to be dropped once the lock is released. Only the exchange holding a
+    /// claim converts it, and after a fence no exchange claims, so a claimed
+    /// or granted slot is the caller's.
+    fn release(&mut self, attempt_id: [u8; 16]) -> Option<Slot<I>> {
+        let request_id = match self.get(&attempt_id) {
+            Some(Slot::Claimed { request_id, .. } | Slot::Granted { request_id, .. }) => {
+                *request_id
+            }
+            _ => return None,
+        };
+        self.requests.remove(&request_id);
+        self.remove(attempt_id)
+    }
+
+    /// Record the granted attempt of `attempt_id`, whose exchange ended
+    /// without its input, as ended with nothing committed and no response
+    /// that will be signed; the slot it replaced.
+    fn abandon(&mut self, attempt_id: [u8; 16]) -> Option<Slot<I>> {
+        let (grant, request) = match self.get(&attempt_id) {
+            Some(Slot::Granted { grant, request, .. }) => (*grant, *request),
+            _ => return None,
+        };
+        let ended = Slot::Ended {
+            grant,
+            request,
+            state: None,
+            cleaned: Cleaned::NothingCommitted,
+            response: Retained::Faulted,
+            settled: watch::channel(false).0,
+            _input: None,
+        };
+        self.set(attempt_id, ended)
+    }
+
     /// Withdraw an attempt that never started: it is no longer live.
     fn withdraw(&mut self, attempt_id: [u8; 16], grant: [u8; 32]) -> Option<Slot<I>> {
         self.set(
@@ -1134,6 +1172,36 @@ pub struct AttemptLifecycle<I = VerifiedStagedInput> {
     // Set once a recovery snapshot was handed out.
     snapshot_taken: AtomicBool,
     attempts: Mutex<Table<I>>,
+    // Runs as an owner begins its run, before it takes the attempts lock.
+    #[cfg(test)]
+    before_begin: BeginHook<I>,
+}
+
+/// A test's step at the start of [`Claim::begin`].
+#[cfg(test)]
+type BeginStep<I> = Box<dyn FnOnce(&AttemptLifecycle<I>) + Send>;
+
+/// The one test step [`Claim::begin`] runs before it takes the attempts
+/// lock, so a test can interleave a fence there.
+#[cfg(test)]
+struct BeginHook<I>(Mutex<Option<BeginStep<I>>>);
+
+#[cfg(test)]
+impl<I> BeginHook<I> {
+    /// Run the test's step, once.
+    fn run(&self, lifecycle: &AttemptLifecycle<I>) {
+        let step = lock(&self.0).take();
+        if let Some(step) = step {
+            step(lifecycle);
+        }
+    }
+}
+
+#[cfg(test)]
+impl<I> std::fmt::Debug for BeginHook<I> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BeginHook")
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1159,6 +1227,8 @@ impl<I> AttemptLifecycle<I> {
             fenced: AtomicBool::new(false),
             snapshot_taken: AtomicBool::new(false),
             attempts: Mutex::new(Table::new()),
+            #[cfg(test)]
+            before_begin: BeginHook(Mutex::new(None)),
         }
     }
 
@@ -1359,7 +1429,7 @@ impl<I> AttemptLifecycle<I> {
         }
         let voided = claimed
             .into_iter()
-            .map(|attempt_id| attempts.remove(attempt_id))
+            .map(|attempt_id| attempts.release(attempt_id))
             .collect::<Vec<_>>();
         drop(attempts);
         // The voided claims wake their waiters outside the attempts lock.
@@ -1488,53 +1558,6 @@ impl<I> AttemptLifecycle<I> {
     }
 }
 
-impl AttemptLifecycle {
-    /// Take exclusive ownership of the attempt `input` admitted, whose claim
-    /// was converted before its AGR1 was written (ADR-069 R11 Amendment 1,
-    /// item P8).
-    ///
-    /// The lifecycle keeps the admission, and its staging reservation, until
-    /// the attempt is withdrawn before it started, its run is dropped part-way
-    /// (after the lifecycle was quarantined), or it is reconciled after it
-    /// ended clean. An attempt that ended with its cleanup unproved keeps it:
-    /// its reconcile reports [`AttemptLifecycleError::CleanupFailed`]. A
-    /// fence or cancellation since the conversion never refuses it: its run
-    /// records the cancelled ending with nothing committed.
-    ///
-    /// # Errors
-    /// [`AttemptLifecycleError::UnknownAttempt`] when no converted claim
-    /// awaits the attempt, [`AttemptLifecycleError::GrantMismatch`] when it
-    /// awaits another AGR1, and [`AttemptLifecycleError::AttemptKnown`] when
-    /// the attempt was already admitted. The refused input is dropped,
-    /// releasing its reservation.
-    pub fn admit(
-        &self,
-        input: VerifiedStagedInput,
-    ) -> Result<OwnedAttempt<'_>, AttemptLifecycleError> {
-        self.admit_input(input)
-    }
-
-    /// Record the attempt whose input failed after its AGR1 was sent.
-    ///
-    /// The attempt is admitted, so it is never relaunched and ends in a
-    /// stored `UnavailableAfterAdmission`, not in SPE1 (ADR-069 §4). It
-    /// ended with nothing committed: no intent, directory, root or unit, and
-    /// its staging reservation was already released. It stays known until it
-    /// is reconciled; a cancellation reports it already terminal. It is not
-    /// part of a recovery snapshot, since it left nothing to recover. A
-    /// fence since the conversion never refuses it, and a cancellation
-    /// requested meanwhile is its TME1 `cancel-source`.
-    ///
-    /// # Errors
-    /// Those of [`AttemptLifecycle::admit`].
-    pub fn record_failed_input(
-        &self,
-        failed: &FailedInput,
-    ) -> Result<EndedAttempt<SystemdVerifiedStart>, AttemptLifecycleError> {
-        self.record_failed(failed)
-    }
-}
-
 /// The exclusive owner of one admitted attempt until it ended.
 ///
 /// Dropping it before its run started withdraws the attempt and releases its
@@ -1578,11 +1601,15 @@ impl<I> Claim<'_, I> {
     /// one still holding its slot is recorded as ended with nothing
     /// committed, and its admission is released.
     fn begin(&mut self) -> Option<I> {
-        // Only a fence or a cancellation before the admission cancels an
-        // owner that still holds its slot: a cancellation of an admitted,
-        // unstarted attempt withdraws the slot.
-        let cancelled = self.state.cancel.source().is_some();
+        #[cfg(test)]
+        self.lifecycle.before_begin.run(self.lifecycle);
         let mut attempts = lock(&self.lifecycle.attempts);
+        // Only a fence or a cancellation before the admission cancels an
+        // owner that still holds its slot (a cancellation of an admitted,
+        // unstarted attempt withdraws the slot). Both cancel under the
+        // attempts lock, so it is read under that lock too: a fence either
+        // sees this run started, and waits for it, or this run sees it.
+        let cancelled = self.state.cancel.source().is_some();
         let mut input = match attempts.slots.get_mut(&self.attempt_id) {
             Some(Slot::Running { started, input, .. }) => {
                 *started = true;
@@ -1848,7 +1875,7 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
 mod claim;
 mod retention;
 
-pub use claim::{ExchangeClaim, GrantWrite};
+pub use claim::{AwaitedInput, ExchangeClaim, GrantWrite};
 use retention::Retained;
 
 #[cfg(test)]

@@ -706,11 +706,9 @@ struct HeldLauncher {
     facts: crate::LauncherFacts,
 }
 
-/// Identify the very descriptor opened from the running process.
+/// Identify the very descriptor `file` opened from the running process.
 /// Holding it through the handshake prevents a path/stat/hash substitution.
-fn hold_launcher(pid: u32, facts: &crate::LauncherFacts) -> Result<HeldLauncher, BarrierError> {
-    let file =
-        File::open(format!("/proc/{pid}/exe")).map_err(|_| BarrierError::LauncherIdentity)?;
+fn hold_launcher(file: File, facts: &crate::LauncherFacts) -> Result<HeldLauncher, BarrierError> {
     verify_launcher_identity(&file, facts).and_then(|()| {
         statx(
             &file,
@@ -732,18 +730,25 @@ fn hold_launcher(pid: u32, facts: &crate::LauncherFacts) -> Result<HeldLauncher,
     })
 }
 
-/// Hold the launcher of `main_pid`, then observe its adapter as the
-/// launcher inside the unit sees it: through the unit's own root, so in the
-/// unit's mount namespace.
+/// Anchor `main_pid` once, hold its launcher through that anchor, then
+/// observe its adapter through the same anchor as the launcher inside the
+/// unit sees it: through the unit's own root, so in the unit's mount
+/// namespace.
 fn hold_launcher_and_adapter(
     main_pid: u32,
     admitted: &AdmittedAttempt,
 ) -> Result<(HeldLauncher, FdIdentity), BarrierError> {
-    hold_launcher(main_pid, admitted.launcher()).and_then(|held| {
-        crate::observe_adapter(main_pid, admitted.executable_path())
-            .map(|adapter| (held, adapter))
-            .map_err(BarrierError::AdapterIdentity)
-    })
+    crate::MainProcess::open(main_pid)
+        .and_then(|process| process.executable().map(|file| (process, file)))
+        .map_err(|_| BarrierError::LauncherIdentity)
+        .and_then(|(process, file)| {
+            hold_launcher(file, admitted.launcher()).and_then(|held| {
+                process
+                    .adapter(admitted.executable_path())
+                    .map(|adapter| (held, adapter))
+                    .map_err(BarrierError::AdapterIdentity)
+            })
+        })
 }
 
 fn verify_launcher(file: &File, facts: &crate::LauncherFacts) -> Result<(), BarrierError> {

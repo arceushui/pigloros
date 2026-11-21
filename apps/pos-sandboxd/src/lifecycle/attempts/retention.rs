@@ -60,7 +60,8 @@ impl<I> AttemptLifecycle<I> {
     /// it is signed once.
     /// A response whose classification quarantines (a contradiction, any
     /// code-2 candidate or the fail-closed fallback, R9 §4.6.4 and §4.6.5)
-    /// is retained and closes admission.
+    /// is retained and closes admission. A response already settled is
+    /// returned without signing or chunking anything again.
     ///
     /// # Errors
     /// [`AttemptLifecycleError::UnknownAttempt`] for an attempt that has not
@@ -80,8 +81,32 @@ impl<I> AttemptLifecycle<I> {
         R: RuntimeAttestationSigner,
     {
         let attempt = (ended.attempt_id(), ended.admission().grant().digest());
-        let response = ended.signed_response(signer, admitted).map(Arc::new);
-        self.store(attempt, None, response)
+        self.settled(attempt).unwrap_or_else(|| {
+            let response = ended.signed_response(signer, admitted).map(Arc::new);
+            self.store(attempt, None, response)
+        })
+    }
+
+    /// The response the ended attempt of `grant` already settled on: the
+    /// one retained, or the closed refusal after a fault. `None` while it is
+    /// pending, and for any other slot, whose refusal `store` reports.
+    fn settled(
+        &self,
+        (attempt_id, grant): ([u8; 16], [u8; 32]),
+    ) -> Option<Result<Arc<RetainedResponse>, AttemptLifecycleError>> {
+        match lock(&self.attempts).get(&attempt_id) {
+            Some(Slot::Ended {
+                grant: admitted,
+                response: Retained::Signed(response),
+                ..
+            }) if *admitted == grant => Some(Ok(Arc::clone(response))),
+            Some(Slot::Ended {
+                grant: admitted,
+                response: Retained::Faulted,
+                ..
+            }) if *admitted == grant => Some(Err(AttemptLifecycleError::ResponseUnavailable)),
+            _ => None,
+        }
     }
 
     /// Join an exact repeated execute of `attempt_id` whose SPX1 digests to

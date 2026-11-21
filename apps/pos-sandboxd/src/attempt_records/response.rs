@@ -535,6 +535,21 @@ type Signed = (
     SandboxProviderResult,
 );
 
+/// The output SBC1 records under `result` when it carries an output
+/// descriptor, that is when it Completed; any other response retains none.
+fn retained_output(
+    output: Option<ReleasedOutput>,
+    grant: &AdmissionGrant,
+    result: &SandboxProviderResult,
+) -> Result<Option<RetainedOutput>, SandboxProviderProtocolError> {
+    output
+        .filter(|_| result.output.is_some())
+        .map(|output| {
+            output.into_records(result.result_digest(), grant.request_id, grant.attempt_id)
+        })
+        .transpose()
+}
+
 /// Sign the events after `prefix`, then SPR1 and SPY1, and retain them with
 /// what they bind. `output` becomes the SBC1 records under SPY1 only when
 /// SPY1 carries an output descriptor, that is when it Completed.
@@ -549,12 +564,7 @@ fn assemble<R: RuntimeAttestationSigner>(
     let grant = AdmissionGrant::from_canonical_cbor(issued.bytes())?;
     let (chain, receipt, result) =
         sign_records(signer, admitted, (&grant, issued), &records, &sent, prefix)?;
-    output
-        .filter(|_| result.output.is_some())
-        .map(|output| {
-            output.into_records(result.result_digest(), grant.request_id, grant.attempt_id)
-        })
-        .transpose()
+    retained_output(output, &grant, &result)
         .and_then(|output| {
             encoded(&chain, &receipt, &result, sent.release.as_ref())
                 .map(|encoded| (encoded, output))

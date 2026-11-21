@@ -1608,10 +1608,10 @@ mod cases {
         ));
         // Released, the attempt can be claimed again.
         drop(claim);
-        let write = lifecycle
+        let awaited = lifecycle
             .claim([1; 16], [1; 16], REQUEST)?
-            .convert(grant(1))?;
-        write.written();
+            .convert(grant(1))?
+            .written();
         assert!(matches!(
             lifecycle.reconcile(&reconcile_request(1, grant(1))),
             Err(AttemptLifecycleError::AttemptActive)
@@ -1624,18 +1624,73 @@ mod cases {
             lifecycle.admit_input(FakeInput::new(2).with_attempt([1; 16])),
             Err(AttemptLifecycleError::GrantMismatch)
         ));
-        let ended: EndedAttempt<()> = lifecycle.record_failed(&FakeFailed(1))?;
+        let ended: EndedAttempt<()> = awaited.record_failed_admission(&FakeFailed(1))?;
         assert_eq!(ended.cancel_source(), None);
         lifecycle.reconcile(&reconcile_request(1, grant(1)))?;
         assert!(matches!(
             lifecycle.claim([1; 16], [1; 16], REQUEST),
             Err(AttemptLifecycleError::UnknownAttempt)
         ));
+        // A request ID stays known once its AGR1 was written, but a claim
+        // that admitted nothing frees it, whether released or voided.
+        assert!(matches!(
+            lifecycle.claim([5; 16], [1; 16], [0x77; 32]),
+            Err(AttemptLifecycleError::RequestConflict)
+        ));
+        drop(lifecycle.claim([5; 16], [9; 16], REQUEST)?);
+        drop(
+            lifecycle
+                .claim([6; 16], [9; 16], [0x77; 32])?
+                .convert(grant(6))?,
+        );
+        let voided = lifecycle.claim([7; 16], [9; 16], [0x78; 32])?;
         lifecycle.fence_and_snapshot().await?;
+        assert!(!lifecycle.lock_requests().contains_key(&[9; 16]));
+        drop(voided);
         assert!(matches!(
             lifecycle.claim([3; 16], [3; 16], REQUEST),
             Err(AttemptLifecycleError::Fenced)
         ));
+        Ok(())
+    }
+
+    /// An awaited input whose attempt was admitted elsewhere settles nothing
+    /// and faults nothing when it is dropped.
+    #[test]
+    fn an_awaited_input_admitted_through_the_table_faults_nothing() -> TestResult {
+        let runtime = Runtime::new()?;
+        let awaited = runtime
+            .lifecycle
+            .claim([1; 16], [1; 16], REQUEST)?
+            .convert(grant(1))?
+            .written();
+        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        drop(awaited);
+        assert!(runtime.admits()?);
+        drop(owned);
+        Ok(())
+    }
+
+    /// A fence that lands as an owner begins its run, before the owner
+    /// takes the attempts lock, is seen by the run: the ending is recorded
+    /// with nothing committed, so no run starts that the fence did not wait
+    /// for.
+    #[tokio::test(start_paused = true)]
+    async fn a_fence_as_a_run_begins_records_the_cancelled_ending() -> TestResult {
+        let runtime = Runtime::new()?;
+        let fixture = manager(1).await?;
+        let calls = fixture.calls();
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
+        *lock(&runtime.lifecycle.before_begin.0) = Some(Box::new(|lifecycle| {
+            drop(lifecycle.fence());
+        }));
+        let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+        assert_eq!(ended.cancel_source(), Some(CancelSource::Revocation));
+        assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
+        assert!(matches!(ended.cleanup(), Ok(None)));
+        assert!(!exists(&runtime.record(1)?));
+        assert_eq!(calls.count()?, 0);
         Ok(())
     }
 
@@ -1705,9 +1760,9 @@ mod cases {
         let joined = lifecycle.join([1; 16], REQUEST);
         let ran = async {
             tokio::task::yield_now().await;
-            claim.convert(grant(1))?.written();
+            let awaited = claim.convert(grant(1))?.written();
             tokio::task::yield_now().await;
-            let owned = lifecycle.admit_input(FakeInput::new(1))?;
+            let owned = awaited.admit_owned(FakeInput::new(1))?;
             tokio::task::yield_now().await;
             let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
             cleaned(&ended)?;
@@ -1750,7 +1805,21 @@ mod cases {
             voided.convert(grant(4)),
             Err(AttemptLifecycleError::Fenced)
         ));
-        writing.written();
+        // An exchange that ends after its AGR1 without the input owes the
+        // attempt a response: a provider fault, never an orphaned slot.
+        drop(writing.written());
+        assert!(matches!(
+            lifecycle.terminal_response([3; 16], grant(3)),
+            Err(AttemptLifecycleError::ResponseUnavailable)
+        ));
+        assert!(matches!(
+            lifecycle.join([3; 16], REQUEST).await,
+            Err(AttemptLifecycleError::ResponseUnavailable)
+        ));
+        assert!(lifecycle
+            .reconcile(&reconcile_request(3, grant(3)))?
+            .intent()
+            .is_none());
         let owned = lifecycle.admit_input(FakeInput::new(1))?;
         // A repeat that joined it wakes when the ending is recorded.
         let joined = lifecycle.join([1; 16], REQUEST);
@@ -2123,15 +2192,15 @@ mod cases {
             );
             let request = input.entry().admission().snapshot().request().clone();
             let grant_digest = input.entry().grant_digest();
-            lifecycle
+            let owned = lifecycle
                 .claim(
                     request.attempt_id,
                     request.request.request_id,
                     request.request_digest,
                 )?
                 .convert(grant_digest)?
-                .written();
-            let owned = lifecycle.admit(input)?;
+                .written()
+                .admit(input)?;
             assert_eq!(ledger.usage().attempts, 1);
             let fixture = manager(1).await?;
             let (_store_root, store) = crate::test_fixtures::capture_store()?;

@@ -536,8 +536,12 @@ fn chunk_oracle(parent: [u8; 32], index: u64, chunk: &[u8]) -> TestResult<Vec<u8
 #[test]
 fn output_records_are_the_contiguous_sbc1_chunks_a_selector_accepts() -> TestResult {
     let parent = [2; 32];
+    assert_eq!(SandboxPayloadChunk::CHUNK_BYTES, CHUNK);
     let payload: Vec<u8> = (0..=CHUNK).map(|byte| byte.to_le_bytes()[0]).collect();
-    let records = SandboxPayloadChunk::output_records(parent, [3; 16], [4; 16], &payload)?;
+    let record = |index: u64, bytes: &[u8]| {
+        SandboxPayloadChunk::output_record(parent, [3; 16], [4; 16], index, bytes.to_vec())
+    };
+    let records = [record(0, &payload[..CHUNK])?, record(1, &payload[CHUNK..])?];
     assert_eq!(
         records,
         [
@@ -562,12 +566,19 @@ fn output_records_are_the_contiguous_sbc1_chunks_a_selector_accepts() -> TestRes
         validator.accept(&SandboxPayloadChunk::from_canonical_cbor(record)?)?;
     }
     validator.finish()?;
-    // An empty payload has no records.
-    assert!(SandboxPayloadChunk::output_records(parent, [3; 16], [4; 16], &[])?.is_empty());
-    // A chunk names its parent SPY1.
-    assert_eq!(
-        SandboxPayloadChunk::output_records([0; 32], [3; 16], [4; 16], &payload).err(),
-        Some(SandboxProviderProtocolError::FieldOutOfBounds)
-    );
+    // A chunk names its parent SPY1, carries bytes, and fits the 128-chunk
+    // payload, even at an index whose offset overflows.
+    for (parent, index, bytes) in [
+        ([0; 32], 0, vec![1]),
+        (parent, 0, Vec::new()),
+        (parent, 0, vec![1; CHUNK + 1]),
+        (parent, 128, vec![1]),
+        (parent, u64::MAX, vec![1]),
+    ] {
+        assert_eq!(
+            SandboxPayloadChunk::output_record(parent, [3; 16], [4; 16], index, bytes).err(),
+            Some(SandboxProviderProtocolError::FieldOutOfBounds)
+        );
+    }
     Ok(())
 }
