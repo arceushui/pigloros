@@ -3200,6 +3200,185 @@ fn a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not() 
     Ok(())
 }
 
+fn cbor(value: &ciborium::value::Value) -> TestResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// The FAC1 the Fork admission service sends for its own principal: a POC1
+/// binding it to an owner name when `parent` is `None`, else an FCC1 Fork
+/// of `parent` at cut zero.
+fn service_command(
+    host: &mut ErasureExecutionHostV1,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    operation: u8,
+    parent: Option<TimelineId>,
+) -> TestResult<pos_core::ForkAdmissionHostCommandV1> {
+    use ciborium::value::Value;
+    let (signer, adapter, policy) = service_keys()?;
+    let evidence = adapter.sign_authenticated_principal(
+        pos_core::fork_authentication::AuthenticatedPrincipalRecordV1 {
+            principal: pos_core::PrincipalRefV1::try_new([4; 16], "service.local")?,
+            adapter_id: "service-adapter".to_owned(),
+            assurance: 1,
+            issued_at: 0,
+            expires_at: u64::MAX,
+            registry_binding: Hash::from_bytes([3; 32]),
+            operation_nonce: [5; 32],
+        },
+    )?;
+    let verified = pos_crypto::fork_authentication::verify_authenticated_principal_evidence_v1(
+        &policy, evidence,
+    )?;
+    let principal = pos_core::fork_authentication::principal_digest_v1(
+        &verified.evidence().record().principal,
+    )?;
+    let store_id = host
+        .fork_admission_bootstrap()
+        .fork_admission_host_record()?
+        .store_id();
+    let mut fields = vec![
+        Value::Text(if parent.is_some() { "FCC1" } else { "POC1" }.to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(store_id.as_bytes().to_vec()),
+        Value::Bytes(session.identity().as_bytes().to_vec()),
+        Value::Bytes(vec![operation; 32]),
+        Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+        Value::Bytes(principal.as_bytes().to_vec()),
+    ];
+    fields.extend(parent.map_or_else(
+        || vec![Value::Text("service".to_owned())],
+        |parent| {
+            vec![
+                Value::Bytes(parent.inner().to_bytes().to_vec()),
+                Value::Integer(0.into()),
+                Value::Integer(0.into()),
+                Value::Bytes(vec![8; 32]),
+                Value::Bytes(vec![9; 32]),
+                Value::Integer(1.into()),
+                Value::Text("service-fork".to_owned()),
+            ]
+        },
+    ));
+    let inner = cbor(&Value::Array(fields))?;
+    let signature = signer.sign_command(&inner, &verified)?;
+    Ok(pos_core::ForkAdmissionHostCommandV1::from_canonical_cbor(
+        &cbor(&Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(inner),
+            Value::Bytes(verified.evidence().to_canonical_cbor()?),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ]))?,
+    )?)
+}
+
+/// The Fork admission service's host key, its authentication adapter and
+/// the policy that trusts that adapter.
+fn service_keys() -> TestResult<(
+    pos_crypto::fork_authentication::ForkHostSigningKeyV1,
+    pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1,
+    pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+)> {
+    let signer = pos_crypto::fork_authentication::ForkHostSigningKeyV1::from_seed([0x71; 32])?;
+    let adapter =
+        pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1::from_seed(
+            [0x72; 32],
+        )?;
+    let policy = pos_core::fork_authentication::ForkAuthenticationPolicyV1::new(vec![
+        pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1 {
+            adapter_id: "service-adapter".to_owned(),
+            verifying_key: adapter.public_key(),
+            minimum_assurance: 1,
+            registry_bindings: vec![Hash::from_bytes([3; 32])],
+        },
+    ])?;
+    Ok((signer, adapter, policy))
+}
+
+/// Provision the Fork admission service on `host`, bind its own principal
+/// and admit its Fork of `parent` (an FCC1): the child's id.
+fn service_admitted_fork(
+    host: &mut ErasureExecutionHostV1,
+    parent: TimelineId,
+) -> TestResult<TimelineId> {
+    let (signer, _, policy) = service_keys()?;
+    let key = pos_core::PublicKey::from_bytes(signer.public_key());
+    let bootstrap = host.fork_admission_bootstrap();
+    let initialize = bootstrap.begin_fork_admission_initialize(key, policy.digest()?)?;
+    bootstrap.finalize_fork_admission_initialize(
+        &initialize,
+        &signer.sign_initialize(&initialize.to_canonical_cbor()?)?,
+    )?;
+    let open = bootstrap.begin_fork_admission_open(key, policy.digest()?)?;
+    let session = bootstrap
+        .finalize_fork_admission_open(&open, &signer.sign_open(&open.to_canonical_cbor()?)?)?;
+    let bind = service_command(host, &session, 1, None)?;
+    host.execute_fork_admission_command(&session, &policy, &bind)?;
+    let fork = service_command(host, &session, 2, Some(parent))?;
+    match host.execute_fork_admission_command(&session, &policy, &fork)? {
+        pos_core::ForkAdmissionOperationResultV1::Fork(receipt) => Ok(receipt.child_id),
+        other @ pos_core::ForkAdmissionOperationResultV1::PrincipalOwner(_) => {
+            Err(format!("expected an admitted Fork, got {other:?}").into())
+        }
+    }
+}
+
+/// ADR-136 §1 and §3 (#1477): a Fork the Fork admission service admits for
+/// its own principal inherits its parent's owner, so it freezes by owner.
+///
+/// The parent is a listed host Timeline, which the freeze leaves out, so no
+/// `fork_point` lineage reaches the child: only its owner, the actor, does.
+#[test]
+fn a_service_admitted_fork_of_a_host_timeline_freezes_by_its_inherited_owner() -> TestResult {
+    let owned = OwnedStore::new()?;
+    let host_timeline = owned
+        .store
+        .sqlite()?
+        .create_timeline_with_meta(TimelineMeta::root_owned("host", actor()))?
+        .id();
+    let mut hosting = bundle();
+    hosting.host_timelines.push(host_timeline);
+    hosting.host_timelines.sort_unstable();
+    let case = Case::signed(&hosting, &bundle_root(), &[])?;
+    let (child, digest) = {
+        let mut host = owned.store.host(&case, 4_096)?;
+        let child = service_admitted_fork(&mut host, host_timeline)?;
+        assert_eq!(
+            host.read_sender()?
+                .timeline(child)?
+                .ok_or("no admitted child")?
+                .meta
+                .owner,
+            Some(actor())
+        );
+        let digest = prepared(
+            &owned.store,
+            &mut host,
+            1,
+            ErasureScopeV1::PrivateSubjectData,
+        )?;
+        (child, digest)
+    };
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::FreezeAuthorization,
+        digest,
+        &erasure_signer(),
+        1,
+    )?;
+    owned.store.retain(std::slice::from_ref(&signed))?;
+    let mut host = owned.store.host(&case, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .freeze_access(request_of(1)?, &freeze(signature_address(&signed)?))?
+            .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert_frozen(&mut host, &[owned.owned, child], host_timeline)?;
+    Ok(())
+}
+
 #[test]
 fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestResult {
     let owned = OwnedStore::new()?;
