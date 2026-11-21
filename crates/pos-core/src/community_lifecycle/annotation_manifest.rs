@@ -59,8 +59,9 @@ pub struct CommunityAnnotationManifestV1<'a>(CommunityAnnotationManifestInputV1<
 impl<'a> CommunityAnnotationManifestV1<'a> {
     /// Validate links, item order and every count and byte bound.
     ///
-    /// A manifest exists only when validated items were retained, so it is
-    /// never empty.
+    /// An empty CAT1 is refused. This is inferred from ADR-129 §6: "Retain
+    /// no aggregate when that complete input set/budget would fail", and CPS1
+    /// names an annotation manifest only when validated items were retained.
     ///
     /// # Errors
     /// Returns `BoundsExceeded` for no or more than 1,024 items, a guest
@@ -86,6 +87,9 @@ impl<'a> CommunityAnnotationManifestV1<'a> {
             .try_fold(0, |floor, item| validate_item(floor, *item))
             .and_then(|_| validate_horizon(input.evidence_not_after_micros))
             .map(|()| Self(input))
+            // This re-encodes up to 2 MiB only to check the size. On the
+            // decode path it is redundant: `record_cursor` already enforced
+            // the same cap on the input bytes.
             .and_then(|manifest| {
                 if manifest.to_canonical_cbor().len() > MAX_COMMUNITY_ANNOTATION_MANIFEST_BYTES_V1 {
                     Err(Error::BoundsExceeded)
@@ -166,6 +170,12 @@ impl<'a> CommunityAnnotationManifestV1<'a> {
     }
 }
 
+/// Check one item against the running guest-index floor.
+///
+/// Guest indices may repeat (nondecreasing, owner decision 2026-11-21): one
+/// guest may contribute several items, which keeps the 1,024-item limit
+/// reachable with indices 0..=63. Bound violations take precedence over
+/// ordering violations.
 fn validate_item(floor: u64, item: CommunityAnnotationItemV1<'_>) -> Result<u64> {
     let digests: Vec<Hash> = item.resolved_input_digests.iter().collect();
     if item.guest_index > MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1
