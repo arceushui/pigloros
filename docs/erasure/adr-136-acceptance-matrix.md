@@ -15,7 +15,7 @@ rows say why no test can exist, and the deviations index lists them.
 | Test | Rows | Mapped | Not mapped | Deviations |
 |---|---|---|---|---|
 | 1. Lifecycle bytes | 3 | 3 | 0 | Q16 |
-| 2. The C1′ partition | 13 | 13 | 0 | Deleted after freeze, imported Timelines, service Fork after freeze; service Fork owner **pending #1477** |
+| 2. The C1′ partition | 13 | 13 | 0 | Deleted after freeze, imported Timelines, service Fork after freeze |
 | 3. ARD1 and key binding | 5 | 5 | 0 | none |
 | 3a. Snapshot port parity | 3 | 3 | 0 | none |
 | 3b. Closure bound | 4 | 4 | 0 | Closure bound |
@@ -26,7 +26,7 @@ rows say why no test can exist, and the deviations index lists them.
 | 8. The Gateway | 17 | 16 | 1 (compile time) | `q_subject < 1`, plain submission, four runtime-seam mappings |
 | 9. `getErasure` and the golden check | 6 | 5 | 1 (no metrics) | none |
 | 10. Export and the offline evaluator | 1 | 1 | 0 | Field-level reporting |
-| 11. Key-less recovery and serve modes | 9 | 9 | 0 | Adapter N/A (D21), Air-Gapped predicate 6; service Fork owner **pending #1477** |
+| 11. Key-less recovery and serve modes | 9 | 9 | 0 | Adapter N/A (D21), Air-Gapped predicate 6 |
 | **Total** | **90** | **86** | **4** | |
 
 ### Deviations index
@@ -46,7 +46,6 @@ Each entry names its owner decision and the rows it explains.
 | pos-cli has no plain submission | 8 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
 | Root-chain advance and revocation, the A/B retry and the signer revocation map to the runtime seam (errata) | 8 | Owner 2026-11-20 | [Test 8](#test-8-the-gateway) |
 | Unavailable fields are reported per artifact | 10 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
-| A Fork the service admits records no owner | 2, 11 | **Pending #1477** (owner 2026-11-20): the production fix is its own ticket | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
 | The service refuses a Fork of an affected parent after the freeze (errata) | 2, 11 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
 | The conformance adapter never acts as a key-less root | 11 | D21 (owner 2026-11-20) | [Test 11](#test-11-key-less-recovery-and-serve-modes) |
 | Air-Gapped predicate 6 is vouched for in the served suite | 11 | Harness | [Test 11](#test-11-key-less-recovery-and-serve-modes) |
@@ -59,6 +58,7 @@ Each entry names its owner decision and the rows it explains.
 | `ACC` | `crates/pos-runtime/tests/local_erasure_composition/acceptance.rs`, the module `local_erasure_composition_public::acceptance` |
 | `EHP` | `crates/pos-runtime/tests/erasure_host_public.rs` |
 | `LEA` | `crates/pos-store/tests/local_erasure_adapter_public.rs` |
+| `FAA` | `crates/pos-store/tests/fork_admission_authority.rs` |
 | `LER` | `crates/pos-core/tests/local_erasure_records_public.rs` |
 | `GW` | `apps/piglor-gateway/src` (in-crate tests) |
 | `E` | `apps/piglor-gateway/src/erasure/tests.rs`, the served-router tests of `requestErasure` and `getErasure` |
@@ -144,18 +144,6 @@ other `LEC` test.
   (class, digest, from and to claim, redaction state, authoritative use). It
   has no field-level output, and the Gateway has no subject-export route.
   Test 10 is therefore covered at artifact level through the runtime seam.
-- **A Fork the service admits records no owner (tests 2 and 11, pending
-  #1477, owner 2026-11-20):** the ADR says a Fork inherits its parent's
-  owner. The runtime host's Fork does
-  (`TimelineMeta::forked_from_owned`). The Fork admission service's FCC1
-  creates its child with `TimelineMeta::forked_from`, so the child has no
-  owner (`crates/pos-store/src/sqlite.rs`, the FCC1 child of
-  `execute_fork_admission_command_in_topology_transition`). The child is
-  still affected: the freeze takes every Fork descendant by `fork_point`
-  lineage. The production fix, making the child inherit the owner, is its
-  own ticket, #1477, stacked on C6c. Until then the test asserts today's
-  behaviour (frozen through lineage); #1477 tightens it to an owner
-  assertion.
 - **The service refuses a Fork of an affected parent after the freeze (tests
   2 and 11, ADR errata, owner 2026-11-20):** the ADR says "Forks of
   affected Timelines are always in
@@ -183,7 +171,7 @@ other `LEC` test.
 | Bullet | Test | Adapters | Note |
 |---|---|---|---|
 | An actor-created Timeline is affected. Another actor's Timeline, an unowned Timeline and an imported Timeline are not. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_signed_private_freeze_commits_the_subject_closure`; `EA::the_served_partition_freezes_only_the_actors_lineage` | both; `SQLite`; `SQLite` | Deviation (errata): ADR says imported = unaffected; ownership follows the data (owner 2026-11-20). The ACC test imports with `import_timeline_with_id`: the actor's own Timeline is affected; another owner's and an unowned one are not. The EA test seeds the same imports and an unowned root into a served store: after the actor's erasure the actor's root and own import answer `403 deleted`, and every other one stays readable through the router. |
-| A Fork of the actor's Timeline made by another actor inherits the actor as owner and is affected. The actor's Fork of another subject's Timeline is not affected. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not`; `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | both; `SQLite`; `SQLite` | The runtime host's `fork_timeline` does not take the forking actor, and a child always inherits its parent's owner. So any host Fork stands for a Fork "made by another actor". The EA test is the Gateway part, in the managed mode: the Fork admission service forks the actor's root for its own FACR1 principal, and the actor's erasure freezes that child with the root (two `timeline-payload` targets, both `403 deleted`). Pending #1477 (owner 2026-11-20): the service's child records no owner, so the bullet's "inherits the actor as owner" does not hold through the service yet. The child is affected through its `fork_point` lineage, which the test asserts; #1477 tightens it to an owner assertion. |
+| A Fork of the actor's Timeline made by another actor inherits the actor as owner and is affected. The actor's Fork of another subject's Timeline is not affected. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not`; `LEC::a_service_admitted_fork_of_a_host_timeline_freezes_by_its_inherited_owner`; `FAA::memory_fcc1_child_inherits_the_parent_owner`; `FAA::sqlite_fcc1_child_inherits_the_parent_owner`; `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | both; `SQLite`; `SQLite`; Memory; `SQLite`; `SQLite` | The runtime host's `fork_timeline` does not take the forking actor, and a child always inherits its parent's owner. So any host Fork stands for a Fork "made by another actor". The Fork admission service's FCC1 child also inherits its parent's owner, read in the commit's transaction (#1477); the FAA tests check an owned and an unowned parent on each adapter. The second LEC test forks, through the service, a listed host Timeline the actor owns: the freeze leaves the host Timeline out, so no `fork_point` lineage reaches the child, and the child freezes by its inherited owner alone. The EA test is the Gateway part, in the managed mode: the Fork admission service forks the actor's root for its own FACR1 principal, the child records the actor as owner, and the actor's erasure freezes that child with the root (two `timeline-payload` targets, both `403 deleted`). |
 | A Memory host without an authorizer creates unowned Timelines | `EHP::an_owned_root_records_its_owner_at_creation`; `LP::a_created_root_is_owned_by_its_admitted_actor` | both; Memory | The LP test is the Gateway part: an unprotected Gateway (no authorizer) creates an unowned root through `POST /v1/timelines`. |
 | An existing descendant | `LEC::a_signed_private_freeze_commits_the_subject_closure` | `SQLite` | Write behind the host. |
 | A future Fork | `LEC::identified_forks_extend_a_frozen_scope_across_restart_and_rotation` | `SQLite` | Restart and bundle rotation. |
@@ -408,6 +396,6 @@ runtime-seam rows hold in every mode.
 | Bullet | Test | Adapters | Note |
 |---|---|---|---|
 | The managed Local Fork admission mode runs the Gateway lifecycle suite: the served bullets of tests 1, 2, 4, 8 and 9 (tests 3 to 7 and 10 have no served bullet) | `E::an_exact_retry_answers_the_same_receipt_bytes`; `E::each_erasure_operation_needs_its_own_grant`; `E::get_erasure_answers_one_not_found`; `E::parallel_requests_of_one_subject_admit_one`; `E::a_retained_only_scope_is_refused_after_the_decision`; `E::each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next`; `E::a_subject_past_its_quota_is_refused_for_good`; `EA::the_served_partition_freezes_only_the_actors_lineage`; `EA::every_actors_used_quota_holds_across_a_restart`; `EA::a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines`, each `::managed_local_fork_admission` | `SQLite` | Submission, the drive to the first receipt, the `getErasure` projection, the exact retry (also after a restart), the quota, consent revocation, the 404s and the disclosure golden check. A restart stops the listener and serves the store again. |
-| The managed mode's Fork admission service | `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | `SQLite` | Test 2 through the service: the child's owner is pending #1477, and the post-freeze refusal is an ADR errata (see the deviations). |
+| The managed mode's Fork admission service | `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | `SQLite` | Test 2 through the service: the child inherits its parent's owner (the actor's root's child is the actor's, the other actor's root's child is the other actor's), and the post-freeze refusal is an ADR errata (see the deviations). |
 | Air-Gapped passes the same suite with the bundled TPS1 | The same ten suite functions, each `::air_gapped` | `SQLite` | The projection discloses `gateway-mode-air-gapped-v1`. The consent test asserts the same `403 revoked` and exact-retry `200` as Local: an Air-Gapped binding only fixes the authorizer's revocation-freshness claim to current (D10), which every serve composition already holds. |
 | The Local serve mode (the baseline of both) | The same ten suite functions, each `::local` | `SQLite` | |

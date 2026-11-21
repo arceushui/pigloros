@@ -224,6 +224,17 @@ impl Served {
         Ok((read.status, code))
     }
 
+    /// The owner the Gateway's store records for `timeline`.
+    async fn owner(&self, timeline: TimelineId) -> TestResult<Option<EntityId>> {
+        let held = self
+            .gateway
+            .store
+            .timeline(timeline)
+            .await
+            .map_err(crate::GatewayError::from)?;
+        Ok(held.ok_or("no Timeline")?.meta.owner)
+    }
+
     /// Whether the Gateway's store holds, unfrozen, the Consent Timeline
     /// and the Erasure Host Timeline.
     async fn holds_the_consent_and_erasure_host_timelines(&self) -> TestResult<bool> {
@@ -544,9 +555,11 @@ async fn the_fork_admission_service_forks_into_and_beside_an_erasure() -> TestRe
     // visible parent; it never compares the parent's Timeline owner, so the
     // actor's HTTP-created root is a valid parent.
     assert_eq!(&request(&socket, &bind_payload(60), false)?[..10], &BIND_OK);
-    let descendant = fork_result(&fork(&socket, 61, &owned)?)?.0.to_string();
-    // Event reads are granted per operation, not per owner, so the actor
-    // reads the unowned child (as the C6b partition test reads unowned roots).
+    let (child, _) = fork_result(&fork(&socket, 61, &owned)?)?;
+    // ADR-136 §1 (#1477): the FCC1 child inherits its parent's owner, the
+    // actor, although the service's own principal made the Fork.
+    assert_eq!(served.owner(child).await?, Some(actor));
+    let descendant = child.to_string();
     assert_eq!(served.events(actor, &descendant).await?.0, StatusCode::OK);
     let admitted = served
         .request(actor, "erasure-1", "private-subject-data")
@@ -558,12 +571,10 @@ async fn the_fork_admission_service_forks_into_and_beside_an_erasure() -> TestRe
     assert_monotonic(&observed)?;
     let last = observed.last().ok_or("no projection")?;
     assert_eq!(last["state"], "partial-failure");
-    // The FCC1 child records no owner (`TimelineMeta::forked_from`), but the
-    // Local freeze (`affected_timelines`) takes every Fork descendant of an
-    // owned Timeline by `fork_point`, and the closure has one
+    // The actor owns the child, so the Local freeze (`affected_timelines`)
+    // takes it with the actor's root, and the closure has one
     // `timeline-payload` target per affected Timeline: the root and the
-    // child. #1477 makes the child inherit the actor as owner and will
-    // tighten this to an owner assertion.
+    // child.
     assert_eq!(payload_class(last)?["required"], 2);
     for frozen in [&owned, &descendant] {
         assert_eq!(
@@ -576,8 +587,12 @@ async fn the_fork_admission_service_forks_into_and_beside_an_erasure() -> TestRe
     // an active request covers (ADR-106 r3 containment); joining the frozen
     // scope holds at the runtime seam.
     assert_eq!(fork(&socket, 62, &owned)?, rejected(5));
-    let beside = fork_result(&fork(&socket, 63, &others)?)?.0.to_string();
-    assert_eq!(served.events(other, &beside).await?.0, StatusCode::OK);
+    let (beside, _) = fork_result(&fork(&socket, 63, &others)?)?;
+    assert_eq!(served.owner(beside).await?, Some(other));
+    assert_eq!(
+        served.events(other, &beside.to_string()).await?.0,
+        StatusCode::OK
+    );
     served.stop(driver).await?;
     Ok(())
 }
