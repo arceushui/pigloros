@@ -622,23 +622,57 @@ fn a_reissue_releases_the_output_once_its_frames_are_written() -> TestResult {
     Ok(())
 }
 
-/// A response already retained is returned without signing anything again.
+/// A signer that counts its signatures.
+struct Counting {
+    signer: KeyFileRuntimeSigner,
+    signed: std::cell::Cell<usize>,
+}
+
+impl RuntimeAttestationSigner for Counting {
+    fn runtime_attestation_key_id(&self) -> &str {
+        self.signer.runtime_attestation_key_id()
+    }
+
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+        self.signed.set(self.signed.get() + 1);
+        self.signer.sign(record)
+    }
+}
+
+/// A response already retained is returned as it is, without signing
+/// anything again; one for another grant is refused, whether the stored
+/// response was signed or faulted.
 #[test]
 fn a_retained_response_is_never_signed_again() -> TestResult {
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     let (_directory, lifecycle, _ledger) = lifecycle()?;
     let digest = signed_grant()?.grant.grant_digest();
     lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
-    let public = signing_key().verifying_key();
-    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     let retained = lifecycle.retain_response(completed()?, &signer(), admitted)?;
-    // A signer that could not sign is never asked.
-    let foreign = KeyFileRuntimeSigner::from_signing_key(
-        ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
-        KEY_ID.to_owned(),
-    );
+    let counting = Counting {
+        signer: signer(),
+        signed: std::cell::Cell::new(0),
+    };
     assert!(Arc::ptr_eq(
-        &lifecycle.retain_response(completed()?, &foreign, admitted)?,
+        &lifecycle.retain_response(completed()?, &counting, admitted)?,
         &retained
+    ));
+    assert_eq!(counting.signed.get(), 0);
+    // Another grant's attempt is not the one stored.
+    assert!(matches!(
+        lifecycle.retain_response(Released::default().ended()?, &signer(), admitted),
+        Err(AttemptLifecycleError::GrantMismatch)
+    ));
+    // The same for a stored fault.
+    let (_directory, lifecycle, _ledger) = self::lifecycle()?;
+    let unsignable = lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    assert!(lifecycle
+        .retain_response(unsignable, &signer(), admitted)
+        .is_err());
+    assert!(matches!(
+        lifecycle.retain_response(Released::default().ended()?, &signer(), admitted),
+        Err(AttemptLifecycleError::GrantMismatch)
     ));
     Ok(())
 }
