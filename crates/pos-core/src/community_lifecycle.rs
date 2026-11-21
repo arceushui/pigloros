@@ -5,6 +5,7 @@
 //! source, selected generation, current head and actual protected use. These
 //! codecs cannot issue a guest permit or restore a live state cell.
 
+mod annotation_manifest;
 mod authority_catalogue;
 mod authority_evidence;
 mod budget_quote;
@@ -52,6 +53,12 @@ mod state;
 mod step;
 mod terminal;
 
+pub use annotation_manifest::{
+    CommunityAnnotationItemV1, CommunityAnnotationManifestInputV1, CommunityAnnotationManifestV1,
+    MAX_COMMUNITY_ANNOTATION_CLAIM_BYTES_V1, MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1,
+    MAX_COMMUNITY_ANNOTATION_INPUT_REFS_V1, MAX_COMMUNITY_ANNOTATION_ITEMS_V1,
+    MAX_COMMUNITY_ANNOTATION_MANIFEST_BYTES_V1,
+};
 pub use authority_catalogue::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,
     CommunityActorRowV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,

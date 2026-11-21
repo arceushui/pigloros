@@ -15,6 +15,7 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
 
 const GRAPH_MAXIMA: [u64; 6] = [4096, 8192, 4096, 4096, 67_108_864, 268_435_456];
+const NODE: [Hash; 1] = [hash(30)];
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -179,7 +180,8 @@ fn required_node_list_bound_is_exact_and_rows_are_distinct_nonzero() -> TestResu
     let repeated = [hash(1), hash(2), hash(1)];
     let zero = [hash(1), Hash::zero()];
     for (nodes, expected) in [
-        (&[][..], None),
+        (&[][..], Some(Error::BoundsExceeded)),
+        (&distinct[..1], None),
         (&distinct[..4096], None),
         (&distinct[..], Some(Error::BoundsExceeded)),
         (&repeated[..], Some(Error::InvalidBinding)),
@@ -201,9 +203,42 @@ fn required_node_list_bound_is_exact_and_rows_are_distinct_nonzero() -> TestResu
 }
 
 #[test]
+fn largest_valid_bundle_fits_its_encoding_capacity() -> TestResult {
+    let nodes: Vec<Hash> = (0..4096_u32)
+        .map(|index| {
+            let mut digest = [0xaa; 32];
+            digest[..4].copy_from_slice(&index.to_be_bytes());
+            Hash::from_bytes(digest)
+        })
+        .collect();
+    let mut input = input(&nodes, true, ROOT_FORMS[3])?;
+    input.pass_key = Pass::new(
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([1; 16])),
+        [2; 16],
+        u64::MAX,
+    )?;
+    input.native_producer_ordinal = u64::MAX;
+    input.shared_counts = SharedCounts {
+        nodes: u64::MAX,
+        edges: u64::MAX,
+        declared_inputs: u64::MAX,
+        encoded_record_bytes: u64::MAX,
+    };
+    input.graph_counts = graph_counts(GRAPH_MAXIMA);
+    input.evidence_not_after_micros = u64::MAX / 2;
+    let encoded = Bundle::new(input)?.to_canonical_cbor();
+    // Framing 7, CPK1 52, ordinal 9, digests 102, nodes 139,267, roots 73,
+    // shared counts 37, graph counts 23 and the horizon 9.
+    assert_eq!(encoded.len(), 139_579);
+    assert!(encoded.len() <= MAX_COMMUNITY_DEPENDENCY_BUNDLE_BYTES_V1);
+    assert!(Bundle::from_canonical_cbor(&encoded).is_ok());
+    Ok(())
+}
+
+#[test]
 fn bundle_rejects_zero_ordinal_and_every_zero_identity() -> TestResult {
     for index in 0..6 {
-        let mut input = input(&[], true, ROOT_FORMS[3])?;
+        let mut input = input(&NODE, true, ROOT_FORMS[3])?;
         let mut factual = input.factual_binding.ok_or("factual")?;
         match index {
             0 => input.native_producer_ordinal = 0,
@@ -216,7 +251,7 @@ fn bundle_rejects_zero_ordinal_and_every_zero_identity() -> TestResult {
         input.factual_binding = Some(factual);
         assert_eq!(Bundle::new(input).err(), Some(Error::InvalidBinding));
     }
-    let mut zero_ordinal = fixture(&[], false, ROOT_FORMS[0])?;
+    let mut zero_ordinal = fixture(&NODE, false, ROOT_FORMS[0])?;
     fields(&mut zero_ordinal)?[3] = uint(0);
     assert_eq!(decode(&zero_ordinal)?, Some(Error::InvalidBinding));
     Ok(())
@@ -225,7 +260,7 @@ fn bundle_rejects_zero_ordinal_and_every_zero_identity() -> TestResult {
 #[test]
 fn factual_binding_is_both_present_or_both_null() -> TestResult {
     for index in [5, 6] {
-        let mut half = fixture(&[], true, ROOT_FORMS[0])?;
+        let mut half = fixture(&NODE, true, ROOT_FORMS[0])?;
         fields(&mut half)?[index] = Value::Null;
         assert_eq!(decode(&half)?, Some(Error::InvalidBinding));
     }
@@ -251,7 +286,7 @@ fn evidence_roots_are_sorted_known_roles_at_most_one_each() -> TestResult {
         ),
         (vec![Value::Null], Some(Error::InvalidEncoding)),
     ] {
-        let mut wire = fixture(&[], false, ROOT_FORMS[0])?;
+        let mut wire = fixture(&NODE, false, ROOT_FORMS[0])?;
         fields(&mut wire)?[8] = Value::Array(rows);
         assert_eq!(decode(&wire)?, expected);
     }
@@ -262,7 +297,7 @@ fn evidence_roots_are_sorted_known_roles_at_most_one_each() -> TestResult {
 fn graph_counts_have_profile_one_maxima_and_shared_counts_are_exact_u64() -> TestResult {
     for index in 0..6 {
         let mut values = GRAPH_MAXIMA;
-        let mut input = input(&[], false, ROOT_FORMS[0])?;
+        let mut input = input(&NODE, false, ROOT_FORMS[0])?;
         input.graph_counts = graph_counts(values);
         let encoded = Bundle::new(input)?.to_canonical_cbor();
         assert!(
@@ -274,11 +309,11 @@ fn graph_counts_have_profile_one_maxima_and_shared_counts_are_exact_u64() -> Tes
         values[index] += 1;
         input.graph_counts = graph_counts(values);
         assert_eq!(Bundle::new(input).err(), Some(Error::BoundsExceeded));
-        let mut wire = fixture(&[], false, ROOT_FORMS[0])?;
+        let mut wire = fixture(&NODE, false, ROOT_FORMS[0])?;
         fields(&mut wire)?[10] = Value::Array(values.into_iter().map(uint).collect());
         assert_eq!(decode(&wire)?, Some(Error::BoundsExceeded));
     }
-    let mut zero = input(&[], false, ROOT_FORMS[0])?;
+    let mut zero = input(&NODE, false, ROOT_FORMS[0])?;
     zero.graph_counts = graph_counts([0; 6]);
     zero.shared_counts = SharedCounts::default();
     assert!(Bundle::new(zero).is_ok());
@@ -293,7 +328,7 @@ fn bundle_horizon_preserves_positive_i64_range() -> TestResult {
         (0, false),
         (u64::MAX / 2 + 1, false),
     ] {
-        let mut input = input(&[], false, ROOT_FORMS[0])?;
+        let mut input = input(&NODE, false, ROOT_FORMS[0])?;
         input.evidence_not_after_micros = horizon;
         assert_eq!(Bundle::new(input).is_ok(), valid);
     }
@@ -312,7 +347,7 @@ fn bundle_rejects_truncation_trailer_version_size_and_malformed_fields() -> Test
         Bundle::from_canonical_cbor(&trailing).err(),
         Some(Error::InvalidEncoding)
     );
-    let mut version = fixture(&[], false, ROOT_FORMS[0])?;
+    let mut version = fixture(&NODE, false, ROOT_FORMS[0])?;
     fields(&mut version)?[1] = uint(2);
     assert_eq!(decode(&version)?, Some(Error::UnsupportedVersion));
     for (index, value) in [
@@ -322,9 +357,30 @@ fn bundle_rejects_truncation_trailer_version_size_and_malformed_fields() -> Test
         (10, Value::Array((0..5).map(uint).collect())),
         (8, Value::Null),
     ] {
-        let mut malformed = fixture(&[], false, ROOT_FORMS[0])?;
+        let mut malformed = fixture(&NODE, false, ROOT_FORMS[0])?;
         fields(&mut malformed)?[index] = value;
         assert!(decode(&malformed)?.is_some());
+    }
+    let encoded = encode(&fixture(&NODE, false, ROOT_FORMS[0])?)?;
+    if encoded[7] != 0x58 || encoded[9 + usize::from(encoded[8])] != 0x04 {
+        return Err("fixture layout changed".into());
+    }
+    let end = 9 + usize::from(encoded[8]);
+    let mut nonshortest = encoded.clone();
+    nonshortest.splice(end..=end, [0x18, 0x04]);
+    let mut array = vec![0x9f];
+    array.extend_from_slice(&encoded[1..]);
+    array.push(0xff);
+    let mut string = encoded[..7].to_vec();
+    string.push(0x5f);
+    string.extend_from_slice(&encoded[7..end]);
+    string.push(0xff);
+    string.extend_from_slice(&encoded[end..]);
+    for form in [nonshortest, array, string] {
+        assert_eq!(
+            Bundle::from_canonical_cbor(&form).err(),
+            Some(Error::InvalidEncoding)
+        );
     }
     let limit = MAX_COMMUNITY_DEPENDENCY_BUNDLE_BYTES_V1;
     assert_eq!(limit, 1_048_576);

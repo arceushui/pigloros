@@ -19,10 +19,11 @@ use zeroize::Zeroizing;
 pub const MAX_COMMUNITY_DEPENDENCY_BUNDLE_BYTES_V1: usize = 1_048_576;
 /// Maximum required native nodes one CPD1 lists.
 pub const MAX_COMMUNITY_REQUIRED_NODES_V1: usize = 4096;
-/// Largest valid encoding: framing 7, CPK1 66, ordinal 9, three digests 102,
-/// 4,096 node rows in a three-byte head 139,267, both roots 73, counts 37+55
-/// and the horizon 9.
-const ENCODED_CAPACITY: usize = 139_625;
+/// Largest valid encoding: framing 7, the at most 50-byte CPK1 in a two-byte
+/// head 52, ordinal 9, three digests 102, 4,096 node rows in a three-byte head
+/// 139,267, both roots 73, shared counts 37, graph counts at their profile-1
+/// maxima 23 and the horizon 9.
+const ENCODED_CAPACITY: usize = 139_579;
 
 /// The factual bindings of a nonempty pass. A zero-Event pass has neither.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -72,12 +73,17 @@ pub struct CommunityDependencyBundleV1<'a>(CommunityDependencyBundleInputV1<'a>)
 impl<'a> CommunityDependencyBundleV1<'a> {
     /// Validate identities, the node-list bound and the graph-count maxima.
     ///
+    /// The required list is the execution-root closure, which contains at
+    /// least the nonempty CGR1 roots. Native coordinate order and the
+    /// exactness of `shared_counts` and `graph_counts` as checked sums are
+    /// re-derived by both adapters (ADR-129 §4), not checked here.
+    ///
     /// # Errors
     /// Returns `InvalidBinding` for a zero ordinal, a zero or repeated
-    /// identity, and `BoundsExceeded` for more than 4,096 nodes, a graph
+    /// identity, and `BoundsExceeded` for no or more than 4,096 nodes, a graph
     /// count over its maximum or an invalid horizon.
     pub fn new(input: CommunityDependencyBundleInputV1<'a>) -> Result<Self> {
-        if input.required_node_digests.len() > MAX_COMMUNITY_REQUIRED_NODES_V1 {
+        if !(1..=MAX_COMMUNITY_REQUIRED_NODES_V1).contains(&input.required_node_digests.len()) {
             return Err(Error::BoundsExceeded);
         }
         let mut identities = vec![input.graph_root_digest];

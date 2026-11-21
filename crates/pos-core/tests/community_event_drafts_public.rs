@@ -185,6 +185,21 @@ fn sealed<'a>(
     chunk: usize,
     drafts: &[EventDraft],
 ) -> Fallible<(Manifest, Vec<Fragment<'a>>)> {
+    sealed_as(
+        vector,
+        chunk,
+        drafts.len() as u64,
+        pipeline_draft_vector_digest_v1(drafts),
+    )
+}
+
+/// [`sealed`] with an explicit recorded draft count and vector digest.
+fn sealed_as(
+    vector: &[u8],
+    chunk: usize,
+    count: u64,
+    vector_digest: Hash,
+) -> Fallible<(Manifest, Vec<Fragment<'_>>)> {
     let total = vector.len() as u64;
     let mut fragments = Vec::new();
     let mut references = Vec::new();
@@ -199,10 +214,28 @@ fn sealed<'a>(
         fragments.push(fragment);
     }
     let manifest = Manifest::new(ManifestInput {
-        draft_vector_digest: pipeline_draft_vector_digest_v1(drafts),
-        ..manifest_input(references, total, drafts.len() as u64)?
+        draft_vector_digest: vector_digest,
+        ..manifest_input(references, total, count)?
     })?;
     Ok((manifest, fragments))
+}
+
+/// The record as an indefinite-length array, and with its CPK1 byte string
+/// as an indefinite-length byte string.
+fn indefinite_forms(encoded: &[u8]) -> Fallible<[Vec<u8>; 2]> {
+    if encoded[7] != 0x58 {
+        return Err("fixture CPK1 is not at offset 7".into());
+    }
+    let end = 9 + usize::from(encoded[8]);
+    let mut array = vec![0x9f];
+    array.extend_from_slice(&encoded[1..]);
+    array.push(0xff);
+    let mut string = encoded[..7].to_vec();
+    string.push(0x5f);
+    string.extend_from_slice(&encoded[7..end]);
+    string.push(0xff);
+    string.extend_from_slice(&encoded[end..]);
+    Ok([array, string])
 }
 
 #[test]
@@ -288,8 +321,25 @@ fn fragment_rejects_truncation_trailer_version_size_and_nonpreferred() -> TestRe
         Fragment::from_canonical_cbor(&encode(&bad_pass)?).err(),
         Some(Error::InvalidBinding)
     );
+    for form in indefinite_forms(&encoded)? {
+        assert_eq!(
+            Fragment::from_canonical_cbor(&form).err(),
+            Some(Error::InvalidEncoding)
+        );
+    }
     let limit = MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_RECORD_BYTES_V1;
-    assert_eq!(limit, 262_240);
+    assert_eq!(limit, 262_218);
+    // The largest valid CEB1: a u64::MAX ordinal (the 50-byte CPK1), a
+    // five-byte offset and total, and a full fragment.
+    let full = vec![3; MAX_FRAGMENT];
+    let max = MAX_VECTOR as u64;
+    let largest = Fragment::new(FragmentInput {
+        pass_key: pass(u64::MAX)?,
+        ..fragment_input(max - MAX_FRAGMENT as u64, max, &full)?
+    })?;
+    let largest = largest.to_canonical_cbor();
+    assert_eq!(largest.len(), limit);
+    assert!(Fragment::from_canonical_cbor(&largest).is_ok());
     assert_eq!(
         Fragment::from_canonical_cbor(&vec![0; limit]).err(),
         Some(Error::InvalidEncoding)
@@ -304,12 +354,12 @@ fn fragment_rejects_truncation_trailer_version_size_and_nonpreferred() -> TestRe
 #[test]
 fn manifest_has_exact_seven_fields_and_digest() -> TestResult {
     let input = manifest_input(
-        vec![reference(0, 3, hash(4)), reference(3, 2, hash(5))],
-        5,
+        vec![reference(0, 30, hash(4)), reference(30, 2, hash(5))],
+        32,
         1,
     )?;
     let manifest = Manifest::new(input.clone())?;
-    let expected = encode(&manifest_value(&[(0, 3, 4), (3, 2, 5)], 5, 1)?)?;
+    let expected = encode(&manifest_value(&[(0, 30, 4), (30, 2, 5)], 32, 1)?)?;
     assert_eq!(&*manifest.to_canonical_cbor(), &expected);
     assert_eq!(
         manifest.digest(),
@@ -322,16 +372,16 @@ fn manifest_has_exact_seven_fields_and_digest() -> TestResult {
 #[test]
 fn manifest_partition_must_be_contiguous_from_zero_and_complete() -> TestResult {
     for (rows, total, expected) in [
-        (&[(0, 5)][..], 5, None),
-        (&[(0, 2), (2, 3)][..], 5, None),
-        (&[][..], 5, Some(Error::InvalidBinding)),
-        (&[(1, 4)][..], 5, Some(Error::InvalidBinding)),
-        (&[(0, 2), (3, 2)][..], 5, Some(Error::InvalidBinding)),
-        (&[(0, 3), (2, 3)][..], 5, Some(Error::InvalidBinding)),
-        (&[(0, 4)][..], 5, Some(Error::InvalidBinding)),
-        (&[(0, 6)][..], 5, Some(Error::InvalidBinding)),
+        (&[(0, 50)][..], 50, None),
+        (&[(0, 20), (20, 30)][..], 50, None),
+        (&[][..], 50, Some(Error::InvalidBinding)),
+        (&[(10, 40)][..], 50, Some(Error::InvalidBinding)),
+        (&[(0, 20), (30, 20)][..], 50, Some(Error::InvalidBinding)),
+        (&[(0, 30), (20, 30)][..], 50, Some(Error::InvalidBinding)),
+        (&[(0, 40)][..], 50, Some(Error::InvalidBinding)),
+        (&[(0, 60)][..], 50, Some(Error::InvalidBinding)),
         (&[(0, 1)][..], 0, Some(Error::BoundsExceeded)),
-        (&[(0, 0)][..], 5, Some(Error::BoundsExceeded)),
+        (&[(0, 0)][..], 50, Some(Error::BoundsExceeded)),
         (&[(0, 262_145)][..], 262_145, Some(Error::BoundsExceeded)),
         (&[(0, 262_144), (262_144, 1)][..], 262_145, None),
     ] {
@@ -340,7 +390,7 @@ fn manifest_partition_must_be_contiguous_from_zero_and_complete() -> TestResult 
             .map(|(offset, length)| reference(*offset, *length, hash(4)))
             .collect();
         assert_eq!(
-            Manifest::new(manifest_input(references, total, 0)?).err(),
+            Manifest::new(manifest_input(references, total, 1)?).err(),
             expected
         );
         let wire: Vec<_> = rows
@@ -348,7 +398,7 @@ fn manifest_partition_must_be_contiguous_from_zero_and_complete() -> TestResult 
             .map(|(offset, length)| (*offset, u64::from(*length), 4))
             .collect();
         assert_eq!(
-            Manifest::from_canonical_cbor(&encode(&manifest_value(&wire, total, 0)?)?).err(),
+            Manifest::from_canonical_cbor(&encode(&manifest_value(&wire, total, 1)?)?).err(),
             expected
         );
     }
@@ -395,6 +445,37 @@ fn manifest_counts_and_vector_length_bounds_are_exact() -> TestResult {
         assert_eq!(Manifest::from_canonical_cbor(&encoded).err(), expected);
     }
     assert_eq!(MAX_COMMUNITY_EVENT_DRAFTS_V1, 1024);
+    Ok(())
+}
+
+#[test]
+fn manifest_length_must_hold_the_draft_count() -> TestResult {
+    // The empty vector is exactly one byte; otherwise at least the array head
+    // plus 25 bytes (the smallest valid draft) per draft.
+    for (total, count, valid) in [
+        (1, 0, true),
+        (2, 0, false),
+        (26, 1, true),
+        (25, 1, false),
+        (1, 1, false),
+        (25_603, 1024, true),
+        (25_602, 1024, false),
+    ] {
+        let input = manifest_input(
+            vec![reference(0, u32::try_from(total)?, hash(4))],
+            total,
+            count,
+        )?;
+        let expected = (!valid).then_some(Error::InvalidBinding);
+        assert_eq!(Manifest::new(input).err(), expected);
+        let wire = encode(&manifest_value(&[(0, total, 4)], total, count)?)?;
+        assert_eq!(Manifest::from_canonical_cbor(&wire).err(), expected);
+    }
+    let smallest = [plain_draft(Vec::new())];
+    let vector = vector_bytes(&smallest)?;
+    assert_eq!(vector.len(), 26);
+    let (manifest, fragments) = sealed(&vector, MAX_FRAGMENT, &smallest)?;
+    assert_eq!(manifest.reconstruct(&fragments)?, smallest);
     Ok(())
 }
 
@@ -459,6 +540,19 @@ fn manifest_rejects_truncation_trailer_version_size_and_malformed_rows() -> Test
             Some(Error::InvalidEncoding)
         );
     }
+    let encoded = encode(&manifest_value(&[(0, 1, 4)], 1, 0)?)?;
+    let mut nonshortest = encoded.clone();
+    let total_at = encoded.len() - 36;
+    if nonshortest[total_at..total_at + 2] != [0x01, 0x00] {
+        return Err("fixture total is not where expected".into());
+    }
+    nonshortest.splice(total_at..=total_at, [0x18, 0x01]);
+    for form in indefinite_forms(&encoded)?.into_iter().chain([nonshortest]) {
+        assert_eq!(
+            Manifest::from_canonical_cbor(&form).err(),
+            Some(Error::InvalidEncoding)
+        );
+    }
     let limit = MAX_COMMUNITY_EVENT_DRAFT_MANIFEST_BYTES_V1;
     assert_eq!(limit, 65_536);
     assert_eq!(
@@ -515,18 +609,24 @@ fn draft_vector_count_and_byte_bounds_are_exact() -> TestResult {
         vector_bytes(&vec![plain_draft(Vec::new()); 1025]).err(),
         Some(Error::BoundsExceeded)
     );
-    // One-draft vector with type "a": 1 + 30 + payload bytes with null
-    // optionals, and 1 + 70 + payload bytes with every optional at full width.
-    for (overhead, full) in [(30, false), (70, true)] {
-        let make = |length: usize| {
-            let mut draft = if full {
-                full_draft(vec![0; length], u64::MAX)
-            } else {
-                plain_draft(vec![0; length])
-            };
-            draft.event_type = Kind::new("a");
+    // One-draft vectors at exactly 64 MiB and one byte over, for null
+    // optionals, full-width optionals, and a 24-byte type (two-byte text
+    // head) with a mid-width (five-byte) wall time and one null identifier.
+    // The overhead is measured with the independent oracle at a payload
+    // length of the same five-byte head width.
+    let forms: [fn(usize) -> EventDraft; 3] = [
+        |length| plain_draft(vec![0; length]),
+        |length| full_draft(vec![0; length], u64::MAX),
+        |length| {
+            let mut draft = full_draft(vec![0; length], 70_000);
+            draft.event_type = Kind::new("x".repeat(24));
+            draft.correlation_id = None;
             draft
-        };
+        },
+    ];
+    for (index, make) in forms.into_iter().enumerate() {
+        let probe = 70_000;
+        let overhead = encode(&Value::Array(vec![draft_value(&make(probe))]))?.len() - probe;
         let exact = [make(MAX_VECTOR - overhead)];
         let vector = vector_bytes(&exact)?;
         assert_eq!(vector.len(), MAX_VECTOR);
@@ -534,7 +634,7 @@ fn draft_vector_count_and_byte_bounds_are_exact() -> TestResult {
             vector_bytes(&[make(MAX_VECTOR - overhead + 1)]).err(),
             Some(Error::BoundsExceeded)
         );
-        if !full {
+        if index == 0 {
             let (manifest, fragments) = sealed(&vector, MAX_FRAGMENT, &exact)?;
             assert_eq!(fragments.len(), 256);
             assert_eq!(manifest.reconstruct(&fragments)?, exact);
@@ -544,27 +644,31 @@ fn draft_vector_count_and_byte_bounds_are_exact() -> TestResult {
 }
 
 #[test]
-fn draft_vector_refuses_nil_identities_and_empty_type() -> TestResult {
-    let mut nil_entity = plain_draft(Vec::new());
+fn draft_vector_keeps_the_existing_draft_rule() -> TestResult {
+    let mut nil_entity = plain_draft(vec![0; 4]);
     nil_entity.entity = EntityId::from_ulid(Ulid::nil());
-    let mut empty_type = plain_draft(Vec::new());
+    let mut empty_type = plain_draft(vec![0; 4]);
     empty_type.event_type = Kind::new("");
-    let mut nil_causation = full_draft(Vec::new(), 1);
-    nil_causation.causation_id = Some(EventId::from_ulid(Ulid::nil()));
-    let mut nil_correlation = full_draft(Vec::new(), 1);
-    nil_correlation.correlation_id = Some(CorrelationId::from_ulid(Ulid::nil()));
-    for draft in [nil_entity, empty_type, nil_causation, nil_correlation] {
+    for draft in [nil_entity, empty_type] {
         assert_eq!(
             vector_bytes(std::slice::from_ref(&draft)).err(),
             Some(Error::InvalidBinding)
         );
         let vector = encode(&Value::Array(vec![draft_value(&draft)]))?;
-        let (manifest, fragments) = sealed(&vector, MAX_FRAGMENT, &[])?;
+        let (manifest, fragments) = sealed_as(&vector, MAX_FRAGMENT, 1, hash(9))?;
         assert_eq!(
             manifest.reconstruct(&fragments).err(),
             Some(Error::InvalidBinding)
         );
     }
+    // Nil causation and correlation identifiers are existing valid fields.
+    let mut nil_links = full_draft(vec![1], 1);
+    nil_links.causation_id = Some(EventId::from_ulid(Ulid::nil()));
+    nil_links.correlation_id = Some(CorrelationId::from_ulid(Ulid::nil()));
+    let drafts = [nil_links];
+    let vector = vector_bytes(&drafts)?;
+    let (manifest, fragments) = sealed(&vector, MAX_FRAGMENT, &drafts)?;
+    assert_eq!(manifest.reconstruct(&fragments)?, drafts);
     Ok(())
 }
 
@@ -576,10 +680,17 @@ fn reconstruction_rejects_malformed_vectors() -> TestResult {
         fields(&mut draft)?[index] = value;
         encode(&Value::Array(vec![draft]))
     };
-    let mut trailing = encode(&Value::Array(Vec::new()))?;
+    let one = encode(&Value::Array(vec![valid.clone()]))?;
+    let mut trailing = one.clone();
     trailing.push(0);
     let mut too_many = vec![0x99, 0x04, 0x01];
-    too_many.extend(std::iter::repeat_n(0, 8));
+    too_many.extend(std::iter::repeat_n(0, 30));
+    let mut wide = vec![0x98, 0x01];
+    wide.extend_from_slice(&one[1..]);
+    let mut short_entity = valid.clone();
+    fields(&mut short_entity)?[0] = bytes(&[5; 15]);
+    let mut six_fields = valid.clone();
+    fields(&mut six_fields)?.pop();
     for (vector, error) in [
         (with(5, uint(2))?, Error::InvalidEncoding),
         (with(6, Value::Text("t".into()))?, Error::InvalidEncoding),
@@ -587,10 +698,13 @@ fn reconstruction_rejects_malformed_vectors() -> TestResult {
         (with(1, bytes(b"a"))?, Error::InvalidEncoding),
         (with(1, Value::Text(String::new()))?, Error::InvalidBinding),
         (
-            encode(&Value::Array(vec![Value::Array(Vec::new())]))?,
+            encode(&Value::Array(vec![six_fields]))?,
             Error::InvalidEncoding,
         ),
-        (vec![0x81, 0x87, 0x50], Error::InvalidEncoding),
+        (
+            encode(&Value::Array(vec![short_entity]))?,
+            Error::InvalidEncoding,
+        ),
         (
             {
                 let mut bad = with(1, Value::Text("ab".into()))?;
@@ -605,9 +719,9 @@ fn reconstruction_rejects_malformed_vectors() -> TestResult {
         ),
         (trailing, Error::InvalidEncoding),
         (too_many, Error::BoundsExceeded),
-        (vec![0x98, 0x00], Error::InvalidEncoding),
+        (wide, Error::InvalidEncoding),
     ] {
-        let (manifest, fragments) = sealed(&vector, MAX_FRAGMENT, &[])?;
+        let (manifest, fragments) = sealed_as(&vector, MAX_FRAGMENT, 1, hash(9))?;
         assert_eq!(manifest.reconstruct(&fragments).err(), Some(error));
     }
     Ok(())
@@ -615,7 +729,7 @@ fn reconstruction_rejects_malformed_vectors() -> TestResult {
 
 #[test]
 fn reconstruction_binds_count_digest_and_every_fragment_field() -> TestResult {
-    let drafts = [plain_draft(vec![1, 2, 3])];
+    let drafts = [plain_draft(vec![1; 40])];
     let vector = vector_bytes(&drafts)?;
     let total = vector.len() as u64;
     let (manifest, fragments) = sealed(&vector, 4, &drafts)?;

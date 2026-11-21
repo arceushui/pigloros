@@ -31,14 +31,17 @@ pub const MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_BYTES_V1: usize = 262_144;
 pub const MAX_COMMUNITY_EVENT_DRAFT_VECTOR_BYTES_V1: u64 = 67_108_864;
 /// Maximum Event drafts in one vector.
 pub const MAX_COMMUNITY_EVENT_DRAFTS_V1: usize = 1024;
-/// Largest canonical CEB1 implied by its field bounds.
+/// Largest valid canonical CEB1, implied by its field bounds.
 ///
-/// Array head, magic, version, the 64-byte CPK1 in a two-byte head, two
-/// nine-byte integers and the largest fragment in a five-byte head
-/// (1+5+1+66+9+9+5+262,144).
-pub const MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_RECORD_BYTES_V1: usize = 262_240;
+/// Array head, magic, version, the at most 50-byte CPK1 in a two-byte head,
+/// an offset and a total below or at 64 MiB in five bytes each, and the
+/// largest fragment in a five-byte head (1+5+1+52+5+5+5+262,144).
+pub const MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_RECORD_BYTES_V1: usize = 262_218;
 const FRAGMENT_BYTES: u32 = 262_144;
 const VECTOR_BYTES: usize = 67_108_864;
+/// Smallest valid draft: array head, entity, a one-byte Event type, an empty
+/// payload, two nulls, the schema version and a null wall time.
+const MIN_DRAFT_BYTES: u64 = 1 + 17 + 2 + 1 + 1 + 1 + 1 + 1;
 
 /// Untrusted CEB1 fields.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -173,13 +176,15 @@ pub struct CommunityEventDraftManifestV1(CommunityEventDraftManifestInputV1);
 
 impl CommunityEventDraftManifestV1 {
     /// Validate the bounds and that the references partition the vector
-    /// exactly once, starting at offset zero.
+    /// exactly once, starting at offset zero, with a length that can hold the
+    /// draft count (the empty vector is exactly one byte).
     ///
     /// # Errors
     /// Returns `BoundsExceeded` for more than 256 references, a reference
     /// length outside 1..=262,144, a vector length outside 1..=64 MiB or more
     /// than 1,024 drafts, and `InvalidBinding` for a zero digest, a
-    /// noncontiguous or incomplete partition, or an invalid materialization.
+    /// noncontiguous or incomplete partition, an invalid materialization, or
+    /// a vector length too short for the draft count.
     pub fn new(input: CommunityEventDraftManifestInputV1) -> Result<Self> {
         if input.fragments.len() > MAX_COMMUNITY_EVENT_DRAFT_FRAGMENTS_V1
             || input.draft_count > MAX_COMMUNITY_EVENT_DRAFTS_V1 as u64
@@ -197,7 +202,14 @@ impl CommunityEventDraftManifestV1 {
                     .try_fold(0, |offset, fragment| validate_reference(offset, *fragment))
             })
             .and_then(|end| {
-                if end == input.total_plaintext_bytes {
+                let minimum =
+                    head_len(input.draft_count) as u64 + MIN_DRAFT_BYTES * input.draft_count;
+                let plausible = if input.draft_count == 0 {
+                    input.total_plaintext_bytes == 1
+                } else {
+                    input.total_plaintext_bytes >= minimum
+                };
+                if end == input.total_plaintext_bytes && plausible {
                     Ok(Self(input))
                 } else {
                     Err(Error::InvalidBinding)
@@ -275,6 +287,8 @@ impl CommunityEventDraftManifestV1 {
         if fragments.len() != input.fragments.len() {
             return Err(Error::InvalidBinding);
         }
+        // Each fragment is re-encoded once to derive `H(CEB1)`: at most 256
+        // encodings of at most 262,218 bytes, bounded by the 64 MiB vector.
         let mut vector = Zeroizing::new(Vec::with_capacity(
             usize::try_from(input.total_plaintext_bytes).unwrap_or(0),
         ));
@@ -323,8 +337,8 @@ impl CommunityEventDraftManifestV1 {
 ///
 /// # Errors
 /// Returns `BoundsExceeded` for more than 1,024 drafts or over 64 MiB of
-/// canonical bytes, and `InvalidBinding` for a nil entity, causation or
-/// correlation identifier or an empty Event type.
+/// canonical bytes, and `InvalidBinding` for a nil entity or an empty Event
+/// type (the existing pipeline draft rule).
 pub fn community_event_draft_vector_bytes_v1(drafts: &[EventDraft]) -> Result<Zeroizing<Vec<u8>>> {
     if drafts.len() > MAX_COMMUNITY_EVENT_DRAFTS_V1 {
         return Err(Error::BoundsExceeded);
@@ -420,15 +434,9 @@ fn read_reference(cursor: &mut CborCursor<'_>) -> Result<CommunityEventDraftFrag
     })
 }
 
+/// The existing pipeline draft rule: a nil entity or an empty Event type.
 fn validate_draft(draft: &EventDraft) -> Result<()> {
-    if crate::pipeline::invalid_draft(draft)
-        || draft
-            .causation_id
-            .is_some_and(|id| id.inner() == Ulid::nil())
-        || draft
-            .correlation_id
-            .is_some_and(|id| id.inner() == Ulid::nil())
-    {
+    if crate::pipeline::invalid_draft(draft) {
         Err(Error::InvalidBinding)
     } else {
         Ok(())
