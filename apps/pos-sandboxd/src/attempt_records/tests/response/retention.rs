@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use pos_reference::provider_admission::execution::FailedInput;
 use pos_reference::sandbox_provider_protocol::{
-    RequestAuthority, RuntimeSigned, SandboxReconcileRequest, SelfDigested,
+    PayloadDirection, PayloadStreamValidator, RequestAuthority, RuntimeSigned, SandboxPayloadChunk,
+    SandboxProviderResult, SandboxReconcileRequest, SelfDigested,
 };
 
 use super::super::{
@@ -47,6 +48,29 @@ fn lifecycle() -> TestResult<(tempfile::TempDir, AttemptLifecycle, StagingLedger
     Ok((directory, lifecycle, ledger))
 }
 
+/// The SPX1 digest the test grants claim their attempts under.
+const REQUEST: [u8; 32] = [0x5d; 32];
+
+/// The frames of `retained` past AGR1, the SAU1 chain and SPR1: its output
+/// SBC1 records, then SPY1.
+fn after_receipt(retained: &RetainedResponse) -> Vec<Vec<u8>> {
+    let skipped = 2 + retained.response().audit.len();
+    retained
+        .frames()
+        .skip(skipped)
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// A Completed attempt under the signed test grant.
+fn completed() -> TestResult<crate::EndedAttempt<String>> {
+    Released {
+        grant: Some(signed_grant()?),
+        ..Released::default()
+    }
+    .ended()
+}
+
 const fn reconcile(agr1_digest: [u8; 32]) -> SandboxReconcileRequest {
     SandboxReconcileRequest {
         request: RequestAuthority {
@@ -67,7 +91,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
     // An ended attempt whose response is not retained yet is pending.
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     assert!(matches!(
         lifecycle.terminal_response(ATTEMPT, digest),
         Err(AttemptLifecycleError::ResponsePending)
@@ -87,7 +111,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     .ended()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    let retained = lifecycle.retain_response(&ended, &signer(), admitted)?;
+    let retained = lifecycle.retain_response(ended, &signer(), admitted)?;
     verified(&retained)?;
     assert!(Arc::ptr_eq(
         &lifecycle.terminal_response(ATTEMPT, digest)?,
@@ -95,7 +119,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     ));
     // It is signed once.
     assert!(Arc::ptr_eq(
-        &lifecycle.retain_response(&ended, &signer(), admitted)?,
+        &lifecycle.retain_response(completed()?, &signer(), admitted)?,
         &retained
     ));
     // A transfer that completed re-issues nothing and keeps the response.
@@ -133,7 +157,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     assert!(matches!(
-        lifecycle.retain_response(&ended, &signer(), admitted),
+        lifecycle.retain_response(completed()?, &signer(), admitted),
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     assert!(matches!(
@@ -185,7 +209,7 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
     let (_directory, lifecycle, _ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let ended = Released {
         grant: Some(grant),
         ..Released::default()
@@ -193,7 +217,7 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
     .ended()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    lifecycle.retain_response(&ended, &signer(), admitted)?;
+    lifecycle.retain_response(ended, &signer(), admitted)?;
     let racing = Racing {
         lifecycle: &lifecycle,
         agr1_digest: digest,
@@ -227,12 +251,12 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
 fn an_unsignable_response_quarantines_the_lifecycle() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let failed = FailedInput::fixture(ATTEMPT, AGR1);
-    let ended = lifecycle.record_failed_input(&failed)?;
+    let ended = lifecycle.failed_granted(&failed)?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     // The fixture's AGR1 bytes are filler that no verifier decodes.
     assert!(matches!(
-        lifecycle.retain_response(&ended, &signer(), admitted),
+        lifecycle.retain_response(ended, &signer(), admitted),
         Err(AttemptLifecycleError::Response(ResponseFault::Sign(
             RuntimeSignerError::Protocol(_)
         )))
@@ -245,7 +269,7 @@ fn an_unsignable_response_quarantines_the_lifecycle() -> TestResult {
         ));
     }
     assert!(matches!(
-        lifecycle.retain_response(&ended, &signer(), admitted),
+        lifecycle.retain_response(Released::default().ended()?, &signer(), admitted),
         Err(AttemptLifecycleError::ResponseUnavailable)
     ));
     Ok(())
@@ -257,7 +281,7 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let ended = Released {
         grant: Some(grant),
         ..Released::default()
@@ -265,7 +289,7 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
     .ended()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    lifecycle.retain_response(&ended, &signer(), admitted)?;
+    lifecycle.retain_response(ended, &signer(), admitted)?;
     let foreign = KeyFileRuntimeSigner::from_signing_key(
         ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
         KEY_ID.to_owned(),
@@ -298,7 +322,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let ended = Released {
         grant: Some(grant),
         ..Released::default()
@@ -306,7 +330,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
     .ended()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    lifecycle.retain_response(&ended, &signer(), admitted)?;
+    lifecycle.retain_response(ended, &signer(), admitted)?;
     assert!(ledger.reserve_storage(0).is_ok());
     assert!(matches!(
         lifecycle.reissue_response(ATTEMPT, digest, None, &signer(), admitted),
@@ -338,7 +362,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
 fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let digest = signed_grant()?.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let foreign = Released {
         grant: Some(signed_grant()?),
         ..Released::default()
@@ -348,7 +372,7 @@ fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     assert!(matches!(
-        lifecycle.retain_response(&other, &signer(), admitted),
+        lifecycle.retain_response(other, &signer(), admitted),
         Err(AttemptLifecycleError::GrantMismatch)
     ));
     assert!(ledger.reserve_storage(0).is_ok());
@@ -362,7 +386,7 @@ fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     assert!(matches!(
-        lifecycle.retain_response(&foreign, &signer(), admitted),
+        lifecycle.retain_response(foreign, &signer(), admitted),
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     Ok(())
@@ -377,7 +401,7 @@ fn a_quarantining_classification_closes_admission() -> TestResult {
         let (_directory, lifecycle, ledger) = lifecycle()?;
         let grant = signed_grant()?;
         let digest = grant.grant.grant_digest();
-        lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+        lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
         let ended = Released {
             grant: Some(grant),
             terminal_cgroup,
@@ -387,7 +411,7 @@ fn a_quarantining_classification_closes_admission() -> TestResult {
         .ended()?;
         let public = signing_key().verifying_key();
         let retained = lifecycle.retain_response(
-            &ended,
+            ended,
             &signer(),
             AdmittedRuntimeKey::new(KEY_ID, &public),
         )?;
@@ -403,11 +427,11 @@ fn a_quarantining_classification_closes_admission() -> TestResult {
 #[test]
 fn the_post_release_fault_quarantines_the_lifecycle() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, AGR1))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, AGR1))?;
     let ended = super::super::failed_after_release()?;
     let public = signing_key().verifying_key();
     assert!(matches!(
-        lifecycle.retain_response(&ended, &signer(), AdmittedRuntimeKey::new(KEY_ID, &public)),
+        lifecycle.retain_response(ended, &signer(), AdmittedRuntimeKey::new(KEY_ID, &public)),
         Err(AttemptLifecycleError::Response(ResponseFault::Evidence(
             EvidenceFault::Record(_)
         )))
@@ -417,5 +441,398 @@ fn the_post_release_fault_quarantines_the_lifecycle() -> TestResult {
         lifecycle.terminal_response(ATTEMPT, AGR1),
         Err(AttemptLifecycleError::ResponseUnavailable)
     ));
+    Ok(())
+}
+
+/// The retained response is the stored full response: AGR1, the SAU1 chain,
+/// SPR1, the output SBC1 records parented by SPY1, and SPY1. An exact
+/// repeat that joined while it was pending receives the very same response;
+/// one with other bytes conflicts, and once reconciled the attempt is
+/// unknown (ADR-069 §4).
+#[tokio::test]
+async fn an_exact_repeat_replays_the_stored_full_response() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    assert!(matches!(
+        lifecycle.join(ATTEMPT, [0x77; 32]).await,
+        Err(AttemptLifecycleError::RequestConflict)
+    ));
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let ended = completed()?;
+    let joined = lifecycle.join(ATTEMPT, REQUEST);
+    let retained = async {
+        tokio::task::yield_now().await;
+        lifecycle.retain_response(ended, &signer(), admitted)
+    };
+    let (joined, retained) = tokio::join!(joined, retained);
+    let retained = retained?;
+    assert!(joined?.is_some_and(|joined| Arc::ptr_eq(&joined, &retained)));
+    let (result, _) = verified(&retained)?;
+    let response = retained.response();
+    let frames = retained.frames().map(<[u8]>::to_vec).collect::<Vec<_>>();
+    assert_eq!(frames[0], response.grant);
+    assert_eq!(frames[1..=response.audit.len()], response.audit[..]);
+    assert_eq!(frames[response.audit.len() + 1], response.receipt);
+    let [chunk, spy1] = &after_receipt(&retained)[..] else {
+        return Err("one output record, then SPY1".into());
+    };
+    assert_eq!(spy1, response.result);
+    let output = result.output.clone().ok_or("a Completed SPY1 has output")?;
+    let mut validator = PayloadStreamValidator::new(
+        result.result_digest(),
+        result.request_id,
+        ATTEMPT,
+        PayloadDirection::Output,
+        output,
+    )?;
+    validator.accept(&SandboxPayloadChunk::from_canonical_cbor(chunk)?)?;
+    validator.finish()?;
+    // The output stays charged while it is retained.
+    let before = ledger.usage().reserved_bytes;
+    // A later exact repeat replays the same response.
+    assert!(lifecycle
+        .join(ATTEMPT, REQUEST)
+        .await?
+        .is_some_and(|again| Arc::ptr_eq(&again, &retained)));
+    // A re-issued successor is not Completed and carries no output.
+    let successor = lifecycle.reissue_response(
+        ATTEMPT,
+        digest,
+        Some(timed_out_transfer()),
+        &signer(),
+        admitted,
+    )?;
+    let [spy1] = &after_receipt(&successor)[..] else {
+        return Err("a successor has no output records".into());
+    };
+    assert!(SandboxProviderResult::from_canonical_cbor(spy1)?
+        .output
+        .is_none());
+    assert!(lifecycle
+        .join(ATTEMPT, REQUEST)
+        .await?
+        .is_some_and(|again| Arc::ptr_eq(&again, &successor)));
+    drop(retained);
+    assert_eq!(ledger.usage().reserved_bytes, before);
+    lifecycle.reconcile(&reconcile(digest))?;
+    assert!(matches!(
+        lifecycle.join(ATTEMPT, REQUEST).await,
+        Err(AttemptLifecycleError::UnknownAttempt)
+    ));
+    Ok(())
+}
+
+/// A repeat of an attempt whose response faulted learns that none will be
+/// signed.
+#[tokio::test]
+async fn a_repeat_of_a_faulted_response_is_refused() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let ended = lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, AGR1))?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let joined = lifecycle.join(ATTEMPT, REQUEST);
+    let refused = async {
+        tokio::task::yield_now().await;
+        lifecycle.retain_response(ended, &signer(), admitted)
+    };
+    let (joined, refused) = tokio::join!(joined, refused);
+    assert!(refused.is_err());
+    assert!(matches!(
+        joined,
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    Ok(())
+}
+
+/// The retained output stays charged while it is retained, also while a
+/// joined repeat holds it, and is released at reconcile (ADR-069 R11
+/// Amendment 1, item P12).
+#[tokio::test]
+async fn retained_output_stays_charged_until_reconcile() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    let output = crate::StagingLedger::new(StagingLimits {
+        aggregate_bytes: 1024,
+    });
+    let ended = Released {
+        grant: Some(grant),
+        output_ledger: Some(output.clone()),
+        ..Released::default()
+    }
+    .ended()?;
+    let public = signing_key().verifying_key();
+    let retained =
+        lifecycle.retain_response(ended, &signer(), AdmittedRuntimeKey::new(KEY_ID, &public))?;
+    assert_eq!(output.usage().reserved_bytes, 70);
+    drop(retained);
+    let joined = lifecycle
+        .join(ATTEMPT, REQUEST)
+        .await?
+        .ok_or("no response")?;
+    assert_eq!(output.usage().reserved_bytes, 70);
+    drop(joined);
+    assert_eq!(output.usage().reserved_bytes, 70);
+    lifecycle.reconcile(&reconcile(digest))?;
+    assert_eq!(output.usage().reserved_bytes, 0);
+    Ok(())
+}
+
+/// A re-issued successor retains no output, so the charge ends with the
+/// first response; a connection still writing its frames keeps them, and
+/// their charge, until it is done.
+#[test]
+fn a_reissue_releases_the_output_once_its_frames_are_written() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    let output = crate::StagingLedger::new(StagingLimits {
+        aggregate_bytes: 1024,
+    });
+    let ended = Released {
+        grant: Some(grant),
+        output_ledger: Some(output.clone()),
+        ..Released::default()
+    }
+    .ended()?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let serving = lifecycle.retain_response(ended, &signer(), admitted)?;
+    let frames = serving.frames().map(<[u8]>::to_vec).collect::<Vec<_>>();
+    lifecycle.reissue_response(
+        ATTEMPT,
+        digest,
+        Some(timed_out_transfer()),
+        &signer(),
+        admitted,
+    )?;
+    // The connection writing the first response still holds its frames.
+    assert_eq!(output.usage().reserved_bytes, 70);
+    assert_eq!(
+        serving.frames().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+        frames
+    );
+    drop(serving);
+    assert_eq!(output.usage().reserved_bytes, 0);
+    Ok(())
+}
+
+/// A signer that counts its signatures.
+struct Counting {
+    signer: KeyFileRuntimeSigner,
+    signed: std::cell::Cell<usize>,
+}
+
+impl RuntimeAttestationSigner for Counting {
+    fn runtime_attestation_key_id(&self) -> &str {
+        self.signer.runtime_attestation_key_id()
+    }
+
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+        self.signed.set(self.signed.get() + 1);
+        self.signer.sign(record)
+    }
+}
+
+/// A response already retained is returned as it is, without signing
+/// anything again; one for another grant is refused, whether the stored
+/// response was signed or faulted.
+#[test]
+fn a_retained_response_is_never_signed_again() -> TestResult {
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let digest = signed_grant()?.grant.grant_digest();
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    let retained = lifecycle.retain_response(completed()?, &signer(), admitted)?;
+    let counting = Counting {
+        signer: signer(),
+        signed: std::cell::Cell::new(0),
+    };
+    assert!(Arc::ptr_eq(
+        &lifecycle.retain_response(completed()?, &counting, admitted)?,
+        &retained
+    ));
+    assert_eq!(counting.signed.get(), 0);
+    // Another grant's attempt is not the one stored.
+    assert!(matches!(
+        lifecycle.retain_response(Released::default().ended()?, &signer(), admitted),
+        Err(AttemptLifecycleError::GrantMismatch)
+    ));
+    // The same for a stored fault.
+    let (_directory, lifecycle, _ledger) = self::lifecycle()?;
+    let unsignable = lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+    assert!(lifecycle
+        .retain_response(unsignable, &signer(), admitted)
+        .is_err());
+    assert!(matches!(
+        lifecycle.retain_response(Released::default().ended()?, &signer(), admitted),
+        Err(AttemptLifecycleError::GrantMismatch)
+    ));
+    Ok(())
+}
+
+/// Interrupt an exchange after its AGR1, cancelled first if `cancel`, while
+/// a repeat waits on it; the repeat's response, and the stored one.
+async fn interrupted_after_agr1(
+    lifecycle: &AttemptLifecycle,
+    cancel: bool,
+) -> TestResult<(Arc<RetainedResponse>, Arc<RetainedResponse>)> {
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    let bytes = grant.bytes;
+    let public = signing_key().verifying_key();
+    let signer = signer();
+    let awaited = lifecycle
+        .claim(ATTEMPT, [0x31; 16], REQUEST)?
+        .convert(digest)?
+        .written(
+            Box::new(move || FailedInput::fixture(ATTEMPT, digest).with_grant_bytes(&bytes)),
+            &signer,
+            AdmittedRuntimeKey::new(KEY_ID, &public),
+        );
+    if cancel {
+        lifecycle
+            .cancel(
+                &pos_reference::sandbox_provider_protocol::SandboxCancelRequest {
+                    request: reconcile(digest).request,
+                    attempt_id: ATTEMPT,
+                    agr1_digest: digest,
+                    request_digest: [5; 32],
+                },
+            )
+            .await?;
+    }
+    let joined = lifecycle.join(ATTEMPT, REQUEST);
+    let (joined, ()) = tokio::join!(joined, async {
+        tokio::task::yield_now().await;
+        // The client disconnected before its input was admitted.
+        drop(awaited);
+    });
+    let joined = joined?.ok_or("the repeat found no attempt")?;
+    Ok((joined, lifecycle.terminal_response(ATTEMPT, digest)?))
+}
+
+/// An exchange interrupted after its AGR1 is a post-admission failure, not
+/// a provider fault (base ADR-069 §4): its stored code-10 response is signed
+/// and retained like any failed input's, a joined repeat receives it, and
+/// the lifecycle stays open. A cancellation before the interruption stays
+/// its cancel source (Redmine #443 journals 22592 and 22319).
+#[tokio::test]
+async fn an_exchange_interrupted_after_agr1_stores_its_failed_input() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let (joined, stored) = interrupted_after_agr1(&lifecycle, false).await?;
+    assert!(Arc::ptr_eq(&joined, &stored));
+    let (result, events) = verified(&stored)?;
+    assert_eq!(
+        result.outcome,
+        pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::UnavailableAfterAdmission
+    );
+    assert_eq!(events, [10]);
+    assert!(ledger.reserve_storage(0).is_ok());
+    let (_directory, lifecycle, ledger) = self::lifecycle()?;
+    let (_, stored) = interrupted_after_agr1(&lifecycle, true).await?;
+    let (result, _) = verified(&stored)?;
+    assert_eq!(
+        result.outcome,
+        pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::Cancelled
+    );
+    assert!(ledger.reserve_storage(0).is_ok());
+    Ok(())
+}
+
+/// A settle refusal names another grant than the one the exchange owes: a
+/// provider bug, which faults the attempt and quarantines the lifecycle.
+#[test]
+fn a_refused_settle_faults_the_awaited_attempt() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let digest = signed_grant()?.grant.grant_digest();
+    let public = signing_key().verifying_key();
+    let signer = signer();
+    let awaited = lifecycle
+        .claim(ATTEMPT, [0x31; 16], REQUEST)?
+        .convert(digest)?
+        .written(
+            Box::new(move || FailedInput::fixture(ATTEMPT, digest)),
+            &signer,
+            AdmittedRuntimeKey::new(KEY_ID, &public),
+        );
+    assert!(matches!(
+        awaited.record_failed_input(&FailedInput::fixture(ATTEMPT, AGR1)),
+        Err(AttemptLifecycleError::GrantMismatch)
+    ));
+    assert!(matches!(
+        lifecycle.terminal_response(ATTEMPT, digest),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    assert!(ledger.reserve_storage(0).is_err());
+    Ok(())
+}
+
+/// A signer that runs one step of another retention before its first
+/// signature: two retentions of the same attempt race.
+struct Interleaved<'a> {
+    signer: KeyFileRuntimeSigner,
+    step: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl RuntimeAttestationSigner for Interleaved<'_> {
+    fn runtime_attestation_key_id(&self) -> &str {
+        self.signer.runtime_attestation_key_id()
+    }
+
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+        let step = self.step.borrow_mut().take();
+        if let Some(step) = step {
+            step();
+        }
+        self.signer.sign(record)
+    }
+}
+
+/// Of two retentions racing for one pending response, the first to store
+/// wins: the other returns the winner's response, or the closed refusal
+/// when the winner faulted.
+#[test]
+fn racing_retentions_keep_the_first_stored_response() -> TestResult {
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let digest = signed_grant()?.grant.grant_digest();
+    for faulted in [false, true] {
+        let (_directory, lifecycle, _ledger) = lifecycle()?;
+        let filler = lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+        let first = std::cell::RefCell::new(None);
+        let interleaved = Interleaved {
+            signer: signer(),
+            step: std::cell::RefCell::new(Some(Box::new(|| {
+                // The filler AGR1 cannot be signed, so that retention faults.
+                let stored = if faulted {
+                    lifecycle.retain_response(filler, &signer(), admitted)
+                } else {
+                    completed()
+                        .map_err(|_| AttemptLifecycleError::UnknownAttempt)
+                        .and_then(|ended| lifecycle.retain_response(ended, &signer(), admitted))
+                };
+                *first.borrow_mut() = Some(stored);
+            }))),
+        };
+        let second = lifecycle.retain_response(completed()?, &interleaved, admitted);
+        drop(interleaved);
+        let first = first.into_inner().ok_or("no racing retention")?;
+        if faulted {
+            assert!(first.is_err());
+            assert!(matches!(
+                second,
+                Err(AttemptLifecycleError::ResponseUnavailable)
+            ));
+        } else {
+            assert!(Arc::ptr_eq(&first?, &second?));
+        }
+    }
     Ok(())
 }

@@ -420,7 +420,7 @@ mod cases {
         fn start(
             &self,
             attempt: &AdmittedAttempt,
-            recheck: Recheck<'_>,
+            recheck: RootRecheck<'_>,
         ) -> Result<Option<BoundAttemptCgroup>, ExecuteError> {
             let ownership = attempt.execution_for_test();
             ownership
@@ -458,7 +458,7 @@ mod cases {
             &'a self,
             (): (),
             attempt: AdmittedAttempt,
-            recheck: Recheck<'a>,
+            recheck: RootRecheck<'a>,
             cancel: CancelSignal,
         ) -> impl Future<Output = Executed<(), BoundAttemptCgroup>> + Send + 'a {
             let attempt_id = attempt.attempt_id();
@@ -691,7 +691,7 @@ mod cases {
                 world: Arc::clone(world),
                 transport: Arc::clone(&transport),
             };
-            let owned = lifecycle.admit_input(input)?;
+            let owned = lifecycle.admit_granted(input)?;
             let (ended, cancelled) = live(lifecycle, owned, &steps, [id; 16]).await?;
             let ios = io_count();
             if *lock(&world.submitted) == Some([id; 16]) {
@@ -1553,7 +1553,7 @@ mod cases {
                     cgroup: Mutex::new(Some(fixture.bound)),
                     world: Arc::clone(&world),
                 };
-                let owned = lifecycle.admit_input(CrashInput {
+                let owned = lifecycle.admit_granted(CrashInput {
                     id: 1,
                     world: Arc::clone(&world),
                     transport,
