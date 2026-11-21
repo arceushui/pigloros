@@ -152,13 +152,15 @@ fn a_new_reason_commits_every_record_in_one_transaction() -> TestResult {
     assert_eq!(fields.optionality, ArtifactOptionalityV1::Required);
     assert_eq!(fields.transition_rule, ArtifactTransitionRuleV1::Remove);
     assert!(fields.child_artifacts.is_empty());
-    let metadata_key = after
+    let metadata_intent = *after
         .keys
         .get(&committed.metadata_key)
         .ok_or("no metadata key")?
         .intent()
-        .as_input()
-        .authority_request_digest;
+        .as_input();
+    // The metadata CKP1 carries the installed metadata horizon (R9.9(2)).
+    assert_eq!(metadata_intent.evidence_not_after_micros, HORIZON);
+    let metadata_key = metadata_intent.authority_request_digest;
 
     // CCI1, CBQ1, CSB1, CPV1, CAU1, CMI1, CCI1, CQC1, CQR1, CQO1.
     let plain = records(&case, CONTROL)?;

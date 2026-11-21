@@ -498,3 +498,36 @@ fn a_retry_returns_its_original_without_re_verifying_the_producer() -> TestResul
     );
     Ok(())
 }
+
+/// R9.9(7): the evaluated TPS1 must be the installed scope's retained one.
+/// Evidence from another scope of the same registry that revokes the same
+/// release, with the installed scope's TPS1 digest claimed, gives 12; the
+/// installed scope's own evidence then succeeds.
+#[test]
+fn evidence_from_another_scope_is_refused() -> TestResult {
+    let roster = Roster::release_one()?;
+    let (mut domain, material, env, foreign) = Bootstrapped::revoked_with_foreign(&SEAL, &roster)?;
+    let rows = roster.rows()?;
+    let profile = profile_until(&rows, HORIZON, hash(1), domain.world.catalogue)?;
+    let receipt = initialize_target(&SEAL, &mut domain, &roster, &profile)??;
+    let mut case = QuarantineCase {
+        head: initial_head(&receipt)?,
+        domain,
+        roster: Roster::release_one()?,
+        material,
+    };
+    assert_eq!(
+        set_reason(
+            &mut case,
+            Claim {
+                trust: Some((&env.anchor, &foreign)),
+                ..claim(Basis::Artifact)
+            }
+        )?
+        .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    let applied = set_reason(&mut case, claim(Basis::Artifact))??;
+    assert!(applied.disposition() == Disposition::Applied);
+    Ok(())
+}

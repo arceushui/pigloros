@@ -67,8 +67,10 @@ use ulid::Ulid;
 use zeroize::Zeroizing;
 
 use crate::plugin_trust_registry_fixtures::{
-    release_one, spec, tps_after, Harness, ManifestSpec, Material, Spec, TpsSpec,
+    release_one, spec, tps_after, Env, Harness, ManifestSpec, Material, Spec, TpsSpec,
 };
+use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 
 /// A fallible fixture step.
 pub type Fallible<T> = Result<T, Box<dyn StdError>>;
@@ -661,6 +663,39 @@ pub enum Revocation {
 /// # Errors
 /// Returns the fixture construction or registry error.
 pub fn revoked_store(revocation: Revocation) -> Fallible<(MemoryStore, Harness, Material)> {
+    let (mut harness, material) = revoked_harness(revocation)?;
+    let store = std::mem::replace(&mut harness.store, MemoryStore::new());
+    Ok((store, harness, material))
+}
+
+/// A second scope `other` in `harness`'s store whose adopted policy
+/// revokes `release_one` by artifact, with its environment and material.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
+pub fn foreign_scope(harness: &mut Harness) -> Fallible<(Env, Material)> {
+    let installed = std::mem::replace(&mut harness.env, Env::new("other")?);
+    PluginTrustPolicyRegistryV1::provision(
+        &mut harness.store,
+        &harness.env.anchor,
+        &harness.env.genesis_tps1,
+    )?;
+    let genesis = harness.env.genesis()?;
+    harness.admit(&genesis, &release_one(), 2)??;
+    let material = harness.env.material(
+        &Spec {
+            epochs: 2,
+            revoked_artifacts: vec![release_one().release_digest()?],
+            ..Spec::default().at(51, 6)
+        },
+        &tps_after(&genesis),
+    )?;
+    harness.advance(&material)??;
+    let foreign = std::mem::replace(&mut harness.env, installed);
+    Ok((foreign, material))
+}
+
+fn revoked_harness(revocation: Revocation) -> Fallible<(Harness, Material)> {
     let mut harness = Harness::new()?;
     let genesis = harness.env.genesis()?;
     harness.admit(&genesis, &release_one(), 1)??;
@@ -699,8 +734,7 @@ pub fn revoked_store(revocation: Revocation) -> Fallible<(MemoryStore, Harness, 
             material
         }
     };
-    let store = std::mem::replace(&mut harness.store, MemoryStore::new());
-    Ok((store, harness, material))
+    Ok((harness, material))
 }
 
 /// The protected initial graph of `records` for `generation`, minted as
@@ -1005,6 +1039,23 @@ impl Bootstrapped {
         Self::over(seal, roster, store, harness, true, HORIZON).map(|domain| (domain, material))
     }
 
+    /// [`Bootstrapped::revoked`] by artifact, whose store also holds the
+    /// [`foreign_scope`] `other`, returned with its environment and
+    /// material.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or bootstrap error.
+    pub fn revoked_with_foreign(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+    ) -> Fallible<(Self, Material, Env, Material)> {
+        let (mut harness, material) = revoked_harness(Revocation::Artifact)?;
+        let (env, foreign) = foreign_scope(&mut harness)?;
+        let store = std::mem::replace(&mut harness.store, MemoryStore::new());
+        Self::over(seal, roster, store, harness, true, HORIZON)
+            .map(|domain| (domain, material, env, foreign))
+    }
+
     fn over(
         seal: &'static AuthorityTrustRootSealV1,
         roster: &Roster,
@@ -1271,6 +1322,8 @@ pub struct Claim<'a> {
     pub tps1: Option<Hash>,
     /// The failure's IMK1; `None` uses the roster's.
     pub implementation: Option<&'a ImplementationKeyV1>,
+    /// The trust gate's anchor and material; `None` uses the case's.
+    pub trust: Option<(&'a PluginTrustPolicyAnchorV1, &'a Material)>,
 }
 
 /// The first-use claim of a release revoked with `basis` on [`target`]'s
@@ -1288,6 +1341,7 @@ pub const fn claim(basis: RevocationBasisV1) -> Claim<'static> {
         head: None,
         tps1: None,
         implementation: None,
+        trust: None,
     }
 }
 
@@ -1315,6 +1369,9 @@ pub fn with_set_reason<T>(
     let projection = manifest.projection()?;
     let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
     let retained = Hash::from_bytes(case.material.tps1_digest());
+    let (anchor, material) = claim
+        .trust
+        .unwrap_or((&case.domain.harness.env.anchor, &case.material));
     let failure = CommunityPreExecutionFailureV1::new(
         seal,
         CommunityPreExecutionFailureInputV1 {
@@ -1324,12 +1381,12 @@ pub fn with_set_reason<T>(
             host_failure: claim.host,
             trust_policy_snapshot_digest: claim.tps1.unwrap_or(retained),
             trust: CommunityPreExecutionTrustV1 {
-                anchor: &case.domain.harness.env.anchor,
-                tps1_bytes: &case.material.tps1,
-                evidence: &case.material.evidence,
+                anchor,
+                tps1_bytes: &material.tps1,
+                evidence: &material.evidence,
                 projection: &projection,
-                trusted_utc: case.material.trusted()?,
-                tick: case.material.tick,
+                trusted_utc: material.trusted()?,
+                tick: material.tick,
             },
         },
     );
