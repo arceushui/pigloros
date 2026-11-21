@@ -165,7 +165,7 @@ jobs:
           } | ConvertTo-Json | Set-Content -LiteralPath "$env:RUNNER_TEMP/owner-windows-lcov-receipt.json" -Encoding utf8
       - name: Retain native LCOV and checkout receipt
         if: ${{ !cancelled() && steps.native-lcov.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: owner-windows-lcov-${{ github.sha }}
           path: |
@@ -174,7 +174,7 @@ jobs:
           if-no-files-found: error
       - name: Retain the measured shim report
         if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: owner-windows-coverage-${{ github.sha }}
           path: |
@@ -236,7 +236,7 @@ jobs:
           }
       - name: Retain failed native coverage diagnostics
         if: ${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: owner-windows-failed-diagnostic-${{ github.sha }}
           path: ${{ runner.temp }}/owner-windows-failed-diagnostic/
