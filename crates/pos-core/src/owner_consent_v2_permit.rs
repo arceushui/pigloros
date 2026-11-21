@@ -40,23 +40,22 @@ mod tests {
     }
 
     #[test]
-    fn the_permit_carries_the_entropy_and_hides_it_in_debug() {
+    fn the_permit_carries_the_entropy_and_hides_it_in_debug() -> Result<(), CoreError> {
         let first = mint_with(|bytes| {
             bytes.fill(7);
             Ok(())
-        });
-        let second = mint_with(|bytes| {
+        })?;
+        let same = mint_with(|bytes| {
+            bytes.fill(7);
+            Ok(())
+        })?;
+        let other = mint_with(|bytes| {
             bytes.fill(8);
             Ok(())
-        });
-        assert_eq!(
-            first.as_ref().ok(),
-            Some(&OwnerConsentV2PermitV1::from_nonce([7; 32]))
-        );
-        assert_ne!(first.ok(), second.ok());
-        assert_eq!(
-            format!("{:?}", OwnerConsentV2PermitV1::from_nonce([7; 32])),
-            "OwnerConsentV2PermitV1(..)"
-        );
+        })?;
+        assert_eq!(first, same);
+        assert_ne!(first, other);
+        assert_eq!(format!("{first:?}"), "OwnerConsentV2PermitV1(..)");
+        Ok(())
     }
 }
