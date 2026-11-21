@@ -24,7 +24,10 @@ use std::time::Duration;
 use futures_util::future::{join, select, Either};
 use pos_reference::{
     provider_admission::execution::AdmittedProviderExecution,
-    sandbox_provider_protocol::{OutputCaptureRecord, PayloadDescriptor, TransferRecord},
+    sandbox_provider_protocol::{
+        OutputCaptureRecord, PayloadDescriptor, SandboxPayloadChunk, SandboxProviderProtocolError,
+        TransferRecord,
+    },
 };
 use rustix::fs::{fcntl_getfl, fcntl_setfl, fstat, makedev, open, FileType, Mode, OFlags};
 use rustix::io::Errno;
@@ -631,7 +634,7 @@ impl FencedOutput {
     pub fn release(self, _terminal: &TerminalResources) -> ReleasedOutput {
         ReleasedOutput {
             bytes: self.bytes,
-            _charge: self.charge,
+            charge: self.charge,
         }
     }
 }
@@ -641,7 +644,7 @@ impl FencedOutput {
 #[derive(Debug)]
 pub struct ReleasedOutput {
     bytes: Vec<u8>,
-    _charge: StagingCharge,
+    charge: StagingCharge,
 }
 
 impl ReleasedOutput {
@@ -649,6 +652,37 @@ impl ReleasedOutput {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The output SBC1 records of a Completed response whose SPY1 digests to
+    /// `parent_digest`, still under the output reservation (ADR-069 §4).
+    pub(crate) fn into_records(
+        self,
+        parent_digest: [u8; 32],
+        request_id: [u8; 16],
+        attempt_id: [u8; 16],
+    ) -> Result<RetainedOutput, SandboxProviderProtocolError> {
+        SandboxPayloadChunk::output_records(parent_digest, request_id, attempt_id, &self.bytes).map(
+            |records| RetainedOutput {
+                records,
+                _charge: self.charge,
+            },
+        )
+    }
+}
+
+/// The output SBC1 records a Completed response retains until the attempt
+/// is reconciled; dropping them releases their output reservation.
+#[derive(Debug)]
+pub(crate) struct RetainedOutput {
+    records: Vec<Vec<u8>>,
+    _charge: StagingCharge,
+}
+
+impl RetainedOutput {
+    /// The exact SBC1 records, from index zero.
+    pub(crate) fn records(&self) -> &[Vec<u8>] {
+        &self.records
     }
 }
 

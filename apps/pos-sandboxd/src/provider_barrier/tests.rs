@@ -296,7 +296,9 @@ fn own_pid() -> u32 {
     std::process::id()
 }
 
-fn ready_for<S>(barrier: &TestBarrier<S>) -> TestResult<LauncherReady> {
+fn ready_for<S, R>(
+    barrier: &ProviderReleaseBarrier<S, TestIdentity, R, TestObserved>,
+) -> TestResult<LauncherReady> {
     let parameters = &barrier.parameters;
     Ok(LauncherReady::new(LauncherReadyFields {
         attempt_id: parameters.attempt_id,
@@ -435,6 +437,68 @@ async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
         .await?;
     let received = launcher.join().map_err(|_| "launcher thread")?;
     Ok((barrier, received))
+}
+
+/// Builds the production barrier over the root recheck the attempt
+/// lifecycle lends it for the execution.
+struct Production {
+    nonce: [u8; 32],
+    observed: TestObserved,
+}
+
+impl crate::BarrierFactory for Production {
+    type Barrier<'r> =
+        ProviderReleaseBarrier<TestSigner, TestIdentity, crate::RootRecheck<'r>, TestObserved>;
+    type Error = BarrierError;
+
+    fn barrier<'r>(
+        self,
+        attempt: &AdmittedAttempt,
+        root: crate::RootRecheck<'r>,
+    ) -> Result<Self::Barrier<'r>, BarrierError> {
+        ProviderReleaseBarrier::new(
+            attempt,
+            self.nonce,
+            BarrierEvidence {
+                adapter_identity: ADAPTER_IDENTITY,
+            },
+            test_signer(),
+            TestIdentity::new(own_pid()),
+            AuthorityCheck::new(root, self.observed, Arc::new(AtomicBool::new(false))),
+        )
+    }
+}
+
+/// The production barrier holds the lent root recheck in its
+/// `AuthorityCheck`: it rechecks the root once at the frozen observation
+/// and once more before it releases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_factory_builds_the_production_barrier_over_the_lent_root_recheck() -> TestResult {
+    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let rechecks = AtomicUsize::new(0);
+    let root = || {
+        rechecks.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::test_fixtures::checked_root(&attempt))
+    };
+    let factory = Production {
+        nonce: fresh_nonce()?,
+        observed: TestObserved::new(Observing::Stable)?,
+    };
+    let mut barrier = crate::BarrierFactory::barrier(factory, &attempt, &root)?;
+    let unit_end = StdOwnedFd::from(barrier.prepare(&attempt)?.1);
+    let ready = ready_for(&barrier)?.to_canonical_cbor()?;
+    let launcher = thread::spawn(move || {
+        send_ready(&unit_end, &ready)?;
+        receive_release(&unit_end)
+    });
+    barrier
+        .release(&active(attempt.clone(), GENEROUS_MS), cgroup_view())
+        .await?;
+    let received = launcher.join().map_err(|_| "launcher thread")?;
+    assert!(received.is_some());
+    assert_eq!(received.as_ref(), barrier.sent_release());
+    assert_eq!(rechecks.load(Ordering::SeqCst), 2);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

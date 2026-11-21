@@ -253,8 +253,8 @@ async fn release_root<R: RootRelease>(
 mod attempts;
 pub use attempts::{
     AttemptCleanup, AttemptLaunch, AttemptLifecycle, AttemptLifecycleError, AttemptProgress,
-    CleanupBudget, EndedAttempt, LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt,
-    ReconciledAttempt, SystemdAttemptSteps,
+    BarrierFactory, CleanupBudget, EndedAttempt, LiveAttemptIdentity, LiveAttemptSnapshot,
+    OwnedAttempt, ReconciledAttempt, RootRecheck, SystemdAttemptSteps,
 };
 
 #[cfg(test)]

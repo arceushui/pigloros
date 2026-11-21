@@ -420,7 +420,7 @@ mod cases {
         fn start(
             &self,
             attempt: &AdmittedAttempt,
-            recheck: Recheck<'_>,
+            recheck: RootRecheck<'_>,
         ) -> Result<Option<BoundAttemptCgroup>, ExecuteError> {
             let ownership = attempt.execution_for_test();
             ownership
@@ -458,7 +458,7 @@ mod cases {
             &'a self,
             (): (),
             attempt: AdmittedAttempt,
-            recheck: Recheck<'a>,
+            recheck: RootRecheck<'a>,
             cancel: CancelSignal,
         ) -> impl Future<Output = Executed<(), BoundAttemptCgroup>> + Send + 'a {
             let attempt_id = attempt.attempt_id();

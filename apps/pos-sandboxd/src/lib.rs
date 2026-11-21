@@ -334,8 +334,9 @@ pub use kernel_observation::{
 #[cfg(target_os = "linux")]
 pub use lifecycle::{
     finish_attempt, AttemptCleanup, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch,
-    AttemptLifecycle, AttemptLifecycleError, AttemptProgress, CleanupBudget, EndedAttempt,
-    LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, SystemdAttemptSteps,
+    AttemptLifecycle, AttemptLifecycleError, AttemptProgress, BarrierFactory, CleanupBudget,
+    EndedAttempt, LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt,
+    RootRecheck, SystemdAttemptSteps,
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{

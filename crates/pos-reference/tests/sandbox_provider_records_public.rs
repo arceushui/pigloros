@@ -1,4 +1,5 @@
-//! The provider runtime's SDY1 and SPE1 producers (ADR-069 R9 §5, R11 §7).
+//! The provider runtime's SDY1, SPE1 and output SBC1 producers (ADR-069
+//! §4, R9 §5, R11 §7).
 //!
 //! Each record is self-digested by its encoder, signed over the message the
 //! sealed record derives, verified under the admitted key, and encoded. An
@@ -11,9 +12,10 @@ use std::error::Error;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use pos_reference::sandbox_provider_protocol::{
-    RuntimeSigned, SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxProviderError,
-    SandboxProviderErrorCode, SandboxProviderErrorFields, SandboxProviderProtocolError, Sdy1,
-    SelfDigested, Spe1,
+    PayloadDescriptor, PayloadDirection, PayloadStreamValidator, RuntimeSigned,
+    SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxPayloadChunk,
+    SandboxProviderError, SandboxProviderErrorCode, SandboxProviderErrorFields,
+    SandboxProviderProtocolError, Sdy1, SelfDigested, Spe1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -506,6 +508,66 @@ fn the_sdy1_decoder_refuses_an_unbound_digest_and_a_zero_signature() -> TestResu
     assert_eq!(
         SandboxDescribeResponse::from_canonical_cbor(&encode(&Value::Array(wrapper))?).err(),
         Some(SandboxProviderProtocolError::SignatureInvalid)
+    );
+    Ok(())
+}
+
+const CHUNK: usize = 1024 * 1024;
+
+/// The oracle of one SBC1: `[unsigned, digest]` under its §4 domain.
+fn chunk_oracle(parent: [u8; 32], index: u64, chunk: &[u8]) -> TestResult<Vec<u8>> {
+    let unsigned = Value::Array(vec![
+        Value::Text("SBC1".to_owned()),
+        int(1),
+        bytes(&parent),
+        bytes(&[3; 16]),
+        bytes(&[4; 16]),
+        int(1),
+        int(index),
+        int(index * CHUNK as u64),
+        bytes(chunk),
+    ]);
+    let mut preimage = b"PiglorOS.SBC1.v1\0".to_vec();
+    preimage.extend(encode(&unsigned)?);
+    let digest = *blake3::hash(&preimage).as_bytes();
+    encode(&Value::Array(vec![unsigned, bytes(&digest)]))
+}
+
+#[test]
+fn output_records_are_the_contiguous_sbc1_chunks_a_selector_accepts() -> TestResult {
+    let parent = [2; 32];
+    let payload: Vec<u8> = (0..=CHUNK).map(|byte| byte.to_le_bytes()[0]).collect();
+    let records = SandboxPayloadChunk::output_records(parent, [3; 16], [4; 16], &payload)?;
+    assert_eq!(
+        records,
+        [
+            chunk_oracle(parent, 0, &payload[..CHUNK])?,
+            chunk_oracle(parent, 1, &payload[CHUNK..])?,
+        ]
+    );
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SandboxOutputBytes.v1\0");
+    hasher.update(&payload);
+    let mut validator = PayloadStreamValidator::new(
+        parent,
+        [3; 16],
+        [4; 16],
+        PayloadDirection::Output,
+        PayloadDescriptor {
+            byte_length: payload.len() as u64,
+            digest: *hasher.finalize().as_bytes(),
+        },
+    )?;
+    for record in &records {
+        validator.accept(&SandboxPayloadChunk::from_canonical_cbor(record)?)?;
+    }
+    validator.finish()?;
+    // An empty payload has no records.
+    assert!(SandboxPayloadChunk::output_records(parent, [3; 16], [4; 16], &[])?.is_empty());
+    // A chunk names its parent SPY1.
+    assert_eq!(
+        SandboxPayloadChunk::output_records([0; 32], [3; 16], [4; 16], &payload).err(),
+        Some(SandboxProviderProtocolError::FieldOutOfBounds)
     );
     Ok(())
 }

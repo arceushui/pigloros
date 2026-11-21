@@ -17,6 +17,9 @@
 //! * [`AttemptLifecycle::record_failed_input`] records an attempt whose
 //!   input failed after its AGR1 was sent: it ended with nothing committed,
 //!   and stays known until it is reconciled.
+//! * [`AttemptLifecycle::join`] joins an exact repeated execute to the
+//!   attempt it repeats: it waits while the attempt is active and receives
+//!   the stored full response, never a second AGR1 (ADR-069 §4).
 //! * [`AttemptLifecycle::reconcile`] reports an attempt whose cleanup was
 //!   proved, or that ended with nothing committed, releases its retained
 //!   admission, and forgets it: later requests for that attempt are unknown.
@@ -156,10 +159,15 @@ pub enum AttemptLifecycleError {
     /// The attempt ended and its terminal response is not retained yet.
     #[error("the attempt's terminal response is not retained yet")]
     ResponsePending,
-    /// The attempt's terminal response was refused as a provider fault; the
-    /// lifecycle is quarantined and restart reconciliation recovers.
+    /// The attempt's terminal response was refused as a provider fault, or
+    /// its run was dropped part-way so none will be signed; the lifecycle is
+    /// quarantined and restart reconciliation recovers.
     #[error("the attempt's terminal response is unavailable")]
     ResponseUnavailable,
+    /// A repeated execute carries other EVR1 or SPX1 bytes than the attempt
+    /// was admitted with (ADR-069 §4; SPE1 16 `RequestIdentityConflict`).
+    #[error("the repeated execute differs from the attempt's request")]
+    RequestConflict,
 }
 
 /// How far an attempt got before its terminal cleanup.
@@ -483,8 +491,13 @@ fn finished_at() -> Option<u64> {
     crate::launcher::clock::monotonic_ns().ok()
 }
 
-/// The recheck an execution runs immediately before its unit starts.
-type Recheck<'a> = &'a (dyn Fn() -> Result<CheckedRoot, ImageActivationError> + Sync);
+/// The recheck of an attempt's activated root against current authority.
+///
+/// It is `|| root.recheck(&directory, &entry)` over the root and directory
+/// the lifecycle owns. The execution runs it immediately before the unit
+/// starts, and the release barrier's `AuthorityCheck` again before
+/// `ReleaseV1`.
+pub type RootRecheck<'a> = &'a (dyn Fn() -> Result<CheckedRoot, ImageActivationError> + Sync);
 
 /// The result of one execution step.
 type Executed<S, C> =
@@ -504,7 +517,7 @@ trait AttemptSteps<I: AdmittedInput>: Sync {
         &'a self,
         launch: Self::Launch,
         attempt: AdmittedAttempt,
-        recheck: Recheck<'a>,
+        recheck: RootRecheck<'a>,
         cancel: CancelSignal,
     ) -> impl Future<Output = Executed<Self::Started, Self::Cgroup>> + Send + 'a;
 
@@ -518,6 +531,29 @@ trait AttemptSteps<I: AdmittedInput>: Sync {
         root: Option<I::Root>,
         deadlines: AttemptCleanupDeadlines,
     ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a;
+}
+
+/// Builds the launcher barrier of one admitted attempt.
+///
+/// The barrier may borrow the attempt's [`RootRecheck`], which the
+/// lifecycle owns for the execution, so the production
+/// `ProviderReleaseBarrier` can recheck the attempt's own root and
+/// directory in its `AuthorityCheck` before `ReleaseV1`.
+pub trait BarrierFactory: Send {
+    /// The barrier, which may borrow the root recheck.
+    type Barrier<'r>: LaunchBarrier<Evidence = ReleaseOutcome> + Send + 'r;
+    /// Why the barrier could not be built.
+    type Error: Error + Send + Sync + 'static;
+
+    /// Build the barrier for `attempt`, whose root `root` rechecks.
+    ///
+    /// # Errors
+    /// Fails if the barrier cannot be built; nothing is started then.
+    fn barrier<'r>(
+        self,
+        attempt: &AdmittedAttempt,
+        root: RootRecheck<'r>,
+    ) -> Result<Self::Barrier<'r>, Self::Error>;
 }
 
 /// What one production execution needs beyond the admission.
@@ -556,13 +592,11 @@ impl<'a, N, F> SystemdAttemptSteps<'a, N, F> {
     }
 }
 
-impl<I, N, F, B, E> AttemptSteps<I> for SystemdAttemptSteps<'_, N, F>
+impl<I, N, F> AttemptSteps<I> for SystemdAttemptSteps<'_, N, F>
 where
     I: AdmittedInput,
     N: LocalNetworkPort + Sync,
-    F: FnOnce(&AdmittedAttempt) -> Result<B, E> + Send,
-    B: LaunchBarrier<Evidence = ReleaseOutcome> + Send + 'static,
-    E: Error + Send + Sync + 'static,
+    F: BarrierFactory,
 {
     type Launch = AttemptLaunch<F>;
     type Started = SystemdVerifiedStart;
@@ -572,11 +606,11 @@ where
         &'a self,
         launch: AttemptLaunch<F>,
         attempt: AdmittedAttempt,
-        recheck: Recheck<'a>,
+        recheck: RootRecheck<'a>,
         cancel: CancelSignal,
     ) -> impl Future<Output = Executed<SystemdVerifiedStart, crate::BoundAttemptCgroup>> + Send + 'a
     {
-        let barrier = (launch.barrier)(&attempt);
+        let barrier = launch.barrier.barrier(&attempt, recheck);
         let job = ExecuteJob {
             attempt,
             mode: launch.mode,
@@ -849,6 +883,7 @@ enum Slot<I> {
     /// admission stays here until the run takes it.
     Running {
         grant: [u8; 32],
+        request: [u8; 32],
         state: Arc<RunState>,
         ended: watch::Receiver<bool>,
         started: bool,
@@ -856,12 +891,15 @@ enum Slot<I> {
     },
     /// Ended, with what its cleanup achieved and its signed terminal
     /// response once retained. `state` is `None` for an attempt that never
-    /// ran.
+    /// ran. `settled` wakes every joined repeat once the response is
+    /// retained or refused, and when the slot is replaced.
     Ended {
         grant: [u8; 32],
+        request: [u8; 32],
         state: Option<Arc<RunState>>,
         cleaned: Cleaned,
         response: Retained,
+        settled: watch::Sender<bool>,
         _input: Option<I>,
     },
     /// Reconciled, or withdrawn before it started (`intent` is `None`):
@@ -1290,18 +1328,21 @@ impl<I> AttemptLifecycle<I> {
         let attempt_id = failed.attempt_id();
         let mut attempts = lock(&self.attempts);
         self.admissible(&attempts, attempt_id)?;
+        let admission = failed.admission();
         let ended = Slot::Ended {
             grant: failed.grant_digest(),
+            request: admission.grant().request_digest(),
             state: None,
             cleaned: Cleaned::NothingCommitted,
             response: Retained::Pending,
+            settled: watch::channel(false).0,
             _input: None,
         };
         attempts.set(attempt_id, ended);
         drop(attempts);
         Ok(EndedAttempt {
             attempt_id,
-            admission: failed.admission(),
+            admission,
             cancel_source: None,
             progress: AttemptProgress::InputFailed,
             cleanup: Ok(None),
@@ -1325,8 +1366,10 @@ impl<I> AttemptLifecycle<I> {
             fence: Mutex::new(None),
         });
         let (ended, waiting) = watch::channel(false);
+        let request = admission.grant().request_digest();
         let running = Slot::Running {
             grant,
+            request,
             state: Arc::clone(&state),
             ended: waiting,
             started: false,
@@ -1339,6 +1382,7 @@ impl<I> AttemptLifecycle<I> {
                 lifecycle: self,
                 attempt_id,
                 grant,
+                request,
                 admission,
                 state,
                 ended,
@@ -1419,6 +1463,7 @@ struct Claim<'l, I> {
     lifecycle: &'l AttemptLifecycle<I>,
     attempt_id: [u8; 16],
     grant: [u8; 32],
+    request: [u8; 32],
     admission: AttemptAdmission,
     state: Arc<RunState>,
     ended: watch::Sender<bool>,
@@ -1447,16 +1492,24 @@ impl<I> Claim<'_, I> {
         input
     }
 
-    /// Record the attempt as ended, retaining `input` until reconciliation,
-    /// then wake every waiting cancellation. Returns the first cancellation
-    /// request's source, read under the same lock that a cancellation takes.
-    fn end(&mut self, input: Option<I>, cleaned: Cleaned) -> Option<CancelSource> {
+    /// Record the attempt as ended with its `response`, retaining `input`
+    /// until reconciliation, then wake every waiting cancellation and joined
+    /// repeat. Returns the first cancellation request's source, read under
+    /// the same lock that a cancellation takes.
+    fn end(
+        &mut self,
+        input: Option<I>,
+        cleaned: Cleaned,
+        response: Retained,
+    ) -> Option<CancelSource> {
         self.finished = true;
         let ended = Slot::Ended {
             grant: self.grant,
+            request: self.request,
             state: Some(Arc::clone(&self.state)),
             cleaned,
-            response: Retained::Pending,
+            response,
+            settled: watch::channel(false).0,
             _input: input,
         };
         let mut attempts = lock(&self.lifecycle.attempts);
@@ -1484,9 +1537,10 @@ impl<I> Drop for Claim<'_, I> {
     fn drop(&mut self) {
         if !self.finished {
             if self.started {
-                // The run was abandoned: nothing about its resources is proved.
+                // The run was abandoned: nothing about its resources is
+                // proved, and no response will be signed for it.
                 self.lifecycle.quarantine();
-                self.end(None, Cleaned::Unproved);
+                self.end(None, Cleaned::Unproved, Retained::Faulted);
             } else {
                 self.withdraw();
             }
@@ -1500,7 +1554,7 @@ impl OwnedAttempt<'_> {
     /// The attempt's cleanup is proved, or the registry owner is quarantined,
     /// before this returns. The returned value is evidence for the attempt's
     /// classification; it grants no admission.
-    pub async fn run<N, F, B, E>(
+    pub async fn run<N, F>(
         self,
         steps: &SystemdAttemptSteps<'_, N, F>,
         launch: AttemptLaunch<F>,
@@ -1508,9 +1562,7 @@ impl OwnedAttempt<'_> {
     ) -> EndedAttempt<SystemdVerifiedStart>
     where
         N: LocalNetworkPort + Sync,
-        F: FnOnce(&AdmittedAttempt) -> Result<B, E> + Send,
-        B: LaunchBarrier<Evidence = ReleaseOutcome> + Send + 'static,
-        E: Error + Send + Sync + 'static,
+        F: BarrierFactory,
     {
         self.run_with(steps, launch, budget).await
     }
@@ -1565,7 +1617,7 @@ impl<I> OwnedAttempt<'_, I> {
             run.claim.lifecycle.quarantine();
         }
         let Run { mut claim, input } = run;
-        let cancel_source = claim.end(Some(input), cleaned);
+        let cancel_source = claim.end(Some(input), cleaned, Retained::Pending);
         EndedAttempt {
             attempt_id,
             admission: claim.admission.clone(),

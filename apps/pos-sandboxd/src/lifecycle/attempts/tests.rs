@@ -23,6 +23,9 @@ mod cases {
 
     const SIM1: [u8; 32] = [9; 32];
 
+    /// The SPX1 digest `IssuedGrant::fixture` answers.
+    const REQUEST: [u8; 32] = [0x5d; 32];
+
     /// How the fake admission activates its root.
     #[derive(Clone, Copy, Debug)]
     enum Activation {
@@ -299,7 +302,7 @@ mod cases {
             &'a self,
             (): (),
             attempt: AdmittedAttempt,
-            _recheck: Recheck<'a>,
+            _recheck: RootRecheck<'a>,
             cancel: CancelSignal,
         ) -> impl Future<Output = Executed<(), BoundAttemptCgroup>> + Send + 'a {
             let ownership = attempt.execution_for_test();
@@ -917,6 +920,11 @@ mod cases {
             steps.executing().await;
             runtime.lifecycle.cancel(&cancel_request(1, grant(1))).await
         };
+        // An exact repeat joins the running attempt.
+        let joined = async {
+            steps.executing().await;
+            runtime.lifecycle.join([1; 16], REQUEST).await
+        };
         // The broker dies after the cancellation was requested.
         let died = async {
             let run = Box::pin(owned.run_with(&steps, (), budget()?));
@@ -924,11 +932,20 @@ mod cases {
             assert!(abandoned.is_err());
             TestResult::Ok(())
         };
-        let (cancelled, died) = tokio::join!(cancel, died);
+        let (cancelled, joined, died) = tokio::join!(cancel, joined, died);
         died?;
         assert!(matches!(
             cancelled,
             Err(AttemptLifecycleError::CleanupFailed)
+        ));
+        // No response is ever signed for the abandoned run.
+        assert!(matches!(
+            joined,
+            Err(AttemptLifecycleError::ResponseUnavailable)
+        ));
+        assert!(matches!(
+            runtime.lifecycle.terminal_response([1; 16], grant(1)),
+            Err(AttemptLifecycleError::ResponseUnavailable)
         ));
         // Its intent and directory are left for restart reconciliation; its
         // input, and its staging reservation, went with the dropped run.
@@ -943,6 +960,49 @@ mod cases {
         assert!(matches!(
             runtime.lifecycle.reconcile(&reconcile_request(1, grant(1))),
             Err(AttemptLifecycleError::CleanupFailed)
+        ));
+        Ok(())
+    }
+
+    /// An exact repeat waits while the attempt runs and while its response
+    /// is pending, and learns of its reconciliation; other bytes conflict,
+    /// and an attempt never known is no repeat (ADR-069 §4).
+    #[tokio::test(start_paused = true)]
+    async fn an_exact_repeat_waits_for_the_attempt_it_joins() -> TestResult {
+        let runtime = Runtime::new()?;
+        assert!(runtime.lifecycle.join([1; 16], REQUEST).await?.is_none());
+        let fixture = manager(1).await?;
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        assert!(matches!(
+            runtime.lifecycle.join([1; 16], [0x77; 32]).await,
+            Err(AttemptLifecycleError::RequestConflict)
+        ));
+        let joined = runtime.lifecycle.join([1; 16], REQUEST);
+        let ran = async {
+            let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+            cleaned(&ended)?;
+            // The joined repeat now waits for the pending response.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            assert!(matches!(
+                runtime.lifecycle.terminal_response([1; 16], grant(1)),
+                Err(AttemptLifecycleError::ResponsePending)
+            ));
+            runtime
+                .lifecycle
+                .reconcile(&reconcile_request(1, grant(1)))?;
+            TestResult::Ok(())
+        };
+        let (joined, ran) = tokio::join!(joined, ran);
+        ran?;
+        assert!(matches!(joined, Err(AttemptLifecycleError::UnknownAttempt)));
+        // A withdrawn attempt is unknown to a repeat as well.
+        drop(runtime.lifecycle.admit_input(FakeInput::new(2))?);
+        assert!(matches!(
+            runtime.lifecycle.join([2; 16], REQUEST).await,
+            Err(AttemptLifecycleError::UnknownAttempt)
         ));
         Ok(())
     }
@@ -1652,17 +1712,24 @@ mod cases {
         #[error("refused by the test")]
         struct Refused;
 
-        /// A barrier that hands over `/dev/null` and releases at once.
-        struct OpenBarrier;
+        /// A barrier that holds the attempt's root recheck, rechecks the root
+        /// as it prepares, hands over `/dev/null` and releases at once.
+        struct OpenBarrier<'r> {
+            root: crate::RootRecheck<'r>,
+            rechecked: Arc<std::sync::OnceLock<bool>>,
+        }
 
-        impl LaunchBarrier for OpenBarrier {
+        impl LaunchBarrier for OpenBarrier<'_> {
             type Error = Refused;
             type Evidence = crate::ReleaseOutcome;
 
             fn prepare(
                 &mut self,
-                _attempt: &AdmittedAttempt,
+                attempt: &AdmittedAttempt,
             ) -> Result<(LauncherInvocation, zbus::OwnedFd), Refused> {
+                // The recheck yields this very attempt's root.
+                let own = (self.root)().is_ok_and(|checked| checked.matches_attempt(attempt));
+                self.rechecked.set(own).ok();
                 let invocation = crate::test_fixtures::invocation().map_err(|_| Refused)?;
                 File::open("/dev/null")
                     .map(|file| (invocation, zbus::OwnedFd::from(StdOwnedFd::from(file))))
@@ -1682,9 +1749,34 @@ mod cases {
             }
         }
 
-        type BarrierFactory = fn(&AdmittedAttempt) -> Result<OpenBarrier, Refused>;
+        /// Builds an [`OpenBarrier`] over the attempt's root recheck, or
+        /// refuses to.
+        #[derive(Default)]
+        struct Opening {
+            refused: bool,
+            rechecked: Arc<std::sync::OnceLock<bool>>,
+        }
 
-        const fn launch(barrier: BarrierFactory) -> AttemptLaunch<BarrierFactory> {
+        impl crate::BarrierFactory for Opening {
+            type Barrier<'r> = OpenBarrier<'r>;
+            type Error = Refused;
+
+            fn barrier<'r>(
+                self,
+                _attempt: &AdmittedAttempt,
+                root: crate::RootRecheck<'r>,
+            ) -> Result<OpenBarrier<'r>, Refused> {
+                if self.refused {
+                    return Err(Refused);
+                }
+                Ok(OpenBarrier {
+                    root,
+                    rechecked: self.rechecked,
+                })
+            }
+        }
+
+        const fn launch(barrier: Opening) -> AttemptLaunch<Opening> {
             AttemptLaunch {
                 mode: ModePlan::AirGapped,
                 barrier,
@@ -1694,7 +1786,7 @@ mod cases {
         async fn run_production(
             runtime: &Runtime,
             transport: &crate::SystemdTransientUnitTransport,
-            barrier: BarrierFactory,
+            barrier: Opening,
         ) -> TestResult<EndedAttempt<SystemdVerifiedStart>> {
             let (_store_root, store) = crate::test_fixtures::capture_store()?;
             let steps = SystemdAttemptSteps::new(transport, &FailClosedLocalNetwork, store);
@@ -1709,7 +1801,11 @@ mod cases {
             let runtime = Runtime::new()?;
             let fixture = manager(1).await?;
             let calls = fixture.calls();
-            let ended = run_production(&runtime, &fixture.transport, |_| Err(Refused)).await?;
+            let refusing = Opening {
+                refused: true,
+                ..Opening::default()
+            };
+            let ended = run_production(&runtime, &fixture.transport, refusing).await?;
             assert!(matches!(
                 ended.progress(),
                 AttemptProgress::Failed {
@@ -1729,7 +1825,11 @@ mod cases {
         async fn a_requested_unit_start_without_a_bound_cgroup_quarantines() -> TestResult {
             let runtime = Runtime::new()?;
             let fixture = manager(1).await?;
-            let ended = run_production(&runtime, &fixture.transport, |_| Ok(OpenBarrier)).await?;
+            let opening = Opening::default();
+            let rechecked = Arc::clone(&opening.rechecked);
+            let ended = run_production(&runtime, &fixture.transport, opening).await?;
+            // The barrier rechecked the attempt's own root before the start.
+            assert_eq!(rechecked.get(), Some(&true));
             // The fake manager refuses the start, so no cgroup proves the unit gone.
             assert!(matches!(ended.progress(), AttemptProgress::Failed { .. }));
             assert!(matches!(
@@ -1776,7 +1876,7 @@ mod cases {
             let (_store_root, store) = crate::test_fixtures::capture_store()?;
             let steps =
                 SystemdAttemptSteps::new(&fixture.transport, &FailClosedLocalNetwork, store);
-            let ended = Box::pin(owned.run(&steps, launch(|_| Ok(OpenBarrier)), budget()?)).await;
+            let ended = Box::pin(owned.run(&steps, launch(Opening::default()), budget()?)).await;
             assert_eq!(ended.attempt_id(), request.attempt_id);
             // No mountfsd serves the container: nothing was mounted or started.
             assert!(matches!(ended.progress(), AttemptProgress::NotActivated(_)));

@@ -107,6 +107,54 @@ impl SandboxPayloadChunk {
         chunk.validate(fields).map(|()| chunk)
     }
 
+    /// The canonical SBC1 records of one output payload (ADR-069 §4): its
+    /// `bytes` in contiguous 1 MiB chunks from index and offset zero, each
+    /// bound to `parent_digest`, the SPY1 self-digest, and to the request
+    /// and attempt. An empty payload has no records.
+    ///
+    /// # Errors
+    /// Refuses a zero parent digest and a payload of more than 128 chunks.
+    pub fn output_records(
+        parent_digest: [u8; 32],
+        request_id: [u8; 16],
+        attempt_id: [u8; 16],
+        bytes: &[u8],
+    ) -> Result<Vec<Vec<u8>>, SandboxProviderProtocolError> {
+        bytes
+            .chunks(PAYLOAD_CHUNK_BYTES)
+            .zip(0_u64..)
+            .map(|(chunk, index)| {
+                Self {
+                    parent_digest,
+                    request_id,
+                    attempt_id,
+                    direction: PayloadDirection::Output,
+                    index,
+                    offset: index * PAYLOAD_CHUNK_BYTES as u64,
+                    bytes: chunk.to_vec(),
+                    chunk_digest: [0; 32],
+                }
+                .encoded()
+            })
+            .collect()
+    }
+
+    /// Self-digest this chunk, validate it and encode it.
+    fn encoded(mut self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = self.unsigned_value();
+        record_digest("SBC1", &Value::Array(unsigned.to_vec()))
+            .and_then(|digest| {
+                self.chunk_digest = digest;
+                self.validate(&unsigned)
+            })
+            .and_then(|()| {
+                encode(&Value::Array(vec![
+                    Value::Array(unsigned.to_vec()),
+                    bytes_value(&self.chunk_digest),
+                ]))
+            })
+    }
+
     fn validate(&self, fields: &[Value; 9]) -> Result<(), SandboxProviderProtocolError> {
         let expected_offset = self
             .index
