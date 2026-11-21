@@ -1660,6 +1660,12 @@ fn source_genesis_refs_have_the_exact_wire_and_only_one_observation_use() -> Tes
         error_of(observation(Index::Direct(TypedRefs::from_references(&two)))),
         Some(Error::InvalidBinding)
     );
+    assert_eq!(
+        error_of(Node::new(revision_input(Index::Direct(
+            TypedRefs::from_references(&two)
+        )))),
+        Some(Error::InvalidBinding)
+    );
     let one = [genesis(4, 1)];
     assert_eq!(
         error_of(Node::new(revision_input(Index::Direct(

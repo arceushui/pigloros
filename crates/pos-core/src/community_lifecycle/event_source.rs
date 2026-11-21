@@ -316,6 +316,9 @@ fn read_u32(cursor: &mut CborCursor<'_>) -> Result<u32> {
 /// scope with no key dependencies (owner 2026-11-21 (#560), item (f)).
 pub const COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1: (&str, u32) = ("pos.community.native-event", 1);
 
+/// Maximum rows of the installed source catalogue.
+pub const MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1: usize = 4096;
+
 /// The closed installed source catalogue whose digest is the CDP1
 /// `source_catalogue_digest` (owner 2026-11-21 (#560), item (f)).
 ///
@@ -330,9 +333,13 @@ impl<'a> CommunitySourceCatalogueV1<'a> {
     /// Validate every row and the strict `(event_type, schema_version)` order.
     ///
     /// # Errors
-    /// Returns the row errors of [`CommunitySourceSchemaRuleV1`], and
-    /// `InvalidBinding` for unsorted or repeated `(event_type, version)` keys.
+    /// Returns `BoundsExceeded` for more than 4,096 rows, the row errors of
+    /// [`CommunitySourceSchemaRuleV1`], and `InvalidBinding` for unsorted or
+    /// repeated `(event_type, version)` keys.
     pub fn new(rows: &'a [CommunitySourceSchemaRuleV1<'a>]) -> Result<Self> {
+        if rows.len() > MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1 {
+            return Err(Error::BoundsExceeded);
+        }
         rows.iter()
             .try_for_each(|row| row.validate())
             .and_then(|()| {
@@ -367,8 +374,11 @@ impl<'a> CommunitySourceCatalogueV1<'a> {
         schema_version: u32,
     ) -> Option<CommunitySourceSchemaRuleV1<'a>> {
         self.0
-            .iter()
-            .find(|row| row.event_type == event_type && row.schema_version == schema_version)
-            .copied()
+            .binary_search_by(|row| {
+                (row.event_type.as_bytes(), row.schema_version)
+                    .cmp(&(event_type.as_bytes(), schema_version))
+            })
+            .ok()
+            .map(|index| self.0[index])
     }
 }

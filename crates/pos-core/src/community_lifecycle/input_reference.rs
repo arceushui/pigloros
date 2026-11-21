@@ -335,7 +335,7 @@ pub enum CommunityTypedInputRefV1<'a> {
     },
 }
 
-impl CommunityTypedInputRefV1<'_> {
+impl<'a> CommunityTypedInputRefV1<'a> {
     /// `H("TypedInputRef", canonical_typed_input_ref)`, the CSB1
     /// coverage-row key of this reference (ADR-129 §3).
     #[must_use]
@@ -345,10 +345,58 @@ impl CommunityTypedInputRefV1<'_> {
         digest(b"PiglorOS.Community.TypedInputRef.v1\0", &out)
     }
 
-    fn validate(self) -> Result<()> {
+    /// Split the reference into its node variants 0–1 and its record
+    /// variants 2–4, so each operation stays one small match.
+    const fn split(self) -> Split<'a> {
         match self {
-            Self::Native(reference) => reference.validate(),
+            Self::Native(reference) => Split::Native(reference),
             Self::Factual {
+                timeline,
+                node,
+                record_digest,
+            } => Split::Factual {
+                timeline,
+                node,
+                record_digest,
+            },
+            Self::Artifact {
+                owner_reference,
+                artifact_class,
+                artifact_digest,
+                registration_address,
+                source_scope_binding_digest,
+            } => Split::Record(RecordRef::Artifact {
+                owner_reference,
+                artifact_class,
+                artifact_digest,
+                registration_address,
+                source_scope_binding_digest,
+            }),
+            Self::Metadata {
+                schema,
+                locator,
+                envelope_address,
+                private_record_digest,
+            } => Split::Record(RecordRef::Metadata {
+                schema,
+                locator,
+                envelope_address,
+                private_record_digest,
+            }),
+            Self::SourceGenesis {
+                timeline,
+                genesis_chain_hash,
+            } => Split::Record(RecordRef::SourceGenesis {
+                timeline,
+                genesis_chain_hash,
+            }),
+        }
+    }
+
+    fn validate(self) -> Result<()> {
+        match self.split() {
+            Split::Native(reference) => reference.validate(),
+            Split::Factual {
                 timeline,
                 node,
                 record_digest,
@@ -357,6 +405,80 @@ impl CommunityTypedInputRefV1<'_> {
                     && valid_factual_node(node)
                     && record_digest != Hash::zero(),
             ),
+            Split::Record(record) => record.validate(),
+        }
+    }
+
+    /// Exact length of [`Self::encode`]: array head and tag (2), then the
+    /// variant's fields.
+    pub(super) fn encoded_len(self) -> usize {
+        match self.split() {
+            Split::Native(reference) => 2 + reference.encoded_len(),
+            Split::Factual { node, .. } => {
+                let node_len = node_bytes(node);
+                2 + 17 + head_len(node_len as u64) + node_len + 34
+            }
+            Split::Record(record) => record.encoded_len(),
+        }
+    }
+
+    pub(super) fn encode(self, out: &mut Vec<u8>) {
+        match self.split() {
+            Split::Native(reference) => {
+                out.extend_from_slice(&[0x82, 0]);
+                reference.encode(out);
+            }
+            Split::Factual {
+                timeline,
+                node,
+                record_digest,
+            } => {
+                out.extend_from_slice(&[0x84, 1]);
+                encode_bytes(out, &timeline.inner().to_bytes(), 2);
+                encode_factual_node(out, node);
+                encode_hash(out, record_digest);
+            }
+            Split::Record(record) => record.encode(out),
+        }
+    }
+}
+
+/// A typed reference split into its node variants and its record variants.
+enum Split<'a> {
+    Native(CommunityNativeNodeReferenceV1),
+    Factual {
+        timeline: TimelineId,
+        node: CommunityFactualNodeReferenceV1<'a>,
+        record_digest: Hash,
+    },
+    Record(RecordRef),
+}
+
+/// The record variants 2–4 of a typed reference.
+#[derive(Clone, Copy)]
+enum RecordRef {
+    Artifact {
+        owner_reference: Hash,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_digest: Hash,
+        registration_address: Hash,
+        source_scope_binding_digest: Hash,
+    },
+    Metadata {
+        schema: CommunityMetadataSchemaV1,
+        locator: CommunityMetadataLocatorV1,
+        envelope_address: Hash,
+        private_record_digest: Hash,
+    },
+    SourceGenesis {
+        timeline: TimelineId,
+        genesis_chain_hash: Hash,
+    },
+}
+
+impl RecordRef {
+    fn validate(self) -> Result<()> {
+        match self {
             Self::Artifact {
                 owner_reference,
                 artifact_digest,
@@ -394,15 +516,8 @@ impl CommunityTypedInputRefV1<'_> {
         }
     }
 
-    /// Exact length of [`Self::encode`]: array head and tag (2), then the
-    /// variant's fields.
-    pub(super) fn encoded_len(self) -> usize {
+    fn encoded_len(self) -> usize {
         match self {
-            Self::Native(reference) => 2 + reference.encoded_len(),
-            Self::Factual { node, .. } => {
-                let node_len = node_bytes(node);
-                2 + 17 + head_len(node_len as u64) + node_len + 34
-            }
             Self::Artifact { artifact_class, .. } => {
                 2 + 34 + head_len(artifact_class.code()) + 3 * 34
             }
@@ -411,22 +526,8 @@ impl CommunityTypedInputRefV1<'_> {
         }
     }
 
-    pub(super) fn encode(self, out: &mut Vec<u8>) {
+    fn encode(self, out: &mut Vec<u8>) {
         match self {
-            Self::Native(reference) => {
-                out.extend_from_slice(&[0x82, 0]);
-                reference.encode(out);
-            }
-            Self::Factual {
-                timeline,
-                node,
-                record_digest,
-            } => {
-                out.extend_from_slice(&[0x84, 1]);
-                encode_bytes(out, &timeline.inner().to_bytes(), 2);
-                encode_factual_node(out, node);
-                encode_hash(out, record_digest);
-            }
             Self::Artifact {
                 owner_reference,
                 artifact_class,

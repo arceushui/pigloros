@@ -115,7 +115,7 @@ pub use event_source::{
     CommunityEventSourceInputV1, CommunityEventSourceV1, CommunitySourceCatalogueV1,
     CommunitySourceSchemaRuleV1, COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1,
     MAX_COMMUNITY_EVENT_SOURCE_BYTES_V1, MAX_COMMUNITY_EVENT_SOURCE_KEYS_V1,
-    MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
+    MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1, MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
 };
 pub use failure::{
     CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,

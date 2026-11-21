@@ -11,7 +11,7 @@ use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunitySourceCatalogueV1 as Catalogue,
     CommunitySourceSchemaRuleV1 as Rule, COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1,
     MAX_COMMUNITY_EVENT_SOURCE_BYTES_V1, MAX_COMMUNITY_EVENT_SOURCE_KEYS_V1,
-    MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
+    MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1, MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
 };
 use pos_core::{
     ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
@@ -423,5 +423,22 @@ fn the_source_catalogue_is_closed_sorted_and_digested() -> TestResult {
         .err(),
         Some(Error::InvalidBinding)
     );
+    Ok(())
+}
+
+#[test]
+fn the_source_catalogue_holds_at_most_4096_rows() -> TestResult {
+    assert_eq!(MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1, 4096);
+    let rows: Vec<Rule<'static>> = (0..=4096_u32)
+        .map(|schema_version| Rule {
+            schema_version,
+            ..RULE
+        })
+        .collect();
+    let catalogue = Catalogue::new(&rows[..4096])?;
+    assert_eq!(catalogue.rule("world.action", 4095), Some(rows[4095]));
+    assert_eq!(catalogue.rule("world.action", 0), Some(rows[0]));
+    assert_eq!(catalogue.rule("world.action", 4096), None);
+    assert_eq!(Catalogue::new(&rows).err(), Some(Error::BoundsExceeded));
     Ok(())
 }

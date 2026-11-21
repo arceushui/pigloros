@@ -42,10 +42,12 @@ use pos_core::community_lifecycle::{
     CommunitySourceCatalogueV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1,
     COMMUNITY_FOLD_BUDGET_MICROS_V1, COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1,
     MAX_COMMUNITY_DIRECT_INPUTS_V1, MAX_COMMUNITY_OBSERVATION_EVENTS_V1,
+    MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
 };
-use pos_core::store::{EventStore, SeqRange};
+use pos_core::store::{EventReadBounds, EventStore, SeqRange};
 use pos_core::{
-    AuthorityTrustRootSealV1, Event, Hash, Hasher, RecordedDependencyClassV1, Seq, TimelineId,
+    AuthorityTrustRootSealV1, CoreError, Event, Hash, Hasher, RecordedDependencyClassV1, Seq,
+    TimelineId,
 };
 use zeroize::Zeroizing;
 
@@ -100,7 +102,16 @@ pub struct CommunityObservationMaterializationV1(CommunityObservationMaterializa
 
 impl CommunityObservationMaterializationV1 {
     /// Wrap the publisher's data. Only a holder of the composition root's
-    /// seal, the runtime projection publisher, can build it.
+    /// seal, the runtime projection publisher, can build it (I61):
+    ///
+    /// ```compile_fail,E0061
+    /// use pos_store::community::{
+    ///     CommunityObservationMaterializationInputV1, CommunityObservationMaterializationV1,
+    /// };
+    /// fn forge(input: CommunityObservationMaterializationInputV1) {
+    ///     let _ = CommunityObservationMaterializationV1::new(input);
+    /// }
+    /// ```
     #[must_use]
     pub const fn new(
         _seal: &'static AuthorityTrustRootSealV1,
@@ -117,8 +128,14 @@ pub struct CommunityObservationInstallationV1<'a> {
     pub profile: &'a CommunityDurableProfileV1<'a>,
     /// The installed closed source catalogue; its digest must be the CDP1's.
     pub source_catalogue: CommunitySourceCatalogueV1<'a>,
-    /// The installed observation encoder's schema ID.
+    /// The installed observation encoder's schema ID. Only the schema is
+    /// checked (R9.6): the reference digest is not tied to the observation
+    /// bytes here, which is a trust assumption on the runtime publisher.
     pub observation_schema_id: u32,
+    /// The installed history read bounds: payload, Event type and total
+    /// bytes, the Fork depth and at most 4,096 Events. The publisher's fold
+    /// reads under the same bounds.
+    pub event_read_bounds: EventReadBounds,
 }
 
 /// The pass the observation serves.
@@ -198,10 +215,17 @@ pub struct CommunityObservationRecordsV1 {
 
 /// Stage 1: re-check the cut and mint its CES1s and COV1.
 ///
+/// The three history reads (Logical Head, Events and chain hashes) are not
+/// one atomic snapshot: the Reserve writer's Logical Head and chain-head
+/// compare (R9.7 step 6, A4c) is the guard against a cut that moves.
+///
 /// # Errors
-/// Returns `CapacityExhausted` for more than 4,096 Events or a deterministic
-/// fold cost over the CDP1 `fold_budget_micros`, before any re-check;
-/// `EvidenceUnavailable` when the cut is not T's Logical Head, a row, owner or
+/// Returns `EvidenceUnavailable` for a consumer list that is not 1..=64
+/// strictly ordered consumers with nonzero bounds of at most 250 ms;
+/// `CapacityExhausted` for more than 4,096 Events, a deterministic fold cost
+/// over the CDP1 `fold_budget_micros`, before any re-check, or an Event read
+/// over the installed payload or total-byte bounds; `EvidenceUnavailable`
+/// when the cut is not T's Logical Head, a row, owner or
 /// the stitched chain differs from the domain's history, the catalogue or
 /// encoder is not the installed one, an Event type has no pinned native-event
 /// row, or the scope references are not exactly one nonzero ref per owning
@@ -213,26 +237,53 @@ pub fn prepare_community_observation_v1<D: CommunityStoreDomainV1>(
     materialization: &CommunityObservationMaterializationV1,
 ) -> Result<CommunityObservationSourcesV1, Error> {
     let input = &materialization.0;
-    check_capacity(input)
+    check_consumers(input)
+        .and_then(|()| check_capacity(input))
         .and_then(|()| check_installation(installation, input))
         .and_then(|()| {
             let (events, hasher) = domain.event_history();
-            recheck_history(events, hasher, input)
+            recheck_history(events, hasher, installation.event_read_bounds, input)
         })
         .and_then(|history| mint_sources(installation, pass, input, &history))
 }
 
+/// The largest admitted per-callback bound: the staged reducer admission
+/// maximum (ADR-113; pos-runtime `MAX_STAGED_CALLBACK_BOUND_V1`), the
+/// R9.7(a) table's 250 ms column.
+const MAX_CALLBACK_BOUND: Duration = Duration::from_millis(250);
+
+/// The sealed consumer list must be an admitted recorded set before its
+/// bounds are trusted for the fold cost: 1..=64 consumers, strictly
+/// ascending by consumer identity, each with a nonzero bound of at most
+/// 250 ms (R9.4, R9.7(a)).
+fn check_consumers(input: &CommunityObservationMaterializationInputV1) -> Result<(), Error> {
+    let consumers = &input.consumers;
+    if (1..=MAX_COMMUNITY_RECORDED_CONSUMERS_V1).contains(&consumers.len())
+        && consumers.windows(2).all(|pair| {
+            pair[0].binding.consumer_identity_digest < pair[1].binding.consumer_identity_digest
+        })
+        && consumers.iter().all(|consumer| {
+            !consumer.callback_bound.is_zero() && consumer.callback_bound <= MAX_CALLBACK_BOUND
+        })
+    {
+        Ok(())
+    } else {
+        Err(Error::EvidenceUnavailable)
+    }
+}
+
 /// The deterministic pre-fold checks (R9.7(a), N13): the 4,096-row bound and
-/// Σ over consumers of (rows + 1) × callback bound within the fold budget.
+/// Σ over consumers of (rows + 1) × callback bound within the fold budget,
+/// summed in nanoseconds and rounded up to whole microseconds.
 fn check_capacity(input: &CommunityObservationMaterializationInputV1) -> Result<(), Error> {
     let rows = u128::from(input.through_seq);
-    let cost = input
+    let nanos = input
         .consumers
         .iter()
-        .map(|consumer| (rows + 1) * consumer.callback_bound.as_micros())
+        .map(|consumer| (rows + 1) * consumer.callback_bound.as_nanos())
         .sum::<u128>();
     if input.through_seq > MAX_COMMUNITY_OBSERVATION_EVENTS_V1 as u64
-        || cost > u128::from(COMMUNITY_FOLD_BUDGET_MICROS_V1)
+        || nanos.div_ceil(1_000) > u128::from(COMMUNITY_FOLD_BUDGET_MICROS_V1)
     {
         Err(Error::CapacityExhausted)
     } else {
@@ -267,21 +318,26 @@ struct History {
 fn recheck_history(
     events: &dyn EventStore,
     hasher: &dyn Hasher,
+    bounds: EventReadBounds,
     input: &CommunityObservationMaterializationInputV1,
 ) -> Result<History, Error> {
-    fork_segments(events, input.timeline).and_then(|segments| {
+    fork_segments(events, input.timeline, bounds.max_fork_depth()).and_then(|segments| {
         let root = segments[0].0;
         let genesis = hasher.genesis_hash();
-        let stored = events
-            .read(
-                input.timeline,
-                SeqRange {
-                    from: Seq::from_u64(1),
-                    to: Some(Seq::from_u64(input.through_seq)),
-                },
-            )
-            .ok()
-            .map(|stored| chain(hasher, genesis, &segments, stored));
+        let stored = match events.read_bounded(
+            input.timeline,
+            SeqRange {
+                from: Seq::from_u64(1),
+                to: Some(Seq::from_u64(input.through_seq)),
+            },
+            bounds,
+        ) {
+            Ok(stored) => Some(chain(hasher, genesis, &segments, stored)),
+            Err(CoreError::PayloadTooLarge { .. } | CoreError::ReadBytesTooLarge { .. }) => {
+                return Err(Error::CapacityExhausted);
+            }
+            Err(_) => None,
+        };
         let head = events.logical_head(input.timeline).ok();
         let tip = events
             .chain_hash_at(input.timeline, Seq::from_u64(input.through_seq))
@@ -306,14 +362,19 @@ fn recheck_history(
 }
 
 /// `(segment Timeline, first owned seq)` from the Fork chain's root down to
-/// T.
+/// T. A chain of more than `max_depth` Forks, which includes any cyclic
+/// ancestry, is refused.
 fn fork_segments(
     events: &dyn EventStore,
     timeline: TimelineId,
+    max_depth: usize,
 ) -> Result<Vec<(TimelineId, u64)>, Error> {
     let mut segments = Vec::new();
     let mut current = Some(timeline);
     while let Some(id) = current {
+        if segments.len() > max_depth {
+            return Err(Error::EvidenceUnavailable);
+        }
         current = events
             .get_timeline(id)
             .ok()
@@ -412,6 +473,11 @@ struct Shared<'a> {
 impl Shared<'_> {
     /// The owner's whole-Timeline scope row (owner 2026-11-21 (#560), item
     /// (c)). Every owner has exactly one scope ref, re-checked before.
+    ///
+    /// The lease reference `H("RetentionPolicy", retention_bytes)` names the
+    /// generation's admitted retention policy, which is a native Event's
+    /// lease: a reader resolves it by recomputing the digest from the
+    /// installed CDP1 retention bytes (owner 2026-11-21, #560).
     fn scope_member(&self, owner: TimelineId) -> CommunityScopeMemberV1 {
         let scope_reference = self
             .input
@@ -666,7 +732,13 @@ impl CommunityObservationSourcesV1 {
     }
 
     /// The Observation's Event-source inputs in canonical order: one mode-2
-    /// ref per CES1, or the single `SourceGenesis` ref of an empty cut. Every
+    /// ref per CES1, or the single `SourceGenesis` ref of an empty cut.
+    ///
+    /// These are its only typed inputs: the Observation's reducer and policy
+    /// binding is carried by its CPE1 reducer rows, the CMI1 `[1, H(CPE1)]`
+    /// binding and its authorization digest (owner 2026-11-21, #560). The
+    /// CPN1 codec cannot see the cut, so A4c, with the CPE1, enforces that a
+    /// `SourceGenesis` input appears only when `through_seq` is 0. Every
     /// row ref has one owner and class, so canonical order is the order of
     /// the fixed-width digest fields.
     fn input_refs(

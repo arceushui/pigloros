@@ -22,7 +22,7 @@ use pos_core::community_lifecycle::{
     CommunityProfileRetentionV1, CommunityReducerBindingV1, CommunitySourceCatalogueV1,
     CommunitySourceSchemaRuleV1, CommunityTypedInputRefV1,
 };
-use pos_core::store::{EventStore, SeqRange};
+use pos_core::store::{EventReadBounds, EventStore, SeqRange};
 use pos_core::{
     AuthorityTrustRootSealV1, CanonicalBytes, EntityId, ErasureContainmentGateV1, Event,
     EventDraft, Hash, Hasher, ImplementationKeyV1, Kind, Seq, TimelineId,
@@ -48,6 +48,9 @@ const GENERATION: [u8; 16] = [0x20; 16];
 const RESERVATION: [u8; 16] = [0x30; 16];
 const ENCODER: u32 = 0x4f42_0001;
 const HORIZON: u64 = 5_000;
+/// Generous installed history read bounds for the honest fixtures.
+const BOUNDS: EventReadBounds =
+    EventReadBounds::new_with_total_bytes(1 << 20, 128, 64, 4096, 1 << 30);
 const EVENT_TYPE: &str = "world.action";
 const RULE: CommunitySourceSchemaRuleV1<'static> = CommunitySourceSchemaRuleV1 {
     event_type: EVENT_TYPE,
@@ -232,7 +235,7 @@ const OBSERVATION: &[u8] = b"observation";
 fn honest(history: &History, timeline: TimelineId) -> CommunityObservationMaterializationInputV1 {
     let events = history.visible(timeline);
     let mut scopes = vec![(timeline, hash(0x70))];
-    if timeline != history.root {
+    if timeline != history.root && !events.is_empty() {
         scopes.push((history.root, hash(0x71)));
     }
     CommunityObservationMaterializationInputV1 {
@@ -270,6 +273,15 @@ fn prepare(
     installed: &Installed,
     input: CommunityObservationMaterializationInputV1,
 ) -> Fallible<Result<CommunityObservationSourcesV1, Error>> {
+    prepare_bounded(history, installed, input, BOUNDS)
+}
+
+fn prepare_bounded(
+    history: &History,
+    installed: &Installed,
+    input: CommunityObservationMaterializationInputV1,
+    bounds: EventReadBounds,
+) -> Fallible<Result<CommunityObservationSourcesV1, Error>> {
     let catalogue = installed.catalogue()?;
     let members = installed.members()?;
     let profile = profile(&members, catalogue.digest())?;
@@ -279,6 +291,7 @@ fn prepare(
             profile: &profile,
             source_catalogue: catalogue,
             observation_schema_id: ENCODER,
+            event_read_bounds: bounds,
         },
         pass(),
         &CommunityObservationMaterializationV1::new(&SEAL, input),
@@ -567,6 +580,7 @@ fn every_row_head_catalogue_and_encoder_mismatch_refuses_with_12() -> TestResult
                 profile: &foreign,
                 source_catalogue: catalogue,
                 observation_schema_id: ENCODER,
+                event_read_bounds: BOUNDS,
             },
             pass(),
             &CommunityObservationMaterializationV1::new(&SEAL, honest(&history, root)),
@@ -607,7 +621,7 @@ fn the_fold_cost_and_row_bounds_refuse_with_14_before_any_recheck() -> TestResul
         .collect();
     assert_eq!(at(0, many)?, Some(Error::CapacityExhausted));
     // 4,096 rows reach the re-check; 4,097 are refused (I63).
-    let free = vec![consumer(0x50, Duration::ZERO)];
+    let free = vec![consumer(0x50, Duration::from_nanos(1))];
     assert_eq!(at(4_096, free.clone())?, Some(Error::EvidenceUnavailable));
     assert_eq!(at(4_097, free)?, Some(Error::CapacityExhausted));
     Ok(())
@@ -672,6 +686,7 @@ fn stage_inputs_that_cannot_mint_their_records_are_refused() -> TestResult {
         profile: &profile,
         source_catalogue: catalogue,
         observation_schema_id: ENCODER,
+        event_read_bounds: BOUNDS,
     };
     assert_eq!(
         prepare_community_observation_v1(
@@ -712,6 +727,152 @@ fn stage_inputs_that_cannot_mint_their_records_are_refused() -> TestResult {
     assert_eq!(
         sources.operation_id(),
         community_observation_materialization_id_v1(history.root, RESERVATION)?
+    );
+    Ok(())
+}
+
+#[test]
+fn the_sealed_consumer_list_must_be_an_admitted_set_before_its_cost_is_trusted() -> TestResult {
+    let history = history(0, EVENT_TYPE, None)?;
+    let installed = Installed::new(vec![RULE])?;
+    let with = |through_seq: u64,
+                consumers: Vec<CommunityObservationConsumerV1>|
+     -> Fallible<Option<Error>> {
+        let mut input = honest(&history, history.root);
+        input.through_seq = through_seq;
+        input.consumers = consumers;
+        Ok(prepare(&history, &installed, input)?.err())
+    };
+    let max = Duration::from_millis(250);
+    let one_ns = Duration::from_nanos(1);
+    // 250 ms is the admitted maximum; one nanosecond over, a zero bound, no
+    // consumer, 65 consumers, and an unsorted or repeated list are refused.
+    assert_eq!(with(0, vec![consumer(0x50, max)])?, None);
+    for consumers in [
+        vec![consumer(0x50, max + one_ns)],
+        vec![consumer(0x50, Duration::ZERO)],
+        Vec::new(),
+        (0..65).map(|byte| consumer(byte, one_ns)).collect(),
+        vec![consumer(0x52, one_ns), consumer(0x51, one_ns)],
+        vec![consumer(0x51, one_ns), consumer(0x51, one_ns)],
+    ] {
+        assert_eq!(with(0, consumers)?, Some(Error::EvidenceUnavailable));
+    }
+    let sixty_four: Vec<_> = (0..64).map(|byte| consumer(byte, one_ns)).collect();
+    assert_eq!(with(0, sixty_four)?, None);
+    // The cost rounds up to whole microseconds: 1,200 callbacks of
+    // 10 ms + 1 ns exceed 12 s, though each bound floors to 10,000 µs.
+    assert_eq!(
+        with(
+            1_199,
+            vec![consumer(0x50, Duration::from_millis(10) + one_ns)]
+        )?,
+        Some(Error::CapacityExhausted)
+    );
+    // A sub-microsecond bound still costs at least one microsecond in total.
+    assert_eq!(with(0, vec![consumer(0x50, one_ns)])?, None);
+    Ok(())
+}
+
+#[test]
+fn history_reads_are_bounded_by_the_installed_read_bounds_and_fork_depth() -> TestResult {
+    let history = history(2, EVENT_TYPE, None)?;
+    let installed = Installed::new(vec![RULE])?;
+    let at = |bounds: EventReadBounds| -> Fallible<Option<Error>> {
+        Ok(prepare_bounded(&history, &installed, honest(&history, history.root), bounds)?.err())
+    };
+    // Payload and total-byte bounds give 14 (§4: the prefix does not fit).
+    assert_eq!(
+        at(EventReadBounds::new_with_total_bytes(
+            0,
+            128,
+            64,
+            4096,
+            1 << 30
+        ))?,
+        Some(Error::CapacityExhausted)
+    );
+    assert_eq!(
+        at(EventReadBounds::new_with_total_bytes(
+            1 << 20,
+            128,
+            64,
+            4096,
+            1
+        ))?,
+        Some(Error::CapacityExhausted)
+    );
+    // Any other read refusal, here an over-long Event type, gives 12.
+    assert_eq!(
+        at(EventReadBounds::new_with_total_bytes(
+            1 << 20,
+            1,
+            64,
+            4096,
+            1 << 30
+        ))?,
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(at(BOUNDS)?, None);
+    // A Fork chain deeper than the installed depth is refused before reading.
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let root = store.create_timeline("root")?.id();
+    let first = store.fork(root, Seq::ZERO, "first")?.id();
+    let second = store.fork(first, Seq::ZERO, "second")?.id();
+    let deep = History {
+        domain: MemoryCommunityDomainV1::new(
+            store,
+            INCARNATION,
+            MemoryTrustedClockAuthorityV1::new(),
+        )?,
+        root,
+        child: Some(second),
+        cut: 0,
+        events: Vec::new(),
+        chain: Vec::new(),
+    };
+    let depth = |max_fork_depth: usize| -> Fallible<Option<Error>> {
+        Ok(prepare_bounded(
+            &deep,
+            &installed,
+            honest(&deep, second),
+            EventReadBounds::new_with_total_bytes(1 << 20, 128, max_fork_depth, 4096, 1 << 30),
+        )?
+        .err())
+    };
+    assert_eq!(depth(2)?, None);
+    assert_eq!(depth(1)?, Some(Error::EvidenceUnavailable));
+    Ok(())
+}
+
+#[test]
+fn an_empty_fork_child_names_its_fork_chain_root_genesis() -> TestResult {
+    let history = history(0, EVENT_TYPE, Some(0))?;
+    let child = history.child.ok_or("child")?;
+    let installed = Installed::new(vec![RULE])?;
+    let sources = prepare(&history, &installed, honest(&history, child))??;
+    assert_eq!(sources.owning_timelines(), [child]);
+    let authority = [(child, hash(0x90))];
+    let records = sources.finish(bindings(&[], &authority))?;
+    let node = CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?;
+    let CommunityInputIndexV1::Direct(inputs) = node.as_input().input_index else {
+        return Err("direct".into());
+    };
+    let inputs: Vec<_> = inputs.iter().collect::<Result<_, _>>()?;
+    assert!(
+        inputs
+            == [CommunityTypedInputRefV1::SourceGenesis {
+                timeline: history.root,
+                genesis_chain_hash: Blake3Hasher.genesis_hash(),
+            }]
+    );
+    // The root, which owns no Event of the empty cut, needs no scope ref.
+    let mut extra = honest(&history, child);
+    extra.timeline_scopes.push((history.root, hash(0x71)));
+    assert_eq!(
+        prepare(&history, &installed, extra)?.err(),
+        Some(Error::EvidenceUnavailable)
     );
     Ok(())
 }
