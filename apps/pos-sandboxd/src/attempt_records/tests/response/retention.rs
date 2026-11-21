@@ -739,3 +739,66 @@ fn a_refused_settle_faults_the_awaited_attempt() -> TestResult {
     assert!(ledger.reserve_storage(0).is_err());
     Ok(())
 }
+
+/// A signer that runs one step of another retention before its first
+/// signature: two retentions of the same attempt race.
+struct Interleaved<'a> {
+    signer: KeyFileRuntimeSigner,
+    step: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl RuntimeAttestationSigner for Interleaved<'_> {
+    fn runtime_attestation_key_id(&self) -> &str {
+        self.signer.runtime_attestation_key_id()
+    }
+
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+        let step = self.step.borrow_mut().take();
+        if let Some(step) = step {
+            step();
+        }
+        self.signer.sign(record)
+    }
+}
+
+/// Of two retentions racing for one pending response, the first to store
+/// wins: the other returns the winner's response, or the closed refusal
+/// when the winner faulted.
+#[test]
+fn racing_retentions_keep_the_first_stored_response() -> TestResult {
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let digest = signed_grant()?.grant.grant_digest();
+    for faulted in [false, true] {
+        let (_directory, lifecycle, _ledger) = lifecycle()?;
+        let filler = lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
+        let first = std::cell::RefCell::new(None);
+        let interleaved = Interleaved {
+            signer: signer(),
+            step: std::cell::RefCell::new(Some(Box::new(|| {
+                // The filler AGR1 cannot be signed, so that retention faults.
+                let stored = if faulted {
+                    lifecycle.retain_response(filler, &signer(), admitted)
+                } else {
+                    completed()
+                        .map_err(|_| AttemptLifecycleError::UnknownAttempt)
+                        .and_then(|ended| lifecycle.retain_response(ended, &signer(), admitted))
+                };
+                *first.borrow_mut() = Some(stored);
+            }))),
+        };
+        let second = lifecycle.retain_response(completed()?, &interleaved, admitted);
+        drop(interleaved);
+        let first = first.into_inner().ok_or("no racing retention")?;
+        if faulted {
+            assert!(first.is_err());
+            assert!(matches!(
+                second,
+                Err(AttemptLifecycleError::ResponseUnavailable)
+            ));
+        } else {
+            assert!(Arc::ptr_eq(&first?, &second?));
+        }
+    }
+    Ok(())
+}
