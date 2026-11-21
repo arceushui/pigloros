@@ -7,6 +7,7 @@ members = [
   "crates/pos-time",
   "crates/pos-query",
   "crates/pos-runtime",
+  "crates/pos-local-erasure-loader",
   "crates/pos-conformance",
   "crates/pos-reference",
   "crates/pos-plugin-release",
