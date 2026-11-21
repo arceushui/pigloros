@@ -10,6 +10,8 @@
 //! sees them as unused.
 
 use std::error::Error as StdError;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ciborium::Value;
 use pos_core::community_lifecycle::{
@@ -22,25 +24,35 @@ use pos_core::community_lifecycle::{
     CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityRecordKindsV1,
     CommunityStateContentV1,
 };
+use pos_core::community_lifecycle::{CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1};
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
     ForkAuthenticationPolicyV1,
 };
-use pos_core::trusted_clock::{ScriptedTrustedWallSourceV1, SystemGuardMonotonicSourceV1};
+use pos_core::store::EventStore;
+use pos_core::trusted_clock::{
+    GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1, ScriptedTrustedWallSourceV1,
+    SystemGuardMonotonicSourceV1,
+};
+use pos_core::{AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1};
 use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1, CapabilityGrantDraftV1,
     CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, Hash,
     ImplementationKeyV1, PrincipalRefV1, Seq, TimelineId,
 };
+use pos_core::{TimelineMeta, TimelineMode, WallTime};
 use pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1;
 use pos_store::community::{
-    CommunityAdministrativeRequestV1, CommunityArtifactProtectorV1, CommunityAuthorityAdmissionV1,
-    CommunityAuthorityCallV1, CommunityInitializationGraphInputV1, CommunityInitializationGraphV1,
-    CommunityInitializationInstallationV1, CommunityInitializationMemberV1,
-    CommunityInitializationPlannerV1, CommunityInitializationRecordsV1, CommunityInitializeFormV1,
-    CommunityInitializerOwnerV1, CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
-    CommunityProtectionCohortV1, MemoryCommunityDomainV1,
+    metadata_resource, CommunityAdministrativeRequestV1, CommunityArtifactProtectorV1,
+    CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1, CommunityBootstrapRequestV1,
+    CommunityDomainBindingV1, CommunityDomainOpenedV1, CommunityInitializationGraphInputV1,
+    CommunityInitializationGraphV1, CommunityInitializationInstallationV1,
+    CommunityInitializationMemberV1, CommunityInitializationPlannerV1,
+    CommunityInitializationRecordsV1, CommunityInitializeFormV1, CommunityInitializerOwnerV1,
+    CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
+    CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1, CommunityProtectionCohortV1,
+    MemoryCommunityDomainV1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::MemoryTrustedClockAuthorityV1;
@@ -83,7 +95,7 @@ pub const ISSUED: u64 = 100;
 /// Credential expiry.
 pub const EXPIRES: u64 = 30_000_100;
 /// The CDP1 horizon.
-pub const HORIZON: u64 = 1_000;
+pub const HORIZON: u64 = 40_000_000;
 /// The roster's State schema.
 pub const SCHEMA: Hash = Hash::from_bytes([0x22; 32]);
 /// The roster entries.
@@ -277,15 +289,29 @@ impl Roster {
 pub fn profile<'a>(
     roster: &'a [CommunityProfileMemberV1<'a>],
 ) -> Fallible<CommunityDurableProfileV1<'a>> {
+    profile_until(roster, HORIZON, hash(1), hash(9))
+}
+
+/// The CDP1 over `roster` with generation horizon `horizon`, execution
+/// profile `execution` and authority catalogue `catalogue`.
+///
+/// # Errors
+/// Returns the fixture construction error.
+pub fn profile_until<'a>(
+    roster: &'a [CommunityProfileMemberV1<'a>],
+    horizon: u64,
+    execution: Hash,
+    catalogue: Hash,
+) -> Fallible<CommunityDurableProfileV1<'a>> {
     Ok(CommunityDurableProfileV1::new(
         CommunityDurableProfileInputV1 {
             backend: CommunityDurableBackendV1::RetainedMemory,
-            execution_profile_digest: hash(1),
+            execution_profile_digest: execution,
             roster,
             source_catalogue_digest: hash(2),
-            authority_catalogue_digest: hash(9),
+            authority_catalogue_digest: catalogue,
             retention: CommunityProfileRetentionV1 {
-                generation_not_after_micros: HORIZON,
+                generation_not_after_micros: horizon,
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: HORIZON,
                 metadata_not_after_micros: HORIZON,
@@ -447,15 +473,39 @@ impl World {
     /// Returns the fixture construction error.
     pub fn new(
         seal: &'static AuthorityTrustRootSealV1,
-        mut store: MemoryStore,
+        store: MemoryStore,
         scope: &str,
         clock: MemoryTrustedClockAuthorityV1,
     ) -> Fallible<Self> {
-        let grants = LEAVES
+        Self::with_grants(
+            seal,
+            store,
+            scope,
+            clock,
+            Vec::new(),
+            SystemGuardMonotonicSourceV1,
+        )
+    }
+
+    /// Issue the [`LEAVES`] grants and then `extra` into `store`, and install
+    /// the authority with the guard monotonic source `mono`.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error.
+    pub fn with_grants(
+        seal: &'static AuthorityTrustRootSealV1,
+        mut store: MemoryStore,
+        scope: &str,
+        clock: MemoryTrustedClockAuthorityV1,
+        extra: Vec<CapabilityGrantV1>,
+        mono: impl GuardMonotonicSourceV1 + 'static,
+    ) -> Fallible<Self> {
+        let mut grants = LEAVES
             .iter()
             .zip(1..)
             .map(|(leaf, seq)| grant(*leaf, seq, &[target(), other_timeline()]))
             .collect::<Fallible<Vec<_>>>()?;
+        grants.extend(extra);
         let mut bindings = grants
             .iter()
             .map(CapabilityGrantV1::binding_digest)
@@ -501,7 +551,7 @@ impl World {
                     store_incarnation: INCARNATION,
                 },
                 ScriptedTrustedWallSourceV1::from_micros([NOW; 64]),
-                SystemGuardMonotonicSourceV1,
+                mono,
             )?,
             catalogue: digest,
         })
@@ -529,6 +579,21 @@ impl World {
         request: CommunityAdministrativeRequestV1,
         leaf: Hash,
     ) -> Fallible<(CommunityAuthorityCallV1, CommunityAuthorityAdmissionV1)> {
+        let credential = self.credential(request)?;
+        let call = self
+            .authority
+            .authenticate(&credential, request, &mut self.domain)?;
+        let admission = self
+            .authority
+            .authorize_administrative(&call, &self.domain, leaf)?;
+        Ok((call, admission))
+    }
+
+    /// A canonical FAE1 for `request`, signed by the pinned adapter.
+    ///
+    /// # Errors
+    /// Returns the signing or encoding error.
+    pub fn credential(&self, request: CommunityAdministrativeRequestV1) -> Fallible<Vec<u8>> {
         let record = AuthenticatedPrincipalRecordV1 {
             principal: caller()?,
             adapter_id: ADAPTER.to_owned(),
@@ -543,16 +608,9 @@ impl World {
                 &request.operation_constraint(),
             )?,
         };
-        let credential = signing_key()?
+        Ok(signing_key()?
             .sign_authenticated_principal(record)?
-            .to_canonical_cbor()?;
-        let call = self
-            .authority
-            .authenticate(&credential, request, &mut self.domain)?;
-        let admission = self
-            .authority
-            .authorize_administrative(&call, &self.domain, leaf)?;
-        Ok((call, admission))
+            .to_canonical_cbor()?)
     }
 }
 
@@ -640,4 +698,329 @@ pub fn graph(
         &owner,
         &mut protector,
     )?)
+}
+
+/// The leaf of the [`data_grant`] of every [`Bootstrapped`] domain.
+pub const DATA_LEAF: Hash = Hash::from_bytes([3; 32]);
+/// The leaf of the metadata grant of every [`Bootstrapped`] domain.
+pub const METADATA_LEAF: Hash = Hash::from_bytes([4; 32]);
+/// The installed metadata owner's audience.
+pub const METADATA_AUDIENCE: &str = "community-owner";
+/// The bootstrap control identity.
+pub const BOOTSTRAP_CONTROL: [u8; 16] = [0xc1; 16];
+/// The CSI1 installed catalogue identity.
+pub const INSTALLED_CATALOGUE: Hash = Hash::from_bytes([0x64; 32]);
+/// The qualified native profile identity, as [`planner_at`] installs it.
+pub const NATIVE_PROFILE: Hash = Hash::from_bytes([0x61; 32]);
+
+/// `community:<T32>:member:<M64>` of `entry` under `implementation`.
+///
+/// # Errors
+/// Returns the encoding error.
+pub fn member_resource(
+    timeline: TimelineId,
+    entry: &str,
+    implementation: &ImplementationKeyV1,
+) -> Fallible<String> {
+    let imk1 = encode(&Value::Array(vec![
+        Value::Bytes(b"IMK1".to_vec()),
+        Value::Integer(1.into()),
+        Value::Text(implementation.plugin_id().to_owned()),
+        Value::Text(implementation.version().to_owned()),
+        Value::Bytes(implementation.release_digest().as_bytes().to_vec()),
+    ]))?;
+    let preimage = encode(&Value::Array(vec![
+        Value::Text(entry.to_owned()),
+        Value::Bytes(imk1),
+    ]))?;
+    Ok(format!(
+        "community:{}:member:{}",
+        hex(&timeline.inner().to_bytes()),
+        hex(adr_h("StableMember", &preimage).as_bytes())
+    ))
+}
+
+/// One grant that admits every decision of a code-0 initialize of `timeline`.
+///
+/// It covers the administrative request, `roster`'s initializer `read` and
+/// every member's `execute`. The CAV1 has one authority row per chain
+/// coordinate, so one operation's decisions on one authority Timeline come
+/// from one chain.
+///
+/// # Errors
+/// Returns the grant refusal.
+pub fn data_grant(
+    id: Hash,
+    seq: u64,
+    roster: &Roster,
+    timeline: TimelineId,
+) -> Fallible<CapabilityGrantV1> {
+    let mut resources = ENTRIES
+        .iter()
+        .map(|entry| member_resource(timeline, entry, &roster.implementation))
+        .collect::<Fallible<Vec<_>>>()?;
+    resources.push(format!(
+        "community-initializer:{}",
+        hex(&roster.initializer().digest)
+    ));
+    resources.push(lifecycle_resource(timeline));
+    resources.sort_unstable();
+    issued(
+        id,
+        seq,
+        caller()?,
+        CapabilityScopeDraftV1 {
+            resources,
+            actions: vec![
+                "community.initialize.v1".to_owned(),
+                "execute".to_owned(),
+                "read".to_owned(),
+            ],
+            purposes: vec!["lifecycle-administration".to_owned()],
+            audiences: vec![AUDIENCE.to_owned(), RECIPIENT.to_owned()],
+            actor_entity_ids: vec![actor()],
+            subject_ids: vec![],
+            participant_ids: vec![],
+            plugin_id: None,
+            principal_roles: vec![AuthorityRoleV1::Actor],
+            max_uses: 1,
+            budget: 1,
+            environment_constraints: vec![],
+        },
+    )
+}
+
+/// The installed metadata owner's authentication result.
+///
+/// # Errors
+/// Returns the construction refusal.
+pub fn metadata_principal(
+    seal: &'static AuthorityTrustRootSealV1,
+) -> Fallible<AuthenticatedPrincipalResultV1> {
+    Ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        seal,
+        AuthenticatedPrincipalDraftV1 {
+            principal: PrincipalRefV1::try_new([0x22; 16], "community.local")?,
+            adapter_id: "metadata-adapter".to_owned(),
+            assurance: AssuranceLevelV1::try_new(1)?,
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(EXPIRES),
+            binding_digest: hash(39),
+        },
+    )?)
+}
+
+/// The metadata owner's grant on this incarnation's metadata resource.
+///
+/// # Errors
+/// Returns the grant refusal.
+pub fn metadata_grant(
+    seal: &'static AuthorityTrustRootSealV1,
+    id: Hash,
+    seq: u64,
+) -> Fallible<CapabilityGrantV1> {
+    issued(
+        id,
+        seq,
+        metadata_principal(seal)?.principal().clone(),
+        CapabilityScopeDraftV1 {
+            resources: vec![metadata_resource(INCARNATION)],
+            actions: vec!["inspect".to_owned(), "write".to_owned()],
+            purposes: vec!["owner-enforcement".to_owned()],
+            audiences: vec![METADATA_AUDIENCE.to_owned()],
+            actor_entity_ids: vec![actor()],
+            subject_ids: vec![],
+            participant_ids: vec![],
+            plugin_id: None,
+            principal_roles: vec![AuthorityRoleV1::Actor],
+            max_uses: 1,
+            budget: 1,
+            environment_constraints: vec![],
+        },
+    )
+}
+
+fn issued(
+    id: Hash,
+    seq: u64,
+    grantee: PrincipalRefV1,
+    scope: CapabilityScopeDraftV1,
+) -> Fallible<CapabilityGrantV1> {
+    Ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id: id,
+        grantor: PrincipalRefV1::try_new([1; 16], "community.local")?,
+        grantee: AuthorityGranteeV1::Principal(grantee),
+        trust_domain: "community.local".to_owned(),
+        scope: CapabilityScopeV1::try_from_draft(scope)?,
+        valid_from_position: Seq::from_u64(seq),
+        valid_until_position: Seq::from_u64(100),
+        parent_grant_id: None,
+        delegation_depth: 0,
+        max_delegation_depth: 0,
+        permitted_delegate_classes: vec![],
+        consent_references: vec![],
+        policy_revision: POLICY_REVISION,
+        issuance_timeline: authority_timeline(),
+        issuance_seq: Seq::from_u64(seq),
+        revocation_epoch: 0,
+        revocation_fence: None,
+        authority_registry_digest: REGISTRY,
+    })?)
+}
+
+/// A bootstrapped domain on [`target`] / [`GENERATION`], ready to initialize.
+///
+/// It keeps its metadata authority, the guard monotonic script shared with
+/// its lifecycle authority, and the trust harness that must stay alive.
+pub struct Bootstrapped {
+    /// The domain and its lifecycle authority.
+    pub world: World,
+    /// The installed NMP1.
+    pub policy: CommunityMetadataPolicyV1,
+    /// The installed metadata authority.
+    pub metadata: CommunityMetadataAuthorityV1,
+    /// The lifecycle authority's guard monotonic script.
+    pub mono: Arc<Mutex<ScriptedGuardMonotonicSourceV1>>,
+    /// The trust registry harness.
+    pub harness: Harness,
+}
+
+impl Bootstrapped {
+    /// Bootstrap a domain whose `release_one` is active when `admit`, and
+    /// whose store holds the [`target`] Timeline when `timeline`, under an
+    /// NMP1 with the [`HORIZON`] metadata horizon.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or bootstrap error.
+    pub fn new(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+        admit: bool,
+        timeline: bool,
+    ) -> Fallible<Self> {
+        Self::until(seal, roster, admit, timeline, HORIZON)
+    }
+
+    /// [`Bootstrapped::new`] under an NMP1 with metadata horizon
+    /// `metadata_horizon`.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or bootstrap error.
+    pub fn until(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+        admit: bool,
+        timeline: bool,
+        metadata_horizon: u64,
+    ) -> Fallible<Self> {
+        let (mut store, harness) = trusted_store(admit)?;
+        if timeline {
+            store.create_timeline_with_meta(TimelineMeta {
+                id: target(),
+                mode: TimelineMode::Live,
+                name: None,
+                owner: None,
+                fork_point: None,
+            })?;
+        }
+        let mono = Arc::new(Mutex::new(ScriptedGuardMonotonicSourceV1::new([])));
+        let metadata_grant = metadata_grant(seal, METADATA_LEAF, 4)?;
+        let registry = metadata_registry(seal)?;
+        let mut world = World::with_grants(
+            seal,
+            store,
+            TRUST_SCOPE,
+            MemoryTrustedClockAuthorityV1::new(),
+            vec![data_grant(DATA_LEAF, 3, roster, target())?, metadata_grant],
+            Arc::clone(&mono),
+        )?;
+        let policy = CommunityMetadataPolicyV1::new(CommunityMetadataPolicyInputV1 {
+            metadata_owner_registry_binding: metadata_principal(seal)?.registry_binding_digest(),
+            metadata_authority_leaf_grant: METADATA_LEAF,
+            compiled_schema_catalogue_digest: hash(0x65),
+            metadata_not_after_micros: metadata_horizon,
+        })?;
+        let mut metadata = metadata_authority(seal, registry, 64)?;
+        let opened = world.domain.open(
+            CommunityDomainBindingV1 {
+                metadata_policy: &policy,
+                installed_catalogue_digest: INSTALLED_CATALOGUE,
+                native_profile_digest: NATIVE_PROFILE,
+            },
+            &mut metadata,
+            CommunityBootstrapRequestV1::new(BOOTSTRAP_CONTROL, target(), GENERATION)?,
+        )?;
+        if opened != CommunityDomainOpenedV1::Bootstrapped {
+            return Err("the domain must bootstrap".into());
+        }
+        Ok(Self {
+            world,
+            policy,
+            metadata,
+            mono,
+            harness,
+        })
+    }
+
+    /// The installed domain binding.
+    #[must_use]
+    pub const fn binding(&self) -> CommunityDomainBindingV1<'_> {
+        CommunityDomainBindingV1 {
+            metadata_policy: &self.policy,
+            installed_catalogue_digest: INSTALLED_CATALOGUE,
+            native_profile_digest: NATIVE_PROFILE,
+        }
+    }
+
+    /// Script the lifecycle authority's next guard monotonic marks.
+    pub fn script_mono(&self, offsets: &[Duration]) {
+        let mut mono = self
+            .mono
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for offset in offsets {
+            mono.push(*offset);
+        }
+    }
+}
+
+/// The metadata owner's registry snapshot: its principal and its grant.
+///
+/// # Errors
+/// Returns the construction refusal.
+pub fn metadata_registry(
+    seal: &'static AuthorityTrustRootSealV1,
+) -> Fallible<AuthorityRegistrySnapshotV1> {
+    Ok(AuthorityRegistrySnapshotV1::try_new(
+        seal,
+        REGISTRY,
+        vec![metadata_principal(seal)?.registry_binding_digest()],
+        vec![metadata_grant(seal, METADATA_LEAF, 4)?.binding_digest()?],
+        vec![],
+    )?)
+}
+
+/// The metadata owner's authority over `registry`, with `samples` trusted
+/// wall samples at [`NOW`].
+///
+/// # Errors
+/// Returns the construction refusal.
+pub fn metadata_authority(
+    seal: &'static AuthorityTrustRootSealV1,
+    registry: AuthorityRegistrySnapshotV1,
+    samples: usize,
+) -> Fallible<CommunityMetadataAuthorityV1> {
+    Ok(CommunityMetadataAuthorityV1::new(
+        seal,
+        CommunityMetadataAuthorityInputV1 {
+            registry,
+            principal: metadata_principal(seal)?,
+            actor_entity_id: actor(),
+            principal_role: AuthorityRoleV1::Actor,
+            audience: METADATA_AUDIENCE.to_owned(),
+            consent_policy_revision: CONSENT_REVISION,
+            capability_policy_revision: POLICY_REVISION,
+        },
+        ScriptedTrustedWallSourceV1::from_micros(vec![NOW; samples]),
+    ))
 }

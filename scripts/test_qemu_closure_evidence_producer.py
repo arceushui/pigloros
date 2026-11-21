@@ -15,6 +15,8 @@ import io
 import json
 import os
 import pathlib
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -558,7 +560,8 @@ esac
         (self.bin / "nix").chmod(0o755)
 
     def environment(self, secret: str | None) -> dict[str, str]:
-        environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}")
+        environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", GITHUB_SHA=self.TIP,
+                           GH_REPO="owner/repo")
         environment.pop("QEMU_KERNEL_CACHE_SIGNING_KEY", None)
         if secret is not None:
             environment["QEMU_KERNEL_CACHE_SIGNING_KEY"] = secret
@@ -617,7 +620,7 @@ esac
             f"stdin {self.SECRET}",
             "config show trusted-public-keys",
             *self.path_evals("x86_64"),
-            f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {' '.join(self.OUTPUTS)}",
+            f"copy --to file://{self.cache}?compression=zstd&secret-key={key_path} {' '.join(self.OUTPUTS)}",
             "key-mode 600",
             f"key-content {self.SECRET}",
             *self.path_evals("x86_64"),
@@ -722,6 +725,273 @@ esac
         self.assertIn("the kernel has no output paths", result.stderr)
         self.assertFalse(any(call.startswith("copy") for call in self.calls()))
 
+    ASSET = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxya.tar"
+    OLD_ASSET = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxyz.tar"
+    ROTATED = "qemu-kernel-piglor-qemu-kernel-0-x86_64-0123456789abcdfghijklmnpqrsvwxyz.tar"
+    OTHER_ARCH = "qemu-kernel-piglor-qemu-kernel-1-aarch64-0123456789abcdfghijklmnpqrsvwxyz.tar"
+    OLD = "2026-01-01T00:00:00Z"
+    TIP = "0123456789abcdef0123456789abcdef01234567"
+    TIP_CALL = "gh api repos/owner/repo/commits/main --jq .sha"
+    LISTING = "gh release view qemu-kernel-cache --json assets --jq .assets[] | select(.state == \"uploaded\") | [.name, .createdAt] | @tsv"
+
+    def stub_gh(self, assets: tuple[tuple[str, str], ...] = (), release: str = "present",
+                create_status: int = 0, download_status: int = 0, upload_status: int = 0,
+                archive: pathlib.Path | None = None, tip: str = TIP) -> None:
+        # Logs each call as "gh ARGS". `release view --json` lists the
+        # uploaded assets as gh's --jq would, reports a missing release as gh
+        # does, or fails with another error; `upload` logs the archive's
+        # member names.
+        listing = " ".join(f"'{name}\t{created}'" for name, created in assets)
+        listing = f"printf '%s\\n' {listing}" if assets else ":"
+        (self.bin / "gh").write_text(f"""#!/bin/bash
+printf 'gh %s\\n' "$*" >>"{self.log}"
+case "$1 $2" in
+"release view")
+  case "{release}" in
+  missing) printf 'release not found\\n' >&2; exit 1 ;;
+  broken) printf 'HTTP 502: Bad Gateway\\n' >&2; exit 4 ;;
+  esac
+  printf 'A new release of gh is available\\n' >&2
+  if [[ $* == *--json* ]]; then {listing}; fi ;;
+"api repos/owner/repo/commits/main")
+  if [[ "{tip}" == fail ]]; then printf 'HTTP 502: Bad Gateway\\n' >&2; exit 5; fi
+  printf '%s\\n' '{tip}' ;;
+"release create") exit {create_status} ;;
+"release download")
+  if (({download_status} != 0)); then exit {download_status}; fi
+  cp -- "{archive}" "$7/$5" ;;
+"release upload")
+  printf 'upload-listing %s\\n' "$(tar -tf "$4" | sort | tr '\\n' ' ')" >>"{self.log}"
+  exit {upload_status} ;;
+esac
+""")
+        (self.bin / "gh").chmod(0o755)
+
+    def archive(self, *members: tuple[str, str]) -> pathlib.Path:
+        source = self.base / "source"
+        shutil.rmtree(source, ignore_errors=True)
+        source.mkdir()
+        for name, kind in members:
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "link":
+                path.symlink_to("/etc/passwd")
+            elif kind == "hardlink":
+                os.link(source / "nix-cache-info", path)
+            else:
+                path.write_text(name)
+        archive = self.base / "archive.tar"
+        subprocess.run(["tar", "-cf", str(archive), "-C", str(source), "."], check=True)
+        return archive
+
+    def gh_calls(self) -> list[str]:
+        return [call for call in self.calls() if call.startswith(("gh ", "upload-listing "))]
+
+    def published(self) -> None:
+        self.cache.mkdir(exist_ok=True)
+        (self.cache / "nix-cache-info").write_text("StoreDir: /nix/store\n")
+
+    def test_fetch_unpacks_the_asset_named_by_the_kernel_derivation(self):
+        archive = self.archive(("nix-cache-info", "file"), ("nar/a.nar.zst", "file"))
+        self.stub_gh(assets=((self.OTHER_ARCH, self.OLD), (self.ASSET, self.OLD)), archive=archive)
+        self.cache.mkdir()
+        (self.cache / "stale").write_text("left by an earlier fetch")
+        result = self.run_cache("fetch", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "hit=true\n")
+        self.assertEqual((self.cache / "nar" / "a.nar.zst").read_text(), "nar/a.nar.zst")
+        self.assertFalse((self.cache / "stale").exists())
+        calls = self.gh_calls()
+        self.assertEqual(calls[0], self.LISTING)
+        self.assertRegex(calls[1], rf"^gh release download qemu-kernel-cache --pattern {re.escape(self.ASSET)} --dir /")
+
+    def test_fetch_misses_without_the_asset_or_the_release(self):
+        for stub in ({"assets": ((self.OLD_ASSET, self.OLD), (self.OTHER_ARCH, self.OLD))},
+                     {"release": "missing"}):
+            with self.subTest(stub=stub):
+                self.log.unlink(missing_ok=True)
+                self.stub_gh(**stub)
+                result = self.run_cache("fetch", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "hit=false\n")
+                self.assertEqual(self.gh_calls(), [self.LISTING])
+                self.assertFalse(self.cache.exists())
+
+    def test_fetch_misses_when_the_download_fails(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD),), download_status=1)
+        result = self.run_cache("fetch", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "hit=false\n")
+        self.assertIn("could not be downloaded", result.stderr)
+        self.assertFalse(self.cache.exists())
+
+    def test_fetch_fails_when_the_release_cannot_be_listed(self):
+        self.stub_gh(release="broken")
+        result = self.run_cache("fetch", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("HTTP 502", result.stderr)
+
+    def test_fetch_refuses_links_and_unexpected_names(self):
+        for members in ((("nix-cache-info", "file"), ("nar/link", "link")),
+                        (("nix-cache-info", "file"), ("nar/hard", "hardlink")),
+                        (("nix-cache-info", "file"), ("nar/a b", "file"))):
+            with self.subTest(members=members):
+                self.stub_gh(assets=((self.ASSET, self.OLD),), archive=self.archive(*members))
+                result = self.run_cache("fetch", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(self.cache.exists())
+
+    def test_fetch_refuses_traversal_and_absolute_names(self):
+        (self.base / "payload").write_text("outside the cache")
+        for transform, shown in (("s,^,../,", "../payload"), ("s,^,/abs/,", "/abs/payload")):
+            with self.subTest(transform=transform):
+                archive = self.base / "outside.tar"
+                subprocess.run(["tar", "-cf", str(archive), "-P", "-C", str(self.base), "--transform", transform,
+                                "payload"], check=True)
+                self.stub_gh(assets=((self.ASSET, self.OLD),), archive=archive)
+                result = self.run_cache("fetch", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"unexpected kernel cache archive entry: {shown}", result.stderr)
+                self.assertFalse(self.cache.exists())
+
+    def test_publish_uploads_the_cache_replacing_an_unfinished_asset(self):
+        self.published()
+        self.stub_gh(assets=((self.OTHER_ARCH, self.OLD),))
+        result = self.run_cache("publish", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, rf"^kernel cache archive {re.escape(self.ASSET)}: [0-9]+ bytes\n$")
+        calls = self.gh_calls()
+        self.assertEqual(calls[0], "gh release view qemu-kernel-cache")
+        self.assertRegex(calls[1], rf"^gh release upload qemu-kernel-cache /.*/{re.escape(self.ASSET)} --clobber$")
+        self.assertEqual(calls[2:], ["upload-listing ./ ./nix-cache-info "])
+
+    def test_publish_fails_when_the_upload_fails(self):
+        self.published()
+        self.stub_gh(upload_status=3)
+        result = self.run_cache("publish", "x86_64", str(self.cache))
+        self.assertEqual(result.returncode, 3)
+
+    def test_publish_refuses_an_archive_at_the_asset_limit(self):
+        # A copy of the script with a 1 KiB limit, so the test needs no 2 GiB file.
+        script = self.base / "scripts" / "qemu-kernel-cache.sh"
+        script.parent.mkdir()
+        text = KERNEL_CACHE.read_text()
+        limit = "asset_limit=$((2 * 1024 * 1024 * 1024))"
+        self.assertIn(limit, text)
+        script.write_text(text.replace(limit, "asset_limit=1024"))
+        self.published()
+        self.stub_gh()
+        result = subprocess.run(["bash", str(script), "publish", "x86_64", str(self.cache)],
+                                env=self.environment(None), capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is 2 GiB or larger", result.stderr)
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_publish_creates_the_release_or_finds_the_one_another_job_created(self):
+        self.published()
+        for create_status, status in ((0, 0), (1, 1)):
+            with self.subTest(create_status=create_status):
+                self.log.unlink(missing_ok=True)
+                self.stub_gh(release="missing", create_status=create_status)
+                result = self.run_cache("publish", "x86_64", str(self.cache))
+                self.assertEqual(result.returncode, status, result.stderr)
+                calls = self.gh_calls()
+                self.assertEqual(calls[0], "gh release view qemu-kernel-cache")
+                self.assertTrue(calls[1].startswith("gh release create qemu-kernel-cache --prerelease --latest=false"))
+                if create_status:
+                    # The release still does not exist, so nothing is uploaded.
+                    self.assertEqual(calls[2:], ["gh release view qemu-kernel-cache"])
+                else:
+                    self.assertTrue(calls[2].startswith("gh release upload qemu-kernel-cache "))
+
+    def test_prune_deletes_only_this_architectures_week_old_other_kernels_but_the_newest(self):
+        recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        recent_other = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxy0.tar"
+        older = "qemu-kernel-piglor-qemu-kernel-1-x86_64-0123456789abcdfghijklmnpqrsvwxy1.tar"
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, "2026-02-01T00:00:00Z"),
+                             (self.ROTATED, "2026-01-02T00:00:00Z"), (older, "2026-01-01T00:00:00Z"),
+                             (recent_other, recent), (self.OTHER_ARCH, self.OLD)))
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The current asset is never a candidate. recent_other is the newest of
+        # the others, so it stays; every older one goes, newest first.
+        self.assertEqual(self.gh_calls(), [
+            self.TIP_CALL,
+            self.LISTING,
+            f"gh release delete-asset qemu-kernel-cache {self.OLD_ASSET} --yes",
+            f"gh release delete-asset qemu-kernel-cache {self.ROTATED} --yes",
+            f"gh release delete-asset qemu-kernel-cache {older} --yes",
+        ])
+
+    def test_prune_keeps_the_live_kernel_when_an_older_commit_is_rerun(self):
+        # A rerun published ASSET (the newest) while the live kernel is the
+        # older OLD_ASSET: it is the newest other asset, so it stays.
+        self.stub_gh(assets=((self.ASSET, "2026-03-01T00:00:00Z"), (self.OLD_ASSET, "2026-02-01T00:00:00Z"),
+                             (self.ROTATED, "2026-01-02T00:00:00Z")))
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gh_calls(), [
+            self.TIP_CALL,
+            self.LISTING,
+            f"gh release delete-asset qemu-kernel-cache {self.ROTATED} --yes",
+        ])
+
+    def test_the_asset_listing_filter_keeps_only_finished_uploads(self):
+        script = KERNEL_CACHE.read_text()
+        match = re.search(r"--jq '([^']*select\(\.state == \"uploaded\"\)[^']*)'", script)
+        self.assertIsNotNone(match)
+        listing = json.dumps({"assets": [
+            {"name": "done.tar", "createdAt": "2026-01-01T00:00:00Z", "state": "uploaded"},
+            {"name": "partial.tar", "createdAt": "2026-01-02T00:00:00Z", "state": "starter"},
+        ]})
+        result = subprocess.run(["jq", "-r", match.group(1)], input=listing, capture_output=True, text=True,
+                                check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "done.tar\t2026-01-01T00:00:00Z\n")
+
+    def test_fetch_refuses_a_shallow_target_directory(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD),), archive=self.archive(("nix-cache-info", "file")))
+        for directory in ("/", "//", "/tmp", "/tmp/", "/tmp/..", "/tmp/.", "/tmp/a/../b", "relative", "/tmp/a b"):
+            with self.subTest(directory=directory):
+                result = self.run_cache("fetch", "x86_64", directory)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("must be a plain absolute path two levels deep", result.stderr)
+                self.assertEqual(self.gh_calls(), [])
+
+    def test_prune_without_a_release_does_nothing(self):
+        self.stub_gh(release="missing")
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL, self.LISTING])
+
+    def test_prune_deletes_nothing_when_the_tip_cannot_be_read_or_the_commit_is_unknown(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD)),
+                     tip="fail")
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 5)
+        self.assertIn("HTTP 502", result.stderr)
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL])
+        self.log.unlink()
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD)))
+        environment = self.environment(None)
+        del environment["GITHUB_SHA"]
+        result = subprocess.run(["bash", str(KERNEL_CACHE), "prune", "x86_64"], env=environment,
+                                capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GITHUB_SHA", result.stderr)
+        # The tip is read first; nothing is listed or deleted after the abort.
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL])
+
+    def test_prune_does_nothing_for_a_rerun_of_an_older_commit(self):
+        self.stub_gh(assets=((self.ASSET, self.OLD), (self.OLD_ASSET, self.OLD), (self.ROTATED, self.OLD)),
+                     tip="f" * 40)
+        result = self.run_cache("prune", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not pruning", result.stdout)
+        self.assertEqual(self.gh_calls(), [self.TIP_CALL])
+
     def selftest(self, **stub) -> subprocess.CompletedProcess:
         self.stub_nix(**{"verify_status": 1, "import_status": 1, **stub})
         return self.run_cache("selftest", str(self.cache))
@@ -743,7 +1013,7 @@ esac
             "key convert-secret-to-public",
             f"stdin {self.THROWAWAY_SECRET}",
             f"path-info --json --json-format 1 {self.SAMPLE}",
-            f"copy --to file://{self.cache}?compression=none&secret-key={key_path} {self.SAMPLE}",
+            f"copy --to file://{self.cache}?compression=zstd&secret-key={key_path} {self.SAMPLE}",
             "key-mode 600",
             f"key-content {self.THROWAWAY_SECRET}",
             verify,

@@ -83,6 +83,9 @@ struct ExecutionPolicyFacts {
     readback_digest: [u8; 32],
     request_digest: [u8; 32],
     input: PayloadDescriptor,
+    /// Whether the admission recorded its TME1 `input`: false when the clock
+    /// could not report one of its times (R9 Amendment 1 change F).
+    input_recorded: bool,
 }
 
 /// The facts of one reserved, admitted attempt that the execute path binds.
@@ -161,6 +164,7 @@ impl AdmittedAttempt {
                 readback_digest: entry.policy().expected_readback_digest(),
                 request_digest: entry.policy().request_digest(),
                 input: entry.policy().input_descriptor().clone(),
+                input_recorded: entry.transfer().is_some(),
             }),
             lease: ExecutionLease(entry.retain()),
             execution: directory.execution_ownership(),
@@ -200,6 +204,12 @@ impl AdmittedAttempt {
 
     pub(crate) fn expected_readback_digest(&self) -> [u8; 32] {
         self.policy.readback_digest
+    }
+
+    /// Whether the admission recorded its TME1 `input`; without it no
+    /// `ReleaseV1` is sent (R9 Amendment 1 change F).
+    pub(crate) fn input_recorded(&self) -> bool {
+        self.policy.input_recorded
     }
 
     /// The admitted input and the attempt's one output reservation.
@@ -360,12 +370,22 @@ impl AdmittedAttempt {
                                 byte_length: 1,
                                 digest: [8; 32],
                             },
+                            input_recorded: true,
                         }),
                         lease: ExecutionLease(crate::test_fixtures::shared_test_payload()),
                         execution: ExecutionOwnership::default(),
                     })
                 })
             })
+    }
+
+    /// The same facts with an input transfer the clock could not time.
+    #[cfg(all(test, unix))]
+    pub(crate) fn without_input_record(mut self) -> Self {
+        let mut policy = (*self.policy).clone();
+        policy.input_recorded = false;
+        self.policy = Arc::new(policy);
+        self
     }
 
     /// The shared execution ownership, for fencing and inspection in tests.

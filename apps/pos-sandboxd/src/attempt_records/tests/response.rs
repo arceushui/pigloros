@@ -255,7 +255,7 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
     )?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    let successor = first.successor(timed_out_transfer(), &signer(), admitted)?;
+    let successor = first.successor(Some(timed_out_transfer()), &signer(), admitted)?;
     let (result, events) = verified(&successor)?;
     assert_eq!(events, [11, 12, 10]);
     assert_eq!(
@@ -300,10 +300,14 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
         }
         .ended()?,
     )?;
+    // A successor or a failed attempt is never re-issued, whether or not
+    // the transfer's times could be read.
     for (response, transfer) in [
-        (&successor, timed_out_transfer()),
-        (&first, complete),
-        (&failed, timed_out_transfer()),
+        (&successor, Some(timed_out_transfer())),
+        (&first, Some(complete)),
+        (&failed, Some(timed_out_transfer())),
+        (&successor, None),
+        (&failed, None),
     ] {
         assert!(matches!(
             response.successor(transfer, &signer(), admitted),
@@ -311,8 +315,14 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
         ));
     }
     assert!(matches!(
-        first.successor(unordered, &signer(), admitted),
+        first.successor(Some(unordered), &signer(), admitted),
         Err(ResponseFault::Evidence(EvidenceFault::Record(_)))
+    ));
+    // An `output-transfer` time the clock could not report is a provider
+    // fault, never a substitute time (R9 Amendment 1 change F).
+    assert!(matches!(
+        first.successor(None, &signer(), admitted),
+        Err(ResponseFault::Evidence(EvidenceFault::Clock))
     ));
     // The transfer must carry the retained 70 bytes and start after the
     // cleanup finished.
@@ -326,7 +336,7 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
     };
     for transfer in [shorter, early] {
         assert!(matches!(
-            first.successor(transfer, &signer(), admitted),
+            first.successor(Some(transfer), &signer(), admitted),
             Err(ResponseFault::Evidence(EvidenceFault::UnboundTransfer))
         ));
     }
@@ -335,7 +345,7 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
         start: CLEANED_AT,
         ..timed_out_transfer()
     };
-    verified(&first.successor(at_cleanup, &signer(), admitted)?)?;
+    verified(&first.successor(Some(at_cleanup), &signer(), admitted)?)?;
     Ok(())
 }
 
