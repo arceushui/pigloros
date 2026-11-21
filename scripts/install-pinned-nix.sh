@@ -55,7 +55,10 @@ esac
 work="$(mktemp -d)"
 trap 'rm -rf -- "${work}"' EXIT
 tarball="${work}/nix-${version}-${system}.tar.xz"
+# --retry-all-errors also retries a connection reset, which --retry alone does
+# not. The digest check below still rejects a wrong or truncated tarball.
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --retry 3 --retry-all-errors --max-time 600 \
   --output "${tarball}" \
   "https://releases.nixos.org/nix/nix-${version}/nix-${version}-${system}.tar.xz"
 printf '%s  %s\n' "${sha256}" "${tarball}" | sha256sum --check --strict
