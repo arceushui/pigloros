@@ -14,10 +14,13 @@
 use pos_crypto::subject_key::SubjectKeyWrapV1;
 use pos_owner_bridge::encryptor_lock::linux::{
     SubjectEncryptorLock, SubjectKeyArtifactContent, SubjectKeyArtifactEntry,
-    SubjectKeyArtifactKind, SubjectKeyArtifactName,
+    SubjectKeyArtifactName,
 };
 use pos_owner_bridge::{OwnerError, OwnerErrorKind};
-use pos_owner_bridge_codec::decode_subject_credential_binding;
+use pos_owner_bridge_codec::{
+    decode_subject_credential_binding, CoseEs256PublicKey, OwnerUserHandle,
+    SubjectCredentialBindingInputV1, SubjectCredentialBindingV1, SubjectId, TransportCodes,
+};
 
 const REGISTRY: OwnerError = OwnerError::new(OwnerErrorKind::Registry);
 
@@ -31,14 +34,92 @@ struct Named {
 
 /// One regular file whose contents parsed as a wrap or a binding.
 pub(crate) struct Artifact {
-    /// Which codec parsed the contents, whatever the file's name.
-    pub(crate) kind: SubjectKeyArtifactKind,
     /// The raw directory entry name.
     pub(crate) name: Vec<u8>,
-    /// The credential ID that the wrap or binding names.
+    /// What the contents parsed as, whatever the file's name.
+    pub(crate) parsed: Parsed,
+}
+
+/// The parsed contents of one artifact.
+pub(crate) enum Parsed {
+    /// A `SubjectKeyWrapV1`.
+    Wrap(SubjectKeyWrapV1),
+    /// A `SubjectCredentialBindingV1`, with its fields owned.
+    Binding(StoredBinding),
+}
+
+impl Parsed {
+    /// The wrap, when these contents are one.
+    pub(crate) const fn wrap(&self) -> Option<&SubjectKeyWrapV1> {
+        match self {
+            Self::Wrap(wrap) => Some(wrap),
+            Self::Binding(_) => None,
+        }
+    }
+
+    /// The binding, when these contents are one.
+    pub(crate) const fn binding(&self) -> Option<&StoredBinding> {
+        match self {
+            Self::Wrap(_) => None,
+            Self::Binding(binding) => Some(binding),
+        }
+    }
+
+    fn credential_id(&self) -> &[u8] {
+        match self {
+            Self::Wrap(wrap) => &wrap.params().credential_id,
+            Self::Binding(binding) => &binding.credential_id,
+        }
+    }
+}
+
+/// The fields of one decoded `SubjectCredentialBindingV1`, owned.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct StoredBinding {
+    pub(crate) owner_id: String,
+    pub(crate) subject_id: SubjectId,
+    pub(crate) epoch: u64,
     pub(crate) credential_id: Vec<u8>,
-    /// The exact bytes read.
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) user_handle: OwnerUserHandle,
+    pub(crate) public_key: CoseEs256PublicKey,
+    pub(crate) backup_eligible: bool,
+    pub(crate) backup_state: bool,
+    pub(crate) sign_count: u32,
+    pub(crate) transports: TransportCodes,
+}
+
+impl StoredBinding {
+    /// Own the fields of a validated binding.
+    pub(crate) fn new(binding: SubjectCredentialBindingV1<'_>) -> Self {
+        Self {
+            owner_id: binding.owner_id().to_owned(),
+            subject_id: binding.subject_id(),
+            epoch: binding.epoch(),
+            credential_id: binding.credential_id().to_vec(),
+            user_handle: binding.user_handle(),
+            public_key: binding.public_key(),
+            backup_eligible: binding.backup_eligible(),
+            backup_state: binding.backup_state(),
+            sign_count: binding.sign_count(),
+            transports: binding.transports(),
+        }
+    }
+
+    /// The codec input that rebuilds this binding.
+    pub(crate) fn input(&self) -> SubjectCredentialBindingInputV1<'_> {
+        SubjectCredentialBindingInputV1 {
+            owner_id: &self.owner_id,
+            subject_id: self.subject_id,
+            epoch: self.epoch,
+            credential_id: &self.credential_id,
+            user_handle: self.user_handle,
+            public_key: self.public_key,
+            backup_eligible: self.backup_eligible,
+            backup_state: self.backup_state,
+            sign_count: self.sign_count,
+            transports: self.transports,
+        }
+    }
 }
 
 /// Every `(owner, epoch)` and parsed artifact the P4 directory names.
@@ -72,7 +153,7 @@ impl Inventory {
             named
                 .artifact
                 .as_ref()
-                .map(|artifact| artifact.credential_id.as_slice())
+                .map(|artifact| artifact.parsed.credential_id())
                 != Some(credential_id)
         })
     }
@@ -111,7 +192,7 @@ fn classify(entry: SubjectKeyArtifactEntry) -> Result<Vec<Named>, OwnerError> {
         artifact: None,
     });
     match content {
-        SubjectKeyArtifactContent::Regular { bytes, .. } => match (parse(name, bytes), reserved) {
+        SubjectKeyArtifactContent::Regular { bytes, .. } => match (parse(name, &bytes), reserved) {
             (None, Some(_)) => Err(REGISTRY),
             (parsed, reserved) => Ok(parsed.into_iter().chain(reserved).collect()),
         },
@@ -119,37 +200,25 @@ fn classify(entry: SubjectKeyArtifactEntry) -> Result<Vec<Named>, OwnerError> {
     }
 }
 
-fn parse(name: Vec<u8>, bytes: Vec<u8>) -> Option<Named> {
-    let parsed = SubjectKeyWrapV1::from_bytes(&bytes)
+fn parse(name: Vec<u8>, bytes: &[u8]) -> Option<Named> {
+    let parsed = SubjectKeyWrapV1::from_bytes(bytes)
         .ok()
-        .map(|wrap| {
-            (
-                wrap.owner_id(),
-                wrap.params().epoch,
-                SubjectKeyArtifactKind::Wrap,
-                wrap.params().credential_id.clone(),
-            )
-        })
+        .map(|wrap| (wrap.owner_id(), wrap.params().epoch, Parsed::Wrap(wrap)))
         .or_else(|| {
-            decode_subject_credential_binding(&bytes)
+            decode_subject_credential_binding(bytes)
                 .ok()
+                .map(StoredBinding::new)
                 .map(|binding| {
                     (
-                        binding.owner_id().to_owned(),
-                        binding.epoch(),
-                        SubjectKeyArtifactKind::Binding,
-                        binding.credential_id().to_vec(),
+                        binding.owner_id.clone(),
+                        binding.epoch,
+                        Parsed::Binding(binding),
                     )
                 })
         });
-    parsed.map(|(owner_id, epoch, kind, credential_id)| Named {
+    parsed.map(|(owner_id, epoch, parsed)| Named {
         owner_id,
         epoch,
-        artifact: Some(Artifact {
-            kind,
-            name,
-            credential_id,
-            bytes,
-        }),
+        artifact: Some(Artifact { name, parsed }),
     })
 }

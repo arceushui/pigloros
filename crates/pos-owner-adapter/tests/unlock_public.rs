@@ -467,6 +467,29 @@ fn a_wrong_prf_fails_the_open_and_leaves_the_binding() -> TestResult {
 }
 
 #[test]
+fn a_later_failed_open_withdraws_the_earlier_success() -> TestResult {
+    let mut fixture = Fixture::enrolled(honest())?;
+    let binding = fixture.read(&binding_name(1))?;
+    let mut adapter = open(&fixture.lock, &mut fixture.store, 1)?;
+    open_pending(&mut adapter)?;
+    let wrong = Zeroizing::new([0x33; 32]);
+    assert_eq!(
+        adapter.open_pending(PrfOutput::new(&wrong)).err(),
+        Some(OwnerError::new(OwnerErrorKind::Wrap))
+    );
+    assert_eq!(
+        adapter.persist_binding_update(&update(2, false)),
+        Err(REGISTRY)
+    );
+    assert_eq!(fixture.read(&binding_name(1))?, binding);
+    // A fresh successful open lets the same update through.
+    open_pending(&mut adapter)?;
+    assert_eq!(adapter.persist_binding_update(&update(2, false)), Ok(()));
+    assert_eq!(sign_count(&fixture.read(&binding_name(1))?), Some(2));
+    Ok(())
+}
+
+#[test]
 fn a_root_whose_fingerprint_is_not_the_registry_identitys_is_refused() -> TestResult {
     let fixture = Fixture::enrolled(honest())?;
     let binding = fixture.read(&binding_name(1))?;
@@ -588,9 +611,13 @@ fn opening_refuses_missing_duplicate_misnamed_and_unrecognized_artifacts() -> Te
         ("missing wrap", |fixture| {
             Ok(fs::remove_file(fixture.path(&wrap_name(1)))?)
         }),
-        ("binding copy", |fixture| {
-            fixture.put("copy", &fixture.read(&binding_name(1))?)
-        }),
+        (
+            "parseable binding copy under a non-reserved name",
+            |fixture| {
+                let name = binding_name(1);
+                fixture.put(&format!("{name}.bak"), &fixture.read(&name)?)
+            },
+        ),
         ("staged binding", |fixture| {
             let name = binding_name(1);
             fixture.put(&format!("{name}.tmp"), &fixture.read(&name)?)
