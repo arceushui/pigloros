@@ -5,14 +5,17 @@
 //! source, selected generation, current head and actual protected use. These
 //! codecs cannot issue a guest permit or restore a live state cell.
 
+mod annotation_manifest;
 mod authority_catalogue;
 mod authority_evidence;
 mod budget_quote;
 mod classification;
 mod copy_inventory;
 mod current_view;
+mod dependency_bundle;
 mod envelope;
 mod error;
+mod event_drafts;
 mod failure;
 mod generation_admission;
 mod graph_root;
@@ -50,6 +53,12 @@ mod state;
 mod step;
 mod terminal;
 
+pub use annotation_manifest::{
+    CommunityAnnotationItemV1, CommunityAnnotationManifestInputV1, CommunityAnnotationManifestV1,
+    MAX_COMMUNITY_ANNOTATION_CLAIM_BYTES_V1, MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1,
+    MAX_COMMUNITY_ANNOTATION_INPUT_REFS_V1, MAX_COMMUNITY_ANNOTATION_ITEMS_V1,
+    MAX_COMMUNITY_ANNOTATION_MANIFEST_BYTES_V1,
+};
 pub use authority_catalogue::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,
     CommunityActorRowV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
@@ -80,12 +89,26 @@ pub use current_view::{
     MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1, MAX_COMMUNITY_VIEW_KEY_ROWS_V1,
     MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1, MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
 };
+pub use dependency_bundle::{
+    CommunityDependencyBundleInputV1, CommunityDependencyBundleV1, CommunityEvidenceRootsV1,
+    CommunityFactualBindingV1, MAX_COMMUNITY_DEPENDENCY_BUNDLE_BYTES_V1,
+    MAX_COMMUNITY_REQUIRED_NODES_V1,
+};
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityEncryptedEnvelopeV1,
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
 };
 pub use error::CommunityLifecycleErrorV1;
+pub use event_drafts::{
+    community_event_draft_vector_bytes_v1, CommunityEventDraftFragmentInputV1,
+    CommunityEventDraftFragmentReferenceV1, CommunityEventDraftFragmentV1,
+    CommunityEventDraftManifestInputV1, CommunityEventDraftManifestV1,
+    MAX_COMMUNITY_EVENT_DRAFTS_V1, MAX_COMMUNITY_EVENT_DRAFT_FRAGMENTS_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_BYTES_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_RECORD_BYTES_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_MANIFEST_BYTES_V1, MAX_COMMUNITY_EVENT_DRAFT_VECTOR_BYTES_V1,
+};
 pub use failure::{
     CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
     CommunityPassFailureV1,
