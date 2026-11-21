@@ -73,6 +73,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/community/memory_domain/tests.rs",
     "src/community/initialize/tests.rs",
     "src/community/extractor/tests.rs",
+    "src/community/quarantine/tests.rs",
 )
 EXPECTED_OWNER_NATIVE_TEST_EXCLUSIONS = (
     "src/adapter/native_tests.rs",

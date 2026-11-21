@@ -230,6 +230,47 @@ impl<'a> CommunityPassFailureV1<'a> {
     }
 }
 
+/// The five R8.5(1) components of one decision-provenance digest.
+///
+/// Each equals the corresponding CFI1 field (ADR-129 revision 8).
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CommunityDecisionProvenanceInputV1 {
+    /// The reserved pass, or `None` when no pass was reserved.
+    pub pass_key: Option<CommunityPassKeyV1>,
+    /// The failing member's CMB1 digest.
+    pub member_binding_digest: Hash,
+    /// The member's CIN1 digest, or `None` when no CIN1 was prepared.
+    pub prepared_invocation_digest: Option<Hash>,
+    /// The closed host failure, or `None` for an authenticated reset's
+    /// current admission (R8.5(4)).
+    pub host_failure: Option<Host>,
+    /// The TPS1 digest: the CIN1's when a CIN1 exists, otherwise the one
+    /// read under the operation's guard (R8.5(2)).
+    pub trust_snapshot_digest: Hash,
+}
+
+/// The ADR-129 revision 8 R8.5(1) decision-provenance digest.
+///
+/// It is `H("DecisionProvenance", preferred [CPK1_bytes_or_null,
+/// CMB1_digest, CIN1_digest_or_null, host_failure_or_null,
+/// trust_snapshot_digest])`. The CPK1 is a bstr of its canonical bytes and the host failure is the
+/// same inline nested array CFI1 field 6 encodes. The digest is a binding,
+/// not evidence that the failure happened.
+#[must_use]
+pub fn community_decision_provenance_digest_v1(input: CommunityDecisionProvenanceInputV1) -> Hash {
+    let mut preimage = Zeroizing::new(Vec::with_capacity(256));
+    preimage.push(0x85);
+    encode_optional_pass(&mut preimage, input.pass_key);
+    encode_hash(&mut preimage, input.member_binding_digest);
+    super::encode_optional_hash(&mut preimage, input.prepared_invocation_digest);
+    match input.host_failure {
+        None => preimage.push(0xf6),
+        Some(failure) => encode_host(&mut preimage, failure),
+    }
+    encode_hash(&mut preimage, input.trust_snapshot_digest);
+    digest(b"PiglorOS.Community.DecisionProvenance.v1\0", &preimage)
+}
+
 const fn validate_host(error: Host) -> Result<()> {
     match error {
         Host::MissingFeature { index } | Host::CapabilityDenied { index } if index >= 256 => {
