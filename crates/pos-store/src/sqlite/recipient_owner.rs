@@ -1008,7 +1008,7 @@ impl SqliteStore {
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
         #[cfg(feature = "test-support")]
         let _test_fault_guard = RecipientExportPublicationTestFaultGuard;
-        if self.consent_authority_permit != Some(authority.append_permit()) {
+        if self.consent_permits.gateway() != Some(authority.append_permit()) {
             return Err(RecipientExportPublicationErrorV1::Consent(
                 ConsentError::NoConsent,
             ));

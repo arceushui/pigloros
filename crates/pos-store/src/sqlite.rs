@@ -102,7 +102,7 @@ use pos_core::{
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionSnapshotV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicyCopiesV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptV1,
-    ManifestSlotBindingV1, OwnerIdV1, PersistedAuthorityV1, PluginId,
+    ManifestSlotBindingV1, OwnerConsentV2PermitV1, OwnerIdV1, PersistedAuthorityV1, PluginId,
     PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
     PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
     PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
@@ -289,7 +289,7 @@ pub struct SqliteStore {
     writer_reservation_connection: Option<Connection>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
-    consent_authority_permit: Option<ConsentAppendPermit>,
+    consent_permits: crate::ConsentPermitBinding,
     erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
@@ -2239,7 +2239,7 @@ impl SqliteStore {
             writer_reservation_connection,
             hasher,
             clock: Box::new(SystemAdmissionClock),
-            consent_authority_permit: None,
+            consent_permits: crate::ConsentPermitBinding::default(),
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
             erasure_gate,
@@ -4339,7 +4339,7 @@ impl SqliteStore {
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         if gateway_consent {
-            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+            let bound_permit = self.consent_permits.gateway().ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
             })?;
             let permit = permit.ok_or_else(|| {
@@ -5975,16 +5975,14 @@ impl EventStore for SqliteStore {
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
-        match self.consent_authority_permit {
-            Some(existing) if existing != permit => Err(CoreError::Storage(
-                "Gateway consent authority is already bound".to_owned(),
-            )),
-            Some(_) => Ok(()),
-            None => {
-                self.consent_authority_permit = Some(permit);
-                Ok(())
-            }
-        }
+        self.consent_permits.bind_gateway(permit)
+    }
+
+    fn bind_owner_consent_v2_permit(
+        &mut self,
+        permit: OwnerConsentV2PermitV1,
+    ) -> Result<(), CoreError> {
+        self.consent_permits.bind_owner(permit)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {

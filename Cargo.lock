@@ -5853,6 +5853,7 @@ dependencies = [
  "blake3",
  "bytes",
  "ciborium",
+ "getrandom 0.4.3",
  "proptest",
  "serde",
  "serde_bytes",
@@ -5985,6 +5986,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pos-owner-adapter"
+version = "0.1.0"
+dependencies = [
+ "pos-core",
+ "pos-crypto",
+ "pos-owner-bridge",
+ "pos-owner-bridge-codec",
+ "sha2 0.11.1",
+ "ulid",
+ "zeroize",
 ]
 
 [[package]]

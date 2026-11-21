@@ -9,8 +9,15 @@ use rustix::io::{self, Errno};
 
 use super::{nonce_ledger_support, HOST_TARGET_OS};
 use crate::{BridgeError, UnavailableCode};
+use owner_session::SubjectOwnerLocks;
+pub use owner_session::{SubjectOwnerExclusiveGuard, SubjectOwnerSharedGuard};
 
 pub use store_file::store_file_id;
+pub use subject_keys::{
+    SubjectKeyArtifactContent, SubjectKeyArtifactEntry, SubjectKeyArtifactKind,
+    SubjectKeyArtifactName, SubjectKeyArtifactSlot, MAX_SUBJECT_KEY_ARTIFACT_BYTES,
+    MAX_SUBJECT_KEY_ARTIFACT_ENTRIES,
+};
 
 const LOCK_NAME: &str = "pigloros.subject-encryptor.v1.lock";
 const FILE_FLAGS: OFlags = OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
@@ -23,12 +30,15 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
 /// Retain this value for the owner-process lifetime, including quarantine and
 /// recovery. Dropping it closes the descriptor. The lock file is never unlinked.
 /// This primitive creates no owner adapter, store binding or nonce reservation.
-/// The remaining ADR-097 activation gates still apply.
+/// It owns the process-local ADR-091 subject-owner locks, so they are always
+/// taken after it and released before it. The remaining ADR-097 activation
+/// gates still apply.
 #[derive(Debug)]
 #[must_use = "retain the encryptor lock for the owner-process lifetime"]
 pub struct SubjectEncryptorLock {
     _file: OwnedFd,
     directory: OwnedFd,
+    subject_owners: SubjectOwnerLocks,
 }
 
 impl SubjectEncryptorLock {
@@ -64,6 +74,7 @@ impl SubjectEncryptorLock {
                             nonce_ledger::remove_stale_temporary(&directory).map(|()| Self {
                                 _file: file,
                                 directory,
+                                subject_owners: SubjectOwnerLocks::default(),
                             })
                         })
                 })
@@ -143,8 +154,11 @@ fn validate_file_identity(directory: &OwnedFd, name: &str, file: &impl AsFd) -> 
     })
 }
 
+mod commit;
 mod nonce_ledger;
+mod owner_session;
 mod store_file;
+mod subject_keys;
 
 #[cfg(test)]
 mod tests;

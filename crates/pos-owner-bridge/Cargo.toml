@@ -46,6 +46,11 @@ path = "tests/nonce_ledger_replace_public.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "subject_key_artifacts_public"
+path = "tests/subject_key_artifacts_public.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "store_file_identity_public"
 path = "tests/store_file_identity_public.rs"
 required-features = ["test-support"]
@@ -58,4 +63,9 @@ required-features = ["test-support"]
 [[test]]
 name = "listener_serving"
 path = "tests/listener_serving.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "subject_owner_lock_public"
+path = "tests/subject_owner_lock_public.rs"
 required-features = ["test-support"]
