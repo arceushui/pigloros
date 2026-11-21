@@ -1,10 +1,12 @@
-//! ADR-136 acceptance matrix, slice C6b (#1470): the Gateway parts of
-//! acceptance tests 2, 8 and 9 through the served router.
+//! ADR-136 acceptance matrix, slices C6b (#1470) and C6c (#1471): the
+//! Gateway parts of acceptance tests 2, 8 and 9 through the served router,
+//! in every serve mode of acceptance test 11.
 //!
 //! `docs/erasure/adr-136-acceptance-matrix.md` maps every bullet to its
 //! test. Each test serves a `SQLite` world, as the Gateway serves only
 //! `SQLite` with the Local erasure authority.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use pos_core::store::{import_timeline_with_id, TimelineExport};
@@ -13,11 +15,11 @@ use pos_local_erasure_loader::local_principal::local_principal_authority_timelin
 use pos_store::memory::MemoryStore;
 
 use super::*;
-use crate::local_erasure_composition::tests::erasure_world_provisioned;
 use crate::local_erasure_signing_fixture::SIGNER_OWNER;
-use crate::local_principal::{
-    LocalConsentDraftV1, LocalConsentGrantDraftV1, LocalPrincipalProvisionV1,
+use crate::local_fork_service::tests::{
+    bind_payload, fork_payload, fork_result, rejected, request, BIND_OK,
 };
+use crate::local_principal::{LocalConsentDraftV1, LocalConsentGrantDraftV1};
 
 /// The Timelines seeded into a served store before the Gateway opens it.
 struct Seeded {
@@ -267,11 +269,10 @@ fn payload_class(projection: &Value) -> TestResult<Value> {
 /// readable through the served router. Every erasure answer discloses only
 /// its declared digests and ids, and the projection's generation only rises
 /// while its claim only weakens.
-#[tokio::test]
-async fn the_served_partition_freezes_only_the_actors_lineage() -> TestResult {
-    let world = erasure_world_granting(&SERVED)?;
+async fn the_served_partition_freezes_only_the_actors_lineage(mode: ServeMode) -> TestResult {
+    let world = mode.world(&SERVED)?;
     let seeded = seed(&world.fixture.path)?;
-    let (served, driver) = Served::over(world, compiled())?;
+    let (served, driver) = Served::over(world, mode, compiled())?;
     let (actor, other) = (actor()?, other_actor()?);
     let owned = served.create(actor, "owned").await?;
     let others = served.create(other, "others").await?;
@@ -312,17 +313,18 @@ async fn the_served_partition_freezes_only_the_actors_lineage() -> TestResult {
     for body in &observed {
         disclosure.check_body(body);
     }
-    for answer in [
-        served
-            .request(actor, "erasure-1", "private-subject-data")
-            .await?,
-        served
-            .request(actor, "erasure-1", "consented-shared-data")
-            .await?,
-        served.read(actor, &id).await?,
-        served.read(other, &id).await?,
-        served.read(actor, &Ulid::nil().to_string()).await?,
-    ] {
+    // Each answer is bound before the next await, so no `?` result is
+    // held across one (`future_not_send`).
+    let retried = served
+        .request(actor, "erasure-1", "private-subject-data")
+        .await?;
+    let conflict = served
+        .request(actor, "erasure-1", "consented-shared-data")
+        .await?;
+    let own = served.read(actor, &id).await?;
+    let foreign = served.read(other, &id).await?;
+    let unknown = served.read(actor, &Ulid::nil().to_string()).await?;
+    for answer in [retried, conflict, own, foreign, unknown] {
         disclosure.check(&answer)?;
     }
     served.stop(driver).await?;
@@ -335,10 +337,9 @@ async fn the_served_partition_freezes_only_the_actors_lineage() -> TestResult {
 /// exact retry still answers its original receipt bytes and each actor's
 /// next request is `409 erasure-quota-exhausted`, so the store holds
 /// exactly `maximum_requests - reserve = 2` requests.
-#[tokio::test]
-async fn every_actors_used_quota_holds_across_a_restart() -> TestResult {
+async fn every_actors_used_quota_holds_across_a_restart(mode: ServeMode) -> TestResult {
     let limits = ErasureRecoveryLimitsV1::from_maximum_requests(514)?;
-    let (served, driver) = Served::local(&SERVED, limits)?;
+    let (served, driver) = Served::serve(mode, &SERVED, limits)?;
     let subjects = [actor()?, other_actor()?];
     let mut receipts = Vec::new();
     for subject in subjects {
@@ -346,19 +347,17 @@ async fn every_actors_used_quota_holds_across_a_restart() -> TestResult {
             .request(subject, "erasure-1", "private-subject-data")
             .await?;
         assert_eq!(admitted.status, StatusCode::ACCEPTED);
-        served
-            .receipted(subject, &erasure_id(subject, "erasure-1")?.to_string())
-            .await?;
+        let id = erasure_id(subject, "erasure-1")?.to_string();
+        served.receipted(subject, &id).await?;
         receipts.push(admitted.bytes);
     }
     let world = served.stop(driver).await?;
-    let (served, driver) = Served::over(world, limits)?;
+    let (served, driver) = Served::over(world, mode, limits)?;
     // Each recovered request reads at its first receipt again, and the
     // driver is then stopped, so nothing advances under the requests below.
     for subject in subjects {
-        served
-            .receipted(subject, &erasure_id(subject, "erasure-1")?.to_string())
-            .await?;
+        let id = erasure_id(subject, "erasure-1")?.to_string();
+        served.receipted(subject, &id).await?;
     }
     driver.stop().await;
     // Why `409` and never `429`: `local_subject_admission` answers
@@ -389,7 +388,7 @@ async fn every_actors_used_quota_holds_across_a_restart() -> TestResult {
             )
         );
     }
-    served.gateway.shutdown().await?;
+    served.shut_down().await?;
     Ok(())
 }
 
@@ -405,10 +404,10 @@ const CONSENTED: [GatewayOperationV1; 6] = [
     GatewayOperationV1::READ_ERASURE,
 ];
 
-/// A Local erasure world whose Principal binds one consent of the actor,
-/// governing Timeline creation.
-fn consented_world() -> TestResult<World> {
-    erasure_world_provisioned(&LocalPrincipalProvisionV1::try_new_with_consent(
+/// A Local erasure world for `mode` whose Principal binds one consent of
+/// the actor, governing Timeline creation.
+fn consented_world(mode: ServeMode) -> TestResult<World> {
+    mode.provisioned(&LocalPrincipalProvisionV1::try_new_with_consent(
         &principal()?,
         [actor()?, other_actor()?],
         CONSENTED,
@@ -450,9 +449,16 @@ async fn revoke(
 /// closure holds only the actor's root, the Session still reads the
 /// revoked consent and the revocation's exact retry still answers its
 /// original bytes.
-#[tokio::test]
-async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines() -> TestResult {
-    let (served, driver) = Served::over(consented_world()?, compiled())?;
+async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines(
+    mode: ServeMode,
+) -> TestResult {
+    // The answers are the same in every mode. An Air-Gapped binding only
+    // fixes the authorizer's revocation-freshness claim to current
+    // (`with_mode_binding`, D10), and every serve composition already
+    // recomposes the Local Principal from its store with the claim current
+    // (`every_serve_composition_binds_the_served_mode`). The consent
+    // revocation is a Consent Timeline record that both read alike.
+    let (served, driver) = Served::over(consented_world(mode)?, mode, compiled())?;
     let actor = actor()?;
     served.create(actor, "owned").await?;
     let session = served
@@ -479,9 +485,8 @@ async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timeline
         .request(actor, "erasure-1", "private-subject-data")
         .await?;
     assert_eq!(admitted.status, StatusCode::ACCEPTED);
-    let observed = served
-        .receipted(actor, &erasure_id(actor, "erasure-1")?.to_string())
-        .await?;
+    let id = erasure_id(actor, "erasure-1")?.to_string();
+    let observed = served.receipted(actor, &id).await?;
     assert_monotonic(&observed)?;
     let last = observed.last().ok_or("no projection")?;
     assert_eq!(last["acknowledgements"]["required"], 3);
@@ -500,6 +505,79 @@ async fn a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timeline
             .holds_the_consent_and_erasure_host_timelines()
             .await?
     );
+    served.stop(driver).await?;
+    Ok(())
+}
+
+in_every_serve_mode!(
+    the_served_partition_freezes_only_the_actors_lineage,
+    every_actors_used_quota_holds_across_a_restart,
+    a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines,
+);
+
+/// The FAL1 Fork of `parent` with the operation byte `operation`, sent to
+/// the managed listener at `socket`: the FARL1 answer.
+fn fork(socket: &Path, operation: u8, parent: &str) -> TestResult<Vec<u8>> {
+    let parent = TimelineId::from_ulid(Ulid::from_string(parent)?);
+    Ok(request(socket, &fork_payload(operation, parent)?, false)?)
+}
+
+/// Acceptance tests 2 and 11 through the Fork admission service of the
+/// managed mode.
+///
+/// A Fork the service admits of the actor's root, for the service's own
+/// principal, is a descendant of that root, so the actor's erasure freezes
+/// it with the root: two `timeline-payload` targets. After the freeze the
+/// service refuses a Fork of the frozen root with code 5, the ADR-106
+/// containment answer for a parent an active request covers, and still
+/// admits a Fork of another actor's root, which stays readable.
+#[tokio::test]
+async fn the_fork_admission_service_forks_into_and_beside_an_erasure() -> TestResult {
+    let mode = ServeMode::ManagedLocalForkAdmission;
+    let (served, driver) = Served::serve(mode, &SERVED, compiled())?;
+    let (actor, other) = (actor()?, other_actor()?);
+    let owned = served.create(actor, "owned").await?;
+    let others = served.create(other, "others").await?;
+    let socket = socket_of(&served.world)?;
+    // The FCC1 needs only the POC1 binding of the service's own principal
+    // (`admitted_fork_binding` looks it up by principal digest) and a
+    // visible parent; it never compares the parent's Timeline owner, so the
+    // actor's HTTP-created root is a valid parent.
+    assert_eq!(&request(&socket, &bind_payload(60), false)?[..10], &BIND_OK);
+    let descendant = fork_result(&fork(&socket, 61, &owned)?)?.0.to_string();
+    // Event reads are granted per operation, not per owner, so the actor
+    // reads the unowned child (as the C6b partition test reads unowned roots).
+    assert_eq!(served.events(actor, &descendant).await?.0, StatusCode::OK);
+    let admitted = served
+        .request(actor, "erasure-1", "private-subject-data")
+        .await?;
+    assert_eq!(admitted.status, StatusCode::ACCEPTED);
+    let observed = served
+        .receipted(actor, &erasure_id(actor, "erasure-1")?.to_string())
+        .await?;
+    assert_monotonic(&observed)?;
+    let last = observed.last().ok_or("no projection")?;
+    assert_eq!(last["state"], "partial-failure");
+    // The FCC1 child records no owner (`TimelineMeta::forked_from`), but the
+    // Local freeze (`affected_timelines`) takes every Fork descendant of an
+    // owned Timeline by `fork_point`, and the closure has one
+    // `timeline-payload` target per affected Timeline: the root and the
+    // child. #1477 makes the child inherit the actor as owner and will
+    // tighten this to an owner assertion.
+    assert_eq!(payload_class(last)?["required"], 2);
+    for frozen in [&owned, &descendant] {
+        assert_eq!(
+            served.events(actor, frozen).await?,
+            (StatusCode::FORBIDDEN, json!("deleted")),
+            "{frozen}"
+        );
+    }
+    // ADR errata (owner 2026-11-20): the service refuses a Fork of a parent
+    // an active request covers (ADR-106 r3 containment); joining the frozen
+    // scope holds at the runtime seam.
+    assert_eq!(fork(&socket, 62, &owned)?, rejected(5));
+    let beside = fork_result(&fork(&socket, 63, &others)?)?.0.to_string();
+    assert_eq!(served.events(other, &beside).await?.0, StatusCode::OK);
     served.stop(driver).await?;
     Ok(())
 }

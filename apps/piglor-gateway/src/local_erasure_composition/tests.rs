@@ -497,19 +497,23 @@ fn erasure_world() -> TestResult<World> {
 /// A Local Principal store whose root grant covers both fixture actors for
 /// `operations`, provisioned for Local erasure.
 pub(crate) fn erasure_world_granting(operations: &[GatewayOperationV1]) -> TestResult<World> {
-    erasure_world_provisioned(&LocalPrincipalProvisionV1::try_new(
-        &principal()?,
-        [actor()?, other_actor()?],
-        operations.iter().copied(),
-    )?)
+    erasure_world_provisioned(
+        &LocalPrincipalProvisionV1::try_new(
+            &principal()?,
+            [actor()?, other_actor()?],
+            operations.iter().copied(),
+        )?,
+        GatewayModeProfileIdV1::Local,
+    )
 }
 
-/// A Local Principal store provisioned with `provision`, then for Local
-/// erasure.
+/// A Local Principal store bound to `mode`, provisioned with `provision`,
+/// then for Local erasure.
 pub(crate) fn erasure_world_provisioned(
     provision: &LocalPrincipalProvisionV1,
+    mode: GatewayModeProfileIdV1,
 ) -> TestResult<World> {
-    let fixture = Fixture::new(false)?;
+    let fixture = Fixture::in_mode(false, mode)?;
     let mut host = open_recovered_erasure_host(
         StoreConfig::Sqlite {
             path: fixture.path.clone(),

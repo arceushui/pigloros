@@ -1,9 +1,55 @@
 # ADR-136 acceptance matrix
 
-This table maps each bullet of the ADR-136 acceptance tests (Redmine #1414) to
-the public-seam tests that cover it. Slice C6a (#1469) covers tests 1 to 7 at
-the runtime seams. Slice C6b (#1470) adds tests 8 to 10 and the Gateway parts
-of test 2. Slice C6c adds test 11.
+This document is the complete acceptance matrix of ADR-136 (Redmine #1414).
+It maps each bullet of the ADR-136 acceptance tests to the public-seam tests
+that cover it. Slice C6a (#1469) covers tests 1 to 7 at the runtime seams.
+Slice C6b (#1470) adds tests 8 to 10 and the Gateway parts of test 2. Slice
+C6c (#1471) adds test 11: key-less recovery by every consumer, and the served
+lifecycle suite in every serve mode.
+
+## Summary
+
+A row is one bullet of a test. "Mapped" rows name at least one test; the other
+rows say why no test can exist, and the deviations index lists them.
+
+| Test | Rows | Mapped | Not mapped | Deviations |
+|---|---|---|---|---|
+| 1. Lifecycle bytes | 3 | 3 | 0 | Q16 |
+| 2. The C1′ partition | 13 | 13 | 0 | Deleted after freeze, imported Timelines, service Fork after freeze; service Fork owner **pending #1477** |
+| 3. ARD1 and key binding | 5 | 5 | 0 | none |
+| 3a. Snapshot port parity | 3 | 3 | 0 | none |
+| 3b. Closure bound | 4 | 4 | 0 | Closure bound |
+| 4. Retries and acknowledgements | 5 | 5 | 0 | none |
+| 5. Rejections | 4 | 3 | 1 (unreachable) | Rejection provenance |
+| 6. Trust and evidence | 15 | 14 | 1 (deferred to #448) | ELTA1 history, recovery legs |
+| 7. Crash windows | 5 | 5 | 0 | none |
+| 8. The Gateway | 17 | 16 | 1 (compile time) | `q_subject < 1`, plain submission, four runtime-seam mappings |
+| 9. `getErasure` and the golden check | 6 | 5 | 1 (no metrics) | none |
+| 10. Export and the offline evaluator | 1 | 1 | 0 | Field-level reporting |
+| 11. Key-less recovery and serve modes | 9 | 9 | 0 | Adapter N/A (D21), Air-Gapped predicate 6; service Fork owner **pending #1477** |
+| **Total** | **90** | **86** | **4** | |
+
+### Deviations index
+
+Each entry names its owner decision and the rows it explains.
+
+| Deviation | Tests | Decision | Where |
+|---|---|---|---|
+| ELTA1 operator-key history is not yet refused | 6 | Deferred to #448 (Q9) | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| Memory and `SQLite` bytes differ only in the replica row | 1 | Q16 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| An affected Timeline cannot be deleted under the host | 2 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| Imported Timelines keep their exported owner (errata) | 2 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| The closure bound counts the store target (errata) | 3b | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| Authorization rejection provenance (errata) | 5 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| Test 6 recovery legs are admission-only (errata) | 6 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| `q_subject < 1` is refused at compile time | 8 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| pos-cli has no plain submission | 8 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| Root-chain advance and revocation, the A/B retry and the signer revocation map to the runtime seam (errata) | 8 | Owner 2026-11-20 | [Test 8](#test-8-the-gateway) |
+| Unavailable fields are reported per artifact | 10 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| A Fork the service admits records no owner | 2, 11 | **Pending #1477** (owner 2026-11-20): the production fix is its own ticket | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| The service refuses a Fork of an affected parent after the freeze (errata) | 2, 11 | Owner 2026-11-20 | [Deviations](#deviations-owner-decisions-of-2026-11-20) |
+| The conformance adapter never acts as a key-less root | 11 | D21 (owner 2026-11-20) | [Test 11](#test-11-key-less-recovery-and-serve-modes) |
+| Air-Gapped predicate 6 is vouched for in the served suite | 11 | Harness | [Test 11](#test-11-key-less-recovery-and-serve-modes) |
 
 ## Paths
 
@@ -19,6 +65,15 @@ of test 2. Slice C6c adds test 11.
 | `EA` | `apps/piglor-gateway/src/erasure/tests/acceptance.rs`, the module `erasure::tests::acceptance` (C6b) |
 | `FS` | `apps/piglor-gateway/src/local_fork_service.rs` (in-crate tests, real Unix socket) |
 | `LP` | `apps/piglor-gateway/src/local_principal.rs` (in-crate tests) |
+| `KEY` | `apps/piglor-gateway/tests/keyless_erasure_recovery.rs` |
+| `CLI` | `apps/pos-cli/src/host_store.rs`, the module `keyless_erasure_tests` |
+| `LED` | `apps/piglor-ledger/src/lib.rs`, the module `keyless_erasure_tests` |
+| `EXP` | `apps/pos-experiment/src/lib.rs`, the module `keyless_erasure_tests` |
+| `ADP` | `apps/pos-gateway-conformance-adapter/src/subject/execute.rs` (in-crate tests) |
+
+A served test `T` of `E` or `EA` that runs in every serve mode is the module
+`T` with the three tests `T::local`, `T::managed_local_fork_admission` and
+`T::air_gapped` (test 11). The matrix names it `T`.
 
 ## Adapters
 
@@ -89,6 +144,31 @@ other `LEC` test.
   (class, digest, from and to claim, redaction state, authoritative use). It
   has no field-level output, and the Gateway has no subject-export route.
   Test 10 is therefore covered at artifact level through the runtime seam.
+- **A Fork the service admits records no owner (tests 2 and 11, pending
+  #1477, owner 2026-11-20):** the ADR says a Fork inherits its parent's
+  owner. The runtime host's Fork does
+  (`TimelineMeta::forked_from_owned`). The Fork admission service's FCC1
+  creates its child with `TimelineMeta::forked_from`, so the child has no
+  owner (`crates/pos-store/src/sqlite.rs`, the FCC1 child of
+  `execute_fork_admission_command_in_topology_transition`). The child is
+  still affected: the freeze takes every Fork descendant by `fork_point`
+  lineage. The production fix, making the child inherit the owner, is its
+  own ticket, #1477, stacked on C6c. Until then the test asserts today's
+  behaviour (frozen through lineage); #1477 tightens it to an owner
+  assertion.
+- **The service refuses a Fork of an affected parent after the freeze (tests
+  2 and 11, ADR errata, owner 2026-11-20):** the ADR says "Forks of
+  affected Timelines are always in
+  scope through ELLR1, including Forks admitted by the Fork admission
+  service". The service admits a Fork only of a parent that every active
+  request proves unaffected (ADR-106 r3,
+  `ErasureContainmentGateV1::admitted_fork_context`). Once a request has
+  frozen the parent, the service answers code 5 and writes nothing, so it
+  admits no Fork between the freeze and the first ERSE1. The runtime host's
+  `fork_timeline_identified` admits that Fork as the first ERSE1. The owner
+  keeps the refusal: the service refuses, and joining the frozen scope holds
+  at the runtime seam
+  (`ACC::a_fork_admitted_after_freeze_is_the_first_extension_of_the_frozen_scope`).
 
 ## Test 1: lifecycle bytes
 
@@ -103,11 +183,11 @@ other `LEC` test.
 | Bullet | Test | Adapters | Note |
 |---|---|---|---|
 | An actor-created Timeline is affected. Another actor's Timeline, an unowned Timeline and an imported Timeline are not. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_signed_private_freeze_commits_the_subject_closure`; `EA::the_served_partition_freezes_only_the_actors_lineage` | both; `SQLite`; `SQLite` | Deviation (errata): ADR says imported = unaffected; ownership follows the data (owner 2026-11-20). The ACC test imports with `import_timeline_with_id`: the actor's own Timeline is affected; another owner's and an unowned one are not. The EA test seeds the same imports and an unowned root into a served store: after the actor's erasure the actor's root and own import answer `403 deleted`, and every other one stays readable through the router. |
-| A Fork of the actor's Timeline made by another actor inherits the actor as owner and is affected. The actor's Fork of another subject's Timeline is not affected. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not` | both; `SQLite` | The runtime host's `fork_timeline` does not take the forking actor, and a child always inherits its parent's owner. So any host Fork stands for a Fork "made by another actor". Not covered at the Gateway: the managed Fork admission service records no forking actor either, and a served Local erasure world with the Fork listener is C6c's managed-mode suite (test 11). |
+| A Fork of the actor's Timeline made by another actor inherits the actor as owner and is affected. The actor's Fork of another subject's Timeline is not affected. | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `LEC::a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not`; `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | both; `SQLite`; `SQLite` | The runtime host's `fork_timeline` does not take the forking actor, and a child always inherits its parent's owner. So any host Fork stands for a Fork "made by another actor". The EA test is the Gateway part, in the managed mode: the Fork admission service forks the actor's root for its own FACR1 principal, and the actor's erasure freezes that child with the root (two `timeline-payload` targets, both `403 deleted`). Pending #1477 (owner 2026-11-20): the service's child records no owner, so the bullet's "inherits the actor as owner" does not hold through the service yet. The child is affected through its `fork_point` lineage, which the test asserts; #1477 tightens it to an owner assertion. |
 | A Memory host without an authorizer creates unowned Timelines | `EHP::an_owned_root_records_its_owner_at_creation`; `LP::a_created_root_is_owned_by_its_admitted_actor` | both; Memory | The LP test is the Gateway part: an unprotected Gateway (no authorizer) creates an unowned root through `POST /v1/timelines`. |
 | An existing descendant | `LEC::a_signed_private_freeze_commits_the_subject_closure` | `SQLite` | Write behind the host. |
 | A future Fork | `LEC::identified_forks_extend_a_frozen_scope_across_restart_and_rotation` | `SQLite` | Restart and bundle rotation. |
-| A Fork admitted between the freeze and the first ERSE1 | `ACC::a_fork_admitted_after_freeze_is_the_first_extension_of_the_frozen_scope` | both | Covered end to end at the runtime host seam. The Gateway Fork admission service runs the same host command (`fork_timeline_identified`); a served run is C6c's managed-mode suite (test 11). |
+| A Fork admitted between the freeze and the first ERSE1 | `ACC::a_fork_admitted_after_freeze_is_the_first_extension_of_the_frozen_scope`; `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | both; `SQLite` | Covered end to end at the runtime host seam, whose `fork_timeline_identified` admits the Fork as the first ERSE1. The Gateway Fork admission service runs another host command, the FCC1 of `execute_fork_admission_command`. Deviation, ADR errata (owner 2026-11-20): the service refuses; joining holds at the runtime seam (the ACC test). After the freeze the service answers a Fork of the frozen root with code 5 (ADR-106 r3 containment) and writes nothing, and it still admits a Fork of another actor's root, which stays readable (EA test, managed mode). |
 | The consent-subject actor's erasure leaves the Consent Timeline and the Erasure Host Timeline unaffected and available | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage`; `EA::a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines` | both; `SQLite` | The EA test is the Gateway part: the consent-subject actor revokes its consent and is erased; the closure holds only its root, the Session still reads the revoked consent from the Consent Timeline, the revocation's exact retry answers its original bytes, and the store holds both host Timelines unfrozen. |
 | Every client route answers 404 for the Erasure Host Timeline, and creating it does not consume the root-Timeline ceiling | `LP::host_timelines_are_hidden_from_clients_and_outside_the_ceiling`; `GW/local_fork_coordinator.rs::coordinator_refuses_a_host_timeline_as_fork_parent`; `FS::listener_refuses_the_erasure_host_timeline_as_a_fork_parent`; `EHP::a_client_root_count_leaves_out_recorded_host_roots` | `SQLite`; Memory; `SQLite`; both | Read, signal and action routes answer the 404 of an unknown Timeline (LP). The Fork-parent route is the Unix socket, not HTTP: the FS test sends a FAL1 Fork naming the recorded Erasure Host Timeline through the served listener and gets code 4 (`ParentChanged`), the code of a parent the store does not hold, with no write; the coordinator test shows the bytes equal an unknown parent's. |
 | A new owned root created after the freeze, and its Forks, stay unaffected for that request | `ACC::the_c1_partition_freezes_exactly_the_actors_lineage` | both | |
@@ -264,7 +344,70 @@ refusals without a conformance case are covered by these tests:
 | `409 erasure-quota-exhausted` | `E::a_subject_past_its_quota_is_refused_for_good`; `EA::every_actors_used_quota_holds_across_a_restart`; `LEC::the_subject_quota_admits_exactly_its_share`; `LEC::the_quota_is_shared_by_the_principals_actors` |
 | `400 erasure-scope-too-large` | `E::every_submit_refusal_has_its_answer` (the HTTP mapping); `LEC::the_closure_bound_is_exact_at_submit_and_freeze`; `LEC::the_key_and_backup_bound_is_exact_at_submit` (`ScopeTooLarge` at submit) |
 
-## Test 11 (placeholder for C6c)
+## Test 11: key-less recovery and serve modes
 
-<!-- C6c adds rows here for test 11 (recovery by every consumer, managed
-Local Fork admission, Air-Gapped). -->
+### Key-less recovery
+
+Slice C5d (#1450) added these tests. Each consumer opens a Gateway store that
+holds a Local erasure request with the shared loader's key-less composition
+(`LocalErasureRecoveryV1`: ELB1, ELB1S and the release anchor from
+`$CREDENTIALS_DIRECTORY`, the TPS1 from the deployment trust state, no signer
+key). A store without a recorded erasure identity opens with the closed
+composition. Missing or invalid trust inputs over a store with an identity
+are a typed refusal, never a fall back to the closed composition.
+
+| Bullet | Test | Adapters | Note |
+|---|---|---|---|
+| The shared loader recovers a Gateway store that holds ERQ1 records without a private key | `KEY::valid_credentials_recover_the_store_and_its_request`; `KEY::the_closed_composition_cannot_recover_a_store_that_holds_a_request`; `KEY::missing_or_invalid_credentials_are_typed_refusals` | `SQLite` | The store is one the Gateway provisioned. The closed composition refuses it, which is why every consumer needs the key-less one. |
+| pos-cli recovers it | `CLI::valid_credentials_recover_a_store_that_holds_a_request`; `CLI::a_store_without_an_identity_opens_and_works`; `CLI::missing_credentials_are_a_typed_refusal`; `CLI::an_invalid_bundle_or_signature_is_a_typed_refusal` | `SQLite` | Through `HostedCliStore::open_with_trust`. |
+| piglor-ledger recovers it | `LED::valid_credentials_recover_a_store_that_holds_a_request`; `LED::a_store_without_an_identity_opens_and_works`; `LED::missing_credentials_are_a_typed_refusal`; `LED::an_invalid_bundle_or_signature_is_a_typed_refusal` | `SQLite` | The read-only ledger path composes on its read-only handle. |
+| pos-experiment recovers it | `EXP::valid_credentials_recover_a_store_that_holds_a_request`; `EXP::a_store_without_an_identity_opens_and_works`; `EXP::missing_credentials_are_a_typed_refusal`; `EXP::an_invalid_bundle_or_signature_is_a_typed_refusal` | `SQLite` | |
+| The conformance adapter recovers it | `ADP::only_the_erasure_bundle_compositions_record_an_erasure_identity` | `SQLite`; Memory (`open`) | N/A: the adapter never acts as a key-less root; its erasure compositions hold the signer (D21, owner 2026-11-20). Each sub-case serves a fresh store. The test composes every adapter composition: each one without a fixture erasure bundle serves a store with no recorded erasure identity under the closed composition, so it has no ERQ1 to recover. It holds in any environment: on a networked host `authorized-air-gapped` does not compose (predicate 6, `air-gapped-no-route`, refuses it), and where it composes it records no identity; the adapter's existing namespace tests cover that case. The `authorized-erasure` compositions record one, and compose through the `serve` loader, which refuses to start without the signer credential. |
+
+### The served lifecycle suite in every serve mode
+
+The served lifecycle suite runs as one test per serve mode (owner decision of
+2026-11-20). Each suite function takes the mode, and `in_every_serve_mode!`
+in `apps/piglor-gateway/src/erasure/tests.rs` gives it the tests `local`,
+`managed_local_fork_admission` and `air_gapped`. Each mode is composed on the
+production entry points of its `serve`:
+
+- **Local:** `LocalErasureServeV1::for_serve` reads the four erasure
+  credentials, the host opens with that composition, `LocalErasureServeV1::start`
+  runs the startup sweep, and `local_gateway` composes the Gateway, as
+  `serve_http` does. The host does not run `bind_gateway_mode_v1`: the
+  fixture bound the store to the Local mode when it was created, and the host
+  attaches to that binding under a binding whose predicates the test vouches
+  for (`test_attach_host` with `test_binding`).
+- **Managed Local Fork admission:** `serve_managed_local_fork_admission` with
+  `--require-local-erasure`. The test seam
+  `local_fork_service::tests::start_managed_for_test` runs its steps in order:
+  `managed_credentials_and_erasure` reads the three Fork admission and the
+  four erasure credentials from one unit directory, the host opens, the
+  production `bind_gateway_mode_v1` binds it over the Fork-admission socket,
+  the startup sweep runs, and `open_with_credentials` and `start_listener`
+  start the Gateway with its Fork-admission slot and the listener. It is the
+  only mode that runs the production `bind_gateway_mode_v1`. The loaded
+  FACR1 registers no peer of the test process, whose uid is its service uid,
+  so the listener runs the current-peer credentials of the same seeds, whose
+  FAH1 the world provisioned.
+- **Air-Gapped:** the Local composition's steps over a store the fixture
+  bound to the Air-Gapped mode, attached under a vouched Air-Gapped binding
+  (`test_attach_host` with `test_binding`), not through
+  `bind_gateway_mode_v1`: predicate 6, `air-gapped-no-route`, cannot hold on
+  a networked test host (`main.rs` runs it in a network namespace). The
+  deployment seeds the trust state store with its bundled TPS1 (D17), and the
+  world's trust state stands for it.
+
+Every mode opens its host with the test's recovery limits, so the quota tests
+can lower them (D11). The suite covers the served bullets of tests 1, 2, 4, 8
+and 9. Tests 3 to 7 and 10 have no served bullet; the serve mode selects only
+the composition, the binding and the listener over the same host, so their
+runtime-seam rows hold in every mode.
+
+| Bullet | Test | Adapters | Note |
+|---|---|---|---|
+| The managed Local Fork admission mode runs the Gateway lifecycle suite: the served bullets of tests 1, 2, 4, 8 and 9 (tests 3 to 7 and 10 have no served bullet) | `E::an_exact_retry_answers_the_same_receipt_bytes`; `E::each_erasure_operation_needs_its_own_grant`; `E::get_erasure_answers_one_not_found`; `E::parallel_requests_of_one_subject_admit_one`; `E::a_retained_only_scope_is_refused_after_the_decision`; `E::each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next`; `E::a_subject_past_its_quota_is_refused_for_good`; `EA::the_served_partition_freezes_only_the_actors_lineage`; `EA::every_actors_used_quota_holds_across_a_restart`; `EA::a_revoked_consent_still_admits_an_erasure_that_spares_the_host_timelines`, each `::managed_local_fork_admission` | `SQLite` | Submission, the drive to the first receipt, the `getErasure` projection, the exact retry (also after a restart), the quota, consent revocation, the 404s and the disclosure golden check. A restart stops the listener and serves the store again. |
+| The managed mode's Fork admission service | `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | `SQLite` | Test 2 through the service: the child's owner is pending #1477, and the post-freeze refusal is an ADR errata (see the deviations). |
+| Air-Gapped passes the same suite with the bundled TPS1 | The same ten suite functions, each `::air_gapped` | `SQLite` | The projection discloses `gateway-mode-air-gapped-v1`. The consent test asserts the same `403 revoked` and exact-retry `200` as Local: an Air-Gapped binding only fixes the authorizer's revocation-freshness claim to current (D10), which every serve composition already holds. |
+| The Local serve mode (the baseline of both) | The same ten suite functions, each `::local` | `SQLite` | |
