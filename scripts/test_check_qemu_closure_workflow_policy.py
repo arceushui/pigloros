@@ -60,40 +60,55 @@ class QemuClosureWorkflowPolicyTests(unittest.TestCase):
             lambda w: evidence(w)["steps"][-2]["with"].update(**{"retention-days": 1}),
             lambda w: evidence(w)["steps"][-2]["with"].update(**{"if-no-files-found": "ignore"}),
             lambda w: evidence(w)["steps"][-1].update(**{"if": "${{ always() }}"}),
-            # The kernel cache: main-only signing, exact-key restore, signed import.
+            # The kernel cache: main-only signing and publishing, exact-key
+            # fetch, signed import.
             lambda w: evidence(w).pop("if"),
             lambda w: evidence(w).update(**{"if": "${{ always() }}"}),
-            lambda w: step(evidence(w), "kernel-cache")["with"].update(**{"restore-keys": "qemu-kernel-"}),
-            lambda w: step(evidence(w), "kernel-cache")["with"].update(key="qemu-kernel"),
+            lambda w: step(evidence(w), "kernel-cache").update(
+                run='bash scripts/qemu-kernel-cache.sh fetch x86_64 "${RUNNER_TEMP}/qemu-kernel-cache"'),
+            lambda w: step(evidence(w), "kernel-cache").pop("env"),
+            lambda w: step(evidence(w), "kernel-cache")["env"].update(GH_REPO="someone/else"),
             lambda w: step(evidence(w), "Import the signed kernel").update(
                 run='nix copy --no-check-sigs --from "file://${RUNNER_TEMP}/qemu-kernel-cache"'),
             lambda w: step(evidence(w), "Import the signed kernel").pop("if"),
-            lambda w: evidence(w)["steps"].append(copy.deepcopy(step(kernel(w), "Save the signed kernel"))),
+            lambda w: evidence(w)["steps"].append(copy.deepcopy(step(kernel(w), "Publish the signed kernel"))),
+            lambda w: step(evidence(w), "Build the pinned guest and record its store identities").update(
+                env={"GH_TOKEN": "${{ github.token }}"}),
             lambda w: w["jobs"].pop("kernel-cache-selftest"),
             lambda w: w["jobs"]["kernel-cache-selftest"].update(environment="qemu-kernel-cache"),
             lambda w: w["jobs"]["kernel-cache-selftest"].update(**{"continue-on-error": True}),
             lambda w: step(w["jobs"]["kernel-cache-selftest"], "Sign, verify and import a throwaway path").update(
                 env={"QEMU_KERNEL_CACHE_SIGNING_KEY": "${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"}),
+            lambda w: w["jobs"]["kernel-cache-selftest"].update(permissions={"contents": "write"}),
             lambda w: kernel(w).pop("environment"),
             lambda w: kernel(w).update(environment="production"),
             lambda w: kernel(w).pop("if"),
             lambda w: kernel(w).update(**{"if": "${{ always() }}"}),
             lambda w: kernel(w).update(**{"continue-on-error": True}),
-            lambda w: kernel(w).update(permissions={"contents": "write"}),
+            lambda w: kernel(w).pop("permissions"),
+            lambda w: kernel(w)["permissions"].update(actions="write"),
+            lambda w: kernel(w).update(permissions="write-all"),
             lambda w: kernel(w)["env"].update(QEMU_KERNEL_CACHE_SIGNING_KEY="${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"),
             lambda w: step(kernel(w), "Sign the kernel")["env"].update(
                 QEMU_KERNEL_CACHE_SIGNING_KEY="${{ secrets.OTHER }}"),
             lambda w: step(kernel(w), "Sign the kernel").update(**{"if": "${{ always() }}"}),
             lambda w: step(kernel(w), "Build the kernel").update(
                 env={"QEMU_KERNEL_CACHE_SIGNING_KEY": "${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"}),
-            lambda w: step(kernel(w), "kernel-restore")["with"].update(**{"lookup-only": True}),
-            lambda w: kernel(w)["steps"].remove(step(kernel(w), "Verify the cached kernel")),
-            lambda w: step(kernel(w), "Verify the cached kernel").update(**{"continue-on-error": True}),
-            lambda w: step(kernel(w), "Save the signed kernel").update(**{"if": "${{ always() }}"}),
+            lambda w: step(kernel(w), "Build the kernel").update(env={"GH_TOKEN": "${{ github.token }}"}),
+            lambda w: step(kernel(w), "Sign the kernel")["env"].update(GH_TOKEN="${{ github.token }}"),
+            lambda w: kernel(w)["env"].update(GH_TOKEN="${{ github.token }}"),
+            lambda w: step(kernel(w), "kernel-fetch").update(
+                run='bash scripts/qemu-kernel-cache.sh fetch "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-kernel-cache"'
+                    ' >>"${GITHUB_OUTPUT}" || echo hit=false >>"${GITHUB_OUTPUT}"'),
+            lambda w: kernel(w)["steps"].remove(step(kernel(w), "Verify the published kernel")),
+            lambda w: step(kernel(w), "Verify the published kernel").update(**{"continue-on-error": True}),
+            lambda w: step(kernel(w), "Publish the signed kernel").update(**{"if": "${{ always() }}"}),
+            lambda w: step(kernel(w), "Prune week-old kernel assets").update(**{"continue-on-error": True}),
+            lambda w: evidence(w)["steps"].append(copy.deepcopy(step(kernel(w), "Prune week-old kernel assets"))),
             lambda w: w["concurrency"].update(**{"cancel-in-progress": True}),
             lambda w: w[True]["push"].update(branches=["**"]),
             lambda w: w[True]["push"]["paths"].pop(),
-            lambda w: w[True].pop("schedule"),
+            lambda w: w[True].update(schedule=[{"cron": "23 4 * * *"}]),
         ]
         policy.check(self.workflow, self.producers)
         for mutate in mutations:

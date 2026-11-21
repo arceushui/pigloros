@@ -854,6 +854,10 @@ impl crate::UnitHost for SystemdTransientUnitTransport {
         self.release_resources(started, cgroup)
     }
 
+    fn evidence_timed(evidence: &crate::ReleaseResources) -> bool {
+        evidence.baseline().observed_at_ns().is_some()
+    }
+
     async fn stop(
         &self,
         unit_name: TransientServiceUnitName,
