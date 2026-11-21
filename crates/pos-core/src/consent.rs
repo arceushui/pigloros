@@ -730,6 +730,33 @@ pub struct ConsentRevocationReservation {
     completed: bool,
 }
 
+/// Opaque capability of the owner process to append `consent.granted.v2`
+/// (ADR-137 L8).
+///
+/// It is minted once at the owner composition root from fresh randomness and
+/// is not derived from a [`ConsentAuthority`] or the Gateway consent lease.
+/// The root binds it with
+/// [`EventStore::bind_owner_consent_v2_permit`](crate::EventStore::bind_owner_consent_v2_permit)
+/// before any consumer gets a handle. Only the test-support
+/// `mint_owner_consent_v2_permit` mints it until activation (ADR-137 G2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct OwnerConsentV2PermitV1 {
+    nonce: [u8; 32],
+}
+
+impl OwnerConsentV2PermitV1 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) const fn from_nonce(nonce: [u8; 32]) -> Self {
+        Self { nonce }
+    }
+}
+
+impl std::fmt::Debug for OwnerConsentV2PermitV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnerConsentV2PermitV1(..)")
+    }
+}
+
 /// Opaque host capability required to append Gateway-owned consent Events.
 ///
 /// The capability is issued only by a [`ConsentAuthority`]. Requiring it at

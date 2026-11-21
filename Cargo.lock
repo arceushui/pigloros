@@ -5853,6 +5853,7 @@ dependencies = [
  "blake3",
  "bytes",
  "ciborium",
+ "getrandom 0.4.3",
  "proptest",
  "serde",
  "serde_bytes",
