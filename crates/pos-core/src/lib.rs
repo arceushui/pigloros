@@ -61,6 +61,8 @@ pub mod manifest_owner_members;
 pub mod manifest_plugin_roster;
 pub mod manifest_roster_comparison;
 pub mod output_policy;
+#[cfg(any(test, feature = "test-support"))]
+pub mod owner_consent_v2_permit;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
@@ -400,9 +402,10 @@ pub use consent::{
     is_consent_event_type, is_consent_sensitive_event_type, is_subject_controlled_event_type,
     required_modality_for_event, ConsentAppendPermit, ConsentAuthority, ConsentCapabilityToken,
     ConsentCodecError, ConsentError, ConsentGate, ConsentGrantedV1, ConsentRevocationFoldListener,
-    ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1,
-    EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS,
-    MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT, MODALITY_PERSONA,
+    ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1, OwnerConsentV2PermitV1,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE,
+    MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT,
+    MODALITY_PERSONA,
 };
 pub use counterfactual_dependency::{
     CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,

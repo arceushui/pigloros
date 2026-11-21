@@ -61,6 +61,10 @@ name = "memory_erasure"
 harness = false
 
 [[test]]
+name = "owner_consent_v2_permit_public"
+required-features = ["test-support"]
+
+[[test]]
 name = "recipient_export_publication_faults_public"
 required-features = ["test-support"]
 
