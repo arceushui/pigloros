@@ -15,7 +15,7 @@ use pos_core::{
     CanonicalBytes, EntityId, ErasureContainmentGateV1, EventDraft, EventStore,
     ForkAdmissionCommandCodecErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1,
     ForkAdmissionRecoveryProofV1, Hash, Kind, PrincipalRefV1, PublicKey, Signature, TimelineId,
-    WallTime,
+    TimelineMeta, WallTime,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
@@ -3242,6 +3242,73 @@ fn memory_fcc1_commits_far1_and_rolls_back_rejected_operations() -> Result<(), B
 #[test]
 fn sqlite_fcc1_commits_far1_and_rolls_back_rejected_operations() -> Result<(), Box<dyn Error>> {
     assert_fcc1_and_atomic_recovery(&mut SqliteStore::open_in_memory()?)
+}
+
+/// ADR-136 §1: an FCC1 child inherits its parent's owner, read in the
+/// commit's transaction, and the child of an unowned parent stays unowned.
+fn assert_fcc1_child_inherits_the_parent_owner<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1 + EventStore,
+{
+    bind_open_gate(store)?;
+    let host = ForkHostSigningKeyV1::from_seed([61; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([62; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let principal = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [63; 32],
+        u64::MAX,
+        "service-owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &principal)?;
+    let owner = EntityId::new();
+    let owned_parent =
+        store.create_timeline_with_meta(TimelineMeta::root_owned("owned-parent", owner))?;
+    let unowned_parent = store.create_timeline("unowned-parent")?;
+    for (operation, parent, expected) in [
+        ([64; 32], owned_parent.id(), Some(owner)),
+        ([65; 32], unowned_parent.id(), None),
+    ] {
+        let command = fork_command(
+            store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            operation,
+            parent,
+            "admitted-child",
+        )?;
+        let ForkAdmissionOperationResultV1::Fork(receipt) =
+            store.execute_fork_admission_command(&session, &policy, &command)?
+        else {
+            return Err("FCC1 did not return a FAR1 receipt".into());
+        };
+        let child = store
+            .get_timeline(receipt.child_id)?
+            .ok_or("the admitted child is missing")?;
+        assert_eq!(child.meta.owner, expected);
+        assert_eq!(
+            child.meta.fork_point.map(|(forked, _)| forked),
+            Some(parent)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn memory_fcc1_child_inherits_the_parent_owner() -> Result<(), Box<dyn Error>> {
+    assert_fcc1_child_inherits_the_parent_owner(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_fcc1_child_inherits_the_parent_owner() -> Result<(), Box<dyn Error>> {
+    assert_fcc1_child_inherits_the_parent_owner(&mut SqliteStore::open_in_memory()?)
 }
 
 #[test]
