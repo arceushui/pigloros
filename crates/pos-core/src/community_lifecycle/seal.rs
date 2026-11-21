@@ -212,7 +212,7 @@ fn validate_list(list: CommunityDigestListV1<'_>) -> Result<()> {
     }
 }
 
-fn encode_list(out: &mut Vec<u8>, list: CommunityDigestListV1<'_>) {
+pub(super) fn encode_list(out: &mut Vec<u8>, list: CommunityDigestListV1<'_>) {
     encode_head(out, 4, list.len() as u64);
     for hash in list.iter() {
         encode_hash(out, hash);
@@ -220,9 +220,17 @@ fn encode_list(out: &mut Vec<u8>, list: CommunityDigestListV1<'_>) {
 }
 
 pub(super) fn read_list<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityDigestListV1<'a>> {
+    read_bounded_list(cursor, MAX_COMMUNITY_MEMBERS_V1)
+}
+
+/// Borrow at most `maximum` exact 32-byte digest rows.
+pub(super) fn read_bounded_list<'a>(
+    cursor: &mut CborCursor<'a>,
+    maximum: usize,
+) -> Result<CommunityDigestListV1<'a>> {
     read_head(cursor, 4).and_then(|count| {
         let count = usize::try_from(count).unwrap_or(usize::MAX);
-        if count > MAX_COMMUNITY_MEMBERS_V1 {
+        if count > maximum {
             return Err(Error::BoundsExceeded);
         }
         cursor
