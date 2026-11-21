@@ -16,10 +16,10 @@ use std::time::Duration;
 use community_initialization_fixture::*;
 use plugin_trust_registry_fixtures::{release_one, release_two, ManifestSpec};
 use pos_core::community_lifecycle::{
-    CommunityDurableProfileInputV1, CommunityDurableProfileV1, CommunityLifecycleErrorV1 as Error,
-    CommunityPluginHostErrorV1 as Host, CommunityProfileRetentionV1,
-    CommunityQuarantineDispositionV1 as Disposition, CommunityQuarantineOutcomeV1,
-    CommunityQuarantineReasonV1 as Reason, RevocationBasisV1 as Basis, TrustDenialBasisV1,
+    CommunityDurableProfileV1, CommunityLifecycleErrorV1 as Error,
+    CommunityPluginHostErrorV1 as Host, CommunityQuarantineDispositionV1 as Disposition,
+    CommunityQuarantineOutcomeV1, CommunityQuarantineReasonV1 as Reason,
+    RevocationBasisV1 as Basis, TrustDenialBasisV1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash, ImplementationKeyV1};
 use pos_store::community::CommunityQuarantineReceiptV1;
@@ -38,6 +38,7 @@ fn set_reason_with(
     claim: Claim<'_>,
 ) -> Fallible<Result<CommunityQuarantineReceiptV1, Error>> {
     with_set_reason(
+        &SEAL,
         case,
         profile,
         manifest,
@@ -395,25 +396,6 @@ fn the_writer_refuses_at_the_command_bound() -> TestResult {
     Ok(())
 }
 
-/// The CDP1 `rows` under `quarantine` as its quarantine horizon.
-fn profile_with_quarantine<'a>(
-    rows: &'a [pos_core::community_lifecycle::CommunityProfileMemberV1<'a>],
-    catalogue: Hash,
-    quarantine: u64,
-) -> Fallible<CommunityDurableProfileV1<'a>> {
-    Ok(CommunityDurableProfileV1::new(
-        CommunityDurableProfileInputV1 {
-            retention: CommunityProfileRetentionV1 {
-                quarantine_not_after_micros: quarantine,
-                ..profile_until(rows, HORIZON, hash(1), catalogue)?
-                    .as_input()
-                    .retention
-            },
-            ..*profile_until(rows, HORIZON, hash(1), catalogue)?.as_input()
-        },
-    )?)
-}
-
 /// A case whose generation was initialized under a CDP1 with quarantine
 /// horizon `quarantine`.
 fn case_with_quarantine(quarantine: u64) -> Fallible<QuarantineCase> {
@@ -477,6 +459,38 @@ fn another_implementation_of_the_entry_is_not_admitted() -> TestResult {
             Claim {
                 implementation: Some(&other),
                 ..claim(Basis::Artifact)
+            }
+        )?
+        .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A5.5 step 4 (review M2): original-outcome discovery needs only the
+/// metadata decision, so a lost-reply retry returns its original CQO1 even
+/// when the trust evidence no longer re-verifies, while a new operation on
+/// that evidence gives 12.
+#[test]
+fn a_retry_returns_its_original_without_re_verifying_the_producer() -> TestResult {
+    let mut case = QuarantineCase::new(&SEAL, Revocation::Artifact)?;
+    let revoked_tps1 = Hash::from_bytes(case.material.tps1_digest());
+    let first = Claim {
+        tps1: Some(revoked_tps1),
+        ..claim(Basis::Artifact)
+    };
+    let receipt = set_reason(&mut case, first)??;
+    // The trust gate's evidence is now the genesis policy, which does not
+    // revoke the release.
+    case.material = case.domain.harness.env.genesis()?;
+    assert_eq!(set_reason(&mut case, first)??, receipt);
+    assert_eq!(
+        set_reason(
+            &mut case,
+            Claim {
+                control: [0x43; 16],
+                ledger: Some(receipt.selected_ledger_digest()),
+                ..first
             }
         )?
         .err(),

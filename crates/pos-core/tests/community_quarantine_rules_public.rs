@@ -288,8 +288,7 @@ fn the_quarantine_delta_reproduces_its_preimage() -> TestResult {
     Ok(())
 }
 
-/// No row, 65 rows, a zero digest, unordered rows and a repeated key are
-/// refused.
+/// No row, 65 rows, unordered rows and a repeated key are refused.
 #[test]
 fn the_quarantine_delta_refuses_bad_rows() {
     let over: Vec<Row> = (1..=65).map(|key| row(key * 3)).collect();
@@ -301,19 +300,7 @@ fn the_quarantine_delta_refuses_bad_rows() {
         community_quarantine_delta_digest_v1(&over).err(),
         Some(Error::BoundsExceeded)
     );
-    let zero = |field: usize| {
-        let mut bad = row(1);
-        match field {
-            0 => bad.quarantine_key_digest = Hash::zero(),
-            1 => bad.ledger_digest = Hash::zero(),
-            _ => bad.outcome_digest = Hash::zero(),
-        }
-        bad
-    };
     for rows in [
-        vec![zero(0)],
-        vec![zero(1)],
-        vec![zero(2)],
         vec![row(10), row(1)],
         vec![
             row(1),

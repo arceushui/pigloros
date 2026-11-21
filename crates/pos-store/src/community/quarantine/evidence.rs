@@ -123,14 +123,24 @@ impl MemoryCommunityDomainV1 {
             .get(&operation.key)
             .filter(|ledger| ledger.reasons.iter().any(|row| row.reason == reason))
             .map_or_else(
-                || self.stage_applied(seal, lifecycle, operation),
+                || {
+                    if operation.authority.bound.as_micros() > operation.failure_horizon {
+                        Err(Error::EvidenceExpired)
+                    } else {
+                        self.stage_applied(seal, lifecycle, operation)
+                    }
+                },
                 |ledger| self.stage_already(operation, ledger),
             )
     }
 
     /// An active reason keeps its evidence and horizon (annex): only the
     /// CQC1 and the `AlreadyQuarantined` CQO1 naming the existing CQR1 are
-    /// persisted, under a fresh metadata key.
+    /// persisted, with the CCI1 key copy, under a fresh metadata key, as one
+    /// inventory step (owner 2026-11-21, #560). No CFO1 is written, so the
+    /// CFO1 and quarantine horizons bind nothing here and are not checked:
+    /// the CQC1's CFO1 digest commits to the request content and is not a
+    /// pointer to a stored CFO1 (owner 2026-11-21, #560).
     fn stage_already(
         &self,
         operation: &OperationV1<'_>,
@@ -161,7 +171,7 @@ impl MemoryCommunityDomainV1 {
                 ];
                 self.seal_all(operation, None, &plaintexts)
                     .map(|(key, records)| {
-                        self.staged(operation, vec![key], records, None, None, receipt)
+                        self.staged(operation, (key, None), records, None, None, receipt)
                     })
             })
         })
@@ -292,7 +302,7 @@ impl MemoryCommunityDomainV1 {
                         .map(|(key, records)| {
                             let mut staged = self.staged(
                                 operation,
-                                vec![key, protected.cohort_key],
+                                (key, Some(protected.cohort_key)),
                                 records,
                                 Some(StagedEvidenceV1 {
                                     batch: protected.batch,
@@ -450,11 +460,12 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// The staged commit around `records` and `receipt`.
+    /// The staged commit around `records` and `receipt`, retaining the
+    /// metadata key that sealed them and the CFO1 cohort key, if any.
     fn staged(
         &self,
         operation: &OperationV1<'_>,
-        keys: Vec<VaultKeyV1>,
+        (metadata, cohort): (VaultKeyV1, Option<VaultKeyV1>),
         records: Vec<SealedMetadataV1>,
         evidence: Option<StagedEvidenceV1>,
         admission: Option<CommunityArtifactAdmissionV1>,
@@ -462,9 +473,8 @@ impl MemoryCommunityDomainV1 {
     ) -> StagedSetReasonV1 {
         let call = operation.call;
         let failure = &call.failure.0;
-        let metadata_key = keys.first().map_or([0; 16], |key| {
-            key.intent().as_input().protection_operation_id
-        });
+        let metadata_key = metadata.intent().as_input().protection_operation_id;
+        let keys: Vec<VaultKeyV1> = std::iter::once(metadata).chain(cohort).collect();
         StagedSetReasonV1 {
             key: (failure.timeline, call.control_operation_id),
             committed: CommittedQuarantineControlV1 {

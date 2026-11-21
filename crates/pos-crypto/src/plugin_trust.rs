@@ -408,18 +408,6 @@ impl ValidatedPluginManifestProjectionV1 {
         self.pmf1_digest
     }
 
-    /// The exact PMF1 field 2 Plugin ID text.
-    #[must_use]
-    pub fn plugin_id(&self) -> &str {
-        &self.plugin_id
-    }
-
-    /// The PMF1 field 27 release digest.
-    #[must_use]
-    pub const fn release_digest(&self) -> [u8; 32] {
-        self.release_digest
-    }
-
     fn is_complete(&self) -> bool {
         self.role == 3
             && self.epoch != 0

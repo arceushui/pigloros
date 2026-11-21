@@ -7,7 +7,7 @@
 use pos_core::community_lifecycle::{
     community_catalogue_owner_v1, CommunityArtifactOperationV1, CommunityAuthorityEvidenceV1,
     CommunityLifecycleErrorV1 as Error, CommunityMaterializationV1, CommunityProducerBindingV1,
-    CommunityQuarantineDispositionV1 as Disposition,
+    CommunityQuarantineDispositionV1 as Disposition, CommunityQuarantineKeyV1,
     CommunityQuarantineReasonEvidenceV1 as Evidence, CommunityQuarantineReasonV1 as Reason,
     CommunityQuarantineRevisionV1, RevocationBasisV1 as Basis,
 };
@@ -16,11 +16,14 @@ use pos_core::{
     AuthorityTrustRootSealV1, ErasureArtifactClassV1,
 };
 
-use super::{CommunityQuarantineReceiptV1, SetReasonPreparedV1, StagedSetReasonV1};
+use super::{
+    CommunityQuarantineReceiptV1, QuarantineLedgerV1, SetReasonPreparedV1, StagedSetReasonV1,
+};
 use crate::community::MemoryCommunityDomainV1;
 use crate::community_initialization_fixture::{
-    claim, hash, profile_until, target, with_set_reason, Claim, Fallible, QuarantineCase,
-    Revocation, Roster, CONTROL, GENERATION, HORIZON, METADATA_LEAF,
+    claim, hash, initial_head, initialize_target, profile_until, profile_with_quarantine, target,
+    with_set_reason, Bootstrapped, Claim, Fallible, QuarantineCase, Revocation, Roster, CONTROL,
+    ENTRIES, EXPIRES, GENERATION, HORIZON, METADATA_LEAF,
 };
 use crate::memory::MemoryStore;
 use crate::plugin_trust_registry_fixtures::release_one;
@@ -38,6 +41,7 @@ fn staged(case: &mut QuarantineCase, claim: Claim<'_>) -> Fallible<StagedSetReas
     let rows = roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
     let prepared = with_set_reason(
+        &SEAL,
         case,
         &profile,
         &release_one(),
@@ -63,6 +67,7 @@ fn set_reason(
     let rows = roster.rows()?;
     let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
     with_set_reason(
+        &SEAL,
         case,
         &profile,
         &release_one(),
@@ -370,5 +375,74 @@ fn the_reservation_refuses_another_domain() -> TestResult {
         set_reason(&mut case, claim(Basis::Artifact))?.err(),
         Some(Error::EvidenceUnavailable)
     );
+    Ok(())
+}
+
+/// Owner 2026-11-21 (#560), review L3: an already active reason writes no
+/// CFO1, so the CFO1 and quarantine horizons are not checked, even when the
+/// bound is past the generation's quarantine horizon.
+#[test]
+fn an_active_reason_skips_the_horizon_check() -> TestResult {
+    let roster = Roster::release_one()?;
+    let (mut domain, material) = Bootstrapped::revoked(&SEAL, &roster, Revocation::Artifact)?;
+    let rows = roster.rows()?;
+    let short = profile_with_quarantine(&rows, domain.world.catalogue, EXPIRES - 1)?;
+    let receipt = initialize_target(&SEAL, &mut domain, &roster, &short)??;
+    let mut case = QuarantineCase {
+        head: initial_head(&receipt)?,
+        domain,
+        roster: Roster::release_one()?,
+        material,
+    };
+    let implementation = Roster::release_one()?.implementation;
+    let key = CommunityQuarantineKeyV1::new(target(), ENTRIES[0], &implementation)?.digest();
+    let head = hash(0x93);
+    case.domain.world.domain.quarantine_index.insert(
+        key,
+        QuarantineLedgerV1 {
+            head,
+            ordinal: 1,
+            reasons: vec![Evidence {
+                reason: Reason::Revoked,
+                failure_evidence_digest: hash(0x94),
+            }],
+            evidence_not_after_micros: EXPIRES - 1,
+        },
+    );
+    let outcome = with_set_reason(
+        &SEAL,
+        &mut case,
+        &short,
+        &release_one(),
+        Claim {
+            ledger: Some(head),
+            ..claim(Basis::Artifact)
+        },
+        |world, metadata, context, call| {
+            world
+                .domain
+                .set_quarantine_reason(&SEAL, context, &mut world.authority, metadata, call)
+        },
+    )??;
+    assert!(outcome.disposition() == Disposition::AlreadyQuarantined);
+    assert_eq!(outcome.selected_ledger_digest(), head);
+    // A new reason under the same horizon is still `EvidenceExpired`.
+    case.domain.world.domain.quarantine_index.clear();
+    let refused = with_set_reason(
+        &SEAL,
+        &mut case,
+        &short,
+        &release_one(),
+        Claim {
+            control: [0x44; 16],
+            ..claim(Basis::Artifact)
+        },
+        |world, metadata, context, call| {
+            world
+                .domain
+                .set_quarantine_reason(&SEAL, context, &mut world.authority, metadata, call)
+        },
+    )?;
+    assert_eq!(refused.err(), Some(Error::EvidenceExpired));
     Ok(())
 }

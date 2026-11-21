@@ -188,25 +188,18 @@ pub struct CommunityQuarantineDeltaRowV1 {
 ///
 /// # Errors
 /// Returns `BoundsExceeded` for no row or more than 64 rows, and
-/// `InvalidBinding` for a zero digest, rows out of strict triple order or
-/// two rows of one quarantine key.
+/// `InvalidBinding` for rows out of strict key order, including two rows of
+/// one quarantine key.
 pub fn community_quarantine_delta_digest_v1(
     rows: &[CommunityQuarantineDeltaRowV1],
 ) -> Result<Hash> {
     if !(1..=64).contains(&rows.len()) {
         return Err(Error::BoundsExceeded);
     }
-    let invalid = rows.iter().any(|row| {
-        [
-            row.quarantine_key_digest,
-            row.ledger_digest,
-            row.outcome_digest,
-        ]
-        .contains(&Hash::zero())
-    }) || rows
+    if rows
         .windows(2)
-        .any(|pair| pair[0].quarantine_key_digest >= pair[1].quarantine_key_digest);
-    if invalid {
+        .any(|pair| pair[0].quarantine_key_digest >= pair[1].quarantine_key_digest)
+    {
         return Err(Error::InvalidBinding);
     }
     let mut preimage = Zeroizing::new(Vec::with_capacity(2 + rows.len() * 103));

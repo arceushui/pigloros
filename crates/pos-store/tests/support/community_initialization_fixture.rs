@@ -1291,13 +1291,16 @@ pub const fn claim(basis: RevocationBasisV1) -> Claim<'static> {
     }
 }
 
-/// Build the sealed failure, context and call of `claim` on `case` with
-/// the release `manifest` and the installed CDP1 `profile`, and hand them
-/// to `run` with the domain's world and metadata authority.
+/// Run one `SetReason` of `claim` on `case` through `run`.
+///
+/// The failure is sealed with `seal` and names the release `manifest`; the
+/// context installs the CDP1 `profile`. `run` gets the domain's world and
+/// metadata authority.
 ///
 /// # Errors
 /// Returns the fixture construction error.
 pub fn with_set_reason<T>(
+    seal: &'static AuthorityTrustRootSealV1,
     case: &mut QuarantineCase,
     profile: &CommunityDurableProfileV1<'_>,
     manifest: &ManifestSpec,
@@ -1313,7 +1316,7 @@ pub fn with_set_reason<T>(
     let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
     let retained = Hash::from_bytes(case.material.tps1_digest());
     let failure = CommunityPreExecutionFailureV1::new(
-        &COMPOSITION_SEAL,
+        seal,
         CommunityPreExecutionFailureInputV1 {
             timeline: claim.timeline,
             stable_entry: claim.entry,
@@ -1352,5 +1355,24 @@ pub fn with_set_reason<T>(
     ))
 }
 
-/// The seal a fixture-built pre-execution failure is sealed with.
-const COMPOSITION_SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
+/// The CDP1 `rows` under `quarantine` as its quarantine horizon.
+///
+/// # Errors
+/// Returns the CDP1 refusal.
+pub fn profile_with_quarantine<'a>(
+    rows: &'a [CommunityProfileMemberV1<'a>],
+    catalogue: Hash,
+    quarantine: u64,
+) -> Fallible<CommunityDurableProfileV1<'a>> {
+    Ok(CommunityDurableProfileV1::new(
+        CommunityDurableProfileInputV1 {
+            retention: CommunityProfileRetentionV1 {
+                quarantine_not_after_micros: quarantine,
+                ..profile_until(rows, HORIZON, hash(1), catalogue)?
+                    .as_input()
+                    .retention
+            },
+            ..*profile_until(rows, HORIZON, hash(1), catalogue)?.as_input()
+        },
+    )?)
+}

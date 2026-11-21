@@ -68,6 +68,7 @@ use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::sealer::SealedMetadataV1;
 use super::store_domain::CommunityStoreDomainV1;
 use super::vault::VaultKeyV1;
+#[cfg(target_os = "linux")]
 use crate::plugin_trust_registry::{
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
 };
@@ -288,6 +289,35 @@ pub(super) struct AuthorityV1 {
     pub(super) trust_snapshot_digest: Hash,
 }
 
+/// The metadata `write` decision of one `SetReason` with the call's
+/// reservation identity and bound, before the producer is re-verified.
+pub(super) struct MetadataWriteV1 {
+    reservation_id: u64,
+    sampled_at: WallTime,
+    bound: WallTime,
+    request: AuthorizationRequestV1,
+    decision: AuthorizationDecisionV1,
+    decision_digest: Hash,
+    leaf_grant_id: Hash,
+}
+
+impl MetadataWriteV1 {
+    /// The authority once the producer's re-verification read
+    /// `trust_snapshot_digest` under the guard.
+    fn with_trust(self, trust_snapshot_digest: Hash) -> AuthorityV1 {
+        AuthorityV1 {
+            reservation_id: self.reservation_id,
+            sampled_at: self.sampled_at,
+            bound: self.bound,
+            request: self.request,
+            decision: self.decision,
+            decision_digest: self.decision_digest,
+            leaf_grant_id: self.leaf_grant_id,
+            trust_snapshot_digest,
+        }
+    }
+}
+
 /// The facts every staging step reads.
 pub(super) struct OperationV1<'c> {
     pub(super) context: CommunityQuarantineContextV1<'c>,
@@ -377,7 +407,7 @@ impl MemoryCommunityDomainV1 {
         let failure = &call.failure.0;
         let key = check_shape(&call)?;
         let reservation = lifecycle.reserve_control(self)?;
-        let authority = self.authority(context, &reservation, lifecycle, metadata, failure)?;
+        let write = self.metadata_write(context, &reservation, metadata)?;
         let bound = SetReasonBoundV1 {
             key,
             expected_ledger: call.expected_ledger_digest,
@@ -398,6 +428,8 @@ impl MemoryCommunityDomainV1 {
                 Err(Error::Conflict)
             };
         }
+        let trust_snapshot_digest = self.verify_failure(lifecycle.trust_scope(), failure)?;
+        let authority = write.with_trust(trust_snapshot_digest);
         let member = self.member(context, &call)?;
         let current = self.quarantine_index.get(&key);
         if current.map(|ledger| ledger.head) != call.expected_ledger_digest {
@@ -418,24 +450,20 @@ impl MemoryCommunityDomainV1 {
                     .metadata_not_after_micros,
             ),
         };
-        if operation.authority.bound.as_micros() > operation.failure_horizon {
-            return Err(Error::EvidenceExpired);
-        }
         let bound = operation.authority.bound;
         self.stage_set_reason(seal, lifecycle, &operation)
             .map(|staged| SetReasonPreparedV1::Staged(Box::new(staged), reservation, bound))
     }
 
-    /// Step 3, after the step-2 reservation: its bound, the metadata
-    /// `write` decision and the producer's re-verification.
-    fn authority(
+    /// Step 3, after the step-2 reservation: its bound and the metadata
+    /// `write` decision, which alone admits original-outcome discovery
+    /// (A5.5 step 4).
+    fn metadata_write(
         &self,
         context: CommunityQuarantineContextV1<'_>,
         reservation: &TrustedClockReservationV1,
-        lifecycle: &CommunityLifecycleAuthorityV1,
         metadata: &mut CommunityMetadataAuthorityV1,
-        failure: &CommunityPreExecutionFailureInputV1<'_>,
-    ) -> Result<AuthorityV1, Error> {
+    ) -> Result<MetadataWriteV1, Error> {
         let policy = context.binding.metadata_policy;
         let bound = reservation
             .decision_bound()
@@ -454,21 +482,15 @@ impl MemoryCommunityDomainV1 {
                     .ok()
             })
             .and_then(|(request, decision)| {
-                decision
-                    .encode()
-                    .ok()
-                    .map(|aud| Hash::from_bytes(*blake3::hash(aud.as_slice()).as_bytes()))
-                    .zip(self.verify_failure(lifecycle.trust_scope(), failure).ok())
-                    .map(|(decision_digest, trust_snapshot_digest)| AuthorityV1 {
-                        reservation_id: reservation.reservation_seq(),
-                        sampled_at: reservation.sampled_at(),
-                        bound,
-                        request,
-                        decision,
-                        decision_digest,
-                        leaf_grant_id,
-                        trust_snapshot_digest,
-                    })
+                decision.encode().ok().map(|aud| MetadataWriteV1 {
+                    reservation_id: reservation.reservation_seq(),
+                    sampled_at: reservation.sampled_at(),
+                    bound,
+                    request,
+                    decision_digest: Hash::from_bytes(*blake3::hash(aud.as_slice()).as_bytes()),
+                    decision,
+                    leaf_grant_id,
+                })
             })
             .ok_or(Error::EvidenceUnavailable)
     }
@@ -522,25 +544,22 @@ impl MemoryCommunityDomainV1 {
             .map(drop)
     }
 
-    /// The R9.9(7) re-verification under the guard: the evidence is the
-    /// member's release in the installed trust scope, this domain's own
-    /// registry reports it revoked with the claimed basis, and the claimed
-    /// TPS1 digest is the one the registry retains now, which it returns.
+    /// The R9.9(7) re-verification under the guard: the evaluated TPS1 is
+    /// the one the installed trust scope retains now (so its anchor is that
+    /// scope's), this domain's own registry reports the release revoked with
+    /// the claimed basis, and the claimed TPS1 digest is the retained one,
+    /// which it returns. The release itself is bound through its PMF1
+    /// (whose field 27 is the release digest) against the member's CMB1.
     fn verify_failure(
         &self,
         scope: &str,
         failure: &CommunityPreExecutionFailureInputV1<'_>,
     ) -> Result<Hash, Error> {
-        let projection = failure.trust.projection;
-        let implementation = failure.implementation;
-        let named = failure.trust.anchor.scope() == scope
-            && projection.plugin_id() == implementation.plugin_id()
-            && projection.release_digest() == *implementation.release_digest().as_bytes();
         let revoked = revocation_basis(self.evaluate_release(failure.trust))
             .map(|basis| CommunityPluginHostErrorV1::ArtifactRevoked { basis });
         CommunityStoreDomainV1::plugin_trust_policy(self, scope).and_then(|policy| {
             let digest = Hash::from_bytes(policy.tps1_digest());
-            if named
+            if policy.tps1_bytes() == failure.trust.tps1_bytes
                 && revoked == Some(failure.host_failure)
                 && digest == failure.trust_policy_snapshot_digest
             {
@@ -562,24 +581,21 @@ impl MemoryCommunityDomainV1 {
         let failure = &call.failure.0;
         self.read_selection(context)
             .and_then(|(anchor, selection, selection_address)| {
-                current_floor(&selection, failure.timeline)
-                    .and_then(|(generation, head)| {
-                        match (
-                            generation == call.expected_generation,
-                            head == call.expected_state_head_digest,
-                        ) {
-                            (false, _) => Err(Error::StaleGeneration),
-                            (true, false) => Err(Error::StaleFrontier),
-                            (true, true) => {
-                                self.admitted_member(context, failure, (generation, head))
-                            }
-                        }
-                    })
-                    .map(|found| MemberV1 {
-                        anchor,
-                        selection_address,
-                        ..found
-                    })
+                current_floor(&selection, failure.timeline).and_then(|(generation, head)| {
+                    match (
+                        generation == call.expected_generation,
+                        head == call.expected_state_head_digest,
+                    ) {
+                        (false, _) => Err(Error::StaleGeneration),
+                        (true, false) => Err(Error::StaleFrontier),
+                        (true, true) => self.admitted_member(
+                            context,
+                            failure,
+                            (generation, head),
+                            (anchor, selection_address),
+                        ),
+                    }
+                })
             })
     }
 
@@ -621,12 +637,14 @@ impl MemoryCommunityDomainV1 {
     /// The first-use proof: the committed initialization of T whose CGA1
     /// admits `generation`, and the roster row and sealed CMB1 the
     /// failure's entry and IMK1 name, under the generation's own CDP1. The
-    /// CMB1's PMF1 must be the re-verified release's.
+    /// CMB1's PMF1 must be the re-verified release's. `anchor` and
+    /// `selection_address` are the CMA1 anchor and the read CSI1's address.
     fn admitted_member(
         &self,
         context: CommunityQuarantineContextV1<'_>,
         failure: &CommunityPreExecutionFailureInputV1<'_>,
         (generation, head): ([u8; 16], Hash),
+        (anchor, selection_address): ((TimelineId, [u8; 16]), Hash),
     ) -> Result<MemberV1, Error> {
         let roster = context.profile.as_input().roster;
         self.initializations
@@ -687,8 +705,8 @@ impl MemoryCommunityDomainV1 {
                                 negotiated_tuple_digest: fields.negotiated_tuple_digest,
                                 pmf1_digest: fields.pmf1_digest,
                                 owner_binding_digest: owner.digest(),
-                                anchor: (failure.timeline, generation),
-                                selection_address: Hash::zero(),
+                                anchor,
+                                selection_address,
                             }
                         })
                     })
