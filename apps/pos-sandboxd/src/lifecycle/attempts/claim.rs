@@ -67,6 +67,10 @@ pub type InterruptedInput<'l> = Box<dyn FnOnce() -> FailedInput + Send + 'l>;
 /// response and the lifecycle stays open. Only a refusal while it is
 /// settled, which means the caller named another attempt or grant, faults
 /// the attempt and quarantines the lifecycle.
+///
+/// The interrupted input is recorded and signed in `Drop`, possibly during
+/// unwinding, so its source must be trivial and never panic, and its signer
+/// local and CPU-bound; see [`GrantWrite::written`].
 pub struct AwaitedInput<
     'l,
     I = VerifiedStagedInput,
@@ -261,6 +265,15 @@ impl<'l, I> GrantWrite<'l, I> {
     /// input is awaited. `interrupted` supplies the failed input should the
     /// exchange end without one, and `signer` signs its response under
     /// `admitted`.
+    ///
+    /// Both are used inside the [`AwaitedInput`]'s `Drop`, possibly while
+    /// the thread unwinds:
+    /// * `interrupted` must be trivial: it returns prebuilt state, does no
+    ///   I/O and never panics, since a panic during unwinding aborts the
+    ///   process;
+    /// * `signer` must be local and CPU-bound (an in-process ed25519 key),
+    ///   since the response is signed synchronously on the dropping thread;
+    ///   a remote or HSM signer would stall the executor.
     #[must_use = "a dropped awaited input records an interrupted input"]
     pub fn written<R: RuntimeAttestationSigner>(
         mut self,
