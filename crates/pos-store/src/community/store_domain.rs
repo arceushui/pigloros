@@ -20,6 +20,8 @@ use pos_core::community_lifecycle::{
     community_authority_bindings_digest_v1, CommunityAuthorityViewRowV1, CommunityClockLatchV1,
     CommunityLifecycleErrorV1 as Error,
 };
+use pos_core::hasher::Hasher;
+use pos_core::store::EventStore;
 #[cfg(target_os = "linux")]
 use pos_core::trusted_clock::open_release_guard;
 use pos_core::trusted_clock::{
@@ -90,6 +92,11 @@ pub trait CommunityStoreDomainV1 {
         mono: &mut dyn GuardMonotonicSourceV1,
         bound: WallTime,
     ) -> Result<(), Error>;
+
+    /// The domain's own Event history and the pinned Hasher its chains are
+    /// built with: the store-side re-check of an observation (ADR-129
+    /// revision 9, R9.6). Reads keep the store's own erasure fences.
+    fn event_history(&self) -> (&dyn EventStore, &dyn Hasher);
 
     /// The domain's current community inventory generation (owner decision
     /// on #560, note 22722, G5): 0 at bootstrap, incremented once per
@@ -232,6 +239,10 @@ impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
             .filter(|now| *now < bound.as_micros())
             .map(drop)
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    fn event_history(&self) -> (&dyn EventStore, &dyn Hasher) {
+        (&self.store, self.store.event_hasher())
     }
 
     fn inventory_generation(&self) -> u64 {

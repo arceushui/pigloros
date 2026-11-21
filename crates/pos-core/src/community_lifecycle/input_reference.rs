@@ -323,6 +323,16 @@ pub enum CommunityTypedInputRefV1<'a> {
         /// Private owner record commitment.
         private_record_digest: Hash,
     },
+    /// `[4, source_T, genesis_chain_hash]` (`SourceGenesis`, revision 9,
+    /// R9.3): the immutable seq-0 chain hash of an empty-history source.
+    /// Admitted only as the single Event-source input of an Observation
+    /// whose cut is empty; its scope is `H("ScopeSet", [])`.
+    SourceGenesis {
+        /// Source Timeline: T, or the root of a Fork chain.
+        timeline: TimelineId,
+        /// The source owner's pinned-Hasher genesis chain hash.
+        genesis_chain_hash: Hash,
+    },
 }
 
 impl CommunityTypedInputRefV1<'_> {
@@ -378,12 +388,15 @@ impl CommunityTypedInputRefV1<'_> {
                     && private_record_digest != Hash::zero(),
             )
             .and_then(|()| locator.validate()),
+            // The pinned Hasher's genesis may be the zero hash; only the
+            // source owner can prove it (R9.3).
+            Self::SourceGenesis { timeline, .. } => require(timeline.inner().to_bytes() != [0; 16]),
         }
     }
 
     /// Exact length of [`Self::encode`]: array head and tag (2), then the
     /// variant's fields.
-    fn encoded_len(self) -> usize {
+    pub(super) fn encoded_len(self) -> usize {
         match self {
             Self::Native(reference) => 2 + reference.encoded_len(),
             Self::Factual { node, .. } => {
@@ -394,10 +407,11 @@ impl CommunityTypedInputRefV1<'_> {
                 2 + 34 + head_len(artifact_class.code()) + 3 * 34
             }
             Self::Metadata { locator, .. } => 2 + 5 + locator.encoded_len() + 2 * 34,
+            Self::SourceGenesis { .. } => 2 + 17 + 34,
         }
     }
 
-    fn encode(self, out: &mut Vec<u8>) {
+    pub(super) fn encode(self, out: &mut Vec<u8>) {
         match self {
             Self::Native(reference) => {
                 out.extend_from_slice(&[0x82, 0]);
@@ -439,11 +453,21 @@ impl CommunityTypedInputRefV1<'_> {
                 encode_hash(out, envelope_address);
                 encode_hash(out, private_record_digest);
             }
+            Self::SourceGenesis {
+                timeline,
+                genesis_chain_hash,
+            } => {
+                out.extend_from_slice(&[0x83, 4]);
+                encode_bytes(out, &timeline.inner().to_bytes(), 2);
+                encode_hash(out, genesis_chain_hash);
+            }
         }
     }
 }
 
-fn read_typed_ref<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityTypedInputRefV1<'a>> {
+pub(super) fn read_typed_ref<'a>(
+    cursor: &mut CborCursor<'a>,
+) -> Result<CommunityTypedInputRefV1<'a>> {
     read_head(cursor, 4).and_then(|fields| {
         read_head(cursor, 0).and_then(|tag| match (fields, tag) {
             (2, 0) => {
@@ -460,6 +484,14 @@ fn read_typed_ref<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityTypedInput
             }),
             (6, 2) => read_artifact_ref(cursor),
             (5, 3) => read_metadata_ref(cursor),
+            (3, 4) => fixed_bytes(cursor).and_then(|timeline| {
+                read_hash(cursor).map(|genesis_chain_hash| {
+                    CommunityTypedInputRefV1::SourceGenesis {
+                        timeline: TimelineId::from_ulid(ulid::Ulid::from_bytes(timeline)),
+                        genesis_chain_hash,
+                    }
+                })
+            }),
             _ => Err(Error::InvalidEncoding),
         })
     })

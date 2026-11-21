@@ -5,6 +5,7 @@ use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityDurableBackendV1 as Backend, CommunityDurableProfileInputV1 as Input,
     CommunityDurableProfileV1 as Profile, CommunityLifecycleErrorV1 as Error,
     CommunityProfileMemberV1 as Member, CommunityProfileRetentionV1 as Retention,
+    COMMUNITY_FOLD_BUDGET_MICROS_V1,
 };
 use pos_core::{Hash, ImplementationKeyV1};
 
@@ -142,6 +143,7 @@ fn expected(
             3836,
             16_384,
             65_536,
+            12_000_000,
         ])?,
         policy(&retention)?,
         policy(&[
@@ -430,6 +432,38 @@ fn retained_profile_requires_exact_policy_bytes_and_all_fourteen_fields() -> Tes
         Profile::validate_canonical_cbor(&vec![0; 1_048_577], input).err(),
         Some(Error::BoundsExceeded)
     );
+    Ok(())
+}
+
+#[test]
+fn limits_carry_the_sixteenth_fold_budget_entry_and_refuse_the_fifteen_entry_form() -> TestResult {
+    // ADR-129 revision 9, R9.7(a) and I82: `fold_budget_micros` is the 16th
+    // `limits_bytes` entry, 12 s, below the 24 s worker result deadline. CDP1
+    // stays version 1. Its retained bytes are compared with the exact
+    // reconstruction, so the earlier 15-entry form is refused.
+    assert_eq!(COMMUNITY_FOLD_BUDGET_MICROS_V1, 12_000_000);
+    let key = key()?;
+    let entries = vec!["entry".into()];
+    let members = roster(&key, &entries)?;
+    let input = input(&members, Backend::RetainedMemory);
+    let expected = expected(0, &key, &entries, [12, 13, 14, 15])?;
+    let profile = Profile::validate_canonical_cbor(&encode(&expected)?, input)?;
+    let mut fifteen = expected;
+    let limits = &mut fields(&mut fifteen)?[9];
+    let mut values: Vec<u64> =
+        ciborium::de::from_reader::<Vec<u64>, _>(limits.as_bytes().ok_or("limits")?.as_slice())?;
+    assert_eq!(values.len(), 16);
+    assert_eq!(values.pop(), Some(12_000_000));
+    *limits = policy(&values)?;
+    let fifteen = encode(&fifteen)?;
+    assert_eq!(
+        Profile::validate_canonical_cbor(&fifteen, input).err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.Community.CDP1.v1\0");
+    hasher.update(&fifteen);
+    assert_ne!(profile.digest().as_bytes(), hasher.finalize().as_bytes());
     Ok(())
 }
 

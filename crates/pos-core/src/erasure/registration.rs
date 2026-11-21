@@ -527,16 +527,7 @@ fn encode_registration(fields: &ArtifactRegistrationFieldsV1) -> Vec<u8> {
     }
     encode_head(&mut out, 4, fields.key_dependencies.len() as u64);
     for dependency in &fields.key_dependencies {
-        out.push(0x85);
-        encode_text(&mut out, dependency.identity.owner_id.as_str());
-        encode_head(&mut out, 0, u64::from(dependency.identity.role.code()));
-        encode_head(&mut out, 0, dependency.identity.epoch);
-        encode_blob(&mut out, dependency.material_digest.as_bytes());
-        out.push(if dependency.private_material_required {
-            0xf5
-        } else {
-            0xf4
-        });
+        super::encode_artifact_key_dependency(&mut out, dependency);
     }
     encode_head(&mut out, 4, fields.child_artifacts.len() as u64);
     for child in &fields.child_artifacts {
@@ -547,11 +538,6 @@ fn encode_registration(fields: &ArtifactRegistrationFieldsV1) -> Vec<u8> {
         out.push(if child.required { 0xf5 } else { 0xf4 });
     }
     out
-}
-
-fn encode_text(out: &mut Vec<u8>, text: &str) {
-    encode_head(out, 3, text.len() as u64);
-    out.extend_from_slice(text.as_bytes());
 }
 
 fn encode_blob(out: &mut Vec<u8>, bytes: &[u8]) {

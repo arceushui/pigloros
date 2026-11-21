@@ -33,7 +33,11 @@ const GRAPH: [u64; 10] = [
 /// that every operation's CBQ1 quote must fit (ADR-129 §2, §5).
 pub const COMMUNITY_SHARED_RECORD_LIMITS_V1: [u64; 3] = [LIMITS[4], LIMITS[5], LIMITS[6]];
 
-const LIMITS: [u64; 15] = [
+/// The CDP1 `limits_bytes` deterministic fold budget, 12 s in microseconds
+/// (ADR-129 revision 9, R9.7(a)): the 16th entry.
+pub const COMMUNITY_FOLD_BUDGET_MICROS_V1: u64 = LIMITS[15];
+
+const LIMITS: [u64; 16] = [
     64,
     256,
     8192,
@@ -49,6 +53,7 @@ const LIMITS: [u64; 15] = [
     3836,
     16_384,
     65_536,
+    12_000_000,
 ];
 const WORKER: [u64; 10] = [
     30_000_000,
@@ -62,6 +67,8 @@ const WORKER: [u64; 10] = [
     1,
     0,
 ];
+// Installation requires the fold budget below the worker result deadline.
+const _: () = assert!(LIMITS[15] < WORKER[2]);
 const ANNOTATION: [u64; 5] = [1_128_333_313, 1024, 1_048_576, 4096, 86_400_000_000];
 const REPLAY: [u64; 3] = [1, 1, 0];
 const _: () = assert!(1024 + MAX_COMMUNITY_MEMBERS_V1 * 512 < MAX_RECORD);
@@ -285,6 +292,26 @@ impl<'a> CommunityDurableProfileV1<'a> {
         encode_policy(&mut out, &ANNOTATION);
         encode_policy(&mut out, &REPLAY);
         out
+    }
+
+    /// `H("RetentionPolicy", retention_bytes)`: the generation's CDP1
+    /// retention-policy digest over the exact canonical `retention_bytes`
+    /// array. It is the lease reference of a native Event's whole-Timeline
+    /// scope row (owner 2026-11-21 (#560), item (c)).
+    #[must_use]
+    pub fn retention_policy_digest(&self) -> Hash {
+        let retention = self.0.retention;
+        let mut bytes = Vec::with_capacity(37);
+        encode_head(&mut bytes, 4, 4);
+        for value in [
+            retention.generation_not_after_micros,
+            retention.recovery_window_micros,
+            retention.quarantine_not_after_micros,
+            retention.metadata_not_after_micros,
+        ] {
+            encode_head(&mut bytes, 0, value);
+        }
+        digest(b"PiglorOS.Community.RetentionPolicy.v1\0", &bytes)
     }
 
     /// Exact CDP1 logical identity, including backend, modes through CNT1 and policy.
