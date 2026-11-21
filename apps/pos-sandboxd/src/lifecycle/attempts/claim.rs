@@ -83,16 +83,6 @@ pub struct AwaitedInput<
     admitted: AdmittedRuntimeKey<'l>,
 }
 
-impl<I, R: RuntimeAttestationSigner> std::fmt::Debug for AwaitedInput<'_, I, R> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("AwaitedInput")
-            .field("attempt_id", &self.attempt_id)
-            .field("owed", &self.interrupted.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
 /// The slot one claim or grant write holds, released on drop unless it was
 /// passed on.
 #[derive(Debug)]

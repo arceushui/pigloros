@@ -1620,6 +1620,18 @@ mod cases {
             lifecycle.terminal_response([1; 16], grant(1)),
             Err(AttemptLifecycleError::AttemptActive)
         ));
+        // A granted attempt conflicts with other bytes, to a claim and to a
+        // repeat alike.
+        assert!(matches!(
+            lifecycle.claim([1; 16], [1; 16], [0x77; 32]),
+            Err(AttemptLifecycleError::RequestConflict)
+        ));
+        assert!(matches!(
+            lifecycle.join([1; 16], [0x77; 32]).await,
+            Err(AttemptLifecycleError::RequestConflict)
+        ));
+        // The test seam leaves the lifecycle's diagnostics intact.
+        assert!(format!("{lifecycle:?}").contains("BeginHook"));
         assert!(matches!(
             lifecycle.admit_input(FakeInput::new(2).with_attempt([1; 16])),
             Err(AttemptLifecycleError::GrantMismatch)
