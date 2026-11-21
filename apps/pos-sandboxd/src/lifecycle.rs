@@ -254,8 +254,8 @@ mod attempts;
 pub use attempts::{
     AttemptCleanup, AttemptLaunch, AttemptLifecycle, AttemptLifecycleError, AttemptProgress,
     AwaitedInput, BarrierFactory, CleanupBudget, EndedAttempt, ExchangeClaim, GrantWrite,
-    LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, RootRecheck,
-    SystemdAttemptSteps,
+    InterruptedInput, LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt,
+    RootRecheck, SystemdAttemptSteps,
 };
 
 #[cfg(test)]

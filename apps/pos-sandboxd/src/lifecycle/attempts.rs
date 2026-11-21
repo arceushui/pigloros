@@ -1172,7 +1172,9 @@ pub struct AttemptLifecycle<I = VerifiedStagedInput> {
     // Set once a recovery snapshot was handed out.
     snapshot_taken: AtomicBool,
     attempts: Mutex<Table<I>>,
-    // Runs as an owner begins its run, before it takes the attempts lock.
+    // Test-only: a step run as an owner begins its run, before it takes
+    // the attempts lock, so a test can land a fence exactly there and prove
+    // the cancellation is read under that lock (no production behaviour).
     #[cfg(test)]
     before_begin: BeginHook<I>,
 }
@@ -1875,7 +1877,7 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
 mod claim;
 mod retention;
 
-pub use claim::{AwaitedInput, ExchangeClaim, GrantWrite};
+pub use claim::{AwaitedInput, ExchangeClaim, GrantWrite, InterruptedInput};
 use retention::Retained;
 
 #[cfg(test)]

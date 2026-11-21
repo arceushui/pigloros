@@ -335,7 +335,7 @@ pub use kernel_observation::{
 pub use lifecycle::{
     finish_attempt, AttemptCleanup, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch,
     AttemptLifecycle, AttemptLifecycleError, AttemptProgress, AwaitedInput, BarrierFactory,
-    CleanupBudget, EndedAttempt, ExchangeClaim, GrantWrite, LiveAttemptIdentity,
+    CleanupBudget, EndedAttempt, ExchangeClaim, GrantWrite, InterruptedInput, LiveAttemptIdentity,
     LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, RootRecheck, SystemdAttemptSteps,
 };
 #[cfg(target_os = "linux")]

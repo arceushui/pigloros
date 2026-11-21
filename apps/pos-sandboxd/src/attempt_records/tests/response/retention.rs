@@ -642,3 +642,100 @@ fn a_retained_response_is_never_signed_again() -> TestResult {
     ));
     Ok(())
 }
+
+/// Interrupt an exchange after its AGR1, cancelled first if `cancel`, while
+/// a repeat waits on it; the repeat's response, and the stored one.
+async fn interrupted_after_agr1(
+    lifecycle: &AttemptLifecycle,
+    cancel: bool,
+) -> TestResult<(Arc<RetainedResponse>, Arc<RetainedResponse>)> {
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    let bytes = grant.bytes;
+    let public = signing_key().verifying_key();
+    let signer = signer();
+    let awaited = lifecycle
+        .claim(ATTEMPT, [0x31; 16], REQUEST)?
+        .convert(digest)?
+        .written(
+            Box::new(move || FailedInput::fixture(ATTEMPT, digest).with_grant_bytes(&bytes)),
+            &signer,
+            AdmittedRuntimeKey::new(KEY_ID, &public),
+        );
+    if cancel {
+        lifecycle
+            .cancel(
+                &pos_reference::sandbox_provider_protocol::SandboxCancelRequest {
+                    request: reconcile(digest).request,
+                    attempt_id: ATTEMPT,
+                    agr1_digest: digest,
+                    request_digest: [5; 32],
+                },
+            )
+            .await?;
+    }
+    let joined = lifecycle.join(ATTEMPT, REQUEST);
+    let (joined, ()) = tokio::join!(joined, async {
+        tokio::task::yield_now().await;
+        // The client disconnected before its input was admitted.
+        drop(awaited);
+    });
+    let joined = joined?.ok_or("the repeat found no attempt")?;
+    Ok((joined, lifecycle.terminal_response(ATTEMPT, digest)?))
+}
+
+/// An exchange interrupted after its AGR1 is a post-admission failure, not
+/// a provider fault (base ADR-069 §4): its stored code-10 response is signed
+/// and retained like any failed input's, a joined repeat receives it, and
+/// the lifecycle stays open. A cancellation before the interruption stays
+/// its cancel source (Redmine #443 journals 22592 and 22319).
+#[tokio::test]
+async fn an_exchange_interrupted_after_agr1_stores_its_failed_input() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let (joined, stored) = interrupted_after_agr1(&lifecycle, false).await?;
+    assert!(Arc::ptr_eq(&joined, &stored));
+    let (result, events) = verified(&stored)?;
+    assert_eq!(
+        result.outcome,
+        pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::UnavailableAfterAdmission
+    );
+    assert_eq!(events, [10]);
+    assert!(ledger.reserve_storage(0).is_ok());
+    let (_directory, lifecycle, ledger) = self::lifecycle()?;
+    let (_, stored) = interrupted_after_agr1(&lifecycle, true).await?;
+    let (result, _) = verified(&stored)?;
+    assert_eq!(
+        result.outcome,
+        pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::Cancelled
+    );
+    assert!(ledger.reserve_storage(0).is_ok());
+    Ok(())
+}
+
+/// A settle refusal names another grant than the one the exchange owes: a
+/// provider bug, which faults the attempt and quarantines the lifecycle.
+#[test]
+fn a_refused_settle_faults_the_awaited_attempt() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let digest = signed_grant()?.grant.grant_digest();
+    let public = signing_key().verifying_key();
+    let signer = signer();
+    let awaited = lifecycle
+        .claim(ATTEMPT, [0x31; 16], REQUEST)?
+        .convert(digest)?
+        .written(
+            Box::new(move || FailedInput::fixture(ATTEMPT, digest)),
+            &signer,
+            AdmittedRuntimeKey::new(KEY_ID, &public),
+        );
+    assert!(matches!(
+        awaited.record_failed_input(&FailedInput::fixture(ATTEMPT, AGR1)),
+        Err(AttemptLifecycleError::GrantMismatch)
+    ));
+    assert!(matches!(
+        lifecycle.terminal_response(ATTEMPT, digest),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    assert!(ledger.reserve_storage(0).is_err());
+    Ok(())
+}

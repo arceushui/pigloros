@@ -657,9 +657,9 @@ impl ReleasedOutput {
     /// The output SBC1 records of a Completed response whose SPY1 digests to
     /// `parent_digest`, still under the output reservation (ADR-069 §4).
     ///
-    /// The records are built from the last chunk back while the captured
-    /// bytes are consumed and shrunk, so the capture and its records are
-    /// never both held whole.
+    /// The records are built from the last chunk back, each chunk copied out
+    /// and cut from the capture in place, without reallocating it per chunk;
+    /// the capture's buffer is freed once every record exists.
     pub(crate) fn into_records(
         self,
         parent_digest: [u8; 32],
@@ -670,8 +670,9 @@ impl ReleasedOutput {
         (0..bytes.len().div_ceil(SandboxPayloadChunk::CHUNK_BYTES))
             .rev()
             .map(|index| {
-                let chunk = bytes.split_off(index * SandboxPayloadChunk::CHUNK_BYTES);
-                bytes.shrink_to_fit();
+                let start = index * SandboxPayloadChunk::CHUNK_BYTES;
+                let chunk = bytes[start..].to_vec();
+                bytes.truncate(start);
                 SandboxPayloadChunk::output_record(
                     parent_digest,
                     request_id,

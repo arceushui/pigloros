@@ -1611,7 +1611,7 @@ mod cases {
         let awaited = lifecycle
             .claim([1; 16], [1; 16], REQUEST)?
             .convert(grant(1))?
-            .written();
+            .written_for_test(grant(1));
         assert!(matches!(
             lifecycle.reconcile(&reconcile_request(1, grant(1))),
             Err(AttemptLifecycleError::AttemptActive)
@@ -1654,7 +1654,7 @@ mod cases {
         Ok(())
     }
 
-    /// An awaited input whose attempt was admitted elsewhere settles nothing
+    /// An awaited input whose attempt was admitted elsewhere records nothing
     /// and faults nothing when it is dropped.
     #[test]
     fn an_awaited_input_admitted_through_the_table_faults_nothing() -> TestResult {
@@ -1663,7 +1663,7 @@ mod cases {
             .lifecycle
             .claim([1; 16], [1; 16], REQUEST)?
             .convert(grant(1))?
-            .written();
+            .written_for_test(grant(1));
         let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
         drop(awaited);
         assert!(runtime.admits()?);
@@ -1760,7 +1760,7 @@ mod cases {
         let joined = lifecycle.join([1; 16], REQUEST);
         let ran = async {
             tokio::task::yield_now().await;
-            let awaited = claim.convert(grant(1))?.written();
+            let awaited = claim.convert(grant(1))?.written_for_test(grant(1));
             tokio::task::yield_now().await;
             let owned = awaited.admit_owned(FakeInput::new(1))?;
             tokio::task::yield_now().await;
@@ -1805,9 +1805,10 @@ mod cases {
             voided.convert(grant(4)),
             Err(AttemptLifecycleError::Fenced)
         ));
-        // An exchange that ends after its AGR1 without the input owes the
-        // attempt a response: a provider fault, never an orphaned slot.
-        drop(writing.written());
+        // An exchange interrupted after its AGR1 records its failed input,
+        // never an orphaned slot; this fixture's filler AGR1 cannot be
+        // signed, so its response faults.
+        drop(writing.written_for_test(grant(3)));
         assert!(matches!(
             lifecycle.terminal_response([3; 16], grant(3)),
             Err(AttemptLifecycleError::ResponseUnavailable)
@@ -2199,7 +2200,7 @@ mod cases {
                     request.request_digest,
                 )?
                 .convert(grant_digest)?
-                .written()
+                .written_for_test(grant_digest)
                 .admit(input)?;
             assert_eq!(ledger.usage().attempts, 1);
             let fixture = manager(1).await?;

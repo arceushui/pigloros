@@ -15,15 +15,20 @@
 //! request ID stays known for as long as the attempt or its tombstone.
 //!
 //! Once AGR1 was written the exchange owes the attempt its input: an
-//! [`AwaitedInput`] is consumed by the admission or the failed input, and an
-//! exchange that ends without either leaves a provider fault, never an
-//! orphaned slot.
+//! [`AwaitedInput`] is consumed by the admission or the failed input. An
+//! exchange that ends without either was interrupted after AGR1: base §4
+//! retains the grant and classifies it as a post-admission failure, so the
+//! dropped input is recorded and signed exactly as a failed input (TME1
+//! progress 0, `input.complete = false`, code 10; Redmine #443 journal
+//! 22592), never left as an orphaned slot.
 
 use std::sync::atomic::Ordering;
 
 use tokio::sync::watch;
 
 use pos_reference::provider_admission::execution::FailedInput;
+
+use crate::{AdmittedRuntimeKey, KeyFileRuntimeSigner, RuntimeAttestationSigner};
 
 use super::{lock, AttemptLifecycle, AttemptLifecycleError, OwnedAttempt, Slot, MAX_LIVE_ATTEMPTS};
 use crate::{EndedAttempt, SystemdVerifiedStart, VerifiedStagedInput};
@@ -47,19 +52,41 @@ pub struct GrantWrite<'l, I = VerifiedStagedInput> {
     held: Held<'l, I>,
 }
 
+/// The failed input of an exchange interrupted after its AGR1, as far as
+/// its transfer got: the serving layer's staging state supplies it.
+pub type InterruptedInput<'l> = Box<dyn FnOnce() -> FailedInput + Send + 'l>;
+
 /// A granted attempt whose AGR1 was completely written, awaiting its
 /// input.
 ///
 /// Its admission or its failed input consumes it. Dropping it otherwise
-/// means the exchange ended owing the attempt its stored response: the
-/// attempt is recorded as ended with nothing committed and no response,
-/// a provider fault that quarantines the lifecycle (R9 §5), so the slot is
-/// never left counting toward the cap with its repeats waiting.
-#[derive(Debug)]
-pub struct AwaitedInput<'l, I = VerifiedStagedInput> {
+/// means the exchange was interrupted after AGR1, a routine post-admission
+/// failure (base ADR-069 §4): its [`InterruptedInput`] is recorded exactly
+/// as [`Self::record_failed_input`] records a failed input, and its response
+/// is signed and retained, so joined repeats receive the stored code-10
+/// response and the lifecycle stays open. Only a refusal while it is
+/// settled, which means the caller named another attempt or grant, faults
+/// the attempt and quarantines the lifecycle.
+pub struct AwaitedInput<
+    'l,
+    I = VerifiedStagedInput,
+    R: RuntimeAttestationSigner = KeyFileRuntimeSigner,
+> {
     lifecycle: &'l AttemptLifecycle<I>,
     attempt_id: [u8; 16],
-    armed: bool,
+    interrupted: Option<InterruptedInput<'l>>,
+    signer: &'l R,
+    admitted: AdmittedRuntimeKey<'l>,
+}
+
+impl<I, R: RuntimeAttestationSigner> std::fmt::Debug for AwaitedInput<'_, I, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AwaitedInput")
+            .field("attempt_id", &self.attempt_id)
+            .field("owed", &self.interrupted.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The slot one claim or grant write holds, released on drop unless it was
@@ -83,18 +110,39 @@ impl<I> Drop for Held<'_, I> {
     }
 }
 
-impl<I> Drop for AwaitedInput<'_, I> {
+impl<I, R: RuntimeAttestationSigner> Drop for AwaitedInput<'_, I, R> {
     fn drop(&mut self) {
-        if self.armed {
-            let mut attempts = lock(&self.lifecycle.attempts);
-            let abandoned = attempts.abandon(self.attempt_id);
-            drop(attempts);
-            if abandoned.is_some() {
-                self.lifecycle.quarantine();
+        if let Some(interrupted) = self.interrupted.take() {
+            // The same record, signing and retention as a failed input; a
+            // response that cannot be signed is faulted there (R9 §5).
+            match self
+                .lifecycle
+                .record_failed::<SystemdVerifiedStart, _>(&interrupted())
+            {
+                Ok(ended) => drop(self.lifecycle.retain_response(
+                    ended,
+                    self.signer,
+                    self.admitted,
+                )),
+                Err(_) => self.fault(),
             }
-            // Its waiters are woken outside the attempts lock.
-            drop(abandoned);
         }
+    }
+}
+
+impl<I, R: RuntimeAttestationSigner> AwaitedInput<'_, I, R> {
+    /// The caller named another attempt or grant than the one it owes: the
+    /// awaited attempt is recorded as ended with no response, a provider
+    /// fault that quarantines the lifecycle, so its slot is not orphaned.
+    fn fault(&self) {
+        let mut attempts = lock(&self.lifecycle.attempts);
+        let abandoned = attempts.abandon(self.attempt_id);
+        drop(attempts);
+        if abandoned.is_some() {
+            self.lifecycle.quarantine();
+        }
+        // Its waiters are woken outside the attempts lock.
+        drop(abandoned);
     }
 }
 
@@ -210,31 +258,44 @@ impl<'l, I> ExchangeClaim<'l, I> {
 
 impl<'l, I> GrantWrite<'l, I> {
     /// The AGR1 was completely written: the attempt is admitted, and its
-    /// input is awaited.
-    #[must_use = "a dropped awaited input is a provider fault"]
-    pub fn written(mut self) -> AwaitedInput<'l, I> {
+    /// input is awaited. `interrupted` supplies the failed input should the
+    /// exchange end without one, and `signer` signs its response under
+    /// `admitted`.
+    #[must_use = "a dropped awaited input records an interrupted input"]
+    pub fn written<R: RuntimeAttestationSigner>(
+        mut self,
+        interrupted: InterruptedInput<'l>,
+        signer: &'l R,
+        admitted: AdmittedRuntimeKey<'l>,
+    ) -> AwaitedInput<'l, I, R> {
         self.held.armed = false;
         AwaitedInput {
             lifecycle: self.held.lifecycle,
             attempt_id: self.held.attempt_id,
-            armed: true,
+            interrupted: Some(interrupted),
+            signer,
+            admitted,
         }
     }
 }
 
-impl<'l, I> AwaitedInput<'l, I> {
-    /// Settle the obligation with `settled`; a refusal leaves it owed.
+impl<'l, I, R: RuntimeAttestationSigner> AwaitedInput<'l, I, R> {
+    /// Settle the obligation with `settled`. A refusal means the caller
+    /// named another attempt or grant: a provider bug, which faults it.
     fn settle<T>(
         mut self,
         settled: impl FnOnce(&'l AttemptLifecycle<I>) -> Result<T, AttemptLifecycleError>,
     ) -> Result<T, AttemptLifecycleError> {
+        self.interrupted = None;
         let settled = settled(self.lifecycle);
-        self.armed = settled.is_err();
+        if settled.is_err() {
+            self.fault();
+        }
         settled
     }
 }
 
-impl<'l, I> AwaitedInput<'l, I> {
+impl<'l, I, R: RuntimeAttestationSigner> AwaitedInput<'l, I, R> {
     /// Take exclusive ownership of the attempt `input` admitted.
     pub(super) fn admit_owned(self, input: I) -> Result<OwnedAttempt<'l, I>, AttemptLifecycleError>
     where
@@ -252,7 +313,7 @@ impl<'l, I> AwaitedInput<'l, I> {
     }
 }
 
-impl<'l> AwaitedInput<'l> {
+impl<'l, R: RuntimeAttestationSigner> AwaitedInput<'l, VerifiedStagedInput, R> {
     /// Take exclusive ownership of the attempt `input` admitted.
     ///
     /// The lifecycle keeps the admission, and its staging reservation, until
@@ -268,7 +329,8 @@ impl<'l> AwaitedInput<'l> {
     /// [`AttemptLifecycleError::GrantMismatch`] when `input` was admitted
     /// under another AGR1, and [`AttemptLifecycleError::UnknownAttempt`]
     /// for another attempt. The refused input is dropped, releasing its
-    /// reservation, and the awaited attempt is left owed: a provider fault.
+    /// reservation, and the awaited attempt ends with no response: a
+    /// provider fault that quarantines the lifecycle.
     pub fn admit(
         self,
         input: VerifiedStagedInput,
@@ -311,9 +373,9 @@ impl<I> AttemptLifecycle<I> {
         self.claim(attempt_id, attempt_id, [0x5d; 32])
             .and_then(|claim| claim.convert(grant))
             .map(|write| {
-                let mut awaited = write.written();
+                let mut awaited = write.written_for_test(grant);
                 // The test admits or records the attempt itself.
-                awaited.armed = false;
+                awaited.interrupted = None;
             })
     }
 
@@ -348,6 +410,34 @@ impl AttemptLifecycle {
     ) -> Result<EndedAttempt<SystemdVerifiedStart>, AttemptLifecycleError> {
         self.claim(failed.attempt_id(), failed.attempt_id(), [0x5d; 32])
             .and_then(|claim| claim.convert(failed.grant().digest()))
-            .and_then(|write| write.written().record_failed_input(failed))
+            .and_then(|write| {
+                write
+                    .written_for_test(failed.grant().digest())
+                    .record_failed_input(failed)
+            })
+    }
+}
+
+#[cfg(test)]
+impl<'l, I> GrantWrite<'l, I> {
+    /// [`Self::written`] with the test runtime key, whose interrupted input
+    /// is the fixture failed input of `grant`.
+    pub(crate) fn written_for_test(self, grant: [u8; 32]) -> AwaitedInput<'l, I> {
+        static SIGNER: std::sync::OnceLock<KeyFileRuntimeSigner> = std::sync::OnceLock::new();
+        static KEY: std::sync::OnceLock<ed25519_dalek::VerifyingKey> = std::sync::OnceLock::new();
+        let signing = || ed25519_dalek::SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED);
+        let signer = SIGNER.get_or_init(|| {
+            KeyFileRuntimeSigner::from_signing_key(
+                signing(),
+                crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
+            )
+        });
+        let key = KEY.get_or_init(|| signing().verifying_key());
+        let attempt_id = self.held.attempt_id;
+        self.written(
+            Box::new(move || FailedInput::fixture(attempt_id, grant)),
+            signer,
+            AdmittedRuntimeKey::new(crate::test_fixtures::RUNTIME_KEY_ID, key),
+        )
     }
 }
