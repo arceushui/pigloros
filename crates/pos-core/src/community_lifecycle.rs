@@ -11,8 +11,10 @@ mod budget_quote;
 mod classification;
 mod copy_inventory;
 mod current_view;
+mod dependency_bundle;
 mod envelope;
 mod error;
+mod event_drafts;
 mod failure;
 mod generation_admission;
 mod graph_root;
@@ -80,12 +82,26 @@ pub use current_view::{
     MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1, MAX_COMMUNITY_VIEW_KEY_ROWS_V1,
     MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1, MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
 };
+pub use dependency_bundle::{
+    CommunityDependencyBundleInputV1, CommunityDependencyBundleV1, CommunityEvidenceRootsV1,
+    CommunityFactualBindingV1, MAX_COMMUNITY_DEPENDENCY_BUNDLE_BYTES_V1,
+    MAX_COMMUNITY_REQUIRED_NODES_V1,
+};
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityEncryptedEnvelopeV1,
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
 };
 pub use error::CommunityLifecycleErrorV1;
+pub use event_drafts::{
+    community_event_draft_vector_bytes_v1, CommunityEventDraftFragmentInputV1,
+    CommunityEventDraftFragmentReferenceV1, CommunityEventDraftFragmentV1,
+    CommunityEventDraftManifestInputV1, CommunityEventDraftManifestV1,
+    MAX_COMMUNITY_EVENT_DRAFTS_V1, MAX_COMMUNITY_EVENT_DRAFT_FRAGMENTS_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_BYTES_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_RECORD_BYTES_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_MANIFEST_BYTES_V1, MAX_COMMUNITY_EVENT_DRAFT_VECTOR_BYTES_V1,
+};
 pub use failure::{
     CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
     CommunityPassFailureV1,
