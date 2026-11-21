@@ -83,6 +83,8 @@ enum Fault {
     RequestedConfiguration,
     Bind,
     Evidence,
+    /// The baseline snapshot's `observed-at` could not be read.
+    UntimedEvidence,
     HangEvidence,
     Kill,
     ReadCgroup,
@@ -127,6 +129,9 @@ struct FakeHost {
     released: Arc<Mutex<Vec<(String, Instant)>>>,
     /// Descriptors held as systemd holds its duplicates of the unit ends.
     systemd_held: Arc<Mutex<Vec<StdOwnedFd>>>,
+    /// A duplicate of each stdout write end a never-finishing stdio adapter
+    /// keeps open, which the kill watches.
+    adapter_stdout: Arc<Mutex<Vec<StdOwnedFd>>>,
 }
 
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
@@ -159,6 +164,7 @@ impl FakeHost {
             stdio_report: Arc::default(),
             released: Arc::default(),
             systemd_held: Arc::default(),
+            adapter_stdout: Arc::default(),
         }
     }
 
@@ -470,6 +476,8 @@ impl UnitHost for FakeHost {
         let activated = self.activated.unwrap_or_else(monotonic_now_ns);
         let outcome = if self.faulty(Fault::Evidence) {
             Err(Injected)
+        } else if self.faulty(Fault::UntimedEvidence) {
+            Ok((activated, 0))
         } else {
             // The evidence is the activation it was read with.
             Ok((activated, activated))
@@ -479,6 +487,12 @@ impl UnitHost for FakeHost {
             hang_if(hang).await;
             outcome
         }
+    }
+
+    /// The fake's evidence is the activation it was read with; zero stands
+    /// for an unreadable baseline `observed-at`.
+    fn evidence_timed(evidence: &u64) -> bool {
+        *evidence != 0
     }
 
     fn stop(
@@ -507,11 +521,41 @@ impl UnitHost for FakeHost {
             Ok(())
         };
         let hang = self.faulty(Fault::HangKill);
+        let stdout = Arc::clone(&self.adapter_stdout);
         async move {
+            output_read(&stdout).await;
             hang_if(hang).await;
             outcome
         }
     }
+}
+
+/// Until the provider read every byte the stdio adapters queued on `stdout`.
+///
+/// A kill answers only then, so the ending it leads to never overtakes the
+/// capture's first read, however late the supervision was first polled. Each
+/// yield lets the runtime poll its I/O driver, which reports the channel
+/// readable to the capture. The wait is bounded by the termination call (at
+/// least `MIN_TERMINATION_CALL`, 1 s), acknowledged kills included: the
+/// capture's read needs one driver turn on an idle runtime, so a capture
+/// still unread after a whole termination call is a real fault, and the kill
+/// then counts as unanswered and the test fails on its ending.
+async fn output_read(stdout: &Mutex<Vec<StdOwnedFd>>) {
+    while queued(stdout) > 0 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The bytes queued on every channel in `stdout`.
+fn queued(stdout: &Mutex<Vec<StdOwnedFd>>) -> u64 {
+    stdout
+        .lock()
+        .map(|held| {
+            held.iter()
+                .filter_map(|end| rustix::io::ioctl_fionread(end).ok())
+                .sum()
+        })
+        .unwrap_or_default()
 }
 
 /// Never finishes when `hang` is set.
@@ -2025,6 +2069,48 @@ mod release_evidence {
         assert!(failed.started.is_some());
         assert!(!scenario.entries().iter().any(|entry| entry == "release"));
         Ok(())
+    }
+
+    /// R9 Amendment 1 change F: a pre-release time the clock could not
+    /// report sends no `ReleaseV1`; the unit is killed and its cgroup and
+    /// evidence kept for the terminal cleanup.
+    #[tokio::test]
+    async fn an_untimed_baseline_snapshot_sends_no_release() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.faults.push(Fault::UntimedEvidence);
+        let failed = scenario.fails().await?;
+        assert_untimed_release(&scenario, &failed);
+        assert_eq!(failed.evidence, Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_untimed_input_transfer_sends_no_release() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        let mut job = scenario.job(
+            ATTEMPT,
+            SandboxExecutionMode::AirGapped,
+            ModePlan::AirGapped,
+            GENEROUS_WATCHDOG_MS,
+        )?;
+        job.attempt = job.attempt.without_input_record();
+        let recheck = root_for(&scenario.log, &job.attempt);
+        let failed = failure(scenario.run_on(&LoopbackNetwork, job, recheck).await)?;
+        assert_untimed_release(&scenario, &failed);
+        assert!(failed.evidence.is_some_and(|evidence| evidence != 0));
+        Ok(())
+    }
+
+    fn assert_untimed_release(
+        scenario: &Scenario,
+        failed: &ExecuteFailure<FakeCgroup, u64, String>,
+    ) {
+        assert!(matches!(failed.error, ExecuteError::UnreadableClock));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(failed.cgroup.is_some());
+        assert!(failed.started.is_some());
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        assert_eq!(failed.error.launch_failure(), None);
     }
 
     #[tokio::test]

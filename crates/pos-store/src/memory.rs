@@ -122,6 +122,8 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+#[cfg(target_os = "linux")]
+mod community_artifacts;
 mod composition_fallback_registry;
 mod counterfactual_store;
 mod fork_attribution_authority_import;
