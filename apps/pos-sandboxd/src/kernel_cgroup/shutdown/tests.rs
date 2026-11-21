@@ -194,6 +194,10 @@ mod cases {
             ))
         }
 
+        fn evidence_timed((): &()) -> bool {
+            true
+        }
+
         async fn stop(&self, unit: TransientServiceUnitName) -> Result<(), Self::Error> {
             self.act("stop", unit, self.stop).await
         }

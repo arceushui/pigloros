@@ -591,8 +591,11 @@ pub struct TerminationFacts {
     pub work_after: Option<WorkStatfsFacts>,
     /// TME1 `watchdog-deadline` (`D`), in `CLOCK_MONOTONIC` nanoseconds.
     ///
-    /// `None` when `ActiveEnterTimestampMonotonic` was unreadable or zero
-    /// ([`attempt_watchdog_deadline`]): missing evidence once a unit exists.
+    /// `None` when the recorded value is 0: `ActiveEnterTimestampMonotonic`
+    /// was unreadable or zero ([`attempt_watchdog_deadline`]), or `D` was
+    /// not read. That is missing evidence only after a done start job with
+    /// `unit` present, and otherwise selects no code of its own (R9
+    /// Amendment 1 change G).
     pub watchdog_deadline: Option<NonZeroU64>,
     /// TME1 `cancel-source`.
     pub cancel_source: Option<CancelSource>,
@@ -705,21 +708,30 @@ impl TerminationFacts {
         matches!(self.service_result(), Some(ServiceResultCode::Timeout))
     }
 
-    /// The terminal snapshot was taken at or after `D - G`.
-    fn watchdog_reached(&self) -> bool {
+    /// Whether the terminal snapshot was taken at or after `D - G`; `None`
+    /// without a terminal snapshot or without a `D`. A zero (absent) `D`
+    /// makes neither watchdog comparison a candidate (R9 Amendment 1 change
+    /// G).
+    fn watchdog_agreement(&self) -> Option<bool> {
         self.terminal
             .zip(self.watchdog_deadline)
-            .is_some_and(|(terminal, deadline)| {
+            .map(|(terminal, deadline)| {
                 terminal.observed_at.saturating_add(WATCHDOG_GRACE_NS) >= deadline.get()
             })
     }
 
+    /// The terminal snapshot was taken at or after `D - G`.
+    fn watchdog_reached(&self) -> bool {
+        self.watchdog_agreement() == Some(true)
+    }
+
     /// The broker killed although systemd did not time out, or systemd timed
-    /// out before the authorized deadline.
+    /// out before the authorized deadline `D - G`. Without a `D` there is no
+    /// deadline to time out before.
     fn enforcement_disagrees(&self) -> bool {
         let timed_out = self.timed_out();
         (self.ending.is_some_and(EndingCode::broker_killed) && !timed_out)
-            || (timed_out && self.terminal.is_some() && !self.watchdog_reached())
+            || (timed_out && self.watchdog_agreement() == Some(false))
     }
 
     /// Required evidence is absent (R9 O6).

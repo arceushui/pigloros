@@ -42,7 +42,7 @@ jobs:
           tools_dir="$(mktemp -d "${RUNNER_TEMP}/codeql-wit.XXXXXX")"
           archive="${tools_dir}/wit-bindgen.tar.gz"
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            --retry 3 --max-time 120 --output "$archive" "$url"
+            --retry 3 --retry-all-errors --max-time 120 --output "$archive" "$url"
           printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --strict -
           members="${tools_dir}/members.txt"
           tar --list --gzip --file "$archive" > "$members"

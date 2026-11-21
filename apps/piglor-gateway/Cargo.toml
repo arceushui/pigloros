@@ -30,6 +30,7 @@ pos-core = { path = "../../crates/pos-core", features = [
   "authority-trust-root",
 ] }
 pos-crypto = { path = "../../crates/pos-crypto" }
+pos-local-erasure-loader = { path = "../../crates/pos-local-erasure-loader" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-store = { path = "../../crates/pos-store" }
 pos-plugin-ledger = { path = "../../plugins/ledger" }
@@ -57,7 +58,6 @@ serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ed25519-dalek = { workspace = true }
-libc = { workspace = true }
 rustix = { version = "1.1.4", default-features = false, features = [
   "fs",
   "net",

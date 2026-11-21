@@ -17,9 +17,12 @@
 //!    Local admission is bound to it;
 //! 5. the launcher barrier releases the adapter, exactly once, before the
 //!    watchdog deadline `D`: the unit's `ActiveEnterTimestampMonotonic` plus
-//!    the watchdog (ADR-069 R9 §4.6.5); from then on the verified input is fed
-//!    to the adapter's stdin and its stdout captured (R10 §4.5 and §4.6),
-//!    until the attempt's ending stops both;
+//!    the watchdog (ADR-069 R9 §4.6.5), unless a pre-release time the clock
+//!    could not report (the admission's TME1 `input` or the baseline
+//!    snapshot's `observed-at`) makes the attempt a provider fault that sends
+//!    no `ReleaseV1` (R9 Amendment 1 change F); from then on the verified
+//!    input is fed to the adapter's stdin and its stdout captured (R10 §4.5
+//!    and §4.6), until the attempt's ending stops both;
 //! 6. a Local proxy serves FD 3 until the channel ends or the attempt
 //!    watchdog closes it, and the cgroup is observed until it is empty or the
 //!    broker's escalation deadline `D + G` passes, which kills the unit;
@@ -136,6 +139,11 @@ pub trait UnitHost {
         started: &Self::Started,
         cgroup: &Self::Cgroup,
     ) -> impl Future<Output = Result<(u64, Self::Evidence), Self::Error>> + Send;
+
+    /// Whether every provider clock read in `evidence` reported a time: the
+    /// baseline snapshot's `observed-at`. A failed read is a provider fault,
+    /// so `ReleaseV1` is not sent (ADR-069 R9 Amendment 1 change F).
+    fn evidence_timed(evidence: &Self::Evidence) -> bool;
 
     /// Stop the unit, replacing a queued start job.
     fn stop(
@@ -436,6 +444,12 @@ pub enum ExecuteError {
     /// Cancellation was requested before the barrier released the adapter.
     #[error("the attempt was cancelled before its release")]
     Cancelled,
+    /// The clock could not report a time a pre-release record holds: the
+    /// admission's TME1 `input` or the baseline snapshot's `observed-at`.
+    /// `ReleaseV1` was not sent, and the attempt is a provider fault with no
+    /// response (ADR-069 R9 Amendment 1 change F).
+    #[error("a pre-release time could not be read")]
+    UnreadableClock,
     /// The unit's activation time or the bound cgroup's pre-release evidence
     /// could not be read.
     #[error("the pre-release resource evidence could not be read")]
@@ -804,16 +818,17 @@ where
     let (started, mut cgroup, evidence, anchored, requested) =
         submit_anchored(host, &attempt, request, bounds, watchdog, guard).await?;
     let attempt_id = attempt.attempt_id();
+    let timed = pre_release_timed::<H>(&attempt, &evidence);
     let active = ActiveAttempt::record(attempt, anchored.release, requested);
     let bound = bind_planned(planned);
-    // Release must arrive before the attempt deadline (ADR-069), whatever the
-    // port does, and is abandoned once cancellation is requested.
-    let release = barrier.release(
+    let refused = release_timed(
+        barrier,
         &active,
         CgroupView::new(cgroup.directory(), cgroup.identity()),
-    );
-    let released = until(anchored.release, unless(cancel.clone(), release)).await;
-    let refused = released.map_or(Some(ExecuteError::ReleaseTimeout), refusal);
+        timed,
+        (anchored.release, cancel.clone()),
+    )
+    .await;
     let bounds = anchored.bounds;
     if let Some(error) = refused {
         let aborted = abort(
@@ -860,6 +875,32 @@ where
         evidence,
         adapter,
     })
+}
+
+/// Whether the clock reported every time a pre-release record holds: the
+/// admission's TME1 `input` and the baseline snapshot's `observed-at` (R9
+/// Amendment 1 change F).
+fn pre_release_timed<H: UnitHost>(attempt: &AdmittedAttempt, evidence: &H::Evidence) -> bool {
+    attempt.input_recorded() && H::evidence_timed(evidence)
+}
+
+/// Release the adapter, or why not. A pre-release time that could not be
+/// read sends no `ReleaseV1` at all (R9 Amendment 1 change F). Otherwise the
+/// release must arrive before the attempt deadline (ADR-069), whatever the
+/// port does, and is abandoned once cancellation is requested.
+async fn release_timed<B: LaunchBarrier>(
+    barrier: &mut B,
+    active: &ActiveAttempt,
+    cgroup: CgroupView<'_>,
+    timed: bool,
+    (deadline, cancel): (Instant, CancelSignal),
+) -> Option<ExecuteError> {
+    if !timed {
+        return Some(ExecuteError::UnreadableClock);
+    }
+    let release = barrier.release(active, cgroup);
+    let released = until(deadline, unless(cancel, release)).await;
+    released.map_or(Some(ExecuteError::ReleaseTimeout), refusal)
 }
 
 /// The deadlines of a released attempt, anchored on the unit's activation.

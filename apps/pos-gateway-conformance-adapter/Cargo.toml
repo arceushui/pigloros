@@ -24,6 +24,7 @@ piglor-ledger = { path = "../piglor-ledger" }
 pos-conformance = { path = "../../crates/pos-conformance" }
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
+pos-local-erasure-loader = { path = "../../crates/pos-local-erasure-loader" }
 pos-reference = { path = "../../crates/pos-reference" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-store = { path = "../../crates/pos-store" }
