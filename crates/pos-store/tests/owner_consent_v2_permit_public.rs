@@ -2,10 +2,13 @@
 //! Public ADR-137 L8 vectors for the owner V2 consent permit (Redmine #1480):
 //! a store binds the Gateway permit or the owner permit, once, never both.
 
+use std::sync::Arc;
+
 use pos_core::owner_consent_v2_permit::mint_owner_consent_v2_permit;
 use pos_core::{
-    AppendDedupScope, ConsentAuthority, ConsentRevokedV1, CoreError, EntityId, EventDraft,
-    EventStore, Kind, OwnerConsentV2PermitV1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    AppendDedupScope, ConsentAuthority, ConsentRevokedV1, CoreError, EntityId,
+    ErasureContainmentGateV1, EventDraft, EventStore, Kind, OwnerConsentV2PermitV1,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -97,6 +100,8 @@ fn an_owner_bound_store_refuses_gateway_consent_appends() -> TestResult {
     for mut store in stores()? {
         store.bind_owner_consent_v2_permit(mint_owner_consent_v2_permit()?)?;
         let timeline = store.create_timeline("owner-bound")?;
+        // Appends pass the erasure gate first; an open one lets this reach the permit check.
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         let subject = EntityId::new();
         let revocation = ConsentRevokedV1 {
             subject_id: subject,
