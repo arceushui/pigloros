@@ -260,7 +260,7 @@ impl<S: EnrollmentStore, R: SecureRandom> EnrollmentPort for OwnerEnrollmentAdap
     /// The binding must name this adapter's owner, subject and epoch and the
     /// wrap's credential, and the wrap this subject and epoch. Then one
     /// inventory pass repeats the unbound check and P3 step 2 must yield the
-    /// opened epoch again, including its step 5 dry run: a ledger without room
+    /// opened epoch again, including step 2's dry run of step 5: a ledger without room
     /// for the row refuses with `Registry` before anything is staged. The
     /// probe is conservative: it uses the widest store-file identity, so it
     /// may refuse a ledger with up to 16 bytes of headroom that the real row
