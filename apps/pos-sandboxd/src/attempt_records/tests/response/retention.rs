@@ -48,7 +48,7 @@ fn lifecycle() -> TestResult<(tempfile::TempDir, AttemptLifecycle, StagingLedger
     Ok((directory, lifecycle, ledger))
 }
 
-/// The SPX1 digest `IssuedGrant::fixture` answers.
+/// The SPX1 digest the test grants claim their attempts under.
 const REQUEST: [u8; 32] = [0x5d; 32];
 
 /// The frames of `retained` past AGR1, the SAU1 chain and SPR1: its output
@@ -91,7 +91,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
     // An ended attempt whose response is not retained yet is pending.
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     assert!(matches!(
         lifecycle.terminal_response(ATTEMPT, digest),
         Err(AttemptLifecycleError::ResponsePending)
@@ -209,7 +209,7 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
     let (_directory, lifecycle, _ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let ended = Released {
         grant: Some(grant),
         ..Released::default()
@@ -251,7 +251,7 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
 fn an_unsignable_response_quarantines_the_lifecycle() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let failed = FailedInput::fixture(ATTEMPT, AGR1);
-    let ended = lifecycle.record_failed_input(&failed)?;
+    let ended = lifecycle.failed_granted(&failed)?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     // The fixture's AGR1 bytes are filler that no verifier decodes.
@@ -281,7 +281,7 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let ended = Released {
         grant: Some(grant),
         ..Released::default()
@@ -322,7 +322,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let ended = Released {
         grant: Some(grant),
         ..Released::default()
@@ -362,7 +362,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
 fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let digest = signed_grant()?.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     let foreign = Released {
         grant: Some(signed_grant()?),
         ..Released::default()
@@ -401,7 +401,7 @@ fn a_quarantining_classification_closes_admission() -> TestResult {
         let (_directory, lifecycle, ledger) = lifecycle()?;
         let grant = signed_grant()?;
         let digest = grant.grant.grant_digest();
-        lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+        lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
         let ended = Released {
             grant: Some(grant),
             terminal_cgroup,
@@ -427,7 +427,7 @@ fn a_quarantining_classification_closes_admission() -> TestResult {
 #[test]
 fn the_post_release_fault_quarantines_the_lifecycle() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, AGR1))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, AGR1))?;
     let ended = super::super::failed_after_release()?;
     let public = signing_key().verifying_key();
     assert!(matches!(
@@ -454,7 +454,7 @@ async fn an_exact_repeat_replays_the_stored_full_response() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
-    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     assert!(matches!(
         lifecycle.join(ATTEMPT, [0x77; 32]).await,
         Err(AttemptLifecycleError::RequestConflict)
@@ -530,7 +530,7 @@ async fn an_exact_repeat_replays_the_stored_full_response() -> TestResult {
 #[tokio::test]
 async fn a_repeat_of_a_faulted_response_is_refused() -> TestResult {
     let (_directory, lifecycle, _ledger) = lifecycle()?;
-    let ended = lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, AGR1))?;
+    let ended = lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, AGR1))?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     let joined = lifecycle.join(ATTEMPT, REQUEST);

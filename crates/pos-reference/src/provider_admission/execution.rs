@@ -147,7 +147,6 @@ struct GrantedFacts {
     mode: SandboxExecutionMode,
     provider_binary_digest: [u8; 32],
     negative_probe_evidence: [u8; 32],
-    request_digest: [u8; 32],
 }
 
 impl IssuedGrant {
@@ -210,14 +209,6 @@ impl IssuedGrant {
     pub fn negative_probe_evidence(&self) -> [u8; 32] {
         self.admitted.negative_probe_evidence
     }
-
-    /// The self-digest of the SPX1 this grant answers. SPX1 binds the EVR1
-    /// digest, so it identifies the exact canonical EVR1 and SPX1 that an
-    /// exact repeated execute of the attempt must carry (ADR-069 §4).
-    #[must_use]
-    pub fn request_digest(&self) -> [u8; 32] {
-        self.admitted.request_digest
-    }
 }
 
 /// An input that failed after its AGR1 was completely sent (ADR-069 §4).
@@ -264,8 +255,8 @@ impl FailedInput {
 impl IssuedGrant {
     /// A grant under the AGR1 digest `digest`, with filler AGR1 bytes, the
     /// ELM1 `limits` under a filler digest, the execution `mode`, issued at
-    /// 2 with this attempt live and its input incomplete, answering the SPX1
-    /// digest `[0x5d; 32]`, for tests that authenticate nothing.
+    /// 2 with this attempt live and its input incomplete, for tests that
+    /// authenticate nothing.
     #[must_use]
     pub fn fixture(
         digest: [u8; 32],
@@ -286,7 +277,6 @@ impl IssuedGrant {
                 mode,
                 provider_binary_digest: [0xb1; 32],
                 negative_probe_evidence: [0x97; 32],
-                request_digest: [0x5d; 32],
             }),
         }
     }

@@ -673,6 +673,10 @@ impl ReleasedOutput {
 
 /// The output SBC1 records a Completed response retains until the attempt
 /// is reconciled; dropping them releases their output reservation.
+///
+/// The ELM1\[8\] output charge stays held for as long as the records are
+/// retained, so retained output is never uncharged (ADR-069 R11 Amendment 1,
+/// item P12, which extends the R10 §4.7 charge lifetime to reconcile).
 #[derive(Debug)]
 pub(crate) struct RetainedOutput {
     records: Vec<Vec<u8>>,

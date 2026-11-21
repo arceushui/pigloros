@@ -17,7 +17,8 @@
 //! sent, with the RQE1, KOE1 and TME1 they bind. The output leaves its fence
 //! only here, against the attempt's terminal evidence, and its records stay
 //! under the output reservation, so the full response can be replayed byte
-//! for byte until the attempt is reconciled (ADR-069 §4). When the output
+//! for byte until the attempt is reconciled (ADR-069 §4; the charge lifetime
+//! is R11 Amendment 1, item P12). When the output
 //! transfer of a Completed response times out,
 //! [`RetainedResponse::successor`] re-issues it once (R9 §4.7): a successor
 //! TME1, SAU1 event 10 appended to the chain, and a new SPR1 and SPY1. The
@@ -548,14 +549,17 @@ fn assemble<R: RuntimeAttestationSigner>(
     let grant = AdmissionGrant::from_canonical_cbor(issued.bytes())?;
     let (chain, receipt, result) =
         sign_records(signer, admitted, (&grant, issued), &records, &sent, prefix)?;
-    let output = output
+    output
         .filter(|_| result.output.is_some())
         .map(|output| {
             output.into_records(result.result_digest(), grant.request_id, grant.attempt_id)
         })
-        .transpose()?;
-    encoded(&chain, &receipt, &result, sent.release.as_ref())
-        .map(|encoded| RetainedResponse {
+        .transpose()
+        .and_then(|output| {
+            encoded(&chain, &receipt, &result, sent.release.as_ref())
+                .map(|encoded| (encoded, output))
+        })
+        .map(|(encoded, output)| RetainedResponse {
             grant: issued.clone(),
             records,
             sent,

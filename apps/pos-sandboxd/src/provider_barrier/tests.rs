@@ -25,11 +25,62 @@ use crate::KernelObservation;
 const KEY_ID: &str = crate::test_fixtures::RUNTIME_KEY_ID;
 const EXPECTED_READBACK: [u8; 32] = [5; 32];
 const INVOCATION: [u8; 16] = [0x12; 16];
-const ADAPTER_IDENTITY: FdIdentity = FdIdentity {
-    mount_id: 9,
-    inode: 77,
-};
 const GENEROUS_MS: u64 = 30_000;
+
+/// The adapter the test attempts run: this test executable, at its
+/// canonical path.
+fn adapter_path() -> TestResult<String> {
+    Ok(std::env::current_exe()?
+        .to_str()
+        .ok_or("a non-UTF-8 test executable path")?
+        .to_owned())
+}
+
+/// The adapter's mount ID and inode beneath this process's root, as the
+/// launcher of a unit with this process's root would report them.
+fn adapter_identity() -> TestResult<FdIdentity> {
+    let status = statx(
+        CWD,
+        adapter_path()?.as_str(),
+        AtFlags::empty(),
+        StatxFlags::INO.union(StatxFlags::MNT_ID),
+    )?;
+    Ok(FdIdentity {
+        mount_id: status.stx_mnt_id,
+        inode: status.stx_ino,
+    })
+}
+
+/// Set for the child that [`parked_process`] starts.
+const PARK: &str = "POS_SANDBOXD_TEST_PARK";
+
+/// Parks until it is killed when [`parked_process`] starts it; returns at
+/// once otherwise.
+#[test]
+fn parked_process_helper() {
+    if std::env::var_os(PARK).is_some() {
+        thread::sleep(Duration::from_mins(1));
+    }
+}
+
+/// A live process that runs this test executable under this root.
+fn parked_process() -> TestResult<std::process::Child> {
+    Ok(std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "provider_barrier::tests::parked_process_helper",
+            "--test-threads=1",
+        ])
+        .env(PARK, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?)
+}
+
+/// The test attempt in `mode`, running the test adapter.
+fn test_attempt(mode: SandboxExecutionMode) -> TestResult<AdmittedAttempt> {
+    Ok(AdmittedAttempt::for_test(ATTEMPT, authority(), mode)?.running(adapter_path()?))
+}
 
 struct TestSigner {
     key: SigningKey,
@@ -160,7 +211,7 @@ fn observation(main_pid: u32) -> TestResult<KernelObservation> {
     let context = ObservationContext::new(
         CgroupView::new(procs.as_fd(), (0x63, 0x67)),
         crate::RootIdentity::FIXTURE,
-        ADAPTER_IDENTITY,
+        adapter_identity()?,
         [7; 32],
         false,
     );
@@ -272,9 +323,6 @@ fn barrier_with(
     Ok(ProviderReleaseBarrier::new(
         attempt,
         fresh_nonce()?,
-        BarrierEvidence {
-            adapter_identity: ADAPTER_IDENTITY,
-        },
         test_signer(),
         identity,
         check,
@@ -287,7 +335,7 @@ fn barrier_for(
     refusal: Refusal,
     claimed_pid: u32,
 ) -> TestResult<(TestBarrier, AdmittedAttempt)> {
-    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), mode)?;
+    let attempt = test_attempt(mode)?;
     let barrier = barrier_with(&attempt, refusal, TestIdentity::new(claimed_pid))?;
     Ok((barrier, attempt))
 }
@@ -308,7 +356,7 @@ fn ready_for<S, R>(
         launcher_identity: observe_executable(own_pid())?,
         sim1_digest: parameters.sim1_digest,
         adapter_digest: barrier.adapter_digest,
-        adapter_identity: ADAPTER_IDENTITY,
+        adapter_identity: adapter_identity()?,
         launch_parameter_digest: parameters.digest,
         expected_fdl1_digest: parameters.expected_fdl1_digest,
         observed_fdl1_digest: parameters.expected_fdl1_digest,
@@ -408,24 +456,6 @@ fn check_authority(release: &ExecutionRelease) {
     assert_eq!(release.fields().policy_epoch, admitted.policy_epoch);
 }
 
-/// The kernel thread id of a thread that stays alive until the sender drops.
-fn parked_thread_id() -> TestResult<(u32, std::sync::mpsc::Sender<()>)> {
-    let (alive, parked) = std::sync::mpsc::channel::<()>();
-    let (reported, tid) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        let link = std::fs::read_link("/proc/thread-self").ok();
-        reported.send(link).ok();
-        parked.recv().ok();
-    });
-    let link = tid.recv()?.ok_or("no /proc/thread-self")?;
-    let tid = link
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("no thread id")?
-        .parse()?;
-    Ok((tid, alive))
-}
-
 /// Release a correct `ReadyV1` and return what the launcher received.
 async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
     let (mut barrier, attempt) =
@@ -459,9 +489,6 @@ impl crate::BarrierFactory for Production {
         ProviderReleaseBarrier::new(
             attempt,
             self.nonce,
-            BarrierEvidence {
-                adapter_identity: ADAPTER_IDENTITY,
-            },
             test_signer(),
             TestIdentity::new(own_pid()),
             AuthorityCheck::new(root, self.observed, Arc::new(AtomicBool::new(false))),
@@ -474,7 +501,7 @@ impl crate::BarrierFactory for Production {
 /// and once more before it releases.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_factory_builds_the_production_barrier_over_the_lent_root_recheck() -> TestResult {
-    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let attempt = test_attempt(SandboxExecutionMode::AirGapped)?;
     let rechecks = AtomicUsize::new(0);
     let root = || {
         rechecks.fetch_add(1, Ordering::SeqCst);
@@ -565,13 +592,15 @@ async fn a_missing_observed_readback_is_not_released() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_ready_from_another_process_than_the_main_pid_is_not_released() -> TestResult {
-    // A live thread id: `/proc/<tid>/exe` is observable, but the launcher
-    // (this process) is not that id, so the kernel-supplied pid differs.
-    let (tid, release_thread) = parked_thread_id()?;
-    let error = refused(Refusal::None, tid).await?;
-    drop(release_thread);
+    // A live process running this executable under this root: its `exe`
+    // and adapter are observable, but the launcher (this process) is not
+    // that process, so the kernel-supplied pid differs.
+    let mut parked = parked_process()?;
+    let error = refused(Refusal::None, parked.id()).await;
+    parked.kill()?;
+    parked.wait()?;
     assert!(matches!(
-        error,
+        error?,
         BarrierError::Release(ReleaseBarrierError::PidMismatch)
     ));
     Ok(())
@@ -614,7 +643,7 @@ async fn an_unreadable_unit_identity_is_refused() -> TestResult {
 async fn the_unit_identity_is_read_after_the_other_rechecks() -> TestResult {
     // Both the attempt is cancelled and the invocation drifts: the cancellation
     // is reported because the identity is read last.
-    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let attempt = test_attempt(SandboxExecutionMode::AirGapped)?;
     let identity = TestIdentity::behaving(own_pid(), Behaviour::InvocationDrifts);
     let mut barrier = barrier_with(&attempt, Refusal::Cancelled, identity)?;
     let launcher = launcher(&mut barrier)?;
@@ -675,8 +704,7 @@ async fn a_release_channel_that_takes_no_timeout_is_refused() -> TestResult {
 
 #[test]
 fn launch_parameters_that_do_not_fit_are_refused() -> TestResult {
-    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
-        .running("a".repeat(1 << 20));
+    let attempt = test_attempt(SandboxExecutionMode::AirGapped)?.running("a".repeat(1 << 20));
     let barrier = barrier_with(&attempt, Refusal::None, TestIdentity::new(own_pid()));
     assert!(matches!(
         barrier
@@ -750,7 +778,7 @@ async fn the_unit_end_is_handed_over_once_and_the_invocation_carries_the_paramet
         barrier.prepare(&attempt)?.0,
         LauncherInvocation::from_parameters(&barrier.parameters)?
     );
-    assert_eq!(barrier.parameters.adapter_path, "/usr/bin/adapter");
+    assert_eq!(barrier.parameters.adapter_path, adapter_path()?);
     assert_eq!(barrier.adapter_digest, [0x61; 32]);
     assert_eq!(barrier.parameters.arguments, ["--check"]);
     assert_eq!(barrier.parameters.sim1_digest, [0x51; 32]);
@@ -775,7 +803,7 @@ async fn a_current_thread_runtime_is_refused_before_the_unit_would_start() -> Te
 /// Release against a unit whose identity misbehaves after `ReadyV1`; the
 /// launcher is never answered.
 async fn refused_with(behaviour: Behaviour, milliseconds: u64) -> TestResult<BarrierError> {
-    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let attempt = test_attempt(SandboxExecutionMode::AirGapped)?;
     let identity = TestIdentity::behaving(own_pid(), behaviour);
     let mut barrier = barrier_with(&attempt, Refusal::None, identity)?;
     let launcher = launcher(&mut barrier)?;
@@ -1152,7 +1180,6 @@ async fn assert_foreign_signer_refuses_release(signer: crate::KeyFileRuntimeSign
     let mut barrier = ProviderReleaseBarrier::new(
         &attempt,
         parts.parameters.nonce,
-        parts.evidence,
         signer,
         parts.identity,
         parts.check,
@@ -1205,7 +1232,7 @@ async fn a_recheck_resumed_after_the_original_deadline_cannot_release() -> TestR
         refusal: RefCell::new(None),
         observing: super::Observing {
             cgroup: cgroup_view(),
-            adapter: ADAPTER_IDENTITY,
+            adapter: adapter_identity()?,
             observed_fdl1_digest: [7; 32],
             work: false,
         },
@@ -1240,8 +1267,7 @@ mod kernel_observation {
         behaviour: Behaviour,
         milliseconds: u64,
     ) -> TestResult<(ReleaseOutcome, Result<(), BarrierError>)> {
-        let attempt =
-            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+        let attempt = test_attempt(SandboxExecutionMode::AirGapped)?;
         let identity = TestIdentity::behaving(own_pid(), behaviour);
         let mut barrier = barrier_with(&attempt, Refusal::None, identity)?;
         barrier.check.observed = TestObserved::new(observing)?;
@@ -1317,7 +1343,6 @@ mod kernel_observation {
         let mut barrier = ProviderReleaseBarrier::new(
             &attempt,
             parts.parameters.nonce,
-            parts.evidence,
             SlowSigner(test_signer(), Duration::from_millis(3_500)),
             parts.identity,
             parts.check,
@@ -1429,8 +1454,7 @@ mod kernel_observation {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_cancellation_outranks_a_refusal_made_before_it_was_checked() -> TestResult {
-        let attempt =
-            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+        let attempt = test_attempt(SandboxExecutionMode::AirGapped)?;
         let mut barrier = barrier_with(&attempt, Refusal::Cancelled, TestIdentity::new(own_pid()))?;
         // The first observation fails before the binding reads the flag.
         barrier.check.observed = TestObserved::new(Observing::Unavailable)?;
@@ -1479,7 +1503,7 @@ mod kernel_observation {
             refusal: RefCell::new(None),
             observing: super::super::Observing {
                 cgroup: cgroup_view(),
-                adapter: ADAPTER_IDENTITY,
+                adapter: adapter_identity()?,
                 observed_fdl1_digest: [7; 32],
                 work: false,
             },
@@ -1503,9 +1527,7 @@ mod kernel_observation {
         // No `/work` is requested: this test process has none to observe.
         let mut limits = crate::test_fixtures::execution_limits(GENEROUS_MS);
         limits[9].value = 0;
-        let attempt =
-            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
-                .with_limits(limits);
+        let attempt = test_attempt(SandboxExecutionMode::AirGapped)?.with_limits(limits);
         let own = crate::ProviderNamespaces::observe()?;
         let provider = crate::ProviderNamespaces::for_test(crate::NamespaceSet::for_test_shifted(
             own.namespaces(),
@@ -1519,9 +1541,6 @@ mod kernel_observation {
         let mut barrier = ProviderReleaseBarrier::new(
             &attempt,
             fresh_nonce()?,
-            BarrierEvidence {
-                adapter_identity: ADAPTER_IDENTITY,
-            },
             test_signer(),
             TestIdentity::new(own_pid()),
             check,
@@ -1536,7 +1555,7 @@ mod kernel_observation {
             launcher_identity: observe_executable(own_pid())?,
             sim1_digest: parameters.sim1_digest,
             adapter_digest: barrier.adapter_digest,
-            adapter_identity: ADAPTER_IDENTITY,
+            adapter_identity: adapter_identity()?,
             launch_parameter_digest: parameters.digest,
             expected_fdl1_digest: parameters.expected_fdl1_digest,
             observed_fdl1_digest: parameters.expected_fdl1_digest,
@@ -1571,7 +1590,7 @@ mod kernel_observation {
         assert_eq!(observation.main_pid(), own_pid());
         assert_eq!(observation.invocation_id(), INVOCATION);
         assert_eq!(observation.launcher(), observe_executable(own_pid())?);
-        assert_eq!(observation.adapter(), ADAPTER_IDENTITY);
+        assert_eq!(observation.adapter(), adapter_identity()?);
         assert_eq!(observation.root(), crate::RootIdentity::FIXTURE);
         assert_eq!(observation.cgroup().inode(), identity.ino());
         assert_eq!(observation.namespaces(), own.namespaces());
@@ -1717,4 +1736,29 @@ fn a_release_that_ends_past_the_deadline_is_no_barrier_failure() {
         Err(BarrierError::ExpiredAfterRelease)
     ));
     assert!(released_by(Instant::now() + Duration::from_mins(1)).is_ok());
+}
+
+/// The adapter is observed beneath `/proc/<MainPID>/root` before any
+/// `ReadyV1` is awaited; one that cannot be observed there releases nothing
+/// and records `0 ReadyUnavailable`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adapter_unobservable_beneath_the_unit_root_is_refused_before_ready() -> TestResult {
+    let attempt =
+        test_attempt(SandboxExecutionMode::AirGapped)?.running("/missing/adapter".to_owned());
+    let mut barrier = barrier_with(&attempt, Refusal::None, TestIdentity::new(own_pid()))?;
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err()
+        .ok_or("the release was not refused")?;
+    assert!(matches!(
+        error,
+        BarrierError::AdapterIdentity(KernelObservationError::Adapter)
+    ));
+    assert_eq!(
+        error.barrier_failure(),
+        Some(BarrierFailure::ReadyUnavailable)
+    );
+    assert!(barrier.sent_release().is_none());
+    Ok(())
 }

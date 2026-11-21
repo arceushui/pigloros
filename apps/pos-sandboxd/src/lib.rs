@@ -324,7 +324,7 @@ pub use execute::{
     StartFailure, UnitCgroup, UnitHost, UnitKiller, UnitState, UnverifiedStart,
 };
 #[cfg(target_os = "linux")]
-pub use kernel_observation::observation_evidence;
+pub use kernel_observation::{observation_evidence, observe_adapter};
 #[cfg(target_os = "linux")]
 pub use kernel_observation::{
     BlockDevice, CgroupView, DeviceNumber, KernelIdentity, KernelObservation,
@@ -335,8 +335,8 @@ pub use kernel_observation::{
 pub use lifecycle::{
     finish_attempt, AttemptCleanup, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch,
     AttemptLifecycle, AttemptLifecycleError, AttemptProgress, BarrierFactory, CleanupBudget,
-    EndedAttempt, LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt,
-    RootRecheck, SystemdAttemptSteps,
+    EndedAttempt, ExchangeClaim, GrantWrite, LiveAttemptIdentity, LiveAttemptSnapshot,
+    OwnedAttempt, ReconciledAttempt, RootRecheck, SystemdAttemptSteps,
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{
@@ -385,8 +385,8 @@ pub use root_attachment::{
 
 #[cfg(target_os = "linux")]
 pub use provider_barrier::{
-    fresh_nonce, AuthorityCheck, BarrierError, BarrierEvidence, ObservedReadback,
-    ObservedReadbackUnavailable, ProviderReleaseBarrier, RecheckRefusal, UnitIdentitySource,
+    fresh_nonce, AuthorityCheck, BarrierError, ObservedReadback, ObservedReadbackUnavailable,
+    ProviderReleaseBarrier, RecheckRefusal, UnitIdentitySource,
 };
 #[cfg(target_os = "linux")]
 pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};

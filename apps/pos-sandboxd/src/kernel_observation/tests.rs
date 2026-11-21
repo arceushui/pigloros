@@ -467,3 +467,72 @@ fn a_process_list_matches_whole_lines_only() -> TestResult {
     assert_eq!(listed("12\n1\n", 12)?, Ok(()));
     Ok(())
 }
+
+/// The adapter is identified beneath the anchored `/proc/<MainPID>/root`,
+/// so in the main process's own mount namespace, and resolved as the
+/// launcher resolves it: beneath that root, never through a symlink.
+#[test]
+fn the_adapter_is_observed_beneath_the_unit_root() -> TestResult {
+    let executable = std::env::current_exe()?;
+    let path = executable.to_str().ok_or("path")?;
+    let expected = statx(
+        CWD,
+        path,
+        AtFlags::empty(),
+        StatxFlags::INO.union(StatxFlags::MNT_ID),
+    )?;
+    assert_eq!(
+        observe_adapter(own_pid(), path)?,
+        FdIdentity {
+            mount_id: expected.stx_mnt_id,
+            inode: expected.stx_ino,
+        }
+    );
+    // The leading slash is the unit root's own.
+    assert_eq!(
+        observe_adapter(own_pid(), path.trim_start_matches('/'))?,
+        observe_adapter(own_pid(), path)?
+    );
+    let directory = tempfile::tempdir()?;
+    let link = directory.path().join("adapter");
+    std::os::unix::fs::symlink(&executable, &link)?;
+    for refused in [
+        link.to_str().ok_or("path")?.to_owned(),
+        format!("{}/missing", directory.path().to_str().ok_or("path")?),
+        "../../etc/passwd".to_owned(),
+    ] {
+        assert!(matches!(
+            observe_adapter(own_pid(), &refused),
+            Err(KernelObservationError::Adapter)
+        ));
+    }
+    Ok(())
+}
+
+/// The adapter is observed only through a procfs directory of a live
+/// process.
+#[test]
+fn the_adapter_of_an_unanchored_or_exited_process_is_not_observed() -> TestResult {
+    let executable = std::env::current_exe()?;
+    let path = executable.to_str().ok_or("path")?;
+    let fake = tempfile::tempdir()?;
+    std::fs::create_dir(fake.path().join(own_pid().to_string()))?;
+    assert!(matches!(
+        observe_adapter_in(fake.path().to_str().ok_or("path")?, own_pid(), path),
+        Err(KernelObservationError::NotProcfs)
+    ));
+    let mut child = short_lived()?;
+    let pid = child.id();
+    let pidfd = pidfd_open(
+        Pid::from_raw(i32::try_from(pid)?).ok_or("pid")?,
+        PidfdFlags::empty(),
+    )?;
+    exited(&pidfd)?;
+    // Not reaped yet: its procdir still exists, but it is not alive.
+    assert!(matches!(
+        observe_adapter(pid, path),
+        Err(KernelObservationError::Exited)
+    ));
+    child.wait()?;
+    Ok(())
+}

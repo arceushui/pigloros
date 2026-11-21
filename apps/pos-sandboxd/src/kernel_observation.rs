@@ -26,8 +26,8 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{
-    fstat, fstatfs, major, minor, open, openat, statx, AtFlags, Mode, OFlags, StatxFlags,
-    PROC_SUPER_MAGIC,
+    fstat, fstatfs, major, minor, open, openat, openat2, statx, AtFlags, Mode, OFlags,
+    ResolveFlags, StatxFlags, PROC_SUPER_MAGIC,
 };
 use rustix::io::Errno;
 use rustix::process::pidfd_open;
@@ -53,6 +53,13 @@ const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
 const READ: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC);
+/// A path handle, opened for its identity only.
+const PATH: OFlags = OFlags::PATH.union(OFlags::CLOEXEC);
+/// The launcher's own resolution of the adapter path: beneath the root,
+/// without any symlink or magic link (`launcher::adapter`).
+const ADAPTER_RESOLVE: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_MAGICLINKS);
 
 /// A kernel device number as `major:minor`, never a raw `st_dev`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -634,6 +641,9 @@ pub enum KernelObservationError {
     /// The target of `exe` could not be identified.
     #[error("the launcher executable could not be observed")]
     Executable,
+    /// The adapter could not be identified beneath the unit's root.
+    #[error("the adapter could not be observed beneath the unit root")]
+    Adapter,
     /// `cgroup.procs` could not be read.
     #[error("the bound cgroup's process list could not be read")]
     CgroupProcs,
@@ -777,6 +787,81 @@ fn launcher(procdir: BorrowedFd<'_>) -> Result<FdIdentity, KernelObservationErro
         inode: status.stx_ino,
     })
     .ok_or(KernelObservationError::Executable)
+}
+
+/// The mount ID and inode of `adapter_path` beneath the target of `root`.
+///
+/// `root` is a magic link, so it is followed (never `NOFOLLOW`), and its
+/// target is the unit's root in the unit's own mount namespace. The adapter
+/// path is then resolved beneath it exactly as the launcher resolves it, so
+/// the mount ID is the one the launcher sees, not the provider's.
+fn adapter(
+    procdir: BorrowedFd<'_>,
+    adapter_path: &str,
+) -> Result<FdIdentity, KernelObservationError> {
+    openat(
+        procdir,
+        "root",
+        PATH.union(OFlags::DIRECTORY),
+        Mode::empty(),
+    )
+    .and_then(|root| {
+        openat2(
+            root,
+            adapter_path.trim_start_matches('/'),
+            PATH,
+            Mode::empty(),
+            ADAPTER_RESOLVE,
+        )
+    })
+    .ok()
+    .and_then(|adapter| {
+        statx(
+            adapter,
+            "",
+            AtFlags::EMPTY_PATH,
+            StatxFlags::INO.union(StatxFlags::MNT_ID),
+        )
+        .ok()
+    })
+    .filter(|status| StatxFlags::from_bits_retain(status.stx_mask).contains(StatxFlags::MNT_ID))
+    .map(|status| FdIdentity {
+        mount_id: status.stx_mnt_id,
+        inode: status.stx_ino,
+    })
+    .ok_or(KernelObservationError::Adapter)
+}
+
+/// Observe the adapter of a started unit whose manager reports `main_pid`.
+///
+/// The result is its mount ID and inode at `adapter_path` beneath the
+/// unit's root, as `ReadyV1` binds them (owner decision 2026-11-21, #443
+/// slice 9).
+///
+/// It follows the R9 §4.4 procedure: the process is anchored with a pidfd
+/// and a `/proc/<MainPID>` directory proved to be procfs, and the adapter is
+/// read through that directory while the pidfd shows the process alive.
+///
+/// # Errors
+/// A failed anchor, an exited process, or an adapter that cannot be
+/// identified beneath the unit's root.
+pub fn observe_adapter(
+    main_pid: u32,
+    adapter_path: &str,
+) -> Result<FdIdentity, KernelObservationError> {
+    observe_adapter_in(PROC_PATHS.proc, main_pid, adapter_path)
+}
+
+fn observe_adapter_in(
+    proc: &str,
+    main_pid: u32,
+    adapter_path: &str,
+) -> Result<FdIdentity, KernelObservationError> {
+    ProcessAnchor::open(proc, main_pid).and_then(|anchor| {
+        alive(anchor.pidfd.as_fd())
+            .and_then(|()| adapter(anchor.procdir.as_fd(), adapter_path))
+            .and_then(|identity| alive(anchor.pidfd.as_fd()).map(|()| identity))
+    })
 }
 
 /// The mount ID and capacity of a held `/work` handle.

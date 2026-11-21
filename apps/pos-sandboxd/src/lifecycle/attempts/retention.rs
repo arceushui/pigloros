@@ -93,9 +93,13 @@ impl<I> AttemptLifecycle<I> {
     /// original attempt's watchdog and cleanup budget and its response's
     /// signing: it is never admitted, so no second AGR1 is sent and no
     /// `AttemptInProgress` terminal exists. It then receives the very
-    /// response the original connection does. `Ok(None)` means this runtime
-    /// never knew the attempt: the execute is not a repeat. Dropping the
-    /// future leaves the attempt as it is.
+    /// response the original connection does. A repeat during a claim waits
+    /// on the claim, then on the attempt it becomes (ADR-069 R11 Amendment 1,
+    /// §7.5 port step J). `Ok(None)` means no exchange holds the attempt: it
+    /// was never known, or its claim was released or its AGR1 write failed,
+    /// and the repeat re-enters the port at step 7 as a new exchange. The
+    /// caller bounds the wait by the repeat's own initial control deadline;
+    /// dropping the future leaves the attempt as it is.
     ///
     /// # Errors
     /// [`AttemptLifecycleError::UnknownAttempt`] once the attempt was
@@ -127,10 +131,16 @@ impl<I> AttemptLifecycle<I> {
         match lock(&self.attempts).get(&attempt_id) {
             None => Ok(Joined::Ready(None)),
             Some(Slot::Reconciled { .. }) => Err(AttemptLifecycleError::UnknownAttempt),
-            Some(Slot::Running { request, .. } | Slot::Ended { request, .. })
-                if *request != request_digest =>
-            {
-                Err(AttemptLifecycleError::RequestConflict)
+            Some(
+                Slot::Claimed { request, .. }
+                | Slot::Granted { request, .. }
+                | Slot::Running { request, .. }
+                | Slot::Ended { request, .. },
+            ) if *request != request_digest => Err(AttemptLifecycleError::RequestConflict),
+            // A claim converts or is released, and a granted attempt is
+            // admitted or ends: either replaces the slot, which wakes this.
+            Some(Slot::Claimed { changed, .. } | Slot::Granted { changed, .. }) => {
+                Ok(Joined::Waiting(changed.subscribe()))
             }
             Some(Slot::Running { ended, .. }) => Ok(Joined::Waiting(ended.clone())),
             Some(Slot::Ended {
@@ -165,9 +175,15 @@ impl<I> AttemptLifecycle<I> {
         agr1_digest: [u8; 32],
     ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
         match lock(&self.attempts).get(&attempt_id) {
-            None | Some(Slot::Reconciled { .. }) => Err(AttemptLifecycleError::UnknownAttempt),
-            Some(slot) if slot.grant() != agr1_digest => Err(AttemptLifecycleError::GrantMismatch),
-            Some(Slot::Running { .. }) => Err(AttemptLifecycleError::AttemptActive),
+            None | Some(Slot::Reconciled { .. } | Slot::Claimed { .. }) => {
+                Err(AttemptLifecycleError::UnknownAttempt)
+            }
+            Some(slot) if slot.agr1_digest() != Some(agr1_digest) => {
+                Err(AttemptLifecycleError::GrantMismatch)
+            }
+            Some(Slot::Granted { .. } | Slot::Running { .. }) => {
+                Err(AttemptLifecycleError::AttemptActive)
+            }
             Some(Slot::Ended {
                 response: Retained::Pending,
                 ..

@@ -23,7 +23,7 @@ mod cases {
 
     const SIM1: [u8; 32] = [9; 32];
 
-    /// The SPX1 digest `IssuedGrant::fixture` answers.
+    /// The SPX1 digest the test grants claim their attempts under.
     const REQUEST: [u8; 32] = [0x5d; 32];
 
     /// How the fake admission activates its root.
@@ -96,6 +96,12 @@ mod cases {
             input.attempt[0] = high;
             input.attempt[1] = low;
             input
+        }
+
+        /// The same admission, of the attempt `attempt`.
+        const fn with_attempt(mut self, attempt: [u8; 16]) -> Self {
+            self.attempt = attempt;
+            self
         }
 
         const fn activating(mut self, activation: Activation) -> Self {
@@ -488,7 +494,7 @@ mod cases {
             input: FakeInput,
             steps: &FixtureSteps<'_>,
         ) -> TestResult<EndedAttempt<()>> {
-            let owned = self.lifecycle.admit_input(input)?;
+            let owned = self.lifecycle.admit_granted(input)?;
             let budget = budget()?;
             let ended = Box::pin(owned.run_with(steps, (), budget)).await;
             Ok(ended)
@@ -603,9 +609,10 @@ mod cases {
                     .await,
                 Err(AttemptLifecycleError::UnknownAttempt)
             ));
+            // A reconciled attempt is tombstoned (R11 Amendment 1 §7.5).
             assert!(matches!(
-                runtime.lifecycle.admit_input(FakeInput::new(id)),
-                Err(AttemptLifecycleError::AttemptKnown)
+                runtime.lifecycle.admit_granted(FakeInput::new(id)),
+                Err(AttemptLifecycleError::UnknownAttempt)
             ));
         }
         assert!(runtime.admits()?);
@@ -616,6 +623,7 @@ mod cases {
     async fn an_input_failed_after_its_grant_ends_with_nothing_committed() -> TestResult {
         let runtime = Runtime::new()?;
         let before = crate::launcher::clock::monotonic_ns()?;
+        runtime.lifecycle.granted_for_test([1; 16], grant(1))?;
         let ended: EndedAttempt<()> = runtime.lifecycle.record_failed(&FakeFailed(1))?;
         assert_eq!(ended.attempt_id(), [1; 16]);
         assert_eq!(ended.cancel_source(), None);
@@ -628,7 +636,7 @@ mod cases {
             Err(AttemptLifecycleError::AttemptKnown)
         ));
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::new(1)),
+            runtime.lifecycle.admit_granted(FakeInput::new(1)),
             Err(AttemptLifecycleError::AttemptKnown)
         ));
         // A cancellation finds it terminal, for its grant only.
@@ -668,13 +676,13 @@ mod cases {
         let lifecycle: AttemptLifecycle =
             AttemptLifecycle::new(registry, ledger, &crate::ReconciledRestart::for_test());
         let failed = FailedInput::fixture([7; 16], grant(7));
-        let ended = lifecycle.record_failed_input(&failed)?;
+        let ended = lifecycle.failed_granted(&failed)?;
         assert_eq!(ended.attempt_id(), [7; 16]);
         assert!(matches!(ended.progress(), AttemptProgress::InputFailed));
         assert!(matches!(ended.cleanup(), Ok(None)));
         assert!(ended.cleanup_finished_at().is_some());
         assert!(matches!(
-            lifecycle.record_failed_input(&failed),
+            lifecycle.failed_granted(&failed),
             Err(AttemptLifecycleError::AttemptKnown)
         ));
         assert_eq!(
@@ -694,18 +702,21 @@ mod cases {
         }
         runtime
             .lifecycle
+            .granted_for_test([0xfe; 16], grant(0xfe))?;
+        runtime
+            .lifecycle
             .record_failed::<(), _>(&FakeFailed(0xfe))?;
         assert!(matches!(
-            runtime.lifecycle.record_failed::<(), _>(&FakeFailed(0xfd)),
+            runtime.lifecycle.granted_for_test([0xfd; 16], grant(0xfd)),
             Err(AttemptLifecycleError::TooManyLiveAttempts)
         ));
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::numbered(300)),
+            runtime.lifecycle.admit_granted(FakeInput::numbered(300)),
             Err(AttemptLifecycleError::TooManyLiveAttempts)
         ));
         drop(runtime.lifecycle.fence());
         assert!(matches!(
-            runtime.lifecycle.record_failed::<(), _>(&FakeFailed(0xfd)),
+            runtime.lifecycle.granted_for_test([0xfd; 16], grant(0xfd)),
             Err(AttemptLifecycleError::Fenced)
         ));
         Ok(())
@@ -714,9 +725,9 @@ mod cases {
     #[tokio::test(start_paused = true)]
     async fn an_attempt_has_one_owner_while_it_runs_and_after_it_ended() -> TestResult {
         let runtime = Runtime::new()?;
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::new(1)),
+            runtime.lifecycle.admit_granted(FakeInput::new(1)),
             Err(AttemptLifecycleError::AttemptKnown)
         ));
         // A running attempt is not clean yet.
@@ -728,7 +739,7 @@ mod cases {
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         cleaned(&Box::pin(owned.run_with(&steps, (), budget()?)).await)?;
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::new(1)),
+            runtime.lifecycle.admit_granted(FakeInput::new(1)),
             Err(AttemptLifecycleError::AttemptKnown)
         ));
         // Cancelling an ended attempt changes nothing.
@@ -745,7 +756,7 @@ mod cases {
     #[tokio::test(start_paused = true)]
     async fn requests_for_another_attempt_or_grant_are_refused() -> TestResult {
         let runtime = Runtime::new()?;
-        let _owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let _owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         assert!(matches!(
             runtime.lifecycle.cancel(&cancel_request(2, grant(2))).await,
             Err(AttemptLifecycleError::UnknownAttempt)
@@ -774,12 +785,12 @@ mod cases {
         let hook = Arc::new(std::sync::OnceLock::new());
         let mut input = FakeInput::new(1);
         input.cancel_while_preparing = Some(Arc::clone(&hook));
-        let owned = runtime.lifecycle.admit_input(input)?;
+        let owned = runtime.lifecycle.admit_granted(input)?;
         let state = lock(&runtime.lifecycle.attempts)
             .get(&[1; 16])
             .and_then(|slot| match slot {
                 Slot::Running { state, .. } => Some(Arc::clone(state)),
-                Slot::Ended { .. } | Slot::Reconciled { .. } => None,
+                _ => None,
             });
         hook.set(state.ok_or("no running slot")?)
             .map_err(|_| "hook already set")?;
@@ -806,7 +817,7 @@ mod cases {
             let fixture = TeardownFixture::new(1, stop, TeardownReset::Unload).await?;
             let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
                 .behaving(Behaviour::RunsUntilCancelled);
-            let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+            let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
             let cancel = async {
                 steps.executing().await;
                 runtime.lifecycle.cancel(&cancel_request(1, grant(1))).await
@@ -837,7 +848,7 @@ mod cases {
         let fixture = TeardownFixture::new(1, TeardownStop::Empty, TeardownReset::Unload).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
             .behaving(Behaviour::RunsUntilCancelled);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         let cancel = async {
             steps.executing().await;
             runtime.lifecycle.cancel(&cancel_request(1, grant(1))).await
@@ -864,7 +875,7 @@ mod cases {
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         let owned = runtime
             .lifecycle
-            .admit_input(FakeInput::new(1).activating(Activation::Slow))?;
+            .admit_granted(FakeInput::new(1).activating(Activation::Slow))?;
         // Cancel once the directory exists, while the root is being activated:
         // the execution's claim of the directory is then fenced.
         let run = Box::pin(owned.run_with(&steps, (), budget()?));
@@ -874,7 +885,7 @@ mod cases {
                     .get(&[1; 16])
                     .and_then(|slot| match slot {
                         Slot::Running { state, .. } => Some(Arc::clone(state)),
-                        Slot::Ended { .. } | Slot::Reconciled { .. } => None,
+                        _ => None,
                     });
                 let held = running.filter(|state| lock(&state.fence).is_some());
                 if let Some(state) = held {
@@ -914,7 +925,7 @@ mod cases {
         input.probe = Some(DropProbe(Box::new(move || {
             observed.store(ledger.reserve_storage(0).is_err(), Ordering::SeqCst);
         })));
-        let owned = runtime.lifecycle.admit_input(input)?;
+        let owned = runtime.lifecycle.admit_granted(input)?;
         assert_eq!(runtime.reserved(), 1);
         let cancel = async {
             steps.executing().await;
@@ -973,7 +984,7 @@ mod cases {
         assert!(runtime.lifecycle.join([1; 16], REQUEST).await?.is_none());
         let fixture = manager(1).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         assert!(matches!(
             runtime.lifecycle.join([1; 16], [0x77; 32]).await,
             Err(AttemptLifecycleError::RequestConflict)
@@ -999,7 +1010,7 @@ mod cases {
         ran?;
         assert!(matches!(joined, Err(AttemptLifecycleError::UnknownAttempt)));
         // A withdrawn attempt is unknown to a repeat as well.
-        drop(runtime.lifecycle.admit_input(FakeInput::new(2))?);
+        drop(runtime.lifecycle.admit_granted(FakeInput::new(2))?);
         assert!(matches!(
             runtime.lifecycle.join([2; 16], REQUEST).await,
             Err(AttemptLifecycleError::UnknownAttempt)
@@ -1010,10 +1021,10 @@ mod cases {
     #[tokio::test(start_paused = true)]
     async fn an_owner_dropped_before_its_run_started_is_withdrawn() -> TestResult {
         let runtime = Runtime::new()?;
-        drop(runtime.lifecycle.admit_input(runtime.charged(1)?)?);
+        drop(runtime.lifecycle.admit_granted(runtime.charged(1)?)?);
         let fixture = manager(2).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(2))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(2))?;
         drop(Box::pin(owned.run_with(&steps, (), budget()?)));
         // Nothing was committed, so nothing needs restart reconciliation.
         assert!(!exists(&runtime.record(1)?));
@@ -1023,8 +1034,8 @@ mod cases {
         // clean up, and no longer live.
         for id in [1, 2] {
             assert!(matches!(
-                runtime.lifecycle.admit_input(FakeInput::new(id)),
-                Err(AttemptLifecycleError::AttemptKnown)
+                runtime.lifecycle.admit_granted(FakeInput::new(id)),
+                Err(AttemptLifecycleError::UnknownAttempt)
             ));
             let reconciled = runtime
                 .lifecycle
@@ -1054,7 +1065,7 @@ mod cases {
         let fixture = manager(1).await?;
         let calls = fixture.calls();
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-        let owned = runtime.lifecycle.admit_input(runtime.charged(1)?)?;
+        let owned = runtime.lifecycle.admit_granted(runtime.charged(1)?)?;
         assert_eq!(runtime.reserved(), 1);
         // The owner has not run it: the cancellation needs no wait, and the
         // withdrawn admission is released at once.
@@ -1281,7 +1292,7 @@ mod cases {
         let fixture =
             TeardownFixture::new(1, TeardownStop::LeavesPopulated, TeardownReset::Unload).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         cleaned(&Box::pin(owned.run_with(&steps, (), budget)).await)?;
         assert!(runtime.admits()?);
         Ok(())
@@ -1318,7 +1329,7 @@ mod cases {
     /// Admit `input` and start its run without running it, then drop it:
     /// the attempt ended without proved cleanup and nothing was committed.
     fn started_and_dropped(runtime: &Runtime, input: FakeInput) -> TestResult {
-        let mut owned = runtime.lifecycle.admit_input(input)?;
+        let mut owned = runtime.lifecycle.admit_granted(input)?;
         let taken = owned.claim.begin();
         assert!(taken.is_some());
         drop(owned);
@@ -1352,9 +1363,11 @@ mod cases {
         started_and_dropped(&runtime, FakeInput::new(7))?;
         started_and_dropped(&runtime, FakeInput::new(6))?;
         // Attempt 5's input failed after its grant: nothing to recover.
+        runtime.lifecycle.granted_for_test([5; 16], grant(5))?;
         runtime.lifecycle.record_failed::<(), _>(&FakeFailed(5))?;
-        // Attempt 3 was admitted and never started: it is withdrawn.
-        let idle = runtime.lifecycle.admit_input(FakeInput::new(3))?;
+        // Attempt 3 was admitted and never started: it is cancelled by the
+        // revocation, and its run records that ending with nothing committed.
+        let idle = runtime.lifecycle.admit_granted(FakeInput::new(3))?;
         let snapshot = runtime.lifecycle.fence_and_snapshot().await?;
         let attempts = snapshot.attempts();
         assert_eq!(
@@ -1380,12 +1393,13 @@ mod cases {
             (dropped.image(), dropped.directories(), dropped.cgroup()),
             (None, None, None)
         );
-        // The withdrawn attempt cannot start any more.
+        // The cancelled attempt cannot start any more.
         let ended = Box::pin(idle.run_with(&steps, (), budget()?)).await;
         assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
+        assert_eq!(ended.cancel_source(), Some(CancelSource::Revocation));
         // Admission is closed for good, and the snapshot is handed out once.
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::new(4)),
+            runtime.lifecycle.admit_granted(FakeInput::new(4)),
             Err(AttemptLifecycleError::Fenced)
         ));
         assert!(matches!(
@@ -1440,7 +1454,7 @@ mod cases {
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         let owned = runtime
             .lifecycle
-            .admit_input(FakeInput::new(1).activating(Activation::Slow))?;
+            .admit_granted(FakeInput::new(1).activating(Activation::Slow))?;
         let run = Box::pin(owned.run_with(&steps, (), budget()?));
         // Fence once the directory exists, while the root is being activated.
         let fence = async {
@@ -1449,7 +1463,7 @@ mod cases {
                     .get(&[1; 16])
                     .and_then(|slot| match slot {
                         Slot::Running { state, .. } => Some(Arc::clone(state)),
-                        Slot::Ended { .. } | Slot::Reconciled { .. } => None,
+                        _ => None,
                     })
                     .is_some_and(|state| lock(&state.fence).is_some());
                 if held {
@@ -1488,7 +1502,7 @@ mod cases {
         let cgroup = fixture.bound.identity();
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
             .behaving(Behaviour::RunsUntilCancelled);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         let run = Box::pin(owned.run_with(&steps, (), budget()?));
         let fence = async {
             steps.executing().await;
@@ -1510,7 +1524,7 @@ mod cases {
         let fixture = manager(1).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
             .behaving(Behaviour::RunsUntilCancelled);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         let run = Box::pin(owned.run_with(&steps, (), budget()?));
         let fences = async {
             steps.executing().await;
@@ -1539,7 +1553,7 @@ mod cases {
             started_and_dropped(&runtime, FakeInput::numbered(number))?;
         }
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::numbered(300)),
+            runtime.lifecycle.admit_granted(FakeInput::numbered(300)),
             Err(AttemptLifecycleError::TooManyLiveAttempts)
         ));
         let snapshot = runtime.lifecycle.fence_and_snapshot().await?;
@@ -1553,11 +1567,247 @@ mod cases {
         Ok(())
     }
 
+    /// A claim is refused once fenced, for a reconciled attempt, for other
+    /// bytes under a known attempt or request ID, and for the same bytes,
+    /// which join instead (ADR-069 R11 Amendment 1, §7.5 row A).
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_is_refused_as_port_step_a_requires() -> TestResult {
+        let runtime = Runtime::new()?;
+        let lifecycle = &runtime.lifecycle;
+        let claim = lifecycle.claim([1; 16], [1; 16], REQUEST)?;
+        for (attempt, request, digest) in [
+            ([1; 16], [1; 16], [0x77; 32]),
+            ([2; 16], [1; 16], [0x77; 32]),
+        ] {
+            assert!(matches!(
+                lifecycle.claim(attempt, request, digest),
+                Err(AttemptLifecycleError::RequestConflict)
+            ));
+        }
+        assert!(matches!(
+            lifecycle.claim([1; 16], [1; 16], REQUEST),
+            Err(AttemptLifecycleError::AttemptKnown)
+        ));
+        // A claim has no AGR1 that a cancellation, a reconcile or a response
+        // could name, and admits nothing.
+        assert!(matches!(
+            lifecycle.cancel(&cancel_request(1, grant(1))).await,
+            Err(AttemptLifecycleError::UnknownAttempt)
+        ));
+        assert!(matches!(
+            lifecycle.reconcile(&reconcile_request(1, grant(1))),
+            Err(AttemptLifecycleError::GrantMismatch)
+        ));
+        assert!(matches!(
+            lifecycle.terminal_response([1; 16], grant(1)),
+            Err(AttemptLifecycleError::UnknownAttempt)
+        ));
+        assert!(matches!(
+            lifecycle.admit_input(FakeInput::new(1)),
+            Err(AttemptLifecycleError::UnknownAttempt)
+        ));
+        // Released, the attempt can be claimed again.
+        drop(claim);
+        let write = lifecycle
+            .claim([1; 16], [1; 16], REQUEST)?
+            .convert(grant(1))?;
+        write.written();
+        assert!(matches!(
+            lifecycle.reconcile(&reconcile_request(1, grant(1))),
+            Err(AttemptLifecycleError::AttemptActive)
+        ));
+        assert!(matches!(
+            lifecycle.terminal_response([1; 16], grant(1)),
+            Err(AttemptLifecycleError::AttemptActive)
+        ));
+        assert!(matches!(
+            lifecycle.admit_input(FakeInput::new(2).with_attempt([1; 16])),
+            Err(AttemptLifecycleError::GrantMismatch)
+        ));
+        let ended: EndedAttempt<()> = lifecycle.record_failed(&FakeFailed(1))?;
+        assert_eq!(ended.cancel_source(), None);
+        lifecycle.reconcile(&reconcile_request(1, grant(1)))?;
+        assert!(matches!(
+            lifecycle.claim([1; 16], [1; 16], REQUEST),
+            Err(AttemptLifecycleError::UnknownAttempt)
+        ));
+        lifecycle.fence_and_snapshot().await?;
+        assert!(matches!(
+            lifecycle.claim([3; 16], [3; 16], REQUEST),
+            Err(AttemptLifecycleError::Fenced)
+        ));
+        Ok(())
+    }
+
+    /// A released claim frees its place under the cap.
+    #[test]
+    fn a_released_claim_frees_its_place_under_the_cap() -> TestResult {
+        let runtime = Runtime::new()?;
+        for number in 1..=255 {
+            started_and_dropped(&runtime, FakeInput::numbered(number))?;
+        }
+        for _ in 0..2 {
+            drop(runtime.lifecycle.claim([2; 16], [2; 16], REQUEST)?);
+        }
+        drop(
+            runtime
+                .lifecycle
+                .claim([2; 16], [2; 16], REQUEST)?
+                .convert(grant(2))?,
+        );
+        let last = runtime.lifecycle.claim([3; 16], [3; 16], REQUEST)?;
+        assert!(matches!(
+            runtime.lifecycle.claim([4; 16], [4; 16], REQUEST),
+            Err(AttemptLifecycleError::TooManyLiveAttempts)
+        ));
+        drop(last);
+        Ok(())
+    }
+
+    /// A repeat waits on a claim; a released claim or a failed AGR1 write
+    /// removes the slot, and the repeat re-enters as a new exchange.
+    #[tokio::test(start_paused = true)]
+    async fn a_repeat_of_a_released_claim_or_failed_write_is_a_new_exchange() -> TestResult {
+        let runtime = Runtime::new()?;
+        let lifecycle = &runtime.lifecycle;
+        let claim = lifecycle.claim([1; 16], [1; 16], REQUEST)?;
+        let (joined, ()) = tokio::join!(lifecycle.join([1; 16], REQUEST), async {
+            tokio::task::yield_now().await;
+            drop(claim);
+        });
+        assert!(joined?.is_none());
+        let write = lifecycle
+            .claim([1; 16], [1; 16], REQUEST)?
+            .convert(grant(1))?;
+        let (joined, ()) = tokio::join!(lifecycle.join([1; 16], REQUEST), async {
+            tokio::task::yield_now().await;
+            // The AGR1 write failed.
+            drop(write);
+        });
+        assert!(joined?.is_none());
+        assert!(lifecycle.terminal_response([1; 16], grant(1)).is_err());
+        assert!(matches!(
+            lifecycle.admit_input(FakeInput::new(1)),
+            Err(AttemptLifecycleError::UnknownAttempt)
+        ));
+        Ok(())
+    }
+
+    /// A repeat during a claim waits through the conversion and the run,
+    /// and joins the attempt the claim became.
+    #[tokio::test(start_paused = true)]
+    async fn a_repeat_during_a_claim_joins_the_attempt_it_becomes() -> TestResult {
+        let runtime = Runtime::new()?;
+        let lifecycle = &runtime.lifecycle;
+        let fixture = manager(1).await?;
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+        let claim = lifecycle.claim([1; 16], [1; 16], REQUEST)?;
+        let joined = lifecycle.join([1; 16], REQUEST);
+        let ran = async {
+            tokio::task::yield_now().await;
+            claim.convert(grant(1))?.written();
+            tokio::task::yield_now().await;
+            let owned = lifecycle.admit_input(FakeInput::new(1))?;
+            tokio::task::yield_now().await;
+            let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+            cleaned(&ended)?;
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            lifecycle.reconcile(&reconcile_request(1, grant(1)))?;
+            TestResult::Ok(())
+        };
+        let (joined, ran) = tokio::join!(joined, ran);
+        ran?;
+        assert!(matches!(joined, Err(AttemptLifecycleError::UnknownAttempt)));
+        Ok(())
+    }
+
+    /// A fence voids a claim before its conversion: no AGR1 may follow. A
+    /// fence after the conversion never refuses the admission or the failed
+    /// input, which record a cancelled ending with nothing committed
+    /// (invariant 32). The fence never waits for a grant write.
+    #[tokio::test(start_paused = true)]
+    async fn a_fence_voids_claims_and_keeps_converted_attempts() -> TestResult {
+        let runtime = Runtime::new()?;
+        let lifecycle = &runtime.lifecycle;
+        let fixture = manager(1).await?;
+        let calls = fixture.calls();
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+        let voided = lifecycle.claim([4; 16], [4; 16], REQUEST)?;
+        lifecycle.granted_for_test([1; 16], grant(1))?;
+        lifecycle.granted_for_test([2; 16], grant(2))?;
+        let writing = lifecycle
+            .claim([3; 16], [3; 16], REQUEST)?
+            .convert(grant(3))?;
+        let (joined, snapshot) = tokio::join!(
+            lifecycle.join([4; 16], REQUEST),
+            tokio::time::timeout(Duration::from_millis(100), lifecycle.fence_and_snapshot())
+        );
+        assert!(snapshot??.attempts().is_empty());
+        assert!(joined?.is_none());
+        assert!(matches!(
+            voided.convert(grant(4)),
+            Err(AttemptLifecycleError::Fenced)
+        ));
+        writing.written();
+        let owned = lifecycle.admit_input(FakeInput::new(1))?;
+        // A repeat that joined it wakes when the ending is recorded.
+        let joined = lifecycle.join([1; 16], REQUEST);
+        let ran = async {
+            let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            // Its response is retained when it is signed.
+            assert!(matches!(
+                lifecycle.terminal_response([1; 16], grant(1)),
+                Err(AttemptLifecycleError::ResponsePending)
+            ));
+            lifecycle.reconcile(&reconcile_request(1, grant(1)))?;
+            TestResult::Ok(ended)
+        };
+        let (joined, ended) = tokio::join!(joined, ran);
+        let ended = ended?;
+        assert!(matches!(joined, Err(AttemptLifecycleError::UnknownAttempt)));
+        assert_eq!(ended.cancel_source(), Some(CancelSource::Revocation));
+        assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
+        assert!(matches!(ended.cleanup(), Ok(None)));
+        assert!(!exists(&runtime.record(1)?));
+        assert_eq!(calls.count()?, 0);
+        let failed: EndedAttempt<()> = lifecycle.record_failed(&FakeFailed(2))?;
+        assert_eq!(failed.cancel_source(), Some(CancelSource::Revocation));
+        assert!(matches!(
+            lifecycle.terminal_response([2; 16], grant(2)),
+            Err(AttemptLifecycleError::ResponsePending)
+        ));
+        Ok(())
+    }
+
+    /// A cancellation of an attempt awaiting its input is recorded by its
+    /// ending, which commits nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancellation_awaiting_input_is_recorded_by_its_ending() -> TestResult {
+        let runtime = Runtime::new()?;
+        let lifecycle = &runtime.lifecycle;
+        lifecycle.granted_for_test([1; 16], grant(1))?;
+        for _ in 0..2 {
+            assert_eq!(
+                lifecycle.cancel(&cancel_request(1, grant(1))).await?,
+                SandboxCancellationResult::CancelledAndCleaned
+            );
+        }
+        let ended: EndedAttempt<()> = lifecycle.record_failed(&FakeFailed(1))?;
+        assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
+        assert!(matches!(ended.cleanup(), Ok(None)));
+        Ok(())
+    }
+
     /// A running attempt has no terminal response yet.
     #[test]
     fn a_running_attempt_has_no_terminal_response() -> TestResult {
         let runtime = Runtime::new()?;
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(3))?;
+        let owned = runtime.lifecycle.admit_granted(FakeInput::new(3))?;
         assert!(matches!(
             runtime.lifecycle.terminal_response([3; 16], grant(3)),
             Err(AttemptLifecycleError::AttemptActive)
@@ -1572,13 +1822,13 @@ mod cases {
         for number in 1..=255 {
             started_and_dropped(&runtime, FakeInput::numbered(number))?;
         }
-        let last = runtime.lifecycle.admit_input(FakeInput::numbered(256))?;
+        let last = runtime.lifecycle.admit_granted(FakeInput::numbered(256))?;
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::numbered(257)),
+            runtime.lifecycle.admit_granted(FakeInput::numbered(257)),
             Err(AttemptLifecycleError::TooManyLiveAttempts)
         ));
         drop(last);
-        drop(runtime.lifecycle.admit_input(FakeInput::numbered(257))?);
+        drop(runtime.lifecycle.admit_granted(FakeInput::numbered(257))?);
         Ok(())
     }
 
@@ -1595,7 +1845,7 @@ mod cases {
         ));
         // Admission stays closed, but no snapshot was handed out.
         assert!(matches!(
-            runtime.lifecycle.admit_input(FakeInput::new(6)),
+            runtime.lifecycle.admit_granted(FakeInput::new(6)),
             Err(AttemptLifecycleError::Fenced)
         ));
         assert!(!runtime.grants());
@@ -1790,7 +2040,7 @@ mod cases {
         ) -> TestResult<EndedAttempt<SystemdVerifiedStart>> {
             let (_store_root, store) = crate::test_fixtures::capture_store()?;
             let steps = SystemdAttemptSteps::new(transport, &FailClosedLocalNetwork, store);
-            let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+            let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
             let budget = budget()?;
             let ended = Box::pin(owned.run_with(&steps, launch(barrier), budget)).await;
             Ok(ended)
@@ -1870,6 +2120,14 @@ mod cases {
             );
             let request = input.entry().admission().snapshot().request().clone();
             let grant_digest = input.entry().grant_digest();
+            lifecycle
+                .claim(
+                    request.attempt_id,
+                    request.request.request_id,
+                    request.request_digest,
+                )?
+                .convert(grant_digest)?
+                .written();
             let owned = lifecycle.admit(input)?;
             assert_eq!(ledger.usage().attempts, 1);
             let fixture = manager(1).await?;
@@ -1987,13 +2245,13 @@ mod cases {
                 ledger,
                 &crate::ReconciledRestart::for_test(),
             );
-            let ended = lifecycle.record_failed_input(&failed)?;
+            let ended = lifecycle.failed_granted(&failed)?;
             assert_eq!(ended.attempt_id(), failed.attempt_id());
             assert!(matches!(ended.progress(), AttemptProgress::InputFailed));
             assert!(matches!(ended.cleanup(), Ok(None)));
             assert!(ended.cleanup_finished_at() >= Some(transfer.finish));
             assert!(matches!(
-                lifecycle.record_failed_input(&failed),
+                lifecycle.failed_granted(&failed),
                 Err(AttemptLifecycleError::AttemptKnown)
             ));
             let reconciled = lifecycle.reconcile(&SandboxReconcileRequest {

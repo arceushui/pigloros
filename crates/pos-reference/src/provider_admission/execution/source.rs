@@ -480,7 +480,6 @@ impl PreparedProviderExecution {
             mode: snapshot.launch_policy().execution_mode,
             provider_binary_digest: admitted.manifest().binary_digest,
             negative_probe_evidence: admitted.host_profile().negative_probe_evidence,
-            request_digest: self.policy().request_digest(),
         });
         let length = u32::try_from(grant.len()).map_err(invalid)?;
         // A supplied signer may block while installation or the floor changes.
@@ -1553,7 +1552,7 @@ mod tests {
     /// The admitted facts the terminal records need are retained with the
     /// grant: ELM1 under the digest AGR1 names, the mode, and SPR1's
     /// provider binary and negative-probe digests (Redmine #443 journal
-    /// 22723), and the SPX1 digest.
+    /// 22723).
     fn assert_granted_facts(entry: &super::super::AdmittedEntry<'_>, elm1_digest: [u8; 32]) {
         let issued = entry.grant();
         assert_eq!(issued.effective_limits(), entry.policy().effective_limits());
@@ -1572,8 +1571,6 @@ mod tests {
             issued.negative_probe_evidence(),
             provider.host_profile().negative_probe_evidence
         );
-        // The exact SPX1 it answers, for a repeated execute.
-        assert_eq!(issued.request_digest(), snapshot.request().request_digest);
     }
 
     #[test]
