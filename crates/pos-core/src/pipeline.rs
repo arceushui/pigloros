@@ -795,7 +795,7 @@ impl PipelineOutcomeV1 {
     }
 }
 
-fn invalid_draft(draft: &EventDraft) -> bool {
+pub(crate) fn invalid_draft(draft: &EventDraft) -> bool {
     draft.entity.inner() == Ulid::nil() || draft.event_type.as_str().is_empty()
 }
 
