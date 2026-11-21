@@ -594,8 +594,77 @@ async fn exchange_all(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::ScratchStore;
+    use super::{compose, ScratchStore};
+    use crate::subject::payload::CompositionV2;
+    use pos_core::ErasureInventoryPersistencePortV1 as _;
+    use pos_store::sqlite::SqliteStore;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Only the compositions with a fixture erasure bundle record an erasure identity.
+    ///
+    /// ADR-136 acceptance test 11 does not apply to the adapter: it never
+    /// acts as a key-less root (D21). This test proves that every
+    /// composition without a fixture erasure bundle serves a store that
+    /// records no erasure identity, under the closed composition, so it has
+    /// no ERQ1 to recover. The `authorized-erasure` compositions do record
+    /// one; they compose through the `serve` loader, which refuses to start
+    /// without the signer credential, so they hold the signer.
+    ///
+    /// It holds in any environment. On a networked host
+    /// `authorized-air-gapped` does not compose: `bind_gateway_mode_v1`
+    /// refuses it at predicate 6, `air-gapped-no-route`. The adapter's
+    /// existing namespace tests cover the case where it composes.
+    #[test]
+    fn only_the_erasure_bundle_compositions_record_an_erasure_identity() -> TestResult {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        for (index, composition) in [
+            CompositionV2::Open,
+            CompositionV2::Authorized,
+            CompositionV2::AuthorizedAirGapped,
+            CompositionV2::AuthorizedConsented,
+            CompositionV2::AuthorizedRooms,
+            CompositionV2::AuthorizedErasure,
+            CompositionV2::AuthorizedErasureHeld,
+            CompositionV2::AuthorizedErasureExpired,
+            CompositionV2::AuthorizedErasureClosed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let composed = {
+                let _context = runtime.enter();
+                compose(composition)
+            };
+            // `authorized-air-gapped` either does not compose (predicate 6
+            // refuses a networked host) or composes a store without an
+            // erasure identity; every other composition composes.
+            let Some((gateway, store)) = composed else {
+                assert!(
+                    composition == CompositionV2::AuthorizedAirGapped,
+                    "composition {index} is unavailable"
+                );
+                continue;
+            };
+            runtime.block_on(gateway.shutdown())?;
+            drop(gateway);
+            let identity = match &store {
+                Some(store) => SqliteStore::open(&store.path_text())?.erasure_store_identity()?,
+                None => None,
+            };
+            assert_eq!(
+                identity.is_some(),
+                composition.erasure_bundle_expiry().is_some(),
+                "composition {index}"
+            );
+            drop(store);
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_scratch_store_removes_its_files() -> Result<(), Box<dyn std::error::Error>> {
