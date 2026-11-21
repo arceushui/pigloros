@@ -188,6 +188,7 @@ pub use observation::{
     CommunityReducerBindingV1, MAX_COMMUNITY_OBSERVATION_BYTES_V1,
     MAX_COMMUNITY_OBSERVATION_EVENTS_V1, MAX_COMMUNITY_OBSERVATION_SOURCE_BYTES_V1,
     MAX_COMMUNITY_OBSERVATION_VALUE_BYTES_V1, MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
+    MAX_STAGED_CALLBACK_BOUND_V1,
 };
 pub use original_provenance::{CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1};
 pub use owner_binding::{

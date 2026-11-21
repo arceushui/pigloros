@@ -20,6 +20,7 @@ use super::{
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, ErasureArtifactClassV1, Hash, TimelineId,
 };
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Maximum canonical COV1 encoding.
@@ -32,6 +33,10 @@ pub const MAX_COMMUNITY_OBSERVATION_SOURCE_BYTES_V1: usize = 1_048_576;
 pub const MAX_COMMUNITY_OBSERVATION_EVENTS_V1: usize = 4096;
 /// Maximum recorded consumers, and so reducer rows, of one CPE1.
 pub const MAX_COMMUNITY_RECORDED_CONSUMERS_V1: usize = MAX_COMMUNITY_MEMBERS_V1;
+/// Largest per-callback bound a staged Reducer may be admitted with
+/// (ADR-113). The Runtime staged catalogue admits under it, and the store's
+/// observation preparer refuses a sealed consumer list over it.
+pub const MAX_STAGED_CALLBACK_BOUND_V1: Duration = Duration::from_millis(250);
 /// Maximum bytes of a recorded consumer's Plugin ID text.
 const MAX_PLUGIN_ID_BYTES: usize = 128;
 // COV1 framing: record head and magic 6, version 1, T, G and operation 51,

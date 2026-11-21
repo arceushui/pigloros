@@ -42,7 +42,8 @@ use pos_core::community_lifecycle::{
     CommunitySourceCatalogueV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1,
     COMMUNITY_FOLD_BUDGET_MICROS_V1, COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1,
     MAX_COMMUNITY_DIRECT_INPUTS_V1, MAX_COMMUNITY_OBSERVATION_EVENTS_V1,
-    MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
+    MAX_COMMUNITY_RECORDED_CONSUMERS_V1, MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
+    MAX_STAGED_CALLBACK_BOUND_V1,
 };
 use pos_core::store::{EventReadBounds, EventStore, SeqRange};
 use pos_core::{
@@ -132,10 +133,6 @@ pub struct CommunityObservationInstallationV1<'a> {
     /// checked (R9.6): the reference digest is not tied to the observation
     /// bytes here, which is a trust assumption on the runtime publisher.
     pub observation_schema_id: u32,
-    /// The installed history read bounds: payload, Event type and total
-    /// bytes, the Fork depth and at most 4,096 Events. The publisher's fold
-    /// reads under the same bounds.
-    pub event_read_bounds: EventReadBounds,
 }
 
 /// The pass the observation serves.
@@ -224,7 +221,7 @@ pub struct CommunityObservationRecordsV1 {
 /// strictly ordered consumers with nonzero bounds of at most 250 ms;
 /// `CapacityExhausted` for more than 4,096 Events, a deterministic fold cost
 /// over the CDP1 `fold_budget_micros`, before any re-check, or an Event read
-/// over the installed payload or total-byte bounds; `EvidenceUnavailable`
+/// over the payload or total-byte read bounds; `EvidenceUnavailable`
 /// when the cut is not T's Logical Head, a row, owner or
 /// the stitched chain differs from the domain's history, the catalogue or
 /// encoder is not the installed one, an Event type has no pinned native-event
@@ -242,15 +239,22 @@ pub fn prepare_community_observation_v1<D: CommunityStoreDomainV1>(
         .and_then(|()| check_installation(installation, input))
         .and_then(|()| {
             let (events, hasher) = domain.event_history();
-            recheck_history(events, hasher, installation.event_read_bounds, input)
+            recheck_history(events, hasher, EVENT_READ_BOUNDS, input)
         })
         .and_then(|history| mint_sources(installation, pass, input, &history))
 }
 
-/// The largest admitted per-callback bound: the staged reducer admission
-/// maximum (ADR-113; pos-runtime `MAX_STAGED_CALLBACK_BOUND_V1`), the
-/// R9.7(a) table's 250 ms column.
-const MAX_CALLBACK_BOUND: Duration = Duration::from_millis(250);
+/// The history read bounds (owner 2026-11-21, #560): at most 4,096 Events
+/// (CPE1), an Event type of at most 128 bytes (CES1), a 1 MiB payload per
+/// Event, 1 GiB read in total and a Fork depth of 64. The publisher's fold
+/// reads under the same bounds.
+const EVENT_READ_BOUNDS: EventReadBounds = EventReadBounds::new_with_total_bytes(
+    1 << 20,
+    MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
+    64,
+    MAX_COMMUNITY_OBSERVATION_EVENTS_V1,
+    1 << 30,
+);
 
 /// The sealed consumer list must be an admitted recorded set before its
 /// bounds are trusted for the fold cost: 1..=64 consumers, strictly
@@ -263,7 +267,8 @@ fn check_consumers(input: &CommunityObservationMaterializationInputV1) -> Result
             pair[0].binding.consumer_identity_digest < pair[1].binding.consumer_identity_digest
         })
         && consumers.iter().all(|consumer| {
-            !consumer.callback_bound.is_zero() && consumer.callback_bound <= MAX_CALLBACK_BOUND
+            !consumer.callback_bound.is_zero()
+                && consumer.callback_bound <= MAX_STAGED_CALLBACK_BOUND_V1
         })
     {
         Ok(())

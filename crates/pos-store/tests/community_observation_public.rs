@@ -22,7 +22,7 @@ use pos_core::community_lifecycle::{
     CommunityProfileRetentionV1, CommunityReducerBindingV1, CommunitySourceCatalogueV1,
     CommunitySourceSchemaRuleV1, CommunityTypedInputRefV1,
 };
-use pos_core::store::{EventReadBounds, EventStore, SeqRange};
+use pos_core::store::{EventStore, SeqRange};
 use pos_core::{
     AuthorityTrustRootSealV1, CanonicalBytes, EntityId, ErasureContainmentGateV1, Event,
     EventDraft, Hash, Hasher, ImplementationKeyV1, Kind, Seq, TimelineId,
@@ -48,9 +48,6 @@ const GENERATION: [u8; 16] = [0x20; 16];
 const RESERVATION: [u8; 16] = [0x30; 16];
 const ENCODER: u32 = 0x4f42_0001;
 const HORIZON: u64 = 5_000;
-/// Generous installed history read bounds for the honest fixtures.
-const BOUNDS: EventReadBounds =
-    EventReadBounds::new_with_total_bytes(1 << 20, 128, 64, 4096, 1 << 30);
 const EVENT_TYPE: &str = "world.action";
 const RULE: CommunitySourceSchemaRuleV1<'static> = CommunitySourceSchemaRuleV1 {
     event_type: EVENT_TYPE,
@@ -273,15 +270,6 @@ fn prepare(
     installed: &Installed,
     input: CommunityObservationMaterializationInputV1,
 ) -> Fallible<Result<CommunityObservationSourcesV1, Error>> {
-    prepare_bounded(history, installed, input, BOUNDS)
-}
-
-fn prepare_bounded(
-    history: &History,
-    installed: &Installed,
-    input: CommunityObservationMaterializationInputV1,
-    bounds: EventReadBounds,
-) -> Fallible<Result<CommunityObservationSourcesV1, Error>> {
     let catalogue = installed.catalogue()?;
     let members = installed.members()?;
     let profile = profile(&members, catalogue.digest())?;
@@ -291,7 +279,6 @@ fn prepare_bounded(
             profile: &profile,
             source_catalogue: catalogue,
             observation_schema_id: ENCODER,
-            event_read_bounds: bounds,
         },
         pass(),
         &CommunityObservationMaterializationV1::new(&SEAL, input),
@@ -580,7 +567,6 @@ fn every_row_head_catalogue_and_encoder_mismatch_refuses_with_12() -> TestResult
                 profile: &foreign,
                 source_catalogue: catalogue,
                 observation_schema_id: ENCODER,
-                event_read_bounds: BOUNDS,
             },
             pass(),
             &CommunityObservationMaterializationV1::new(&SEAL, honest(&history, root)),
@@ -686,7 +672,6 @@ fn stage_inputs_that_cannot_mint_their_records_are_refused() -> TestResult {
         profile: &profile,
         source_catalogue: catalogue,
         observation_schema_id: ENCODER,
-        event_read_bounds: BOUNDS,
     };
     assert_eq!(
         prepare_community_observation_v1(
@@ -774,52 +759,70 @@ fn the_sealed_consumer_list_must_be_an_admitted_set_before_its_cost_is_trusted()
     Ok(())
 }
 
-#[test]
-fn history_reads_are_bounded_by_the_installed_read_bounds_and_fork_depth() -> TestResult {
-    let history = history(2, EVENT_TYPE, None)?;
-    let installed = Installed::new(vec![RULE])?;
-    let at = |bounds: EventReadBounds| -> Fallible<Option<Error>> {
-        Ok(prepare_bounded(&history, &installed, honest(&history, history.root), bounds)?.err())
-    };
-    // Payload and total-byte bounds give 14 (§4: the prefix does not fit).
-    assert_eq!(
-        at(EventReadBounds::new_with_total_bytes(
-            0,
-            128,
-            64,
-            4096,
-            1 << 30
-        ))?,
-        Some(Error::CapacityExhausted)
-    );
-    assert_eq!(
-        at(EventReadBounds::new_with_total_bytes(
-            1 << 20,
-            128,
-            64,
-            4096,
-            1
-        ))?,
-        Some(Error::CapacityExhausted)
-    );
-    // Any other read refusal, here an over-long Event type, gives 12.
-    assert_eq!(
-        at(EventReadBounds::new_with_total_bytes(
-            1 << 20,
-            1,
-            64,
-            4096,
-            1 << 30
-        ))?,
-        Some(Error::EvidenceUnavailable)
-    );
-    assert_eq!(at(BOUNDS)?, None);
-    // A Fork chain deeper than the installed depth is refused before reading.
+/// A store whose root holds one Event of `event_type` and `payload` bytes.
+fn single(event_type: &str, payload: usize) -> Fallible<History> {
     let mut store = MemoryStore::new();
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let root = store.create_timeline("root")?.id();
-    let first = store.fork(root, Seq::ZERO, "first")?.id();
-    let second = store.fork(first, Seq::ZERO, "second")?.id();
+    let events = store.append(
+        root,
+        &[EventDraft::new(
+            EntityId::new(),
+            Kind::new(event_type),
+            CanonicalBytes::from_vec(vec![7; payload]),
+        )],
+    )?;
+    Ok(History {
+        domain: MemoryCommunityDomainV1::new(
+            store,
+            INCARNATION,
+            MemoryTrustedClockAuthorityV1::new(),
+        )?,
+        root,
+        child: None,
+        cut: 0,
+        events,
+        chain: Vec::new(),
+    })
+}
+
+#[test]
+fn history_reads_are_bounded_by_the_owner_read_bounds_and_fork_depth() -> TestResult {
+    // Owner 2026-11-21 (#560): a 1 MiB payload per Event, a 128-byte Event
+    // type and a Fork depth of 64.
+    let installed = Installed::new(vec![RULE])?;
+    let exact = single(EVENT_TYPE, 1 << 20)?;
+    assert!(prepare(&exact, &installed, honest(&exact, exact.root))?.is_ok());
+    let over = single(EVENT_TYPE, (1 << 20) + 1)?;
+    assert_eq!(
+        prepare(&over, &installed, honest(&over, over.root))?.err(),
+        Some(Error::CapacityExhausted)
+    );
+    let long: &'static str = Box::leak("t".repeat(128).into_boxed_str());
+    let long_rule = Installed::new(vec![CommunitySourceSchemaRuleV1 {
+        event_type: long,
+        ..RULE
+    }])?;
+    let at_limit = single(long, 1)?;
+    assert!(prepare(&at_limit, &long_rule, honest(&at_limit, at_limit.root))?.is_ok());
+    let too_long = single(&"t".repeat(129), 1)?;
+    assert_eq!(
+        prepare(&too_long, &installed, honest(&too_long, too_long.root))?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // 64 nested Forks are read; a 65th is refused before reading.
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let root = store.create_timeline("root")?.id();
+    let mut chain = vec![root];
+    for depth in 1..=65 {
+        let parent = chain[chain.len() - 1];
+        chain.push(
+            store
+                .fork(parent, Seq::ZERO, &format!("fork-{depth}"))?
+                .id(),
+        );
+    }
     let deep = History {
         domain: MemoryCommunityDomainV1::new(
             store,
@@ -827,22 +830,16 @@ fn history_reads_are_bounded_by_the_installed_read_bounds_and_fork_depth() -> Te
             MemoryTrustedClockAuthorityV1::new(),
         )?,
         root,
-        child: Some(second),
+        child: None,
         cut: 0,
         events: Vec::new(),
         chain: Vec::new(),
     };
-    let depth = |max_fork_depth: usize| -> Fallible<Option<Error>> {
-        Ok(prepare_bounded(
-            &deep,
-            &installed,
-            honest(&deep, second),
-            EventReadBounds::new_with_total_bytes(1 << 20, 128, max_fork_depth, 4096, 1 << 30),
-        )?
-        .err())
-    };
-    assert_eq!(depth(2)?, None);
-    assert_eq!(depth(1)?, Some(Error::EvidenceUnavailable));
+    assert!(prepare(&deep, &installed, honest(&deep, chain[64]))?.is_ok());
+    assert_eq!(
+        prepare(&deep, &installed, honest(&deep, chain[65]))?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }
 

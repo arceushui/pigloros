@@ -316,7 +316,7 @@ fn read_u32(cursor: &mut CborCursor<'_>) -> Result<u32> {
 /// scope with no key dependencies (owner 2026-11-21 (#560), item (f)).
 pub const COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1: (&str, u32) = ("pos.community.native-event", 1);
 
-/// Maximum rows of the installed source catalogue.
+/// Maximum rows of the installed source catalogue (owner 2026-11-21, #560).
 pub const MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1: usize = 4096;
 
 /// The closed installed source catalogue whose digest is the CDP1
