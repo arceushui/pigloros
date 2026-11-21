@@ -41,7 +41,6 @@ use crate::{
 /// ELM1 limit IDs the records read (ADR-069 §8).
 const WATCHDOG_LIMIT: u8 = 4;
 
-const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
 
 /// The four limit-event sources in TME1 order (R9 §4.6.2).
@@ -126,17 +125,12 @@ impl AttemptRecords {
     /// The records with the successor of this first, Completed TME1 after
     /// its output transfer timed out (R9 §4.7): every field is copied except
     /// `output-transfer`, now the incomplete `transfer`, the predecessor's
-    /// digest and the recomputed terminal code.
-    fn successor(&self, transfer: TransferRecord) -> Result<Self, EvidenceFault> {
+    /// digest and the recomputed terminal code. `transfer` is `None` when a
+    /// time of the output transfer could not be read: a provider fault
+    /// ([`EvidenceFault::Clock`], R9 Amendment 1 change F).
+    fn successor(&self, transfer: Option<TransferRecord>) -> Result<Self, EvidenceFault> {
+        let transfer = self.reissued_transfer(transfer)?;
         let stored = self.termination.fields();
-        // The stored TME1 must be a first one (no predecessor): R9 §4.7
-        // then gives it no output transfer.
-        let reissuable = stored.previous_tme1_digest.is_none()
-            && self.classification.code().is_none()
-            && !transfer.complete;
-        if !reissuable {
-            return Err(EvidenceFault::NotReissuable);
-        }
         // The transfer carries the retained output and starts after the
         // teardown the stored TME1 records.
         let bound = stored
@@ -150,6 +144,26 @@ impl AttemptRecords {
         fields.output_transfer = Some(transfer);
         fields.previous_tme1_digest = Some(self.termination.digest());
         classified(self.requested.clone(), self.observed.clone(), fields)
+    }
+
+    /// The output transfer a re-issue records: refused
+    /// ([`EvidenceFault::NotReissuable`]) unless the stored TME1 is a first,
+    /// Completed one and the transfer did not complete, and a provider fault
+    /// ([`EvidenceFault::Clock`]) when its times could not be read.
+    fn reissued_transfer(
+        &self,
+        transfer: Option<TransferRecord>,
+    ) -> Result<TransferRecord, EvidenceFault> {
+        // The stored TME1 must be a first one (no predecessor): R9 §4.7
+        // then gives it no output transfer.
+        let reissuable = self.termination.fields().previous_tme1_digest.is_none()
+            && self.classification.code().is_none()
+            && !transfer.is_some_and(|transfer| transfer.complete);
+        if reissuable {
+            transfer.ok_or(EvidenceFault::Clock)
+        } else {
+            Err(EvidenceFault::NotReissuable)
+        }
     }
 }
 
@@ -183,7 +197,9 @@ fn classified(
 #[derive(Debug, thiserror::Error)]
 pub enum EvidenceFault {
     /// The monotonic clock could not report a time TME1 requires: `input`,
-    /// `cleanup.finished-at` or a snapshot's `observed-at`.
+    /// `cleanup.finished-at`, a snapshot's `observed-at`, an `adapter-input`
+    /// time or, for a successor, an `output-transfer` time (R9 Amendment 1
+    /// change F).
     #[error("a time the termination evidence requires could not be read")]
     Clock,
     /// A fact R9 requires at the attempt's progress could not be read, so no
@@ -400,29 +416,28 @@ fn observation_evidence(
     .map_err(EvidenceFault::from)
 }
 
-/// A `CLOCK_MONOTONIC` `(seconds, nanoseconds)` pair in nanoseconds (R9
-/// §4.1); a negative component or an unrepresentable sum is unreadable.
-fn monotonic_ns((seconds, nanoseconds): (i64, i64)) -> Option<u64> {
-    u64::try_from(seconds)
-        .ok()
-        .zip(u64::try_from(nanoseconds).ok())
-        .and_then(|(seconds, nanoseconds)| {
-            seconds
-                .checked_mul(NANOSECONDS_PER_SECOND)
-                .and_then(|whole| whole.checked_add(nanoseconds))
-        })
-}
-
 /// One snapshot as TME1 records it, with its exact sources.
 fn sources(snapshot: &AttemptLimitEventSnapshot) -> Result<CgroupSources, EvidenceFault> {
     let cgroup = DeviceNumber::cgroup_evidence(snapshot.cgroup_identity())
         .ok_or(EvidenceFault::Unrepresentable)?;
-    let observed_at = monotonic_ns(snapshot.observed_monotonic()).ok_or(EvidenceFault::Clock)?;
+    let observed_at = snapshot.observed_at_ns().ok_or(EvidenceFault::Clock)?;
     Ok(CgroupSources {
         cgroup,
         observed_at,
         sources: SOURCES.map(|source| snapshot.raw(source).to_vec()),
     })
+}
+
+/// TME1 `input` and `adapter-input`; [`EvidenceFault::Clock`] when the
+/// clock could not report a time of either (R9 Amendment 1 change F).
+fn transfers(
+    admission: &AttemptAdmission,
+    adapter: Option<&AdapterIo>,
+) -> Result<(TransferRecord, Option<TransferRecord>), EvidenceFault> {
+    admission
+        .input()
+        .zip(adapter.map_or(Some(None), |adapter| adapter.input().map(Some)))
+        .ok_or(EvidenceFault::Clock)
 }
 
 /// TME1 `baseline` and `terminal`. Before a release they are recorded as a
@@ -520,6 +535,7 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
             })
             .transpose()?;
         let (baseline, terminal) = snapshots(evidence, released)?;
+        let (input, adapter_input) = transfers(admission, reached.adapter)?;
         let bound = unit.is_some();
         Ok(TerminationEvidenceFields {
             attempt_id: self.attempt_id(),
@@ -539,7 +555,7 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
                 .map(ServiceFacts::from),
             ending: reached.ending,
             barrier_failure: reached.barrier_failure(),
-            input: admission.input().ok_or(EvidenceFault::Clock)?,
+            input,
             output_capture: reached.adapter.map(|adapter| adapter.output().capture()),
             output_transfer: None,
             local_network: local_network(reached, grant.execution_mode()),
@@ -550,7 +566,7 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
             cleanup: self.cleanup_record(bound)?,
             previous_tme1_digest: None,
             terminal_code: None,
-            adapter_input: reached.adapter.map(AdapterIo::input),
+            adapter_input,
         })
     }
 

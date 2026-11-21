@@ -307,7 +307,7 @@ async fn a_complete_framed_output_is_captured_after_the_whole_input_was_fed() ->
     // The adapter read exactly the verified input, after the release only.
     assert_eq!(report.input, INPUT);
     assert_eq!(report.released_before_input, Some(true));
-    let fed = execution.adapter.input();
+    let fed = execution.adapter.input().ok_or("the feed was not timed")?;
     assert_eq!((fed.expected_bytes, fed.accepted_bytes), (5, 5));
     assert!(fed.complete);
     assert_eq!(fed.deadline - fed.start, 1_000_000_000);
@@ -705,7 +705,11 @@ async fn an_adapter_that_closes_stdin_leaves_the_feed_incomplete() -> TestResult
     };
     let limits = limits(100, 1_000, GENEROUS_WATCHDOG_MS);
     let run = StdioRun::with(script, TestPayload::with_input(INPUT), limits).await?;
-    let fed = run.execution()?.adapter.input();
+    let fed = run
+        .execution()?
+        .adapter
+        .input()
+        .ok_or("the feed was not timed")?;
     // EPIPE: nothing was accepted, and the feed stopped well before its deadline.
     assert_eq!((fed.expected_bytes, fed.accepted_bytes), (5, 0));
     assert!(!fed.complete);
@@ -721,7 +725,11 @@ async fn a_zero_input_window_is_a_literal_zero_window() -> TestResult {
     };
     let limits = limits(100, 0, GENEROUS_WATCHDOG_MS);
     let run = StdioRun::with(script, TestPayload::with_input(INPUT), limits).await?;
-    let fed = run.execution()?.adapter.input();
+    let fed = run
+        .execution()?
+        .adapter
+        .input()
+        .ok_or("the feed was not timed")?;
     // The closed window stops the feed before its first write.
     assert_eq!(fed.deadline, fed.start);
     assert_eq!(fed.accepted_bytes, 0);
@@ -741,7 +749,11 @@ async fn an_input_the_adapter_never_reads_closes_the_feed_at_its_deadline() -> T
     let input = vec![0x5a; 4 * 1024 * 1024];
     let limits = limits(100, 50, 400);
     let run = StdioRun::with(script, TestPayload::with_input(&input), limits).await?;
-    let fed = run.execution()?.adapter.input();
+    let fed = run
+        .execution()?
+        .adapter
+        .input()
+        .ok_or("the feed was not timed")?;
     assert_eq!(fed.expected_bytes, input.len() as u64);
     assert!(fed.accepted_bytes < fed.expected_bytes);
     assert!(fed.finish >= fed.deadline);

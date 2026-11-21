@@ -105,13 +105,22 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
         ..timed_out_transfer()
     };
     assert!(matches!(
-        lifecycle.reissue_response(ATTEMPT, digest, complete, &signer(), admitted),
+        lifecycle.reissue_response(ATTEMPT, digest, Some(complete), &signer(), admitted),
         Err(AttemptLifecycleError::Response(ResponseFault::Evidence(
             EvidenceFault::NotReissuable
         )))
     ));
-    let successor =
-        lifecycle.reissue_response(ATTEMPT, digest, timed_out_transfer(), &signer(), admitted)?;
+    assert!(Arc::ptr_eq(
+        &lifecycle.terminal_response(ATTEMPT, digest)?,
+        &retained
+    ));
+    let successor = lifecycle.reissue_response(
+        ATTEMPT,
+        digest,
+        Some(timed_out_transfer()),
+        &signer(),
+        admitted,
+    )?;
     verified(&successor)?;
     assert!(Arc::ptr_eq(
         &lifecycle.terminal_response(ATTEMPT, digest)?,
@@ -128,7 +137,13 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     assert!(matches!(
-        lifecycle.reissue_response(ATTEMPT, digest, timed_out_transfer(), &signer(), admitted),
+        lifecycle.reissue_response(
+            ATTEMPT,
+            digest,
+            Some(timed_out_transfer()),
+            &signer(),
+            admitted
+        ),
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     Ok(())
@@ -154,7 +169,7 @@ impl RuntimeAttestationSigner for Racing<'_> {
             self.lifecycle.reissue_response(
                 ATTEMPT,
                 self.agr1_digest,
-                timed_out_transfer(),
+                Some(timed_out_transfer()),
                 &self.signer,
                 self.admitted,
             )
@@ -186,8 +201,13 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
         signer: signer(),
         winner: OnceCell::new(),
     };
-    let returned =
-        lifecycle.reissue_response(ATTEMPT, digest, timed_out_transfer(), &racing, admitted)?;
+    let returned = lifecycle.reissue_response(
+        ATTEMPT,
+        digest,
+        Some(timed_out_transfer()),
+        &racing,
+        admitted,
+    )?;
     let winner = racing
         .winner
         .into_inner()
@@ -251,7 +271,13 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
         KEY_ID.to_owned(),
     );
     assert!(matches!(
-        lifecycle.reissue_response(ATTEMPT, digest, timed_out_transfer(), &foreign, admitted),
+        lifecycle.reissue_response(
+            ATTEMPT,
+            digest,
+            Some(timed_out_transfer()),
+            &foreign,
+            admitted
+        ),
         Err(AttemptLifecycleError::Response(ResponseFault::Sign(
             RuntimeSignerError::Unverified
         )))
@@ -259,6 +285,48 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
     assert!(ledger.reserve_storage(0).is_err());
     assert!(matches!(
         lifecycle.terminal_response(ATTEMPT, digest),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    Ok(())
+}
+
+/// An `output-transfer` time the clock could not report is a provider fault
+/// (R9 Amendment 1 change F): no successor is signed, the retained response
+/// is replaced by the fault and the lifecycle is quarantined.
+#[test]
+fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.record_failed_input(&FailedInput::fixture(ATTEMPT, digest))?;
+    let ended = Released {
+        grant: Some(grant),
+        ..Released::default()
+    }
+    .ended()?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    lifecycle.retain_response(&ended, &signer(), admitted)?;
+    assert!(ledger.reserve_storage(0).is_ok());
+    assert!(matches!(
+        lifecycle.reissue_response(ATTEMPT, digest, None, &signer(), admitted),
+        Err(AttemptLifecycleError::Response(ResponseFault::Evidence(
+            EvidenceFault::Clock
+        )))
+    ));
+    assert!(ledger.reserve_storage(0).is_err());
+    assert!(matches!(
+        lifecycle.terminal_response(ATTEMPT, digest),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    assert!(matches!(
+        lifecycle.reissue_response(
+            ATTEMPT,
+            digest,
+            Some(timed_out_transfer()),
+            &signer(),
+            admitted
+        ),
         Err(AttemptLifecycleError::ResponseUnavailable)
     ));
     Ok(())
