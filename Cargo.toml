@@ -110,7 +110,7 @@ indexmap = "2"
 num-traits = "0.2"
 
 # SQLite
-rusqlite = { version = "0.41", features = ["bundled", "hooks", "functions"] }
+rusqlite = { version = "0.43", features = ["bundled", "hooks", "functions"] }
 
 # Community Plugin Component host (ADR-061 revision 4, decision 2): an exact
 # pin with default features off. `runtime` is the feature that lets the
@@ -127,7 +127,7 @@ proptest = "1"
 tempfile = "3"
 # Component text fixtures for the community Plugin host tests; the same
 # wasm-tools release (wasmparser 0.258) that builds the guest fixtures.
-wat = "=1.262.0"
+wat = "=1.263.0"
 wit-parser = { version = "=0.258.3", default-features = false }
 jsonschema = { version = "=0.59.0", default-features = false }
 
