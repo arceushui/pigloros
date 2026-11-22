@@ -1506,7 +1506,7 @@ jobs:
           toolchain: nightly-2026-07-01
           components: rust-src
       - name: Install cargo-nextest for the ASan archive
-        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
           tool: cargo-nextest@0.9.146
           fallback: none
@@ -1639,7 +1639,7 @@ jobs:
         with:
           toolchain: nightly-2026-07-01
       - name: Install cargo-nextest for partitioned ASan tests
-        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
           tool: cargo-nextest@0.9.146
           fallback: none
