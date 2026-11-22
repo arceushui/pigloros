@@ -42,11 +42,17 @@ const MAX_REPLY_BYTES: usize = 64 * 1024;
 
 /// A Tokio Unix stream whose read half seals descriptors at receipt.
 #[derive(Debug)]
-pub(super) struct SealedUnixSocket(UnixStream);
+pub(super) struct SealedUnixSocket {
+    stream: UnixStream,
+    frame: Frame,
+}
 
 impl SealedUnixSocket {
-    pub(super) const fn new(stream: UnixStream) -> Self {
-        Self(stream)
+    pub(super) fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            frame: Frame::default(),
+        }
     }
 }
 
@@ -57,14 +63,28 @@ impl Socket for SealedUnixSocket {
     const CAN_TRANSFER_FDS: bool = true;
 
     fn split(self) -> (Self::ReadHalf, Self::WriteHalf) {
-        let (read, write) = self.0.into_split();
+        let Self { stream, frame } = self;
+        let (read, write) = stream.into_split();
         (
             SealedReadHalf {
                 stream: read,
-                frame: Frame::default(),
+                frame,
             },
             SealedWriteHalf(write),
         )
+    }
+
+    fn join(read: Self::ReadHalf, write: Self::WriteHalf) -> zlink::Result<Self> {
+        let stream = read.stream.reunite(write.0).map_err(|_| {
+            zlink::Error::from(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socket halves came from different streams",
+            ))
+        })?;
+        Ok(Self {
+            stream,
+            frame: read.frame,
+        })
     }
 }
 
@@ -97,7 +117,7 @@ impl ReadHalf for SealedReadHalf {
     }
 }
 
-/// The write half: each zlink message leaves in one `sendmsg`.
+/// The write half sends descriptors with the first bytes of each message.
 #[derive(Debug)]
 pub(super) struct SealedWriteHalf(OwnedWriteHalf);
 
@@ -107,7 +127,7 @@ impl WriteHalf for SealedWriteHalf {
         buf: &[u8],
         fds: &[impl AsFd],
         _credentials: Option<&PassedCredentials>,
-    ) -> impl Future<Output = zlink::Result<()>> {
+    ) -> impl Future<Output = zlink::Result<usize>> {
         // Borrow the descriptors up front so the future holds only Send data.
         let descriptors: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
         let socket: &UnixStream = self.0.as_ref();
@@ -115,7 +135,6 @@ impl WriteHalf for SealedWriteHalf {
             socket
                 .async_io(Interest::WRITABLE, || send(socket, buf, &descriptors))
                 .await
-                .and_then(|sent| whole_message(sent, buf.len()))
                 .map_err(zlink::Error::from)
         }
     }
@@ -223,6 +242,7 @@ fn send(socket: &UnixStream, message: &[u8], descriptors: &[BorrowedFd<'_>]) -> 
 }
 
 /// One message per `sendmsg`: a short write is a transport failure.
+#[cfg(test)]
 fn whole_message(sent: usize, expected: usize) -> io::Result<()> {
     if sent == expected {
         Ok(())
