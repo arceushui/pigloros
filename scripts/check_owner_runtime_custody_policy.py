@@ -12,7 +12,7 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+UPLOAD = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 WORKFLOW = ".github/workflows/owner-runtime-custody.yml"
 # These pins bind the complete reviewed producer programs, including commands
 # reached through the workflow's PowerShell indirection. Universal newlines

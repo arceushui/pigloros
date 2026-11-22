@@ -212,7 +212,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                              {'name': 'Retain native LCOV and checkout receipt',
                                               'if': '${{ !cancelled() && steps.native-lcov.outcome '
                                                     "== 'success' }}",
-                                              'uses': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+                                              'uses': 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
                                               'with': {'name': 'owner-windows-lcov-${{ github.sha '
                                                                '}}',
                                                        'path': '${{ runner.temp '
@@ -223,7 +223,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                              {'name': 'Retain the measured shim report',
                                               'if': '${{ !cancelled() && steps.coverage.outcome == '
                                                     "'success' }}",
-                                              'uses': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+                                              'uses': 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
                                               'with': {'name': 'owner-windows-coverage-${{ '
                                                                'github.sha }}',
                                                        'path': '${{ runner.temp '
@@ -300,7 +300,7 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
          '}\n'},
  {'name': 'Retain failed native coverage diagnostics',
   'if': "${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}",
-  'uses': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+  'uses': 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
   'with': {'name': 'owner-windows-failed-diagnostic-${{ github.sha }}',
            'path': '${{ runner.temp }}/owner-windows-failed-diagnostic/',
            'if-no-files-found': 'error'}}])
