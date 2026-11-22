@@ -75,16 +75,13 @@ impl Socket for SealedUnixSocket {
     }
 
     fn join(read: Self::ReadHalf, write: Self::WriteHalf) -> zlink::Result<Self> {
-        let stream = read.stream.reunite(write.0).map_err(|_| {
-            zlink::Error::from(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "socket halves came from different streams",
-            ))
-        })?;
-        Ok(Self {
-            stream,
-            frame: read.frame,
-        })
+        read.stream
+            .reunite(write.0)
+            .map(|stream| Self {
+                stream,
+                frame: read.frame,
+            })
+            .map_err(|_| zlink::Error::from(io::Error::from(io::ErrorKind::InvalidInput)))
     }
 }
 
