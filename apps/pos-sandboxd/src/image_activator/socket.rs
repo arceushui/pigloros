@@ -75,13 +75,13 @@ impl Socket for SealedUnixSocket {
     }
 
     fn join(read: Self::ReadHalf, write: Self::WriteHalf) -> zlink::Result<Self> {
-        read.stream
-            .reunite(write.0)
-            .map(|stream| Self {
-                stream,
-                frame: read.frame,
-            })
-            .map_err(|_| zlink::Error::from(io::Error::from(io::ErrorKind::InvalidInput)))
+        Ok(Self {
+            stream: read
+                .stream
+                .reunite(write.0)
+                .map_err(|_| zlink::Error::from(io::Error::from(io::ErrorKind::InvalidInput)))?,
+            frame: read.frame,
+        })
     }
 }
 
