@@ -37,7 +37,7 @@ ed25519-dalek = { workspace = true }
 futures-util = { version = "0.3", default-features = false }
 # Safe `execveat` for the launcher's final release step (Q9.12). Only the
 # `process` feature, which gates `fcntl::AtFlags`, is enabled.
-nix = { version = "=0.31.3", default-features = false, features = ["process"] }
+nix = { version = "=0.32.0", default-features = false, features = ["process"] }
 pos-reference = { path = "../../crates/pos-reference" }
 # `event` is for the pidfd liveness `poll` of the kernel observation
 # (ADR-069 R9 §4.4); it creates no process. `pipe` is for the adapter's
@@ -77,7 +77,7 @@ zbus_systemd = { version = "=0.26201.0", default-features = false, features = [
 # ADR-087 MountImage transport. The facade needs its `tokio` runtime feature
 # for descriptor support; production code supplies its own atomic
 # close-on-exec socket instead of zlink's Tokio Unix stream.
-zlink = { version = "=0.7.1", default-features = false, features = [
+zlink = { version = "=0.8.0", default-features = false, features = [
   "tokio",
   "tracing",
 ] }
@@ -100,7 +100,7 @@ pos-reference = { path = "../../crates/pos-reference", features = [
 ] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-zlink = { version = "=0.7.1", default-features = false, features = [
+zlink = { version = "=0.8.0", default-features = false, features = [
   "proxy",
   "tokio",
   "tracing",

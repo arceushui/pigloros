@@ -1522,6 +1522,72 @@ fn resolve_import_event_key(
     Ok(*public_key)
 }
 
+/// The consent permit bound to one store adapter (ADR-137 L8). A store
+/// carries the Gateway's [`pos_core::ConsentAppendPermit`] or the owner's
+/// [`pos_core::OwnerConsentV2PermitV1`], never both, and each binding accepts
+/// only the same permit again; the Memory and `SQLite` adapters share it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ConsentPermitBinding {
+    gateway: Option<pos_core::ConsentAppendPermit>,
+    owner: Option<pos_core::OwnerConsentV2PermitV1>,
+}
+
+impl ConsentPermitBinding {
+    /// The bound Gateway consent permit, if any.
+    pub(crate) const fn gateway(&self) -> Option<pos_core::ConsentAppendPermit> {
+        self.gateway
+    }
+
+    /// Bind the Gateway consent permit.
+    pub(crate) fn bind_gateway(
+        &mut self,
+        permit: pos_core::ConsentAppendPermit,
+    ) -> Result<(), pos_core::CoreError> {
+        bind_consent_permit_once(
+            &mut self.gateway,
+            permit,
+            self.owner.is_some(),
+            "Gateway consent authority is already bound",
+        )
+    }
+
+    /// Bind the owner V2 consent permit.
+    pub(crate) fn bind_owner(
+        &mut self,
+        permit: pos_core::OwnerConsentV2PermitV1,
+    ) -> Result<(), pos_core::CoreError> {
+        bind_consent_permit_once(
+            &mut self.owner,
+            permit,
+            self.gateway.is_some(),
+            "owner consent permit is already bound",
+        )
+    }
+}
+
+fn bind_consent_permit_once<T: Copy + PartialEq>(
+    slot: &mut Option<T>,
+    permit: T,
+    other_bound: bool,
+    already: &str,
+) -> Result<(), pos_core::CoreError> {
+    if other_bound {
+        return Err(pos_core::CoreError::Storage(
+            "a store binds the Gateway or the owner consent permit, not both".to_owned(),
+        ));
+    }
+    match *slot {
+        Some(existing) if existing != permit => {
+            Err(pos_core::CoreError::Storage(already.to_owned()))
+        }
+        Some(_) => Ok(()),
+        None => {
+            *slot = Some(permit);
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
