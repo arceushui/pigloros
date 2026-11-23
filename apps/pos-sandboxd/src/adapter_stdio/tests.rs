@@ -547,3 +547,49 @@ async fn a_readable_clock_times_the_feed() -> TestResult {
     assert_eq!(fed, b"input");
     Ok(())
 }
+
+/// The output records cut a multi-chunk capture at exact 1 MiB offsets,
+/// each record carrying its own index, offset and bytes, contiguous from
+/// index zero and accepted by the selector's stream validator.
+#[test]
+fn output_records_cut_the_capture_at_every_chunk_offset() -> TestResult {
+    use pos_reference::sandbox_provider_protocol::{PayloadDirection, PayloadStreamValidator};
+    let chunk = SandboxPayloadChunk::CHUNK_BYTES;
+    let bytes: Vec<u8> = (0..2 * chunk + 3)
+        .map(|byte| byte.to_le_bytes()[0])
+        .collect();
+    let charge = crate::StagingLedger::new(crate::StagingLimits { aggregate_bytes: 0 })
+        .reserve_storage(0)?;
+    let released = ReleasedOutput {
+        bytes: bytes.clone(),
+        charge,
+    };
+    let records = released.into_records([2; 32], [3; 16], [4; 16])?;
+    assert_eq!(records.records().len(), 3);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(OUTPUT_DOMAIN);
+    hasher.update(&bytes);
+    let mut validator = PayloadStreamValidator::new(
+        [2; 32],
+        [3; 16],
+        [4; 16],
+        PayloadDirection::Output,
+        PayloadDescriptor {
+            byte_length: bytes.len() as u64,
+            digest: *hasher.finalize().as_bytes(),
+        },
+    )?;
+    for (index, record) in records.records().iter().enumerate() {
+        let decoded = SandboxPayloadChunk::from_canonical_cbor(record)?;
+        let start = index * chunk;
+        assert_eq!(decoded.index, index as u64);
+        assert_eq!(decoded.offset, start as u64);
+        assert_eq!(
+            decoded.bytes,
+            bytes[start..(start + chunk).min(bytes.len())]
+        );
+        validator.accept(&decoded)?;
+    }
+    validator.finish()?;
+    Ok(())
+}

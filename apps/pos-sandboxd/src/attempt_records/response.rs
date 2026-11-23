@@ -12,12 +12,17 @@
 //! * the terminal event `[agr1, elm1, tme1]`, whose code is TME1's, unless
 //!   the attempt Completed.
 //!
-//! [`RetainedResponse`] keeps the exact bytes: AGR1, the chain, SPR1, SPY1
-//! and the `ReleaseV1` sent, with the RQE1, KOE1 and TME1 they bind. The
-//! output bytes stay fenced in the attempt's capture. When the output
+//! [`RetainedResponse`] keeps the exact bytes: AGR1, the chain, SPR1, the
+//! output SBC1 records of a Completed response, SPY1 and the `ReleaseV1`
+//! sent, with the RQE1, KOE1 and TME1 they bind. The output leaves its fence
+//! only here, against the attempt's terminal evidence, and its records stay
+//! under the output reservation, so the full response can be replayed byte
+//! for byte until the attempt is reconciled (ADR-069 §4; the charge lifetime
+//! is R11 Amendment 1, item P12). When the output
 //! transfer of a Completed response times out,
 //! [`RetainedResponse::successor`] re-issues it once (R9 §4.7): a successor
-//! TME1, SAU1 event 10 appended to the chain, and a new SPR1 and SPY1.
+//! TME1, SAU1 event 10 appended to the chain, and a new SPR1 and SPY1. The
+//! successor is not Completed, so it carries no output.
 
 use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AttemptResponse, ExecutionRelease, PayloadDescriptor, ReceiptAuthority,
@@ -27,8 +32,9 @@ use pos_reference::sandbox_provider_protocol::{
 };
 
 use super::{AttemptRecords, EvidenceFault};
+use crate::adapter_stdio::RetainedOutput;
 use crate::{
-    sign_verified, AdmittedRuntimeKey, AttemptProgress, EndedAttempt, IssuedGrant,
+    sign_verified, AdmittedRuntimeKey, AttemptProgress, EndedAttempt, IssuedGrant, ReleasedOutput,
     RequestedConfiguration, RuntimeAttestationSigner, RuntimeSignerError,
 };
 
@@ -39,13 +45,14 @@ const EXECUTION_RELEASE_DENIED: u8 = 13;
 
 /// The complete signed response of one ended attempt, as it is retained
 /// until the attempt is reconciled.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct RetainedResponse {
     grant: IssuedGrant,
     records: AttemptRecords,
     sent: Sent,
     chain: Vec<SandboxAuditRecord>,
     encoded: Encoded,
+    output: Option<RetainedOutput>,
 }
 
 impl RetainedResponse {
@@ -60,6 +67,23 @@ impl RetainedResponse {
     #[must_use]
     pub const fn records(&self) -> &AttemptRecords {
         &self.records
+    }
+
+    /// The stored full response, frame by frame, exactly as every
+    /// connection of the attempt receives it (ADR-069 §4): AGR1, the SAU1
+    /// chain from sequence zero, SPR1, the output SBC1 records from index
+    /// zero when Completed, and SPY1.
+    pub fn frames(&self) -> impl Iterator<Item = &[u8]> {
+        let (audit, receipt, result, _) = &self.encoded;
+        let output = self
+            .output
+            .as_ref()
+            .map_or(&[][..], RetainedOutput::records);
+        std::iter::once(self.grant.bytes())
+            .chain(audit.iter().map(Vec::as_slice))
+            .chain(std::iter::once(receipt.as_slice()))
+            .chain(output.iter().map(Vec::as_slice))
+            .chain(std::iter::once(result.as_slice()))
     }
 
     /// The exact AGR1, SAU1 chain, SPR1, SPY1 and `ReleaseV1` bytes.
@@ -98,9 +122,9 @@ impl RetainedResponse {
             signer,
             admitted,
             &self.grant,
-            records,
-            self.sent.clone(),
+            (records, self.sent.clone()),
             self.chain.clone(),
+            None,
         )?)
     }
 }
@@ -152,6 +176,19 @@ impl Sent {
 
     fn release_digest(&self) -> Option<[u8; 32]> {
         self.release.as_ref().map(ExecutionRelease::digest)
+    }
+}
+
+/// The captured output of an executed attempt, released from its fence
+/// against the terminal evidence read after exit and before teardown.
+fn released<S>(progress: AttemptProgress<S>) -> Option<ReleasedOutput> {
+    match progress {
+        AttemptProgress::Executed {
+            evidence, adapter, ..
+        } => evidence
+            .terminal()
+            .map(|terminal| adapter.into_output().release(terminal)),
+        _ => None,
     }
 }
 
@@ -498,33 +535,56 @@ type Signed = (
     SandboxProviderResult,
 );
 
+/// The output SBC1 records under `result` when it carries an output
+/// descriptor, that is when it Completed; any other response retains none.
+fn retained_output(
+    output: Option<ReleasedOutput>,
+    grant: &AdmissionGrant,
+    result: &SandboxProviderResult,
+) -> Result<Option<RetainedOutput>, SandboxProviderProtocolError> {
+    output
+        .filter(|_| result.output.is_some())
+        .map(|output| {
+            output.into_records(result.result_digest(), grant.request_id, grant.attempt_id)
+        })
+        .transpose()
+}
+
 /// Sign the events after `prefix`, then SPR1 and SPY1, and retain them with
-/// what they bind.
+/// what they bind. `output` becomes the SBC1 records under SPY1 only when
+/// SPY1 carries an output descriptor, that is when it Completed.
 fn assemble<R: RuntimeAttestationSigner>(
     signer: &R,
     admitted: AdmittedRuntimeKey<'_>,
     issued: &IssuedGrant,
-    records: AttemptRecords,
-    sent: Sent,
+    (records, sent): (AttemptRecords, Sent),
     prefix: Vec<SandboxAuditRecord>,
+    output: Option<ReleasedOutput>,
 ) -> Result<RetainedResponse, RuntimeSignerError> {
     let grant = AdmissionGrant::from_canonical_cbor(issued.bytes())?;
     let (chain, receipt, result) =
         sign_records(signer, admitted, (&grant, issued), &records, &sent, prefix)?;
-    encoded(&chain, &receipt, &result, sent.release.as_ref())
-        .map(|encoded| RetainedResponse {
+    retained_output(output, &grant, &result)
+        .and_then(|output| {
+            encoded(&chain, &receipt, &result, sent.release.as_ref())
+                .map(|encoded| (encoded, output))
+        })
+        .map(|(encoded, output)| RetainedResponse {
             grant: issued.clone(),
             records,
             sent,
             chain,
             encoded,
+            output,
         })
         .map_err(Into::into)
 }
 
 impl<S: RequestedConfiguration> EndedAttempt<S> {
     /// Assemble this attempt's records and sign its terminal response: the
-    /// SAU1 chain, SPR1 and SPY1 (R9 §4.7 steps 7 to 9).
+    /// SAU1 chain, SPR1 and SPY1 (R9 §4.7 steps 7 to 9). A Completed
+    /// response also takes the attempt's captured output, as the SBC1
+    /// records SPY1 parents.
     ///
     /// # Errors
     /// [`ResponseFault::Evidence`] when the records cannot be assembled, and
@@ -532,18 +592,20 @@ impl<S: RequestedConfiguration> EndedAttempt<S> {
     /// record is refused, or a signature does not verify under `admitted`.
     /// Each is a provider fault: nothing is emitted.
     pub fn signed_response<R: RuntimeAttestationSigner>(
-        &self,
+        self,
         signer: &R,
         admitted: AdmittedRuntimeKey<'_>,
     ) -> Result<RetainedResponse, ResponseFault> {
         let records = self.records()?;
+        let sent = Sent::of(self.progress());
+        let grant = self.admission().grant().clone();
         Ok(assemble(
             signer,
             admitted,
-            self.admission().grant(),
-            records,
-            Sent::of(self.progress()),
+            &grant,
+            (records, sent),
             Vec::new(),
+            released(self.into_parts().0),
         )?)
     }
 }

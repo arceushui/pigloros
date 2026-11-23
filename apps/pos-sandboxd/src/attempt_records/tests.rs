@@ -234,6 +234,9 @@ struct Released {
     /// The signed AGR1, under which `ReleaseV1` is signed too; `None` for
     /// filler AGR1 bytes and no `ReleaseV1`.
     grant: Option<SignedGrant>,
+    /// The ledger the output is charged to, one byte per captured byte;
+    /// `None` for an uncharged output.
+    output_ledger: Option<crate::StagingLedger>,
 }
 
 impl Default for Released {
@@ -256,6 +259,7 @@ impl Default for Released {
             proved: true,
             cleaned_at: Some(CLEANED_AT),
             grant: None,
+            output_ledger: None,
         }
     }
 }
@@ -370,11 +374,14 @@ fn cleanup(proved: bool) -> TestResult<crate::AttemptCleanup> {
 }
 
 fn adapter(run: &Released) -> TestResult<AdapterIo> {
-    let charge = crate::StagingLedger::new(crate::StagingLimits { aggregate_bytes: 0 })
-        .reserve_storage(0)?;
     let output = match &run.output {
         Some(output) => output.clone(),
         None => framed()?,
+    };
+    let charge = match &run.output_ledger {
+        Some(ledger) => ledger.reserve_storage(output.len() as u64)?,
+        None => crate::StagingLedger::new(crate::StagingLimits { aggregate_bytes: 0 })
+            .reserve_storage(0)?,
     };
     Ok(AdapterIo::for_test_capture(
         run.feed_complete.map(feed),
