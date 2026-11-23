@@ -317,6 +317,14 @@ impl FailedInput {
             }),
         }
     }
+
+    /// The same failed input whose AGR1 is the canonical `bytes`, for tests
+    /// that sign the stored response it ends in.
+    #[must_use]
+    pub fn with_grant_bytes(mut self, bytes: &[u8]) -> Self {
+        self.grant = self.grant.with_bytes(bytes);
+        self
+    }
 }
 
 /// Why staged input was not admitted.
