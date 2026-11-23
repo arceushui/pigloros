@@ -77,31 +77,47 @@ pub fn check_community_pass_installation_v1(
     if state_limit_bytes.len() != roster.len() {
         return Err(Error::InvalidBinding);
     }
-    if state_limit_bytes
+    // Each limit as a payload length, at most 1 MiB.
+    let lengths: Option<Vec<usize>> = state_limit_bytes
         .iter()
-        .any(|limit| *limit > MAX_COMMUNITY_STATE_BYTES_V1 as u64)
-    {
-        return Err(Error::BoundsExceeded);
-    }
+        .map(|limit| {
+            usize::try_from(*limit)
+                .ok()
+                .filter(|length| *length <= MAX_COMMUNITY_STATE_BYTES_V1)
+        })
+        .collect();
+    lengths
+        .ok_or(Error::BoundsExceeded)
+        .and_then(|lengths| minimum_pass(profile, state_limit_bytes, &lengths))
+}
+
+/// The minimum required pass of `profile` checked over its initialization
+/// base.
+fn minimum_pass(
+    profile: &CommunityDurableProfileV1<'_>,
+    state_limit_bytes: &[u64],
+    lengths: &[usize],
+) -> Result<CommunityPassInstallationV1> {
     let timeline = TimelineId::from_ulid(ulid::Ulid::from_bytes([0xff; 16]));
     let generation = [0xff; 16];
     let prior = vec![0; MAX_COMMUNITY_STATE_BYTES_V1];
     let inputs = [CommunityTypedInputRefV1::Native(widest_node_reference())];
-    let members: Vec<_> = roster
+    let members: Vec<_> = profile
+        .as_input()
+        .roster
         .iter()
-        .zip(state_limit_bytes)
+        .zip(state_limit_bytes.iter().zip(lengths))
         .zip(1_u8..)
-        .map(|((row, limit), slot)| CommunityPassQuoteMemberV1 {
-            member_binding_digest: Hash::from_bytes([slot; 32]),
-            negotiated_tuple_digest: row.digests()[2],
-            state_limit_bytes: *limit,
-            prepared_invocation: widest_invocation(
-                timeline,
-                &prior[..usize::try_from(*limit).unwrap_or(0)],
-            ),
-            step_inputs: &inputs,
-            consumes_minted_observation: true,
-        })
+        .map(
+            |((row, (limit, length)), slot)| CommunityPassQuoteMemberV1 {
+                member_binding_digest: Hash::from_bytes([slot; 32]),
+                negotiated_tuple_digest: row.digests()[2],
+                state_limit_bytes: *limit,
+                prepared_invocation: widest_invocation(timeline, &prior[..*length]),
+                step_inputs: &inputs,
+                consumes_minted_observation: true,
+            },
+        )
         .collect();
     CommunityProtectionSizesV1::new(timeline, generation).and_then(|sizes| {
         minimum_observation(&sizes, timeline, generation).and_then(|(observation, graph)| {
@@ -114,32 +130,43 @@ pub fn check_community_pass_installation_v1(
                 minted_observation: Some(observation),
             })
             .and_then(|quote| {
-                quote
-                    .require_fit()
-                    .and_then(|()| {
-                        initialization_base(&sizes, timeline, generation, state_limit_bytes)
-                    })
-                    .and_then(|base| {
-                        quote.demand(CommunityPassDomainV1 {
-                            selected_graph: base,
-                            live_keys: INITIALIZATION_KEYS,
-                            observation_graph: graph,
-                            observation_keys: OBSERVATION_KEYS,
-                        })
-                    })
-                    .and_then(|demand| {
-                        demand
-                            .require_keys()
-                            .and_then(|()| demand.require_graph())
-                            .and_then(|()| demand.require_objects())
-                            .map(|()| CommunityPassInstallationV1 {
-                                quote: [quote.state_terms(), quote.total_terms()],
-                                demand,
-                            })
-                    })
+                initialization_base(&sizes, timeline, generation, state_limit_bytes).and_then(
+                    |base| {
+                        check_minimum(
+                            &quote,
+                            CommunityPassDomainV1 {
+                                selected_graph: base,
+                                live_keys: INITIALIZATION_KEYS,
+                                observation_graph: graph,
+                                observation_keys: OBSERVATION_KEYS,
+                            },
+                        )
+                    },
+                )
             })
         })
     })
+}
+
+/// The R11.5(3) checks of a minimum pass over `domain`, in the R11.5(1)
+/// order: the CBQ1, then the keys, the graph and the objects.
+fn check_minimum(
+    quote: &CommunityPassQuoteV1,
+    domain: CommunityPassDomainV1,
+) -> Result<CommunityPassInstallationV1> {
+    quote
+        .require_fit()
+        .and_then(|()| quote.demand(domain))
+        .and_then(|demand| {
+            demand
+                .require_keys()
+                .and_then(|()| demand.require_graph())
+                .and_then(|()| demand.require_objects())
+                .map(|()| CommunityPassInstallationV1 {
+                    quote: [quote.state_terms(), quote.total_terms()],
+                    demand,
+                })
+        })
 }
 
 /// A CIN1 with an empty observation, `prior` as its prior State and every
@@ -341,3 +368,6 @@ fn initialization_base(
         }
     })
 }
+
+#[cfg(test)]
+mod tests;
