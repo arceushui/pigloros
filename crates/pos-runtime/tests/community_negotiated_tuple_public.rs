@@ -61,7 +61,7 @@ fn traps() -> Vec<Trap> {
 }
 fn runtime() -> Fallible<Runtime> {
     Ok(Runtime::new(
-        "49.0.6".into(),
+        "50.0.3".into(),
         vec!["z-feature".into(), "a-feature".into()],
         engine(),
         traps(),
@@ -116,7 +116,7 @@ fn profile_value() -> Value {
             uint(16_384),
         ]),
         Value::Array(vec![
-            text("49.0.6"),
+            text("50.0.3"),
             Value::Array(vec![text("a-feature"), text("z-feature")]),
             Value::Array(vec![uint(524_288), Value::Bool(true), Value::Bool(true)]),
             Value::Array(vec![
@@ -226,7 +226,7 @@ fn equivalent_runtime_order_reconstructs_same_canonical_tuple() -> TestResult {
     let mut runtime_traps = traps();
     runtime_traps.reverse();
     let reordered = Runtime::new(
-        "49.0.6".into(),
+        "50.0.3".into(),
         vec!["a-feature".into(), "z-feature".into()],
         engine(),
         runtime_traps,
@@ -249,7 +249,7 @@ fn tuple_refuses_missing_foreign_profile_and_zero_release_identities() -> TestRe
         Tuple::new(&negotiated, &missing).err(),
         Some(Error::InvalidBinding)
     );
-    let foreign = Runtime::new("49.0.6".into(), vec![], engine(), vec![])?;
+    let foreign = Runtime::new("50.0.3".into(), vec![], engine(), vec![])?;
     let foreign = Profile::new(Mode::Local, Ceilings::V1, Some(foreign));
     assert_eq!(
         Tuple::new(&negotiated, &foreign).err(),
