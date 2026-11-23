@@ -803,3 +803,52 @@ fn read_u16(cursor: &mut CborCursor<'_>) -> Result<u16> {
 fn read_u32(cursor: &mut CborCursor<'_>) -> Result<u32> {
     read_head(cursor, 0).and_then(|value| u32::try_from(value).map_err(|_| Error::BoundsExceeded))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `encoded_len` is the exact length `encode` writes for every variant,
+    /// with field values whose heads take more than one byte.
+    #[test]
+    fn encoded_len_is_the_exact_encoding_length_of_every_variant() {
+        let timeline = TimelineId::from_ulid(ulid::Ulid::from_bytes([4; 16]));
+        let locator = CommunityMetadataLocatorV1 {
+            timeline,
+            generation: [2; 16],
+            producer: CommunityLocatorProducerV1::Native(70_000),
+            record_role: 300,
+            slot: 65_535,
+        };
+        let references = [
+            CommunityTypedInputRefV1::Native(CommunityNativeNodeReferenceV1 {
+                store_incarnation: [7; 16],
+                producer_ordinal: u64::MAX,
+                node_ordinal: 70_000,
+                node_digest: Hash::from_bytes([9; 32]),
+            }),
+            CommunityTypedInputRefV1::Artifact {
+                owner_reference: Hash::from_bytes([1; 32]),
+                artifact_class: ErasureArtifactClassV1::ConformanceReport,
+                artifact_digest: Hash::from_bytes([2; 32]),
+                registration_address: Hash::from_bytes([3; 32]),
+                source_scope_binding_digest: Hash::from_bytes([5; 32]),
+            },
+            CommunityTypedInputRefV1::Metadata {
+                schema: CommunityMetadataSchemaV1::Cms1,
+                locator,
+                envelope_address: Hash::from_bytes([6; 32]),
+                private_record_digest: Hash::from_bytes([8; 32]),
+            },
+            CommunityTypedInputRefV1::SourceGenesis {
+                timeline,
+                genesis_chain_hash: Hash::from_bytes([10; 32]),
+            },
+        ];
+        for reference in references {
+            let mut out = Vec::new();
+            reference.encode(&mut out);
+            assert_eq!(reference.encoded_len(), out.len());
+        }
+    }
+}
