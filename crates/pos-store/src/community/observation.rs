@@ -38,9 +38,10 @@ use pos_core::community_lifecycle::{
     CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1, CommunityNativeNodeReferencesV1,
     CommunityNativeNodeV1, CommunityObservationEventRowV1, CommunityObservationSourceInputV1,
     CommunityObservationSourceV1, CommunityObservationValueInputV1, CommunityObservationValueV1,
-    CommunityPassObservationV1, CommunityPassTermsV1, CommunityReducerBindingV1,
-    CommunityScopeMemberV1, CommunityScopeMembersV1, CommunitySourceCatalogueV1,
-    CommunityTypedInputRefV1, CommunityTypedInputRefsV1, COMMUNITY_FOLD_BUDGET_MICROS_V1,
+    CommunityPassGraphTermsV1, CommunityPassObservationV1, CommunityPassTermsV1,
+    CommunityProtectionSizesV1, CommunityReducerBindingV1, CommunityScopeMemberV1,
+    CommunityScopeMembersV1, CommunitySourceCatalogueV1, CommunityTypedInputRefV1,
+    CommunityTypedInputRefsV1, COMMUNITY_FOLD_BUDGET_MICROS_V1,
     COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
     MAX_COMMUNITY_OBSERVATION_EVENTS_V1, MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
     MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1, MAX_STAGED_CALLBACK_BOUND_V1,
@@ -170,6 +171,19 @@ pub struct CommunityObservationSourcesV1 {
     observation_value: Zeroizing<Vec<u8>>,
     observation_value_digest: Hash,
     evidence_not_after_micros: u64,
+}
+
+/// The materialization's share of a pass quote (ADR-129 revisions 10 and
+/// 11).
+pub struct CommunityObservationQuoteV1 {
+    /// The R10.3(5) Observation row and the Observation CPN1's node ordinal.
+    pub observation: CommunityPassObservationV1,
+    /// What the materialization adds to T's ARD1 closure (R11.3(3)).
+    pub graph: CommunityPassGraphTermsV1,
+    /// The store keys it provisions (R11.1(4)).
+    pub keys: u64,
+    /// Its Observation CPN1's scope rows (R11.4(2)).
+    pub scope: Vec<CommunityScopeMemberV1>,
 }
 
 /// Stage-2 inputs from the Reserve pipeline (A4c).
@@ -675,16 +689,21 @@ impl CommunityObservationSourcesV1 {
         &self.owning_timelines
     }
 
-    /// The R10.3(5) Observation row of the pass quote: `1 + g(r')` nodes,
-    /// `r' + g(r')` edges, and the exact bytes of the COV1, the new CES1s,
-    /// the CPE1 and every CIB1 and CPN1 of the materialization, with its
-    /// unallocated producer ordinal at the widest form (R10.3(3)). Stage 2
-    /// runs on fixed-width placeholders for the values the Reserve pipeline
-    /// has not derived yet; its records are measured, never kept.
+    /// The materialization's share of the pass quote (ADR-129 revisions 10
+    /// and 11), measured by running stage 2 on fixed-width placeholders, with
+    /// the unallocated producer ordinal at its widest form (R10.3(3)). The
+    /// records are measured and never kept.
+    ///
+    /// `retained` says whether a CES1 with this logical digest is already in
+    /// T's selected closure (the R11.3(3) closure index).
     ///
     /// # Errors
     /// The record errors of stage 2.
-    pub fn quote_terms(&self) -> Result<CommunityPassObservationV1, Error> {
+    pub fn quote_terms(
+        &self,
+        sizes: &CommunityProtectionSizesV1,
+        retained: impl Fn(Hash) -> bool,
+    ) -> Result<CommunityObservationQuoteV1, Error> {
         let placeholder = Hash::from_bytes([0xff; 32]);
         let registrations = vec![placeholder; self.sources.len()];
         let authority: Vec<_> = self
@@ -701,30 +720,121 @@ impl CommunityObservationSourcesV1 {
             authority_rows: &authority,
         })
         .map(|records| {
-            let groups = records.input_groups.len() as u64;
-            let bytes = self
+            let fresh: Vec<&MintedSource> = self
                 .sources
                 .iter()
-                .map(|source| source.bytes.len())
-                .chain(
-                    records
-                        .input_groups
-                        .iter()
-                        .map(|(group, node)| group.len() + node.len()),
-                )
-                .sum::<usize>()
-                + self.observation_value.len()
-                + records.source_proof.len()
-                + records.observation_node.len();
-            CommunityPassObservationV1 {
-                terms: CommunityPassTermsV1 {
-                    nodes: 1 + groups,
-                    edges: self.sources.len().max(1) as u64 + groups,
-                    bytes: bytes as u64,
-                },
-                node_ordinal: records.observation_reference.node_ordinal,
+                .filter(|source| !retained(source.digest))
+                .collect();
+            CommunityObservationQuoteV1 {
+                observation: self.observation_row(&records),
+                graph: self.closure_terms(sizes, &records, &fresh),
+                keys: self.cohort_keys(&fresh),
+                scope: self.scope_rows(),
             }
         })
+    }
+
+    /// The R10.3(5) Observation row: `1 + g(r')` nodes, `r' + g(r')` edges
+    /// and the exact bytes of the COV1, the new CES1s, the CPE1 and every
+    /// CIB1 and CPN1.
+    fn observation_row(
+        &self,
+        records: &CommunityObservationRecordsV1,
+    ) -> CommunityPassObservationV1 {
+        let groups = records.input_groups.len() as u64;
+        let bytes = self
+            .sources
+            .iter()
+            .map(|source| source.bytes.len())
+            .chain(
+                records
+                    .input_groups
+                    .iter()
+                    .map(|(group, node)| group.len() + node.len()),
+            )
+            .sum::<usize>()
+            + self.observation_value.len()
+            + records.source_proof.len()
+            + records.observation_node.len();
+        CommunityPassObservationV1 {
+            terms: CommunityPassTermsV1 {
+                nodes: 1 + groups,
+                edges: self.sources.len().max(1) as u64 + groups,
+                bytes: bytes as u64,
+            },
+            node_ordinal: records.observation_reference.node_ordinal,
+        }
+    }
+
+    /// The R11.3(3) closure additions under the R11.2(4) child lists: each
+    /// CES1 not yet in the closure and the COV1 with no children, the
+    /// Observation CPN1 → COV1 and its CES1s (or its groups), and each
+    /// `InputIndex` CPN1 → its CIB1 and leaves. CPE1 is outside the closure.
+    /// The keys are the cohorts whose records join it (R11.1(4)).
+    fn closure_terms(
+        &self,
+        sizes: &CommunityProtectionSizesV1,
+        records: &CommunityObservationRecordsV1,
+        fresh: &[&MintedSource],
+    ) -> CommunityPassGraphTermsV1 {
+        let leaves = self.sources.len() as u64;
+        let observation_children = if records.input_groups.is_empty() {
+            1 + leaves
+        } else {
+            1 + records.input_groups.len() as u64
+        };
+        let groups = records
+            .input_groups
+            .iter()
+            .zip(self.sources.chunks(MAX_COMMUNITY_DIRECT_INPUTS_V1))
+            .fold(
+                CommunityPassGraphTermsV1::default(),
+                |total, ((group, node), chunk)| {
+                    total
+                        .plus(sizes.record(group.len() as u64, 0))
+                        .plus(sizes.record(node.len() as u64, 1 + chunk.len() as u64))
+                },
+            );
+        fresh
+            .iter()
+            .fold(groups, |total, source| {
+                total.plus(sizes.record(source.bytes.len() as u64, 0))
+            })
+            .plus(sizes.record(self.observation_value.len() as u64, 0))
+            .plus(sizes.record(records.observation_node.len() as u64, observation_children))
+            .plus(CommunityPassGraphTermsV1 {
+                keys: self.cohort_keys(fresh) - 1,
+                ..CommunityPassGraphTermsV1::default()
+            })
+    }
+
+    /// The materialization's store keys (R11.1(4)): its metadata key, one
+    /// CES1 cohort per owning Timeline with a new CES1, and the union
+    /// cohort unless it equals the one CES1 cohort's set.
+    fn cohort_keys(&self, fresh: &[&MintedSource]) -> u64 {
+        let cohorts: BTreeSet<_> = fresh
+            .iter()
+            .map(|source| source.member.source_timeline.inner().to_bytes())
+            .collect();
+        let rows: BTreeSet<_> = self
+            .sources
+            .iter()
+            .map(|source| source.member.source_timeline.inner().to_bytes())
+            .collect();
+        let union = u64::from(!(rows.len() == 1 && cohorts.len() == 1));
+        1 + cohorts.len() as u64 + union
+    }
+
+    /// The materialization's scope rows: the distinct rows of its CPE1 rows
+    /// (`[]` for an empty cut), the scope of its Observation CPN1 (R11.4(2)).
+    fn scope_rows(&self) -> Vec<CommunityScopeMemberV1> {
+        let mut rows: Vec<CommunityScopeMemberV1> = Vec::new();
+        for source in &self.sources {
+            if !rows.contains(&source.member) {
+                rows.push(source.member);
+            }
+        }
+        rows
     }
 
     /// Stage 2: mint the CPE1 and the Observation CPN1 with its groups.

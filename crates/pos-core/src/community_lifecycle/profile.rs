@@ -33,6 +33,27 @@ const GRAPH: [u64; 10] = [
 /// that every operation's CBQ1 quote must fit (ADR-129 §2, §5).
 pub const COMMUNITY_SHARED_RECORD_LIMITS_V1: [u64; 3] = [LIMITS[4], LIMITS[5], LIMITS[6]];
 
+/// The CDP1 `owner_policy_bytes` maximum store keys, compared with the
+/// domain's live key count (ADR-129 §2; revision 11, R11.1(6)).
+pub const COMMUNITY_MAXIMUM_STORE_KEYS_V1: u64 = OWNER[2];
+
+/// The CDP1 `limits_bytes` roster maximum (ADR-129 revision 11, R11.6(d′)):
+/// a CDP1 with more roster rows is refused at installation.
+pub const COMMUNITY_MAXIMUM_ROSTER_V1: usize = 9;
+
+// R11.6 minimum-lifetime floor: the minimum required pass, repeated 64
+// times from the initialization base with every member due and no new
+// Event, fits the 4,096-registration and 8,192-edge closure bounds at the
+// roster maximum (5n + 2 + 7n x 64 and 6n + 1 + 11n x 64).
+const _: () = assert!(5 * LIMITS[0] + 2 + 7 * LIMITS[0] * 64 <= GRAPH[1]);
+const _: () = assert!(6 * LIMITS[0] + 1 + 11 * LIMITS[0] * 64 <= GRAPH[2]);
+// R11.1(5): no V1 key reaches the per-key encryption maximum. The pass
+// ExecutionState cohort holds at most n x (7 + 2 x 16) + 2 records plus the
+// Measurement CPN1s, and a CES1 cohort at most 4,096 records, two credits
+// each.
+const _: () = assert!(2 * (LIMITS[0] * (7 + 2 * 16 + 1) + 2) <= OWNER[3]);
+const _: () = assert!(2 * LIMITS[3] <= OWNER[3]);
+
 /// The CDP1 `limits_bytes` cumulative recorded-set maxima `[nodes, edges,
 /// declared_inputs]` (ADR-129 §2; revision 10, R10.4(1)).
 pub const COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1: [u64; 3] = [LIMITS[7], LIMITS[8], LIMITS[9]];
@@ -54,7 +75,7 @@ pub const COMMUNITY_FOLD_BUDGET_MICROS_V1: u64 = LIMITS[15];
 pub const COMMUNITY_DECISION_DEADLINE_MICROS_V1: u64 = WORKER[1];
 
 const LIMITS: [u64; 16] = [
-    64,
+    COMMUNITY_MAXIMUM_ROSTER_V1 as u64,
     256,
     8192,
     4096,
@@ -239,7 +260,7 @@ pub struct CommunityDurableProfileInputV1<'a> {
     pub backend: CommunityDurableBackendV1,
     /// Existing complete execution-profile digest, distinct from CDP1/CNT1.
     pub execution_profile_digest: Hash,
-    /// Complete roster in strict stable-entry byte order,1..64 members.
+    /// Complete roster in strict stable-entry byte order, 1..=9 members.
     pub roster: &'a [CommunityProfileMemberV1<'a>],
     /// Actual independently installed source/extractor catalogue.
     pub source_catalogue_digest: Hash,
@@ -266,7 +287,7 @@ impl<'a> CommunityDurableProfileV1<'a> {
     /// lease horizons, worst-case graph fit and worker qualification remain
     /// independent installation checks, not conclusions of this constructor.
     pub fn new(input: CommunityDurableProfileInputV1<'a>) -> Result<Self> {
-        if input.roster.len() > MAX_COMMUNITY_MEMBERS_V1 {
+        if input.roster.len() > COMMUNITY_MAXIMUM_ROSTER_V1 {
             return Err(Error::BoundsExceeded);
         }
         if input.roster.is_empty()

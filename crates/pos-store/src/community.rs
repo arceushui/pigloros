@@ -58,13 +58,13 @@ pub use observation::{
     prepare_community_observation_v1, CommunityObservationBindingsV1,
     CommunityObservationConsumerV1, CommunityObservationEventV1,
     CommunityObservationInstallationV1, CommunityObservationMaterializationInputV1,
-    CommunityObservationMaterializationV1, CommunityObservationPassV1,
+    CommunityObservationMaterializationV1, CommunityObservationPassV1, CommunityObservationQuoteV1,
     CommunityObservationRecordsV1, CommunityObservationSourcesV1,
 };
 pub use pass_planner::{
     plan_community_pass_v1, CommunityPassDueV1, CommunityPassInstallationV1,
-    CommunityPassMemberViewV1, CommunityPassPlanV1, CommunityPassRequestV1,
-    CommunityPassStepInputsV1, CommunityPassViewV1,
+    CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
+    CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
 };
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,

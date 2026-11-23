@@ -12,33 +12,40 @@
 //! - step 5d and 5e ([`CommunityPassDueV1::admit`]): the retained-outcome
 //!   and control-operation caps (14, R10.4(4)) and the recording horizon
 //!   (19, R10.4(3));
-//! - the CBQ1 part of step 5g ([`CommunityPassDueV1::quote`]): the R10.3
-//!   quote, State demand first (14) and then State plus recording demand
-//!   (19), under the R10.4(1) fit rule.
+//! - step 5g ([`CommunityPassDueV1::quote`]), in the R11.5(1) order: the
+//!   R10.3 CBQ1 quote, the live key count (R11.1(6)), the ARD1 graph demand
+//!   (R11.3), the pass CSB1/CPV1 bounds (R11.4(1)–(3)) and the CAU1 object
+//!   bound (R11.4(4)), each State demand first (14) and then with the
+//!   recording (19).
 //!
 //! Steps 5a–5c (the step-5 decisions, the trust gate and the observation
 //! reuse decision) and 5f (the materialization's history read and fold) run
-//! between these calls, in the Reserve pipeline (A4c). The key, encryption
-//! and graph demands of R10.4(2), the R10.4(6) format bounds and the
-//! R10.4(5) install check are not part of this planner.
+//! between these calls, in the Reserve pipeline (A4c). The R10.4(5)
+//! installation check is [`check_community_pass_installation_v1`].
 //!
 //! The planner reads the domain only through [`CommunityQuarantineIndexV1`]
 //! and [`CommunityPassReadPortV1`] and commits nothing: every backend's `run_pass` uses the same planner,
 //! and the Reserve writer re-checks generation, head, counters, quarantine,
 //! caps and the recording horizon (R10.7 step 5j).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use pos_core::community_lifecycle::{
-    community_member_due_v1, CommunityDurableProfileV1, CommunityHostProgressV1,
-    CommunityLifecycleErrorV1 as Error, CommunityPassObservationV1, CommunityPassQuoteInputV1,
-    CommunityPassQuoteMemberV1, CommunityPassQuoteV1, CommunityPreparedInvocationInputV1,
-    CommunityQuarantineKeyV1, CommunityQuarantineReasonV1, CommunitySharedCountsV1,
+    community_member_due_v1, CommunityDurableProfileV1, CommunityGraphCountsV1,
+    CommunityHostProgressV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
+    CommunityPassDomainV1, CommunityPassGraphTermsV1, CommunityPassObservationV1,
+    CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1, CommunityPassQuoteV1,
+    CommunityPreparedInvocationInputV1, CommunityProtectionSizesV1, CommunityQuarantineKeyV1,
+    CommunityQuarantineReasonV1, CommunityScopeMemberV1, CommunitySharedCountsV1,
     CommunityTypedInputRefV1, COMMUNITY_CONTROL_OPERATIONS_V1,
     COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
+    MAX_COMMUNITY_COVERAGE_ROWS_V1, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
 };
 use pos_core::{Hash, TimelineId};
 
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
+use super::observation::{CommunityObservationQuoteV1, CommunityObservationSourcesV1};
 
 /// The domain's quarantine index read (R10.6(2)).
 ///
@@ -65,10 +72,12 @@ impl CommunityQuarantineIndexV1 for MemoryCommunityDomainV1 {
 }
 
 /// The other domain reads the planner needs, under the call's guard: the
-/// recorded-set counters (R10.3(6)) and the retained-outcome and
-/// control-operation counts (R10.4(4)). They are domain-private and have no
-/// wire form; the Memory domain adds their storage and implements this
-/// port in A4c. The trait is re-exported nowhere.
+/// recorded-set counters (R10.3(6)), the retained-outcome and
+/// control-operation counts (R10.4(4)), the live key count (R11.1(6)), the
+/// selected CGR1 counts and closure index (R11.3) and the scope rows of the
+/// step inputs (R11.4(3)). They are domain-private and have no wire form;
+/// the Memory domain adds their storage and implements this port in A4c.
+/// The trait is re-exported nowhere.
 pub trait CommunityPassReadPortV1 {
     /// T's cumulative recorded-set counters (R10.3(6)).
     fn recorded_set_counters(&self, timeline: TimelineId) -> CommunitySharedCountsV1;
@@ -80,6 +89,39 @@ pub trait CommunityPassReadPortV1 {
     /// The retained control and protection operations of `(T, G)`
     /// (R10.4(4)).
     fn control_operations(&self, timeline: TimelineId, generation: [u8; 16]) -> u64;
+
+    /// The domain's live key count: CKP1 keys in its key vault that are not
+    /// Tombstoned (R11.1(6)).
+    fn live_keys(&self) -> u64;
+
+    /// T's selected CGR1 `graph_counts`: the initialization CGR1's for an
+    /// Initial frontier (R11.3(1)).
+    fn selected_graph(&self, timeline: TimelineId) -> CommunityGraphCountsV1;
+
+    /// Whether a CES1 with this logical digest is already in T's selected
+    /// closure, from the closure index (R11.3(3)).
+    fn event_source_in_closure(&self, timeline: TimelineId, event_source: Hash) -> bool;
+
+    /// What a reused Observation CPN1's materialization adds to T's selected
+    /// closure: its exact records when they are not yet in it (an Aborted
+    /// Reserve), zero when they are (R11.3(3)).
+    fn observation_graph(
+        &self,
+        timeline: TimelineId,
+        observation: CommunityNativeNodeReferenceV1,
+    ) -> CommunityPassGraphTermsV1;
+
+    /// A mode-0, mode-1 or mode-2 ref's scope rows (R11.4(3)): a native
+    /// node's from the CSB1 of the operation that minted it, an Event's or
+    /// CES1's from its owning Timeline's one whole-Timeline row.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` when the rows cannot be read.
+    fn scope_rows(
+        &self,
+        timeline: TimelineId,
+        reference: CommunityTypedInputRefV1<'_>,
+    ) -> Result<Vec<CommunityScopeMemberV1>, Error>;
 }
 
 /// Installed composition inputs of the planner. None comes from a caller.
@@ -342,31 +384,57 @@ impl CommunityPassDueV1<'_> {
         }
     }
 
-    /// The CBQ1 part of step 5g: the R10.3 quote over the due members, with
-    /// the counters read under the guard as `prior_shared_counts`, checked
-    /// State first and then with the recording (R10.4(1)–(2)).
+    /// Step 5g in the R11.5(1) order: the R10.3 CBQ1 quote, the live key
+    /// count, the ARD1 graph demand, the pass CSB1/CPV1 bounds and the CAU1
+    /// object bound. Each is checked for State demand first and then with
+    /// the recording (R10.4(2)).
     ///
-    /// `steps` has one entry per due member, in due order. `minted` is the
-    /// [`super::CommunityObservationSourcesV1::quote_terms`] of the observation this
-    /// call mints, or `None` when it reuses one.
+    /// `steps` has one entry per due member, in due order.
     ///
     /// # Errors
-    /// Returns `InvalidBinding` when `steps` does not cover the due set;
-    /// the quote errors of [`CommunityPassQuoteV1::new`]; then
-    /// `CapacityExhausted` when the State demand does not fit and
-    /// `RecordingUnavailable` when only the full demand does not.
+    /// Returns `InvalidBinding` when `steps` does not cover the due set or a
+    /// member's scope differs from the pass scope (R11.1(2)); the quote
+    /// errors of [`CommunityPassQuoteV1::new`], the stage-2 errors of a
+    /// minted observation and the port's scope-read errors; then
+    /// `CapacityExhausted` when a State demand does not fit and
+    /// `RecordingUnavailable` when only a full demand does not.
     pub fn quote<P: CommunityPassReadPortV1>(
         &self,
         port: &P,
         steps: &[CommunityPassStepInputsV1<'_>],
-        minted: Option<CommunityPassObservationV1>,
+        observation: CommunityPassObservationUseV1<'_>,
     ) -> Result<CommunityPassQuoteV1, Error> {
-        if steps.len() == self.due.len() {
-            self.pass_quote(port, steps, minted)
-                .and_then(|quote| quote.require_fit().map(|()| quote))
-        } else {
-            Err(Error::InvalidBinding)
+        if steps.len() != self.due.len() {
+            return Err(Error::InvalidBinding);
         }
+        let timeline = self.view.host_progress.timeline();
+        CommunityProtectionSizesV1::new(timeline, self.view.host_progress.generation())
+            .and_then(|sizes| share(port, timeline, &sizes, observation))
+            .and_then(|share| {
+                self.pass_quote(port, steps, share.observation)
+                    .and_then(|quote| {
+                        quote
+                            .require_fit()
+                            .and_then(|()| {
+                                quote.demand(CommunityPassDomainV1 {
+                                    selected_graph: port.selected_graph(timeline),
+                                    live_keys: port.live_keys(),
+                                    observation_graph: share.graph,
+                                    observation_keys: share.keys,
+                                })
+                            })
+                            .and_then(|demand| {
+                                demand
+                                    .require_keys()
+                                    .and_then(|()| demand.require_graph())
+                                    .and_then(|()| {
+                                        scope_bounds(port, timeline, steps, &share.scope)
+                                    })
+                                    .and_then(|()| demand.require_objects())
+                            })
+                            .map(|()| quote)
+                    })
+            })
     }
 
     fn pass_quote<P: CommunityPassReadPortV1>(
@@ -399,6 +467,157 @@ impl CommunityPassDueV1<'_> {
             members: &members,
             minted_observation: observation,
         })
+    }
+}
+
+/// The pass's observation: one this call mints, or a committed one it
+/// reuses (R10.7 step 5c).
+#[derive(Clone, Copy)]
+pub enum CommunityPassObservationUseV1<'a> {
+    /// The stage-1 result of the observation this call mints.
+    Minted(&'a CommunityObservationSourcesV1),
+    /// The committed Observation CPN1 this call reuses.
+    Reused(CommunityNativeNodeReferenceV1),
+}
+
+/// The observation's share of the quote: its CBQ1 row when minted, its
+/// closure additions, its store keys and, when minted, its scope rows.
+fn share<P: CommunityPassReadPortV1>(
+    port: &P,
+    timeline: TimelineId,
+    sizes: &CommunityProtectionSizesV1,
+    observation: CommunityPassObservationUseV1<'_>,
+) -> Result<Share, Error> {
+    match observation {
+        CommunityPassObservationUseV1::Minted(sources) => sources
+            .quote_terms(sizes, |digest| {
+                port.event_source_in_closure(timeline, digest)
+            })
+            .map(Share::minted),
+        CommunityPassObservationUseV1::Reused(reference) => Ok(Share {
+            observation: None,
+            graph: port.observation_graph(timeline, reference),
+            keys: 0,
+            scope: Vec::new(),
+        }),
+    }
+}
+
+struct Share {
+    observation: Option<CommunityPassObservationV1>,
+    graph: CommunityPassGraphTermsV1,
+    keys: u64,
+    scope: Vec<CommunityScopeMemberV1>,
+}
+
+impl Share {
+    fn minted(quote: CommunityObservationQuoteV1) -> Self {
+        Self {
+            observation: Some(quote.observation),
+            graph: quote.graph,
+            keys: quote.keys,
+            scope: quote.scope,
+        }
+    }
+}
+
+/// One scope row's identity: its five fields.
+type RowKey = ([u8; 32], [u8; 16], [u8; 32], [u8; 32], u64);
+
+const fn row_key(row: &CommunityScopeMemberV1) -> RowKey {
+    (
+        *row.scope_reference.as_bytes(),
+        row.source_timeline.inner().to_bytes(),
+        *row.owner_reference.as_bytes(),
+        *row.retention_lease_reference.as_bytes(),
+        row.not_after_micros,
+    )
+}
+
+/// R11.4(1)–(3) and R11.1(2): the pass's distinct CIR1 refs (its CSB1
+/// `coverage_rows` and CPV1 `source_root_refs`) are at most 4,096; every
+/// member's scope union equals the pass scope; and the pass scope (its
+/// `scope_members`) is at most 2,048 rows.
+fn scope_bounds<P: CommunityPassReadPortV1>(
+    port: &P,
+    timeline: TimelineId,
+    steps: &[CommunityPassStepInputsV1<'_>],
+    minted: &[CommunityScopeMemberV1],
+) -> Result<(), Error> {
+    let mut refs = BTreeSet::new();
+    let mut minting = false;
+    for step in steps {
+        refs.extend(
+            step.step_inputs
+                .iter()
+                .map(|input| *input.digest().as_bytes()),
+        );
+        minting |= step.consumes_minted_observation;
+    }
+    if refs.len() + usize::from(minting) > MAX_COMMUNITY_COVERAGE_ROWS_V1 {
+        return Err(Error::CapacityExhausted);
+    }
+    let mut rows = BTreeMap::new();
+    steps
+        .iter()
+        .map(|step| member_scope(port, timeline, step, minted, &mut rows))
+        .collect::<Result<Vec<_>, Error>>()
+        .and_then(|scopes| {
+            let pass: BTreeSet<RowKey> = scopes.iter().flatten().copied().collect();
+            if scopes.iter().any(|scope| *scope != pass) {
+                Err(Error::InvalidBinding)
+            } else if pass.len() > MAX_COMMUNITY_SCOPE_MEMBERS_V1 {
+                Err(Error::CapacityExhausted)
+            } else {
+                Ok(())
+            }
+        })
+}
+
+/// `S_m`: the union of the scope rows of a member's CIR1 refs (R11.4(3)),
+/// reading each distinct ref once.
+fn member_scope<P: CommunityPassReadPortV1>(
+    port: &P,
+    timeline: TimelineId,
+    step: &CommunityPassStepInputsV1<'_>,
+    minted: &[CommunityScopeMemberV1],
+    cache: &mut BTreeMap<[u8; 32], Vec<RowKey>>,
+) -> Result<BTreeSet<RowKey>, Error> {
+    let mut scope: BTreeSet<RowKey> = if step.consumes_minted_observation {
+        minted.iter().map(row_key).collect()
+    } else {
+        BTreeSet::new()
+    };
+    step.step_inputs
+        .iter()
+        .try_for_each(|input| {
+            let digest = *input.digest().as_bytes();
+            let rows = cache.get(&digest).cloned().map_or_else(
+                || {
+                    input_rows(port, timeline, *input).map(|rows| {
+                        let keys: Vec<RowKey> = rows.iter().map(row_key).collect();
+                        cache.insert(digest, keys.clone());
+                        keys
+                    })
+                },
+                Ok,
+            );
+            rows.map(|rows| scope.extend(rows))
+        })
+        .map(|()| scope)
+}
+
+/// A ref's scope rows (R11.4(3)): modes 3 and 4 have none; the others are
+/// read from the domain.
+fn input_rows<P: CommunityPassReadPortV1>(
+    port: &P,
+    timeline: TimelineId,
+    input: CommunityTypedInputRefV1<'_>,
+) -> Result<Vec<CommunityScopeMemberV1>, Error> {
+    match input {
+        CommunityTypedInputRefV1::Metadata { .. }
+        | CommunityTypedInputRefV1::SourceGenesis { .. } => Ok(Vec::new()),
+        _ => port.scope_rows(timeline, input),
     }
 }
 
