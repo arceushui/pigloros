@@ -1955,7 +1955,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '3fee8a9ea7609019c88fce323b9e5ecd8cadc372e69c14d477d1c4c66d235157',
     'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',
     'crates/pos-owner-bridge/assets/qualification/external.html': '45c476fa75fd4ac257c62148a1b288eb7f13ab411d371d8b8842eec48a9e96b4',
-    'crates/pos-owner-bridge/assets/qualification/manifest.json': '4d37c95ce8fd82b2bc183cffdee8ee11a164f4c534e12a09b87a35780e193811',
+    'crates/pos-owner-bridge/assets/qualification/manifest.json': 'd5d6e3a390bfcfa80dc04f4964ba6e5ad2bb1758a9684d357f066646d1f85533',
     'crates/pos-owner-bridge/src/listener/fixture_assets.rs': '7891ff7491e638fb11ecdb54f04b8270cf5a24c5c80b46971402d0064c971c3d',
     'crates/pos-owner-bridge/src/listener/fixtures.rs': '2487177ab012dad956a79396d87714e4a7aaacbf897d44e8cbc801bb893cb998',
 }
