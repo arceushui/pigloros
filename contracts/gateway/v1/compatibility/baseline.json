@@ -24,6 +24,11 @@
                   "$ref": "#/components/schemas/HealthOk"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -33,6 +38,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -58,6 +68,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/LedgerView"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -93,6 +108,11 @@
                   "$ref": "#/components/schemas/PredictionCreated"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "403": {
@@ -102,6 +122,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -113,6 +138,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -122,6 +152,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -136,6 +171,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -146,6 +186,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -196,6 +239,11 @@
                   "$ref": "#/components/schemas/TimelineCreated"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -213,6 +261,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -227,6 +278,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "403": {
@@ -237,6 +293,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -246,6 +307,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           }
@@ -324,6 +390,11 @@
                   "$ref": "#/components/schemas/EventPage"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "400": {
@@ -333,6 +404,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -344,6 +420,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "403": {
@@ -353,6 +434,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -364,6 +450,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "409": {
@@ -374,6 +465,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "413": {
@@ -383,6 +479,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -397,6 +498,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -407,6 +513,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -454,6 +563,11 @@
                   "$ref": "#/components/schemas/EventView"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "200": {
@@ -463,6 +577,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/EventView"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -474,6 +593,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "401": {
@@ -483,6 +607,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -494,6 +623,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "404": {
@@ -503,6 +637,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -514,6 +653,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "422": {
@@ -524,6 +668,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -533,6 +682,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -547,6 +701,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -600,6 +757,11 @@
                   "$ref": "#/components/schemas/EventView"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "404": {
@@ -609,6 +771,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -623,6 +790,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "403": {
@@ -632,6 +804,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -643,6 +820,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -660,6 +840,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           }
@@ -698,6 +883,11 @@
                   "$ref": "#/components/schemas/OwnTracksAccepted"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -708,6 +898,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -752,6 +945,11 @@
                   "$ref": "#/components/schemas/Session"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "401": {
@@ -761,6 +959,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -772,6 +975,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -782,6 +990,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -799,6 +1010,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -852,6 +1068,11 @@
                   "$ref": "#/components/schemas/ConsentRevocation"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "200": {
@@ -861,6 +1082,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ConsentRevocation"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -872,6 +1098,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "401": {
@@ -881,6 +1112,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -892,6 +1128,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "404": {
@@ -901,6 +1142,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -912,6 +1158,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "413": {
@@ -921,6 +1172,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -932,6 +1188,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -949,6 +1208,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -999,6 +1263,11 @@
                   "$ref": "#/components/schemas/ScenarioRoomRevision"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "200": {
@@ -1008,6 +1277,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ScenarioRoomRevision"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1019,6 +1293,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "401": {
@@ -1028,6 +1307,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1039,6 +1323,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "409": {
@@ -1048,6 +1337,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1059,6 +1353,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -1068,6 +1367,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1079,6 +1383,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -1088,6 +1397,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1141,6 +1455,11 @@
                   "$ref": "#/components/schemas/ScenarioRoomRevision"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "200": {
@@ -1150,6 +1469,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/ScenarioRoomRevision"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1161,6 +1485,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "401": {
@@ -1170,6 +1499,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1181,6 +1515,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "409": {
@@ -1190,6 +1529,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1201,6 +1545,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -1210,6 +1559,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1221,6 +1575,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "422": {
@@ -1231,6 +1590,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -1240,6 +1604,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1283,6 +1652,11 @@
                   "$ref": "#/components/schemas/ScenarioRoomRevision"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "400": {
@@ -1292,6 +1666,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1303,6 +1682,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "404": {
@@ -1312,6 +1696,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1323,6 +1712,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -1333,6 +1727,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "429": {
@@ -1342,6 +1741,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1395,6 +1799,11 @@
                   "$ref": "#/components/schemas/PreferenceRevision"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "200": {
@@ -1404,6 +1813,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/PreferenceRevision"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1415,6 +1829,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "401": {
@@ -1424,6 +1843,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1435,6 +1859,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "404": {
@@ -1444,6 +1873,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1455,6 +1889,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "410": {
@@ -1465,6 +1904,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "413": {
@@ -1474,6 +1918,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1492,6 +1941,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1502,6 +1954,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1548,6 +2005,11 @@
                   "$ref": "#/components/schemas/PreferenceRevision"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "400": {
@@ -1557,6 +2019,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1568,6 +2035,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "403": {
@@ -1577,6 +2049,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1588,6 +2065,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "410": {
@@ -1597,6 +2079,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1615,6 +2102,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1625,6 +2115,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1678,6 +2173,11 @@
                   "$ref": "#/components/schemas/OptionSpecRevision"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "200": {
@@ -1687,6 +2187,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/OptionSpecRevision"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1698,6 +2203,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "401": {
@@ -1707,6 +2217,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1718,6 +2233,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "404": {
@@ -1727,6 +2247,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1738,6 +2263,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "410": {
@@ -1748,6 +2278,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "413": {
@@ -1757,6 +2292,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1775,6 +2315,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1785,6 +2328,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1831,6 +2379,11 @@
                   "$ref": "#/components/schemas/OptionSpecRevision"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "400": {
@@ -1840,6 +2393,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1851,6 +2409,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "403": {
@@ -1860,6 +2423,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1871,6 +2439,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "410": {
@@ -1880,6 +2453,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1898,6 +2476,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1908,6 +2489,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1961,6 +2547,11 @@
                   "$ref": "#/components/schemas/AdmissionReceipt"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "400": {
@@ -1970,6 +2561,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -1981,6 +2577,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "403": {
@@ -1990,6 +2591,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -2001,6 +2607,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "413": {
@@ -2010,6 +2621,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -2021,6 +2637,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -2038,6 +2657,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -2081,6 +2705,11 @@
                   "$ref": "#/components/schemas/Erasure"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "400": {
@@ -2090,6 +2719,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -2101,6 +2735,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "404": {
@@ -2110,6 +2749,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -2121,6 +2765,11 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
             }
           },
           "503": {
@@ -2130,6 +2779,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
@@ -2143,6 +2797,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           }
@@ -4244,6 +4903,12 @@
           },
           "external_copies": {
             "const": "not-covered"
+          },
+          "redaction_generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "The store's redaction generation (ADR-136 follow-up F2, #1407): how many client-cache redaction generations (ELCG1) the store has committed, across every erasure of every subject. It is store-wide, never decreases, also across a restart, and is 0 before the first. A Gateway serving a Local erasure composition always carries it; a client compares it with the value it last saw and, when it rose, re-reads before it trusts any copy (README, *Client cache*)."
           }
         },
         "unevaluatedProperties": false
@@ -4354,6 +5019,11 @@
               "$ref": "#/components/schemas/Problem"
             }
           }
+        },
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControl"
+          }
         }
       }
     },
@@ -4361,6 +5031,16 @@
       "ownTracksBasic": {
         "type": "http",
         "scheme": "basic"
+      }
+    },
+    "headers": {
+      "CacheControl": {
+        "description": "The supported client-cache rule (ADR-136 follow-up F2, #1407): every response, problems included, is `no-store`, so no cache may store it. RFC 9111 §5.2.2.5 does not make `no-store` sufficient for privacy: a supported client also never persists a managed representation and drops its copies once an erasure's `client-cache-signal` is positive (README, *Client cache*).",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "const": "no-store"
+        }
       }
     }
   },

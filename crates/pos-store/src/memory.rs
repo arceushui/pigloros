@@ -348,6 +348,10 @@ pub struct MemoryStore {
     erasure_retained_objects: BTreeMap<ErasureReferenceV1, String>,
     /// The write-once erasure store identity (ADR-136 §4).
     erasure_store_identity: Option<Hash>,
+    /// The redaction generation: how many ELCG1 cache generations the store
+    /// committed (ADR-136 follow-up F2, #1407). Like every other erasure
+    /// record of a `MemoryStore`, it lives as long as the instance.
+    redaction_generation: u64,
     /// Exact immutable artifact bytes and ARD1 rows visible in each local owner catalog.
     artifact_registrations: BTreeMap<Hash, ArtifactRegistrationCatalogRowV1>,
     /// Unique immutable identity index for `(owner, class, artifact digest)`.
@@ -854,6 +858,7 @@ impl MemoryStore {
             erasure_evidence: BTreeMap::new(),
             erasure_retained_objects: BTreeMap::new(),
             erasure_store_identity: None,
+            redaction_generation: 0,
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
@@ -3974,6 +3979,10 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         prepared: pos_core::PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         self.local_erasure_commit_owner_effect(&prepared)
+    }
+
+    fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
+        Ok(self.redaction_generation)
     }
 
     fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
