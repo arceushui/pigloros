@@ -5576,6 +5576,8 @@ mod tests {
             inner: OwnedSelectorListener::bind_path(&directory.socket, directory.uid)?,
         };
         listener.set_nonblocking()?;
+        // No connection waits yet: one poll sleeps and keeps serving.
+        assert!(administer_once(&listener, &composition)?.is_continue());
         let running = AtomicBool::new(false);
         let transaction = |nonce: Option<[u8; 16]>| -> TestResult<Vec<u8>> {
             let mut client = UnixStream::connect(&directory.socket)?;
