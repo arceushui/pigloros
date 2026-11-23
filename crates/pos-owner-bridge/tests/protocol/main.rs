@@ -31,7 +31,7 @@ use pos_owner_bridge::fake::surface::{
 use pos_owner_bridge::{
     BindingUpdate, BridgeConfig, BridgeError, ConfirmedBinding, EnrollmentContext, EnrollmentPort,
     MonotonicClock, OwnerBridge, OwnerError, OwnerErrorKind, PrfOutput, RootFingerprint,
-    SurfaceEvent, UnlockPort,
+    SealInputs, SurfaceEvent, UnlockPort,
 };
 use pos_owner_bridge_codec::{
     CeremonyId, CeremonyKind, CoseEs256PublicKey, OwnerBridgeCodecError, OwnerUserHandle, PrfInput,
@@ -343,6 +343,8 @@ struct FakeEnrollment {
     commit_error: Option<OwnerError>,
     lie_in_confirm: bool,
     seal_prf: Option<[u8; 32]>,
+    /// The credential ID, PRF input and context `seal_candidate` received.
+    sealed_over: Option<(Vec<u8>, PrfInput, EnrollmentContext)>,
     confirm_prf: Option<[u8; 32]>,
     committed: Option<ConfirmedBinding>,
     surface: Option<FakeSurfaceHandle>,
@@ -361,6 +363,7 @@ impl FakeEnrollment {
             commit_error: None,
             lie_in_confirm: false,
             seal_prf: None,
+            sealed_over: None,
             confirm_prf: None,
             committed: None,
             surface: None,
@@ -396,9 +399,14 @@ impl EnrollmentPort for FakeEnrollment {
     fn seal_candidate(
         &mut self,
         prf: PrfOutput<'_>,
-        _context: &EnrollmentContext,
+        inputs: SealInputs<'_>,
     ) -> Result<(Candidate, RootFingerprint), OwnerError> {
         self.calls.push(Call::Seal);
+        self.sealed_over = Some((
+            inputs.credential_id().to_vec(),
+            inputs.prf_input(),
+            inputs.context().clone(),
+        ));
         self.observe();
         if let Some((clock, delay)) = &self.seal_delay {
             clock.advance(*delay);
