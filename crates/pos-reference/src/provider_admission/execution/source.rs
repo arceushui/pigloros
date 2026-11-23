@@ -2368,7 +2368,8 @@ mod tests {
         // SIC1 verifies every indexed object's bytes when the join opens it,
         // so the change is refused at row 10, before the image check of row
         // 11: the precedence base §4 orders. ImageIdentity itself is the
-        // image check's own refusal (see `refusals_name_their_cause_and_the_image_code`).
+        // image check's own refusal (see
+        // `an_image_check_failure_is_image_identity`).
         let (source, _selector) = source_pair(&staged, &ledger, &installation)?;
         let (_, error) = refused(admit(source, &ledger, &installation))?;
         assert!(
@@ -2379,6 +2380,35 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(ledger.usage(), StagingUsage::default());
+        Ok(())
+    }
+
+    // Row 11: a proof no longer valid at host time fails the image check
+    // itself, in the retained snapshot and in the join, and both give
+    // ImageIdentity (SPE1 `9`).
+    #[test]
+    fn an_image_check_failure_is_image_identity() -> TestResult {
+        use std::time::UNIX_EPOCH;
+        let admitted = Arc::new(
+            crate::selector::installation::tests::admitted_state()?
+                .authenticate_bootstrap()?
+                .admit_provider()?,
+        );
+        let request = crate::provider_admission::tests::request_for(&admitted)?;
+        let expired = || UNIX_EPOCH + Duration::from_secs(2_200_000_000);
+        let valid = || UNIX_EPOCH + Duration::from_hours(500_000);
+        let fault = ProviderImageSnapshot::checked(Arc::clone(&admitted), request.clone(), expired)
+            .err()
+            .ok_or("an expired proof was admitted")?;
+        assert!(matches!(snapshot_fault(fault), StagingError::ImageIdentity));
+        let snapshot = ok(ProviderImageSnapshot::checked(admitted, request, valid))?;
+        let current = crate::selector::installation::tests::admitted_state()
+            .map_err(|_| InstallationError::Io);
+        let fault = snapshot
+            .join_current(current, expired)
+            .err()
+            .ok_or("an expired proof was joined")?;
+        assert!(matches!(join_fault(fault), StagingError::ImageIdentity));
         Ok(())
     }
 
