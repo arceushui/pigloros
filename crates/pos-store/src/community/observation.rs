@@ -694,8 +694,11 @@ impl CommunityObservationSourcesV1 {
     /// the unallocated producer ordinal at its widest form (R10.3(3)). The
     /// records are measured and never kept.
     ///
-    /// `retained` says whether a CES1 with this logical digest is already in
-    /// T's selected closure (the R11.3(3) closure index).
+    /// Its R10.3(5) Observation row is an upper bound: it counts every row's
+    /// CES1, including one the Reserve pipeline reuses (R9.2), so it never
+    /// under-quotes. Its closure additions count only the CES1s not yet in
+    /// the closure: `retained` says whether a CES1 with this logical digest
+    /// is already in T's selected closure (the R11.3(3) closure index).
     ///
     /// # Errors
     /// The record errors of stage 2.
@@ -735,8 +738,8 @@ impl CommunityObservationSourcesV1 {
     }
 
     /// The R10.3(5) Observation row: `1 + g(r')` nodes, `r' + g(r')` edges
-    /// and the exact bytes of the COV1, the new CES1s, the CPE1 and every
-    /// CIB1 and CPN1.
+    /// and the bytes of the COV1, every row's CES1, the CPE1 and every CIB1
+    /// and CPN1.
     fn observation_row(
         &self,
         records: &CommunityObservationRecordsV1,

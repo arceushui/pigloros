@@ -880,11 +880,11 @@ fn an_empty_fork_child_names_its_fork_chain_root_genesis() -> TestResult {
 
 #[test]
 fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> TestResult {
-    // Revision 10, R10.3(3) and (5): the Observation row counts 1 + g(r')
-    // nodes, r' + g(r') edges and the exact bytes of every record the
-    // materialization mints, with its unallocated ordinal at 9 bytes.
-    // Revision 11, R11.1(4), R11.2(4), R11.3(3) and R11.4(2): its closure
-    // records, cohort keys and scope rows.
+    // Revision 10, R10.3(3) and (5): the Observation row's nodes, edges and
+    // bytes, derived from the decoded stage-2 records minted at the widest
+    // producer ordinal, not from the row formula. Revision 11, R11.1(4),
+    // R11.2(4), R11.3(3) and R11.4(2): its closure records, cohort keys and
+    // scope rows.
     let installed = Installed::new(vec![RULE])?;
     for events in [0, 1, 300] {
         let history = history(events, EVENT_TYPE, None)?;
@@ -896,7 +896,23 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
         let mut widest = bindings(&registrations, &authority);
         widest.producer_ordinal = u64::MAX;
         let records = sources.finish(widest)?;
-        let groups = records.input_groups.len() as u64;
+        let observation = CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?;
+        assert_eq!(observation.as_input().producer_ordinal, u64::MAX);
+        // Each node's input count, from its decoded input index.
+        let inputs = |node: &CommunityNativeNodeV1<'_>| match node.as_input().input_index {
+            CommunityInputIndexV1::Direct(inputs) => inputs.len() as u64,
+            CommunityInputIndexV1::Grouped { groups, .. } => groups.len() as u64,
+            CommunityInputIndexV1::Empty => 0,
+        };
+        let mut nodes = 1;
+        let mut edges = inputs(&observation);
+        let mut leaves = Vec::new();
+        for (_group, node) in &records.input_groups {
+            let node = CommunityNativeNodeV1::from_canonical_cbor(node)?;
+            nodes += 1;
+            edges += inputs(&node);
+            leaves.push(inputs(&node));
+        }
         let bytes = sources.event_sources().map(<[u8]>::len).sum::<usize>()
             + sources.observation_value().len()
             + records.source_proof.len()
@@ -910,16 +926,13 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
         for retain in [false, true] {
             let quote = sources.quote_terms(&sizes, |_| retain)?;
             let terms = quote.observation;
-            assert_eq!(terms.terms.nodes, 1 + groups);
-            assert_eq!(terms.terms.edges, events.max(1) as u64 + groups);
+            assert_eq!(terms.terms.nodes, nodes);
+            assert_eq!(terms.terms.edges, edges);
             assert_eq!(terms.terms.bytes, bytes as u64);
-            assert_eq!(
-                terms.node_ordinal,
-                records.observation_reference.node_ordinal
-            );
-            assert_eq!(terms.node_ordinal, u32::try_from(groups)?);
-            // Closure records: new CES1s, the COV1, the Observation CPN1
-            // and the group pairs.
+            assert_eq!(terms.node_ordinal, observation.as_input().node_ordinal);
+            // Closure records: new CES1s and the COV1 with no children, the
+            // Observation CPN1 → COV1 and its inputs (a genesis ref has no
+            // registration), and each group pair → its CIB1 and leaves.
             let mut expected = CommunityPassGraphTermsV1::default();
             if !retain {
                 for source in sources.event_sources() {
@@ -927,29 +940,17 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
                 }
             }
             expected = expected.plus(sizes.record(sources.observation_value().len() as u64, 0));
-            let observation_children = if groups == 0 {
-                1 + events as u64
-            } else {
-                1 + groups
-            };
-            expected = expected
-                .plus(sizes.record(records.observation_node.len() as u64, observation_children));
-            for ((group, node), chunk) in records.input_groups.iter().zip([256_u64, 44]) {
+            let registered = if events == 0 { 0 } else { inputs(&observation) };
+            expected =
+                expected.plus(sizes.record(records.observation_node.len() as u64, 1 + registered));
+            for ((group, node), leaves) in records.input_groups.iter().zip(&leaves) {
                 expected = expected
                     .plus(sizes.record(group.len() as u64, 0))
-                    .plus(sizes.record(node.len() as u64, 1 + chunk));
+                    .plus(sizes.record(node.len() as u64, 1 + leaves));
             }
-            // One CES1 cohort for the root when a CES1 is new, else the union
-            // cohort; plus the metadata key.
-            let fresh = !retain && events > 0;
             expected.keys = 1;
             assert_eq!(quote.graph, expected);
             assert_eq!(quote.keys, 2);
-            assert_eq!(
-                quote.graph.registrations,
-                if fresh { events as u64 } else { 0 } + 2 + 2 * groups
-            );
-            assert_eq!(quote.graph.edges, 1 + events as u64 + 2 * groups);
             let scope: Vec<_> = quote.scope.iter().map(|row| row.source_timeline).collect();
             if events == 0 {
                 assert!(scope.is_empty());
