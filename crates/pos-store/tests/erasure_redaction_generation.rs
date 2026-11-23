@@ -155,6 +155,13 @@ fn stored_generation(path: &str, generation: i64) -> TestResult {
     Ok(())
 }
 
+/// `REDACTION_GENERATION_MAX_V1` is exactly the largest JSON-safe integer,
+/// `2^53 - 1`, the `redaction_generation` maximum the Gateway contract declares.
+#[test]
+fn the_redaction_generation_bound_is_the_largest_json_safe_integer() {
+    assert_eq!(REDACTION_GENERATION_MAX_V1, 9_007_199_254_740_991);
+}
+
 /// A `SQLite` generation one below `REDACTION_GENERATION_MAX_V1`, the
 /// JSON-safe bound of the Gateway contract, still rises to it; at the bound
 /// it cannot be raised: the ELCG1 commit fails and rolls back, so neither
