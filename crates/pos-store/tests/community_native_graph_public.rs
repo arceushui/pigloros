@@ -29,11 +29,11 @@ use pos_core::{
     ErasureArtifactClassV1 as Class, Hash, ImplementationKeyV1, Seq, TimelineId,
 };
 use pos_store::community::{
-    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1,
-    CommunityArtifactProtectorV1, CommunityArtifactRecordInputV1, CommunityAssembledRecordV1,
-    CommunityInitializationGraphInputV1, CommunityInitializationGraphV1,
-    CommunityInitializationMemberV1, CommunityInitializerOwnerV1, CommunityProtectionCohortV1,
-    CommunityRecordEvidenceV1,
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1 as Form,
+    CommunityArtifactBatchInputV1, CommunityArtifactProtectorV1, CommunityArtifactRecordInputV1,
+    CommunityAssembledRecordV1, CommunityInitializationGraphInputV1,
+    CommunityInitializationGraphV1, CommunityInitializationMemberV1, CommunityInitializerOwnerV1,
+    CommunityProtectionCohortV1, CommunityRecordEvidenceV1,
 };
 use ulid::Ulid;
 use zeroize::Zeroizing;
@@ -766,10 +766,13 @@ fn the_extractor_admits_the_assembled_initial_graph() -> TestResult {
     let records = batch_records(graph);
     let batch = prepare_community_artifact_batch_v1(
         &SEAL,
-        batch_input(&assembled, &records, graph.graph_root()),
+        Form::Closure(batch_input(&assembled, &records, graph.graph_root())),
         &[&assembled.protector],
     )?;
-    assert_eq!(batch.graph_root_digest(), adr_h("CGR1", graph.graph_root()));
+    assert_eq!(
+        batch.graph_root_digest(),
+        Some(adr_h("CGR1", graph.graph_root()))
+    );
     assert_eq!(batch.records().len(), 10);
     for (verified, record) in batch.records().iter().zip(graph.records()) {
         let record = record.protected();
@@ -792,7 +795,7 @@ fn the_extractor_refuses_a_stale_head_or_a_missing_key() -> TestResult {
     let records = batch_records(graph);
     let input = batch_input(&assembled, &records, graph.graph_root());
     let prepare = |input, keys: &[&CommunityArtifactProtectorV1]| {
-        prepare_community_artifact_batch_v1(&SEAL, input, keys).err()
+        prepare_community_artifact_batch_v1(&SEAL, Form::Closure(input), keys).err()
     };
     // Note 22661, item 8: the current head must be the expected prior head.
     let stale = CommunityArtifactBatchInputV1 {
@@ -833,7 +836,7 @@ fn the_extractor_refuses_tampered_records() -> TestResult {
     let prepare = |records: &[CommunityArtifactRecordInputV1<'_>]| {
         prepare_community_artifact_batch_v1(
             &SEAL,
-            batch_input(&assembled, records, graph.graph_root()),
+            Form::Closure(batch_input(&assembled, records, graph.graph_root())),
             &[&assembled.protector],
         )
         .err()
@@ -885,7 +888,7 @@ fn the_extractor_refuses_an_incomplete_or_extended_closure() -> TestResult {
     let prepare = |records: &[CommunityArtifactRecordInputV1<'_>], root: &[u8]| {
         prepare_community_artifact_batch_v1(
             &SEAL,
-            batch_input(&assembled, records, root),
+            Form::Closure(batch_input(&assembled, records, root)),
             &[&assembled.protector],
         )
         .err()
@@ -952,8 +955,10 @@ fn the_extractor_refuses_another_store_profile_head_or_request() -> TestResult {
     let graph = &assembled.graph;
     let records = batch_records(graph);
     let input = batch_input(&assembled, &records, graph.graph_root());
-    let prepare =
-        |input| prepare_community_artifact_batch_v1(&SEAL, input, &[&assembled.protector]).err();
+    let prepare = |input| {
+        prepare_community_artifact_batch_v1(&SEAL, Form::Closure(input), &[&assembled.protector])
+            .err()
+    };
     let cases = [
         CommunityArtifactBatchInputV1 {
             store_incarnation: [0x5b; 16],

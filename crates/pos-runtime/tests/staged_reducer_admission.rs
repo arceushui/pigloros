@@ -6,6 +6,7 @@
 //! `PluginRegistry`, so case 14 compares two independent folds of the same
 //! Event range rather than a candidate opened from the live registry.
 
+use pos_core::community_lifecycle::MAX_STAGED_CALLBACK_BOUND_V1;
 use pos_core::staged_install::ProjectionSourceV1;
 use pos_core::{
     clock::{Seq, WallTime},
@@ -19,7 +20,7 @@ use pos_core::{
 use pos_runtime::{
     fold_detached_candidate_v1, is_reviewed_staged_factory, HostProjectionProviderV1,
     InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1, PluginRegistry,
-    StagedReducerAdmissionErrorV1, MAX_STAGED_CALLBACK_BOUND_V1,
+    StagedReducerAdmissionErrorV1,
 };
 use pos_state::{
     EntityStateProjection, InitialStateV1, ProjectionCandidateErrorV1,
