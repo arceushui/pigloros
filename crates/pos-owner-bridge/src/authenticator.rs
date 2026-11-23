@@ -2,19 +2,15 @@
 //! The ADR-110 E20 LS3 direct-ceremony seam.
 //!
 //! On the Linux profile the owner process is itself the `WebAuthn` client: a native CTAP2 client
-//! implements [`OwnerAuthenticatorPort`], and [`DirectHost`] runs each ceremony through
-//! [`CeremonyDriver::run_direct`]. There is no surface, listener, generation or cleanup record,
-//! and the reply reaches the same `parse_and_verify` path as the buffer protocol.
+//! implements [`OwnerAuthenticatorPort`], and the Linux `CeremonyHost` (Redmine #1438) runs each
+//! ceremony through [`run_direct`](crate::ceremony::driver::CeremonyDriver::run_direct). There is no surface, listener, generation or
+//! cleanup record, and the reply reaches the same `parse_and_verify` path as the buffer protocol.
 //!
 //! Everything here stays behind `test-support` until the Linux activation (Redmine #1438).
 
 use std::time::Instant;
 
-use crate::ceremony::driver::CeremonyDriver;
-use crate::{
-    BridgeError, CeremonyHost, CeremonyReply, MonotonicClock, QuarantinePoll, ReplyImage,
-    RequestImage,
-};
+use crate::{BridgeError, MonotonicClock, ReplyImage, RequestImage};
 
 /// A native authenticator client that answers one ceremony request (ADR-110 E20 LS3).
 pub trait OwnerAuthenticatorPort {
@@ -40,35 +36,4 @@ pub trait OwnerAuthenticatorPort {
         deadline: Instant,
         clock: &dyn MonotonicClock,
     ) -> Result<usize, BridgeError>;
-}
-
-/// A [`CeremonyHost`] that runs every ceremony through a native authenticator client.
-///
-/// It never quarantines: the direct path spawns no process and keeps no cleanup record
-/// (ADR-110 E20 LS8).
-pub struct DirectHost<P: OwnerAuthenticatorPort, C: MonotonicClock> {
-    port: P,
-    clock: C,
-}
-
-impl<P: OwnerAuthenticatorPort, C: MonotonicClock> DirectHost<P, C> {
-    /// A host that answers every ceremony with `port`, timed by `clock`.
-    #[must_use]
-    pub const fn new(port: P, clock: C) -> Self {
-        Self { port, clock }
-    }
-}
-
-impl<P: OwnerAuthenticatorPort, C: MonotonicClock> CeremonyHost for DirectHost<P, C> {
-    fn run(&mut self, mut driver: CeremonyDriver) -> CeremonyReply {
-        let result = driver.run_direct(&mut self.port, &self.clock);
-        CeremonyReply {
-            result,
-            driver: Some(driver),
-        }
-    }
-
-    fn poll_quarantine(&mut self) -> QuarantinePoll {
-        QuarantinePoll::default()
-    }
 }

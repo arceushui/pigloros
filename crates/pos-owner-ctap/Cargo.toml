@@ -1,0 +1,37 @@
+[package]
+name = "pos-owner-ctap"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "ADR-110 E20 native CTAP2 owner client for the Linux owner surface"
+
+[features]
+# The whole crate stays behind this feature until the Linux activation (Redmine
+# #1438): it exposes the CTAP2 client, the software authenticator and the
+# in-memory device. It is intentionally off in deployable dependency graphs.
+test-support = ["pos-owner-bridge/test-support"]
+
+[dependencies]
+# ADR-110 E20 AM-110g: in-repo AES-256-CBC for PIN/UV auth protocol 2; the
+# zeroize feature is already enabled in the locked graph through aes-gcm.
+aes = { workspace = true, features = ["zeroize"] }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+p256 = { workspace = true }
+pos-owner-bridge = { path = "../pos-owner-bridge" }
+pos-owner-bridge-codec = { path = "../pos-owner-bridge-codec" }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+pos-owner-bridge = { path = "../pos-owner-bridge", features = ["test-support"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "ceremonies"
+path = "tests/ceremonies/main.rs"
+required-features = ["test-support"]

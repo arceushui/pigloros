@@ -15,9 +15,9 @@ use pos_owner_bridge::fake::signer::{FixtureSigner, ReplyShape, FIXTURE_COSE_KEY
 use pos_owner_bridge::fake::stepper::FakeHost;
 use pos_owner_bridge::fake::surface::{FakeSurface, SurfaceConfig};
 use pos_owner_bridge::{
-    BridgeConfig, BridgeError, BridgeStatus, CeremonyHost, DirectHost, LifecycleCode,
-    MonotonicClock, OwnerAuthenticatorPort, OwnerBridge, ProtocolCode, ReplyImage, RequestImage,
-    UnavailableCode,
+    BridgeConfig, BridgeError, BridgeStatus, CeremonyHost, CeremonyReply, LifecycleCode,
+    MonotonicClock, OwnerAuthenticatorPort, OwnerBridge, ProtocolCode, QuarantinePoll, ReplyImage,
+    RequestImage, UnavailableCode,
 };
 use pos_owner_bridge_codec::{
     decode_create_options, decode_get_options, CeremonyId, CeremonyKind, CoseEs256PublicKey,
@@ -33,6 +33,32 @@ use super::{
 
 const MALFORMED: BridgeError = BridgeError::Protocol(ProtocolCode::Malformed);
 const OUT_OF_BOUNDS: BridgeError = BridgeError::Protocol(ProtocolCode::LengthOutOfBounds);
+
+/// The Linux `CeremonyHost` shape (Redmine #1438): every ceremony runs through `run_direct`.
+struct DirectHost<P: OwnerAuthenticatorPort, C: MonotonicClock> {
+    port: P,
+    clock: C,
+}
+
+impl<P: OwnerAuthenticatorPort, C: MonotonicClock> DirectHost<P, C> {
+    const fn new(port: P, clock: C) -> Self {
+        Self { port, clock }
+    }
+}
+
+impl<P: OwnerAuthenticatorPort, C: MonotonicClock> CeremonyHost for DirectHost<P, C> {
+    fn run(&mut self, mut driver: CeremonyDriver) -> CeremonyReply {
+        let result = driver.run_direct(&mut self.port, &self.clock);
+        CeremonyReply {
+            result,
+            driver: Some(driver),
+        }
+    }
+
+    fn poll_quarantine(&mut self) -> QuarantinePoll {
+        QuarantinePoll::default()
+    }
+}
 
 /// The secret the fixture port's PRF derives from.
 fn prf_secret() -> [u8; 32] {

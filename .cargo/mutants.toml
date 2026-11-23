@@ -15,4 +15,8 @@ exclude_globs = [
   # erasure-composition stub is `cfg(not(target_os = "linux"))` only, so this
   # Linux gate never builds it and would report every mutant as missed.
   "apps/piglor-gateway/src/local_erasure_composition_closed.rs",
+  # ADR-110 E20 S1 (Redmine #1475): the P-tier software authenticator and its
+  # in-memory device are test-support fixtures, like the two above.
+  "crates/pos-owner-ctap/src/soft.rs",
+  "crates/pos-owner-ctap/src/memory.rs",
 ]

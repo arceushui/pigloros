@@ -1,0 +1,4 @@
+# ADR-110 E20 LP4 salt golden vectors: salt1 = SHA-256("WebAuthn PRF" || 0x00 || prf_input),
+# as reproduced by stdlib Python for the ADR acceptance gate (2026-11-20).
+zero 4f24c9221e0ed3b764b4558a0d880ecea08117d62f2bdc13ae2c6c3ea662e3a1
+counting dc1f4f3b3d759586245d5de7e2e115d2a056a2df27109db7cef9b4b3a89bb106

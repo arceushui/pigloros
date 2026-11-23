@@ -29,7 +29,7 @@ pub mod unlock;
 pub mod encryptor_lock_test_support;
 
 #[cfg(any(test, feature = "test-support"))]
-pub use authenticator::{DirectHost, OwnerAuthenticatorPort};
+pub use authenticator::OwnerAuthenticatorPort;
 pub use bridge::{BridgeConfig, OwnerBridge, RestartProgress};
 pub use enroll::{
     ConfirmedBinding, EnrollmentContext, EnrollmentPort, RootFingerprint, SealInputs,
