@@ -735,18 +735,37 @@ fn serve_administrator(
     stopped: &AtomicBool,
 ) -> Result<(), SelectorBoundaryError> {
     while !stopped.load(Ordering::Acquire) {
-        match listener.try_accept()? {
-            Some(stream) => {
-                if let Err(InstallationUpdateError::Overdue(_)) =
-                    composition.update_installation(stream)
-                {
-                    return Ok(());
-                }
-            }
-            None => thread::sleep(Duration::from_millis(10)),
+        if administer_once(listener, composition)?.is_break() {
+            return Ok(());
         }
     }
     Ok(())
+}
+
+/// Serve one waiting administrative connection, or sleep briefly when none
+/// waits. Breaks only when that transaction's live update is overdue.
+///
+/// # Errors
+/// Returns the listener's error when its pathname identity is lost or
+/// accepting fails.
+fn administer_once(
+    listener: &OwnedAdministratorListener,
+    composition: &RootSelectorComposition,
+) -> Result<std::ops::ControlFlow<()>, SelectorBoundaryError> {
+    listener.try_accept().map(|accepted| {
+        accepted.map_or_else(
+            || {
+                thread::sleep(Duration::from_millis(10));
+                std::ops::ControlFlow::Continue(())
+            },
+            |stream| match composition.update_installation(stream) {
+                Err(InstallationUpdateError::Overdue(_)) => std::ops::ControlFlow::Break(()),
+                Ok(()) | Err(InstallationUpdateError::Refused(_)) => {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        )
+    })
 }
 
 fn serve_evaluator(
