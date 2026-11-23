@@ -3010,7 +3010,7 @@
         "tags": [
           "erasure"
         ],
-        "description": "Request the erasure of the acting subject's own data in one destruction-eligible scope class (#309, ADR-136 §3 and §7), under the `erasure.request` grant. The subject is the Local Principal acting as `x-piglor-actor-entity`; its data is the root Timelines the actor created and their Forks. The operation is consent-exempt. A malformed body, a body whose `impact_acknowledged` is not `true` and a missing or malformed `Idempotency-Key` are `400 invalid-request` before the authority decision; after the decision a scope class the deployment always retains is `400 erasure-scope-retained`. The `202` admission receipt names the erasure (`request_id` = `operation_id` = the `erasure_id`, derived from the Principal, the actor and the key), the BLAKE3 digest of the key, and binds the policy, the trust bundle and the execution-mode profile of the submission; an exact retry answers the same receipt bytes, also after a restart, a bundle rotation or a mode migration. The receipt never claims that anything was erased: `getErasure` reports the progress. A Gateway without a Local erasure composition answers `503`.",
+        "description": "Request the erasure of the acting subject's own data in one destruction-eligible scope class (#309, ADR-136 §3 and §7), under the `erasure.request` grant. The subject is the Local Principal acting as `x-piglor-actor-entity`; its data is the root Timelines the actor created and their Forks. The operation is consent-exempt. A malformed body, a body whose `impact_acknowledged` is not `true` and a missing or malformed `Idempotency-Key` are `400 invalid-request` before the authority decision; after the decision a scope class the deployment always retains is `400 erasure-scope-retained`. The `202` admission receipt names the erasure (`request_id` = `operation_id` = the `erasure_id`, derived from the Principal, the actor and the key), the BLAKE3 digest of the key, and binds the policy, the trust bundle and the execution-mode profile of the submission; an exact retry answers the same receipt bytes, also after a restart, a bundle rotation or a mode migration. The receipt never claims that anything was erased: `getErasure` reports the progress. A Gateway without a Local erasure composition answers `503`, and while the operator has closed erasure admissions a fresh request is `503 erasure-admissions-closed`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -3115,7 +3115,7 @@
             }
           },
           "503": {
-            "description": "`temporarily-unavailable`: the Gateway serves no Local erasure, or its trust admission has expired, so new erasures are closed (both not retryable); or the host cannot vouch for its revocation state, record the denial evidence or reach its erasure store (retryable).",
+            "description": "`erasure-admissions-closed`: the operator closed new erasure admissions with `piglor-gateway erasure-admissions close` (not retryable; an exact retry of an admitted request is still answered). `temporarily-unavailable`: the Gateway serves no Local erasure, or its trust admission has expired, so new erasures are closed (both not retryable); or the host cannot vouch for its revocation state, record the denial evidence or reach its erasure store (retryable).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3318,7 +3318,8 @@
               "internal-safe-failure",
               "erasure-scope-retained",
               "erasure-scope-too-large",
-              "erasure-quota-exhausted"
+              "erasure-quota-exhausted",
+              "erasure-admissions-closed"
             ]
           },
           "schema_id": {
