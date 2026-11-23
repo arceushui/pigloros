@@ -230,21 +230,20 @@ struct HostedExperimentStore {
 }
 
 impl HostedExperimentStore {
-    fn open(config: pos_store::StoreConfig) -> Result<Self, ErasureHostErrorV1> {
-        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
-        Self::open_with_authority(config, &composition)
+    /// Open `config` under the erasure authority the shared loader composes
+    /// from this process's deployment trust source.
+    fn open(config: pos_store::StoreConfig) -> Result<Self, LocalErasureOpenErrorV1> {
+        Self::open_with_trust(config, &LocalErasureTrustSourceV1::from_environment())
     }
 
-    fn open_with_authority(
+    /// Open `config` under the erasure authority composed from `source`:
+    /// closed for a store without an erasure store identity, else the Local
+    /// erasure authority with no executor, or a typed refusal.
+    fn open_with_trust(
         config: pos_store::StoreConfig,
-        composition: &pos_runtime::ErasureCoordinatorCompositionV1,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        pos_runtime::ErasureExecutionHostV1::open_with_authority(
-            config,
-            composition,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .map(|host| {
+        source: &LocalErasureTrustSourceV1,
+    ) -> Result<Self, LocalErasureOpenErrorV1> {
+        LocalErasureRecoveryV1::open_host(config, source).map(|host| {
             let gate = host.containment_gate();
             Self {
                 host: Mutex::new(host),

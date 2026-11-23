@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
+pos-local-erasure-loader = { path = "../../crates/pos-local-erasure-loader" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-store = { path = "../../crates/pos-store" }
 pos-time = { path = "../../crates/pos-time" }
@@ -28,6 +29,18 @@ pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-experiment = { path = "../pos-experiment", features = ["test-support"] }
 tempfile = "3"
 rusqlite = { workspace = true }
+
+# ADR-136 acceptance test 11 (#1450): the key-less root store fixture and the
+# shared signing fixtures it provisions with.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ed25519-dalek = { workspace = true }
+piglor-gateway = { path = "../piglor-gateway" }
+pos-conformance = { path = "../../crates/pos-conformance" }
+pos-crypto = { path = "../../crates/pos-crypto" }
+
+# The ADR-136 acceptance tests include shared signing and key-less store
+# fixtures via #[path]. cargo-shear follows those module edges, so these
+# required dev-dependencies need no ignore metadata.
 
 [lints]
 workspace = true

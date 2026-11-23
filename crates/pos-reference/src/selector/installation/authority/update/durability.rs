@@ -474,7 +474,7 @@ fn write_recovery(
         })
 }
 
-fn publish_successor(
+pub(super) fn publish_successor(
     root: &File,
     owner: u32,
     previous: &[u8],
@@ -615,6 +615,17 @@ pub(super) fn read_bounded_immutable(
     owner: u32,
     limit: u64,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
+    read_held_immutable(root, name, owner, limit).map(|(_, bytes)| bytes)
+}
+
+/// [`read_bounded_immutable`], also returning the descriptor that was read,
+/// whose identity a later step rechecks.
+pub(super) fn read_held_immutable(
+    root: &File,
+    name: &str,
+    owner: u32,
+    limit: u64,
+) -> Result<(File, Vec<u8>), SelectorBoundaryError> {
     statat(root, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(map_io_to_boundary_failure)
         .and_then(|metadata| {
@@ -627,7 +638,7 @@ pub(super) fn read_bounded_immutable(
                 open_immutable_file(root, name, 0o400, length, owner)
             }
         })
-        .and_then(|file| read_complete_file(&file, limit))
+        .and_then(|file| read_complete_file(&file, limit).map(|bytes| (file, bytes)))
 }
 
 fn verify_recovery_identity(

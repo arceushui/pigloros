@@ -59,11 +59,14 @@ pub enum ProblemCodeV1 {
     ResourceLimitExceeded,
     TemporarilyUnavailable,
     InternalSafeFailure,
+    ErasureScopeRetained,
+    ErasureScopeTooLarge,
+    ErasureQuotaExhausted,
 }
 
 impl ProblemCodeV1 {
     /// Every code, in registry order.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 25] = [
         Self::InvalidRequest,
         Self::UnsupportedVersion,
         Self::IncompatibleProfile,
@@ -86,65 +89,51 @@ impl ProblemCodeV1 {
         Self::ResourceLimitExceeded,
         Self::TemporarilyUnavailable,
         Self::InternalSafeFailure,
+        Self::ErasureScopeRetained,
+        Self::ErasureScopeTooLarge,
+        Self::ErasureQuotaExhausted,
     ];
 
     /// The stable wire code.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidRequest => "invalid-request",
-            Self::UnsupportedVersion => "unsupported-version",
-            Self::IncompatibleProfile => "incompatible-profile",
-            Self::Unauthenticated => "unauthenticated",
-            Self::Unauthorized => "unauthorized",
-            Self::ConsentInvalid => "consent-invalid",
-            Self::Revoked => "revoked",
-            Self::Deleted => "deleted",
-            Self::NotFoundOrUnavailable => "not-found-or-unavailable",
-            Self::AdmissionRejected => "admission-rejected",
-            Self::ApprovalRejected => "approval-rejected",
-            Self::AppendConflict => "append-conflict",
-            Self::IdempotencyConflict => "idempotency-conflict",
-            Self::ArtifactMissing => "artifact-missing",
-            Self::ArtifactUntrusted => "artifact-untrusted",
-            Self::ReplayClaimInsufficient => "replay-claim-insufficient",
-            Self::DependencyGraphIncomplete => "dependency-graph-incomplete",
-            Self::MixedForkGeneration => "mixed-fork-generation",
-            Self::CounterfactualIncomplete => "counterfactual-incomplete",
-            Self::ResourceLimitExceeded => "resource-limit-exceeded",
-            Self::TemporarilyUnavailable => "temporarily-unavailable",
-            Self::InternalSafeFailure => "internal-safe-failure",
-        }
+        Self::NAMES[self as usize].0
     }
 
     /// The fixed human-readable `title` of the family.
     #[must_use]
     pub const fn title(self) -> &'static str {
-        match self {
-            Self::InvalidRequest => "Invalid request",
-            Self::UnsupportedVersion => "Unsupported version",
-            Self::IncompatibleProfile => "Incompatible profile",
-            Self::Unauthenticated => "Unauthenticated",
-            Self::Unauthorized => "Unauthorized",
-            Self::ConsentInvalid => "Consent invalid",
-            Self::Revoked => "Revoked",
-            Self::Deleted => "Deleted",
-            Self::NotFoundOrUnavailable => "Not found or unavailable",
-            Self::AdmissionRejected => "Admission rejected",
-            Self::ApprovalRejected => "Approval rejected",
-            Self::AppendConflict => "Append conflict",
-            Self::IdempotencyConflict => "Idempotency conflict",
-            Self::ArtifactMissing => "Artifact missing",
-            Self::ArtifactUntrusted => "Artifact untrusted",
-            Self::ReplayClaimInsufficient => "Replay claim insufficient",
-            Self::DependencyGraphIncomplete => "Dependency graph incomplete",
-            Self::MixedForkGeneration => "Mixed Fork generation",
-            Self::CounterfactualIncomplete => "Counterfactual incomplete",
-            Self::ResourceLimitExceeded => "Resource limit exceeded",
-            Self::TemporarilyUnavailable => "Temporarily unavailable",
-            Self::InternalSafeFailure => "Internal safe failure",
-        }
+        Self::NAMES[self as usize].1
     }
+
+    /// The wire code and `title` of each code, in declaration order.
+    const NAMES: [(&'static str, &'static str); 25] = [
+        ("invalid-request", "Invalid request"),
+        ("unsupported-version", "Unsupported version"),
+        ("incompatible-profile", "Incompatible profile"),
+        ("unauthenticated", "Unauthenticated"),
+        ("unauthorized", "Unauthorized"),
+        ("consent-invalid", "Consent invalid"),
+        ("revoked", "Revoked"),
+        ("deleted", "Deleted"),
+        ("not-found-or-unavailable", "Not found or unavailable"),
+        ("admission-rejected", "Admission rejected"),
+        ("approval-rejected", "Approval rejected"),
+        ("append-conflict", "Append conflict"),
+        ("idempotency-conflict", "Idempotency conflict"),
+        ("artifact-missing", "Artifact missing"),
+        ("artifact-untrusted", "Artifact untrusted"),
+        ("replay-claim-insufficient", "Replay claim insufficient"),
+        ("dependency-graph-incomplete", "Dependency graph incomplete"),
+        ("mixed-fork-generation", "Mixed Fork generation"),
+        ("counterfactual-incomplete", "Counterfactual incomplete"),
+        ("resource-limit-exceeded", "Resource limit exceeded"),
+        ("temporarily-unavailable", "Temporarily unavailable"),
+        ("internal-safe-failure", "Internal safe failure"),
+        ("erasure-scope-retained", "Erasure scope retained"),
+        ("erasure-scope-too-large", "Erasure scope too large"),
+        ("erasure-quota-exhausted", "Erasure quota exhausted"),
+    ];
 }
 
 /// One problem answer: its family, HTTP status, safe detail and retry hint.

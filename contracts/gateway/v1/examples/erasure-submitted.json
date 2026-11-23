@@ -1,11 +1,13 @@
 {
-  "name": "draft-erasure-complete",
+  "name": "erasure-submitted",
   "operation_id": "getErasure",
   "request": {
     "path": {
       "erasure_id": "01JC0GATEWAYW90ERASVRE0001"
     },
-    "headers": {}
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
   },
   "request_valid": true,
   "response": {
@@ -13,7 +15,7 @@
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:erasure",
       "id": "01JC0GATEWAYW90ERASVRE0001",
-      "generation": 6,
+      "generation": 0,
       "provenance": {
         "digest": "0303030303030303030303030303030303030303030303030303030303030303",
         "origin": "host-derived"
@@ -34,17 +36,18 @@
         "state": "available",
         "withheld": []
       },
-      "state": "complete",
-      "scopes": [
-        "private-subject-data"
-      ],
-      "replay_claim": "structural-only",
+      "state": "submitted",
+      "scope": "private-subject-data",
+      "replay_claim": "exact",
       "retained_classes": [
+        "public-record",
+        "aggregate",
         "structural-audit-metadata"
       ],
       "acknowledgements": {
-        "required": 3,
-        "positive": 3
+        "required": 0,
+        "positive": 0,
+        "classes": []
       },
       "external_copies": "not-covered"
     }

@@ -61,6 +61,8 @@ pub mod manifest_owner_members;
 pub mod manifest_plugin_roster;
 pub mod manifest_roster_comparison;
 pub mod output_policy;
+#[cfg(any(test, feature = "test-support"))]
+pub mod owner_consent_v2_permit;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
@@ -400,9 +402,10 @@ pub use consent::{
     is_consent_event_type, is_consent_sensitive_event_type, is_subject_controlled_event_type,
     required_modality_for_event, ConsentAppendPermit, ConsentAuthority, ConsentCapabilityToken,
     ConsentCodecError, ConsentError, ConsentGate, ConsentGrantedV1, ConsentRevocationFoldListener,
-    ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1,
-    EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS,
-    MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT, MODALITY_PERSONA,
+    ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1, OwnerConsentV2PermitV1,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE,
+    MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT,
+    MODALITY_PERSONA,
 };
 pub use counterfactual_dependency::{
     CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,
@@ -495,20 +498,21 @@ pub use erasure::{
     ErasureTopologyTransitionPermitV1, ErasureVerifiedEmptyInventoryQueryV1,
     ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
     ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, ErasureVerifiedTopologyProofV1,
-    EvaluatedArtifactClaimV1, LocalErasureArtifactDispositionV1, LocalErasureAuthorizationV1,
-    LocalErasureBundleSignatureV1, LocalErasureBundleV1, LocalErasureCacheGenerationV1,
-    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
-    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureNegativeResultV1,
-    LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
-    LocalErasureRecipientExportWithdrawalV1, LocalErasureRedactionV1, LocalErasureRejectionV1,
-    LocalErasureReplicaPurgeV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
-    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
-    LocalOwnerEffectV1, LocalOwnerResultBindingV1, PreparedArtifactRegistrationBatchV1,
-    PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PreparedLocalOwnerEffectV1,
-    RecipientExportPublicationRowV1, RecipientExportWithdrawalBindingV1,
-    RecipientExportWithdrawalRowV1, RecipientExportWithdrawalStateV1, RegisteredArtifactV1,
-    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, ReproManifestArtifactRegistrationErrorV1,
+    EvaluatedArtifactClaimV1, LocalErasureAdmissionV1, LocalErasureArtifactDispositionV1,
+    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureCacheGenerationV1, LocalErasureClassificationV1, LocalErasureDisclosureV1,
+    LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1, LocalErasureLineageRuleV1,
+    LocalErasureNegativeResultV1, LocalErasureOwnerResultV1, LocalErasureOwnerRowV1,
+    LocalErasurePolicyV1, LocalErasureRecipientExportWithdrawalV1, LocalErasureRedactionV1,
+    LocalErasureRejectionV1, LocalErasureReplicaPurgeV1, LocalErasureSelectorV1,
+    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
+    LocalErasureTrustAnchorV1, LocalOwnerEffectV1, LocalOwnerResultBindingV1,
+    PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
+    PreparedErasureCasV1, PreparedErasureForkAdmissionV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PreparedLocalOwnerEffectV1, RecipientExportPublicationRowV1,
+    RecipientExportWithdrawalBindingV1, RecipientExportWithdrawalRowV1,
+    RecipientExportWithdrawalStateV1, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, ReproManifestArtifactRegistrationErrorV1,
     ReproManifestRootRegistrationInputV1, StoredErasureManifestV1,
     ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,

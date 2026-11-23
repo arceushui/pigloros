@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::body::Body;
 use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
+use piglor_gateway::local_erasure_composition::LocalErasureServeV1;
 use piglor_gateway::local_principal::{
     local_gateway, provision_on_host, LocalConsentDraftV1, LocalConsentGrantDraftV1,
     LocalPrincipalProvisionV1,
@@ -31,9 +32,10 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
+use super::erasure_fixture::{hold_subject, local_erasure};
 use super::payload::{
     CaptureV2, CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, CONSENT_SLOT,
-    ROOM_SLOT, TIMELINE_SLOT,
+    ERASURE_SLOT, ROOM_SLOT, TIMELINE_SLOT,
 };
 use super::{ACTOR_ENTITY_ID, GOVERNANCE_RECORD_ID};
 use crate::{observation_v1, substitute_captured_v1};
@@ -155,7 +157,8 @@ fn host() -> Option<ErasureExecutionHostV1> {
 }
 
 /// The Gateway of a composition (requirements section 3), with the store file it serves when
-/// it has one.
+/// it has one. The `authorized-erasure` compositions also compose the Local erasure authority
+/// over that store (#1449), and `authorized-erasure-closed` the closed one.
 ///
 /// `open` is the unprotected in-process harness Gateway. `authorized`,
 /// `authorized-air-gapped`, `authorized-consented` and `authorized-rooms` are the production
@@ -184,24 +187,60 @@ fn authorized_gateway(
     composition: CompositionV2,
 ) -> Option<(Gateway, Option<ScratchStore>)> {
     let store = ScratchStore::new();
-    store_host(&store)
+    let closed = ErasureCoordinatorCompositionV1::closed();
+    store_host(&store, &closed)
         .and_then(|mut host| bind_mode(&mut host, id))
         .and_then(|_| provision_store(&store, composition))
-        .and_then(|()| store_host(&store))
+        .and_then(|()| erasure_authority(&store, composition))
+        .and_then(|erasure| store_host(&store, erasure.composition()))
         .and_then(|mut host| {
-            bind_mode(&mut host, id).and_then(|mode| local_gateway(host, None, &mode).ok())
+            bind_mode(&mut host, id)
+                .filter(|_| !composition.holds_erasure() || hold_fixture_subject(&mut host))
+                .and_then(|mode| local_gateway(host, None, &mode).ok())
         })
         .map(|gateway| (gateway, Some(store)))
 }
 
-/// The recovered production host of `store`.
-fn store_host(store: &ScratchStore) -> Option<ErasureExecutionHostV1> {
+/// The erasure authority of `composition` over `store`: the Local erasure authority under
+/// the fixture bundle of an `authorized-erasure` composition (#1449), else the closed one.
+fn erasure_authority(
+    store: &ScratchStore,
+    composition: CompositionV2,
+) -> Option<LocalErasureServeV1> {
+    composition.erasure_bundle_expiry().map_or_else(
+        || Some(LocalErasureServeV1::closed()),
+        |expiry| {
+            std::fs::create_dir(store.directory())
+                .ok()
+                .and_then(|()| local_erasure(&store.path_text(), &store.directory(), expiry))
+        },
+    )
+}
+
+/// Admit one erasure of the fixture actor's subject on `host` before it serves.
+fn hold_fixture_subject(host: &mut ErasureExecutionHostV1) -> bool {
+    fixture_principal()
+        .zip(entity(ACTOR_ENTITY_ID))
+        .and_then(|(principal, actor)| hold_subject(host, &principal, actor))
+        .is_some()
+}
+
+/// The fixture Local Principal.
+fn fixture_principal() -> Option<PrincipalRefV1> {
+    PrincipalRefV1::try_new([1; 16], "gateway.fixture").ok()
+}
+
+/// The recovered production host of `store` with the erasure authority `composition`.
+fn store_host(
+    store: &ScratchStore,
+    composition: &ErasureCoordinatorCompositionV1,
+) -> Option<ErasureExecutionHostV1> {
     open_recovered_erasure_host(
         StoreConfig::Sqlite {
             path: store.path_text(),
         },
         GatewayHostStoreV1::Standard,
-        &ErasureCoordinatorCompositionV1::closed(),
+        composition,
     )
     .ok()
 }
@@ -235,7 +274,8 @@ fn bind_mode(
 /// creation. `authorized-rooms` may create Timelines, read its Session, revoke a consent and
 /// create, derive and read Scenario Rooms; it records the fixture governance record, and its
 /// one consent governs Timeline creation and permits export, so a room may name it as its
-/// `privacy_export_ref`.
+/// `privacy_export_ref`. The `authorized-erasure` compositions (#1449) may request and read
+/// their own erasures and nothing else.
 fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
     let consent = |export_permitted| LocalConsentDraftV1 {
         subject: actor,
@@ -247,27 +287,19 @@ fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
         }],
     };
     match composition {
-        CompositionV2::AuthorizedConsented => (
+        CompositionV2::AuthorizedConsented | CompositionV2::AuthorizedRooms => {
+            consented_document(composition == CompositionV2::AuthorizedRooms, &consent)
+        }
+        CompositionV2::AuthorizedErasure
+        | CompositionV2::AuthorizedErasureHeld
+        | CompositionV2::AuthorizedErasureExpired
+        | CompositionV2::AuthorizedErasureClosed => (
             vec![
-                GatewayOperationV1::CREATE_TIMELINE,
-                GatewayOperationV1::READ_EVENTS,
-                GatewayOperationV1::READ_SESSION,
-                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::REQUEST_ERASURE,
+                GatewayOperationV1::READ_ERASURE,
             ],
-            Some(consent(false)),
             None,
-        ),
-        CompositionV2::AuthorizedRooms => (
-            vec![
-                GatewayOperationV1::CREATE_TIMELINE,
-                GatewayOperationV1::READ_SESSION,
-                GatewayOperationV1::REVOKE_CONSENT,
-                GatewayOperationV1::CREATE_SCENARIO_ROOM,
-                GatewayOperationV1::DERIVE_SCENARIO_ROOM,
-                GatewayOperationV1::READ_SCENARIO_ROOM,
-            ],
-            Some(consent(true)),
-            entity(GOVERNANCE_RECORD_ID),
+            None,
         ),
         CompositionV2::Open | CompositionV2::Authorized | CompositionV2::AuthorizedAirGapped => (
             vec![
@@ -281,6 +313,39 @@ fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
     }
 }
 
+/// The document of `authorized-rooms` if `rooms`, else of `authorized-consented`, with its
+/// one consent from `consent` given whether it permits export.
+fn consented_document(
+    rooms: bool,
+    consent: &dyn Fn(bool) -> LocalConsentDraftV1,
+) -> FixtureDocument {
+    if rooms {
+        (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::CREATE_SCENARIO_ROOM,
+                GatewayOperationV1::DERIVE_SCENARIO_ROOM,
+                GatewayOperationV1::READ_SCENARIO_ROOM,
+            ],
+            Some(consent(true)),
+            entity(GOVERNANCE_RECORD_ID),
+        )
+    } else {
+        (
+            vec![
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+            ],
+            Some(consent(false)),
+            None,
+        )
+    }
+}
+
 /// The operations, consent and governance record of a fixture Local Principal document.
 type FixtureDocument = (
     Vec<GatewayOperationV1>,
@@ -291,8 +356,7 @@ type FixtureDocument = (
 /// Provision the fixture Local Principal of `composition` into `store`. Only its document is
 /// fixture data.
 fn provision_store(store: &ScratchStore, composition: CompositionV2) -> Option<()> {
-    PrincipalRefV1::try_new([1; 16], "gateway.fixture")
-        .ok()
+    fixture_principal()
         .zip(entity(ACTOR_ENTITY_ID))
         .and_then(|(principal, actor)| {
             let (operations, consent, governance) = document(composition, actor);
@@ -306,7 +370,8 @@ fn provision_store(store: &ScratchStore, composition: CompositionV2) -> Option<(
             .ok()
         })
         .and_then(|provision| {
-            store_host(store).and_then(|mut host| provision_on_host(&mut host, &provision).ok())
+            store_host(store, &ErasureCoordinatorCompositionV1::closed())
+                .and_then(|mut host| provision_on_host(&mut host, &provision).ok())
         })
 }
 
@@ -332,15 +397,24 @@ impl ScratchStore {
     fn path_text(&self) -> String {
         self.path.to_string_lossy().into_owned()
     }
+
+    /// The directory beside the store an `authorized-erasure` composition keeps its fixture
+    /// trust state, bundle and credentials in.
+    fn directory(&self) -> PathBuf {
+        let mut directory = self.path.clone().into_os_string();
+        directory.push("-erasure");
+        PathBuf::from(directory)
+    }
 }
 
 impl Drop for ScratchStore {
     fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", ".gateway-mode.lock"] {
             let mut path = self.path.clone().into_os_string();
             path.push(suffix);
             drop(std::fs::remove_file(path));
         }
+        drop(std::fs::remove_dir_all(self.directory()));
     }
 }
 
@@ -366,7 +440,8 @@ fn request(exchange: &ExchangeV2, slots: &Slots, key: &str) -> Request<Body> {
     let path = exchange
         .path
         .replace(TIMELINE_SLOT, slots.timeline.as_deref().unwrap_or_default())
-        .replace(ROOM_SLOT, slots.room.as_deref().unwrap_or_default());
+        .replace(ROOM_SLOT, slots.room.as_deref().unwrap_or_default())
+        .replace(ERASURE_SLOT, slots.erasure.as_deref().unwrap_or_default());
     *request.uri_mut() = Uri::try_from(path).unwrap_or_default();
     if exchange.body.is_some() {
         request.headers_mut().insert(
@@ -393,6 +468,7 @@ struct Slots {
     timeline: Option<String>,
     consent: Option<String>,
     room: Option<String>,
+    erasure: Option<String>,
 }
 
 impl Slots {
@@ -401,6 +477,7 @@ impl Slots {
         [
             (CONSENT_SLOT, self.consent.as_deref()),
             (ROOM_SLOT, self.room.as_deref()),
+            (ERASURE_SLOT, self.erasure.as_deref()),
         ]
         .into_iter()
         .filter_map(|(slot, value)| value.map(|value| (slot, value)))
@@ -409,17 +486,22 @@ impl Slots {
 
     /// Fill the slot `capture` names from the response `parsed`.
     fn capture(&mut self, capture: Option<CaptureV2>, parsed: Option<&Value>) {
-        let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+        if let Some(capture) = capture {
+            let (slot, pointer) = self.slot(capture);
+            *slot = parsed
+                .and_then(|value| value.pointer(pointer))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+
+    /// The slot `capture` fills and the JSON pointer of its value in the response.
+    const fn slot(&mut self, capture: CaptureV2) -> (&mut Option<String>, &'static str) {
         match capture {
-            Some(CaptureV2::Timeline) => {
-                self.timeline = text(parsed.and_then(|value| value.get("id")));
-            }
-            Some(CaptureV2::Room) => self.room = text(parsed.and_then(|value| value.get("id"))),
-            Some(CaptureV2::Consent) => {
-                self.consent =
-                    text(parsed.and_then(|value| value.pointer("/consents/0/consent_ref")));
-            }
-            None => {}
+            CaptureV2::Timeline => (&mut self.timeline, "/id"),
+            CaptureV2::Room => (&mut self.room, "/id"),
+            CaptureV2::Erasure => (&mut self.erasure, "/request_id"),
+            CaptureV2::Consent => (&mut self.consent, "/consents/0/consent_ref"),
         }
     }
 }
@@ -512,8 +594,77 @@ async fn exchange_all(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::ScratchStore;
+    use super::{compose, ScratchStore};
+    use crate::subject::payload::CompositionV2;
+    use pos_core::ErasureInventoryPersistencePortV1 as _;
+    use pos_store::sqlite::SqliteStore;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Only the compositions with a fixture erasure bundle record an erasure identity.
+    ///
+    /// ADR-136 acceptance test 11 does not apply to the adapter: it never
+    /// acts as a key-less root (D21). This test proves that every
+    /// composition without a fixture erasure bundle serves a store that
+    /// records no erasure identity, under the closed composition, so it has
+    /// no ERQ1 to recover. The `authorized-erasure` compositions do record
+    /// one; they compose through the `serve` loader, which refuses to start
+    /// without the signer credential, so they hold the signer.
+    ///
+    /// It holds in any environment. On a networked host
+    /// `authorized-air-gapped` does not compose: `bind_gateway_mode_v1`
+    /// refuses it at predicate 6, `air-gapped-no-route`. The adapter's
+    /// existing namespace tests cover the case where it composes.
+    #[test]
+    fn only_the_erasure_bundle_compositions_record_an_erasure_identity() -> TestResult {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        for (index, composition) in [
+            CompositionV2::Open,
+            CompositionV2::Authorized,
+            CompositionV2::AuthorizedAirGapped,
+            CompositionV2::AuthorizedConsented,
+            CompositionV2::AuthorizedRooms,
+            CompositionV2::AuthorizedErasure,
+            CompositionV2::AuthorizedErasureHeld,
+            CompositionV2::AuthorizedErasureExpired,
+            CompositionV2::AuthorizedErasureClosed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let composed = {
+                let _context = runtime.enter();
+                compose(composition)
+            };
+            // `authorized-air-gapped` either does not compose (predicate 6
+            // refuses a networked host) or composes a store without an
+            // erasure identity; every other composition composes.
+            let Some((gateway, store)) = composed else {
+                assert!(
+                    composition == CompositionV2::AuthorizedAirGapped,
+                    "composition {index} is unavailable"
+                );
+                continue;
+            };
+            runtime.block_on(gateway.shutdown())?;
+            drop(gateway);
+            let identity = match &store {
+                Some(store) => SqliteStore::open(&store.path_text())?.erasure_store_identity()?,
+                None => None,
+            };
+            assert_eq!(
+                identity.is_some(),
+                composition.erasure_bundle_expiry().is_some(),
+                "composition {index}"
+            );
+            drop(store);
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_scratch_store_removes_its_files() -> Result<(), Box<dyn std::error::Error>> {
@@ -525,9 +676,13 @@ mod tests {
         let mut journal = path.clone().into_os_string();
         journal.push("-wal");
         std::fs::write(&journal, b"journal")?;
+        let directory = store.directory();
+        std::fs::create_dir(&directory)?;
+        std::fs::write(directory.join("credential"), b"credential")?;
         drop(store);
         assert!(!path.exists());
         assert!(!std::path::Path::new(&journal).exists());
+        assert!(!directory.exists());
         Ok(())
     }
 }

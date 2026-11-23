@@ -38,7 +38,7 @@ pub use contract::{
     MAX_STATE_BYTES_V1, MAX_TRACE_ANNOTATION_BYTES_V1, PLUGIN_OUTPUT_DIGEST_DOMAIN_V1,
 };
 pub use durable_initialization::CommunityInitializationStateReferenceV1;
-pub use durable_tuple::CommunityNegotiatedTupleV1;
+pub use durable_tuple::{community_state_limits_v1, CommunityNegotiatedTupleV1};
 pub use error::{
     AtomicCommitFailureV1, BundleContentReasonV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
     HostFailureClassV1, RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,

@@ -129,6 +129,9 @@ struct FakeHost {
     released: Arc<Mutex<Vec<(String, Instant)>>>,
     /// Descriptors held as systemd holds its duplicates of the unit ends.
     systemd_held: Arc<Mutex<Vec<StdOwnedFd>>>,
+    /// A duplicate of each stdout write end a never-finishing stdio adapter
+    /// keeps open, which the kill watches.
+    adapter_stdout: Arc<Mutex<Vec<StdOwnedFd>>>,
 }
 
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
@@ -161,6 +164,7 @@ impl FakeHost {
             stdio_report: Arc::default(),
             released: Arc::default(),
             systemd_held: Arc::default(),
+            adapter_stdout: Arc::default(),
         }
     }
 
@@ -517,11 +521,41 @@ impl UnitHost for FakeHost {
             Ok(())
         };
         let hang = self.faulty(Fault::HangKill);
+        let stdout = Arc::clone(&self.adapter_stdout);
         async move {
+            output_read(&stdout).await;
             hang_if(hang).await;
             outcome
         }
     }
+}
+
+/// Until the provider read every byte the stdio adapters queued on `stdout`.
+///
+/// A kill answers only then, so the ending it leads to never overtakes the
+/// capture's first read, however late the supervision was first polled. Each
+/// yield lets the runtime poll its I/O driver, which reports the channel
+/// readable to the capture. The wait is bounded by the termination call (at
+/// least `MIN_TERMINATION_CALL`, 1 s), acknowledged kills included: the
+/// capture's read needs one driver turn on an idle runtime, so a capture
+/// still unread after a whole termination call is a real fault, and the kill
+/// then counts as unanswered and the test fails on its ending.
+async fn output_read(stdout: &Mutex<Vec<StdOwnedFd>>) {
+    while queued(stdout) > 0 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The bytes queued on every channel in `stdout`.
+fn queued(stdout: &Mutex<Vec<StdOwnedFd>>) -> u64 {
+    stdout
+        .lock()
+        .map(|held| {
+            held.iter()
+                .filter_map(|end| rustix::io::ioctl_fionread(end).ok())
+                .sum()
+        })
+        .unwrap_or_default()
 }
 
 /// Never finishes when `hang` is set.

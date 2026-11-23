@@ -1931,7 +1931,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/obstruction/tests.rs': 'f8b4ec091ca43d5652f3852b08ab5c1642ce1f8f269001ae886f202b7770b210',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': 'b31eca2c9b8dd862fe08312b9b9583f94402be495432e61950b162e00031bdab',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': '75ab4125d3d73408247b96d86724aaf1afa9e1163ff67efe3f962c4c779e61dc',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': 'dfbb90c082db2ae740681117de33344e068ab798cb9dd0b6bc05923b42af8b9a',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '921544a6c11558b17879befec7f0e9afae3fecdc068e183633745451fbeb4545',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': '46828ff25edf3810bae3c0890b81faf3aad8632a38150e0d465f5a00d628f16c',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '6fcd4e9d65e7fd1c08aafc78ddf2772b120378addcf252dbc253148b4a3f858d',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '9eecf9c656fc640a0f3979d6681537ef7c0272c833070d9c1c3852139a0d01d4',
@@ -1955,7 +1955,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '3fee8a9ea7609019c88fce323b9e5ecd8cadc372e69c14d477d1c4c66d235157',
     'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',
     'crates/pos-owner-bridge/assets/qualification/external.html': '45c476fa75fd4ac257c62148a1b288eb7f13ab411d371d8b8842eec48a9e96b4',
-    'crates/pos-owner-bridge/assets/qualification/manifest.json': '4d37c95ce8fd82b2bc183cffdee8ee11a164f4c534e12a09b87a35780e193811',
+    'crates/pos-owner-bridge/assets/qualification/manifest.json': 'd5d6e3a390bfcfa80dc04f4964ba6e5ad2bb1758a9684d357f066646d1f85533',
     'crates/pos-owner-bridge/src/listener/fixture_assets.rs': '7891ff7491e638fb11ecdb54f04b8270cf5a24c5c80b46971402d0064c971c3d',
     'crates/pos-owner-bridge/src/listener/fixtures.rs': '2487177ab012dad956a79396d87714e4a7aaacbf897d44e8cbc801bb893cb998',
 }

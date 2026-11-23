@@ -63,9 +63,9 @@ struct Measurement {
 
 /// Measurements recorded in `docs/evidence/adr-061-r4-prototype.md`.
 const MEASUREMENTS: [Measurement; 6] = [
-    measured("rust", "describe", 1, 3_113, 1_179_648, 0),
-    measured("rust", "reduce", 1, 21_112, 1_179_648, 3),
-    measured("rust", "reduce-1MiB", 1, 16_798_314, 2_293_760, 3),
+    measured("rust", "describe", 4, 3_113, 1_179_648, 0),
+    measured("rust", "reduce", 4, 21_112, 1_179_648, 3),
+    measured("rust", "reduce-1MiB", 4, 16_798_314, 2_293_760, 3),
     measured("c", "describe", 19, 3_019, 131_072, 0),
     measured("c", "reduce", 19, 20_744, 131_072, 3),
     measured("c", "reduce-1MiB", 19, 9_982_361, 1_179_648, 3),

@@ -5,9 +5,9 @@ use crate::{
     operation::{
         AppendSignalOperation, CreateOptionSpecOperation, CreatePredictionOperation,
         CreatePreferenceOperation, CreateScenarioRoomOperation, CreateTimelineOperation,
-        DeriveScenarioRoomOperation, OperationAuthority, ReadOptionSpecOperation,
-        ReadPreferenceOperation, ReadScenarioRoomOperation, ReadSessionOperation,
-        RevokeConsentOperation,
+        DeriveScenarioRoomOperation, OperationAuthority, ReadErasureOperation,
+        ReadOptionSpecOperation, ReadPreferenceOperation, ReadScenarioRoomOperation,
+        ReadSessionOperation, RequestErasureOperation, RevokeConsentOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -171,6 +171,8 @@ fn loopback_routes() -> Router<AppState> {
             get(get_scenario_room_revision),
         )
         .route("/v1/me/consent-revocations", post(post_consent_revocation))
+        .route("/v1/me/erasures", post(post_erasure))
+        .route("/v1/me/erasures/{erasure_id}", get(get_erasure))
         .route("/v1/preferences", post(post_preference))
         .route(
             "/v1/preferences/{preference_id}/revisions/{revision}",
@@ -210,6 +212,8 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/scenario-rooms/{room_id}/revisions"),
     ("GET", "/v1/scenario-rooms/{room_id}/revisions/{revision}"),
     ("POST", "/v1/me/consent-revocations"),
+    ("POST", "/v1/me/erasures"),
+    ("GET", "/v1/me/erasures/{erasure_id}"),
     ("POST", "/v1/preferences"),
     (
         "GET",
@@ -783,6 +787,27 @@ async fn post_consent_revocation(
     })
 }
 
+/// `POST /v1/me/erasures` (#1449): request the erasure of the acting
+/// subject's own data under the permit of its `erasure.request` decision.
+async fn post_erasure(
+    State(state): State<AppState>,
+    IdempotencyKey(key): IdempotencyKey,
+    authority: OperationAuthority<RequestErasureOperation>,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Response {
+    crate::erasure::request(&state.gateway, authority, &key, body).await
+}
+
+/// `GET /v1/me/erasures/{erasure_id}` (#1449): one of the acting subject's
+/// own erasures under the permit of its `erasure.read` decision.
+async fn get_erasure(
+    State(state): State<AppState>,
+    ContractPath(erasure_id): ContractPath<String>,
+    authority: OperationAuthority<ReadErasureOperation>,
+) -> Response {
+    crate::erasure::read(&state.gateway, authority, &erasure_id).await
+}
+
 /// `POST /v1/preferences` (#304): create a Preference or its next revision.
 async fn post_preference(
     State(state): State<AppState>,
@@ -1302,6 +1327,7 @@ mod tests {
                                 .replace("{preference_id}", &timeline)
                                 .replace("{option_spec_id}", &timeline)
                                 .replace("{room_id}", &timeline)
+                                .replace("{erasure_id}", &timeline)
                                 .replace("{revision}", "1")
                         ))
                         .header("content-type", "application/json")
@@ -2158,6 +2184,56 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(problem["code"], "resource-limit-exceeded");
+    }
+
+    #[tokio::test]
+    async fn flagged_json_routes_bound_bytes_and_nesting_before_conversion() {
+        let actor = EntityId::new();
+        let app = authority_test_app(actor);
+        let actor = actor.to_string();
+        let id = EntityId::new();
+        for path in [
+            "/v1/me/erasures".to_owned(),
+            "/v1/preferences".to_owned(),
+            "/v1/option-specs".to_owned(),
+            "/v1/scenario-rooms".to_owned(),
+            format!("/v1/scenario-rooms/{id}/revisions"),
+            format!("/v1/timelines/{id}/actions"),
+        ] {
+            for (body, expected) in [
+                (
+                    " ".repeat(MAX_HTTP_BODY_BYTES + 1),
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                ),
+                (
+                    format!("{{\"payload\":{}null{}}}", "[".repeat(200), "]".repeat(200)),
+                    StatusCode::BAD_REQUEST,
+                ),
+            ] {
+                let (status, _, problem) = raw_request(
+                    app.clone(),
+                    "POST",
+                    &path,
+                    &[
+                        ("content-type", "application/json"),
+                        (crate::operation::ACTOR_ENTITY_HEADER, &actor),
+                        ("idempotency-key", "bounded-request"),
+                    ],
+                    Some(Body::from(body)),
+                )
+                .await;
+                assert_eq!(status, expected, "{path}: {problem}");
+                assert_eq!(
+                    problem["code"],
+                    if expected == StatusCode::PAYLOAD_TOO_LARGE {
+                        "resource-limit-exceeded"
+                    } else {
+                        "invalid-request"
+                    },
+                    "{path}: {problem}"
+                );
+            }
+        }
     }
 
     /// ADR-134 §8: a stale-binding refusal answers `503`, then stops serving.
@@ -3103,6 +3179,7 @@ osf_link = \"https://osf.io/example\"\n";
                     action_registry: crate::gateway_action_registry(),
                     authorization: None,
                     authorization_required: false,
+                    local_erasure_wake: std::sync::Arc::default(),
                 },
                 ledger_view: LedgerView::default(),
                 ledger_write: LedgerWriteMode::Disabled,

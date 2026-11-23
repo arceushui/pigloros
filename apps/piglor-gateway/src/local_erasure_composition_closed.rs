@@ -10,9 +10,6 @@ use thiserror::Error;
 
 use crate::Gateway;
 
-/// The fixed path of the deployment trust state store.
-pub const DEPLOYMENT_TRUST_STATE_PATH: &str = "/var/lib/pigloros/trust-state.db";
-
 /// Why `serve --require-local-erasure` refuses to start.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum LocalErasureServeErrorV1 {

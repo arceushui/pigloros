@@ -102,7 +102,7 @@ use pos_core::{
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionSnapshotV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicyCopiesV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptV1,
-    ManifestSlotBindingV1, OwnerIdV1, PersistedAuthorityV1, PluginId,
+    ManifestSlotBindingV1, OwnerConsentV2PermitV1, OwnerIdV1, PersistedAuthorityV1, PluginId,
     PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
     PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
     PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
@@ -289,7 +289,7 @@ pub struct SqliteStore {
     writer_reservation_connection: Option<Connection>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
-    consent_authority_permit: Option<ConsentAppendPermit>,
+    consent_permits: crate::ConsentPermitBinding,
     erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
@@ -2239,7 +2239,7 @@ impl SqliteStore {
             writer_reservation_connection,
             hasher,
             clock: Box::new(SystemAdmissionClock),
-            consent_authority_permit: None,
+            consent_permits: crate::ConsentPermitBinding::default(),
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
             erasure_gate,
@@ -4339,7 +4339,7 @@ impl SqliteStore {
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         if gateway_consent {
-            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+            let bound_permit = self.consent_permits.gateway().ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
             })?;
             let permit = permit.ok_or_else(|| {
@@ -5975,16 +5975,14 @@ impl EventStore for SqliteStore {
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
-        match self.consent_authority_permit {
-            Some(existing) if existing != permit => Err(CoreError::Storage(
-                "Gateway consent authority is already bound".to_owned(),
-            )),
-            Some(_) => Ok(()),
-            None => {
-                self.consent_authority_permit = Some(permit);
-                Ok(())
-            }
-        }
+        self.consent_permits.bind_gateway(permit)
+    }
+
+    fn bind_owner_consent_v2_permit(
+        &mut self,
+        permit: OwnerConsentV2PermitV1,
+    ) -> Result<(), CoreError> {
+        self.consent_permits.bind_owner(permit)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
@@ -10249,7 +10247,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn delete_recipient_export_ciphertext(
         &mut self,
         export_id: [u8; 16],
-    ) -> Result<(), ErasureErrorV1> {
+    ) -> Result<pos_core::RecipientExportWithdrawalBindingV1, ErasureErrorV1> {
         #[cfg(target_os = "linux")]
         {
             self.delete_captured_recipient_export(export_id)
@@ -12953,6 +12951,23 @@ impl SqliteStore {
             })
     }
 
+    /// ADR-136 §1: create the admitted child with the parent's owner (none
+    /// for an unowned parent), read inside the commit's write transaction.
+    fn create_admitted_fork_child(
+        &self,
+        parent: TimelineId,
+        cut: u64,
+        name: String,
+    ) -> Result<Timeline, CoreError> {
+        Self::timeline_owner_in_transaction(&self.conn, parent).and_then(|owner| {
+            let meta = TimelineMeta {
+                owner,
+                ..TimelineMeta::forked_from(parent, Seq::from_u64(cut), name)
+            };
+            Self::create_timeline_with_meta_in_transaction(&self.conn, self.hasher.as_ref(), &meta)
+        })
+    }
+
     fn insert_fork_operation(
         &self,
         command: SqliteForkAdmissionOperation,
@@ -12986,30 +13001,29 @@ impl SqliteStore {
                     Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary)
                 }
             })?;
-        let meta = TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name);
         // Verified FCC1 facts and the fresh child ID satisfy every FAR1
         // invariant; any construction failure still fails closed.
-        let admission =
-            Self::create_timeline_with_meta_in_transaction(&self.conn, self.hasher.as_ref(), &meta)
-                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
-                .and_then(|child| {
-                    ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
-                        operation_id,
-                        principal_owner_binding_digest: binding.digest(),
-                        creator: binding.input().owner,
-                        parent_timeline_id: parent_id,
-                        child_timeline_id: child.id(),
-                        room_revision_descriptor_hash: descriptor_hash,
-                        parent_logical_head: cut,
-                        parent_chain_head_hash: chain_head,
-                        completed_fold_cursor: cut,
-                        post_fold_tick_boundary: cut,
-                        plugin_composition_hash: composition_hash,
-                        attribution_required,
-                        origin: ForkAttributionOriginV1::Local,
-                    })
-                    .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-                })?;
+        let admission = self
+            .create_admitted_fork_child(parent_id, cut, child_name)
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+            .and_then(|child| {
+                ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+                    operation_id,
+                    principal_owner_binding_digest: binding.digest(),
+                    creator: binding.input().owner,
+                    parent_timeline_id: parent_id,
+                    child_timeline_id: child.id(),
+                    room_revision_descriptor_hash: descriptor_hash,
+                    parent_logical_head: cut,
+                    parent_chain_head_hash: chain_head,
+                    completed_fold_cursor: cut,
+                    post_fold_tick_boundary: cut,
+                    plugin_composition_hash: composition_hash,
+                    attribution_required,
+                    origin: ForkAttributionOriginV1::Local,
+                })
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+            })?;
         let receipt = ForkAdmissionReceiptV1 {
             child_id: admission.input().child_timeline_id,
             admission_digest: admission.digest(),

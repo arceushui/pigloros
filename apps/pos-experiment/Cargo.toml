@@ -87,6 +87,7 @@ pos-core = { path = "../../crates/pos-core", features = [
   "authority-trust-root",
 ] }
 pos-crypto = { path = "../../crates/pos-crypto" }
+pos-local-erasure-loader = { path = "../../crates/pos-local-erasure-loader" }
 pos-store = { path = "../../crates/pos-store" }
 pos-state = { path = "../../crates/pos-state" }
 pos-runtime = { path = "../../crates/pos-runtime", features = [

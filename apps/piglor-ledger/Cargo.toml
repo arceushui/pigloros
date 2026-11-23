@@ -18,6 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
+pos-local-erasure-loader = { path = "../../crates/pos-local-erasure-loader" }
 pos-store = { path = "../../crates/pos-store" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-plugin-ledger = { path = "../../plugins/ledger" }
@@ -36,6 +37,17 @@ rustix = { workspace = true }
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 tempfile = { workspace = true }
+
+# ADR-136 acceptance test 11 (#1450): the key-less root store fixture
+# provisions its store through the Gateway, which depends on this crate; the
+# cycle is dev-only.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+piglor-gateway = { path = "../piglor-gateway" }
+pos-conformance = { path = "../../crates/pos-conformance" }
+
+# The ADR-136 acceptance tests include shared signing and key-less store
+# fixtures via #[path]. cargo-shear follows those module edges, so these
+# required dev-dependencies need no ignore metadata.
 
 [lints]
 workspace = true

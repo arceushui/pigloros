@@ -10,6 +10,8 @@
 
 mod attestation;
 mod extractor;
+#[cfg(target_os = "linux")]
+mod initialize;
 mod initializer;
 mod lifecycle_authority;
 mod memory_domain;
@@ -25,6 +27,10 @@ mod vault;
 pub use extractor::{
     prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
     CommunityArtifactRecordInputV1,
+};
+#[cfg(target_os = "linux")]
+pub use initialize::{
+    CommunityInitializationContextV1, CommunityInitializationReceiptV1, CommunityInitializeCallV1,
 };
 pub use initializer::CommunityInitializerOwnerV1;
 pub use lifecycle_authority::{
