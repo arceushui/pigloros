@@ -371,7 +371,7 @@ fn stores_nothing(headers: &HeaderMap) -> bool {
     headers
         .get_all("cache-control")
         .iter()
-        .map(|value| value.as_bytes())
+        .map(axum::http::HeaderValue::as_bytes)
         .eq([b"no-store".as_slice()])
 }
 
@@ -732,6 +732,45 @@ async fn a_closed_gateway_serves_no_erasure() -> TestResult {
     Ok(())
 }
 
+/// The id of a Timeline `actor` creates on `served` under `name`.
+async fn created_timeline(served: &Served, actor: EntityId, name: &str) -> TestResult<String> {
+    let answer = served
+        .send(
+            "POST",
+            "/v1/timelines",
+            actor,
+            None,
+            Some(json!({ "name": name })),
+        )
+        .await?
+        .json()?;
+    Ok(answer["id"].as_str().unwrap_or_default().to_owned())
+}
+
+/// The acknowledgements of a partial failure whose closure is the store
+/// target's cache signal and replica and one Timeline payload: three are
+/// required, the cache signal is positive and the payload is not.
+fn assert_cache_signal_alone_positive(last: &Value) -> TestResult {
+    let acknowledgements = &last["acknowledgements"];
+    assert_eq!(acknowledgements["required"], 3);
+    let classes = acknowledgements["classes"]
+        .as_array()
+        .ok_or("no classes")?
+        .iter()
+        .map(|class| {
+            (
+                class["class"].as_str().unwrap_or_default().to_owned(),
+                class["positive"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(classes[0], ("client-cache-signal".to_owned(), 1));
+    assert_eq!(classes[1].0, "local-replica");
+    assert_eq!(classes[2], ("timeline-payload".to_owned(), 0));
+    assert_eq!(classes.len(), 3);
+    Ok(())
+}
+
 /// D7, acceptance tests 8 and 9 and the Gateway parts of test 2.
 ///
 /// After each `202` the driver is woken, so with a tick far beyond the test a request admitted
@@ -750,31 +789,8 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
 ) -> TestResult {
     let (served, driver) = Served::serve(mode, &SERVED, compiled())?;
     let (actor, other) = (actor()?, other_actor()?);
-    let timeline = |answer: Value| answer["id"].as_str().unwrap_or_default().to_owned();
-    let owned = timeline(
-        served
-            .send(
-                "POST",
-                "/v1/timelines",
-                actor,
-                None,
-                Some(json!({"name": "owned"})),
-            )
-            .await?
-            .json()?,
-    );
-    let others = timeline(
-        served
-            .send(
-                "POST",
-                "/v1/timelines",
-                other,
-                None,
-                Some(json!({"name": "others"})),
-            )
-            .await?
-            .json()?,
-    );
+    let owned = created_timeline(&served, actor, "owned").await?;
+    let others = created_timeline(&served, other, "others").await?;
     let events = |timeline: &str| format!("/v1/timelines/{timeline}/events");
     let deleted = (StatusCode::FORBIDDEN, "deleted".to_owned(), false);
     let redaction = |body: &Value| body["redaction_generation"].as_u64();
@@ -828,23 +844,7 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
             last["replay_claim"],
             "exact-authoritative-with-redacted-views"
         );
-        let acknowledgements = &last["acknowledgements"];
-        assert_eq!(acknowledgements["required"], 3);
-        let classes = acknowledgements["classes"]
-            .as_array()
-            .ok_or("no classes")?
-            .iter()
-            .map(|class| {
-                (
-                    class["class"].as_str().unwrap_or_default().to_owned(),
-                    class["positive"].as_u64().unwrap_or_default(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(classes[0], ("client-cache-signal".to_owned(), 1));
-        assert_eq!(classes[1].0, "local-replica");
-        assert_eq!(classes[2], ("timeline-payload".to_owned(), 0));
-        assert_eq!(classes.len(), 3);
+        assert_cache_signal_alone_positive(last)?;
     }
     let readable = served
         .send("GET", &events(&others), other, None, None)
@@ -856,10 +856,8 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
     let world = served.stop(driver).await?;
     let (served, driver) = Served::over(world, mode, compiled())?;
     for key in ["erasure-1", "erasure-2"] {
-        let body = served
-            .read(actor, &erasure_id(actor, key)?.to_string())
-            .await?
-            .json()?;
+        let id = erasure_id(actor, key)?.to_string();
+        let body = served.read(actor, &id).await?.json()?;
         assert!(redaction(&body) >= Some(redacted), "{key}: {body}");
         assert_eq!(
             body["replay_claim"],
