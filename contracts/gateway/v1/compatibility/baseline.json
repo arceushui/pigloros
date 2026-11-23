@@ -2463,7 +2463,8 @@
               "internal-safe-failure",
               "erasure-scope-retained",
               "erasure-scope-too-large",
-              "erasure-quota-exhausted"
+              "erasure-quota-exhausted",
+              "erasure-admissions-closed"
             ]
           },
           "schema_id": {
@@ -5070,6 +5071,14 @@
       "title": "Erasure quota exhausted",
       "statuses": [
         409
+      ]
+    },
+    {
+      "code": "erasure-admissions-closed",
+      "type": "urn:pigloros:gateway:v1:problem:erasure-admissions-closed",
+      "title": "Erasure admissions closed",
+      "statuses": [
+        503
       ]
     }
   ]

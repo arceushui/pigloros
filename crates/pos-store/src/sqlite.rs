@@ -150,6 +150,7 @@ mod composition_fallback_registry;
 mod composition_fallback_registry_rows;
 mod composition_fallback_registry_schema;
 mod counterfactual_store;
+mod erasure_admissions;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
@@ -2609,9 +2610,11 @@ impl SqliteStore {
                  );
                  {}
                  {}
+                 {}
                  COMMIT;",
                 sqlite_schema_ddl(gateway_mode_binding::GATEWAY_MODE_SCHEMA_TABLES),
-                sqlite_schema_ddl(gateway_revision::GATEWAY_REVISION_SCHEMA_TABLES)
+                sqlite_schema_ddl(gateway_revision::GATEWAY_REVISION_SCHEMA_TABLES),
+                sqlite_schema_ddl(erasure_admissions::ERASURE_ADMISSIONS_SCHEMA_TABLES)
             ))
             .map_err(Self::into_storage_error)
             .and_then(|()| self.validate_authority_schema_and_state())
@@ -2621,6 +2624,7 @@ impl SqliteStore {
         self.validate_authority_schema()
             .and_then(|()| self.validate_gateway_mode_schema())
             .and_then(|()| self.validate_gateway_revision_schema())
+            .and_then(|()| self.validate_erasure_admissions_schema())
             .and_then(|()| {
                 read_authority_state(&self.conn)
                     .map(|_| ())
