@@ -132,6 +132,20 @@ impl CommunityMetadataAuthorityV1 {
         store_incarnation: [u8; 16],
         action: MetadataActionV1,
     ) -> Result<AuthorizationDecisionV1, Error> {
+        self.authorize_request(policy, persisted, store_incarnation, action)
+            .map(|(_, decision)| decision)
+    }
+
+    /// [`Self::authorize`], returning the exact evaluated request with its
+    /// `Active` decision, for an operation whose CAU1 records the decision
+    /// row (ADR-129 revision 9 R9.9(4)).
+    pub(super) fn authorize_request(
+        &mut self,
+        policy: &CommunityMetadataPolicyV1,
+        persisted: &PersistedAuthorityV1,
+        store_incarnation: [u8; 16],
+        action: MetadataActionV1,
+    ) -> Result<(AuthorizationRequestV1, AuthorizationDecisionV1), Error> {
         let pinned = policy.as_input();
         if self.input.principal.registry_binding_digest() != pinned.metadata_owner_registry_binding
             || persisted.leaf_grant_id() != pinned.metadata_authority_leaf_grant
@@ -151,11 +165,20 @@ impl CommunityMetadataAuthorityV1 {
                     persisted,
                 )
                 .map(|snapshot| {
-                    AuthorityEvaluatorV1::authorize(&request, persisted.chain(), &snapshot)
+                    let decision =
+                        AuthorityEvaluatorV1::authorize(&request, persisted.chain(), &snapshot);
+                    (request, decision)
                 })
             })
-            .filter(AuthorizationDecisionV1::is_allowed)
+            .filter(|(_, decision)| decision.is_allowed())
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    /// The installed owner result's `expires_at`, which bounds a `SetReason`
+    /// command (ADR-129 revision 9 R9.9(6), an A5.4 extension).
+    #[cfg(target_os = "linux")]
+    pub(super) const fn owner_expires_at(&self) -> WallTime {
+        self.input.principal.expires_at()
     }
 
     /// Build the exact request. The leaf lookup cannot miss: a resolved

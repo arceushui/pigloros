@@ -3,7 +3,8 @@
 use super::{
     bounded_bytes, bounded_text, canonical_end, digest, encode_implementation_key, fixed_bytes,
     read_hash, read_head, read_implementation_key, read_optional_hash, record_cursor,
-    record_prefix, validate_horizon, CommunityLifecycleErrorV1 as Error, Result,
+    record_prefix, validate_horizon, CommunityLifecycleErrorV1 as Error,
+    CommunityPluginHostErrorV1 as Host, Result,
 };
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, Hash, ImplementationKeyV1, TimelineId,
@@ -136,6 +137,87 @@ impl CommunityQuarantineReasonV1 {
             Self::Unavailable => 3,
         }
     }
+}
+
+/// The ADR-129 annex failure-to-quarantine mapping.
+///
+/// Host code 11 is `Trapped`, codes 13 to 16 are `ResourceExhausted`, code 2
+/// is `Revoked` and code 12 is `Unavailable`. Every other host failure
+/// quarantines nothing. A watchdog stop (18) is never relabelled a crash.
+#[must_use]
+pub const fn community_quarantine_reason_v1(failure: Host) -> Option<CommunityQuarantineReasonV1> {
+    match failure {
+        Host::ComponentTrap { .. } => Some(CommunityQuarantineReasonV1::Trapped),
+        Host::FuelExhausted
+        | Host::MemoryLimitExceeded
+        | Host::HostCallLimitExceeded
+        | Host::OutputLimitExceeded => Some(CommunityQuarantineReasonV1::ResourceExhausted),
+        Host::ArtifactRevoked { .. } => Some(CommunityQuarantineReasonV1::Revoked),
+        Host::WorkerCrashed => Some(CommunityQuarantineReasonV1::Unavailable),
+        Host::InvalidManifest
+        | Host::InvalidBundleContent { .. }
+        | Host::ArtifactTrustDenied { .. }
+        | Host::IncompatibleAbi
+        | Host::MissingFeature { .. }
+        | Host::CapabilityDenied { .. }
+        | Host::InvalidInvocation
+        | Host::InvalidGuestOutput
+        | Host::UnsupportedSchema
+        | Host::StateMigrationFailed
+        | Host::GuestDeclaredFailure
+        | Host::DeterministicDeadlineExceeded
+        | Host::OperationalWatchdogStop
+        | Host::AtomicCommitFailed { .. } => None,
+    }
+}
+
+/// One `[CQK1_digest, CQR1_digest, CQO1_digest]` row of a quarantine delta.
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct CommunityQuarantineDeltaRowV1 {
+    /// The quarantine key's CQK1 digest.
+    pub quarantine_key_digest: Hash,
+    /// The selected CQR1 digest.
+    pub ledger_digest: Hash,
+    /// The CQO1 digest.
+    pub outcome_digest: Hash,
+}
+
+/// The CAB1 quarantine delta digest (ADR-129 annex "Exact control transition").
+///
+/// It is `H("QuarantineDelta", preferred [[CQK1, CQR1, CQO1], ...])`.
+///
+/// # Errors
+/// Returns `BoundsExceeded` for no row or more than 64 rows, and
+/// `InvalidBinding` for rows out of strict key order, including two rows of
+/// one quarantine key.
+pub fn community_quarantine_delta_digest_v1(
+    rows: &[CommunityQuarantineDeltaRowV1],
+) -> Result<Hash> {
+    if !(1..=64).contains(&rows.len()) {
+        return Err(Error::BoundsExceeded);
+    }
+    if rows
+        .windows(2)
+        .any(|pair| pair[0].quarantine_key_digest >= pair[1].quarantine_key_digest)
+    {
+        return Err(Error::InvalidBinding);
+    }
+    let mut preimage = Zeroizing::new(Vec::with_capacity(2 + rows.len() * 103));
+    encode_head(&mut preimage, 4, rows.len() as u64);
+    for row in rows {
+        preimage.push(0x83);
+        for hash in [
+            row.quarantine_key_digest,
+            row.ledger_digest,
+            row.outcome_digest,
+        ] {
+            encode_hash(&mut preimage, hash);
+        }
+    }
+    Ok(digest(
+        b"PiglorOS.Community.QuarantineDelta.v1\0",
+        &preimage,
+    ))
 }
 
 /// Untrusted reason plus its exact earlier CFO1 evidence identity.

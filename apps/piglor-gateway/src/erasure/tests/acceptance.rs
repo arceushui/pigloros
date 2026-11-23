@@ -153,8 +153,10 @@ impl Disclosure {
     /// token is a declared digest or the body's own `provenance.digest`,
     /// every ULID token is an id the request named, and no owner name
     /// appears. No Timeline, actor, owner, store identity or other state
-    /// digest therefore does.
+    /// digest therefore does. The `Cache-Control: no-store` every answer
+    /// carries (#1407) is scanned too, and is neither.
     fn check(&self, answer: &Answer) -> TestResult {
+        assert_eq!(answer.headers["cache-control"], "no-store");
         let mut text = String::from_utf8(answer.bytes.clone())?;
         for value in answer.headers.values() {
             text.push(' ');

@@ -150,6 +150,7 @@ mod composition_fallback_registry;
 mod composition_fallback_registry_rows;
 mod composition_fallback_registry_schema;
 mod counterfactual_store;
+mod erasure_admissions;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
@@ -671,6 +672,27 @@ const ERASURE_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             },
         ],
         constraints: &["CHECK (singleton = 1)", "CHECK (length(identity) = 32)"],
+    },
+    // The redaction generation (ADR-136 follow-up F2, #1407): one singleton
+    // row, absent until the first ELCG1 commit, which inserts it at 1.
+    SqliteSchemaTable {
+        name: "erasure_redaction_generation",
+        columns_query: "PRAGMA table_info(erasure_redaction_generation)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "singleton",
+                kind: "INTEGER",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "generation",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (singleton = 1)", "CHECK (generation >= 1)"],
     },
     SqliteSchemaTable {
         name: "erasure_retained_objects",
@@ -2609,9 +2631,11 @@ impl SqliteStore {
                  );
                  {}
                  {}
+                 {}
                  COMMIT;",
                 sqlite_schema_ddl(gateway_mode_binding::GATEWAY_MODE_SCHEMA_TABLES),
-                sqlite_schema_ddl(gateway_revision::GATEWAY_REVISION_SCHEMA_TABLES)
+                sqlite_schema_ddl(gateway_revision::GATEWAY_REVISION_SCHEMA_TABLES),
+                sqlite_schema_ddl(erasure_admissions::ERASURE_ADMISSIONS_SCHEMA_TABLES)
             ))
             .map_err(Self::into_storage_error)
             .and_then(|()| self.validate_authority_schema_and_state())
@@ -2621,6 +2645,7 @@ impl SqliteStore {
         self.validate_authority_schema()
             .and_then(|()| self.validate_gateway_mode_schema())
             .and_then(|()| self.validate_gateway_revision_schema())
+            .and_then(|()| self.validate_erasure_admissions_schema())
             .and_then(|()| {
                 read_authority_state(&self.conn)
                     .map(|_| ())
@@ -10191,6 +10216,10 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         prepared: pos_core::PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         self.local_erasure_commit_owner_effect(&prepared)
+    }
+
+    fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
+        self.local_erasure_redaction_generation()
     }
 
     fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
