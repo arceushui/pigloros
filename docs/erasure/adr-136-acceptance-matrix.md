@@ -449,14 +449,17 @@ which the Gateway answers `503 erasure-admissions-closed`, not retryable.
 ## Follow-up F2: the supported client-cache contract (#1407)
 
 The Gateway v1 contract states the client-cache rule (README, *Client
-cache*): every response carries `Cache-Control: no-store`, a supported
+cache*): every response the Gateway's router produces carries
+`Cache-Control: no-store`, a supported
 client never persists a managed representation, and it re-reads and drops
 its copies once `getErasure` shows `client-cache-signal` positive. RFC 9111
 §5.2.2.5 makes `no-store` alone insufficient for privacy, so the client rule
 carries the guarantee; `Clear-Site-Data` is a precedent only and never sent.
 One router layer (`http::finish`) adds the header to every answer of every
 router, problems, unrouted paths and the non-v1 routes `/`, `/ledger` and
-`/health` included. `openapi.json` declares it `required` on every operation
+`/health` included. A connection-level error the HTTP server writes before
+routing, and a connection closed after a handler panic, carry no
+representation and so no header. `openapi.json` declares it `required` on every operation
 response through the shared `components/headers/CacheControl` (`const:
 "no-store"`), and the baseline freezes it.
 
@@ -465,14 +468,25 @@ ELCG1 cache generations the store has committed. `commit_local_owner_effect`
 raises it by one in the same adapter transaction that newly retains an
 ELCG1 (`PreparedLocalOwnerEffectV1::raises_redaction_generation`); a repeated
 ELCG1 retains nothing new and raises nothing, and a generation that cannot
-be raised fails the commit, so neither changes. `SQLite` keeps it in the
-singleton table `erasure_redaction_generation` (absent until the first
-commit, validated like the other erasure tables); `MemoryStore` keeps it for
-the instance's life, like its other erasure records. The per-request ELCG1
+be raised fails the commit, so neither changes. Both adapters cap it at
+`REDACTION_GENERATION_MAX_V1` (2^53-1), the JSON-safe `maximum` the schema
+declares. `SQLite` keeps it in the singleton table
+`erasure_redaction_generation` (absent until the first commit, validated
+like the other erasure tables) and fails closed on a stored value that is
+negative or above the cap, and on a missing row while the store still
+retains an ELCG1, which would otherwise read 0 and let the counter
+decrease; `MemoryStore` keeps it for the instance's life, like its other
+erasure records, and cannot lose it. The per-request ELCG1
 `generation` is unchanged (the attempt's admitted position, 2 for attempt 0).
 `getErasure` always carries it as `redaction_generation` when a Local
 erasure composition serves it, 0 before any commit; the schema keeps the
-member optional for append-only compatibility.
+member optional for append-only compatibility. A projection whose counter
+read fails is a closed host error, never an `Erasure` without the member.
+
+The counter is store-wide by the owner's decision: `getErasure` discloses
+to one subject how many client-cache redactions the host has committed,
+across every subject. Every caller of `getErasure` on a Local host is an
+actor of its one Local Principal, so no other Principal learns it.
 
 Wholly erased resources keep their refusals: a frozen Timeline is
 `403 deleted` and an erased revision `410 deleted`. The contract states that
@@ -488,8 +502,11 @@ members; no served representation does today.
 | A served projection carries `redaction_generation: 0` before any commit | `E::get_erasure_answers_one_not_found` | `SQLite` | Every serve mode. |
 | The counter starts at 0, rises exactly once per new ELCG1 commit and for no other effect, a repeated ELCG1 raises nothing, and a refused commit changes nothing | `RDG::each_new_cache_generation_raises_it_once_on_both_adapters` | both | |
 | A `SQLite` counter persists across a reopen | `RDG::a_sqlite_generation_survives_a_reopen` | `SQLite` | |
-| A counter that cannot be raised rolls the ELCG1 commit back; an unreadable one fails closed | `RDG::a_sqlite_generation_that_cannot_be_raised_rolls_the_commit_back`; `RDG::an_unreadable_sqlite_generation_fails_closed`; `crates/pos-store/src/memory/local_erasure.rs::a_generation_that_cannot_be_raised_refuses_the_commit` | both | `SQLite` refuses past `i64::MAX`, Memory past `u64::MAX`. |
+| A counter that cannot be raised rolls the ELCG1 commit back; an unreadable one fails closed | `RDG::a_sqlite_generation_that_cannot_be_raised_rolls_the_commit_back`; `RDG::an_unreadable_sqlite_generation_fails_closed`; `crates/pos-store/src/memory/local_erasure.rs::a_generation_that_cannot_be_raised_refuses_the_commit` | both | Both refuse past `REDACTION_GENERATION_MAX_V1` (2^53-1); one below it still rises to it. |
+| A persisted `SQLite` counter above the cap fails closed | `RDG::a_sqlite_generation_above_the_bound_fails_closed` | `SQLite` | `2^53` and `i64::MAX` both read as an error. |
+| A lost `SQLite` counter row beside a retained ELCG1 fails closed: the read errors and the next ELCG1 commit rolls back | `RDG::a_lost_sqlite_generation_row_fails_closed`; `crates/pos-store/src/sqlite/local_erasure.rs::a_lost_generation_row_beside_an_elcg1_fails_closed` | `SQLite` | Memory cannot lose it. |
+| A failed counter read fails the projection with a payload-free host error | `crates/pos-runtime/src/erasure_host.rs::a_failed_redaction_generation_read_fails_the_projection` | Memory (fault store) | `ErasureHostErrorV1::AdapterFailure`. |
 | Only an ELCG1 raises it | `LER::each_owner_effect_retains_only_its_own_record` | none | |
 | The counter rises across two requests; each ELCG1 keeps `generation` 2 for attempt 0 | `LEC::the_redaction_generation_rises_across_requests` | `SQLite` | |
 | The contract declares the header on every response and the optional member; an example that states `headers` states them exactly | `GCC::test_every_response_is_declared_no_store`; `GCC::test_the_redaction_generation_is_an_optional_erasure_member`; `GCC::test_an_example_states_its_response_headers_exactly` | none | New examples `client-cache-erasure-redacted`, `client-cache-frozen-timeline-deleted` and `client-cache-unrouted-path`, frozen by `--freeze`; no frozen example was edited. |
-| The conformance observation carries `cache-control` only | `GAP::an_observation_carries_the_cache_control_header_only`; `GAP::every_family_meets_its_oracle_identically_in_local_and_air_gapped`; `apps/pos-gateway-conformance-adapter/tests/provider_dispatch_public.rs` | Memory; `SQLite` | The regenerated fixtures expect `no-store` on every sent exchange. |
+| The conformance observation carries `cache-control` only, every field line joined with `, ` | `GAP::an_observation_carries_the_cache_control_header_only`; `GAP::every_cache_control_line_is_observed`; `GAP::every_family_meets_its_oracle_identically_in_local_and_air_gapped`; `apps/pos-gateway-conformance-adapter/tests/provider_dispatch_public.rs` | Memory; `SQLite` | The regenerated fixtures expect `no-store` on every sent exchange. |

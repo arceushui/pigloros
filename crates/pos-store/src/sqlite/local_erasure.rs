@@ -17,7 +17,7 @@ use pos_core::{
     ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1, Hash,
     KeyDestructionRequestV1, KeyTombstoneV1, OwnerIdV1, PreparedLocalOwnerEffectV1,
     RecipientExportPublicationRowV1, RecipientExportWithdrawalRowV1, Seq, TimelineId,
-    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
+    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY, REDACTION_GENERATION_MAX_V1,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -106,16 +106,25 @@ impl SqliteStore {
                         .existing_tombstone()
                         .map_or(Ok(()), |tombstone| self.holds_tombstone(&tombstone))
                 })
+                // The generation is read before the effect is retained, so
+                // the first ELCG1 is not yet in the store when its missing
+                // row is checked.
                 .and_then(|()| {
+                    prepared
+                        .raises_redaction_generation()
+                        .then(|| read_redaction_generation(&self.conn))
+                        .transpose()
+                })
+                .and_then(|current| {
                     prepared
                         .effect_object()
                         .map_or(Ok(false), |object| insert_new_retained(&self.conn, object))
+                        .map(|inserted| current.filter(|_| inserted))
                 })
-                .and_then(|inserted| {
-                    raise_redaction_generation(
-                        &self.conn,
-                        inserted && prepared.raises_redaction_generation(),
-                    )
+                .and_then(|current| {
+                    current.map_or(Ok(()), |generation| {
+                        write_raised_redaction_generation(&self.conn, generation)
+                    })
                 })
                 .and_then(|()| insert_retained(&self.conn, prepared.owner_result()))
         })
@@ -636,37 +645,73 @@ fn insert_new_retained(
         })
 }
 
-/// The redaction generation (#1407); a store without its row has committed
-/// no ELCG1. A row the adapter cannot read is a closed persistence error.
+/// The redaction generation (#1407). A store without its row has committed
+/// no ELCG1 and reads 0, unless it retains an ELCG1: then the row was lost,
+/// and 0 would let the generation decrease. That, a stored value that is
+/// negative or above [`REDACTION_GENERATION_MAX_V1`], and a row the adapter
+/// cannot read are each a closed persistence error.
 fn read_redaction_generation(connection: &Connection) -> Result<u64, ErasureErrorV1> {
     connection
         .query_row(
             "SELECT generation FROM erasure_redaction_generation WHERE singleton = 1",
             [],
-            |row| row.get::<_, u64>(0),
+            |row| row.get::<_, i64>(0),
         )
         .optional()
-        .map(Option::unwrap_or_default)
         .map_err(map_erasure_receipt_failure)
+        .and_then(|stored| {
+            stored.map_or_else(
+                || holds_no_cache_generation(connection).map(|()| 0),
+                |generation| {
+                    u64::try_from(generation)
+                        .ok()
+                        .filter(|generation| *generation <= REDACTION_GENERATION_MAX_V1)
+                        .ok_or(ErasureErrorV1::ReceiptCommitFailed)
+                },
+            )
+        })
 }
 
-/// Raise the redaction generation by one inside the caller's transaction
-/// when `raises`. A generation past the largest `SQLite` integer cannot be
-/// written, so the caller's transaction fails and rolls back.
-fn raise_redaction_generation(connection: &Connection, raises: bool) -> Result<(), ErasureErrorV1> {
-    if !raises {
-        return Ok(());
-    }
-    read_redaction_generation(connection).and_then(|generation| {
-        connection
-            .execute(
-                "INSERT INTO erasure_redaction_generation (singleton, generation) VALUES (1, ?1)
-                 ON CONFLICT (singleton) DO UPDATE SET generation = excluded.generation",
-                params![generation.saturating_add(1)],
-            )
-            .map(drop)
-            .map_err(map_erasure_receipt_failure)
-    })
+/// Whether the store retains no ELCG1 cache generation, so a missing
+/// redaction-generation row means none was committed.
+fn holds_no_cache_generation(connection: &Connection) -> Result<(), ErasureErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM erasure_retained_objects WHERE tag = 'ELCG1')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(map_erasure_receipt_failure)
+        .and_then(|holds| {
+            (!holds)
+                .then_some(())
+                .ok_or(ErasureErrorV1::ReceiptCommitFailed)
+        })
+}
+
+/// Write `generation` raised by one inside the caller's transaction. A
+/// generation past [`REDACTION_GENERATION_MAX_V1`] is never written, so the
+/// caller's transaction fails and rolls back. `generation` was read under
+/// that bound, so the addition cannot overflow.
+fn write_raised_redaction_generation(
+    connection: &Connection,
+    generation: u64,
+) -> Result<(), ErasureErrorV1> {
+    Some(generation + 1)
+        .filter(|raised| *raised <= REDACTION_GENERATION_MAX_V1)
+        .and_then(|raised| i64::try_from(raised).ok())
+        .ok_or(ErasureErrorV1::ReceiptCommitFailed)
+        .and_then(|raised| {
+            connection
+                .execute(
+                    "INSERT INTO erasure_redaction_generation (singleton, generation)
+                     VALUES (1, ?1)
+                     ON CONFLICT (singleton) DO UPDATE SET generation = excluded.generation",
+                    params![raised],
+                )
+                .map(drop)
+                .map_err(map_erasure_receipt_failure)
+        })
 }
 
 /// The first `max` retained objects of the named tags outside `keep`, in
@@ -754,6 +799,58 @@ mod tests {
             load_sqlite_erasure_evidence(&store.conn, reference)?,
             bytes.to_vec()
         );
+        Ok(())
+    }
+
+    /// #1407: a redaction-generation row lost beside a retained ELCG1 is a
+    /// closed read and refuses the next ELCG1 commit, which retains nothing
+    /// and leaves the row absent, rather than restart the generation at 0.
+    /// Without any ELCG1 a missing row still reads 0.
+    #[test]
+    fn a_lost_generation_row_beside_an_elcg1_fails_closed() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("lost-generation.sqlite3");
+        let path = path
+            .to_str()
+            .ok_or("temporary database path is not UTF-8")?;
+        let store = SqliteStore::open(path)?;
+        assert_eq!(store.local_erasure_redaction_generation(), Ok(0));
+        let elcg1 = |value: u8| {
+            PreparedLocalOwnerEffectV1::new(
+                pos_core::LocalOwnerEffectV1::CacheGeneration(vec![
+                    0x83, 0x65, b'E', b'L', b'C', b'G', b'1', 0x01, value,
+                ]),
+                pos_core::LocalOwnerResultBindingV1 {
+                    request: ErasureReferenceV1::from_digest([value; 32]),
+                    attempt: ErasureReferenceV1::from_digest([2; 32]),
+                    obligation: ErasureReferenceV1::from_digest([3; 32]),
+                    command: ErasureReferenceV1::from_digest([4; 32]),
+                    owner_ref: ErasureReferenceV1::from_digest([5; 32]),
+                    error: None,
+                },
+            )
+        };
+        store.local_erasure_commit_owner_effect(&elcg1(1)?)?;
+        assert_eq!(store.local_erasure_redaction_generation(), Ok(1));
+        store
+            .conn
+            .execute("DELETE FROM erasure_redaction_generation", [])?;
+        assert_eq!(
+            store.local_erasure_redaction_generation(),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        assert_eq!(
+            store.local_erasure_commit_owner_effect(&elcg1(2)?),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        let (rows, retained): (i64, i64) = store.conn.query_row(
+            "SELECT (SELECT count(*) FROM erasure_redaction_generation),
+                    (SELECT count(*) FROM erasure_retained_objects WHERE tag = 'ELCG1')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!((rows, retained), (0, 1));
         Ok(())
     }
 

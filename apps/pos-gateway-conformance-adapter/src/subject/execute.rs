@@ -38,7 +38,7 @@ use super::payload::{
     ERASURE_SLOT, ROOM_SLOT, TIMELINE_SLOT,
 };
 use super::{ACTOR_ENTITY_ID, GOVERNANCE_RECORD_ID};
-use crate::{observation_v1, substitute_captured_v1};
+use crate::{cache_control_v1, observation_v1, substitute_captured_v1};
 
 /// The header an exchange with `actor` sends.
 const ACTOR_HEADER: &str = "x-piglor-actor-entity";
@@ -553,10 +553,13 @@ async fn exchange_all(
                 .oneshot(request(exchange, &slots, &subcase.id))
                 .await;
             let status = response.status().as_u16();
-            let cache_control = response
-                .headers()
-                .get(header::CACHE_CONTROL)
-                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+            let cache_control = cache_control_v1(
+                response
+                    .headers()
+                    .get_all(header::CACHE_CONTROL)
+                    .iter()
+                    .map(HeaderValue::as_bytes),
+            );
             let bytes = axum::body::to_bytes(response.into_body(), RESPONSE_LIMIT)
                 .await
                 .unwrap_or_default();

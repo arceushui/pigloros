@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use pos_gateway_conformance_adapter::{
-    executor_declaration, exit_code, normalize_response_v1, observation_v1, run,
+    cache_control_v1, executor_declaration, exit_code, normalize_response_v1, observation_v1, run,
     substitute_captured_v1, AdapterRunErrorV1, ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS,
     CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
@@ -879,5 +879,28 @@ fn an_observation_carries_the_cache_control_header_only() {
     assert_ne!(
         observation_v1(200, Some("no-store"), None),
         observation_v1(200, None, None)
+    );
+}
+
+/// #1407: every `cache-control` field line of a response is observed, joined with `", "`,
+/// so a duplicated or weakening second value cannot pass as the single expected
+/// `no-store`; a response without the field observes none.
+#[test]
+fn every_cache_control_line_is_observed() {
+    let none: [&[u8]; 0] = [];
+    assert_eq!(cache_control_v1(none), None);
+    assert_eq!(
+        cache_control_v1([b"no-store".as_slice()]),
+        Some("no-store".to_owned())
+    );
+    let two = cache_control_v1([b"no-store".as_slice(), b"max-age=60".as_slice()]);
+    assert_eq!(two.as_deref(), Some("no-store, max-age=60"));
+    assert_ne!(
+        observation_v1(200, two.as_deref(), None),
+        observation_v1(200, Some("no-store"), None)
+    );
+    assert_eq!(
+        cache_control_v1([b"no-store".as_slice(), b"no-store".as_slice()]).as_deref(),
+        Some("no-store, no-store")
     );
 }

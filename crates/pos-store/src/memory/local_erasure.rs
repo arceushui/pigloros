@@ -106,7 +106,9 @@ impl MemoryStore {
 
     /// The redaction generation once `prepared` commits (#1407): one higher
     /// when it newly retains an ELCG1, else unchanged. A generation that
-    /// cannot be raised refuses the commit before anything changes.
+    /// would pass [`pos_core::REDACTION_GENERATION_MAX_V1`] refuses the
+    /// commit before anything changes; the generation never exceeds that
+    /// bound, so the addition cannot overflow.
     fn raised_redaction_generation(
         &self,
         prepared: &PreparedLocalOwnerEffectV1,
@@ -115,8 +117,8 @@ impl MemoryStore {
             && prepared
                 .effect_object()
                 .is_some_and(|object| !self.erasure_evidence.contains_key(&object.reference()));
-        self.redaction_generation
-            .checked_add(u64::from(raises))
+        Some(self.redaction_generation + u64::from(raises))
+            .filter(|generation| *generation <= pos_core::REDACTION_GENERATION_MAX_V1)
             .ok_or(ErasureErrorV1::ReceiptCommitFailed)
     }
 
@@ -282,14 +284,15 @@ mod tests {
         Ok(())
     }
 
-    /// #1407: a redaction generation at its largest value cannot be raised,
-    /// so a fresh ELCG1 commit is refused and neither the ELCG1, its ELO1
-    /// nor the generation changes; an effect that raises nothing still
-    /// commits. The public parity tests reach the `SQLite` bound instead.
+    /// #1407: a redaction generation at `REDACTION_GENERATION_MAX_V1` cannot
+    /// be raised, so a fresh ELCG1 commit is refused and neither the ELCG1,
+    /// its ELO1 nor the generation changes; an effect that raises nothing
+    /// still commits, and the generation one below the bound still rises to
+    /// it. The public parity tests reach the `SQLite` bound instead.
     #[test]
     fn a_generation_that_cannot_be_raised_refuses_the_commit() -> Result<(), ErasureErrorV1> {
         let mut store = MemoryStore::new();
-        store.redaction_generation = u64::MAX;
+        store.redaction_generation = pos_core::REDACTION_GENERATION_MAX_V1;
         let binding = pos_core::LocalOwnerResultBindingV1 {
             request: ErasureReferenceV1::from_digest([1; 32]),
             attempt: ErasureReferenceV1::from_digest([2; 32]),
@@ -313,7 +316,10 @@ mod tests {
             Err(ErasureErrorV1::ReceiptCommitFailed)
         );
         assert!(store.erasure_evidence.is_empty());
-        assert_eq!(store.redaction_generation, u64::MAX);
+        assert_eq!(
+            store.redaction_generation,
+            pos_core::REDACTION_GENERATION_MAX_V1
+        );
         let elrp1 = PreparedLocalOwnerEffectV1::new(
             pos_core::LocalOwnerEffectV1::ReplicaPurge(record("ELRP1")),
             binding,
@@ -322,7 +328,19 @@ mod tests {
             store.local_erasure_commit_owner_effect(&elrp1),
             Ok(elrp1.owner_result().reference())
         );
-        assert_eq!(store.redaction_generation, u64::MAX);
+        assert_eq!(
+            store.redaction_generation,
+            pos_core::REDACTION_GENERATION_MAX_V1
+        );
+        store.redaction_generation = pos_core::REDACTION_GENERATION_MAX_V1 - 1;
+        assert_eq!(
+            store.local_erasure_commit_owner_effect(&elcg1),
+            Ok(elcg1.owner_result().reference())
+        );
+        assert_eq!(
+            store.redaction_generation,
+            pos_core::REDACTION_GENERATION_MAX_V1
+        );
         Ok(())
     }
 }

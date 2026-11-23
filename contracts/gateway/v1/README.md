@@ -229,8 +229,13 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
   `redaction_generation` (#1407): the number of client-cache redaction generations (ELCG1) the
   store has committed, across every erasure of every subject, `0` before the first. The store
   raises it by one in the same transaction that commits each `client-cache-signal` owner
-  effect, so it never decreases, also across a restart. The member is optional in the schema,
-  so a v1 client must not require it. See *Client cache* for what a client does with it.
+  effect, so it never decreases, also across a restart, and never exceeds 2^53-1, the schema's
+  JSON-safe `maximum`: a store at that bound refuses the next commit rather than answer a value
+  a JSON client cannot represent. The member is optional in the schema, so a v1 client must
+  not require it. See *Client cache* for what a client does with it. The value is store-wide,
+  not per subject: it discloses to the caller how many client-cache redactions the host has
+  committed, across every subject. This is intended (owner decision on #1407): every caller of
+  `getErasure` on a Local host is an actor of its one Local Principal.
 
 ## Client cache
 
@@ -243,7 +248,9 @@ revision, an erasure receipt or projection, and every problem.
    included, carries `Cache-Control: no-store` (the required `CacheControl` response header of
    `openapi.json`), so no cache may store it. The same router layer also marks the routes
    outside `/v1` (`/`, `/ledger` and `/health`) and every unrouted answer: one rule covers every
-   response the Gateway sends.
+   response the Gateway's router produces. A connection-level error that the HTTP server
+   writes before any request reaches the router, and a connection the server closes after a
+   handler panic, carry no representation and so no header.
 2. **A supported client MUST NOT persist a managed representation.** It may hold one in memory
    only for as long as it renders or acts on it. RFC 9111 §5.2.2.5 states that `no-store` is
    not a reliable or sufficient mechanism for ensuring privacy: it binds caches, not the

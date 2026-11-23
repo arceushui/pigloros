@@ -21,9 +21,9 @@ const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// The observation of one sent exchange: `{"status", "body"}`, whose body is `{"json": <the
 /// normalized value>}` when the response bytes parsed as one JSON value, else `"non-json"`.
-/// When the response carries a `cache-control` field, `cache_control` is its first value as
-/// text and the observation also has `"headers": {"cache-control": <that text>}` (#1407); no
-/// other header is observed.
+/// When the response carries a `cache-control` field, `cache_control` is every value of it,
+/// as [`cache_control_v1`] joins them, and the observation also has
+/// `"headers": {"cache-control": <that text>}` (#1407); no other header is observed.
 #[must_use]
 pub fn observation_v1(status: u16, cache_control: Option<&str>, parsed: Option<Value>) -> Value {
     let body = parsed.map_or_else(
@@ -37,6 +37,19 @@ pub fn observation_v1(status: u16, cache_control: Option<&str>, parsed: Option<V
     }
     observation.insert("body".to_owned(), body);
     Value::Object(observation)
+}
+
+/// The observed `cache-control` text of a response whose `cache-control` field lines are
+/// `values`, in order: each value as lossy UTF-8, joined with `", "` as one combined field
+/// value (RFC 9110 §5.3), or `None` without any. A duplicated or weakening second value is
+/// thus observed and cannot match a single expected directive (#1407).
+#[must_use]
+pub fn cache_control_v1<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<String> {
+    let lines = values
+        .into_iter()
+        .map(String::from_utf8_lossy)
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join(", "))
 }
 
 /// The `(schema_id, member, field)` rows of the digests a placeholder replaces in an object of
