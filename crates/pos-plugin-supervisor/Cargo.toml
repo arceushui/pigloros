@@ -97,14 +97,10 @@ required-features = ["test-support"]
 name = "composition_fallback_public"
 required-features = ["test-support"]
 
-# cargo-shear classifies everything under `tests/` as test code, so it sees the pass harness only
-# through the feature-gated `#[path]` module in `src/lib.rs`: the root file `tests/support/mod.rs`
-# looks unlinked. That is intended: the harness is a library module that other crates reach
-# through the `test-support` feature, and it lives under `tests/support` to stay outside the
-# production-coverage glob (`**/src/**/*.rs`). The `pos-store` dependency is used by
-# `src/fallback`, so it needs no ignore entry.
-[package.metadata.cargo-shear]
-ignored-paths = ["tests/support/mod.rs"]
+# The pass harness remains under `tests/support` and outside the production
+# coverage glob (`**/src/**/*.rs`). cargo-shear follows its feature-gated
+# `#[path]` module edge, so no ignore metadata is needed. `pos-store` is used
+# by `src/fallback`.
 
 [lints]
 workspace = true
