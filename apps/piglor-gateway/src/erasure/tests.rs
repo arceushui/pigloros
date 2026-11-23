@@ -793,7 +793,7 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
     let others = created_timeline(&served, other, "others").await?;
     let events = |timeline: &str| format!("/v1/timelines/{timeline}/events");
     let deleted = (StatusCode::FORBIDDEN, "deleted".to_owned(), false);
-    let redaction = |body: &Value| body["redaction_generation"].as_u64();
+    let redaction_of = |body: &Value| body["redaction_generation"].as_u64();
     let mut redacted = 0;
     for (key, receipts) in [("erasure-1", 1), ("erasure-2", 2)] {
         assert_eq!(
@@ -816,7 +816,7 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
         // Every projection carries the store-wide redaction generation,
         // which never decreases and, at the first receipt, counts one ELCG1
         // per request driven so far.
-        let redactions = observed.iter().map(redaction).collect::<Vec<_>>();
+        let redactions = observed.iter().map(redaction_of).collect::<Vec<_>>();
         assert!(
             redactions.iter().all(Option::is_some)
                 && redactions.windows(2).all(|pair| pair[0] <= pair[1])
@@ -858,7 +858,7 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
     for key in ["erasure-1", "erasure-2"] {
         let id = erasure_id(actor, key)?.to_string();
         let body = served.read(actor, &id).await?.json()?;
-        assert!(redaction(&body) >= Some(redacted), "{key}: {body}");
+        assert!(redaction_of(&body) >= Some(redacted), "{key}: {body}");
         assert_eq!(
             body["replay_claim"],
             "exact-authoritative-with-redacted-views"

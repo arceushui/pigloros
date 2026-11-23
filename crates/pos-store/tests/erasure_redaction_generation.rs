@@ -196,8 +196,8 @@ fn a_sqlite_generation_above_the_bound_fails_closed() -> TestResult {
     let directory = tempdir()?;
     let path = sqlite_path(&directory, "above.sqlite3")?;
     drop(SqliteStore::open(&path)?);
-    for stored in [i64::try_from(REDACTION_GENERATION_MAX_V1 + 1)?, i64::MAX] {
-        stored_generation(&path, stored)?;
+    for raw_generation in [i64::try_from(REDACTION_GENERATION_MAX_V1 + 1)?, i64::MAX] {
+        stored_generation(&path, raw_generation)?;
         let mut store = SqliteStore::open(&path)?;
         assert_eq!(
             store.redaction_generation(),
@@ -277,11 +277,11 @@ fn an_unreadable_sqlite_generation_fails_closed() -> TestResult {
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     drop(store);
-    let stored: i64 = raw.query_row(
+    let raw_generation: i64 = raw.query_row(
         "SELECT generation FROM erasure_redaction_generation WHERE singleton = 1",
         [],
         |row| row.get(0),
     )?;
-    assert_eq!(stored, -1);
+    assert_eq!(raw_generation, -1);
     Ok(())
 }
