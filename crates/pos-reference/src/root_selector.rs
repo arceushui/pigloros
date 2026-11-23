@@ -5378,6 +5378,7 @@ mod tests {
         // It never accepts: the selector connects, sends RCC1 and RCU1, and
         // waits for an RCA1 until its deadline.
         let _provider_listener = UnixListener::bind(&provider_path)?;
+        fs::set_permissions(&provider_path, fs::Permissions::from_mode(SOCKET_MODE))?;
         let recovery = tempfile::tempdir()?;
         fs::set_permissions(recovery.path(), fs::Permissions::from_mode(0o700))?;
         let fixture = Arc::new(UpdateFixture::new()?);
