@@ -27,19 +27,19 @@ pub(super) const ASSET_MANIFEST: &str = include_str!("../../assets/manifest.v1")
 /// The SHA-256 of the owner document body.
 #[cfg(all(test, feature = "test-support"))]
 pub(super) const OWNER_HTML_SHA256: [u8; 32] = [
-    0x62, 0x6c, 0x06, 0x45, 0xb7, 0xd5, 0x9e, 0x69, 0x07, 0x4b, 0x5a, 0x93, 0x6d, 0x44, 0x3a, 0x18,
-    0xdf, 0x6e, 0x80, 0xfb, 0x04, 0x8f, 0x0f, 0xed, 0x54, 0xc3, 0x10, 0xe0, 0x38, 0x87, 0x56, 0x07,
+    0x16, 0x74, 0xd2, 0xd9, 0x83, 0x59, 0xc9, 0x40, 0x22, 0x09, 0x04, 0xf0, 0xb8, 0x4c, 0xa8, 0xae,
+    0xc7, 0x00, 0x59, 0xe0, 0xd8, 0xd7, 0xfc, 0x95, 0x68, 0xf4, 0x78, 0xd5, 0x35, 0xbe, 0xac, 0xac,
 ];
 
 /// The SHA-256 of the exact full owner response: status line, fixed headers and body.
 pub(super) const OWNER_RESPONSE_SHA256: [u8; 32] = [
-    0xaa, 0x7a, 0xe7, 0xda, 0x42, 0xe4, 0xc8, 0x10, 0x35, 0xfc, 0x24, 0x8b, 0xce, 0x37, 0x53, 0xbc,
-    0xbd, 0x18, 0x78, 0x9b, 0x82, 0x7d, 0xb7, 0xe8, 0xb6, 0xae, 0x34, 0xe8, 0xc4, 0x52, 0x26, 0x56,
+    0x5d, 0xc1, 0x5a, 0xce, 0x0f, 0xde, 0xf9, 0xb3, 0xee, 0xc9, 0x4c, 0xb9, 0xd2, 0x28, 0x11, 0x68,
+    0xf8, 0x7d, 0x09, 0xad, 0x83, 0x38, 0xbd, 0x06, 0x22, 0x5a, 0x0e, 0xda, 0x25, 0xa9, 0xc9, 0x5c,
 ];
 
 /// The base64 SHA-256 of the inline script block pinned by the CSP.
 #[cfg(all(test, feature = "test-support"))]
-pub(super) const CSP_SCRIPT_SHA256: &str = "u1EY2j5nmD9k1rTIn3WZ4ws2k366fN4SN1bnbSQ1LRw=";
+pub(super) const CSP_SCRIPT_SHA256: &str = "1j7YP6tBlv7MEi44Vv3Ope5ctyTFZEUAmsMbdxyvWd0=";
 
 /// The base64 SHA-256 of the inline style block pinned by the CSP.
 #[cfg(all(test, feature = "test-support"))]
@@ -49,7 +49,7 @@ pub(super) const CSP_STYLE_SHA256: &str = "Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNw
 pub(super) const OWNER_RESPONSE_HEAD: &str = concat!(
     "HTTP/1.1 200 OK\r\n",
     "Content-Type: text/html; charset=utf-8\r\n",
-    "Content-Length: 14430\r\n",
+    "Content-Length: 14431\r\n",
     "Cache-Control: no-store\r\n",
     "X-Content-Type-Options: nosniff\r\n",
     "Referrer-Policy: no-referrer\r\n",
@@ -57,7 +57,7 @@ pub(super) const OWNER_RESPONSE_HEAD: &str = concat!(
     "Cross-Origin-Resource-Policy: same-origin\r\n",
     "Permissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\n",
     "Connection: close\r\n",
-    "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-u1EY2j5nmD9k1rTIn3WZ4ws2k366fN4SN1bnbSQ1LRw='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n",
+    "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-1j7YP6tBlv7MEi44Vv3Ope5ctyTFZEUAmsMbdxyvWd0='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n",
     "\r\n",
 );
 
@@ -68,7 +68,7 @@ pub(super) const NOT_FOUND_RESPONSE: &str = concat!(
     "Cache-Control: no-store\r\n",
     "X-Content-Type-Options: nosniff\r\n",
     "Connection: close\r\n",
-    "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-u1EY2j5nmD9k1rTIn3WZ4ws2k366fN4SN1bnbSQ1LRw='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n",
+    "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-1j7YP6tBlv7MEi44Vv3Ope5ctyTFZEUAmsMbdxyvWd0='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n",
     "\r\n",
 );
 
@@ -79,6 +79,6 @@ pub(super) const BAD_REQUEST_RESPONSE: &str = concat!(
     "Cache-Control: no-store\r\n",
     "X-Content-Type-Options: nosniff\r\n",
     "Connection: close\r\n",
-    "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-u1EY2j5nmD9k1rTIn3WZ4ws2k366fN4SN1bnbSQ1LRw='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n",
+    "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-1j7YP6tBlv7MEi44Vv3Ope5ctyTFZEUAmsMbdxyvWd0='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n",
     "\r\n",
 );
