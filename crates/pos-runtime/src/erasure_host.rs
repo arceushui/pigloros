@@ -56,9 +56,9 @@ use pos_core::{
 };
 use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
-    local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureAdmissionsPortV1 as _,
-    ErasureAdmissionsStateV1, ErasureRequestInputV1, ErasureScopeV1, LocalErasureAdmissionV1,
-    LocalErasureAuthorizationV1, LocalErasureIdempotencyV1, LocalErasureSelectorV1, PrincipalRefV1,
+    local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureAdmissionsStateV1,
+    ErasureRequestInputV1, ErasureScopeV1, LocalErasureAdmissionV1, LocalErasureAuthorizationV1,
+    LocalErasureIdempotencyV1, LocalErasureSelectorV1, PrincipalRefV1,
     ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 #[cfg(target_os = "linux")]
