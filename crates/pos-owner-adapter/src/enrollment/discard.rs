@@ -52,6 +52,8 @@ pub(super) fn discard_attempt(
     attempt: &Attempt<'_>,
 ) -> Result<(), OwnerError> {
     let owner_id = owner.owner_id();
+    // This read also refuses under a B6 fence, so a fence that appears during
+    // the attempt keeps every artifact for P5 recovery at the next owner start.
     let ceiling = store.registry_epoch_ceiling(owner_id, attempt.subject)?;
     let ledger = read_ledger(lock)
         .filter(|_| ceiling < attempt.epoch)
