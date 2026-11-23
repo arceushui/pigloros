@@ -22,8 +22,8 @@
 //! and graph demands of R10.4(2), the R10.4(6) format bounds and the
 //! R10.4(5) install check are not part of this planner.
 //!
-//! The planner reads the domain only through [`CommunityPassReadPortV1`]
-//! and commits nothing: every backend's `run_pass` uses the same planner,
+//! The planner reads the domain only through [`CommunityQuarantineIndexV1`]
+//! and [`CommunityPassReadPortV1`] and commits nothing: every backend's `run_pass` uses the same planner,
 //! and the Reserve writer re-checks generation, head, counters, quarantine,
 //! caps and the recording horizon (R10.7 step 5j).
 
@@ -37,24 +37,39 @@ use pos_core::community_lifecycle::{
 };
 use pos_core::{Hash, TimelineId};
 
-/// The domain reads the planner needs, under the call's guard.
+#[cfg(target_os = "linux")]
+use super::memory_domain::MemoryCommunityDomainV1;
+
+/// The domain's quarantine index read (R10.6(2)).
 ///
 /// Like [`super::store_domain::CommunityStoreDomainV1`], the trait is
 /// nominally `pub` only because the public planner is generic over it; it
 /// is re-exported nowhere, so no caller outside `community` can implement
-/// it. The quarantine index (R10.6(2)) and the recorded-set counters
-/// (R10.3(6)) are domain-private and have no wire form; the Memory domain
-/// implements this port with that storage in A4c.
-pub trait CommunityPassReadPortV1 {
-    /// The quarantine index row of `key`: `None` when no row exists, which
-    /// in an open context means the member was never quarantined, or its
-    /// active reason set (0..=4 reasons). A row closed due to unavailable
-    /// evidence has a non-empty set (R10.6(2)–(3)).
-    fn quarantine_reasons(
-        &self,
-        key: &CommunityQuarantineKeyV1<'_>,
-    ) -> Option<Vec<CommunityQuarantineReasonV1>>;
+/// it. [`MemoryCommunityDomainV1`] serves it from its A4e-1 quarantine
+/// index.
+pub trait CommunityQuarantineIndexV1 {
+    /// The active reason set of the index row of the CQK1 whose digest is
+    /// `key`: `None` when no row exists, which in an open context means the
+    /// member was never quarantined, or its 0..=4 active reasons. A row
+    /// closed due to unavailable evidence has a non-empty set (R10.6(2)–(3)).
+    fn quarantine_reasons(&self, key: Hash) -> Option<Vec<CommunityQuarantineReasonV1>>;
+}
 
+#[cfg(target_os = "linux")]
+impl CommunityQuarantineIndexV1 for MemoryCommunityDomainV1 {
+    fn quarantine_reasons(&self, key: Hash) -> Option<Vec<CommunityQuarantineReasonV1>> {
+        self.quarantine_index
+            .get(&key)
+            .map(|ledger| ledger.reasons.iter().map(|row| row.reason).collect())
+    }
+}
+
+/// The other domain reads the planner needs, under the call's guard: the
+/// recorded-set counters (R10.3(6)) and the retained-outcome and
+/// control-operation counts (R10.4(4)). They are domain-private and have no
+/// wire form; the Memory domain adds their storage and implements this
+/// port in A4c. The trait is re-exported nowhere.
+pub trait CommunityPassReadPortV1 {
     /// T's cumulative recorded-set counters (R10.3(6)).
     fn recorded_set_counters(&self, timeline: TimelineId) -> CommunitySharedCountsV1;
 
@@ -154,8 +169,8 @@ pub struct CommunityPassDueV1<'a> {
 /// the roster; then `OperationActive` (4b), `PassUnresolved` (4c),
 /// `StaleFrontier` (4d), `Quarantined` (4e) with the CQK1 errors of a
 /// roster row, and `EvidenceExpired` (4f).
-pub fn plan_community_pass_v1<'a, P: CommunityPassReadPortV1>(
-    port: &P,
+pub fn plan_community_pass_v1<'a, Q: CommunityQuarantineIndexV1>(
+    index: &Q,
     installation: CommunityPassInstallationV1<'a>,
     view: CommunityPassViewV1<'a>,
     request: CommunityPassRequestV1,
@@ -169,7 +184,7 @@ pub fn plan_community_pass_v1<'a, P: CommunityPassReadPortV1>(
     }
     active(view)
         .and_then(|()| stale(view.host_progress, request))
-        .and_then(|()| quarantine(port, installation, view.host_progress.timeline()))
+        .and_then(|()| quarantine(index, installation, view.host_progress.timeline()))
         .and_then(|()| expiry(installation, view, request))
         .map(|()| {
             let due = due_members(installation, view, request);
@@ -212,8 +227,8 @@ fn stale(progress: &CommunityHostProgressV1, request: CommunityPassRequestV1) ->
 
 /// Step 4e (R10.6): any roster member, due or not, with a non-empty active
 /// reason set gives 9.
-fn quarantine<P: CommunityPassReadPortV1>(
-    port: &P,
+fn quarantine<Q: CommunityQuarantineIndexV1>(
+    index: &Q,
     installation: CommunityPassInstallationV1<'_>,
     timeline: TimelineId,
 ) -> Result<(), Error> {
@@ -225,8 +240,8 @@ fn quarantine<P: CommunityPassReadPortV1>(
         .try_for_each(|member| {
             CommunityQuarantineKeyV1::new(timeline, member.stable_entry(), member.implementation())
                 .and_then(|key| {
-                    if port
-                        .quarantine_reasons(&key)
+                    if index
+                        .quarantine_reasons(key.digest())
                         .is_some_and(|reasons| !reasons.is_empty())
                     {
                         Err(Error::Quarantined)

@@ -22,6 +22,7 @@ use super::{
     plan_community_pass_v1, CommunityPassDueV1, CommunityPassInstallationV1,
     CommunityPassMemberViewV1, CommunityPassPlanV1, CommunityPassReadPortV1,
     CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
+    CommunityQuarantineIndexV1,
 };
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -75,15 +76,14 @@ impl Port {
     }
 }
 
-impl CommunityPassReadPortV1 for Port {
-    fn quarantine_reasons(
-        &self,
-        key: &CommunityQuarantineKeyV1<'_>,
-    ) -> Option<Vec<CommunityQuarantineReasonV1>> {
+impl CommunityQuarantineIndexV1 for Port {
+    fn quarantine_reasons(&self, key: Hash) -> Option<Vec<CommunityQuarantineReasonV1>> {
         self.reads.set(self.reads.get() + 1);
-        self.quarantine.get(key.digest().as_bytes()).cloned()
+        self.quarantine.get(key.as_bytes()).cloned()
     }
+}
 
+impl CommunityPassReadPortV1 for Port {
     fn recorded_set_counters(&self, timeline: TimelineId) -> CommunitySharedCountsV1 {
         assert_eq!(timeline, self::timeline());
         self.counters
@@ -644,5 +644,54 @@ fn the_quote_refuses_state_demand_with_14_and_recording_demand_with_19() -> Test
         due.quote(&port, &invalid, None).err(),
         Some(Error::InvalidBinding)
     );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_memory_domain_serves_step_4e_from_its_quarantine_index() -> TestResult {
+    // R10.6(2): the Memory domain's A4e-1 index row of a roster member's
+    // CQK1 gives 9; no row gives none.
+    use super::super::quarantine::QuarantineLedgerV1;
+    use crate::community_initialization_fixture::{trusted_store, World, TRUST_SCOPE};
+    use crate::MemoryTrustedClockAuthorityV1;
+    use pos_core::community_lifecycle::CommunityQuarantineReasonEvidenceV1;
+    use pos_core::AuthorityTrustRootSealV1;
+
+    static SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
+    let key = key()?;
+    let fixture = Fixture::new()?;
+    let roster = Fixture::roster(&key)?;
+    let profile = fixture.profile(&roster)?;
+    let (store, _harness) = trusted_store(true)?;
+    let mut world = World::new(
+        &SEAL,
+        store,
+        TRUST_SCOPE,
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
+    let run = |world: &World| {
+        outcome(plan_community_pass_v1(
+            &world.domain,
+            installation(&profile),
+            fixture.view(),
+            request(5, 1000),
+        ))
+    };
+    assert_eq!(run(&world)?, Some(vec![1, 2]));
+    let quarantined = CommunityQuarantineKeyV1::new(timeline(), ENTRIES[0], &key)?.digest();
+    world.domain.quarantine_index.insert(
+        quarantined,
+        QuarantineLedgerV1 {
+            head: hash(40),
+            ordinal: 1,
+            reasons: vec![CommunityQuarantineReasonEvidenceV1 {
+                reason: CommunityQuarantineReasonV1::Trapped,
+                failure_evidence_digest: hash(41),
+            }],
+            evidence_not_after_micros: BOUND,
+        },
+    );
+    assert_eq!(run(&world), Err(Error::Quarantined));
     Ok(())
 }
