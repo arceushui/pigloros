@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-independent-evaluation",
   "family": "independent-evaluation",
-  "input_blake3_digest": "37a477a8c65b73d23fd9ce680ba4f0f6b95b1aad0c916b457cd70d9a065af6c8",
+  "input_blake3_digest": "414e3fbcc1ccd9c1ecfb291085d35921933fd7c7aabaf8f800a5a818663abf0d",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",
@@ -10,12 +10,12 @@
       {
         "mode": "local",
         "outcome": "pass",
-        "actual_digest": "e5b7f06f7b738eb7b872a38d6c33d9ea660c93c85a54cf77f05cba0e5e1d248e"
+        "actual_digest": "0d49653314b5feb785a3b78fb235798bf3b144c45c2f86671071540a4ca1296d"
       },
       {
         "mode": "air-gapped",
         "outcome": "pass",
-        "actual_digest": "e5b7f06f7b738eb7b872a38d6c33d9ea660c93c85a54cf77f05cba0e5e1d248e"
+        "actual_digest": "0d49653314b5feb785a3b78fb235798bf3b144c45c2f86671071540a4ca1296d"
       }
     ]
   },

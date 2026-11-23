@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use pos_gateway_conformance_adapter::{
-    executor_declaration, exit_code, normalize_response_v1, observation_v1, run,
+    cache_control_v1, executor_declaration, exit_code, normalize_response_v1, observation_v1, run,
     substitute_captured_v1, AdapterRunErrorV1, ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS,
     CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
@@ -842,14 +842,65 @@ fn the_binary_runs_one_attempt_through_its_process_boundary_body() -> TestResult
 #[test]
 fn an_observation_is_the_status_and_the_normalized_json_or_non_json_body() {
     assert_eq!(
-        observation_v1(404, None),
+        observation_v1(404, None, None),
         json!({"status": 404, "body": "non-json"})
     );
     assert_eq!(
         observation_v1(
             400,
+            None,
             Some(json!({"detail": "bad", "code": "invalid-request"}))
         ),
         json!({"status": 400, "body": {"json": {"detail": "<message>", "code": "invalid-request"}}})
+    );
+}
+
+/// #1407: a response's `cache-control` field is observed as `headers`, its value kept
+/// verbatim so that any other directive cannot match; a response without one has no
+/// `headers` member.
+#[test]
+fn an_observation_carries_the_cache_control_header_only() {
+    assert_eq!(
+        observation_v1(200, Some("no-store"), Some(json!({"ok": true}))),
+        json!({
+            "status": 200,
+            "headers": {"cache-control": "no-store"},
+            "body": {"json": {"ok": true}},
+        })
+    );
+    assert_eq!(
+        observation_v1(404, Some("max-age=60"), None),
+        json!({
+            "status": 404,
+            "headers": {"cache-control": "max-age=60"},
+            "body": "non-json",
+        })
+    );
+    assert_ne!(
+        observation_v1(200, Some("no-store"), None),
+        observation_v1(200, None, None)
+    );
+}
+
+/// #1407: every `cache-control` field line of a response is observed, joined with `", "`,
+/// so a duplicated or weakening second value cannot pass as the single expected
+/// `no-store`; a response without the field observes none.
+#[test]
+fn every_cache_control_line_is_observed() {
+    let none: [&[u8]; 0] = [];
+    assert_eq!(cache_control_v1(none), None);
+    assert_eq!(
+        cache_control_v1([b"no-store".as_slice()]),
+        Some("no-store".to_owned())
+    );
+    let two = cache_control_v1([b"no-store".as_slice(), b"max-age=60".as_slice()]);
+    assert_eq!(two.as_deref(), Some("no-store, max-age=60"));
+    assert_ne!(
+        observation_v1(200, two.as_deref(), None),
+        observation_v1(200, Some("no-store"), None)
+    );
+    assert_eq!(
+        cache_control_v1([b"no-store".as_slice(), b"no-store".as_slice()]).as_deref(),
+        Some("no-store, no-store")
     );
 }

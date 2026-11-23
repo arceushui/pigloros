@@ -15,7 +15,8 @@ fixtures disagree:
 3. every golden example under `contracts/gateway/v1/examples/` names an operation (or an
    unrouted request, see 8), its request
    (headers, query and path) is valid exactly when the example says so, and its response is
-   valid for its status;
+   valid for its status; an example that states its response `headers` states every required
+   header of that response, each valid for its schema, and no undeclared one;
 4. every expected exchange of `fixtures/conformance/inputs/gateway-client-conformance/` is a
    JSON response valid for its served operation and status. Those fixtures are executed against
    the served routers by `apps/pos-gateway-conformance-adapter`, so a served response that
@@ -321,6 +322,38 @@ class Contract:
         errors = self.schema_errors(body, content[media]["schema"])
         if not errors and media == "application/problem+json":
             errors = self.problem_errors(status, body, template, path)  # type: ignore[arg-type]
+        return errors
+
+    def header_errors(self, response: dict, headers: dict | None) -> list[str]:
+        """Check the response `headers` a golden example states against the response it answers.
+
+        An example that states `headers` states every required header of that response, each
+        valid for its declared schema, and no undeclared one; header names are
+        case-insensitive. An example without `headers` asserts none, so every earlier example,
+        frozen ones included, stays valid when a response gains a header.
+        """
+        if headers is None:
+            return []
+        if not isinstance(headers, dict):
+            return ["response headers are not an object"]
+        declared = {
+            name.lower(): self.resolve(header)
+            for name, header in self.resolve(response).get("headers", {}).items()
+        }
+        given = {name.lower(): value for name, value in headers.items()}
+        errors = [
+            f"missing required response header {name}"
+            for name, header in sorted(declared.items())
+            if header.get("required", False) and name not in given
+        ]
+        for name, value in sorted(given.items()):
+            if name not in declared:
+                errors.append(f"undeclared response header {name}")
+            else:
+                errors.extend(
+                    f"header {name}: {error}"
+                    for error in self.schema_errors(value, declared[name]["schema"])
+                )
         return errors
 
     def problem_errors(self, status: int, body: dict, template: str, path: str) -> list[str]:
@@ -699,6 +732,9 @@ def check_example(
         raise ContractError(f"{name}: request validity is not {example['request_valid']}")
     response = example["response"]
     errors = contract.response_errors(operation, response["status"], response["body"], template)
+    responses = operation["responses"]
+    declared = responses.get(str(response["status"]), responses.get("default", {}))
+    errors += contract.header_errors(declared, response.get("headers"))
     errors += fork_ordinal_errors(response["body"])
     errors += mode_profile_errors(response["body"], frozen=frozen)
     if errors:
@@ -723,6 +759,9 @@ def check_unrouted_example(contract: Contract, name: str, example: dict) -> None
         errors = [f"{path} answers {expected[1]} {expected[0]}"]
     if not errors:
         errors = contract.problem_errors(status, body, path, path)
+    errors += contract.header_errors(
+        {"$ref": "#/components/responses/Problem"}, response.get("headers")
+    )
     if errors:
         raise ContractError(f"{name}: response invalid: {errors[:3]}")
 
