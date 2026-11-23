@@ -7,7 +7,10 @@
 //! lifetime. With a pending SIR1 it binds no evaluator listener and runs one
 //! root-owned recovery operation (ADR-069 R12 §6, §8). Only its durable
 //! completion leads to a normal open from the next SIC1; a failure leaves the
-//! selector closed, serving only that transaction's mode-1 challenge.
+//! selector closed, serving only that transaction's mode-1 challenge. A live
+//! update that fails after its SIR1 commit in a running selector is overdue:
+//! admission stays closed, the selector removes its own evaluator leaf and
+//! enters the same pending-recovery path.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -149,7 +152,46 @@ impl NormalOpen {
                 .map(|evaluator| SelectorMode::Admitting {
                     composition,
                     evaluator,
+                    opening: self.clone(),
                 })
+        })
+    }
+
+    /// What the fixed installation, as it now stands, lets the selector
+    /// serve (R12 §8). Activation and the overdue transition both enter
+    /// here, so a live update that failed after its SIR1 commit is handled
+    /// exactly as a restart would handle it.
+    ///
+    /// Without a pending SIR1 this is a normal open. With one, the evaluator
+    /// pathname must be absent and SIR1 must authenticate; then one recovery
+    /// operation runs. Its durable completion opens normally from the next
+    /// SIC1, and its failure leaves the selector in `RecoveryPending`.
+    ///
+    /// # Errors
+    /// Returns a closed boundary error when the installation cannot be
+    /// opened, an evaluator node exists or SIR1 fails authentication while
+    /// recovery is pending, or the normal open fails.
+    fn open_installation(
+        self,
+        administrator: &OwnedAdministratorListener,
+    ) -> Result<SelectorMode, SelectorBoundaryError> {
+        InstalledSelectorState::open_fixed().and_then(|installed| match installed {
+            FixedInstallation::Admissible(installed) => installed
+                .authenticate_bootstrap()
+                .and_then(|bootstrap| self.open(administrator, bootstrap)),
+            FixedInstallation::RecoveryPending(installed) => require_absent_evaluator_endpoint(
+                Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET),
+            )
+            .and_then(|()| PendingRecoveryTarget::load(&installed))
+            .map_err(SelectorBoundaryError::from)
+            .and_then(|target| {
+                let recovery = recovery_pending::PendingRecovery::fixed(target, self);
+                let operation = recovery.begin_recovery_operation();
+                match operation {
+                    Ok(completed) => recovery.open(administrator, completed.bootstrap),
+                    Err(_) => Ok(SelectorMode::RecoveryPending(recovery)),
+                }
+            }),
         })
     }
 
@@ -184,6 +226,26 @@ struct SynchronizedInstallationUpdate {
     acknowledgement: Vec<u8>,
     /// The cancelled-attempt set the authenticated RCA1 echoes (R11 §8.6 m10).
     cancelled_attempt_ids: Vec<[u8; 16]>,
+}
+
+/// How a failed administrative transaction leaves an admitting selector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+enum InstallationUpdateError {
+    /// Nothing this transaction changed needs recovery: it failed before
+    /// the SIR1 commit was attempted (previous-state admission is reopened),
+    /// or only its acknowledgement could not be delivered after the
+    /// successor was admitted. Serving continues.
+    #[error(transparent)]
+    Refused(SelectorBoundaryError),
+    /// The live update did not end with the successor admitted, from the
+    /// SIR1 commit attempt on: a failed SIR1 rename or durability step, a
+    /// timeout, EOF or bad RCA1, or a failed retirement after completion.
+    /// Admission stays closed and the selector re-enters from the
+    /// installation as it stands (ADR-069 R12 §8): `RecoveryPending` while
+    /// SIR1 exists, otherwise a normal open (crash rows 1 and 8). A failed
+    /// SIR1 rename leaves no SIR1, so it heals through that normal open.
+    #[error(transparent)]
+    Overdue(SelectorBoundaryError),
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -287,10 +349,12 @@ pub struct RootSelectorRuntime {
 /// What an activated selector serves (ADR-069 R12 §8).
 enum SelectorMode {
     /// Normal open: the provider runtime is admitted and the evaluator
-    /// listener is bound beside the administrative one.
+    /// listener is bound beside the administrative one. `opening` is kept
+    /// for the overdue transition.
     Admitting {
         composition: RootSelectorComposition,
         evaluator: OwnedSelectorListener,
+        opening: NormalOpen,
     },
     /// A SIR1 is pending. No evaluator pathname exists, and the administrative
     /// listener answers only the pending transaction.
@@ -300,12 +364,22 @@ enum SelectorMode {
 impl SelectorMode {
     /// Serve this mode beside `administrator`: both listeners while
     /// admitting, and only the pending transaction while a SIR1 is pending.
+    ///
+    /// A live update that fails after its SIR1 commit is overdue (R12 §8,
+    /// O6): admission stays closed, the selector removes its own evaluator
+    /// leaf under the revalidated identity, and runs one recovery operation
+    /// now, from the installation as it then stands.
     fn serve(self, administrator: OwnedAdministratorListener) -> Result<(), SelectorBoundaryError> {
         match self {
             Self::Admitting {
                 composition,
                 evaluator,
-            } => serve_admitting(administrator, composition, evaluator),
+                opening,
+            } => serve_admitting(&administrator, composition, &evaluator)
+                .and_then(|()| evaluator.close())
+                .and_then(|()| opening.open_installation(&administrator))
+                .and_then(|mode| mode.set_nonblocking().map(|()| mode))
+                .and_then(|mode| mode.serve(administrator)),
             Self::RecoveryPending(recovery) => recovery
                 .serve(&administrator)
                 .and_then(|bootstrap| recovery.open(&administrator, bootstrap))
@@ -490,7 +564,6 @@ impl OwnedSelectorListener {
     /// # Errors
     /// Returns a closed identity error if the pathname is absent or has been
     /// replaced. A replacement is never removed.
-    #[cfg(test)]
     fn close(mut self) -> Result<(), SelectorBoundaryError> {
         let result = self.remove_owned_socket();
         if result.is_ok() {
@@ -561,35 +634,13 @@ impl RootSelectorRuntime {
         let administrator = OwnedAdministratorListener::bind()?;
         open_recovery_directory()
             .and_then(|recovery_directory| {
-                InstalledSelectorState::open_fixed().map(|installed| {
-                    (
-                        NormalOpen {
-                            recovery_directory: Arc::new(recovery_directory),
-                            port,
-                            executable_digest,
-                            recovery_host,
-                        },
-                        installed,
-                    )
-                })
-            })
-            .and_then(|(opening, installed)| match installed {
-                FixedInstallation::Admissible(installed) => installed
-                    .authenticate_bootstrap()
-                    .and_then(|bootstrap| opening.open(&administrator, bootstrap)),
-                FixedInstallation::RecoveryPending(installed) => require_absent_evaluator_endpoint(
-                    Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET),
-                )
-                .and_then(|()| PendingRecoveryTarget::load(&installed))
-                .map_err(SelectorBoundaryError::from)
-                .and_then(|target| {
-                    let recovery = recovery_pending::PendingRecovery::fixed(target, opening);
-                    let operation = recovery.begin_recovery_operation();
-                    match operation {
-                        Ok(completed) => recovery.open(&administrator, completed.bootstrap),
-                        Err(_) => Ok(SelectorMode::RecoveryPending(recovery)),
-                    }
-                }),
+                NormalOpen {
+                    recovery_directory: Arc::new(recovery_directory),
+                    port,
+                    executable_digest,
+                    recovery_host,
+                }
+                .open_installation(&administrator)
             })
             .and_then(|mode| {
                 administrator
@@ -619,35 +670,37 @@ impl RootSelectorRuntime {
 }
 
 /// Serve the administrative and evaluator listeners of an admitting
-/// selector until a listener invariant fails, then close admission.
+/// selector until a listener invariant fails or a live update is overdue,
+/// then close admission and join every thread.
+///
+/// # Errors
+/// Returns the first listener or worker failure. `Ok` means only that a live
+/// update failed after its SIR1 commit and every thread stopped cleanly.
 fn serve_admitting(
-    administrator: OwnedAdministratorListener,
+    administrator: &OwnedAdministratorListener,
     composition: RootSelectorComposition,
-    evaluator: OwnedSelectorListener,
+    evaluator: &OwnedSelectorListener,
 ) -> Result<(), SelectorBoundaryError> {
     let composition = Arc::new(composition);
-    let administrator = Arc::new(administrator);
     let stopped = Arc::new(AtomicBool::new(false));
     let (completed, completion) = std::sync::mpsc::channel();
     thread::scope(|scope| {
         let admin_composition = Arc::clone(&composition);
-        let admin_listener = Arc::clone(&administrator);
         let admin_stopped = Arc::clone(&stopped);
         let admin_completed = completed.clone();
         let admin = scope.spawn(move || {
-            let result = serve_administrator(&admin_listener, &admin_composition, &admin_stopped);
+            let result = serve_administrator(administrator, &admin_composition, &admin_stopped);
             let _send_result = admin_completed.send(result);
             result
         });
 
         let evaluator_composition = Arc::clone(&composition);
-        let evaluator_administrator = Arc::clone(&administrator);
         let evaluator_stopped = Arc::clone(&stopped);
         let evaluator_completed = completed.clone();
         let evaluator_thread = scope.spawn(move || {
             let served = serve_evaluator(
-                &evaluator,
-                &evaluator_administrator,
+                evaluator,
+                administrator,
                 &evaluator_composition,
                 &evaluator_stopped,
             );
@@ -657,6 +710,9 @@ fn serve_admitting(
         drop(completed);
 
         let first = completion.recv().map_err(selector_unavailable)?;
+        // On an overdue update this join delays recovery by at most the
+        // 30 s INITIAL_IO_TIMEOUT that bounds an in-flight evaluator or
+        // administrative connection. Admission is already closed meanwhile.
         composition.service.admission.close()?;
         stopped.store(true, Ordering::Release);
         let admin = admin.join().map_err(selector_unavailable)?;
@@ -666,20 +722,50 @@ fn serve_admitting(
     })
 }
 
+/// Serve administrative transactions one at a time until `stopped`, or
+/// until one live update is overdue.
+///
+/// # Errors
+/// Returns the listener's error when its pathname identity is lost or
+/// accepting fails. `Ok` means stopped or overdue; only the overdue case
+/// returns before `stopped` is set.
 fn serve_administrator(
     listener: &OwnedAdministratorListener,
     composition: &RootSelectorComposition,
     stopped: &AtomicBool,
 ) -> Result<(), SelectorBoundaryError> {
     while !stopped.load(Ordering::Acquire) {
-        match listener.try_accept()? {
-            Some(stream) => {
-                let _update_result = composition.update_installation(stream);
-            }
-            None => thread::sleep(Duration::from_millis(10)),
+        if administer_once(listener, composition)?.is_break() {
+            return Ok(());
         }
     }
     Ok(())
+}
+
+/// Serve one waiting administrative connection, or sleep briefly when none
+/// waits. Breaks only when that transaction's live update is overdue.
+///
+/// # Errors
+/// Returns the listener's error when its pathname identity is lost or
+/// accepting fails.
+fn administer_once(
+    listener: &OwnedAdministratorListener,
+    composition: &RootSelectorComposition,
+) -> Result<std::ops::ControlFlow<()>, SelectorBoundaryError> {
+    listener.try_accept().map(|accepted| {
+        accepted.map_or_else(
+            || {
+                thread::sleep(Duration::from_millis(10));
+                std::ops::ControlFlow::Continue(())
+            },
+            |stream| match composition.update_installation(stream) {
+                Err(InstallationUpdateError::Overdue(_)) => std::ops::ControlFlow::Break(()),
+                Ok(()) | Err(InstallationUpdateError::Refused(_)) => {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        )
+    })
 }
 
 fn serve_evaluator(
@@ -878,21 +964,27 @@ impl RootSelectorComposition {
     /// successor publication and successor admission have completed.
     ///
     /// # Errors
-    /// Returns a closed boundary error for a foreign peer, malformed framing,
-    /// invalid authority, failed durability, timeout, or provider rejection.
-    fn update_installation(&self, mut stream: UnixStream) -> Result<(), SelectorBoundaryError> {
-        if !root_peer(&stream, ROOT_UID) {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
+    /// Returns [`InstallationUpdateError::Overdue`] when the update does not
+    /// end with its successor admitted from the SIR1 commit attempt on, and
+    /// [`InstallationUpdateError::Refused`] for a peer other than the
+    /// service's (root in production), malformed framing, invalid authority,
+    /// or an acknowledgement that cannot be delivered.
+    fn update_installation(&self, mut stream: UnixStream) -> Result<(), InstallationUpdateError> {
+        if !root_peer(&stream, self.service.peer_uid) {
+            return Err(InstallationUpdateError::Refused(
+                SelectorBoundaryError::ArtifactInvalid,
+            ));
         }
         configure_update_stream(&stream)
             .and_then(|()| self.updates.lock().map_err(selector_unavailable))
+            .map_err(InstallationUpdateError::Refused)
             .and_then(|_serialized| self.process_installation_update(&mut stream))
     }
 
     fn process_installation_update(
         &self,
         stream: &mut UnixStream,
-    ) -> Result<(), SelectorBoundaryError> {
+    ) -> Result<(), InstallationUpdateError> {
         self.receive_installation_update(stream)
             .and_then(|received| {
                 self.service
@@ -903,6 +995,7 @@ impl RootSelectorComposition {
                         received,
                     })
             })
+            .map_err(InstallationUpdateError::Refused)
             .and_then(|closed| self.prepare_closed_update(closed))
             .and_then(|closed| {
                 self.service
@@ -918,16 +1011,24 @@ impl RootSelectorComposition {
                         acknowledgement: completed.acknowledgement,
                         cancelled_attempt_ids: completed.cancelled_attempt_ids,
                     })
+                    .map_err(InstallationUpdateError::Overdue)
             })
+            // The successor SIC1 is published and SIR1 removed: a failure to
+            // retire the previous generation leaves no successor admitted, so
+            // the update is still overdue (R12 §9 crash row 8).
             .and_then(|synchronized| {
                 self.service
                     .evaluation_namespaces
                     .retire_previous_generation()
-                    .map(|()| synchronized)
+                    .and_then(|()| self.replace_runtime(synchronized))
+                    .map_err(InstallationUpdateError::Overdue)
             })
-            .and_then(|synchronized| self.replace_runtime(synchronized))
-            .and_then(|acknowledgement| write_control_frame(stream, &acknowledgement))
-            .and_then(|()| stream.shutdown(std::net::Shutdown::Write).map_err(io_error))
+            // Only the acknowledgement is lost here; the successor is admitted.
+            .and_then(|acknowledgement| {
+                write_control_frame(stream, &acknowledgement)
+                    .and_then(|()| stream.shutdown(std::net::Shutdown::Write).map_err(io_error))
+                    .map_err(InstallationUpdateError::Refused)
+            })
     }
 
     /// ADR-069 R11 §8.6: after a timely live update, the fenced runtime is
@@ -1003,7 +1104,7 @@ impl RootSelectorComposition {
     fn prepare_closed_update(
         &self,
         closed: ClosedInstallationUpdate,
-    ) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
+    ) -> Result<CommittedClosedInstallationUpdate, InstallationUpdateError> {
         match prepare_live_update(
             &closed.admission,
             &self.service.recovery_directory,
@@ -1048,16 +1149,21 @@ fn open_recovery_directory() -> Result<File, SelectorBoundaryError> {
     Ok(directory)
 }
 
+/// A failure before the SIR1 commit reopens previous-state admission; one
+/// after it leaves admission closed and the update overdue.
 fn finish_failed_preparation(
     admission: &SelectorAdmission,
     closed: &ClosedSelectorAdmission,
     error: PrepareLiveUpdateError,
-) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
+) -> Result<CommittedClosedInstallationUpdate, InstallationUpdateError> {
     match error {
-        PrepareLiveUpdateError::BeforeRecovery(error) => {
-            admission.reopen_previous(&closed.admitted).and(Err(error))
+        PrepareLiveUpdateError::BeforeRecovery(error) => admission
+            .reopen_previous(&closed.admitted)
+            .and(Err(error))
+            .map_err(InstallationUpdateError::Refused),
+        PrepareLiveUpdateError::RecoveryPending(error) => {
+            Err(InstallationUpdateError::Overdue(error))
         }
-        PrepareLiveUpdateError::RecoveryPending(error) => Err(error),
     }
 }
 
@@ -3043,15 +3149,18 @@ mod tests {
             own_runtime_observation(slot)
         }
 
+        /// Stopping the previous runtime's unit ends its threads first.
         fn terminate_previous_runtime(
             &self,
             target: &PreviousRuntimeTarget<'_>,
             deadline: std::time::Instant,
         ) -> Result<PreviousRuntimeObservation, ProviderLifecycleError> {
-            self.recovery
-                .as_ref()
-                .ok_or(ProviderLifecycleError::Unavailable)
-                .and_then(|recovery| recovery.terminate_previous_runtime(target, deadline))
+            self.stop_running().and_then(|()| {
+                self.recovery
+                    .as_ref()
+                    .ok_or(ProviderLifecycleError::Unavailable)
+                    .and_then(|recovery| recovery.terminate_previous_runtime(target, deadline))
+            })
         }
 
         fn reconcile_recovery_slot(
@@ -4456,6 +4565,170 @@ mod tests {
         Ok(())
     }
 
+    /// `/proc/<pid>/stat` as the overdue test reads it: absent. The only
+    /// recorded PID is this process's, whose runtime threads the port joined
+    /// when it terminated that runtime. The production reader is exercised
+    /// by the recovery tests' live and recycled PID cases.
+    #[cfg(target_os = "linux")]
+    fn isolated_process_stat(_pid: u64) -> std::io::Result<String> {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+
+    /// [`isolated_recovery_host`] for a SIR1 that a live update of this
+    /// process's runtime committed.
+    #[cfg(target_os = "linux")]
+    fn overdue_recovery_host(
+        directory: Arc<File>,
+        executable_digest: runtime_start::ExecutableDigest,
+    ) -> RecoveryHost {
+        isolated_recovery_host(directory, executable_digest)
+            .with_process_stat(isolated_process_stat)
+    }
+
+    /// A runtime that answers the installed state's `describe` and hands its
+    /// control listener to the test.
+    #[cfg(target_os = "linux")]
+    fn described_runtime(
+        started: std::sync::mpsc::Sender<UnixListener>,
+    ) -> TestResult<RuntimeStart> {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        Ok(Box::new(move || {
+            let execute_listener = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
+            let control_listener = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
+            started
+                .send(control_listener)
+                .map_err(|_| "runtime start channel closed")?;
+            Ok(vec![std::thread::spawn(move || {
+                serve_installed_describe_response(&execute_listener, &fixture)
+                    .map_err(|error| error.to_string())
+            })])
+        }))
+    }
+
+    /// The provider side of a live update that never answers: it reads RCC1,
+    /// RCU1 and the selector's write EOF, then holds the connection until the
+    /// selector hangs up at its deadline.
+    #[cfg(target_os = "linux")]
+    fn stall_control_exchange(listener: &UnixListener) -> TestResult {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
+        let mut stream = accept_test_connection(listener)?;
+        stream.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        read_frame(&mut stream)?;
+        read_frame(&mut stream)?;
+        let mut trailing = Vec::new();
+        stream.read_to_end(&mut trailing)?;
+        if !trailing.is_empty() {
+            return Err("revocation update contained trailing bytes".into());
+        }
+        let bound = Timespec {
+            tv_sec: i64::try_from(CLIENT_IO_TIMEOUT.as_secs())?,
+            tv_nsec: 0,
+        };
+        let mut hangup = [PollFd::new(&stream, PollFlags::empty())];
+        poll(&mut hangup, Some(&bound))?;
+        if hangup[0].revents().contains(PollFlags::HUP) {
+            Ok(())
+        } else {
+            Err("the selector kept the control connection open".into())
+        }
+    }
+
+    /// ADR-069 R12 §8 and I14: a live update that times out after its SIR1
+    /// commit in a running selector is overdue. Admission stays closed, the
+    /// selector removes its own evaluator leaf, runs exactly one recovery
+    /// operation, and opens normally from the next SIC1 only after durable
+    /// completion. The administrative listener stays bound throughout, and
+    /// the administrator receives no reply.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_overdue_live_update_recovers_before_a_normal_open() -> TestResult {
+        if matches!(
+            isolated_role(
+                "root_selector::tests::an_overdue_live_update_recovers_before_a_normal_open"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+
+        let _paths = FixedCompositionFixture::create()?;
+        let root = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT);
+        drop(crate::selector::installation::tests::materialize_root_selector_state(root)?);
+        let update_fixture =
+            crate::selector::installation::tests::updates::UpdateFixture::at(root)?;
+        fs::create_dir_all(ISOLATED_CGROUPS)?;
+        let (started, started_runtime) = std::sync::mpsc::channel();
+        let port = Arc::new(InProcessProviderPort {
+            recovery: Some(
+                crate::selector::recovery::tests::PeerPort::new(
+                    &Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE),
+                    crate::selector::recovery::tests::Script::default(),
+                )
+                .with_control_group(isolated_peer_cgroup),
+            ),
+            ..InProcessProviderPort::starting(vec![
+                described_runtime(started)?,
+                replacement_runtime()?,
+            ])
+        });
+        let runtime = RootSelectorRuntime::activate_with(
+            Arc::new(SharedPort(Arc::clone(&port))),
+            test_executable_digest,
+            overdue_recovery_host,
+        )?;
+        assert!(matches!(runtime.mode, SelectorMode::Admitting { .. }));
+        let evaluator = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
+        let administrator = Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET);
+        let recovery_record = root.join("installation-update.cbor");
+        let first_evaluator = path_identity(evaluator)?;
+        let bound_administrator = path_identity(administrator)?;
+        let control_listener = started_runtime.recv()?;
+        port.adopt(std::thread::spawn(move || {
+            stall_control_exchange(&control_listener).map_err(|error| error.to_string())
+        }))?;
+        let runtime = std::thread::spawn(move || runtime.serve());
+
+        let mut connection = UnixStream::connect(administrator)?;
+        connection.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
+        let challenge = read_frame(&mut connection)?;
+        write_frame(
+            &mut connection,
+            &update_fixture.request_from_challenge(&challenge, None)?,
+        )?;
+        connection.shutdown(std::net::Shutdown::Write)?;
+        let mut reply = Vec::new();
+        connection.read_to_end(&mut reply)?;
+        assert!(reply.is_empty());
+
+        // SIR1 is removed only after the old leaf is gone, and the normal
+        // open binds a new one after that.
+        let waited = std::time::Instant::now();
+        while (recovery_record.exists() || !evaluator.exists())
+            && waited.elapsed() < CLIENT_IO_TIMEOUT
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!recovery_record.exists());
+        assert_ne!(path_identity(evaluator)?, first_evaluator);
+        assert_eq!(path_identity(administrator)?, bound_administrator);
+        let calls = port
+            .recovery
+            .as_ref()
+            .map(crate::selector::recovery::tests::PeerPort::calls)
+            .unwrap_or_default();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+
+        fs::remove_file(administrator)?;
+        assert!(runtime
+            .join()
+            .map_err(|_| "root selector runtime panicked")?
+            .is_err());
+        port.finish()?;
+        assert!(!evaluator.exists());
+        Ok(())
+    }
+
     fn bind_provider_endpoint(path: &str) -> TestResult<UnixListener> {
         let listener = UnixListener::bind(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))?;
@@ -5063,8 +5336,272 @@ mod tests {
             &closed,
             PrepareLiveUpdateError::RecoveryPending(SelectorBoundaryError::Io),
         );
-        assert!(matches!(result, Err(SelectorBoundaryError::Io)));
+        assert!(matches!(
+            result,
+            Err(InstallationUpdateError::Overdue(SelectorBoundaryError::Io))
+        ));
         assert!(admission.current().is_err());
+        Ok(())
+    }
+
+    /// A composition over `fixture`'s installation whose provider transport
+    /// is `provider_path`, bound by this process, and whose recovery
+    /// directory is `recovery`.
+    fn update_composition(
+        fixture: &crate::selector::installation::tests::updates::UpdateFixture,
+        provider_path: &Path,
+        recovery: &Path,
+    ) -> TestResult<RootSelectorComposition> {
+        let owner = fs::metadata(recovery)?.uid();
+        Ok(RootSelectorComposition {
+            service: RootSelectorService {
+                admission_time: fixture_admission_time,
+                admission: SelectorAdmission::for_test(fixture.admitted()?)?,
+                transport: SelectedProviderTransport::new(ProviderTransport::from_path_for_test(
+                    provider_path,
+                )?),
+                peer_uid: owner,
+                evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: Arc::new(File::open(recovery)?),
+                recovery_owner: owner,
+            },
+            updates: Mutex::new(()),
+            live_update_timeout: LIVE_UPDATE_TIMEOUT,
+            lifecycle: Arc::new(InProcessProviderPort::refusing()),
+            executable_digest: test_executable_digest,
+        })
+    }
+
+    /// One administrative transaction on `composition`: the client reads the
+    /// challenge and answers with `answer` applied to it, then write EOF.
+    fn administer(
+        composition: &RootSelectorComposition,
+        answer: impl FnOnce(&[u8]) -> TestResult<Vec<u8>> + Send + 'static,
+    ) -> TestResult<(Result<(), InstallationUpdateError>, Vec<u8>)> {
+        let (mut client, mut server) = UnixStream::pair()?;
+        let client = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            let challenge = read_frame(&mut client).map_err(|error| error.to_string())?;
+            let update = answer(&challenge).map_err(|error| error.to_string())?;
+            write_frame(&mut client, &update).map_err(|error| error.to_string())?;
+            client
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| error.to_string())?;
+            let mut reply = Vec::new();
+            let _read = client.read_to_end(&mut reply);
+            Ok(reply)
+        });
+        let result = composition.process_installation_update(&mut server);
+        drop(server);
+        let reply = client.join().map_err(|_| "client thread panicked")??;
+        Ok((result, reply))
+    }
+
+    /// ADR-069 R12 §8: a live update that fails after its SIR1 commit is
+    /// overdue. Here the provider never answers the control exchange, so the
+    /// 100 ms bound passes: SIR1 stays, admission stays closed and the
+    /// administrator receives nothing. A failure before the commit is only
+    /// refused and reopens previous-state admission.
+    #[test]
+    fn a_live_update_that_fails_after_its_sir1_commit_is_overdue() -> TestResult {
+        use crate::selector::installation::tests::updates::UpdateFixture;
+
+        let provider_directory = tempfile::tempdir()?;
+        let provider_path = provider_directory.path().join("provider.sock");
+        // It never accepts: the selector connects, sends RCC1 and RCU1, and
+        // waits for an RCA1 until its deadline.
+        let _provider_listener = UnixListener::bind(&provider_path)?;
+        fs::set_permissions(&provider_path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let recovery = tempfile::tempdir()?;
+        fs::set_permissions(recovery.path(), fs::Permissions::from_mode(0o700))?;
+        let fixture = Arc::new(UpdateFixture::new()?);
+        let mut composition = update_composition(&fixture, &provider_path, recovery.path())?;
+        let recovery_record = fixture.path().join("installation-update.cbor");
+
+        // A peer other than the service's is refused before any challenge.
+        let owner = composition.service.peer_uid;
+        composition.service.peer_uid = owner.wrapping_add(1);
+        let (_client, server) = UnixStream::pair()?;
+        assert_eq!(
+            composition.update_installation(server),
+            Err(InstallationUpdateError::Refused(
+                SelectorBoundaryError::ArtifactInvalid
+            ))
+        );
+        composition.service.peer_uid = owner;
+
+        // Before the commit: an SIU1 for another challenge is refused.
+        let stale = Arc::clone(&fixture);
+        let (result, reply) = administer(&composition, move |challenge| {
+            stale.request_from_challenge(challenge, Some([9; 16]))
+        })?;
+        assert_eq!(
+            result,
+            Err(InstallationUpdateError::Refused(
+                SelectorBoundaryError::ArtifactInvalid
+            ))
+        );
+        assert!(reply.is_empty());
+        assert!(!recovery_record.exists());
+        assert!(composition.service.admission.current().is_ok());
+
+        let exact = Arc::clone(&fixture);
+        let (result, reply) = administer(&composition, move |challenge| {
+            exact.request_from_challenge(challenge, None)
+        })?;
+        assert_eq!(
+            result,
+            Err(InstallationUpdateError::Overdue(
+                SelectorBoundaryError::SelectorUnavailable
+            ))
+        );
+        assert!(reply.is_empty());
+        assert!(recovery_record.exists());
+        assert!(composition.service.admission.current().is_err());
+        Ok(())
+    }
+
+    /// A provider endpoint bound by this process with the socket mode the
+    /// selector requires.
+    fn provider_endpoint(directory: &Path) -> TestResult<(PathBuf, UnixListener)> {
+        let path = directory.join("provider.sock");
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        Ok((path, listener))
+    }
+
+    /// A completed live update whose acknowledgement `deliver`s or not, on
+    /// a fresh installation whose provider answers the control exchange.
+    fn completed_update(
+        prepare: impl FnOnce(&RootSelectorComposition),
+        deliver: bool,
+    ) -> TestResult<(Result<(), InstallationUpdateError>, bool)> {
+        use crate::selector::installation::tests::updates::UpdateFixture;
+
+        let provider_directory = tempfile::tempdir()?;
+        let (provider_path, provider_listener) = provider_endpoint(provider_directory.path())?;
+        let recovery = tempfile::tempdir()?;
+        fs::set_permissions(recovery.path(), fs::Permissions::from_mode(0o700))?;
+        let fixture = Arc::new(UpdateFixture::new()?);
+        let mut composition = update_composition(&fixture, &provider_path, recovery.path())?;
+        composition.live_update_timeout = INITIAL_IO_TIMEOUT;
+        prepare(&composition);
+        // The provider answers only once the administrator has sent its
+        // update and, unless it waits for the reply, hung up.
+        let (sent, administrator_done) = std::sync::mpsc::channel();
+        let provider = std::thread::spawn(move || {
+            administrator_done
+                .recv()
+                .map_err(|_| "the administrator never finished".to_owned())?;
+            serve_control_response(&provider_listener).map_err(|error| error.to_string())
+        });
+        let (mut client, mut server) = UnixStream::pair()?;
+        let exact = Arc::clone(&fixture);
+        let client = std::thread::spawn(move || -> Result<(), String> {
+            let challenge = read_frame(&mut client).map_err(|error| error.to_string())?;
+            let update = exact
+                .request_from_challenge(&challenge, None)
+                .map_err(|error| error.to_string())?;
+            write_frame(&mut client, &update).map_err(|error| error.to_string())?;
+            client
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| error.to_string())?;
+            let reply = deliver.then_some(client);
+            sent.send(())
+                .map_err(|_| "the provider is gone".to_owned())?;
+            if let Some(mut client) = reply {
+                let mut received = Vec::new();
+                let _read = client.read_to_end(&mut received);
+            }
+            Ok(())
+        });
+        let result = composition.process_installation_update(&mut server);
+        drop(server);
+        client.join().map_err(|_| "client thread panicked")??;
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok((
+            result,
+            fixture.path().join("installation-update.cbor").exists(),
+        ))
+    }
+
+    /// After the durable completion, a failure to retire the previous
+    /// generation leaves no successor admitted, so the update is overdue
+    /// (crash row 8); losing only the acknowledgement is refused.
+    #[test]
+    fn steps_after_completion_are_overdue_until_only_the_reply_is_lost() -> TestResult {
+        let (result, sir1) = completed_update(
+            |composition| {
+                let states = &composition.service.evaluation_namespaces.states;
+                let _poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = states
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    std::panic::resume_unwind(Box::new(()));
+                }));
+            },
+            true,
+        )?;
+        assert_eq!(
+            result,
+            Err(InstallationUpdateError::Overdue(
+                SelectorBoundaryError::SelectorUnavailable
+            ))
+        );
+        assert!(!sir1);
+
+        let (result, sir1) = completed_update(|_| {}, false)?;
+        assert_eq!(
+            result,
+            Err(InstallationUpdateError::Refused(SelectorBoundaryError::Io))
+        );
+        assert!(!sir1);
+        Ok(())
+    }
+
+    /// The administrative loop keeps serving after a refused transaction and
+    /// returns `Ok` as soon as one is overdue, before it is stopped.
+    #[test]
+    fn administration_returns_at_the_first_overdue_update() -> TestResult {
+        use crate::selector::installation::tests::updates::UpdateFixture;
+
+        let provider_directory = tempfile::tempdir()?;
+        // It never accepts, so the committed update is overdue.
+        let (provider_path, _provider_listener) = provider_endpoint(provider_directory.path())?;
+        let recovery = tempfile::tempdir()?;
+        fs::set_permissions(recovery.path(), fs::Permissions::from_mode(0o700))?;
+        let fixture = UpdateFixture::new()?;
+        let composition = update_composition(&fixture, &provider_path, recovery.path())?;
+        let directory = ListenerTestDirectory::create()?;
+        let listener = OwnedAdministratorListener {
+            inner: OwnedSelectorListener::bind_path(&directory.socket, directory.uid)?,
+        };
+        listener.set_nonblocking()?;
+        // No connection waits yet: one poll sleeps and keeps serving.
+        assert!(administer_once(&listener, &composition)?.is_continue());
+        let running = AtomicBool::new(false);
+        let transaction = |nonce: Option<[u8; 16]>| -> TestResult<Vec<u8>> {
+            let mut client = UnixStream::connect(&directory.socket)?;
+            client.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+            let challenge = read_frame(&mut client)?;
+            write_frame(
+                &mut client,
+                &fixture.request_from_challenge(&challenge, nonce)?,
+            )?;
+            client.shutdown(std::net::Shutdown::Write)?;
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply)?;
+            Ok(reply)
+        };
+        let served = thread::scope(|scope| -> TestResult<Result<(), SelectorBoundaryError>> {
+            let serving = scope.spawn(|| serve_administrator(&listener, &composition, &running));
+            assert!(transaction(Some([9; 16]))?.is_empty());
+            assert!(transaction(None)?.is_empty());
+            // A loop that kept serving would now lose its pathname and fail.
+            fs::remove_file(&directory.socket)?;
+            serving.join().map_err(|_| "administration panicked".into())
+        })?;
+        assert_eq!(served, Ok(()));
+        assert!(fixture.path().join("installation-update.cbor").exists());
         Ok(())
     }
 
@@ -5620,11 +6157,13 @@ mod tests {
         drop(administrator_replacement);
         fs::remove_file(&administrator_fixture.socket)?;
 
-        if owner != ROOT_UID {
-            let (client, server) = UnixStream::pair()?;
-            assert!(composition.update_installation(server).is_err());
-            drop(client);
-        }
+        // An administrator that hung up is refused without a challenge.
+        let (client, server) = UnixStream::pair()?;
+        drop(client);
+        assert!(matches!(
+            composition.update_installation(server),
+            Err(InstallationUpdateError::Refused(_))
+        ));
         Ok(())
     }
 

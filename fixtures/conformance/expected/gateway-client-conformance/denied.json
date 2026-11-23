@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "85f01ec61cf01c89dc38d2a43bd9675547765ee47be687a01e6c2f796d31fe5a",
+  "input_blake3_digest": "314fa589dfa8dd85d7368d44b99b9813fa0a440c18b0724ac2e29775a7a9bf32",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",

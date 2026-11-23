@@ -122,7 +122,13 @@ identical actions of one sub-case are an exact retry.
 
 ## 4. Observations and normalization
 
-The observation of a sent exchange is `{"status": <code>, "body": <body>}`. The body is
+The observation of a sent exchange is `{"status": <code>, "body": <body>}`. When the response
+carries a `cache-control` field, the observation also has the member `"headers":
+{"cache-control": <its first field value as text>}`; no other response header is observed, and a
+response without that field has no `headers` member (#1407). The Gateway v1 contract marks every
+answer `Cache-Control: no-store`, so every expected observation of a sent exchange carries
+`"headers": {"cache-control": "no-store"}` and an answer without it, or with any other value,
+does not match. The body is
 `{"json": <value>}` when the response bytes are one JSON value, else the string `"non-json"`.
 The value is normalized. First, every text value equal to the consent, room or erasure the
 sub-case has captured so far (including by this exchange) becomes the slot literal
@@ -197,7 +203,8 @@ are 0.
   sub-case ID as its key digest, the pinned Local erasure policy and the Local mode profile as
   bound inputs), an exact retry answers the same receipt, the same key for consented shared
   data is the `409` `idempotency-conflict` problem, and the erasure reads back `submitted` with
-  generation 0, no obligation and the `exact` claim (#1449).
+  generation 0, no obligation, the `exact` claim and the store's `redaction_generation` 0, as
+  no driver committed a client-cache redaction generation (#1449, #1407).
 - **denied** (`capability-denied`): an action without a host authorizer is the `401`
   `unauthenticated` problem and an action the fixture authority does not grant is the `403`
   `unauthorized` problem, each followed by an empty poll (denial without state change); a route

@@ -62,11 +62,12 @@ pub enum ProblemCodeV1 {
     ErasureScopeRetained,
     ErasureScopeTooLarge,
     ErasureQuotaExhausted,
+    ErasureAdmissionsClosed,
 }
 
 impl ProblemCodeV1 {
     /// Every code, in registry order.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::InvalidRequest,
         Self::UnsupportedVersion,
         Self::IncompatibleProfile,
@@ -92,6 +93,7 @@ impl ProblemCodeV1 {
         Self::ErasureScopeRetained,
         Self::ErasureScopeTooLarge,
         Self::ErasureQuotaExhausted,
+        Self::ErasureAdmissionsClosed,
     ];
 
     /// The stable wire code.
@@ -107,7 +109,7 @@ impl ProblemCodeV1 {
     }
 
     /// The wire code and `title` of each code, in declaration order.
-    const NAMES: [(&'static str, &'static str); 25] = [
+    const NAMES: [(&'static str, &'static str); 26] = [
         ("invalid-request", "Invalid request"),
         ("unsupported-version", "Unsupported version"),
         ("incompatible-profile", "Incompatible profile"),
@@ -133,6 +135,7 @@ impl ProblemCodeV1 {
         ("erasure-scope-retained", "Erasure scope retained"),
         ("erasure-scope-too-large", "Erasure scope too large"),
         ("erasure-quota-exhausted", "Erasure quota exhausted"),
+        ("erasure-admissions-closed", "Erasure admissions closed"),
     ];
 }
 

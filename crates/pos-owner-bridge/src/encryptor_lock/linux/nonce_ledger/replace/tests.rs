@@ -333,7 +333,8 @@ mod cases {
     fn a_duplicate_descriptor_defers_ledger_unlock_after_commit() -> TestResult {
         let _serial = PROCESS_TEST_LOCK.lock()?;
         let (_root, guard) = prepare()?;
-        let staged = super::super::StagedLedger::open(&guard.directory)?;
+        let staged =
+            super::super::StagedFile::open(&guard.directory, LEDGER_NAME, TEMPORARY_NAME, true)?;
         let duplicate = rustix::io::fcntl_dupfd_cloexec(&staged.file, 0)?;
         staged.commit(&image(13)?, |_| Ok(()))?;
         assert_eq!(
