@@ -4,8 +4,9 @@
 //! The projection reads only verified state: the request's ERS1 head and
 //! history through the host-owned coordinator, its recorded progress
 //! through the complete core recovery, and the ELADM1 its submission
-//! retained. It never discloses a Timeline, Fork, selector, target, owner
-//! or bundle content; the acknowledgement classes are counts only.
+//! retained, and the store's redaction generation (#1407). It never
+//! discloses a Timeline, Fork, selector, target, owner or bundle content;
+//! the acknowledgement classes are counts only.
 
 use std::collections::BTreeMap;
 
@@ -56,6 +57,11 @@ pub struct LocalErasureProjectionV1 {
     pub positive: u64,
     /// The same counts per acknowledgement class, in class order.
     pub classes: Vec<LocalErasureClassCountV1>,
+    /// The store's redaction generation (ADR-136 follow-up F2, #1407): how
+    /// many ELCG1 cache generations the store has committed, across every
+    /// request. It is store-wide, never decreases, and is 0 before the
+    /// first commit.
+    pub redaction_generation: u64,
 }
 
 /// The counts of `progress` per acknowledgement class: each obligation and
@@ -169,6 +175,12 @@ impl ErasureCommandSenderV1<'_> {
         let admission = self
             .local_admission(request)?
             .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+        let redaction_generation = self
+            .host
+            .store
+            .host_store()
+            .redaction_generation()
+            .map_err(map_erasure_error)?;
         Ok(Some(LocalErasureProjectionV1 {
             erasure_id,
             state: verified.state().clone(),
@@ -178,6 +190,7 @@ impl ErasureCommandSenderV1<'_> {
             required: u64::try_from(progress.obligations.len()).unwrap_or(u64::MAX),
             positive: u64::try_from(positives(&progress).count()).unwrap_or(u64::MAX),
             classes: class_counts(&progress, &owners),
+            redaction_generation,
         }))
     }
 }

@@ -410,6 +410,16 @@ impl PreparedLocalOwnerEffectV1 {
     pub const fn owner_result(&self) -> &ErasureRetainedObjectV1 {
         &self.owner_result
     }
+
+    /// Whether newly retaining this effect raises the store's redaction
+    /// generation (ADR-136 follow-up F2, #1407): exactly for an ELCG1 cache
+    /// generation, the one effect record that carries the ELCG1 tag.
+    #[must_use]
+    pub fn raises_redaction_generation(&self) -> bool {
+        self.effect_object
+            .as_ref()
+            .is_some_and(|object| object.tag() == "ELCG1")
+    }
 }
 
 /// The tombstones, the recipient-export withdrawal binding and the ELO1

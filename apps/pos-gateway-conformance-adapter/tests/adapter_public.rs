@@ -842,14 +842,42 @@ fn the_binary_runs_one_attempt_through_its_process_boundary_body() -> TestResult
 #[test]
 fn an_observation_is_the_status_and_the_normalized_json_or_non_json_body() {
     assert_eq!(
-        observation_v1(404, None),
+        observation_v1(404, None, None),
         json!({"status": 404, "body": "non-json"})
     );
     assert_eq!(
         observation_v1(
             400,
+            None,
             Some(json!({"detail": "bad", "code": "invalid-request"}))
         ),
         json!({"status": 400, "body": {"json": {"detail": "<message>", "code": "invalid-request"}}})
+    );
+}
+
+/// #1407: a response's `cache-control` field is observed as `headers`, its value kept
+/// verbatim so that any other directive cannot match; a response without one has no
+/// `headers` member.
+#[test]
+fn an_observation_carries_the_cache_control_header_only() {
+    assert_eq!(
+        observation_v1(200, Some("no-store"), Some(json!({"ok": true}))),
+        json!({
+            "status": 200,
+            "headers": {"cache-control": "no-store"},
+            "body": {"json": {"ok": true}},
+        })
+    );
+    assert_eq!(
+        observation_v1(404, Some("max-age=60"), None),
+        json!({
+            "status": 404,
+            "headers": {"cache-control": "max-age=60"},
+            "body": "non-json",
+        })
+    );
+    assert_ne!(
+        observation_v1(200, Some("no-store"), None),
+        observation_v1(200, None, None)
     );
 }

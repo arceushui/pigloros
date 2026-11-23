@@ -107,12 +107,22 @@ impl SqliteStore {
                         .map_or(Ok(()), |tombstone| self.holds_tombstone(&tombstone))
                 })
                 .and_then(|()| {
-                    prepared.effect_object().map_or(Ok(()), |object| {
-                        insert_retained(&self.conn, object).map(|_| ())
-                    })
+                    prepared
+                        .effect_object()
+                        .map_or(Ok(false), |object| insert_new_retained(&self.conn, object))
+                })
+                .and_then(|inserted| {
+                    raise_redaction_generation(
+                        &self.conn,
+                        inserted && prepared.raises_redaction_generation(),
+                    )
                 })
                 .and_then(|()| insert_retained(&self.conn, prepared.owner_result()))
         })
+    }
+
+    pub(super) fn local_erasure_redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
+        read_redaction_generation(&self.conn)
     }
 
     pub(super) fn local_erasure_store_identity(&self) -> Result<Option<Hash>, ErasureErrorV1> {
@@ -590,6 +600,15 @@ pub(super) fn insert_retained(
     connection: &Connection,
     object: &ErasureRetainedObjectV1,
 ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    insert_new_retained(connection, object).map(|_| object.reference())
+}
+
+/// [`insert_retained`], answering whether the object's bytes were newly
+/// inserted rather than already held.
+fn insert_new_retained(
+    connection: &Connection,
+    object: &ErasureRetainedObjectV1,
+) -> Result<bool, ErasureErrorV1> {
     let reference = object.reference();
     connection
         .execute(
@@ -606,13 +625,48 @@ pub(super) fn insert_retained(
                     params![reference.digest().as_slice(), object.tag(), inserted == 1],
                 )
                 .map_err(map_erasure_receipt_failure)
+                .map(|_| inserted == 1)
         })
-        .and_then(|_| load_sqlite_erasure_evidence(connection, reference))
-        .and_then(|stored| {
-            (stored.as_slice() == object.canonical_cbor())
-                .then_some(reference)
-                .ok_or(ErasureErrorV1::ProvenanceMissing)
+        .and_then(|inserted| {
+            load_sqlite_erasure_evidence(connection, reference).and_then(|stored| {
+                (stored.as_slice() == object.canonical_cbor())
+                    .then_some(inserted)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
         })
+}
+
+/// The redaction generation (#1407); a store without its row has committed
+/// no ELCG1. A row the adapter cannot read is a closed persistence error.
+fn read_redaction_generation(connection: &Connection) -> Result<u64, ErasureErrorV1> {
+    connection
+        .query_row(
+            "SELECT generation FROM erasure_redaction_generation WHERE singleton = 1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .optional()
+        .map(Option::unwrap_or_default)
+        .map_err(map_erasure_receipt_failure)
+}
+
+/// Raise the redaction generation by one inside the caller's transaction
+/// when `raises`. A generation past the largest `SQLite` integer cannot be
+/// written, so the caller's transaction fails and rolls back.
+fn raise_redaction_generation(connection: &Connection, raises: bool) -> Result<(), ErasureErrorV1> {
+    if !raises {
+        return Ok(());
+    }
+    read_redaction_generation(connection).and_then(|generation| {
+        connection
+            .execute(
+                "INSERT INTO erasure_redaction_generation (singleton, generation) VALUES (1, ?1)
+                 ON CONFLICT (singleton) DO UPDATE SET generation = excluded.generation",
+                params![generation.saturating_add(1)],
+            )
+            .map(drop)
+            .map_err(map_erasure_receipt_failure)
+    })
 }
 
 /// The first `max` retained objects of the named tags outside `keep`, in

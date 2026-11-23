@@ -7704,6 +7704,10 @@ mod tests {
             self.inner.commit_local_owner_effect(prepared)
         }
 
+        fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
+            self.inner.redaction_generation()
+        }
+
         fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
             self.inner.erasure_store_identity()
         }

@@ -15,6 +15,11 @@
 //!   An unknown id, another subject's id and a refused decision are the
 //!   same `404 not-found-or-unavailable`.
 //!
+//! The projection always carries the store's `redaction_generation`
+//! (ADR-136 follow-up F2, #1407): the count of ELCG1 cache generations the
+//! store has committed, 0 before the first, which never decreases. Every
+//! response carries `Cache-Control: no-store` (see `http::finish`).
+//!
 //! Both operations are consent-exempt. A Gateway without a Local erasure
 //! composition answers `requestErasure` `503` and `getErasure` `404` (D9).
 //! The `idempotency_key_digest` is BLAKE3 of the key bytes (D6), and the
@@ -201,6 +206,7 @@ fn erasure_resource(projection: &LocalErasureProjectionV1) -> Option<Value> {
                 "classes": classes,
             },
             "external_copies": "not-covered",
+            "redaction_generation": projection.redaction_generation,
         })
     })
 }

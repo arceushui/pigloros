@@ -2869,10 +2869,26 @@ pub trait ErasureInventoryPersistencePortV1 {
     /// captured, deleted and equal to the ELXW1, or already withdrawn with
     /// exactly this ELXW1, and [`ErasureErrorV1::ReceiptCommitFailed`] when
     /// its durable commit is refused. Nothing is committed on error.
+    ///
+    /// A commit that newly retains an ELCG1 cache generation also raises the
+    /// store's redaction generation ([`Self::redaction_generation`]) by one
+    /// in the same transaction (ADR-136 follow-up F2, #1407); repeating a
+    /// committed ELCG1 retains nothing new and raises nothing. A redaction
+    /// generation that cannot be raised fails the commit with
+    /// [`ErasureErrorV1::ReceiptCommitFailed`], and neither is changed.
     fn commit_local_owner_effect(
         &mut self,
         prepared: PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+
+    /// The store's redaction generation (ADR-136 follow-up F2, #1407): how
+    /// many ELCG1 cache generations the store has committed, 0 before the
+    /// first. It never decreases, also across a reopen of a durable store.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when the generation cannot be
+    /// read.
+    fn redaction_generation(&self) -> Result<u64, ErasureErrorV1>;
 
     /// Read the write-once erasure store identity.
     ///
@@ -8052,6 +8068,10 @@ mod coverage_paths {
             &mut self,
             _prepared: PreparedLocalOwnerEffectV1,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
             Err(ErasureErrorV1::ProvenanceMissing)
         }
 

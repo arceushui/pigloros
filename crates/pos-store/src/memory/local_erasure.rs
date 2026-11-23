@@ -94,12 +94,30 @@ impl MemoryStore {
                     .existing_tombstone()
                     .map_or(Ok(()), |tombstone| self.holds_tombstone(&tombstone))
             })
-            .map(|()| {
+            .and_then(|()| self.raised_redaction_generation(prepared))
+            .map(|generation| {
                 if let Some(object) = prepared.effect_object() {
                     self.insert_retained(object);
                 }
+                self.redaction_generation = generation;
                 self.insert_retained(prepared.owner_result())
             })
+    }
+
+    /// The redaction generation once `prepared` commits (#1407): one higher
+    /// when it newly retains an ELCG1, else unchanged. A generation that
+    /// cannot be raised refuses the commit before anything changes.
+    fn raised_redaction_generation(
+        &self,
+        prepared: &PreparedLocalOwnerEffectV1,
+    ) -> Result<u64, ErasureErrorV1> {
+        let raises = prepared.raises_redaction_generation()
+            && prepared
+                .effect_object()
+                .is_some_and(|object| !self.erasure_evidence.contains_key(&object.reference()));
+        self.redaction_generation
+            .checked_add(u64::from(raises))
+            .ok_or(ErasureErrorV1::ReceiptCommitFailed)
     }
 
     pub(super) const fn local_erasure_store_identity(&self) -> Option<Hash> {
@@ -261,6 +279,50 @@ mod tests {
         );
         assert_eq!(store.erasure_evidence.get(&reference), Some(&held));
         assert!(store.erasure_retained_objects.is_empty());
+        Ok(())
+    }
+
+    /// #1407: a redaction generation at its largest value cannot be raised,
+    /// so a fresh ELCG1 commit is refused and neither the ELCG1, its ELO1
+    /// nor the generation changes; an effect that raises nothing still
+    /// commits. The public parity tests reach the `SQLite` bound instead.
+    #[test]
+    fn a_generation_that_cannot_be_raised_refuses_the_commit() -> Result<(), ErasureErrorV1> {
+        let mut store = MemoryStore::new();
+        store.redaction_generation = u64::MAX;
+        let binding = pos_core::LocalOwnerResultBindingV1 {
+            request: ErasureReferenceV1::from_digest([1; 32]),
+            attempt: ErasureReferenceV1::from_digest([2; 32]),
+            obligation: ErasureReferenceV1::from_digest([3; 32]),
+            command: ErasureReferenceV1::from_digest([4; 32]),
+            owner_ref: ErasureReferenceV1::from_digest([5; 32]),
+            error: None,
+        };
+        let record = |tag: &str| {
+            let mut bytes = vec![0x83, 0x65];
+            bytes.extend_from_slice(tag.as_bytes());
+            bytes.extend_from_slice(&[0x01, 0x01]);
+            bytes
+        };
+        let elcg1 = PreparedLocalOwnerEffectV1::new(
+            pos_core::LocalOwnerEffectV1::CacheGeneration(record("ELCG1")),
+            binding,
+        )?;
+        assert_eq!(
+            store.local_erasure_commit_owner_effect(&elcg1),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        assert!(store.erasure_evidence.is_empty());
+        assert_eq!(store.redaction_generation, u64::MAX);
+        let elrp1 = PreparedLocalOwnerEffectV1::new(
+            pos_core::LocalOwnerEffectV1::ReplicaPurge(record("ELRP1")),
+            binding,
+        )?;
+        assert_eq!(
+            store.local_erasure_commit_owner_effect(&elrp1),
+            Ok(elrp1.owner_result().reference())
+        );
+        assert_eq!(store.redaction_generation, u64::MAX);
         Ok(())
     }
 }

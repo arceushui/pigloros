@@ -299,6 +299,10 @@ impl Served {
         let status = response.status();
         let headers = response.headers().clone();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        // #1407: every answer, success or problem, is marked `no-store`.
+        if !stores_nothing(&headers) {
+            return Err(format!("{method} {uri} answered {status} without no-store").into());
+        }
         Ok(Answer {
             status,
             headers,
@@ -360,6 +364,15 @@ impl Served {
         drop(self.gateway);
         Ok(self.world)
     }
+}
+
+/// Whether `headers` carry exactly `Cache-Control: no-store` (#1407).
+fn stores_nothing(headers: &HeaderMap) -> bool {
+    headers
+        .get_all("cache-control")
+        .iter()
+        .map(|value| value.as_bytes())
+        .eq([b"no-store".as_slice()])
 }
 
 /// One answered request.
@@ -578,6 +591,9 @@ async fn get_erasure_answers_one_not_found(mode: ServeMode) -> TestResult {
         json!({"required": 0, "positive": 0, "classes": []})
     );
     assert_eq!(body["external_copies"], "not-covered");
+    // #1407: a served projection always carries the store's redaction
+    // generation, 0 before any ELCG1 commits.
+    assert_eq!(body["redaction_generation"], 0);
     let text = String::from_utf8(own.bytes.clone())?;
     let owned = created["id"].as_str().ok_or("no Timeline id")?.to_owned();
     for withheld in [owned, actor.to_string(), other.to_string()] {
@@ -723,6 +739,12 @@ async fn a_closed_gateway_serves_no_erasure() -> TestResult {
 /// readable; the projection's generation only rises and its claim only
 /// weakens; and after the partial failure the subject's next request is
 /// admitted and driven too.
+///
+/// #1407 (ADR-136 follow-up F2): once each request reaches its first receipt
+/// its ELCG1 has committed, so the store's `redaction_generation` has risen
+/// by one; across the successive reads and a restart it never decreases,
+/// the claim stays weakened and the frozen Timeline's Events stay
+/// `403 deleted`, every answer marked `no-store`.
 async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
     mode: ServeMode,
 ) -> TestResult {
@@ -753,7 +775,11 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
             .await?
             .json()?,
     );
-    for key in ["erasure-1", "erasure-2"] {
+    let events = |timeline: &str| format!("/v1/timelines/{timeline}/events");
+    let deleted = (StatusCode::FORBIDDEN, "deleted".to_owned(), false);
+    let redaction = |body: &Value| body["redaction_generation"].as_u64();
+    let mut redacted = 0;
+    for (key, receipts) in [("erasure-1", 1), ("erasure-2", 2)] {
         assert_eq!(
             served
                 .request(actor, key, "private-subject-data")
@@ -770,6 +796,27 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
         assert!(
             generations.windows(2).all(|pair| pair[0] <= pair[1]),
             "{generations:?}"
+        );
+        // Every projection carries the store-wide redaction generation,
+        // which never decreases and, at the first receipt, counts one ELCG1
+        // per request driven so far.
+        let redactions = observed.iter().map(redaction).collect::<Vec<_>>();
+        assert!(
+            redactions.iter().all(Option::is_some)
+                && redactions.windows(2).all(|pair| pair[0] <= pair[1])
+                && redactions.first().copied().flatten() >= Some(redacted),
+            "{redactions:?}"
+        );
+        redacted = redactions.last().copied().flatten().unwrap_or_default();
+        assert_eq!(redacted, receipts);
+        // Once the generation commits, the subject's own Timeline is a
+        // wholly erased resource: its Events are refused `deleted`.
+        assert_eq!(
+            served
+                .send("GET", &events(&owned), actor, None, None)
+                .await?
+                .problem()?,
+            deleted
         );
         // The actor has no role-0 key, so its closure is the store target's
         // cache signal and replica and its one Timeline's payload, which
@@ -799,18 +846,33 @@ async fn each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next(
         assert_eq!(classes[2], ("timeline-payload".to_owned(), 0));
         assert_eq!(classes.len(), 3);
     }
-    let events = |timeline: &str| format!("/v1/timelines/{timeline}/events");
-    let frozen = served
-        .send("GET", &events(&owned), actor, None, None)
-        .await?;
-    assert_eq!(
-        frozen.problem()?,
-        (StatusCode::FORBIDDEN, "deleted".to_owned(), false)
-    );
     let readable = served
         .send("GET", &events(&others), other, None, None)
         .await?;
     assert_eq!(readable.status, StatusCode::OK);
+    // A restarted Gateway reads the same durable generation for both
+    // requests, still with the weakened claim, and the Timeline stays
+    // refused.
+    let world = served.stop(driver).await?;
+    let (served, driver) = Served::over(world, mode, compiled())?;
+    for key in ["erasure-1", "erasure-2"] {
+        let body = served
+            .read(actor, &erasure_id(actor, key)?.to_string())
+            .await?
+            .json()?;
+        assert!(redaction(&body) >= Some(redacted), "{key}: {body}");
+        assert_eq!(
+            body["replay_claim"],
+            "exact-authoritative-with-redacted-views"
+        );
+    }
+    assert_eq!(
+        served
+            .send("GET", &events(&owned), actor, None, None)
+            .await?
+            .problem()?,
+        deleted
+    );
     served.stop(driver).await?;
     Ok(())
 }
@@ -1035,6 +1097,9 @@ async fn status_of(app: &Router, method: &str, uri: &str, key: bool) -> TestResu
     };
     let request = request.body(body)?;
     let response = app.clone().oneshot(request).await?;
+    if !stores_nothing(response.headers()) {
+        return Err(format!("{method} {uri} was answered without no-store").into());
+    }
     Ok(response.status())
 }
 

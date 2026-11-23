@@ -225,6 +225,47 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
   prove that no backup or plaintext Event payload survives, so a Local erasure ends in
   `partial-failure` with those classes negative. Nothing an erasure answer carries names a
   Timeline, Fork, selector, target, owner or bundle content.
+- **Redaction generation.** An `Erasure` served by a Local erasure composition always carries
+  `redaction_generation` (#1407): the number of client-cache redaction generations (ELCG1) the
+  store has committed, across every erasure of every subject, `0` before the first. The store
+  raises it by one in the same transaction that commits each `client-cache-signal` owner
+  effect, so it never decreases, also across a restart. The member is optional in the schema,
+  so a v1 client must not require it. See *Client cache* for what a client does with it.
+
+## Client cache
+
+The rules below are normative for the Gateway and for every supported client of v1 (ADR-136
+follow-up F2, #1407). A *managed representation* is any response body of a protected loopback
+operation: a Timeline's Events, a Session, a consent, a Scenario Room, Preference or OptionSpec
+revision, an erasure receipt or projection, and every problem.
+
+1. **The Gateway marks every answer `no-store`.** Every response of every operation, problems
+   included, carries `Cache-Control: no-store` (the required `CacheControl` response header of
+   `openapi.json`), so no cache may store it. The same router layer also marks the routes
+   outside `/v1` (`/`, `/ledger` and `/health`) and every unrouted answer: one rule covers every
+   response the Gateway sends.
+2. **A supported client MUST NOT persist a managed representation.** It may hold one in memory
+   only for as long as it renders or acts on it. RFC 9111 §5.2.2.5 states that `no-store` is
+   not a reliable or sufficient mechanism for ensuring privacy: it binds caches, not the
+   application that already holds the bytes. This client rule, not the header alone, carries the
+   guarantee.
+3. **A supported client MUST re-read and drop its copies after an erasure.** Once `getErasure`
+   shows the `client-cache-signal` acknowledgement class positive (`acknowledgements.classes`),
+   the client drops every local copy of a managed representation, including one held in memory,
+   and re-reads what it still needs. A client that sees `redaction_generation` rise above the
+   value it last saw does the same. After the redaction generation commits, the managed
+   representations report the erasure: the subject's frozen Timeline is `403 deleted`, an
+   erased Preference or OptionSpec revision is `410 deleted`, and the erasure's `replay_claim`
+   is weakened (for a Local erasure `exact-authoritative-with-redacted-views` or weaker; it
+   never strengthens).
+4. **Withheld members.** A representation that mixes erased and kept members reports each
+   erased member in `availability.withheld` as `{member, reason: "deleted"}`, with
+   `availability.state` `partial`, or `unavailable` when nothing is left to show. No served
+   representation mixes them today: every erased resource is wholly refused as in rule 3, so a
+   served `availability` withholds nothing.
+5. **`Clear-Site-Data` is not sent.** The `Clear-Site-Data` response header (W3C) is a browser
+   mechanism and only a precedent for rule 3: the Gateway never sends it, and a client must not
+   wait for it.
 
 ## Problems
 
@@ -386,4 +427,8 @@ URL, and the description's revision label is not part of the wire contract. The 
 - Parameters are declared on each operation (not on the path item), each with a `schema`.
 - A golden example is `{name, operation_id, request, request_valid, response}`. An example of a
   request no route serves has a null `operation_id` and names its `method` and query-free
-  `target`.
+  `target`. Its `response` has a `status` and a `body`, and may state its `headers`: an example
+  that states them states every required header of the response it answers (case-insensitive
+  names, values of the declared schema) and no undeclared one; an example without `headers`
+  asserts none, so a header added within v1 leaves every frozen example valid. The
+  `client-cache-*` examples show `Cache-Control: no-store` (#1407).

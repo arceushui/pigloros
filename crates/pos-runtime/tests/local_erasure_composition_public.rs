@@ -9440,6 +9440,52 @@ fn the_projection_follows_a_driven_request() -> TestResult {
     Ok(())
 }
 
+/// #1407 (ADR-136 follow-up F2): the store's redaction generation is 0
+/// until the first ELCG1 commits, never decreases while a request is
+/// driven, and rises again with the next request's ELCG1; every projection
+/// reads the same store-wide value. Each ELCG1 still carries its own
+/// request's attempt position, 2 for attempt 0 (Q8).
+#[test]
+fn the_redaction_generation_rises_across_requests() -> TestResult {
+    let store = driver_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let redaction = |host: &mut ErasureExecutionHostV1, key: u8| -> TestResult<u64> {
+        Ok(projection(host, actor(), key)?
+            .ok_or("no projection")?
+            .redaction_generation)
+    };
+    let mut previous = redaction(&mut host, 1)?;
+    assert_eq!(previous, 0);
+    loop {
+        let step = driver().step(&mut host, request_of(1)?)?;
+        if step == LocalErasureStepV1::Idle {
+            break;
+        }
+        let current = redaction(&mut host, 1)?;
+        assert!(current >= previous, "{step:?}");
+        previous = current;
+    }
+    assert_eq!(previous, 1);
+    submitted(&mut host, 2, ErasureScopeV1::ConsentedSharedData)?;
+    assert_eq!(redaction(&mut host, 2)?, 1);
+    finalized(driver().drive(&mut host, request_of(2)?)?)?;
+    assert_eq!(redaction(&mut host, 1)?, 2);
+    assert_eq!(redaction(&mut host, 2)?, 2);
+    let mut records = store
+        .sqlite()?
+        .retained_erasure_objects("ELCG1", 16)?
+        .iter()
+        .map(|bytes| LocalErasureCacheGenerationV1::from_canonical_cbor(bytes))
+        .map(|record| record.map(|record| (record.request, record.generation)))
+        .collect::<Result<Vec<_>, _>>()?;
+    records.sort_unstable();
+    let mut expected = vec![(request_of(1)?, 2), (request_of(2)?, 2)];
+    expected.sort_unstable();
+    assert_eq!(records, expected);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
 // a subject-scoped export through core `export_timeline`, then erasure,

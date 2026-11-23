@@ -553,6 +553,10 @@ async fn exchange_all(
                 .oneshot(request(exchange, &slots, &subcase.id))
                 .await;
             let status = response.status().as_u16();
+            let cache_control = response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
             let bytes = axum::body::to_bytes(response.into_body(), RESPONSE_LIMIT)
                 .await
                 .unwrap_or_default();
@@ -569,6 +573,7 @@ async fn exchange_all(
             slots.capture(exchange.capture(), parsed.as_ref());
             observation_v1(
                 status,
+                cache_control.as_deref(),
                 parsed.map(|value| substitute_captured_v1(value, &slots.captured())),
             )
         } else {
