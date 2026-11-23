@@ -1,5 +1,5 @@
 // Let the host observe RECEIVED and cancel before the browser opens native UI.
-var STATE_POLL_MS = 20, CREDENTIAL_START_GRACE_MS = 3 * STATE_POLL_MS;
+var STATE_POLL_MS = 20, CREDENTIAL_START_GRACE_MS = 10 * STATE_POLL_MS;
 
 function callCredentialAfterGrace(method, options) {
   return new Promise(function (resolve, reject) {
