@@ -382,18 +382,8 @@ impl<'a> Responder<'a> {
                 } else {
                     Admission::Busy
                 };
-                // A refusal is accepted only with its uncharged reader place
-                // in hand, so it never waits behind a connection accepted
-                // before it; with no place, the acceptor backs off and polls
-                // again.
-                let permit = (execute_ready && admission == Admission::Busy)
-                    .then(|| self.refusals.wait(Instant::now()))
-                    .flatten();
-                (execute_ready && (admission == Admission::Answered || permit.is_some()))
-                    .then(|| execute.accept())
-                    .transpose()
-                    .map(|accepted| {
-                        let accepted = accepted.flatten();
+                self.accept_execute(execute, execute_ready, admission)
+                    .map(|(accepted, permit)| {
                         (
                             missed(control_missed, execute_ready, accepted.is_some()),
                             admission,
@@ -413,6 +403,30 @@ impl<'a> Responder<'a> {
                     answered.extend(spawned);
                 }
             })
+    }
+
+    /// Accept a `ready` execute connection of `admission`. A refusal is
+    /// accepted only with its uncharged reader place in hand, so it never
+    /// waits behind a connection accepted before it; with no place nothing
+    /// is accepted, and the acceptor backs off and polls again.
+    fn accept_execute(
+        &self,
+        execute: &ProviderEndpoint,
+        ready: bool,
+        admission: Admission,
+    ) -> Result<(Option<UnixStream>, Option<ReaderPermit<'_>>), ProviderRuntimeError> {
+        ready
+            .then(|| {
+                let permit = (admission == Admission::Busy)
+                    .then(|| self.refusals.wait(Instant::now()))
+                    .flatten();
+                (admission == Admission::Answered || permit.is_some())
+                    .then(|| execute.accept())
+                    .transpose()
+                    .map(|accepted| (accepted.flatten(), permit))
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     /// Answer one execute-socket connection, then send server write EOF. A
