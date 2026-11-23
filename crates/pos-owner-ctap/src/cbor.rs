@@ -186,10 +186,9 @@ const fn simple(first: u8) -> Option<Value<'static>> {
     }
 }
 
-/// A CTAP2 canonical CBOR writer for the small values this crate sends.
+/// A CTAP2 canonical CBOR writer.
 ///
-/// Every length and integer it writes fits in 16 bits: the largest item is a credential ID of
-/// at most 1,024 bytes.
+/// Every argument width is supported, so no value is ever clamped.
 #[derive(Debug, Default)]
 pub(crate) struct Writer {
     bytes: Vec<u8>,
@@ -197,13 +196,17 @@ pub(crate) struct Writer {
 
 impl Writer {
     fn head(&mut self, major: u8, value: usize) {
-        let major = major << 5;
-        let [high, low] = u16::try_from(value).unwrap_or(u16::MAX).to_be_bytes();
-        match value {
-            0..=23 => self.bytes.push(major + low),
-            24..=0xff => self.bytes.extend_from_slice(&[major + 24, low]),
-            _ => self.bytes.extend_from_slice(&[major + 25, high, low]),
-        }
+        let argument = value as u64;
+        let encoded = argument.to_be_bytes();
+        let (additional, width) = match argument {
+            0..=23 => (encoded[7], 0),
+            24..=0xff => (24, 1),
+            0x100..=0xffff => (25, 2),
+            0x1_0000..=0xffff_ffff => (26, 4),
+            _ => (27, 8),
+        };
+        self.bytes.push((major << 5) + additional);
+        self.bytes.extend_from_slice(&encoded[8 - width..]);
     }
 
     /// An unsigned integer.

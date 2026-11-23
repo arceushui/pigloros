@@ -3,8 +3,11 @@
 //! A message is one initialization packet (channel, command, 16-bit length, 57 data bytes) and
 //! up to 128 continuation packets (channel, sequence, 59 data bytes), so no message exceeds
 //! [`MAX_MESSAGE_BYTES`]. Reassembly is bounded by the authenticator's `maxMsgSize` and that hard
-//! cap. Packets of other channels are ignored; keep-alives extend the wait; the deadline is
-//! enforced by cancelling the request with `CTAPHID_CANCEL`.
+//! cap. Packets of other channels, and `CTAPHID_INIT` replies to another client's nonce, are
+//! ignored. Keep-alives are skipped but never extend the ceremony deadline. No message is sent
+//! once the deadline has passed, and a request still outstanding at the deadline is cancelled
+//! with `CTAPHID_CANCEL` on its channel (ADR-110 E20 LS3); the broadcast `CTAPHID_INIT` is never
+//! cancelled.
 
 use std::time::{Duration, Instant};
 
@@ -14,6 +17,9 @@ use pos_owner_bridge::{BridgeError, LifecycleCode, MonotonicClock, UnavailableCo
 pub const REPORT_BYTES: usize = 64;
 
 /// The largest CTAPHID message: 57 bytes in the first packet and 59 in each of 128 more.
+///
+/// ADR-110 E20 LT6 makes this the hard cap on reassembly, and the limit for an authenticator
+/// whose `authenticatorGetInfo` names no `maxMsgSize`.
 pub const MAX_MESSAGE_BYTES: usize = 7_609;
 
 const INIT_DATA: usize = REPORT_BYTES - 7;
@@ -98,11 +104,14 @@ impl<'a> Channel<'a> {
             deadline,
             cid: BROADCAST,
         };
-        let reply = channel.transact(CMD_INIT, &nonce, MAX_MESSAGE_BYTES)?;
-        let reply = reply
-            .get(..INIT_REPLY_BYTES)
-            .filter(|reply| reply.starts_with(&nonce))
-            .ok_or(CLIENT_FAILED)?;
+        channel.send(CMD_INIT, &nonce, MAX_MESSAGE_BYTES)?;
+        let reply = loop {
+            let reply = channel.receive(CMD_INIT, MAX_MESSAGE_BYTES)?;
+            if reply.starts_with(&nonce) {
+                break reply;
+            }
+        };
+        let reply = reply.get(..INIT_REPLY_BYTES).ok_or(CLIENT_FAILED)?;
         if reply[16] & CAPABILITY_CBOR == 0 {
             return Err(BridgeError::Unavailable(UnavailableCode::PrfUnsupported));
         }
@@ -116,7 +125,8 @@ impl<'a> Channel<'a> {
     ///
     /// Returns `Lifecycle(ClientFailed)` when either message exceeds `limit`, the transport
     /// fails, the device reports `CTAPHID_ERROR` or the reply is misframed, and
-    /// `Lifecycle(InteractionTimeout)` once the deadline passes; the request is then cancelled.
+    /// `Lifecycle(InteractionTimeout)` once the deadline passes: nothing is sent after it, and a
+    /// request still outstanding at it is cancelled.
     pub fn transact(
         &mut self,
         command: u8,
@@ -128,6 +138,9 @@ impl<'a> Channel<'a> {
     }
 
     fn send(&mut self, command: u8, payload: &[u8], limit: usize) -> Result<(), BridgeError> {
+        if self.remaining().is_zero() {
+            return Err(TIMEOUT);
+        }
         let length = u16::try_from(payload.len())
             .ok()
             .filter(|_| payload.len() <= limit.min(MAX_MESSAGE_BYTES))
@@ -153,7 +166,7 @@ impl<'a> Channel<'a> {
     fn next_report(&mut self) -> Result<[u8; REPORT_BYTES], BridgeError> {
         let mut report = [0; REPORT_BYTES];
         loop {
-            let remaining = self.deadline.saturating_duration_since(self.clock.now());
+            let remaining = self.remaining();
             if remaining.is_zero() {
                 return self.cancel();
             }
@@ -163,8 +176,17 @@ impl<'a> Channel<'a> {
         }
     }
 
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(self.clock.now())
+    }
+
     /// Cancel the outstanding request at the deadline (ADR-110 E20 LS3).
+    ///
+    /// The broadcast `CTAPHID_INIT` has no channel to cancel, so nothing is sent for it.
     fn cancel(&mut self) -> Result<[u8; REPORT_BYTES], BridgeError> {
+        if self.cid == BROADCAST {
+            return Err(TIMEOUT);
+        }
         let mut report = [0; REPORT_BYTES];
         report[..4].copy_from_slice(&self.cid);
         report[4] = CMD_CANCEL;

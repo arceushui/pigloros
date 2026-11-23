@@ -3,8 +3,8 @@
 use hmac::{Hmac, KeyInit, Mac};
 use pos_owner_bridge::fake::clock::FakeRandom;
 use pos_owner_bridge::{
-    BridgeError, LifecycleCode, MonotonicClock, OwnerAuthenticatorPort, ProtocolCode, ReplyImage,
-    RequestImage, UnavailableCode,
+    BridgeError, MonotonicClock, OwnerAuthenticatorPort, ProtocolCode, ReplyImage, RequestImage,
+    UnavailableCode,
 };
 use pos_owner_bridge_codec::CeremonyKind;
 use pos_owner_ctap::{CtapAuthenticator, HidTransport, Notice, TransportError};
@@ -13,10 +13,9 @@ use sha2::{Digest, Sha256};
 use super::{
     bytes, counting, head, map, ok, text_item, Ceremony, Prompt, Rig, TestResult, CLIENT_FAILED,
     GET_ASSERTION, GET_INFO, KEY_AGREEMENT, MAKE_CREDENTIAL, NO_TERMINAL, PIN, PIN_RETRIES,
-    PRF_UNSUPPORTED, TOKEN_PIN, TOKEN_UV, UV_RETRIES,
+    PRF_UNSUPPORTED, TIMEOUT, TOKEN_PIN, TOKEN_UV, UV_RETRIES,
 };
 
-const TIMEOUT: BridgeError = BridgeError::Lifecycle(LifecycleCode::InteractionTimeout);
 const MALFORMED: BridgeError = BridgeError::Protocol(ProtocolCode::Malformed);
 const OUT_OF_BOUNDS: BridgeError = BridgeError::Protocol(ProtocolCode::LengthOutOfBounds);
 const RNG: BridgeError = BridgeError::Unavailable(UnavailableCode::RngUnavailable);
@@ -107,7 +106,7 @@ fn built_in_uv_comes_first_and_needs_no_pin() -> TestResult {
 #[test]
 fn uv_without_retries_or_blocked_falls_back_to_the_pin() -> TestResult {
     let mut rig = Rig::new(true);
-    rig.device.with_authenticator(|soft| soft.set_uv(0, true));
+    rig.device.with_authenticator(|soft| soft.set_uv(0, 0));
     rig.prompt.enter(PIN);
     rig.create(&Ceremony::drawn("create"))?;
     assert_eq!(rig.commands(&KNOWN), [0, 2, 1, 3, 5, 6]);
@@ -124,16 +123,49 @@ fn uv_without_retries_or_blocked_falls_back_to_the_pin() -> TestResult {
 }
 
 #[test]
-fn a_failed_uv_attempt_fails_the_ceremony_and_spends_one_retry() -> TestResult {
+fn a_rejected_uv_attempt_is_retried_within_the_authenticator_count() -> TestResult {
     let mut rig = Rig::new(true);
-    rig.device.with_authenticator(|soft| soft.set_uv(3, false));
-    let request = Ceremony::drawn("create").create_request()?;
-    assert_eq!(
-        rig.perform(&request, CeremonyKind::Create),
-        Err(CLIENT_FAILED)
-    );
+    rig.device.with_authenticator(|soft| soft.set_uv(3, 1));
+    rig.create(&Ceremony::drawn("create"))?;
     assert_eq!(rig.device.with_authenticator(|soft| soft.uv_retries()), 2);
+    assert_eq!(rig.commands(&KNOWN), [0, 2, 3, 4, 2, 3, 4, 6]);
+    let expected = [
+        Notice::UserVerification { retries: 3 },
+        Notice::UserVerification { retries: 2 },
+        Notice::Touch,
+    ];
+    assert_eq!(rig.prompt.notices(), expected);
     assert!(rig.prompt.asked().is_empty());
+    Ok(())
+}
+
+#[test]
+fn exhausted_uv_retries_fall_back_to_the_pin() -> TestResult {
+    let mut rig = Rig::new(true);
+    rig.device.with_authenticator(|soft| soft.set_uv(2, 2));
+    rig.prompt.enter(PIN);
+    rig.create(&Ceremony::drawn("create"))?;
+    assert_eq!(rig.device.with_authenticator(|soft| soft.uv_retries()), 0);
+    assert_eq!(rig.commands(&KNOWN), [0, 2, 3, 4, 2, 3, 4, 2, 1, 3, 5, 6]);
+    assert_eq!(rig.prompt.asked(), [8]);
+    Ok(())
+}
+
+#[test]
+fn a_pin_entry_that_outlasts_the_deadline_times_out_and_is_never_sent() -> TestResult {
+    let request = Ceremony::drawn("create").create_request()?;
+    for honours_deadline in [true, false] {
+        let mut rig = Rig::new(false);
+        rig.prompt
+            .enter_after(std::time::Duration::from_mins(3), PIN, honours_deadline);
+        assert_eq!(rig.perform(&request, CeremonyKind::Create), Err(TIMEOUT));
+        assert_eq!(rig.commands(&KNOWN), [0, 1, 3]);
+        assert_eq!(rig.device.cancels(), 0);
+    }
+    let mut rig = Rig::new(false);
+    rig.prompt
+        .enter_after(std::time::Duration::from_secs(30), PIN, true);
+    rig.create(&Ceremony::drawn("create"))?;
     Ok(())
 }
 
@@ -377,7 +409,7 @@ fn failed_or_malformed_info_retries_and_key_agreement_fail_the_client() -> TestR
 
 #[test]
 fn failed_or_malformed_tokens_fail_the_client() -> TestResult {
-    refused(true, CeremonyKind::Create, TOKEN_UV, &[0x3f], CLIENT_FAILED)?;
+    refused(true, CeremonyKind::Create, TOKEN_UV, &[0x27], CLIENT_FAILED)?;
     let one_block = ok(&map(&[(head(0, 2), bytes(&counting(32)))]));
     for reply in [vec![0x31], vec![0x00, 0xff], vec![0x00, 0xa0], one_block] {
         create_refused(TOKEN_PIN, &reply)?;
@@ -516,7 +548,11 @@ impl HidTransport for Unplugged {
 fn an_unplugged_device_or_a_failing_random_source_fails_the_ceremony() -> TestResult {
     let ceremony = Ceremony::drawn("faults");
     let rig = Rig::new(false);
-    let mut unplugged = CtapAuthenticator::new(Unplugged, Prompt::default(), FakeRandom::seeded(1));
+    let mut unplugged = CtapAuthenticator::new(
+        Unplugged,
+        Prompt::new(rig.clock.clone()),
+        FakeRandom::seeded(1),
+    );
     let mut reply = ReplyImage::zeroed();
     let request = ceremony.create_request()?;
     let deadline = rig.deadline();
@@ -531,7 +567,7 @@ fn an_unplugged_device_or_a_failing_random_source_fails_the_ceremony() -> TestRe
     );
 
     for (fills, kind) in [(0, CeremonyKind::Create), (3, CeremonyKind::Get)] {
-        let prompt = Prompt::default();
+        let prompt = Prompt::new(rig.clock.clone());
         prompt.enter(PIN);
         let mut port = CtapAuthenticator::new(
             rig.device.clone(),

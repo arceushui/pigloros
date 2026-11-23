@@ -4,15 +4,18 @@
 //! `Q`, and derives the 64-byte shared secret `HKDF(Z, "CTAP2 HMAC key") ‖ HKDF(Z, "CTAP2 AES
 //! key")`. `encrypt` is `IV ‖ AES-256-CBC(aesKey, IV, m)` with a random IV and no padding, and
 //! `authenticate` is the full 32-byte HMAC-SHA-256. Protocol 1 is never used.
+//!
+//! The ephemeral key, `Z`, the shared secret and every plaintext block are wiped. The HKDF
+//! pseudorandom key lives inside the `hkdf` state, which offers no wipe, so it is not.
 
-use hkdf::Hkdf;
-use hmac::{Hmac, KeyInit, Mac};
+use hkdf::{Hkdf, HmacImpl};
+use hmac::Hmac;
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use p256::elliptic_curve::point::AffineCoordinates;
 use p256::ProjectivePoint;
 use pos_owner_bridge::{BridgeError, LifecycleCode, SecureRandom, UnavailableCode};
 use sha2::Sha256;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::cbc::{self, CbcBlock};
 
@@ -25,7 +28,7 @@ const SCALAR_DRAWS: usize = 4;
 const CLIENT_FAILED: BridgeError = BridgeError::Lifecycle(LifecycleCode::ClientFailed);
 
 /// One uncompressed P-256 point, as its two coordinates.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Point {
     /// The x-coordinate, big-endian.
     pub x: [u8; 32],
@@ -72,8 +75,8 @@ impl SharedSecret {
 /// Returns `Lifecycle(ClientFailed)` if HKDF refuses a 32-byte output, which it never does.
 pub fn kdf(z: &[u8; 32]) -> Result<SharedSecret, BridgeError> {
     let hkdf = Hkdf::<Sha256>::new(None, z);
-    let mut hmac = Zeroizing::new([0; 32]);
-    let mut aes = Zeroizing::new([0; 32]);
+    let mut hmac = Zeroizing::<[u8; 32]>::default();
+    let mut aes = Zeroizing::<[u8; 32]>::default();
     hkdf.expand(b"CTAP2 HMAC key", hmac.as_mut_slice())
         .and_then(|()| hkdf.expand(b"CTAP2 AES key", aes.as_mut_slice()))
         .map(|()| SharedSecret { hmac, aes })
@@ -83,8 +86,10 @@ pub fn kdf(z: &[u8; 32]) -> Result<SharedSecret, BridgeError> {
 /// The x-coordinate of `scalar · peer`.
 fn shared_x(scalar: &SigningKey, peer: &VerifyingKey) -> Zeroizing<[u8; 32]> {
     let product = ProjectivePoint::from(*peer.as_affine()).mul(scalar.as_nonzero_scalar());
-    let mut z = Zeroizing::new([0; 32]);
-    z.copy_from_slice(&product.to_affine().x());
+    let mut x = product.to_affine().x();
+    let mut z = Zeroizing::<[u8; 32]>::default();
+    z.copy_from_slice(&x);
+    x.zeroize();
     z
 }
 
@@ -96,10 +101,7 @@ fn verifying_key(point: Point) -> Result<VerifyingKey, BridgeError> {
 #[must_use]
 pub fn public_point(key: &SigningKey) -> Point {
     let affine = key.verifying_key().as_affine();
-    let mut point = Point {
-        x: [0; 32],
-        y: [0; 32],
-    };
+    let mut point = Point::default();
     point.x.copy_from_slice(&affine.x());
     point.y.copy_from_slice(&affine.y());
     point
@@ -112,7 +114,7 @@ pub fn public_point(key: &SigningKey) -> Point {
 /// Returns `Unavailable(RngUnavailable)` when the source fails or yields no valid scalar in a
 /// few draws.
 pub fn ephemeral_key(random: &mut dyn SecureRandom) -> Result<SigningKey, BridgeError> {
-    let mut scalar = Zeroizing::new([0; 32]);
+    let mut scalar = Zeroizing::<[u8; 32]>::default();
     for _ in 0..SCALAR_DRAWS {
         random
             .fill(scalar.as_mut_slice())
@@ -160,7 +162,7 @@ pub fn encrypt(
     plaintext: &[CbcBlock],
     random: &mut dyn SecureRandom,
 ) -> Result<Vec<u8>, BridgeError> {
-    let mut iv: CbcBlock = [0; 16];
+    let mut iv = CbcBlock::default();
     random.fill(&mut iv).map_err(BridgeError::Unavailable)?;
     let mut blocks = Zeroizing::new(plaintext.to_vec());
     cbc::encrypt(secret.aes_key(), &iv, &mut blocks);
@@ -186,17 +188,15 @@ pub fn decrypt(secret: &SharedSecret, ciphertext: &[u8]) -> Option<Zeroizing<Vec
 
 /// `authenticate(key, message)`: HMAC-SHA-256 of the concatenated `parts`, all 32 bytes.
 ///
-/// `key` is the 32-byte HMAC half of a shared secret or a 32-byte `pinUvAuthToken`. HMAC
-/// accepts a key of any length, so the key setup cannot fail; if it ever did, the tag would be
-/// all zeros, which no authenticator accepts.
+/// `key` is the 32-byte HMAC half of a shared secret or a 32-byte `pinUvAuthToken`. The HMAC
+/// is set up through `hkdf::HmacImpl`, whose key setup cannot fail.
 #[must_use]
-pub fn authenticate(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    <Hmac<Sha256> as KeyInit>::new_from_slice(key).map_or([0; 32], |mut mac| {
-        for part in parts {
-            mac.update(part);
-        }
-        mac.finalize().into_bytes().into()
-    })
+pub fn authenticate(key: &[u8; 32], parts: &[&[u8]]) -> [u8; 32] {
+    let mut mac = <Hmac<Sha256> as HmacImpl>::new_from_slice(key);
+    for part in parts {
+        HmacImpl::update(&mut mac, part);
+    }
+    HmacImpl::finalize(mac).into()
 }
 
 #[cfg(test)]

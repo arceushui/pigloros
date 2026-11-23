@@ -33,6 +33,27 @@ fn the_writer_uses_the_shortest_heads_and_the_reader_reads_them_back() {
 }
 
 #[test]
+fn the_writer_covers_every_argument_width() {
+    let encoded = Writer::default()
+        .array(3)
+        .unsigned(0x1_0000)
+        .unsigned(0xffff_ffff)
+        .unsigned(0x1_0000_0000)
+        .finish();
+    assert_eq!(encoded[..6], [0x83, 0x1a, 0x00, 0x01, 0x00, 0x00]);
+    assert_eq!(encoded[6..11], [0x1a, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(encoded[11..], [0x1b, 0, 0, 0, 0x01, 0, 0, 0, 0]);
+    let values = decode(&encoded).map(|value| {
+        value
+            .items()
+            .iter()
+            .filter_map(Value::unsigned)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(values, Some(vec![0x1_0000, 0xffff_ffff, 0x1_0000_0000]));
+}
+
+#[test]
 fn the_reader_accepts_every_argument_width_without_requiring_canonical_form() {
     let wide: [&[u8]; 4] = [
         &[0x18, 0x05],

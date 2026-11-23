@@ -161,7 +161,7 @@ pub struct SoftAuthenticator {
     pin_hash: [u8; 16],
     pin_retries: u64,
     uv: bool,
-    uv_accepts: bool,
+    uv_rejects: u64,
     uv_retries: u64,
     key_agreement: Option<SigningKey>,
     token: Option<Token>,
@@ -189,7 +189,7 @@ impl SoftAuthenticator {
             pin_hash,
             pin_retries: 8,
             uv,
-            uv_accepts: true,
+            uv_rejects: 0,
             uv_retries: 3,
             key_agreement,
             token: None,
@@ -214,10 +214,10 @@ impl SoftAuthenticator {
         self.pin_retries
     }
 
-    /// Set the remaining built-in UV attempts and whether the next attempts succeed.
-    pub const fn set_uv(&mut self, retries: u64, accepts: bool) {
+    /// Set the remaining built-in UV attempts and how many of the next attempts fail.
+    pub const fn set_uv(&mut self, retries: u64, rejects: u64) {
         self.uv_retries = retries;
-        self.uv_accepts = accepts;
+        self.uv_rejects = rejects;
     }
 
     /// The remaining built-in UV attempts.
@@ -295,7 +295,8 @@ impl SoftAuthenticator {
         if !self.uv || self.uv_retries == 0 {
             return status(STATUS_UV_BLOCKED);
         }
-        if !self.uv_accepts {
+        if self.uv_rejects > 0 {
+            self.uv_rejects -= 1;
             self.uv_retries -= 1;
             return status(STATUS_UV_INVALID);
         }
@@ -356,7 +357,7 @@ impl SoftAuthenticator {
             .token
             .take()
             .filter(|token| token.permissions & wanted != 0)
-            .map(|token| pin::authenticate(token.value.as_slice(), &[client_data_hash]));
+            .map(|token| pin::authenticate(&token.value, &[client_data_hash]));
         expected.is_some_and(|expected| param.and_then(Value::bytes) == Some(&expected[..]))
     }
 

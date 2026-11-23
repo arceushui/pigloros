@@ -35,6 +35,7 @@ type TestResult = Result<(), Box<dyn Error>>;
 const PIN: &[u8] = b"2468";
 
 const CLIENT_FAILED: BridgeError = BridgeError::Lifecycle(LifecycleCode::ClientFailed);
+const TIMEOUT: BridgeError = BridgeError::Lifecycle(LifecycleCode::InteractionTimeout);
 const PRF_UNSUPPORTED: BridgeError = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
 const NO_TERMINAL: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 
@@ -54,23 +55,51 @@ fn text<T, E: Display>(result: Result<T, E>) -> Result<T, String> {
 }
 
 /// One scripted answer to a PIN request.
-type Entry = Result<Vec<u8>, BridgeError>;
+/// One scripted answer to a PIN request: the time the user takes, then the outcome.
+struct Entry {
+    delay: Duration,
+    outcome: Result<Vec<u8>, BridgeError>,
+    honours_deadline: bool,
+}
 
 /// A scripted terminal: it answers each PIN request with the next queued entry.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Prompt {
+    clock: FakeClock,
     entries: Rc<RefCell<VecDeque<Entry>>>,
     notices: Rc<RefCell<Vec<Notice>>>,
     asked: Rc<RefCell<Vec<u64>>>,
 }
 
 impl Prompt {
+    fn new(clock: FakeClock) -> Self {
+        Self {
+            clock,
+            entries: Rc::default(),
+            notices: Rc::default(),
+            asked: Rc::default(),
+        }
+    }
+
+    fn push(&self, delay: Duration, outcome: Result<Vec<u8>, BridgeError>, honours_deadline: bool) {
+        self.entries.borrow_mut().push_back(Entry {
+            delay,
+            outcome,
+            honours_deadline,
+        });
+    }
+
     fn enter(&self, pin: &[u8]) {
-        self.entries.borrow_mut().push_back(Ok(pin.to_vec()));
+        self.push(Duration::ZERO, Ok(pin.to_vec()), true);
     }
 
     fn fail(&self, error: BridgeError) {
-        self.entries.borrow_mut().push_back(Err(error));
+        self.push(Duration::ZERO, Err(error), true);
+    }
+
+    /// The user takes `delay`; a prompt that honours the deadline then gives up at it.
+    fn enter_after(&self, delay: Duration, pin: &[u8], honours_deadline: bool) {
+        self.push(delay, Ok(pin.to_vec()), honours_deadline);
     }
 
     fn notices(&self) -> Vec<Notice> {
@@ -83,10 +112,20 @@ impl Prompt {
 }
 
 impl PinPrompt for Prompt {
-    fn read_pin(&mut self, retries: u64, pin: &mut PinBuffer) -> Result<(), BridgeError> {
+    fn read_pin(
+        &mut self,
+        retries: u64,
+        pin: &mut PinBuffer,
+        deadline: Instant,
+        clock: &dyn MonotonicClock,
+    ) -> Result<(), BridgeError> {
         self.asked.borrow_mut().push(retries);
-        let entry = self.entries.borrow_mut().pop_front();
-        entry.unwrap_or(Err(NO_TERMINAL)).and_then(|bytes| {
+        let entry = self.entries.borrow_mut().pop_front().ok_or(NO_TERMINAL)?;
+        self.clock.advance(entry.delay);
+        if entry.honours_deadline && clock.now() >= deadline {
+            return Err(TIMEOUT);
+        }
+        entry.outcome.and_then(|bytes| {
             if bytes.iter().all(|byte| pin.push(*byte)) {
                 Ok(())
             } else {
@@ -181,7 +220,7 @@ impl Rig {
     fn with_pin(uv: bool, pin: &[u8]) -> Self {
         let clock = FakeClock::start();
         let device = MemoryHid::new(SoftAuthenticator::new("p-tier", pin, uv), clock.clone());
-        let prompt = Prompt::default();
+        let prompt = Prompt::new(clock.clone());
         let port = CtapAuthenticator::new(device.clone(), prompt.clone(), Drbg::new("client"));
         Self {
             clock,

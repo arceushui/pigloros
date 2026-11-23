@@ -6,6 +6,10 @@
 exclude_globs = [
   "crates/pos-reference/src/selector/installation/fixture.rs",
   "crates/pos-reference/src/provider_admission/test_support.rs",
+  # ADR-110 E20 S1 (Redmine #1475): the P-tier software authenticator and its
+  # in-memory CTAPHID device, which exist only behind `test-support`.
+  "crates/pos-owner-ctap/src/soft.rs",
+  "crates/pos-owner-ctap/src/memory.rs",
   # Owner decision 2026-11-14, the first production exception: the WebView2 shim
   # is `cfg(windows)` only, so this Linux gate can neither build nor test it
   # and would report every mutant as missed. ADR-110 qualifies the shim by the
@@ -15,8 +19,4 @@ exclude_globs = [
   # erasure-composition stub is `cfg(not(target_os = "linux"))` only, so this
   # Linux gate never builds it and would report every mutant as missed.
   "apps/piglor-gateway/src/local_erasure_composition_closed.rs",
-  # ADR-110 E20 S1 (Redmine #1475): the P-tier software authenticator and its
-  # in-memory device are test-support fixtures, like the two above.
-  "crates/pos-owner-ctap/src/soft.rs",
-  "crates/pos-owner-ctap/src/memory.rs",
 ]

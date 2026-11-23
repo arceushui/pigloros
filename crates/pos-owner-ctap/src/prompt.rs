@@ -4,7 +4,9 @@
 //! (ADR-110 E20 S2). The PIN is read byte by byte into a fixed, zeroized 64-byte buffer and
 //! never becomes a `String`, a log line, an argument or an environment value.
 
-use pos_owner_bridge::BridgeError;
+use std::time::Instant;
+
+use pos_owner_bridge::{BridgeError, MonotonicClock};
 use zeroize::Zeroizing;
 
 /// The most PIN bytes CTAP 2.1 allows.
@@ -75,11 +77,22 @@ pub enum Notice {
 pub trait PinPrompt {
     /// Read one PIN into `pin`, showing `retries`, the authenticator's remaining PIN attempts.
     ///
+    /// The entry shares the ceremony's interaction bound: the prompt waits for input only until
+    /// `deadline`, compared against `clock` alone, and then gives up. A PIN typed after the
+    /// deadline is never used, because the client sends nothing once the deadline has passed.
+    ///
     /// # Errors
     ///
-    /// Returns `Unavailable(InterfaceUnavailable)` when there is no terminal, and
+    /// Returns `Lifecycle(InteractionTimeout)` when the deadline passes before the entry is
+    /// complete, `Unavailable(InterfaceUnavailable)` when there is no terminal, and
     /// `Lifecycle(ClientFailed)` when the user cancels or the PIN is too long.
-    fn read_pin(&mut self, retries: u64, pin: &mut PinBuffer) -> Result<(), BridgeError>;
+    fn read_pin(
+        &mut self,
+        retries: u64,
+        pin: &mut PinBuffer,
+        deadline: Instant,
+        clock: &dyn MonotonicClock,
+    ) -> Result<(), BridgeError>;
 
     /// Show `notice`.
     fn notice(&mut self, notice: Notice);

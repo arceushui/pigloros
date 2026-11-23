@@ -131,22 +131,48 @@ fn init_allocates_the_channel_from_the_matching_reply() {
 }
 
 #[test]
-fn init_refuses_a_short_or_foreign_reply_and_a_device_without_cbor() {
+fn init_refuses_a_short_reply_and_a_device_without_cbor() {
     let clock = FakeClock::start();
-    let short = frames(BROADCAST, CMD_INIT, &[0; 16]);
+    let short = frames(BROADCAST, CMD_INIT, &[nonce().as_slice(), &[0; 8]].concat());
+    let mut device = Scripted::new(&clock, short);
+    assert_eq!(open(&mut device, &clock), Err(CLIENT_FAILED));
+    let mut device = Scripted::new(&clock, init_reply(nonce(), 0x08));
+    let unsupported = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
+    assert_eq!(open(&mut device, &clock), Err(unsupported));
+}
+
+#[test]
+fn init_skips_replies_to_another_nonce_and_never_cancels_the_broadcast() {
+    let clock = FakeClock::start();
     let mut other = nonce();
     other[0] ^= 1;
-    for (reports, expected) in [
-        (short, CLIENT_FAILED),
-        (init_reply(other, 0x04), CLIENT_FAILED),
-        (
-            init_reply(nonce(), 0x08),
-            BridgeError::Unavailable(UnavailableCode::PrfUnsupported),
-        ),
-    ] {
-        let mut device = Scripted::new(&clock, reports);
-        assert_eq!(open(&mut device, &clock), Err(expected));
-    }
+    let mut reports = init_reply(other, 0x04);
+    reports.extend(init_reply(nonce(), 0x04));
+    let mut device = Scripted::new(&clock, reports);
+    assert_eq!(open(&mut device, &clock), Ok(CID));
+
+    let mut device = Scripted::new(&clock, init_reply(other, 0x04));
+    assert_eq!(open(&mut device, &clock), Err(TIMEOUT));
+    assert_eq!(device.writes.len(), 1);
+}
+
+#[test]
+fn nothing_is_sent_once_the_deadline_has_passed() {
+    let clock = FakeClock::start();
+    let mut device = Scripted::new(&clock, init_reply(nonce(), 0x04));
+    let deadline = clock.now() + Duration::from_secs(10);
+    let opened = Channel::open(&mut device, &clock, deadline, nonce()).map(|mut channel| {
+        clock.advance(Duration::from_secs(10));
+        channel.transact(CMD_CBOR, &[4], 100)
+    });
+    assert_eq!(opened, Ok(Err(TIMEOUT)));
+    assert_eq!(device.writes.len(), 1);
+    let mut late = Scripted::new(&clock, init_reply(nonce(), 0x04));
+    assert_eq!(
+        Channel::open(&mut late, &clock, deadline, nonce()).map(|_| ()),
+        Err(TIMEOUT)
+    );
+    assert!(late.writes.is_empty());
 }
 
 #[test]

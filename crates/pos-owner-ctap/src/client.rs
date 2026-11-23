@@ -2,9 +2,14 @@
 //!
 //! One `perform` is one ceremony: a fresh CTAPHID channel, the LS6 capability check, one
 //! `pinUvAuthToken` (built-in UV first, the PIN as fallback), and exactly one `makeCredential` or
-//! `getAssertion` that spends that token. Nothing is retried automatically, and nothing
-//! PIN-equivalent outlives the call: the PIN, its hash, the ephemeral key, `Z`, the shared
-//! secret and the token are all wiped.
+//! `getAssertion` that spends that token. Nothing PIN-equivalent outlives the call: the PIN, its
+//! hash, the ephemeral key, `Z`, the shared secret and the token are all wiped.
+//!
+//! LS7's "nothing is retried automatically" means nothing beyond the authenticator's own UV
+//! retry count (owner decision 2026-11-24): a rejected built-in UV attempt is tried again inside
+//! the same operation while `getUVRetries` reports attempts left, within the deadline. The
+//! client falls back to the PIN once `getUVRetries` reports 0 or the authenticator answers
+//! `CTAP2_ERR_UV_BLOCKED`. A PIN is entered once per CTAP command and never retried.
 
 use std::time::Instant;
 
@@ -17,6 +22,7 @@ use pos_owner_bridge_codec::{
     AssertionReplyV1, AttestationReplyV1, CeremonyKind, CreateOptionsV1, GetOptionsV1,
     OwnerBridgeControlV1, PrfResult, TransportCodes, CONTROL_HEADER_BYTES,
 };
+use sha2::digest::Output;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -39,6 +45,16 @@ const OUT_OF_BOUNDS: BridgeError = BridgeError::Protocol(ProtocolCode::LengthOut
 
 /// The ADR-097 transport code of `usb`, the only transport the native path reports.
 const USB: u8 = 0;
+
+/// `CTAP2_ERR_UV_INVALID`.
+const STATUS_UV_INVALID: u8 = 0x3f;
+
+/// What one built-in UV attempt produced.
+enum UvAttempt {
+    Granted(Authorization),
+    Rejected,
+    Blocked,
+}
 
 /// The ceremony a request image asks for.
 enum Ceremony<'a> {
@@ -76,7 +92,7 @@ impl Authorization {
         let blocks = pin::decrypt(&secret, encrypted)
             .filter(|blocks| blocks.len() == 2)
             .ok_or(CLIENT_FAILED)?;
-        let mut token = Zeroizing::new([0; 32]);
+        let mut token = Zeroizing::<[u8; 32]>::default();
         token
             .iter_mut()
             .zip(blocks.iter().flatten())
@@ -90,7 +106,7 @@ impl Authorization {
 
     /// `pinUvAuthParam = authenticate(pinUvAuthToken, clientDataHash)`.
     fn param(&self, client_data_hash: &[u8; 32]) -> [u8; 32] {
-        pin::authenticate(self.token.as_slice(), &[client_data_hash])
+        pin::authenticate(&self.token, &[client_data_hash])
     }
 }
 
@@ -124,7 +140,7 @@ impl<T: HidTransport, P: PinPrompt, R: SecureRandom> OwnerAuthenticatorPort
         clock: &dyn MonotonicClock,
     ) -> Result<usize, BridgeError> {
         let ceremony = Ceremony::decode(request)?;
-        let mut nonce = [0; 8];
+        let mut nonce = <[u8; 8]>::default();
         self.random
             .fill(&mut nonce)
             .map_err(BridgeError::Unavailable)?;
@@ -136,6 +152,8 @@ impl<T: HidTransport, P: PinPrompt, R: SecureRandom> OwnerAuthenticatorPort
             capabilities,
             prompt: &mut self.prompt,
             random: &mut self.random,
+            deadline,
+            clock,
         };
         match ceremony {
             Ceremony::Create(options) => client.create(&options, reply),
@@ -150,6 +168,8 @@ struct Client<'a> {
     capabilities: Capabilities,
     prompt: &'a mut dyn PinPrompt,
     random: &'a mut dyn SecureRandom,
+    deadline: Instant,
+    clock: &'a dyn MonotonicClock,
 }
 
 impl Client<'_> {
@@ -160,29 +180,35 @@ impl Client<'_> {
     }
 
     /// One token for `permission`: built-in UV first, then the PIN (ADR-110 E20 LP1).
+    ///
+    /// Each rejected UV attempt spends one of the authenticator's UV retries, so the loop ends
+    /// when they run out, UV is blocked, or the deadline stops the next command.
     fn authorize(&mut self, permission: usize) -> Result<Authorization, BridgeError> {
         if self.capabilities.uv {
-            let retries = self.session.uv_retries()?;
-            if retries > 0 {
+            loop {
+                let retries = self.session.uv_retries()?;
+                if retries == 0 {
+                    break;
+                }
                 self.prompt.notice(Notice::UserVerification { retries });
-                if let Some(authorization) = self.authorize_with_uv(permission)? {
-                    return Ok(authorization);
+                match self.authorize_with_uv(permission)? {
+                    UvAttempt::Granted(authorization) => return Ok(authorization),
+                    UvAttempt::Blocked => break,
+                    UvAttempt::Rejected => {}
                 }
             }
         }
         self.authorize_with_pin(permission)
     }
 
-    /// `getPinUvAuthTokenUsingUvWithPermissions`; `None` when UV is blocked.
-    fn authorize_with_uv(
-        &mut self,
-        permission: usize,
-    ) -> Result<Option<Authorization>, BridgeError> {
+    /// One `getPinUvAuthTokenUsingUvWithPermissions` attempt.
+    fn authorize_with_uv(&mut self, permission: usize) -> Result<UvAttempt, BridgeError> {
         let (platform, secret) = self.agreement()?;
         let Reply { status, body } = self.session.token(&platform, None, permission)?;
         match status {
-            STATUS_OK => Authorization::from_reply(&body, secret, platform).map(Some),
-            STATUS_UV_BLOCKED => Ok(None),
+            STATUS_OK => Authorization::from_reply(&body, secret, platform).map(UvAttempt::Granted),
+            STATUS_UV_INVALID => Ok(UvAttempt::Rejected),
+            STATUS_UV_BLOCKED => Ok(UvAttempt::Blocked),
             _ => Err(CLIENT_FAILED),
         }
     }
@@ -208,10 +234,14 @@ impl Client<'_> {
     /// Read the PIN and return `pinHashEnc = encrypt(sharedSecret, LEFT(SHA-256(PIN), 16))`.
     fn read_pin(&mut self, retries: u64, secret: &SharedSecret) -> Result<Vec<u8>, BridgeError> {
         let mut entry = PinBuffer::default();
-        self.prompt.read_pin(retries, &mut entry)?;
+        self.prompt
+            .read_pin(retries, &mut entry, self.deadline, self.clock)?;
         let entered = entry.validated().ok_or(CLIENT_FAILED)?;
-        let digest: Zeroizing<[u8; 32]> = Zeroizing::new(Sha256::digest(entered).into());
-        let mut left = Zeroizing::new([0; 16]);
+        let mut digest = Zeroizing::<[u8; 32]>::default();
+        Sha256::new()
+            .chain_update(entered)
+            .finalize_into(Output::<Sha256>::cast_from_core_mut(&mut digest));
+        let mut left = Zeroizing::<[u8; 16]>::default();
         left.copy_from_slice(&digest[..16]);
         pin::encrypt(secret, std::slice::from_ref(&*left), self.random)
     }
@@ -268,7 +298,7 @@ impl Client<'_> {
         let param = authorization.param(&hash);
         let salt = Zeroizing::new(prf_salt(options.prf_input().as_bytes()));
         let (first, second) = salt.split_at(16);
-        let mut blocks = Zeroizing::new([[0; 16]; 2]);
+        let mut blocks = Zeroizing::<[[u8; 16]; 2]>::default();
         blocks[0].copy_from_slice(first);
         blocks[1].copy_from_slice(second);
         let salt_enc = pin::encrypt(&authorization.secret, blocks.as_slice(), self.random)?;
@@ -302,7 +332,7 @@ impl Client<'_> {
         let decrypted = hmac_secret_output(auth_data)
             .and_then(|output| pin::decrypt(&authorization.secret, output))
             .ok_or(PRF_UNSUPPORTED)?;
-        let mut prf = Zeroizing::new([0; 32]);
+        let mut prf = Zeroizing::<[u8; 32]>::default();
         prf.iter_mut()
             .zip(decrypted.iter().flatten())
             .for_each(|(to, from)| *to = *from);
