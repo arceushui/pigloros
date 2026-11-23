@@ -732,13 +732,13 @@ async fn a_closed_gateway_serves_no_erasure() -> TestResult {
     Ok(())
 }
 
-/// D7, acceptance tests 8 and 9 and the Gateway parts of test 2: after each
-/// `202` the driver is woken, so with a tick far beyond the test a request
-/// admitted after the startup run still reaches its first receipt. The
-/// actor's own root Timeline is then frozen while another actor's stays
-/// readable; the projection's generation only rises and its claim only
-/// weakens; and after the partial failure the subject's next request is
-/// admitted and driven too.
+/// D7, acceptance tests 8 and 9 and the Gateway parts of test 2.
+///
+/// After each `202` the driver is woken, so with a tick far beyond the test a request admitted
+/// after the startup run still reaches its first receipt. The actor's own root Timeline is then
+/// frozen while another actor's stays readable; the projection's generation only rises and its
+/// claim only weakens; and after the partial failure the subject's next request is admitted and
+/// driven too.
 ///
 /// #1407 (ADR-136 follow-up F2): once each request reaches its first receipt
 /// its ELCG1 has committed, so the store's `redaction_generation` has risen

@@ -2890,10 +2890,11 @@ pub trait ErasureInventoryPersistencePortV1 {
         prepared: PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
 
-    /// The store's redaction generation (ADR-136 follow-up F2, #1407): how
-    /// many ELCG1 cache generations the store has committed, 0 before the
-    /// first. It never decreases, also across a reopen of a durable store,
-    /// and never exceeds [`REDACTION_GENERATION_MAX_V1`].
+    /// The store's redaction generation (ADR-136 follow-up F2, #1407).
+    ///
+    /// It counts the ELCG1 cache generations the store has committed, 0 before the first. It never
+    /// decreases, also across a reopen of a durable store, and never exceeds
+    /// [`REDACTION_GENERATION_MAX_V1`].
     ///
     /// # Errors
     /// Returns a closed persistence error when the generation cannot be

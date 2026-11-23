@@ -10568,8 +10568,8 @@ mod tests {
             trust: reference(71),
             owners: Vec::new(),
         });
-        host.command_sender()?
-            .local_erasure_projection(&principal, actor, erasure_id)
+        let mut sender = host.command_sender()?;
+        sender.local_erasure_projection(&principal, actor, erasure_id)
     }
 
     /// #1407 (M1): a store whose redaction generation cannot be read fails
