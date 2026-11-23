@@ -26,7 +26,7 @@ use crate::community_initialization_fixture::{
     ENTRIES, EXPIRES, GENERATION, HORIZON, METADATA_LEAF,
 };
 use crate::memory::MemoryStore;
-use crate::plugin_trust_registry_fixtures::release_one;
+use crate::plugin_trust_registry_fixtures::{release_one, ManifestSpec};
 use crate::MemoryTrustedClockAuthorityV1;
 
 /// The trust-root seal of the test composition.
@@ -446,5 +446,27 @@ fn an_active_reason_skips_the_horizon_check() -> TestResult {
         },
     )?;
     assert_eq!(refused.err(), Some(Error::EvidenceExpired));
+    Ok(())
+}
+
+/// The member's trust row needs the active release to be the member's PMF1
+/// (R6.5). After initialize, a re-signed PMF1 of the same release digest
+/// becomes active: the PMF1 differs while the release digest matches, so
+/// `SetReason` gives 12.
+#[test]
+fn a_re_signed_active_release_is_not_the_member_release() -> TestResult {
+    let mut case = QuarantineCase::new(&SEAL, Revocation::PublisherKey)?;
+    let mut resigned = ManifestSpec::new("plugin-a", 0x02, 0x11, None);
+    resigned.epoch = 2;
+    assert_eq!(resigned.release_digest()?, release_one().release_digest()?);
+    let domain = &mut case.domain;
+    std::mem::swap(&mut domain.harness.store, &mut domain.world.domain.store);
+    let admitted = domain.harness.admit(&case.material, &resigned, 3);
+    std::mem::swap(&mut domain.harness.store, &mut domain.world.domain.store);
+    admitted??;
+    assert_eq!(
+        set_reason(&mut case, claim(Basis::PublisherKey))?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }

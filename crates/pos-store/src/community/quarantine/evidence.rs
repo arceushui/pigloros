@@ -414,10 +414,13 @@ impl MemoryCommunityDomainV1 {
                 u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
                     .ok()
                     .zip(active)
+                    // Only the PMF1 is compared. The active release digest is
+                    // field 27 of that PMF1, and initialize admitted this
+                    // member's IMK1 release digest against the same active
+                    // PMF1, so a matching PMF1 already fixes the release; a
+                    // re-signed PMF1 with the same release digest differs.
                     .filter(|(_, active)| {
                         active.pmf1_digest() == *operation.member.pmf1_digest.as_bytes()
-                            && active.release_digest()
-                                == *implementation.release_digest().as_bytes()
                     })
                     .map(|(utc, active)| CommunityTrustViewRowV1 {
                         scope: scope.to_owned(),
