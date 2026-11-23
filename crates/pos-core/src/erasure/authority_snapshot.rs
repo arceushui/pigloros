@@ -412,8 +412,10 @@ impl PreparedLocalOwnerEffectV1 {
     }
 
     /// Whether newly retaining this effect raises the store's redaction
-    /// generation (ADR-136 follow-up F2, #1407): exactly for an ELCG1 cache
-    /// generation, the one effect record that carries the ELCG1 tag.
+    /// generation (ADR-136 follow-up F2, #1407).
+    ///
+    /// It does exactly for an ELCG1 cache generation, the one effect record
+    /// that carries the ELCG1 tag.
     #[must_use]
     pub fn raises_redaction_generation(&self) -> bool {
         self.effect_object
