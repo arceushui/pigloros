@@ -2,12 +2,14 @@
 
 use super::super::HeldImageAdmission;
 use super::{
-    AdmittedProviderExecution, InputRefusal, IssuedGrant, OutputReservationRefused,
-    PreparedProviderExecution, ProviderExecutionPolicy, StagingCharge, StagingError,
+    AdmittedProviderExecution, ExecuteRefusal, FailedInput, GrantFailure, GrantedExecution,
+    IssuedGrant, OutputReservationRefused, PreparedProviderExecution, ProviderExecutionPolicy,
+    RefusalCause, StagingCharge, StagingError,
 };
 #[cfg(test)]
 use super::{StagingLedger, StagingLimits, StagingUsage};
 use crate::sandbox_provider_protocol::TransferRecord;
+use crate::sandbox_provider_protocol::{Agr1, SelfDigested, Verified};
 use rustix::fs::{openat2, statat, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
 use std::{
     fs::File,
@@ -111,21 +113,27 @@ impl StagingDirectory {
             })
     }
 
-    /// Create the exclusive, non-executable file that stages one input.
+    /// Create the exclusive, non-executable file that stages one input,
+    /// before the exchange's AGR1 (ADR-122 Amendment 1 change D, R11
+    /// Amendment 1 §7.5 port step S).
     ///
     /// The name is the lowercase hexadecimal of `name`, a provider-issued
     /// identity, so it cannot traverse. An existing entry of any kind,
     /// including a symlink, is never adopted.
     ///
     /// # Errors
-    /// `Io` when the entry exists or cannot be created.
-    pub fn create_input(
+    /// An [`ExecuteRefusal`] with `Io` when the entry exists or cannot be
+    /// created, or `CleanupFailed` once the ledger was closed; the prepared
+    /// exchange is released and its stream returned.
+    pub fn create_input<C>(
         &self,
         name: [u8; 16],
-        prepared: PreparedProviderExecution,
-    ) -> Result<StagedInput, StagingError> {
-        self.create_file(name, prepared.staging_charge())
-            .map(|staged| StagedInput { staged, prepared })
+        prepared: PreparedProviderExecution<C>,
+    ) -> Result<StagedInput<C>, Box<ExecuteRefusal>> {
+        match self.create_file(name, prepared.staging_charge()) {
+            Ok(staged) => Ok(StagedInput { staged, prepared }),
+            Err(error) => Err(Box::new(prepared.refuse(RefusalCause::Staging(error)))),
+        }
     }
 
     fn create_file(
@@ -199,27 +207,83 @@ impl StagedFile {
     }
 }
 
-/// A private input awaiting the complete, grant-bound SBC1 stream.
+/// A prepared exchange and its private staging file, before AGR1.
 #[derive(Debug)]
-pub struct StagedInput {
+pub struct StagedInput<C = ()> {
     staged: StagedFile,
-    prepared: PreparedProviderExecution,
+    prepared: PreparedProviderExecution<C>,
 }
 
-impl StagedInput {
-    /// Verify descriptor, framing and every selected case field before admission.
+impl<C> StagedInput<C> {
+    /// Sign and write AGR1 on the exchange's own connection, converting its
+    /// claim with `convert` as the last check before the write.
+    ///
+    /// `sign` receives the sealed AGR1 record and returns it signed under
+    /// the runtime-attestation key, verified before emission (ADR-069 R9
+    /// §5). Before signing, and again after it immediately before the
+    /// write, the held-image join, the control floor, both deadlines and the
+    /// premature bytes are checked; then `convert` receives the claim and
+    /// the AGR1 digest. On success the conversion's value is returned with
+    /// the input that is now owed.
     ///
     /// # Errors
-    /// [`InputRefusal::NotGranted`] before a complete AGR1; otherwise
-    /// [`InputRefusal::Failed`] refuses incomplete, foreign, expired or
-    /// substituted input and authority, and discards the staged bytes.
-    pub fn receive(self, stream: &mut UnixStream) -> Result<VerifiedStagedInput, InputRefusal> {
+    /// [`GrantFailure::Refused`] before the write began, with the stream:
+    /// `SignerFault` or `GrantCommitmentMismatch` for a grant that cannot
+    /// be emitted, any recheck's failure, or the conversion's refusal.
+    /// [`GrantFailure::Interrupted`] once the write began and failed. The
+    /// staging file and every reservation are released either way.
+    pub fn send_grant<W, E, S>(
+        self,
+        sign: impl FnOnce(SelfDigested<Agr1>) -> Result<Verified<Agr1>, S>,
+        convert: impl FnOnce(C, [u8; 32]) -> Result<W, E>,
+    ) -> Result<(W, GrantedInput), GrantFailure<E>> {
         let Self { staged, prepared } = self;
-        let execution = prepared.receive_input(stream, &staged.file)?;
-        Ok(VerifiedStagedInput {
-            _staged: staged,
-            execution: Arc::new(execution),
-        })
+        prepared
+            .grant(sign, convert)
+            .map(|(write, granted)| (write, GrantedInput { staged, granted }))
+    }
+}
+
+/// A staged input whose AGR1 was completely written: the attempt is
+/// admitted, and its input is owed.
+#[derive(Debug)]
+pub struct GrantedInput {
+    staged: StagedFile,
+    granted: GrantedExecution,
+}
+
+impl GrantedInput {
+    /// The AGR1 that was written.
+    #[must_use]
+    pub const fn grant(&self) -> &IssuedGrant {
+        self.granted.grant()
+    }
+
+    /// The failed input this exchange ends in should it be interrupted
+    /// before any input byte was accepted, finished now: built ahead, so
+    /// recording it later needs no I/O.
+    #[must_use]
+    pub fn interrupted(&self) -> FailedInput {
+        self.granted.interrupted()
+    }
+
+    /// Verify descriptor, framing and every selected case field before
+    /// admission, and return the stream with the result.
+    ///
+    /// # Errors
+    /// The [`FailedInput`] of incomplete, foreign, expired or substituted
+    /// input and authority: the grant and the transfer are retained, the
+    /// staged bytes discarded.
+    pub fn receive(self) -> (Result<VerifiedStagedInput, Box<FailedInput>>, UnixStream) {
+        let Self { staged, granted } = self;
+        let (admitted, stream) = granted.receive(&staged.file);
+        (
+            admitted.map(|execution| VerifiedStagedInput {
+                _staged: staged,
+                execution: Arc::new(execution),
+            }),
+            stream,
+        )
     }
 }
 

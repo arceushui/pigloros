@@ -1,8 +1,6 @@
 // Complete public execution admission; no raw policy or entry constructor.
 
-use pos_reference::provider_admission::{
-    execution::PreparedProviderExecution, test_support::StagedInstallation,
-};
+use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_sandboxd::{StagingDirectory, StagingLedger, VerifiedStagedInput};
 use std::{
     fs::{self, File},
@@ -21,7 +19,7 @@ pub(crate) fn verified_input(
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
     let held = File::open(directory.path())?;
     let staging = StagingDirectory::from_held_directory(held.try_clone()?, held.metadata()?.uid())?;
-    let (mut provider, mut selector) = UnixStream::pair()?;
+    let (provider, mut selector) = UnixStream::pair()?;
     let input = std::thread::scope(|scope| {
         let client = scope.spawn(move || -> Result<(), String> {
             selector
@@ -52,14 +50,12 @@ pub(crate) fn verified_input(
                 .map_err(|error| error.to_string())
         });
         let result = (|| -> Result<VerifiedStagedInput, Box<dyn std::error::Error>> {
-            let mut prepared = PreparedProviderExecution::receive(&mut provider, ledger)?;
+            let prepared = StagedInstallation::admit_source(provider, ledger)?;
             let name = prepared.request().attempt_id;
-            prepared.send_grant(&mut provider, StagedInstallation::sign_grant)?;
-            Ok(staging
-                .create_input(name, prepared)?
-                .receive(&mut provider)?)
+            let (verified, _stream) =
+                StagedInstallation::grant_staged(&staging, name, prepared)?.receive();
+            Ok(verified.map_err(|failed| format!("{:?}", failed.error()))?)
         })();
-        drop(provider);
         let peer = client
             .join()
             .map_err(|_| "selector fixture panicked".to_owned())?;

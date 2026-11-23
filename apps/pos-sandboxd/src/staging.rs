@@ -1,7 +1,7 @@
 //! Provider staging is owned by the same sealed boundary as source admission.
 
 pub use pos_reference::provider_admission::execution::{
-    AdmittedEntry, ControlFloor, FailedInput, InputRefusal, IssuedGrant, OutputReservationRefused,
-    StagedInput, StagingCharge, StagingDirectory, StagingError, StagingLedger, StagingLimits,
-    StagingUsage, VerifiedStagedInput,
+    AdmittedEntry, ControlFloor, FailedInput, IssuedGrant, OutputReservationRefused, StagedInput,
+    StagingCharge, StagingDirectory, StagingError, StagingLedger, StagingLimits, StagingUsage,
+    VerifiedStagedInput,
 };
