@@ -2003,8 +2003,13 @@ mod tests {
                 Ok::<(), Infallible>(())
             }))?;
         assert!(matches!(error, StagingError::InvalidSource), "{error:?}");
+        // Closing with the canary unread may reset the peer; either way no
+        // AGR1 byte arrives.
         drop(stream);
-        assert_eq!(selector.read(&mut [0])?, 0);
+        assert!(match selector.read(&mut [0]) {
+            Ok(length) => length == 0,
+            Err(error) => error.kind() == io::ErrorKind::ConnectionReset,
+        });
         assert_eq!(ledger.usage(), StagingUsage::default());
         Ok(())
     }
@@ -2124,7 +2129,14 @@ mod tests {
         let mut byte = [0];
         root.file().read_exact_at(&mut byte, 0)?;
         byte[0] ^= 1;
-        root.file().write_all_at(&byte, 0)?;
+        // The held descriptor is read-only; root writes the same inode.
+        {
+            use std::os::fd::AsRawFd as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(format!("/proc/self/fd/{}", root.file().as_raw_fd()))?
+                .write_all_at(&byte, 0)?;
+        }
         let (source, _selector) = source_pair(&staged, &ledger, &installation)?;
         let (_, error) = refused(admit(source, &ledger, &installation))?;
         assert!(matches!(error, StagingError::ImageIdentity), "{error:?}");
