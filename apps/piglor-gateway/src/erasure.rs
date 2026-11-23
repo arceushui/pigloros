@@ -251,8 +251,9 @@ fn submit_refusal(error: LocalErasureSubmitErrorV1) -> ProblemV1 {
 /// it; an expired trust admission or a host without a Local erasure
 /// composition is `temporarily-unavailable`. Only `submit_refusal`'s
 /// arm for `OperatorClosed`, `AdmissionsClosed` and `Unserved` calls it:
-/// every other refusal answers `temporarily-unavailable` here, so a new
-/// closed refusal needs its own branch.
+/// any other variant routed here would fall into the
+/// `temporarily-unavailable` branch, so a new closed refusal needs its own
+/// branch.
 fn closed_admissions(error: LocalErasureSubmitErrorV1) -> ProblemV1 {
     if error == LocalErasureSubmitErrorV1::OperatorClosed {
         ProblemV1::new(
