@@ -890,6 +890,13 @@ impl MemoryStore {
         Self::with_default_components(hasher)
     }
 
+    /// The store's pinned Hasher, the one its Event chains are built with.
+    /// The community observation owner re-derives chain hashes with it
+    /// (ADR-129 revision 9, R9.3 and R9.6).
+    pub(crate) fn event_hasher(&self) -> &dyn Hasher {
+        self.hasher.as_ref()
+    }
+
     /// Construct a store with a deterministic or host-provided admission clock.
     #[must_use]
     pub fn with_clock(clock: Box<dyn AdmissionClock>) -> Self {

@@ -22,8 +22,14 @@
 //!    it, and re-derives the CGR1 counts over the ARD1 graph (item 6).
 //!
 //! This first profile admits the code-0 initialization graph: CSC1, CIS1,
-//! CSR1 and the `InitialState` and `StateRevision` CPN1s. Any other family
-//! or form is refused until its extractor is admitted.
+//! CSR1 and the `InitialState` and `StateRevision` CPN1s.
+//!
+//! The control-record form (ADR-129 revision 9 R9.9(5)) admits
+//! `LifecycleControl` COW1s with no CGR1 and no selected head: today the
+//! pre-execution CFO1 of a `SetReason`. Its current head must still be the
+//! CQC1 expected head, and each record must decode as a pre-execution CFO1
+//! with no `PassKey` and no CFI1, so its ARD1 has no children. Any other
+//! family or form is refused until its extractor is admitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,8 +39,9 @@ use pos_core::community_lifecycle::{
     CommunityGraphRootV1, CommunityInitializationProducerV1, CommunityInputIndexV1,
     CommunityLifecycleErrorV1 as Error, CommunityLocatorProducerV1, CommunityMetadataSchemaV1,
     CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1, CommunityNativeNodeV1,
-    CommunityProtectedObjectV1, CommunitySelectedHeadV1, CommunityStateContentV1,
-    CommunityStateProducerV1, CommunityStateRevisionV1, CommunityTypedInputRefV1,
+    CommunityPassFailureV1, CommunityProtectedObjectV1, CommunitySelectedHeadV1,
+    CommunityStateContentV1, CommunityStateProducerV1, CommunityStateRevisionV1,
+    CommunityTypedInputRefV1,
 };
 use pos_core::{
     ArtifactChildEdgeV1, ArtifactRegistrationV1, AuthorityTrustRootSealV1, Hash, TimelineId,
@@ -85,15 +92,45 @@ pub struct CommunityArtifactBatchInputV1<'a> {
     pub expected_prior_head: Option<Hash>,
 }
 
-/// An owner-verified complete community closure, ready for the atomic
-/// commit. It grants no read; COA1 and current authority come after.
+/// One control-record batch (ADR-129 revision 9 R9.9(5)): `LifecycleControl`
+/// COW1s of one Control operation, with no CGR1 and no selected head.
+#[derive(Clone, Copy)]
+pub struct CommunityControlBatchInputV1<'a> {
+    /// The Timeline every record's key and header names.
+    pub timeline: TimelineId,
+    /// The generation every record's key and header names.
+    pub generation: [u8; 16],
+    /// The COB1 commitment every CAR1 binds.
+    pub owner_binding_digest: Hash,
+    /// Every COW1 of the batch, at least one.
+    pub records: &'a [CommunityArtifactRecordInputV1<'a>],
+    /// A CGR1, which a control batch must not carry.
+    pub graph_root: Option<&'a [u8]>,
+    /// The CSI1 row's current `selected_head_or_null`.
+    pub current_head: Option<Hash>,
+    /// The CQC1's `expected_state_head_digest`.
+    pub expected_head: Option<Hash>,
+}
+
+/// The two batch forms of the one sealed extractor (R9.9(5), N8(a)).
+#[derive(Clone, Copy)]
+pub enum CommunityArtifactBatchFormV1<'a> {
+    /// A CGR1 closure, such as the initialization graph.
+    Closure(CommunityArtifactBatchInputV1<'a>),
+    /// A `LifecycleControl` control-record batch.
+    Control(CommunityControlBatchInputV1<'a>),
+}
+
+/// An owner-verified complete community closure or control batch, ready
+/// for the atomic commit. It grants no read; COA1 and current authority
+/// come after.
 pub struct CommunityArtifactBatchV1 {
     #[cfg(target_os = "linux")]
     timeline: TimelineId,
     #[cfg(target_os = "linux")]
     generation: [u8; 16],
     records: Vec<CommunityProtectedRecordV1>,
-    graph_root_digest: Hash,
+    graph_root_digest: Option<Hash>,
 }
 
 impl CommunityArtifactBatchV1 {
@@ -110,9 +147,9 @@ impl CommunityArtifactBatchV1 {
         (self.timeline, self.generation)
     }
 
-    /// `H(CGR1)` of the verified root.
+    /// `H(CGR1)` of the verified root, or `None` for a control batch.
     #[must_use]
-    pub const fn graph_root_digest(&self) -> Hash {
+    pub const fn graph_root_digest(&self) -> Option<Hash> {
         self.graph_root_digest
     }
 }
@@ -155,17 +192,18 @@ struct Root {
     digest: Hash,
 }
 
-/// Verify one candidate community graph and prepare its batch.
+/// Verify one candidate community graph or control batch and prepare its
+/// batch.
 ///
 /// Only the trusted composition root, which holds the
 /// [`AuthorityTrustRootSealV1`], prepares a batch:
 ///
 /// ```compile_fail,E0061
 /// use pos_store::community::{
-///     prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1,
+///     prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1,
 ///     CommunityArtifactProtectorV1,
 /// };
-/// fn forge(input: CommunityArtifactBatchInputV1<'_>, keys: &[&CommunityArtifactProtectorV1]) {
+/// fn forge(input: CommunityArtifactBatchFormV1<'_>, keys: &[&CommunityArtifactProtectorV1]) {
 ///     let _ = prepare_community_artifact_batch_v1(input, keys);
 /// }
 /// ```
@@ -176,20 +214,33 @@ struct Root {
 /// operation or an envelope does not authenticate; the codec refusal for a
 /// malformed COW1, record, CGR1 or CSH1; and `InvalidBinding` for any
 /// header, key, CAR1, ARD1, owner-binding, record-schema, node-shape, child,
-/// member, root, cycle, closure, count or head-binding mismatch.
+/// member, root, cycle, closure, count or head-binding mismatch, and for a
+/// control batch with a CGR1, no record or a record other than a
+/// pre-execution `LifecycleControl` CFO1.
 pub fn prepare_community_artifact_batch_v1(
     _seal: &'static AuthorityTrustRootSealV1,
-    input: CommunityArtifactBatchInputV1<'_>,
+    form: CommunityArtifactBatchFormV1<'_>,
+    keys: &[&CommunityArtifactProtectorV1],
+) -> Result<CommunityArtifactBatchV1, Error> {
+    match form {
+        CommunityArtifactBatchFormV1::Closure(input) => prepare_closure(&input, keys),
+        CommunityArtifactBatchFormV1::Control(input) => prepare_control(input, keys),
+    }
+}
+
+/// The CGR1 closure form.
+fn prepare_closure(
+    input: &CommunityArtifactBatchInputV1<'_>,
     keys: &[&CommunityArtifactProtectorV1],
 ) -> Result<CommunityArtifactBatchV1, Error> {
     if input.current_head != input.expected_prior_head {
         return Err(Error::StaleFrontier);
     }
-    let root = read_root(&input)?;
+    let root = read_root(input)?;
     let extracted = input
         .records
         .iter()
-        .map(|record| extract(*record, &input, &root, keys))
+        .map(|record| extract(*record, input, &root, keys))
         .collect::<Result<Vec<_>, Error>>()?;
     let edges = resolve_children(&extracted)?;
     check_shape(&extracted, &edges, &root)?;
@@ -200,8 +251,64 @@ pub fn prepare_community_artifact_batch_v1(
         #[cfg(target_os = "linux")]
         generation: root.generation,
         records: extracted.into_iter().map(|record| record.record).collect(),
-        graph_root_digest: root.digest,
+        graph_root_digest: Some(root.digest),
     })
+}
+
+/// The control-record form (R9.9(5)): the head must be the CQC1 expected
+/// head, there is no CGR1, and every record is a `LifecycleControl` COW1
+/// holding a pre-execution CFO1 (no `PassKey`, no CFI1), whose ARD1 therefore
+/// has no children.
+fn prepare_control(
+    input: CommunityControlBatchInputV1<'_>,
+    keys: &[&CommunityArtifactProtectorV1],
+) -> Result<CommunityArtifactBatchV1, Error> {
+    if input.current_head != input.expected_head {
+        return Err(Error::StaleFrontier);
+    }
+    if input.graph_root.is_some() || input.records.is_empty() {
+        return Err(Error::InvalidBinding);
+    }
+    let binding = BatchBinding {
+        timeline: input.timeline,
+        generation: input.generation,
+        owner_binding_digest: input.owner_binding_digest,
+    };
+    input
+        .records
+        .iter()
+        .map(|record| {
+            authenticate(*record, binding, keys).and_then(|authenticated| {
+                let pre_execution = authenticated.header.record_kind
+                    == CommunityArtifactKindV1::LifecycleControl
+                    && authenticated
+                        .record
+                        .registration()
+                        .fields()
+                        .child_artifacts
+                        .is_empty()
+                    && CommunityPassFailureV1::from_canonical_cbor(&authenticated.plaintext)
+                        .is_ok_and(|failure| {
+                            let failure = failure.as_input();
+                            failure.pass_key.is_none()
+                                && failure.invocation_evidence_digests.is_empty()
+                        });
+                if pre_execution {
+                    Ok(authenticated.record)
+                } else {
+                    Err(Error::InvalidBinding)
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()
+        .map(|records| CommunityArtifactBatchV1 {
+            #[cfg(target_os = "linux")]
+            timeline: input.timeline,
+            #[cfg(target_os = "linux")]
+            generation: input.generation,
+            records,
+            graph_root_digest: None,
+        })
 }
 
 /// Decode CGR1 and its CSH1 and check that they name each other and this
@@ -243,16 +350,32 @@ fn read_root(input: &CommunityArtifactBatchInputV1<'_>) -> Result<Root, Error> {
     })
 }
 
-/// Authenticate one COW1, re-derive its ARD1 and read its plain record.
+/// The coordinates and owner binding every record of one batch must bind.
+#[derive(Clone, Copy)]
+struct BatchBinding {
+    timeline: TimelineId,
+    generation: [u8; 16],
+    owner_binding_digest: Hash,
+}
+
+/// One COW1 authenticated under its suboperation key, with its plain
+/// record, its header, its CAR1 provenance and its re-derived ARD1.
+struct Authenticated {
+    header: CommunityArtifactHeaderInputV1,
+    provenance: Hash,
+    plaintext: Zeroizing<Vec<u8>>,
+    record: CommunityProtectedRecordV1,
+}
+
+/// Authenticate one COW1 and re-derive its ARD1.
 ///
 /// The COW1 codec already checks both envelopes and that the proof header
 /// is the content header with kind 8, so neither is decoded twice here.
-fn extract(
+fn authenticate(
     input: CommunityArtifactRecordInputV1<'_>,
-    batch: &CommunityArtifactBatchInputV1<'_>,
-    root: &Root,
+    binding: BatchBinding,
     keys: &[&CommunityArtifactProtectorV1],
-) -> Result<Extracted, Error> {
+) -> Result<Authenticated, Error> {
     let object = CommunityProtectedObjectV1::from_canonical_cbor(input.object)?;
     CommunityEncryptedEnvelopeV1::from_canonical_cbor(object.content_envelope()).and_then(
         |content| {
@@ -273,8 +396,8 @@ fn extract(
             let kinds = intent.allowed_record_kinds;
             let bound = header.timeline == intent.timeline
                 && header.generation == intent.generation
-                && header.timeline == root.timeline
-                && header.generation == root.generation
+                && header.timeline == binding.timeline
+                && header.generation == binding.generation
                 && header.purpose == intent.purpose
                 && header.evidence_not_after_micros == intent.evidence_not_after_micros
                 && kinds.contains(header.record_kind);
@@ -297,31 +420,56 @@ fn extract(
                         if car1.envelope_address != content.address()
                             || car1.plaintext_commitment
                                 != plaintext_commitment(header.record_kind, &plaintext)
-                            || car1.owner_binding_digest != batch.owner_binding_digest
+                            || car1.owner_binding_digest != binding.owner_binding_digest
                             || registration != *input.registration
                         {
                             return Err(Error::InvalidBinding);
                         }
-                        let record = CommunityProtectedRecordV1::from_parts(
-                            Zeroizing::new(input.object.to_vec()),
-                            object.address(),
-                            registration,
-                            car1.owner_binding_digest,
-                            header.scope_cover_digest,
-                            header.evidence_not_after_micros,
-                        );
-                        read_record(
-                            &header,
-                            car1.host_provenance_digest,
-                            &plaintext,
-                            batch,
-                            record,
-                        )
+                        Ok(Authenticated {
+                            header,
+                            provenance: car1.host_provenance_digest,
+                            record: CommunityProtectedRecordV1::from_parts(
+                                Zeroizing::new(input.object.to_vec()),
+                                object.address(),
+                                registration,
+                                car1.owner_binding_digest,
+                                header.scope_cover_digest,
+                                header.evidence_not_after_micros,
+                            ),
+                            plaintext,
+                        })
                     })
                 },
             )
         },
     )
+}
+
+/// Authenticate one closure COW1 and read its plain record.
+fn extract(
+    input: CommunityArtifactRecordInputV1<'_>,
+    batch: &CommunityArtifactBatchInputV1<'_>,
+    root: &Root,
+    keys: &[&CommunityArtifactProtectorV1],
+) -> Result<Extracted, Error> {
+    authenticate(
+        input,
+        BatchBinding {
+            timeline: root.timeline,
+            generation: root.generation,
+            owner_binding_digest: batch.owner_binding_digest,
+        },
+        keys,
+    )
+    .and_then(|authenticated| {
+        read_record(
+            &authenticated.header,
+            authenticated.provenance,
+            &authenticated.plaintext,
+            batch,
+            authenticated.record,
+        )
+    })
 }
 
 /// Validate the plain record's schema and derive its logical identity, its

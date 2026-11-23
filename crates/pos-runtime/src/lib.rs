@@ -121,7 +121,7 @@ pub use registry::{
     LocalAdapterSessionV1, ManifestRosterBuildErrorV1, NoActionApproverV1, OperationContext,
     PluginRegistry, PreparedRegistrationV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
     ScheduledProfileErrorV1, StagedGrowthBoundV1, StagedReducerAdmissionErrorV1,
-    StagedReducerAdmissionV1, EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
+    StagedReducerAdmissionV1, EMPTY_CONFIGURATION_DETAILS_V1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
