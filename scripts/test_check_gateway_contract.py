@@ -1219,7 +1219,7 @@ class CheckGatewayContractTest(unittest.TestCase):
             document["paths"][TIMELINES]["post"]["responses"]["429"]
         )
         created = document["paths"][TIMELINES]["post"]["responses"]["201"]
-        created["headers"] = {"Location": {"schema": {"type": "string"}}}
+        created["headers"]["Location"] = {"schema": {"type": "string"}}
         current = contract(document=document)
         baseline = checker.load(checker.BASELINE)
         frozen = checker.freeze(current, baseline)
@@ -1392,6 +1392,82 @@ class CheckGatewayContractTest(unittest.TestCase):
         frozen["Retry-After"] = {"content": {}}
         with self.assertRaisesRegex(checker.ContractError, "declares no schema"):
             checker.check_compatibility(contract(), baseline=baseline)
+
+    def test_every_response_is_declared_no_store(self) -> None:
+        # #1407: every operation response, and the shared problem response, requires the one
+        # `Cache-Control: no-store` header, and the baseline freezes it.
+        subject = contract()
+        header = subject.resolve({"$ref": "#/components/headers/CacheControl"})
+        self.assertEqual(
+            (header["required"], header["schema"]), (True, {"type": "string", "const": "no-store"})
+        )
+        for (method, path), operation in subject.operations().items():
+            for status, response in operation["responses"].items():
+                headers = subject.resolve(response).get("headers", {})
+                self.assertEqual(
+                    headers.get("Cache-Control"),
+                    {"$ref": "#/components/headers/CacheControl"},
+                    f"{method} {path} {status}",
+                )
+        document = copy.deepcopy(DOCUMENT)
+        del document["components"]["responses"]["Problem"]["headers"]["Cache-Control"]
+        self.assert_breaking(document, "header Cache-Control: a frozen response header was removed")
+        document = copy.deepcopy(DOCUMENT)
+        document["components"]["headers"]["CacheControl"]["required"] = False
+        self.assert_breaking(document, "a required response header became optional")
+
+    def test_the_redaction_generation_is_an_optional_erasure_member(self) -> None:
+        # #1407: an `Erasure` may carry it as a non-negative integer, and need not.
+        subject = contract()
+        operation = self.operation(subject, "GET", "/v1/me/erasures/x")
+        body = example("client-cache-erasure-redacted")["response"]["body"]
+        instance = "/v1/me/erasures/{erasure_id}"
+        self.assertEqual(subject.response_errors(operation, 200, body, instance), [])
+        without = {key: value for key, value in body.items() if key != "redaction_generation"}
+        self.assertEqual(subject.response_errors(operation, 200, without, instance), [])
+        for invalid in (-1, "1", 1.5):
+            self.assertTrue(
+                subject.response_errors(
+                    operation, 200, {**body, "redaction_generation": invalid}, instance
+                ),
+                invalid,
+            )
+
+    def test_an_example_states_its_response_headers_exactly(self) -> None:
+        subject = contract()
+        operations = checker.operations_by_id(subject)
+        for name in (
+            "client-cache-erasure-redacted",
+            "client-cache-frozen-timeline-deleted",
+            "client-cache-unrouted-path",
+        ):
+            stated = example(name)
+            checker.check_example(subject, operations, name, stated)
+            # Names are case-insensitive, and an example without headers asserts none.
+            lower = copy.deepcopy(stated)
+            lower["response"]["headers"] = {"cache-control": "no-store"}
+            checker.check_example(subject, operations, name, lower)
+            silent = copy.deepcopy(stated)
+            del silent["response"]["headers"]
+            checker.check_example(subject, operations, name, silent)
+            for headers, error in (
+                ({"Cache-Control": "max-age=60"}, "header cache-control"),
+                ({}, "missing required response header cache-control"),
+                (
+                    {"Cache-Control": "no-store", "Clear-Site-Data": '"cache"'},
+                    "undeclared response header clear-site-data",
+                ),
+                ([], "response headers are not an object"),
+            ):
+                broken = copy.deepcopy(stated)
+                broken["response"]["headers"] = headers
+                with self.assertRaisesRegex(checker.ContractError, error):
+                    checker.check_example(subject, operations, name, broken)
+        # A declared optional header may be stated or left out.
+        response = {"headers": {"Retry-After": {"schema": {"type": "integer", "minimum": 1}}}}
+        self.assertEqual(subject.header_errors(response, {}), [])
+        self.assertEqual(subject.header_errors(response, {"retry-after": 2}), [])
+        self.assertTrue(subject.header_errors(response, {"Retry-After": 0}))
 
     def test_served_limits_move_only_in_their_direction(self) -> None:
         limits = DOCUMENT["x-pigloros-limits"]
