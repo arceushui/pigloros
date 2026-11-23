@@ -24,7 +24,10 @@ use std::time::Duration;
 use futures_util::future::{join, select, Either};
 use pos_reference::{
     provider_admission::execution::AdmittedProviderExecution,
-    sandbox_provider_protocol::{OutputCaptureRecord, PayloadDescriptor, TransferRecord},
+    sandbox_provider_protocol::{
+        OutputCaptureRecord, PayloadDescriptor, SandboxPayloadChunk, SandboxProviderProtocolError,
+        TransferRecord,
+    },
 };
 use rustix::fs::{fcntl_getfl, fcntl_setfl, fstat, makedev, open, FileType, Mode, OFlags};
 use rustix::io::Errno;
@@ -631,7 +634,7 @@ impl FencedOutput {
     pub fn release(self, _terminal: &TerminalResources) -> ReleasedOutput {
         ReleasedOutput {
             bytes: self.bytes,
-            _charge: self.charge,
+            charge: self.charge,
         }
     }
 }
@@ -641,7 +644,7 @@ impl FencedOutput {
 #[derive(Debug)]
 pub struct ReleasedOutput {
     bytes: Vec<u8>,
-    _charge: StagingCharge,
+    charge: StagingCharge,
 }
 
 impl ReleasedOutput {
@@ -649,6 +652,67 @@ impl ReleasedOutput {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The output SBC1 records of a Completed response whose SPY1 digests to
+    /// `parent_digest`, still under the output reservation (ADR-069 §4).
+    ///
+    /// The records are built from the last chunk back, each chunk copied out
+    /// and cut from the capture in place, without reallocating it per chunk;
+    /// the capture's buffer is freed once every record exists.
+    pub(crate) fn into_records(
+        self,
+        parent_digest: [u8; 32],
+        request_id: [u8; 16],
+        attempt_id: [u8; 16],
+    ) -> Result<RetainedOutput, SandboxProviderProtocolError> {
+        let mut bytes = self.bytes;
+        (0..bytes.len().div_ceil(SandboxPayloadChunk::CHUNK_BYTES))
+            .rev()
+            .map(|index| {
+                let start = index * SandboxPayloadChunk::CHUNK_BYTES;
+                let chunk = bytes[start..].to_vec();
+                bytes.truncate(start);
+                SandboxPayloadChunk::output_record(
+                    parent_digest,
+                    request_id,
+                    attempt_id,
+                    index as u64,
+                    chunk,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|mut records| {
+                records.reverse();
+                RetainedOutput {
+                    records,
+                    _charge: self.charge,
+                }
+            })
+    }
+}
+
+/// The output SBC1 records a Completed response retains until the attempt
+/// is reconciled; dropping them releases their output reservation.
+///
+/// The ELM1\[8\] output charge stays held for as long as the records are
+/// retained, so retained output is never uncharged (ADR-069 R11 Amendment 1,
+/// item P12, which extends the R10 §4.7 charge lifetime to reconcile). It is
+/// charged while retained and released at reconcile, at the tombstone, or at
+/// a re-issue, whose successor is not Completed and so retains no output
+/// (R9 §4.7). A connection still writing the frames holds its own
+/// `Arc<RetainedResponse>`, and with it the records and their charge, until
+/// it is done.
+#[derive(Debug)]
+pub(crate) struct RetainedOutput {
+    records: Vec<Vec<u8>>,
+    _charge: StagingCharge,
+}
+
+impl RetainedOutput {
+    /// The exact SBC1 records, from index zero.
+    pub(crate) fn records(&self) -> &[Vec<u8>] {
+        &self.records
     }
 }
 
