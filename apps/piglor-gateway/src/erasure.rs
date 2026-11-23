@@ -224,13 +224,9 @@ fn submit_refusal(error: LocalErasureSubmitErrorV1) -> ProblemV1 {
             StatusCode::BAD_REQUEST,
             "the erasure scope exceeds the Local erasure limit",
         ),
-        LocalErasureSubmitErrorV1::AdmissionsClosed | LocalErasureSubmitErrorV1::Unserved => {
-            ProblemV1::new(
-                ProblemCodeV1::TemporarilyUnavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "erasure admissions are closed on this host",
-            )
-        }
+        LocalErasureSubmitErrorV1::OperatorClosed
+        | LocalErasureSubmitErrorV1::AdmissionsClosed
+        | LocalErasureSubmitErrorV1::Unserved => closed_admissions(error),
         LocalErasureSubmitErrorV1::Host(pos_core::ErasureHostErrorV1::Conflict) => ProblemV1::new(
             ProblemCodeV1::IdempotencyConflict,
             StatusCode::CONFLICT,
@@ -247,6 +243,30 @@ fn submit_refusal(error: LocalErasureSubmitErrorV1) -> ProblemV1 {
             "the erasure host is unavailable",
         )
         .retryable(),
+    }
+}
+
+/// The non-retryable `503` of a host whose admissions are closed. The
+/// operator's closure (#1408) has its own code, since only reopening clears
+/// it; an expired trust admission or a host without a Local erasure
+/// composition is `temporarily-unavailable`. Only `submit_refusal`'s
+/// arm for `OperatorClosed`, `AdmissionsClosed` and `Unserved` calls it:
+/// any other variant routed here would fall into the
+/// `temporarily-unavailable` branch, so a new closed refusal needs its own
+/// branch.
+fn closed_admissions(error: LocalErasureSubmitErrorV1) -> ProblemV1 {
+    if error == LocalErasureSubmitErrorV1::OperatorClosed {
+        ProblemV1::new(
+            ProblemCodeV1::ErasureAdmissionsClosed,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the operator closed erasure admissions on this host",
+        )
+    } else {
+        ProblemV1::new(
+            ProblemCodeV1::TemporarilyUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "erasure admissions are closed on this host",
+        )
     }
 }
 

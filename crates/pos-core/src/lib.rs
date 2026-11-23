@@ -543,6 +543,7 @@ pub use erasure::{
     MAX_ARTIFACT_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_CHILDREN_V1,
     MAX_ARTIFACT_REGISTRATION_KEYS_V1,
 };
+pub use erasure::{ErasureAdmissionsPortV1, ErasureAdmissionsStateV1};
 pub use error::CoreError;
 pub use event::{
     CanonicalBytes, Determinism, Event, EventDraft, EventOriginV1, Kind, RunMode, SchemaVersion,

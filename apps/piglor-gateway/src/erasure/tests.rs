@@ -880,6 +880,14 @@ fn every_submit_refusal_has_its_answer() {
         )
     );
     assert_eq!(
+        answer(LocalErasureSubmitErrorV1::OperatorClosed),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Code::ErasureAdmissionsClosed,
+            json!(false)
+        )
+    );
+    assert_eq!(
         answer(LocalErasureSubmitErrorV1::ScopeTooLarge),
         (
             StatusCode::BAD_REQUEST,
@@ -1122,6 +1130,92 @@ async fn a_request_without_its_admission_is_unavailable() -> TestResult {
         )
     );
     served.shut_down().await?;
+    Ok(())
+}
+
+/// `erasure-admissions <verb>` on `world`'s store, which no serve holds.
+fn admissions(world: &World, verb: &str) -> TestResult<String> {
+    Ok(crate::erasure_admissions::execute(&[
+        verb.to_owned(),
+        world.fixture.path.clone(),
+    ])?)
+}
+
+/// #1408 (ADR-136 follow-up F3): the operator closes admissions with
+/// `erasure-admissions close` while the Gateway is stopped. Served again, a
+/// fresh request is a non-retryable `503 erasure-admissions-closed`, before
+/// the subject checks, while the exact retry of the admitted request
+/// answers its receipt, `getErasure` answers it and the driver takes it to
+/// its first receipt. After another restart the request is still answered
+/// and a fresh one still refused; reopened, the next request is admitted.
+#[tokio::test]
+async fn closed_admissions_refuse_new_erasures_and_finish_admitted_ones() -> TestResult {
+    let mode = ServeMode::Local;
+    let actor = actor()?;
+    let closed = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "erasure-admissions-closed".to_owned(),
+        false,
+    );
+    let (served, driver) = Served::serve(mode, &SERVED, compiled())?;
+    let admitted = served
+        .request(actor, "erasure-1", "private-subject-data")
+        .await?;
+    assert_eq!(admitted.status, StatusCode::ACCEPTED);
+    let world = served.stop(driver).await?;
+    assert_eq!(
+        admissions(&world, "close")?,
+        "Erasure admissions closed (were open)"
+    );
+    let (served, driver) = Served::over(world, mode, compiled())?;
+    // Request 1 may still hold the subject: the closed record answers
+    // before the subject checks would answer `429`.
+    let refused = served
+        .request(actor, "erasure-2", "consented-shared-data")
+        .await?;
+    assert_eq!(refused.problem()?, closed);
+    assert!(!refused.headers.contains_key("retry-after"));
+    let retried = served
+        .request(actor, "erasure-1", "private-subject-data")
+        .await?;
+    assert_eq!(
+        (retried.status, &retried.bytes),
+        (StatusCode::ACCEPTED, &admitted.bytes)
+    );
+    let id = erasure_id(actor, "erasure-1")?.to_string();
+    assert_eq!(served.read(actor, &id).await?.status, StatusCode::OK);
+    let observed = served.receipted(actor, &id).await?;
+    // The actor owns no Timeline, so every target of its closure is one a
+    // Local owner destroys and the request completes.
+    assert_eq!(observed.last().ok_or("no projection")?["state"], "complete");
+    // The subject is released, and the record still refuses.
+    let refused = served
+        .request(actor, "erasure-2", "consented-shared-data")
+        .await?;
+    assert_eq!(refused.problem()?, closed);
+    let world = served.stop(driver).await?;
+    let (served, driver) = Served::over(world, mode, compiled())?;
+    let read = served.read(actor, &id).await?;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(read.json()?["id"], id.as_str());
+    let refused = served
+        .request(actor, "erasure-2", "consented-shared-data")
+        .await?;
+    assert_eq!(refused.problem()?, closed);
+    let world = served.stop(driver).await?;
+    assert_eq!(
+        admissions(&world, "open")?,
+        "Erasure admissions opened (were closed)"
+    );
+    let (served, driver) = Served::over(world, mode, compiled())?;
+    assert_eq!(
+        served
+            .request(actor, "erasure-2", "consented-shared-data")
+            .await?
+            .status,
+        StatusCode::ACCEPTED
+    );
+    served.stop(driver).await?;
     Ok(())
 }
 
