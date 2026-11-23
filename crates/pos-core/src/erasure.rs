@@ -4238,6 +4238,26 @@ pub use artifact::{
     ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
 };
 mod registration;
+
+/// Write one ARD1 key dependency `[owner, role, epoch, material_digest,
+/// private_material_required]`. CES1 reuses this exact encoding (ADR-129
+/// revision 9, R9.1).
+pub(crate) fn encode_artifact_key_dependency(
+    out: &mut Vec<u8>,
+    dependency: &ArtifactKeyDependencyV1,
+) {
+    out.push(0x85);
+    crate::encode_bytes(out, dependency.identity.owner_id.as_str().as_bytes(), 3);
+    crate::encode_head(out, 0, u64::from(dependency.identity.role.code()));
+    crate::encode_head(out, 0, dependency.identity.epoch);
+    crate::encode_hash(out, dependency.material_digest);
+    out.push(if dependency.private_material_required {
+        0xf5
+    } else {
+        0xf4
+    });
+}
+
 pub use registration::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
     extract_repro_manifest_root_registration_v1, AdapterArtifactRegistrationErrorV1,
