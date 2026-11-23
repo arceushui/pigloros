@@ -241,6 +241,15 @@
         409
       ],
       "description": "The subject has used its lifetime share of the store's erasure requests; a retry never succeeds."
+    },
+    {
+      "code": "erasure-admissions-closed",
+      "type": "urn:pigloros:gateway:v1:problem:erasure-admissions-closed",
+      "title": "Erasure admissions closed",
+      "statuses": [
+        503
+      ],
+      "description": "The operator closed new erasure admissions on this host; nothing was requested. Only the operator reopening them clears it, so a retry alone never succeeds. Exact retries of admitted requests, their status reads and their completion continue."
     }
   ]
 }

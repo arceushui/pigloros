@@ -1,0 +1,29 @@
+{
+  "name": "erasure-admissions-closed",
+  "operation_id": "requestErasure",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-29",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    },
+    "body": {
+      "scope": "private-subject-data",
+      "impact_acknowledged": true
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 503,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:erasure-admissions-closed",
+      "title": "Erasure admissions closed",
+      "status": 503,
+      "detail": "the operator closed erasure admissions on this host",
+      "instance": "/v1/me/erasures",
+      "code": "erasure-admissions-closed",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

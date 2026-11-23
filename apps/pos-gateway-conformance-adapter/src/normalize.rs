@@ -14,20 +14,44 @@
 //! it is, so a malformed ID, cursor or hash, or an echo of another consent or room, cannot
 //! match.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 /// The Crockford base-32 alphabet of a ULID.
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// The observation of one sent exchange: `{"status", "body"}`, whose body is `{"json": <the
-/// normalized value>}` when the response bytes parsed as one JSON value, else `"non-json"`.
+/// The observation of one sent exchange: `{"status", "body"}`.
+///
+/// The body is `{"json": <the normalized value>}` when the response bytes parsed as one JSON value,
+/// else `"non-json"`. When the response carries a `cache-control` field, `cache_control` is every
+/// value of it, as [`cache_control_v1`] joins them, and the observation also has `"headers":
+/// {"cache-control": <that text>}` (#1407); no other header is observed.
 #[must_use]
-pub fn observation_v1(status: u16, parsed: Option<Value>) -> Value {
+pub fn observation_v1(status: u16, cache_control: Option<&str>, parsed: Option<Value>) -> Value {
     let body = parsed.map_or_else(
         || Value::from("non-json"),
         |value| json!({"json": normalize_response_v1(value)}),
     );
-    json!({"status": status, "body": body})
+    let mut observation = Map::new();
+    observation.insert("status".to_owned(), Value::from(status));
+    observation.extend(
+        cache_control.map(|value| ("headers".to_owned(), json!({ "cache-control": value }))),
+    );
+    observation.insert("body".to_owned(), body);
+    Value::Object(observation)
+}
+
+/// The observed `cache-control` text of a response whose field lines are `values`.
+///
+/// The `values` are taken in order, each as lossy UTF-8, joined with `", "` as one combined field
+/// value (RFC 9110 §5.3), or `None` without any. A duplicated or weakening second value is thus
+/// observed and cannot match a single expected directive (#1407).
+#[must_use]
+pub fn cache_control_v1<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<String> {
+    let lines = values
+        .into_iter()
+        .map(String::from_utf8_lossy)
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join(", "))
 }
 
 /// The `(schema_id, member, field)` rows of the digests a placeholder replaces in an object of
