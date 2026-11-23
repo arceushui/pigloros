@@ -33,9 +33,9 @@ pub fn observation_v1(status: u16, cache_control: Option<&str>, parsed: Option<V
     );
     let mut observation = Map::new();
     observation.insert("status".to_owned(), Value::from(status));
-    if let Some(value) = cache_control {
-        observation.insert("headers".to_owned(), json!({ "cache-control": value }));
-    }
+    observation.extend(
+        cache_control.map(|value| ("headers".to_owned(), json!({ "cache-control": value }))),
+    );
     observation.insert("body".to_owned(), body);
     Value::Object(observation)
 }

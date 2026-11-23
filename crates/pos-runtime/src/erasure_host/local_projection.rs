@@ -173,15 +173,19 @@ impl ErasureCommandSenderV1<'_> {
             u64::try_from(history.len().saturating_sub(1)).unwrap_or(u64::MAX)
         });
         let progress = self.recorded_local_progress(request)?.unwrap_or_default();
-        let admission = self
+        // The store's redaction generation is read with the admission, so a
+        // store that cannot answer it fails the projection closed.
+        let (admission, redaction_generation) = self
             .local_admission(request)?
-            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
-        let redaction_generation = self
-            .host
-            .store
-            .host_store()
-            .redaction_generation()
-            .map_err(map_erasure_error)?;
+            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)
+            .and_then(|admission| {
+                self.host
+                    .store
+                    .host_store()
+                    .redaction_generation()
+                    .map(|redaction| (admission, redaction))
+                    .map_err(map_erasure_error)
+            })?;
         Ok(Some(LocalErasureProjectionV1 {
             erasure_id,
             state: verified.state().clone(),
