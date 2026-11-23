@@ -38,12 +38,9 @@ piglor-gateway = { path = "../piglor-gateway" }
 pos-conformance = { path = "../../crates/pos-conformance" }
 pos-crypto = { path = "../../crates/pos-crypto" }
 
-# The ADR-136 acceptance test 11 tests include the shared signing and
-# key-less store fixtures via #[path]; cargo-shear does not attribute the
-# external fixtures' imports to this package. Keep these required
-# dev-dependencies; restrict the false-positive exception to them.
-[package.metadata.cargo-shear]
-ignored = ["ed25519-dalek", "piglor-gateway", "pos-conformance", "pos-crypto"]
+# The ADR-136 acceptance tests include shared signing and key-less store
+# fixtures via #[path]. cargo-shear follows those module edges, so these
+# required dev-dependencies need no ignore metadata.
 
 [lints]
 workspace = true
