@@ -116,3 +116,32 @@ fn an_unreadable_record_fails_and_is_left_unchanged() -> TestResult {
     assert_eq!(stored, "unreadable");
     Ok(())
 }
+
+/// A store whose `erasure_admissions` table was reshaped is refused at open,
+/// whether a `CHECK` constraint is missing or a column has another type, so
+/// a record under a weaker schema is never trusted.
+#[test]
+fn a_reshaped_admissions_table_refuses_to_open() -> TestResult {
+    for table in [
+        "CREATE TABLE erasure_admissions (singleton INTEGER PRIMARY KEY, \
+         closed INTEGER NOT NULL)",
+        "CREATE TABLE erasure_admissions (singleton INTEGER PRIMARY KEY \
+         CHECK (singleton = 1), closed TEXT NOT NULL CHECK (closed IN (0, 1)))",
+    ] {
+        let directory = tempdir()?;
+        let path = directory.path().join("reshaped.sqlite3");
+        let path = path
+            .to_str()
+            .ok_or("temporary database path is not UTF-8")?;
+        drop(SqliteStore::open(path)?);
+        rusqlite::Connection::open(path)?
+            .execute_batch(&format!("DROP TABLE erasure_admissions; {table};"))?;
+        let error = SqliteStore::open(path)
+            .err()
+            .ok_or("a reshaped table was opened")?
+            .to_string();
+        assert!(error.contains("erasure_admissions"), "{table}: {error}");
+        assert!(error.contains("incompatible schema"), "{table}: {error}");
+    }
+    Ok(())
+}
