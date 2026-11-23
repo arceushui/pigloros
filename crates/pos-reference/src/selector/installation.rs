@@ -568,9 +568,9 @@ impl InstalledSelectorState {
             .and_then(|directory| {
                 directory
                     .metadata()
+                    // `O_DIRECTORY` already refused anything but a directory.
                     .is_ok_and(|metadata| {
-                        metadata.is_dir()
-                            && metadata.uid() == owner
+                        metadata.uid() == owner
                             && metadata.mode() & 0o7777 == CAPTURE_STORE_MODE.bits()
                     })
                     .then_some(directory)
@@ -1920,6 +1920,57 @@ pub mod tests {
         let manifest_path = root.join(MANIFEST_NAME);
         fs::write(&manifest_path, encode_manifest(unsigned(objects))?)?;
         fs::set_permissions(manifest_path, fs::Permissions::from_mode(0o400))?;
+        Ok(())
+    }
+
+    /// Names the artifact root of the re-executed process that alone runs
+    /// the umask probe below.
+    const UMASK_PROBE: &str = "POS_REFERENCE_CAPTURE_STORE_UMASK_PROBE";
+
+    /// Under a umask that strips the owner's bits, the capture store root
+    /// and both retention directories are still created with mode exactly
+    /// `0700` (ADR-069 R11 Amendment 1 §5.4). The umask is process-wide, so
+    /// the test re-executes itself alone in a child process to change it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_capture_store_is_created_private_under_a_strict_umask() -> TestResult {
+        if let Some(root) = std::env::var_os(UMASK_PROBE) {
+            let held = File::open(&root)?;
+            let state = InstalledSelectorState::open_at_for_test(&held)?;
+            let umask = rustix::process::umask(Mode::from_raw_mode(0o277));
+            let opened = state
+                .open_capture_store_root(held.metadata()?.uid())
+                .map(|root| crate::sandbox_provider_protocol::NetworkCaptureStore::open(&root));
+            rustix::process::umask(umask);
+            opened??;
+            return Ok(());
+        }
+        let temporary = tempfile::tempdir()?;
+        write_state(temporary.path())?;
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "selector::installation::tests::the_capture_store_is_created_private_under_a_strict_umask",
+                "--nocapture",
+            ])
+            .env(UMASK_PROBE, temporary.path())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "the umask probe failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The probe ran exactly this one test.
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        let captures = temporary.path().join("captures");
+        for path in [
+            captures.clone(),
+            captures.join("responses"),
+            captures.join("transcripts"),
+        ] {
+            assert_eq!(fs::metadata(path)?.mode() & 0o7777, 0o700);
+        }
         Ok(())
     }
 
