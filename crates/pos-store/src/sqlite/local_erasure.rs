@@ -672,8 +672,9 @@ fn read_redaction_generation(connection: &Connection) -> Result<u64, ErasureErro
         })
 }
 
-/// Whether the store retains no ELCG1 cache generation, so a missing
-/// redaction-generation row means none was committed.
+/// `Ok` when the store retains no ELCG1 cache generation, so a missing
+/// redaction-generation row means none was committed;
+/// [`ErasureErrorV1::ReceiptCommitFailed`] when it retains one.
 fn holds_no_cache_generation(connection: &Connection) -> Result<(), ErasureErrorV1> {
     connection
         .query_row(
