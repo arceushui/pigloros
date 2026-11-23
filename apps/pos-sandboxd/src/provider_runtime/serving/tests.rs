@@ -10,15 +10,16 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
 use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_reference::sandbox_provider_protocol::{
-    RevocationUpdateRequest, SandboxCancelRequest, SandboxDescribeRequest, SandboxDescribeResponse,
-    SandboxExecuteRequest, SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
+    AdmissionGrant, RevocationUpdateRequest, SandboxCancelRequest, SandboxDescribeRequest,
+    SandboxDescribeResponse, SandboxExecuteRequest, SandboxProviderError, SandboxProviderErrorCode,
+    SandboxProviderResult, SandboxReconcileRequest, SandboxTerminalOutcome,
 };
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use rustix::event::PollFlags;
@@ -28,17 +29,19 @@ use super::{
     Deadlined, Responder, EXECUTE_CLOSED, FENCED, LIVE, REVOKED,
 };
 use crate::provider_runtime::endpoint::bind_endpoints;
+use crate::provider_runtime::port::ExecutePort;
 use crate::provider_runtime::reconcile::ReconcileError;
+use crate::provider_runtime::tests::PortFixture;
 use crate::provider_runtime::tests::{
     bind_as_provider, cancellation_context, encode, in_isolated_root, install_spi1,
-    key_and_provider_revocation_update, revocation_update, spi1, test_lifecycle, Scripted,
-    TestResult, RUNTIME_SEED,
+    key_and_provider_revocation_update, revocation_update, spi1, test_port, Scripted, TestResult,
+    RUNTIME_SEED,
 };
 use crate::provider_runtime::ExchangeObserver;
 use crate::provider_runtime::{
     serve_with, AdmissionState, ProviderRuntimeError, ProviderStartupError, RuntimeAuthority,
 };
-use crate::AttemptLifecycle;
+use crate::StagingLimits;
 
 const RUNTIME: &str = "/run/pigloros";
 const EXECUTE: &str = "/run/pigloros/provider-execute.sock";
@@ -268,16 +271,12 @@ impl Drop for ServingGuard {
     }
 }
 
-/// Bind both endpoints, serve them through `responder` with `pool` while
+/// Bind both endpoints, serve them through `responder` while
 /// `check` runs, then end serving through a replaced execute leaf.
-fn while_serving(
-    responder: &Responder<'_>,
-    pool: usize,
-    check: impl FnOnce() -> TestResult,
-) -> TestResult {
+fn while_serving(responder: &Responder<'_>, check: impl FnOnce() -> TestResult) -> TestResult {
     let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
     let woken = std::thread::scope(|scope| -> TestResult<UnixStream> {
-        let serving = scope.spawn(|| responder.serve(&execute, &control, pool));
+        let serving = scope.spawn(|| responder.serve(&execute, &control));
         let mut guard = ServingGuard { armed: true };
         check()?;
         let (replacement, woken) = guard.end()?;
@@ -440,6 +439,18 @@ fn answers_attempt_operations(
     )
 }
 
+/// Wait until the execute endpoint accepts connections.
+fn await_bound() -> TestResult {
+    let deadline = Instant::now() + CLIENT_TIMEOUT;
+    while UnixStream::connect(EXECUTE).is_err() {
+        if Instant::now() > deadline {
+            return Err("the execute endpoint was never bound".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 /// Send cancel requests until one gets SPE1 `15`: restart reconciliation
 /// opened admission.
 fn await_open(key: &VerifyingKey, authority: Authority) -> TestResult {
@@ -522,18 +533,21 @@ fn binds_nothing_on_a_refusal(manager: &UnixDatagram) -> TestResult {
     Ok(())
 }
 
-/// Reconciliation opens admission. With no execute port, execute is still
-/// refused with 11, cancel and reconcile name an unknown attempt
-/// (invariant 15), and describe still answers. The returned runtime tree
-/// must outlive the lifecycle.
-fn serves_open_without_an_execute_port(
+/// Reconciliation opens admission, but a control exchange began earlier:
+/// execute admission stays closed for the life of the process (R11 D9), so
+/// execute is refused with 11 though the port is composed, cancel and
+/// reconcile name an unknown attempt (invariant 15), and describe still
+/// answers. The returned fixture must outlive the port.
+fn serves_open_after_a_control_exchange(
     key: &VerifyingKey,
     retained: Authority,
     staged: &StagedInstallation,
-    reconciled: &mpsc::Sender<Result<AttemptLifecycle, ReconcileError>>,
-) -> TestResult<tempfile::TempDir> {
-    let (runtime, lifecycle) = test_lifecycle()?;
-    reconciled.send(Ok(lifecycle))?;
+    reconciled: &mpsc::Sender<Result<ExecutePort, ReconcileError>>,
+) -> TestResult<PortFixture> {
+    let (fixture, port) = test_port(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    })?;
+    reconciled.send(Ok(port))?;
     await_open(key, retained)?;
     answers_attempt_operations(key, retained, SandboxProviderErrorCode::UnknownAttempt)?;
     let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
@@ -551,7 +565,132 @@ fn serves_open_without_an_execute_port(
     let bytes = describe([4; 16], retained)?;
     SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
         .verify_signature(key)?;
-    Ok(runtime)
+    Ok(fixture)
+}
+
+/// The records of a response, in order.
+fn records(mut response: &[u8]) -> TestResult<Vec<Vec<u8>>> {
+    let mut records = Vec::new();
+    while !response.is_empty() {
+        let (prefix, rest) = response.split_at_checked(4).ok_or("short frame")?;
+        let length = usize::try_from(u32::from_be_bytes(prefix.try_into()?))?;
+        let (record, rest) = rest.split_at_checked(length).ok_or("short record")?;
+        records.push(record.to_vec());
+        response = rest;
+    }
+    Ok(records)
+}
+
+/// Send `source` without ending the write side, read AGR1 when `granted`,
+/// then end the write side and read the rest to EOF: every record the
+/// connection received.
+fn execute_exchange(source: &[&[u8]], granted: bool) -> TestResult<Vec<Vec<u8>>> {
+    let mut stream = UnixStream::connect(EXECUTE)?;
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    stream.write_all(&framed(source)?)?;
+    let mut received = Vec::new();
+    if granted {
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix)?;
+        let mut grant = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+        stream.read_exact(&mut grant)?;
+        received.push(grant);
+        // No input follows: the admitted attempt's input fails.
+        stream.shutdown(std::net::Shutdown::Write)?;
+    }
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest)?;
+    received.extend(records(&rest)?);
+    Ok(received)
+}
+
+/// An execute is admitted through the port: AGR1, then, its input never
+/// arriving, the stored `UnavailableAfterAdmission` response (code 10, R9
+/// Amendment 1 change A). An exact repeat joins the attempt and replays the
+/// stored full response byte for byte, with no second AGR1 (invariant 31);
+/// other bytes for the same attempt get `16`. A source that half-closes
+/// right after SPX1 fails step 1 with `0`.
+fn admits_joins_and_refuses_through_the_port(
+    key: &VerifyingKey,
+    staged: &StagedInstallation,
+) -> TestResult {
+    let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+    let first = execute_exchange(&[staged.evaluation(), staged.request()], true)?;
+    let grant = AdmissionGrant::from_canonical_cbor(&first[0])?;
+    assert_eq!(grant.attempt_id, execute.attempt_id);
+    let result =
+        SandboxProviderResult::from_canonical_cbor(first.last().ok_or("no terminal result")?)?;
+    result.verify_signature(key)?;
+    assert_eq!(
+        result.outcome,
+        SandboxTerminalOutcome::UnavailableAfterAdmission
+    );
+    assert_eq!(result.agr1_digest, Some(grant.grant_digest()));
+    let repeat = execute_exchange(&[staged.evaluation(), staged.request()], false)?;
+    assert_eq!(repeat, first);
+    let conflicting = staged.changed_request(|request| request.request.nonce[0] ^= 1)?;
+    let decoded = SandboxExecuteRequest::from_canonical_cbor(&conflicting)?;
+    let refused = execute_exchange(&[staged.evaluation(), &conflicting], false)?;
+    assert_refused(
+        &framed(&[&refused[0]])?,
+        key,
+        (
+            1,
+            decoded.request.request_id,
+            decoded.request_digest,
+            Some(decoded.attempt_id),
+        ),
+        SandboxProviderErrorCode::RequestIdentityConflict,
+    )?;
+    assert_invalid(
+        &exchange(&[staged.evaluation(), staged.request()])?,
+        key,
+        None,
+        SandboxProviderErrorCode::InvalidEncoding,
+    )
+}
+
+#[test]
+fn the_open_port_admits_joins_and_refuses_by_code() -> TestResult {
+    if !in_isolated_root(
+        "provider_runtime::serving::tests::the_open_port_admits_joins_and_refuses_by_code",
+    )? {
+        return Ok(());
+    }
+    let staged = stage()?;
+    let authority = bind_as_provider()??;
+    let (admitted, _, _) = &authority;
+    let key = *admitted.provider().runtime_attestation_key();
+    let retained = Authority {
+        apt1: admitted.bootstrap().policy().policy_digest(),
+        epoch: admitted.bootstrap().policy().policy_epoch(),
+    };
+    let (fixture, port) = test_port(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    })?;
+    let (reconciled, reconciling) = mpsc::channel();
+    reconciled.send(Ok(port))?;
+    let served = std::thread::spawn(move || {
+        serve_with(
+            move || Ok(authority),
+            move |_| Ok(Scripted(reconciling)),
+            None,
+        )
+    });
+    let checked = await_bound()
+        .and_then(|()| await_open(&key, retained))
+        .and_then(|()| admits_joins_and_refuses_through_the_port(&key, &staged));
+    let (replacement, woken) = replace_execute_leaf()?;
+    assert_eq!(
+        served.join().map_err(|_| "the runtime panicked")?,
+        ProviderRuntimeError::UnsafeEndpoint
+    );
+    assert_unanswered(woken)?;
+    drop(replacement);
+    fs::remove_file(EXECUTE).ok();
+    drop(fixture);
+    drop(staged);
+    checked
 }
 
 /// EVR1 then SPX1: the precedence of each, step 6, then SPE1 11.
@@ -727,7 +866,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     // gets the SDY1 and a clean EOF.
     let trailing = exchange(&[&describe([3; 16], retained)?, b"trailing"])?;
     SandboxDescribeResponse::from_canonical_cbor(unframe(&trailing)?)?.verify_signature(&key)?;
-    let runtime = serves_open_without_an_execute_port(&key, retained, &staged, &reconciled)?;
+    let runtime = serves_open_after_a_control_exchange(&key, retained, &staged, &reconciled)?;
     let (replacement, woken) = replace_execute_leaf()?;
     let replaced = fs::symlink_metadata(EXECUTE)?.ino();
     assert_eq!(
@@ -789,6 +928,7 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     }
     let staged = stage()?;
     let (admitted, _, signer) = bind_as_provider()??;
+    let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
     let key = *admitted.provider().runtime_attestation_key();
     let retained = Authority {
         apt1: admitted.bootstrap().policy().policy_digest(),
@@ -797,8 +937,8 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     // A failed reconciliation keeps cancel and reconcile refused with 11
     // for the life of the process (invariant 13).
     let failed = OnceLock::from(AdmissionState::ReconcileFailed);
-    let responder = Responder::new(&admitted, &signer, &failed);
-    while_serving(&responder, 4, || {
+    let responder = Responder::new(&admitted, &signer, &failed, 4);
+    while_serving(&responder, || {
         answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
         let bytes = describe([6; 16], retained)?;
         SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
@@ -818,7 +958,9 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     })?;
     // A full pool of one: the next connection is accepted and refused with
     // SPE1 12 at once (journal 22582).
-    while_serving(&responder, 1, || {
+    // Every uncharged read shares one reader place here (item P7): the
+    // refusal waits until the holder's read ended at its deadline.
+    while_serving(&Responder::new(&admitted, &signer, &failed, 1), || {
         let mut holder = UnixStream::connect(EXECUTE)?;
         assert_busy(&mut UnixStream::connect(EXECUTE)?, &key, 2, retained)?;
         assert_expired(&mut holder, &key)
@@ -826,7 +968,7 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     // Pool 0 (ELM1 exact deny-all) refuses every connection with 12. One
     // refusal runs at a time: while it waits, the next connection stays
     // unanswered, and is refused once the first ends.
-    while_serving(&responder, 0, || {
+    while_serving(&Responder::new(&admitted, &signer, &failed, 0), || {
         assert_busy(&mut UnixStream::connect(EXECUTE)?, &key, 4, retained)?;
         let mut holder = UnixStream::connect(EXECUTE)?;
         let mut waiting = UnixStream::connect(EXECUTE)?;
@@ -885,14 +1027,14 @@ fn assert_dropped_unread(server: &UnixStream, peer: &mut UnixStream, sent: &[u8]
 /// revocation responder nor the execute answer reads its request, and the
 /// control state stays `Live` (R11 §6 step 6).
 fn drops_an_untrusted_peer(
-    admitted: &AdmittedSelectorProvider,
-    signer: &crate::KeyFileRuntimeSigner,
+    admitted: &Arc<AdmittedSelectorProvider>,
+    signer: &Arc<crate::KeyFileRuntimeSigner>,
     retained: Authority,
 ) -> TestResult {
     let starting = OnceLock::new();
     let untrusted = Responder {
         peer_uid: rustix::process::geteuid().as_raw() + 1,
-        ..Responder::new(admitted, signer, &starting)
+        ..Responder::new(admitted, signer, &starting, 4)
     };
     let (update, _) = revocation_update(admitted, &[], 4)?;
     let context = cancellation_context(admitted, &update, Vec::new(), Vec::new())?;
@@ -908,7 +1050,7 @@ fn drops_an_untrusted_peer(
     let sent = framed(&[&describe([4; 16], retained)?])?;
     let (server, mut peer) = UnixStream::pair()?;
     peer.write_all(&sent)?;
-    untrusted.answer(&server, Admission::Answered);
+    untrusted.answer(server.try_clone()?, Admission::Answered, None);
     assert_dropped_unread(&server, &mut peer, &sent)?;
     assert_eq!(
         untrusted.revocation.observer().state.load(Ordering::SeqCst),
@@ -926,6 +1068,7 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
     }
     let staged = stage()?;
     let (admitted, _, signer) = bind_as_provider()??;
+    let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
     let key = *admitted.provider().runtime_attestation_key();
     let retained = Authority {
         apt1: admitted.bootstrap().policy().policy_digest(),
@@ -936,8 +1079,8 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
     let starting = OnceLock::new();
     // An acknowledged update fences the runtime for good; describe still
     // answers and execute is refused with 11 (invariant 24).
-    let fenced = Responder::new(&admitted, &signer, &starting);
-    while_serving(&fenced, 4, || {
+    let fenced = Responder::new(&admitted, &signer, &starting, 4);
+    while_serving(&fenced, || {
         let (update, _) = revocation_update(&admitted, &[], 1)?;
         let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
             .to_canonical_cbor()?;
@@ -955,8 +1098,8 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
     // A self-revoking update is acknowledged. Afterwards every execute
     // connection gets zero bytes, and only the retained RCA1 is resent
     // (invariant 25).
-    let revoked = Responder::new(&admitted, &signer, &starting);
-    while_serving(&revoked, 4, || {
+    let revoked = Responder::new(&admitted, &signer, &starting, 4);
+    while_serving(&revoked, || {
         let manifest = admitted.provider().manifest().manifest_digest;
         let (update, _) = revocation_update(&admitted, &[manifest], 2)?;
         let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
@@ -1040,16 +1183,16 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
 }
 
 #[test]
-fn the_execute_listener_is_polled_while_either_pool_has_a_free_slot() {
-    // A free answered slot alone, a free refusing slot alone, and neither.
-    assert!(accepting(0, 1, 1));
-    assert!(accepting(1, 0, 1));
-    assert!(accepting(1, 1, 2));
-    assert!(!accepting(1, 1, 1));
-    assert!(!accepting(2, 3, 2));
-    // Pool 0 still runs one refusal at a time.
-    assert!(accepting(0, 0, 0));
-    assert!(!accepting(0, 1, 0));
+fn the_execute_listener_is_polled_while_either_pool_has_room() {
+    // A free answered slot alone, room for an uncharged reader alone, and
+    // neither.
+    assert!(accepting(0, false, 1));
+    assert!(accepting(1, true, 1));
+    assert!(accepting(1, false, 2));
+    assert!(!accepting(1, false, 1));
+    // Pool 0 answers nobody, but the reader pool still has one place.
+    assert!(accepting(0, true, 0));
+    assert!(!accepting(0, false, 0));
 }
 
 #[test]

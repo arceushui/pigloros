@@ -29,7 +29,8 @@
 //! the mode then binds both SIC1 endpoints, execute then control
 //! (`endpoint`, R11 §6), sends `READY=1` (`notify`) and serves both in state
 //! `Starting` (`serving`, R11 §7). Restart reconciliation runs on its own
-//! thread meanwhile (steps 9 to 11): its success opens admission (`Open`),
+//! thread meanwhile (steps 9 to 11): its success opens admission (`Open`)
+//! through the execute port it hands over (`port`, R11 §7.3),
 //! and its failure leaves `ReconcileFailed` for the life of the process,
 //! with no retry. If that thread cannot be spawned, the runtime stays
 //! `Starting` for the life of the process, which answers exactly as
@@ -41,10 +42,12 @@
 
 mod endpoint;
 mod notify;
+mod port;
 mod reconcile;
 // `pub` only so its `pub(crate)` items pass Clippy's `redundant_pub_crate`;
 // nothing in it is public.
 pub mod recovery_peer;
+mod refusal_pool;
 mod revocation;
 mod serving;
 #[cfg(test)]
@@ -127,12 +130,11 @@ pub(crate) enum ProviderRuntimeError {
 
 /// The execute socket's admission state once restart reconciliation ended
 /// (R11 §7.1). Before it is set, the runtime is `Starting`.
-#[derive(Debug)]
 enum AdmissionState {
-    /// Reconciliation succeeded. The lifecycle holds the registry lock and
-    /// the ledger for the life of the process; the revocation responder
-    /// fences it.
-    Open { lifecycle: AttemptLifecycle },
+    /// Reconciliation succeeded. The execute port's lifecycle holds the
+    /// registry lock and the ledger for the life of the process; the
+    /// revocation responder fences it.
+    Open(Box<port::ExecutePort>),
     /// Reconciliation failed: admission stays closed for the life of the
     /// process, with no retry (R11 §5.1 step 11).
     ReconcileFailed,
@@ -142,13 +144,12 @@ enum AdmissionState {
 /// §8.1): once `Open`, the lifecycle's permanent fence and snapshot, read
 /// through [`crate::LiveAttemptIdentity::cleanup_proved`]. Before that no
 /// attempt can exist in this runtime, so the view is empty.
-#[derive(Debug)]
 struct LiveAttempts<'a>(&'a OnceLock<AdmissionState>);
 
 impl AttemptStateSource for LiveAttempts<'_> {
     fn attempt_states(&self) -> impl Future<Output = Option<Vec<AttemptCleanupState>>> + Send {
         let lifecycle = match self.0.get() {
-            Some(AdmissionState::Open { lifecycle }) => Some(lifecycle),
+            Some(AdmissionState::Open(port)) => Some(&port.lifecycle),
             _ => None,
         };
         async move {
@@ -232,8 +233,11 @@ fn serve_with<R: Reconcile>(
                 reconcile_in_background(reconcile, Arc::clone(&admission));
                 let pool = usize::try_from(required_slots(admitted.provider().broker_hard_caps()))
                     .unwrap_or(1);
-                serving::Responder::new(&admitted, &signer, &admission)
-                    .serve(&execute, &control, pool)
+                // The port's attempts share the startup admission and the
+                // one runtime key with serving.
+                let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+                serving::Responder::new(&admitted, &signer, &admission, pool)
+                    .serve(&execute, &control)
             },
         )
 }
@@ -274,7 +278,7 @@ fn start_reconciliation(
                 .ok();
                 AdmissionState::ReconcileFailed
             },
-            |lifecycle| AdmissionState::Open { lifecycle },
+            |port| AdmissionState::Open(Box::new(port)),
         );
         admission.set(state).ok();
     }))

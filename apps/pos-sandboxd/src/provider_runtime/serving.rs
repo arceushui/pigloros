@@ -12,22 +12,30 @@
 //! is 0, is accepted and refused with SPE1 `12 AdmissionBusy` (owner
 //! decision, Redmine #1358 journal 22582). An SPE1 `12` binds the
 //! authenticated request, so the refusing worker first reads it under the
-//! same rules; at most `max(bound, 1)` such refusals run at once, and the
-//! execute listener is not polled while they are all busy.
+//! same rules. Every read the ledger does not charge (refusals, every read
+//! while `Starting` or `ReconcileFailed`, and the hand-off of a refused
+//! source charge) shares one pool of at most `max(bound, 1)` readers, and a
+//! waiting hand-off is served first (R11 Amendment 1, item P7); the
+//! execute listener is not polled while the pool has no room, and a refusal
+//! is accepted only with its reader place in hand.
 //!
-//! On the execute socket the request first passes validation precedence
+//! Serving samples the admission state when it begins reading (R11
+//! Amendment 1 §7.5). An answered connection of an `Open` runtime whose
+//! execute admission is open is read once, charged, by the execute port
+//! (`port`): execute is admitted there in §7.5 order and answered with AGR1
+//! and its stored response, or with that table's SPE1. Any other
+//! connection is read uncharged and first passes validation precedence
 //! steps 1 to 6 under the initial control deadline (BHC1 limit 16), each
-//! failure with that step's SPE1 code. An expired deadline is a step 1
+//! failure with that step's SPE1 code; an expired deadline is a step 1
 //! failure (journal 22582). Then `describe` gets the SDY1 of the startup
-//! authority in every state. Execute gets SPE1 `11 SandboxUnavailable` in
-//! every state: no execute port is composed yet (R11 §7.3, #443). Cancel and
-//! reconcile get SPE1 `11` while the runtime is `Starting` or
-//! `ReconcileFailed`, and SPE1 `15 UnknownAttempt` once it is `Open`:
-//! without an execute port no attempt can enter this runtime, so every
-//! attempt is unknown (R11 §10 invariant 15). Whatever the request
-//! left unread is read first, so the peer sees the answer and a clean EOF.
-//! Each record is signed by the runtime key, verified before emission,
-//! written under its own short deadline and followed by server write EOF.
+//! authority in every state. Execute read uncharged gets SPE1 `11
+//! SandboxUnavailable`: the runtime is not `Open`, or its execute admission
+//! closed. Cancel and reconcile get SPE1 `11` while the runtime is
+//! `Starting` or `ReconcileFailed`, and SPE1 `15 UnknownAttempt` once it is
+//! `Open` (R11 §10 invariant 15). Whatever the request left unread is read
+//! first, so the peer sees the answer and a clean EOF. Each record is
+//! signed by the runtime key, verified before emission, written under its
+//! own short deadline and followed by server write EOF.
 //!
 //! A root control connection is answered by the one
 //! [`super::RevocationUpdateResponder`] (R11 §8), on the acceptor itself:
@@ -48,7 +56,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
@@ -69,6 +77,8 @@ use pos_reference::selector::installation::authority::{
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use super::endpoint::ProviderEndpoint;
+use super::port::ExecutePort;
+use super::refusal_pool::{ReaderPermit, RefusalPool};
 use super::{
     unavailable, AdmissionState, ExchangeObserver, ExchangeOutcome, LiveAttempts,
     ProviderRuntimeError, RevocationUpdateResponder,
@@ -111,9 +121,8 @@ pub(super) fn exchange_deadline(accepted: Instant) -> Instant {
 /// The live runtime's control state (R11 §7.1, §8.4). It only advances:
 /// `Live`, `ExecuteClosed` once an exchange began, `Fenced` once one
 /// reached the fence, and `Revoked` once an acknowledged RVS1 revokes this
-/// runtime's key, SPM1 or binary. Execute admission may open only while it
-/// is `Live`; no execute port is composed yet, so only `Revoked` changes an
-/// answer here.
+/// runtime's key, SPM1 or binary. Execute admission is open only while it
+/// is `Live`.
 #[derive(Debug)]
 struct ControlState<'a> {
     state: AtomicU8,
@@ -123,6 +132,11 @@ struct ControlState<'a> {
 impl ControlState<'_> {
     fn advance(&self, state: u8) {
         self.state.fetch_max(state, Ordering::AcqRel);
+    }
+
+    /// Whether no control exchange began: execute admission may be open.
+    fn live(&self) -> bool {
+        self.state.load(Ordering::Acquire) == LIVE
     }
 
     fn revoked(&self) -> bool {
@@ -249,30 +263,31 @@ enum Admission {
     Busy,
 }
 
-/// The live workers of one acceptor.
-struct Workers<'scope> {
-    answered: Vec<ScopedJoinHandle<'scope, ()>>,
-    refusing: Vec<ScopedJoinHandle<'scope, ()>>,
-}
-
 /// The startup authority that answers requests, its one signer, the
 /// admission state restart reconciliation sets (unset while `Starting`),
-/// the revocation responder and the control state it leaves, and the one
-/// peer UID both sockets answer.
+/// the revocation responder and the control state it leaves, the one peer
+/// UID both sockets answer, the answered-pool bound and the pool of
+/// uncharged readers.
 pub(super) struct Responder<'a> {
-    admitted: &'a AdmittedSelectorProvider,
-    signer: &'a KeyFileRuntimeSigner,
+    admitted: &'a Arc<AdmittedSelectorProvider>,
+    signer: &'a Arc<KeyFileRuntimeSigner>,
     admission: &'a OnceLock<AdmissionState>,
     revocation:
         RevocationUpdateResponder<'a, KeyFileRuntimeSigner, LiveAttempts<'a>, ControlState<'a>>,
     peer_uid: u32,
+    pool: usize,
+    refusals: RefusalPool,
 }
 
 impl<'a> Responder<'a> {
-    pub(super) const fn new(
-        admitted: &'a AdmittedSelectorProvider,
-        signer: &'a KeyFileRuntimeSigner,
+    /// The responder of the startup authority `admitted` and its `signer`
+    /// over `admission`, answering at most `pool` execute connections at
+    /// once.
+    pub(super) fn new(
+        admitted: &'a Arc<AdmittedSelectorProvider>,
+        signer: &'a Arc<KeyFileRuntimeSigner>,
         admission: &'a OnceLock<AdmissionState>,
+        pool: usize,
     ) -> Self {
         let provider = admitted.provider();
         Self {
@@ -295,24 +310,21 @@ impl<'a> Responder<'a> {
                 },
             ),
             peer_uid: ROOT_UID,
+            pool,
+            refusals: RefusalPool::new(pool),
         }
     }
 
-    /// Serve `execute` and `control` until a listener invariant fails,
-    /// answering at most `pool` execute connections at once.
+    /// Serve `execute` and `control` until a listener invariant fails.
     pub(super) fn serve(
         &self,
         execute: &ProviderEndpoint,
         control: &ProviderEndpoint,
-        pool: usize,
     ) -> ProviderRuntimeError {
         thread::scope(|scope| {
-            let mut workers = Workers {
-                answered: Vec::new(),
-                refusing: Vec::new(),
-            };
+            let mut answered = Vec::new();
             loop {
-                if let Err(error) = self.serve_once(scope, &mut workers, execute, control, pool) {
+                if let Err(error) = self.serve_once(scope, &mut answered, execute, control) {
                     break error;
                 }
             }
@@ -322,14 +334,12 @@ impl<'a> Responder<'a> {
     fn serve_once<'scope>(
         &'scope self,
         scope: &'scope Scope<'scope, '_>,
-        workers: &mut Workers<'scope>,
+        answered: &mut Vec<ScopedJoinHandle<'scope, ()>>,
         execute: &ProviderEndpoint,
         control: &ProviderEndpoint,
-        pool: usize,
     ) -> Result<(), ProviderRuntimeError> {
-        workers.answered.retain(|worker| !worker.is_finished());
-        workers.refusing.retain(|worker| !worker.is_finished());
-        let accepting = accepting(workers.answered.len(), workers.refusing.len(), pool);
+        answered.retain(|worker| !worker.is_finished());
+        let accepting = accepting(answered.len(), self.refusals.has_room(), self.pool);
         let mut ready = [
             PollFd::new(control.listener(), PollFlags::IN),
             PollFd::new(
@@ -364,30 +374,43 @@ impl<'a> Responder<'a> {
                                 .is_none()
                         })
                     })
-                    .and_then(|control_missed| {
-                        execute_ready
-                            .then(|| execute.accept())
-                            .transpose()
-                            .map(|accepted| (control_missed, execute_ready, accepted.flatten()))
-                    })
+                    .map(|control_missed| (control_missed, execute_ready))
             })
-            .map(|(control_missed, execute_ready, accepted)| {
-                let missed = missed(control_missed, execute_ready, accepted.is_some());
-                thread::sleep(ACCEPT_BACKOFF * u32::from(missed));
-                let admission = if workers.answered.len() < pool {
+            .and_then(|(control_missed, execute_ready)| {
+                let admission = if answered.len() < self.pool {
                     Admission::Answered
                 } else {
                     Admission::Busy
                 };
+                // A refusal is accepted only with its uncharged reader place
+                // in hand, so it never waits behind a connection accepted
+                // before it; with no place, the acceptor backs off and polls
+                // again.
+                let permit = (execute_ready && admission == Admission::Busy)
+                    .then(|| self.refusals.wait(Instant::now()))
+                    .flatten();
+                (execute_ready && (admission == Admission::Answered || permit.is_some()))
+                    .then(|| execute.accept())
+                    .transpose()
+                    .map(|accepted| {
+                        let accepted = accepted.flatten();
+                        (
+                            missed(control_missed, execute_ready, accepted.is_some()),
+                            admission,
+                            (accepted, permit),
+                        )
+                    })
+            })
+            .map(|(missed, admission, (accepted, permit))| {
+                thread::sleep(ACCEPT_BACKOFF * u32::from(missed));
                 // A worker that cannot be spawned drops its connection.
                 let spawned = accepted.and_then(|stream| {
                     thread::Builder::new()
-                        .spawn_scoped(scope, move || self.answer(&stream, admission))
+                        .spawn_scoped(scope, move || self.answer(stream, admission, permit))
                         .ok()
                 });
-                match admission {
-                    Admission::Answered => workers.answered.extend(spawned),
-                    Admission::Busy => workers.refusing.extend(spawned),
+                if admission == Admission::Answered {
+                    answered.extend(spawned);
                 }
             })
     }
@@ -395,9 +418,9 @@ impl<'a> Responder<'a> {
     /// Answer one execute-socket connection, then send server write EOF. A
     /// peer that is not root is dropped with zero bytes read and written; so
     /// is every peer once the runtime is `Revoked`, after the peer check.
-    fn answer(&self, stream: &UnixStream, admission: Admission) {
-        if self.answers(stream) {
-            self.answer_root(stream, admission);
+    fn answer(&self, stream: UnixStream, admission: Admission, permit: Option<ReaderPermit<'_>>) {
+        if self.answers(&stream) {
+            self.answer_root(stream, admission, permit);
         }
     }
 
@@ -430,40 +453,118 @@ impl<'a> Responder<'a> {
         )
     }
 
-    /// Answer a root peer's connection: read it under the initial control
-    /// deadline, then write the answer under its own deadline.
-    fn answer_root(&self, stream: &UnixStream, admission: Admission) {
+    /// The execute port, while the runtime is `Open` with execute admission
+    /// still open on it and in the control state.
+    fn open_port(&self) -> Option<&ExecutePort> {
+        match self.admission.get() {
+            Some(AdmissionState::Open(port))
+                if port.open() && self.revocation.observer().live() =>
+            {
+                Some(port)
+            }
+            _ => None,
+        }
+    }
+
+    /// Answer a root peer's connection by its admission-state sample (R11
+    /// Amendment 1 §7.5): an answered connection of an `Open` runtime with
+    /// the port composed is read once, charged, by the port; any other is
+    /// read uncharged, as one of the bounded refusal readers.
+    fn answer_root(
+        &self,
+        stream: UnixStream,
+        admission: Admission,
+        permit: Option<ReaderPermit<'_>>,
+    ) {
+        match (self.open_port(), admission) {
+            (Some(port), Admission::Answered) => self.serve_port(port, stream),
+            _ => self.answer_uncharged(&stream, admission, permit),
+        }
+    }
+
+    /// Read a connection uncharged, under the initial control deadline,
+    /// holding an uncharged reader's place (item P7), then write the answer
+    /// under its own deadline.
+    fn answer_uncharged(
+        &self,
+        stream: &UnixStream,
+        admission: Admission,
+        permit: Option<ReaderPermit<'_>>,
+    ) {
         let limits = self.admitted.provider().broker_hard_caps();
         let mut reading = Deadlined::new(
             stream,
             Duration::from_millis(limits[CONTROL_DEADLINE_LIMIT_ID].value),
         );
-        let response = match (self.classify(&mut reading), admission) {
-            (Ok(identity), Admission::Busy) => self.refuse(Refusal::Authenticated {
-                identity,
-                code: SandboxProviderErrorCode::AdmissionBusy,
-            }),
-            (Ok(identity), Admission::Answered) if identity.operation == DESCRIBE => {
-                self.describe(identity.request_id)
-            }
-            (Ok(identity), Admission::Answered) => self.refuse(Refusal::Authenticated {
-                identity,
-                code: self.closed(identity.operation),
-            }),
-            (Err(refusal), _) => self.refuse(refusal),
+        let until = reading.until;
+        let Some(permit) = permit.or_else(|| self.refusals.wait(until)) else {
+            return Self::conclude(stream, self.refuse(unserved_reader()));
         };
+        let classified = self.classify(&mut reading);
+        drop(permit);
+        match (classified, admission) {
+            (Ok(identity), Admission::Busy) => self.answer_busy(stream, identity, until, false),
+            (Ok(identity), Admission::Answered) => {
+                let response = self.answer_identity(identity);
+                Self::conclude(stream, response);
+            }
+            (Err(refusal), _) => Self::conclude(stream, self.refuse(refusal)),
+        }
+    }
+
+    /// An authenticated request beyond the answered pool: an exact repeat
+    /// of an attempt the port holds joins it (item P10); any other request
+    /// gets `12`, or `14` once the ledger was `closed`.
+    fn answer_busy(
+        &self,
+        stream: &UnixStream,
+        identity: RequestIdentity,
+        until: Instant,
+        closed: bool,
+    ) {
+        let code = if closed {
+            SandboxProviderErrorCode::CleanupFailed
+        } else {
+            SandboxProviderErrorCode::AdmissionBusy
+        };
+        match self.open_port().filter(|_| identity.operation == EXECUTE) {
+            Some(port) => match Self::join(port, identity, until) {
+                Join::Fresh => Self::conclude(stream, self.authenticated(identity, code)),
+                Join::Answer(answer) => self.reply(port, stream, identity, answer),
+            },
+            None => Self::conclude(stream, self.authenticated(identity, code)),
+        }
+    }
+
+    /// The answer of an authenticated request read in full: the SDY1 of
+    /// describe, and the R11 §7.1 refusal of any other operation.
+    fn answer_identity(&self, identity: RequestIdentity) -> Option<Vec<u8>> {
+        if identity.operation == DESCRIBE {
+            self.describe(identity.request_id)
+        } else {
+            self.authenticated(identity, self.closed(identity.operation))
+        }
+    }
+
+    /// The signed SPE1 `code` for the authenticated `identity`.
+    fn authenticated(
+        &self,
+        identity: RequestIdentity,
+        code: SandboxProviderErrorCode,
+    ) -> Option<Vec<u8>> {
+        self.refuse(Refusal::Authenticated { identity, code })
+    }
+
+    /// Write `response`, if any, under its own deadline, then send server
+    /// write EOF. Bytes the peer sends after its request (R11 does not
+    /// require it to half-close an execute connection) are read until its
+    /// EOF, so the close cannot reset the connection before the answer is
+    /// read.
+    fn conclude(stream: &UnixStream, response: Option<Vec<u8>>) {
         let mut writing = Deadlined::new(stream, RESPONSE_DEADLINE);
         response
             .and_then(|bytes| control_framing::write_frame(&mut writing, &bytes, FRAME_LIMIT).ok());
-        stream.shutdown(std::net::Shutdown::Write).ok();
-        // Bytes the peer sends after its request (R11 does not require it to
-        // half-close an execute connection) are read until its EOF, so the
-        // close cannot reset the connection before the answer is read.
-        io::copy(
-            &mut Deadlined::new(stream, RESPONSE_DEADLINE),
-            &mut io::sink(),
-        )
-        .ok();
+        close_answered(stream);
     }
 
     /// Validation precedence steps 1 to 6: the authenticated identities of
@@ -539,13 +640,23 @@ impl<'a> Responder<'a> {
         evaluation: &[u8],
         stream: &mut Deadlined<'_>,
     ) -> Result<RequestIdentity, Refusal> {
+        let request = read_record(stream);
+        self.classify_records(evaluation, request.as_deref().map_err(|refusal| *refusal))
+    }
+
+    /// Steps 2 to 6 of an execute whose EVR1 and SPX1 were read: either
+    /// record's step failure, EVR1's first.
+    fn classify_records(
+        &self,
+        evaluation: &[u8],
+        request: Result<&[u8], Refusal>,
+    ) -> Result<RequestIdentity, Refusal> {
         let evaluation = EvaluationRequest::from_canonical_cbor(evaluation)
             .map_err(|error| Refusal::invalid(EXECUTE, evaluation_step(error)));
-        let request = read_record(stream);
         evaluation
             .and(request)
             .and_then(|bytes| {
-                SandboxExecuteRequest::from_canonical_cbor(&bytes)
+                SandboxExecuteRequest::from_canonical_cbor(bytes)
                     .map_err(|error| Refusal::invalid(EXECUTE, request_step(error)))
             })
             .and_then(|request| {
@@ -674,11 +785,32 @@ impl<'a> Responder<'a> {
 }
 
 /// Whether the acceptor polls the execute listener, given its `answered`
-/// and `refusing` workers: while every answered and every refusing slot is
-/// busy it is not polled; the control listener and both endpoint checks
-/// still are.
-fn accepting(answered: usize, refusing: usize, pool: usize) -> bool {
-    answered < pool || refusing < pool.max(1)
+/// workers and whether the uncharged reader pool has room: while every
+/// answered slot is busy and the reader pool has no room (or a hand-off
+/// waits for it) it is not polled; the control listener and both endpoint
+/// checks still are.
+const fn accepting(answered: usize, room: bool, pool: usize) -> bool {
+    answered < pool || room
+}
+
+/// The refusal of a connection that waited for an uncharged reader until
+/// its initial control deadline and was never read (R11 Amendment 1 §7.5,
+/// invariant 30): no identity was authenticated, so SPE1 can encode only
+/// code `0` with null identities. This is the single place that answer is
+/// chosen (item P13).
+const fn unserved_reader() -> Refusal {
+    Refusal::UNIDENTIFIED
+}
+
+/// Send server write EOF, then read what the peer still sends until its EOF
+/// or the response deadline.
+fn close_answered(stream: &UnixStream) {
+    stream.shutdown(std::net::Shutdown::Write).ok();
+    io::copy(
+        &mut Deadlined::new(stream, RESPONSE_DEADLINE),
+        &mut io::sink(),
+    )
+    .ok();
 }
 
 /// Whether one poll found the control and the execute listener ready. The
@@ -796,6 +928,9 @@ impl Write for Deadlined<'_> {
         Ok(())
     }
 }
+
+mod port;
+use port::Join;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

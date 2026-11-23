@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -19,15 +20,18 @@ use pos_reference::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
 };
 
+use super::port::ExecutePort;
 use super::reconcile::{Reconcile, ReconcileError};
 use super::{
     bind, reconcile_in_background, required_slots, start_reconciliation, AdmissionState,
     ProviderStartupError, RuntimeAuthority,
 };
+use pos_reference::sandbox_provider_protocol::NetworkCaptureStore;
+
 use crate::{
-    issue_release, AdmittedRuntimeKey, AttemptLifecycle, ProviderInstallation,
-    ProviderInstallationError, ReconciledRestart, RuntimeAttestationSigner, StagingLedger,
-    StagingLimits, SystemdAttemptRegistry,
+    issue_release, AdmittedRuntimeKey, AttemptLifecycle, CleanupBudget, ProviderInstallation,
+    ProviderInstallationError, ReconciledRestart, RuntimeAttestationSigner, StagingDirectory,
+    StagingLedger, StagingLimits, SystemdAttemptRegistry, SystemdTransientUnitTransport,
 };
 
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -288,34 +292,97 @@ fn startup_refusals_name_no_secret() {
 
 /// A restart reconciliation whose outcome the test sends; a dropped sender
 /// fails it.
-pub(super) struct Scripted(pub(super) mpsc::Receiver<Result<AttemptLifecycle, ReconcileError>>);
+pub(super) struct Scripted(pub(super) mpsc::Receiver<Result<ExecutePort, ReconcileError>>);
 
 impl Reconcile for Scripted {
-    fn reconcile(self) -> Result<AttemptLifecycle, ReconcileError> {
+    fn reconcile(self) -> Result<ExecutePort, ReconcileError> {
         self.0.recv().unwrap_or(Err(ReconcileError::Staging))
     }
 }
 
-/// A lifecycle over an empty registry in a private temporary runtime tree,
-/// which must outlive it.
-pub(super) fn test_lifecycle() -> TestResult<(tempfile::TempDir, AttemptLifecycle)> {
-    let runtime = tempfile::tempdir()?;
-    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
-    for child in ["registry", "attempts"] {
-        fs::create_dir(runtime.path().join(child))?;
-        fs::set_permissions(
-            runtime.path().join(child),
-            fs::Permissions::from_mode(0o700),
-        )?;
+/// A systemd manager that accepts the subscription and knows no unit.
+struct SubscribingManager(AtomicBool);
+
+#[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+impl SubscribingManager {
+    fn subscribe(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
     }
-    let parent = File::open(runtime.path())?;
-    let registry =
-        SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
-    let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 1 << 30,
-    });
-    let lifecycle = AttemptLifecycle::new(registry, ledger, &ReconciledRestart::for_test());
-    Ok((runtime, lifecycle))
+}
+
+/// What a test execute port borrows: its private runtime tree and the fake
+/// manager's end of the bus.
+pub(super) struct PortFixture {
+    /// The runtime tree: `registry`, `attempts`, `staging` and `captures`.
+    _directory: tempfile::TempDir,
+    _manager: zbus::Connection,
+}
+
+/// A private directory `name` beneath `parent`, mode `0700`.
+fn private_child(parent: &Path, name: &str) -> TestResult<PathBuf> {
+    let path = parent.join(name);
+    fs::create_dir(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    Ok(path)
+}
+
+/// An execute port over an empty registry, a private staging directory and
+/// capture store, and a fake manager, with the ledger `limits`.
+pub(super) fn test_port(limits: StagingLimits) -> TestResult<(PortFixture, ExecutePort)> {
+    let directory = tempfile::tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    for child in ["registry", "attempts"] {
+        private_child(directory.path(), child)?;
+    }
+    let parent = File::open(directory.path())?;
+    let owner = parent.metadata()?.uid();
+    let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+    let staging = StagingDirectory::from_held_directory(
+        File::open(private_child(directory.path(), "staging")?)?,
+        owner,
+    )?;
+    let captures =
+        NetworkCaptureStore::open(&File::open(private_child(directory.path(), "captures")?)?)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let (manager, transport): (zbus::Connection, _) = runtime.block_on(async {
+        let (manager, client) = crate::test_fixtures::peer_connections(|server| {
+            server.serve_at(
+                "/org/freedesktop/systemd1",
+                SubscribingManager(AtomicBool::new(false)),
+            )
+        })
+        .await?;
+        let transport = SystemdTransientUnitTransport::from_connection(client).await?;
+        Ok::<_, Box<dyn Error>>((manager, transport))
+    })?;
+    let ledger = StagingLedger::new(limits);
+    let port = ExecutePort {
+        lifecycle: AttemptLifecycle::new(registry, ledger.clone(), &ReconciledRestart::for_test()),
+        ledger,
+        staging,
+        captures: Arc::new(captures),
+        namespaces: crate::ProviderNamespaces::observe()?,
+        budget: CleanupBudget::new(
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_millis(300),
+            Duration::from_millis(400),
+            Duration::from_millis(500),
+        )?,
+        closed: AtomicBool::new(false),
+        transport,
+        runtime,
+    };
+    Ok((
+        PortFixture {
+            _directory: directory,
+            _manager: manager,
+        },
+        port,
+    ))
 }
 
 /// The admission state once background reconciliation set it.
@@ -334,7 +401,9 @@ pub(super) fn settled(admission: &OnceLock<AdmissionState>) -> TestResult<&Admis
 
 #[test]
 fn background_reconciliation_opens_or_closes_admission() -> TestResult {
-    let (runtime, lifecycle) = test_lifecycle()?;
+    let (runtime, lifecycle) = test_port(StagingLimits {
+        aggregate_bytes: 1 << 30,
+    })?;
     // While reconciliation runs, the runtime is `Starting`.
     let (sender, receiver) = mpsc::channel();
     let admission = Arc::new(OnceLock::new());

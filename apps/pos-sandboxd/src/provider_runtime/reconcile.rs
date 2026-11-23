@@ -21,16 +21,21 @@
 //!    directory, and any other entry fails reconciliation closed;
 //! 10. on success, the registry owner opens over the reconciled registry, a
 //!     ledger with the SPI1 staging cap and the retained control floor, and
-//!     the [`AttemptLifecycle`] over both. Admission is then `Open`.
+//!     the [`AttemptLifecycle`] over both. They are handed over as the
+//!     execute port, with the held staging directory and capture store, the
+//!     provider namespaces step 7 retained (R9's `provider-namespaces`), the
+//!     SPI1 cleanup budget, and the bus transport with the multi-thread
+//!     runtime that drives it, which outlive reconciliation. Admission is
+//!     then `Open`.
 //!
-//! The SPI1 attempt network, the provider namespaces and the held
-//! [`crate::StagingDirectory`] are used only by the execute port, and are
-//! composed with it (#443, R11 §7.3).
+//! The SPI1 attempt network is used only by Local attempts, which the port
+//! refuses until #1488.
 
 use std::fs::File;
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,13 +49,15 @@ use tokio::runtime::Runtime;
 use tokio::time::Instant;
 
 use super::endpoint::{open_parent, DIRECTORY_OPEN, RESOLVE, SANDBOX_STATE};
+use super::port::ExecutePort;
 use super::{ProviderRuntimeError, RuntimeAuthority};
 use crate::{
     reconcile_restart, AttemptCleanupDeadlines, AttemptLifecycle, CleanupBudget, ControlFloor,
     EgressProbe, EgressPropertyProbe, HostEgress, LocalEgressProbe, NamespacedLocalNetwork,
     NetlinkNamespaceControl, NetworkNamespaces, NetworkRange, OrphanNetworkCleanup,
-    RestartReconciliationError, StagingLedger, StagingLimits, SystemdAttemptRecovery,
-    SystemdAttemptRegistry, SystemdAttemptRegistryError, SystemdTransientUnitTransport,
+    ProviderNamespaces, RestartReconciliationError, StagingDirectory, StagingLedger, StagingLimits,
+    SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
+    SystemdTransientUnitTransport,
 };
 
 /// The staging directory's name beneath `/run/pigloros/sandbox`.
@@ -68,6 +75,9 @@ const CAPTURES_RESOLVE: ResolveFlags = RESOLVE.union(ResolveFlags::NO_XDEV);
 const PRIVATE_MODE: u32 = 0o700;
 /// The owner of every provider directory.
 const ROOT: u32 = 0;
+/// The worker threads of the runtime that drives the bus and the attempts;
+/// each serving thread blocks on it, so two suffice to drive its I/O.
+const RUNTIME_WORKERS: usize = 2;
 /// The fixed ADR-069 §9 restart bound.
 const RESTART_BOUND: Duration = Duration::from_secs(10);
 
@@ -94,11 +104,11 @@ pub(super) enum ReconcileError {
 
 /// Restart reconciliation, once the runtime serves in state `Starting`.
 pub(super) trait Reconcile: Send + 'static {
-    /// Reconcile the previous runtime's state and open the lifecycle.
+    /// Reconcile the previous runtime's state and open the execute port.
     ///
     /// # Errors
     /// Why admission stays closed.
-    fn reconcile(self) -> Result<AttemptLifecycle, ReconcileError>;
+    fn reconcile(self) -> Result<ExecutePort, ReconcileError>;
 }
 
 /// The host side of restart reconciliation, bound before any socket exists:
@@ -110,9 +120,10 @@ pub(super) struct HostReconciliation<N, P> {
     transport: SystemdTransientUnitTransport,
     runtime: Runtime,
     recovery: SystemdAttemptRecovery,
-    staging: File,
+    staging: (File, StagingDirectory),
     captures: File,
     store: NetworkCaptureStore,
+    namespaces: ProviderNamespaces,
     network: N,
     egress: P,
     cleanup: CleanupBudget,
@@ -171,7 +182,9 @@ pub(super) fn prepare_with<N, P, E>(
     network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
 ) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
     let (network, egress) = network(installation.attempt_range(), installation.egress_probe());
-    tokio::runtime::Builder::new_current_thread()
+    // Multi-thread: every attempt's release barrier blocks in place on it.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(RUNTIME_WORKERS)
         .enable_all()
         .build()
         .ok()
@@ -185,25 +198,30 @@ pub(super) fn prepare_with<N, P, E>(
         .zip(
             open_parent(Path::new(SANDBOX_STATE))
                 .ok()
-                .and_then(|sandbox| open_staging(&sandbox, ROOT)),
+                .and_then(|sandbox| open_staging(&sandbox, ROOT))
+                .and_then(|staging| held_staging(staging, ROOT)),
         )
         .zip(open_capture_store(
             admitted.bootstrap().installed().artifact_root(),
             ROOT,
         ))
+        .zip(ProviderNamespaces::observe().ok())
         .map(
-            |((((runtime, transport), recovery), staging), (captures, store))| HostReconciliation {
-                transport,
-                runtime,
-                recovery,
-                staging,
-                captures,
-                store,
-                network,
-                egress,
-                cleanup: installation.cleanup_budget(),
-                limits: installation.staging_limits(),
-                floor: retained_floor(admitted),
+            |(((((runtime, transport), recovery), staging), (captures, store)), namespaces)| {
+                HostReconciliation {
+                    transport,
+                    runtime,
+                    recovery,
+                    staging,
+                    captures,
+                    store,
+                    namespaces,
+                    network,
+                    egress,
+                    cleanup: installation.cleanup_budget(),
+                    limits: installation.staging_limits(),
+                    floor: retained_floor(admitted),
+                }
             },
         )
         .ok_or(ProviderRuntimeError::HostUnavailable)
@@ -214,28 +232,49 @@ where
     N: OrphanNetworkCleanup + Send + Sync + 'static,
     P: EgressPropertyProbe + Send + Sync + 'static,
 {
-    fn reconcile(self) -> Result<AttemptLifecycle, ReconcileError> {
+    fn reconcile(self) -> Result<ExecutePort, ReconcileError> {
         let (cleanup, deadline) = self.restart_bounds(Instant::now());
-        self.runtime
+        let Self {
+            transport,
+            runtime,
+            recovery,
+            staging: (swept, staging),
+            captures,
+            store,
+            namespaces,
+            network,
+            egress,
+            cleanup: budget,
+            limits,
+            floor,
+        } = self;
+        runtime
             .block_on(reconcile_restart(
-                &self.transport,
-                self.recovery,
-                (&self.network, &self.egress),
+                &transport,
+                recovery,
+                (&network, &egress),
                 cleanup,
                 deadline,
             ))
             .map_err(ReconcileError::from)
-            .and_then(|reconciled| sweep_staging(&self.staging).map(|()| reconciled))
-            .and_then(|reconciled| sweep_captures(&self.captures, &self.store).map(|()| reconciled))
+            .and_then(|reconciled| sweep_staging(&swept).map(|()| reconciled))
+            .and_then(|reconciled| sweep_captures(&captures, &store).map(|()| reconciled))
             .and_then(|reconciled| {
                 SystemdAttemptRegistry::open()
                     .map_err(ReconcileError::from)
                     .map(|registry| {
-                        AttemptLifecycle::new(
-                            registry,
-                            ledger(self.limits, self.floor),
-                            &reconciled,
-                        )
+                        let ledger = ledger(limits, floor);
+                        ExecutePort {
+                            lifecycle: AttemptLifecycle::new(registry, ledger.clone(), &reconciled),
+                            ledger,
+                            staging,
+                            captures: Arc::new(store),
+                            namespaces,
+                            budget,
+                            closed: AtomicBool::new(false),
+                            transport,
+                            runtime,
+                        }
                     })
             })
     }
@@ -270,6 +309,17 @@ fn ledger(limits: StagingLimits, floor: ControlFloor) -> StagingLedger {
 /// `owner` owns, of mode exactly `0700`, reached without a symlink.
 fn open_staging(sandbox: &File, owner: u32) -> Option<File> {
     open_private(sandbox, STAGING, owner, (DIRECTORY_OPEN, RESOLVE))
+}
+
+/// The held `staging` directory, kept for the sweep, and the private
+/// staging directory over a second descriptor of it that the execute port
+/// creates inputs in, checked for `owner` and mode `0700` (R11 §5.3).
+fn held_staging(staging: File, owner: u32) -> Option<(File, StagingDirectory)> {
+    staging
+        .try_clone()
+        .ok()
+        .and_then(|held| StagingDirectory::from_held_directory(held, owner).ok())
+        .map(|directory| (staging, directory))
 }
 
 /// Open the capture store's root beneath the held SIC1 `artifact_root` as

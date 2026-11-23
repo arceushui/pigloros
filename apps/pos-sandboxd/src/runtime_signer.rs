@@ -29,6 +29,18 @@ pub trait RuntimeAttestationSigner {
     fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64];
 }
 
+/// A shared signer signs as the signer it shares, so each attempt's release
+/// barrier can own the runtime's one key (ADR-069 R9 §5).
+impl<S: RuntimeAttestationSigner> RuntimeAttestationSigner for std::sync::Arc<S> {
+    fn runtime_attestation_key_id(&self) -> &str {
+        (**self).runtime_attestation_key_id()
+    }
+
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+        (**self).sign(record)
+    }
+}
+
 /// The admitted runtime-attestation key: its SPM1 key ID and the public key
 /// that TRS1 authorizes. Every emitted signature verifies under it.
 #[derive(Clone, Copy, Debug)]
@@ -183,6 +195,15 @@ mod tests {
 
     fn signer(seed: [u8; 32]) -> KeyFileRuntimeSigner {
         KeyFileRuntimeSigner::from_signing_key(SigningKey::from_bytes(&seed), "runtime".to_owned())
+    }
+
+    #[test]
+    fn a_shared_signer_signs_as_the_signer_it_shares() -> TestResult {
+        let shared = std::sync::Arc::new(signer([42; 32]));
+        let record = ExecutionRelease::self_digested(fields("runtime"))?;
+        assert_eq!(shared.runtime_attestation_key_id(), "runtime");
+        assert_eq!(shared.sign(&record), signer([42; 32]).sign(&record));
+        Ok(())
     }
 
     #[test]

@@ -548,7 +548,9 @@ pub trait BarrierFactory: Send {
     /// Why the barrier could not be built.
     type Error: Error + Send + Sync + 'static;
 
-    /// Build the barrier for `attempt`, whose root `root` rechecks.
+    /// Build the barrier for `attempt`, whose root `root` rechecks and
+    /// whose cancellation `cancel` reports: a cancellation requested before
+    /// `ReleaseV1` refuses the release.
     ///
     /// # Errors
     /// Fails if the barrier cannot be built; nothing is started then.
@@ -556,6 +558,7 @@ pub trait BarrierFactory: Send {
         self,
         attempt: &AdmittedAttempt,
         root: RootRecheck<'r>,
+        cancel: CancelSignal,
     ) -> Result<Self::Barrier<'r>, Self::Error>;
 }
 
@@ -613,7 +616,7 @@ where
         cancel: CancelSignal,
     ) -> impl Future<Output = Executed<SystemdVerifiedStart, crate::BoundAttemptCgroup>> + Send + 'a
     {
-        let barrier = launch.barrier.barrier(&attempt, recheck);
+        let barrier = launch.barrier.barrier(&attempt, recheck, cancel.clone());
         let job = ExecuteJob {
             attempt,
             mode: launch.mode,

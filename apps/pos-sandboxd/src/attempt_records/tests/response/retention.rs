@@ -608,6 +608,25 @@ fn a_reissue_releases_the_output_once_its_frames_are_written() -> TestResult {
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     let serving = lifecycle.retain_response(ended, &signer(), admitted)?;
     let frames = serving.frames().map(<[u8]>::to_vec).collect::<Vec<_>>();
+    // The transport's view: the grant answered, and the output records,
+    // which come right before SPY1, with the payload bytes they carry.
+    assert_eq!(serving.grant().digest(), digest);
+    let (records, expected) = serving.output();
+    assert!(!records.is_empty());
+    assert_eq!(
+        records,
+        &frames[frames.len() - 1 - records.len()..frames.len() - 1]
+    );
+    assert_eq!(
+        expected,
+        serving
+            .records()
+            .termination()
+            .fields()
+            .output_capture
+            .map(|capture| capture.accepted_bytes)
+            .ok_or("no capture")?
+    );
     lifecycle.reissue_response(
         ATTEMPT,
         digest,
