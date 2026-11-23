@@ -16,6 +16,7 @@ mod dependency_bundle;
 mod envelope;
 mod error;
 mod event_drafts;
+mod event_source;
 mod failure;
 mod generation_admission;
 mod graph_root;
@@ -33,6 +34,7 @@ mod member_progress;
 mod metadata_envelope;
 mod metadata_scope;
 mod native_node;
+mod observation;
 mod original_provenance;
 mod owner_binding;
 mod prepared;
@@ -109,7 +111,14 @@ pub use event_drafts::{
     MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_RECORD_BYTES_V1,
     MAX_COMMUNITY_EVENT_DRAFT_MANIFEST_BYTES_V1, MAX_COMMUNITY_EVENT_DRAFT_VECTOR_BYTES_V1,
 };
+pub use event_source::{
+    CommunityEventSourceInputV1, CommunityEventSourceV1, CommunitySourceCatalogueV1,
+    CommunitySourceSchemaRuleV1, COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1,
+    MAX_COMMUNITY_EVENT_SOURCE_BYTES_V1, MAX_COMMUNITY_EVENT_SOURCE_KEYS_V1,
+    MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1, MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
+};
 pub use failure::{
+    community_decision_provenance_digest_v1, CommunityDecisionProvenanceInputV1,
     CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
     CommunityPassFailureV1,
 };
@@ -171,6 +180,17 @@ pub use native_node::{
     CommunityNativeNodeKindV1, CommunityNativeNodeV1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
     MAX_COMMUNITY_EXPANDED_INPUTS_V1,
 };
+pub use observation::{
+    community_event_source_authority_digest_v1, community_observation_materialization_id_v1,
+    community_recorded_consumer_digest_v1, community_recorded_consumer_set_digest_v1,
+    community_reducer_configuration_digest_v1, CommunityEventSourceRefV1,
+    CommunityObservationEventRowV1, CommunityObservationSourceInputV1,
+    CommunityObservationSourceV1, CommunityObservationValueInputV1, CommunityObservationValueV1,
+    CommunityReducerBindingV1, MAX_COMMUNITY_OBSERVATION_BYTES_V1,
+    MAX_COMMUNITY_OBSERVATION_EVENTS_V1, MAX_COMMUNITY_OBSERVATION_SOURCE_BYTES_V1,
+    MAX_COMMUNITY_OBSERVATION_VALUE_BYTES_V1, MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
+    MAX_STAGED_CALLBACK_BOUND_V1,
+};
 pub use original_provenance::{CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1};
 pub use owner_binding::{
     community_catalogue_owner_reference_v1, community_catalogue_owner_v1,
@@ -184,15 +204,17 @@ pub use prepared::{
 pub use profile::{
     community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
-    COMMUNITY_INITIALIZER_SET_SCHEMA_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    COMMUNITY_FOLD_BUDGET_MICROS_V1, COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+    COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
 };
 pub use quarantine::{
-    CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
-    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
+    community_quarantine_delta_digest_v1, community_quarantine_reason_v1,
+    CommunityQuarantineDeltaRowV1, CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1,
+    CommunityQuarantineReasonV1, CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
     CommunityQuarantineRevisionV1,
 };
 pub use quarantine_control::{

@@ -240,6 +240,23 @@ impl CommunityInputIndexV1<'_> {
         }
     }
 
+    /// A `SourceGenesis` reference (revision 9, R9.3) is admitted only as
+    /// the single Event-source input of an Observation node.
+    fn check_genesis(self, kind: CommunityNativeNodeKindV1) -> Result<()> {
+        let genesis = match self {
+            Self::Direct(references) => references
+                .iter()
+                .filter(|row| matches!(row, Ok(CommunityTypedInputRefV1::SourceGenesis { .. })))
+                .count(),
+            _ => 0,
+        };
+        if genesis == 0 || (genesis == 1 && kind == CommunityNativeNodeKindV1::Observation) {
+            Ok(())
+        } else {
+            Err(Error::InvalidBinding)
+        }
+    }
+
     fn encode(self, out: &mut Vec<u8>) {
         match self {
             Self::Empty => out.extend_from_slice(&[0x81, 0]),
@@ -318,7 +335,8 @@ impl<'a> CommunityNativeNodeV1<'a> {
     ///
     /// # Errors
     /// Returns `InvalidBinding` for zero identities, a class or content magic
-    /// the kind forbids, a grouped input index under an `InputIndex` node,
+    /// the kind forbids, a grouped input index under an `InputIndex` node, a
+    /// `SourceGenesis` input outside an Observation or more than one of them,
     /// unordered or duplicate inputs, or a native input from another store
     /// incarnation or not strictly before this node; `BoundsExceeded` for
     /// input counts or the horizon outside their bounds.
@@ -334,6 +352,7 @@ impl<'a> CommunityNativeNodeV1<'a> {
                     input.node_ordinal,
                 )
             })
+            .and_then(|()| input.input_index.check_genesis(input.kind))
             .and_then(|()| validate_horizon(input.evidence_not_after_micros))
             .map(|()| Self(input))
     }
