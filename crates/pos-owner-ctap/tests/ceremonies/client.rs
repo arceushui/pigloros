@@ -140,6 +140,32 @@ fn a_rejected_uv_attempt_is_retried_within_the_authenticator_count() -> TestResu
 }
 
 #[test]
+fn uv_attempts_are_capped_at_the_first_retry_count() -> TestResult {
+    let mut rig = Rig::new(true);
+    let three = ok(&map(&[(head(0, 5), head(0, 3))]));
+    for _ in 0..4 {
+        rig.device.override_reply(UV_RETRIES, &three);
+        rig.device.override_reply(TOKEN_UV, &[0x3f]);
+    }
+    rig.prompt.enter(PIN);
+    rig.create(&Ceremony::drawn("create"))?;
+    let expected = [0, 2, 3, 4, 2, 3, 4, 2, 3, 4, 2, 1, 3, 5, 6];
+    assert_eq!(rig.commands(&KNOWN), expected);
+    assert_eq!(rig.prompt.asked(), [8]);
+
+    let mut rig = Rig::new(true);
+    rig.device.override_reply(UV_RETRIES, &three);
+    rig.device.override_reply(UV_RETRIES, &[0x01]);
+    rig.device.override_reply(TOKEN_UV, &[0x3f]);
+    let request = Ceremony::drawn("create").create_request()?;
+    assert_eq!(
+        rig.perform(&request, CeremonyKind::Create),
+        Err(CLIENT_FAILED)
+    );
+    Ok(())
+}
+
+#[test]
 fn exhausted_uv_retries_fall_back_to_the_pin() -> TestResult {
     let mut rig = Rig::new(true);
     rig.device.with_authenticator(|soft| soft.set_uv(2, 2));
@@ -232,6 +258,29 @@ fn the_pin_is_at_least_four_code_points_of_at_most_63_utf8_bytes() -> TestResult
         rig.prompt.enter(pin);
         rig.create(&Ceremony::drawn("create"))?;
     }
+    Ok(())
+}
+
+#[test]
+fn the_pin_is_normalized_to_nfc_before_it_is_hashed() -> TestResult {
+    let precomposed: String = ['\u{e9}', '1', '2', '3'].iter().collect();
+    let decomposed: String = ['e', '\u{301}', '1', '2', '3'].iter().collect();
+    assert_ne!(precomposed, decomposed);
+    for entered in [&decomposed, &precomposed] {
+        let mut rig = Rig::with_pin(false, precomposed.as_bytes());
+        rig.prompt.enter(entered.as_bytes());
+        rig.create(&Ceremony::drawn("create"))?;
+    }
+    let expanding: String = std::iter::repeat_n('\u{958}', 21).collect();
+    assert_eq!(expanding.len(), 63);
+    let mut rig = Rig::new(false);
+    rig.prompt.enter(expanding.as_bytes());
+    let request = Ceremony::drawn("create").create_request()?;
+    assert_eq!(
+        rig.perform(&request, CeremonyKind::Create),
+        Err(CLIENT_FAILED)
+    );
+    assert_eq!(rig.commands(&KNOWN), [0, 1, 3]);
     Ok(())
 }
 

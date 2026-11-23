@@ -107,6 +107,9 @@ hkdf = "=0.13.0"
 # through aes-gcm and hkdf.
 aes = { version = "=0.9.4", default-features = false }
 hmac = "=0.13.0"
+# ADR-110 E20 S1: NFC normalization of the owner PIN before it is hashed
+# (CTAP 2.1 PS 6.5.1), owner decision 2026-11-24. No std feature is needed.
+unicode-normalization = { version = "=0.1.26", default-features = false }
 
 # Error handling
 thiserror = "2"

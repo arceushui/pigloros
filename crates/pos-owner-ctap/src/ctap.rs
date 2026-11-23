@@ -24,20 +24,20 @@ pub const GET_INFO: u8 = 0x04;
 pub const CLIENT_PIN: u8 = 0x06;
 
 /// `getPINRetries`.
-pub const GET_PIN_RETRIES: usize = 0x01;
+pub const GET_PIN_RETRIES: u64 = 0x01;
 /// `getKeyAgreement`.
-pub const GET_KEY_AGREEMENT: usize = 0x02;
+pub const GET_KEY_AGREEMENT: u64 = 0x02;
 /// `getPinUvAuthTokenUsingUvWithPermissions`.
-pub const GET_TOKEN_USING_UV: usize = 0x06;
+pub const GET_TOKEN_USING_UV: u64 = 0x06;
 /// `getUVRetries`.
-pub const GET_UV_RETRIES: usize = 0x07;
+pub const GET_UV_RETRIES: u64 = 0x07;
 /// `getPinUvAuthTokenUsingPinWithPermissions`.
-pub const GET_TOKEN_USING_PIN: usize = 0x09;
+pub const GET_TOKEN_USING_PIN: u64 = 0x09;
 
 /// The `mc` permission, for one `makeCredential`.
-pub const PERMISSION_MAKE_CREDENTIAL: usize = 0x01;
+pub const PERMISSION_MAKE_CREDENTIAL: u64 = 0x01;
 /// The `ga` permission, for one `getAssertion`.
-pub const PERMISSION_GET_ASSERTION: usize = 0x02;
+pub const PERMISSION_GET_ASSERTION: u64 = 0x02;
 
 /// `CTAP2_OK`.
 pub const STATUS_OK: u8 = 0x00;
@@ -176,7 +176,7 @@ impl<'a> Session<'a> {
         self.command(CLIENT_PIN, encoded)
     }
 
-    fn retries(&mut self, sub_command: usize, key: u64) -> Result<u64, BridgeError> {
+    fn retries(&mut self, sub_command: u64, key: u64) -> Result<u64, BridgeError> {
         let request = Writer::default()
             .map(1)
             .unsigned(2)
@@ -237,7 +237,7 @@ impl<'a> Session<'a> {
         &mut self,
         platform: &Point,
         pin_hash_enc: Option<&[u8]>,
-        permission: usize,
+        permission: u64,
     ) -> Result<Reply, BridgeError> {
         let mut writer = Writer::default();
         let sub_command = pin_hash_enc.map_or(GET_TOKEN_USING_UV, |_| GET_TOKEN_USING_PIN);

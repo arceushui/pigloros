@@ -258,14 +258,14 @@ impl SoftAuthenticator {
             Some(0x01) => ok(&Writer::default()
                 .map(1)
                 .unsigned(3)
-                .unsigned(usize::try_from(self.pin_retries).unwrap_or(0))
+                .unsigned(self.pin_retries)
                 .finish()),
             Some(0x02) => self.key_agreement_reply(),
             Some(0x06) => self.token_using_uv(parameters),
             Some(0x07) => ok(&Writer::default()
                 .map(1)
                 .unsigned(5)
-                .unsigned(usize::try_from(self.uv_retries).unwrap_or(0))
+                .unsigned(self.uv_retries)
                 .finish()),
             Some(0x09) => self.token_using_pin(parameters),
             _ => status(STATUS_INVALID_PARAMETER),
@@ -350,9 +350,9 @@ impl SoftAuthenticator {
         &mut self,
         param: Option<&Value<'_>>,
         client_data_hash: &[u8],
-        permission: usize,
+        permission: u64,
     ) -> bool {
-        let wanted = u64::try_from(permission).unwrap_or(0);
+        let wanted = permission;
         let expected = self
             .token
             .take()

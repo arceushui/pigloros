@@ -3,7 +3,8 @@
 //! One `perform` is one ceremony: a fresh CTAPHID channel, the LS6 capability check, one
 //! `pinUvAuthToken` (built-in UV first, the PIN as fallback), and exactly one `makeCredential` or
 //! `getAssertion` that spends that token. Nothing PIN-equivalent outlives the call: the PIN, its
-//! hash, the ephemeral key, `Z`, the shared secret and the token are all wiped.
+//! hash, the ephemeral key, `Z`, the shared secret and the token are all wiped. The SHA-256
+//! state that hashed the PIN and the NFC iterator's internal buffer are not (see `pin`).
 //!
 //! LS7's "nothing is retried automatically" means nothing beyond the authenticator's own UV
 //! retry count (owner decision 2026-11-24): a rejected built-in UV attempt is tried again inside
@@ -181,20 +182,20 @@ impl Client<'_> {
 
     /// One token for `permission`: built-in UV first, then the PIN (ADR-110 E20 LP1).
     ///
-    /// Each rejected UV attempt spends one of the authenticator's UV retries, so the loop ends
-    /// when they run out, UV is blocked, or the deadline stops the next command.
-    fn authorize(&mut self, permission: usize) -> Result<Authorization, BridgeError> {
+    /// The attempts are capped at the first `getUVRetries` answer, so an authenticator that
+    /// keeps rejecting UV without spending retries still falls back to the PIN. The loop also
+    /// ends when the retries run out or UV is blocked, and the deadline stops the next command.
+    fn authorize(&mut self, permission: u64) -> Result<Authorization, BridgeError> {
         if self.capabilities.uv {
-            loop {
-                let retries = self.session.uv_retries()?;
-                if retries == 0 {
-                    break;
-                }
+            let mut retries = self.session.uv_retries()?;
+            let mut attempts = retries;
+            while retries > 0 && attempts > 0 {
+                attempts -= 1;
                 self.prompt.notice(Notice::UserVerification { retries });
                 match self.authorize_with_uv(permission)? {
                     UvAttempt::Granted(authorization) => return Ok(authorization),
                     UvAttempt::Blocked => break,
-                    UvAttempt::Rejected => {}
+                    UvAttempt::Rejected => retries = self.session.uv_retries()?,
                 }
             }
         }
@@ -202,7 +203,7 @@ impl Client<'_> {
     }
 
     /// One `getPinUvAuthTokenUsingUvWithPermissions` attempt.
-    fn authorize_with_uv(&mut self, permission: usize) -> Result<UvAttempt, BridgeError> {
+    fn authorize_with_uv(&mut self, permission: u64) -> Result<UvAttempt, BridgeError> {
         let (platform, secret) = self.agreement()?;
         let Reply { status, body } = self.session.token(&platform, None, permission)?;
         match status {
@@ -214,7 +215,7 @@ impl Client<'_> {
     }
 
     /// `getPinUvAuthTokenUsingPinWithPermissions` with one PIN entry.
-    fn authorize_with_pin(&mut self, permission: usize) -> Result<Authorization, BridgeError> {
+    fn authorize_with_pin(&mut self, permission: u64) -> Result<Authorization, BridgeError> {
         let retries = self.session.pin_retries()?;
         if retries == 0 {
             return self.blocked();
@@ -236,10 +237,10 @@ impl Client<'_> {
         let mut entry = PinBuffer::default();
         self.prompt
             .read_pin(retries, &mut entry, self.deadline, self.clock)?;
-        let entered = entry.validated().ok_or(CLIENT_FAILED)?;
+        let normalized = entry.normalized().ok_or(CLIENT_FAILED)?;
         let mut digest = Zeroizing::<[u8; 32]>::default();
         Sha256::new()
-            .chain_update(entered)
+            .chain_update(normalized.as_bytes())
             .finalize_into(Output::<Sha256>::cast_from_core_mut(&mut digest));
         let mut left = Zeroizing::<[u8; 16]>::default();
         left.copy_from_slice(&digest[..16]);

@@ -195,55 +195,58 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
-    fn head(&mut self, major: u8, value: usize) {
-        let argument = value as u64;
-        let encoded = argument.to_be_bytes();
-        let (additional, width) = match argument {
+    /// Write a head whose initial byte is `base` (the major type, already in its top three
+    /// bits) plus the additional information, then `value`'s argument bytes.
+    fn head(&mut self, base: u8, value: u64) {
+        let encoded = value.to_be_bytes();
+        let (additional, width) = match value {
             0..=23 => (encoded[7], 0),
             24..=0xff => (24, 1),
             0x100..=0xffff => (25, 2),
             0x1_0000..=0xffff_ffff => (26, 4),
             _ => (27, 8),
         };
-        self.bytes.push((major << 5) + additional);
+        // `base` has only its top three bits set and `additional` is below 32, so the sum never
+        // carries: it is the two fields side by side.
+        self.bytes.push(base.wrapping_add(additional));
         self.bytes.extend_from_slice(&encoded[8 - width..]);
     }
 
     /// An unsigned integer.
-    pub(crate) fn unsigned(&mut self, value: usize) -> &mut Self {
-        self.head(0, value);
+    pub(crate) fn unsigned(&mut self, value: u64) -> &mut Self {
+        self.head(0x00, value);
         self
     }
 
     /// The negative integer `-1 - magnitude`.
-    pub(crate) fn negative(&mut self, magnitude: usize) -> &mut Self {
-        self.head(1, magnitude);
+    pub(crate) fn negative(&mut self, magnitude: u64) -> &mut Self {
+        self.head(0x20, magnitude);
         self
     }
 
     /// A byte string.
     pub(crate) fn bytes(&mut self, value: &[u8]) -> &mut Self {
-        self.head(2, value.len());
+        self.head(0x40, value.len() as u64);
         self.bytes.extend_from_slice(value);
         self
     }
 
     /// A text string.
     pub(crate) fn text(&mut self, value: &str) -> &mut Self {
-        self.head(3, value.len());
+        self.head(0x60, value.len() as u64);
         self.bytes.extend_from_slice(value.as_bytes());
         self
     }
 
     /// The head of an array of `count` items.
     pub(crate) fn array(&mut self, count: usize) -> &mut Self {
-        self.head(4, count);
+        self.head(0x80, count as u64);
         self
     }
 
     /// The head of a map of `count` entries.
     pub(crate) fn map(&mut self, count: usize) -> &mut Self {
-        self.head(5, count);
+        self.head(0xa0, count as u64);
         self
     }
 

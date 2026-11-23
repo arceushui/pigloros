@@ -5,8 +5,11 @@
 //! key")`. `encrypt` is `IV ‖ AES-256-CBC(aesKey, IV, m)` with a random IV and no padding, and
 //! `authenticate` is the full 32-byte HMAC-SHA-256. Protocol 1 is never used.
 //!
-//! The ephemeral key, `Z`, the shared secret and every plaintext block are wiped. The HKDF
-//! pseudorandom key lives inside the `hkdf` state, which offers no wipe, so it is not.
+//! The ephemeral key, `Z`, the shared secret and every plaintext block are wiped. Three things
+//! are not: the HKDF pseudorandom key inside the `hkdf` state, which offers no wipe; the
+//! `ProjectivePoint` product `d·Q`, which `p256` does not zeroize; and the SHA-256 block buffers
+//! inside the `sha2` state, because enabling `sha2`'s `zeroize` feature would change the
+//! lockfile (it adds `zeroize` to `digest`).
 
 use hkdf::{Hkdf, HmacImpl};
 use hmac::Hmac;
@@ -20,7 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::cbc::{self, CbcBlock};
 
 /// The CTAP2 identifier of PIN/UV auth protocol 2.
-pub const PROTOCOL: usize = 2;
+pub const PROTOCOL: u64 = 2;
 
 /// How many draws may fail to be a valid P-256 scalar before the random source is distrusted.
 const SCALAR_DRAWS: usize = 4;

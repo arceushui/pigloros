@@ -3,7 +3,8 @@
 
 Reads the committed manifests and lockfile without invoking Cargo.
 The older rustix 0.38 transitive dependency is unrelated and remains allowed.
-ADR-110 E20 AM-110g adds the direct aes/hmac pins of pos-owner-ctap and
+ADR-110 E20 AM-110g adds the direct aes/hmac pins of pos-owner-ctap (plus the
+owner-approved unicode-normalization pin for PIN NFC normalization) and
 confines its rustix features to the crate-local Linux tables.
 """
 
@@ -136,10 +137,13 @@ def check_windows(lock: dict, shim: dict, workspace: dict) -> list[str]:
 CTAP_PINS = {
     "aes": ("0.9.4", "fc0fc36d7440d015b45468ba08a21e80e056ebbd014c611c6298bb7503e04bd1"),
     "hmac": ("0.13.0", "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"),
+    # Owner decision 2026-11-24: NFC normalization of the PIN (CTAP 2.1 PS 6.5.1).
+    "unicode-normalization": ("0.1.26", "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"),
 }
 CTAP_WORKSPACE = {
     "aes": {"version": "=0.9.4", "default-features": False},
     "hmac": "=0.13.0",
+    "unicode-normalization": {"version": "=0.1.26", "default-features": False},
 }
 # AM-110g: the workspace rustix entry stays fs/std; pos-owner-ctap names its own
 # Linux features, and pty only for its tests.

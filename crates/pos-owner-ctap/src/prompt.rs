@@ -1,5 +1,7 @@
 //! The PIN prompt port and its fixed-size PIN buffer (ADR-110 E20 LP5).
 //!
+//! The PIN is normalized to Unicode NFC before it is hashed (CTAP 2.1 PS §6.5.1).
+//!
 //! The Linux implementation reads `/dev/tty` through a file descriptor the owner root passes in
 //! (ADR-110 E20 S2). The PIN is read byte by byte into a fixed, zeroized 64-byte buffer and
 //! never becomes a `String`, a log line, an argument or an environment value.
@@ -7,6 +9,7 @@
 use std::time::Instant;
 
 use pos_owner_bridge::{BridgeError, MonotonicClock};
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 /// The most PIN bytes CTAP 2.1 allows.
@@ -49,13 +52,28 @@ impl PinBuffer {
         true
     }
 
-    /// The PIN, when it is UTF-8 of at least four code points.
-    pub(crate) fn validated(&self) -> Option<&[u8]> {
-        let pin = &self.bytes[..self.length];
-        std::str::from_utf8(pin)
-            .ok()
-            .filter(|text| text.chars().count() >= MIN_PIN_CODE_POINTS)
-            .map(str::as_bytes)
+    /// The PIN in Unicode NFC (CTAP 2.1 PS §6.5.1), in another zeroized buffer.
+    ///
+    /// There is none unless the PIN is UTF-8 whose NFC form has at least four code points and
+    /// fits in 63 bytes. Each code point passes through a zeroized 4-byte scratch buffer.
+    pub(crate) fn normalized(&self) -> Option<Self> {
+        let text = std::str::from_utf8(&self.bytes[..self.length]).ok()?;
+        let mut nfc = Self::new();
+        let mut points = 0;
+        let fits = text.nfc().all(|point| {
+            points += 1;
+            let mut utf8 = Zeroizing::<[u8; 4]>::default();
+            point
+                .encode_utf8(utf8.as_mut_slice())
+                .bytes()
+                .all(|byte| nfc.push(byte))
+        });
+        (fits && points >= MIN_PIN_CODE_POINTS).then_some(nfc)
+    }
+
+    /// The bytes of the PIN.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.length]
     }
 }
 

@@ -12,9 +12,9 @@ struct Info {
     versions: &'static [&'static str],
     extensions: &'static [&'static str],
     options: &'static [(&'static str, bool)],
-    max_message: Option<usize>,
-    protocols: &'static [usize],
-    algorithms: Option<&'static [(usize, &'static str)]>,
+    max_message: Option<u64>,
+    protocols: &'static [u64],
+    algorithms: Option<&'static [(u64, &'static str)]>,
 }
 
 const HONEST: Info = Info {

@@ -190,12 +190,13 @@ class CtapLockTests(unittest.TestCase):
             {"name": name, "version": version, "source": SOURCE, "checksum": checksum}
             for name, (version, checksum) in CTAP_PINS.items()
         ] + [
-            {"name": "pos-owner-ctap", "dependencies": ["aes", "hkdf", "hmac", "p256"]},
+            {"name": "pos-owner-ctap", "dependencies": ["aes", "hkdf", "hmac", "p256", "unicode-normalization"]},
             {"name": "piglor-owner", "dependencies": ["pos-owner-bridge"]},
         ]}
         self.ctap = {"dependencies": {
             "aes": {"workspace": True, "features": ["zeroize"]},
             "hmac": {"workspace": True},
+            "unicode-normalization": {"workspace": True},
         }}
         self.workspace = {"workspace": {"dependencies": copy.deepcopy(CTAP_WORKSPACE)}}
 
@@ -213,7 +214,9 @@ class CtapLockTests(unittest.TestCase):
 
     def test_workspace_pins_are_exact(self):
         for name, value in [("aes", {"version": "=0.9.4"}), ("aes", {"version": "0.9.4", "default-features": False}),
-                            ("hmac", "0.13.0"), ("hmac", {"version": "=0.13.0"})]:
+                            ("hmac", "0.13.0"), ("hmac", {"version": "=0.13.0"}),
+                            ("unicode-normalization", {"version": "=0.1.26"}),
+                            ("unicode-normalization", "=0.1.26")]:
             workspace = copy.deepcopy(self.workspace)
             workspace["workspace"]["dependencies"][name] = value
             self.assertTrue(check_ctap(self.lock, self.ctap, workspace), (name, value))
@@ -236,7 +239,8 @@ class CtapLockTests(unittest.TestCase):
                     lock["package"].pop(index)
                 self.assertTrue(check_ctap(lock, self.ctap, self.workspace), (index, duplicate))
         crate = len(CTAP_PINS)
-        for dependencies in [["hkdf", "hmac"], ["aes", "hkdf"], ["aes", "aes", "hmac"]]:
+        for dependencies in [["hkdf", "hmac", "unicode-normalization"], ["aes", "hkdf", "unicode-normalization"],
+                             ["aes", "aes", "hmac", "unicode-normalization"], ["aes", "hmac"]]:
             lock = copy.deepcopy(self.lock)
             lock["package"][crate]["dependencies"] = dependencies
             self.assertTrue(check_ctap(lock, self.ctap, self.workspace), dependencies)
