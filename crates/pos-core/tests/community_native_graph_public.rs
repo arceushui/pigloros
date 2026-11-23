@@ -1594,3 +1594,102 @@ fn every_decoder_refuses_noncanonical_framing() -> TestResult {
     );
     Ok(())
 }
+
+const fn genesis(timeline_byte: u8, hash_byte: u8) -> TypedRef<'static> {
+    TypedRef::SourceGenesis {
+        timeline: timeline(timeline_byte),
+        genesis_chain_hash: hash(hash_byte),
+    }
+}
+
+fn observation(index: Index<'_>) -> Result<Node<'_>, Error> {
+    Node::new(node_input(
+        Kind::Observation,
+        Class::EndogenousRecomputed,
+        content(*b"COV1"),
+        index,
+    ))
+}
+
+#[test]
+fn source_genesis_refs_have_the_exact_wire_and_only_one_observation_use() -> TestResult {
+    // Revision 9, R9.3: `[4, source_T, genesis_chain_hash]`. The pinned
+    // Hasher's genesis may be the zero hash.
+    let refs = [TypedRef::SourceGenesis {
+        timeline: timeline(4),
+        genesis_chain_hash: Hash::zero(),
+    }];
+    let node = observation(Index::Direct(TypedRefs::from_references(&refs)))?;
+    let expected = encode(&node_value(
+        1,
+        b"COV1",
+        2,
+        "pos.community.observation",
+        Value::Array(vec![
+            uint(1),
+            Value::Array(vec![Value::Array(vec![
+                uint(4),
+                bytes(&[4; 16]),
+                bytes(&[0; 32]),
+            ])]),
+        ]),
+    ))?;
+    assert_eq!(&*node.to_canonical_cbor(), &expected);
+    let decoded = Node::from_canonical_cbor(&expected)?;
+    assert!(*decoded.as_input() == *node.as_input());
+    let wire = encode(&Value::Array(vec![
+        uint(4),
+        bytes(&[4; 16]),
+        bytes(&[0; 32]),
+    ]))?;
+    assert_eq!(refs[0].digest(), record_digest("TypedInputRef", &wire));
+    // A zero source Timeline is refused.
+    assert_eq!(
+        error_of(observation(Index::Direct(TypedRefs::from_references(&[
+            TypedRef::SourceGenesis {
+                timeline: TimelineId::from_ulid(ulid::Ulid::from_bytes([0; 16])),
+                genesis_chain_hash: hash(1),
+            }
+        ])))),
+        Some(Error::InvalidBinding)
+    );
+    // Two genesis refs, or one outside an Observation, are refused; one
+    // beside other refs in an Observation is admitted.
+    let two = [genesis(4, 1), genesis(5, 1)];
+    assert_eq!(
+        error_of(observation(Index::Direct(TypedRefs::from_references(&two)))),
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(
+        error_of(Node::new(revision_input(Index::Direct(
+            TypedRefs::from_references(&two)
+        )))),
+        Some(Error::InvalidBinding)
+    );
+    let one = [genesis(4, 1)];
+    assert_eq!(
+        error_of(Node::new(revision_input(Index::Direct(
+            TypedRefs::from_references(&one)
+        )))),
+        Some(Error::InvalidBinding)
+    );
+    let mixed = [TypedRef::Native(native(9, 0, 11)), genesis(4, 1)];
+    assert!(observation(Index::Direct(TypedRefs::from_references(&mixed))).is_ok());
+    assert!(observation(Index::Empty).is_ok());
+    // A short genesis ref does not decode.
+    let short = node_value(
+        1,
+        b"COV1",
+        2,
+        "pos.community.observation",
+        Value::Array(vec![
+            uint(1),
+            Value::Array(vec![Value::Array(vec![uint(4), bytes(&[4; 16])])]),
+        ]),
+    );
+    assert_eq!(
+        Node::from_canonical_cbor(&encode(&short)?).err(),
+        Some(Error::InvalidEncoding)
+    );
+    Ok(())
+}

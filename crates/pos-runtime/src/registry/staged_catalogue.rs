@@ -20,8 +20,10 @@ use pos_state::{
 
 use super::InstalledPluginFactoryV1;
 
-/// Largest per-callback bound a staged Reducer may be admitted with.
-pub const MAX_STAGED_CALLBACK_BOUND_V1: Duration = Duration::from_millis(250);
+// The largest per-callback bound a staged Reducer may be admitted with is
+// pos-core's, shared with the store's observation preparer (owner
+// 2026-11-21, #560).
+use pos_core::community_lifecycle::MAX_STAGED_CALLBACK_BOUND_V1;
 
 /// One reviewed staged Reducer factory.
 struct ReviewedStagedFactoryV1 {
