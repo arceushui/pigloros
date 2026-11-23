@@ -6,10 +6,11 @@
 //! reopens admissions offline with `piglor-gateway erasure-admissions`, and
 //! the Local erasure host reads the record on every fresh submission.
 //!
-//! Closing admissions never reaches anything else: an exact replay of an
-//! installed request, `getErasure`, the erasure driver and its startup sweep
-//! never read the record, so every admitted request still freezes and
-//! completes.
+//! Closing admissions refuses only fresh requests: the host reads the
+//! record before a submission but applies it after the exact-replay check,
+//! so an exact replay of an installed request keeps its answer, and
+//! `getErasure`, the erasure driver and its startup sweep never read the
+//! record, so every admitted request still freezes and completes.
 
 use crate::CoreError;
 

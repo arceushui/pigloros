@@ -414,11 +414,11 @@ store's exclusive mode lock, so they refuse to run beside a live `serve`
 (owner decision of 2026-11-23: a foreign commit would make the serving host
 fail closed, `getErasure` and the driver included, until it restarts); the
 operator stops `serve`, changes the record and starts `serve` again.
-`status` reads under the shared lock. Every verb runs in every execution
+`status` takes the shared lock and only reads the record. Every verb runs in every execution
 mode. The record is
 one singleton row (`erasure_admissions`), absent meaning open. The Local
-erasure host reads it on every submission, after the exact-replay check, so
-only a fresh request is refused: `LocalErasureSubmitErrorV1::OperatorClosed`,
+erasure host reads it on every submission and applies it after the
+exact-replay check, so only a fresh request is refused: `LocalErasureSubmitErrorV1::OperatorClosed`,
 which the Gateway answers `503 erasure-admissions-closed`, not retryable.
 `getErasure`, the driver and its startup sweep never read it.
 

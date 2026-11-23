@@ -7,17 +7,18 @@
 //! the store: the serving host owns its store, and a commit from another
 //! process would make it fail closed, `getErasure` and the erasure driver
 //! included, until it restarts. The operator stops `serve`, changes the
-//! record and starts `serve` again. `status` only reads the record, under
-//! the shared lock, so it also runs beside a live `serve`. Every verb
+//! record and starts `serve` again. `status` takes the shared lock and only
+//! reads the record. Every verb
 //! attaches to the store's execution-mode binding (ADR-134 §8), so an
 //! unbound store is refused. Both changes run in every execution mode,
 //! Air-Gapped included: closing only reduces what the host admits, and
 //! reopening restores the admission the mode already serves.
 //!
-//! The Local erasure host reads the record on every fresh submission.
-//! While it is closed, a fresh `requestErasure` is
-//! `503 erasure-admissions-closed`; an exact retry of an admitted request,
-//! `getErasure`, the erasure driver and its startup sweep never read it.
+//! The Local erasure host reads the record on every submission and applies
+//! it after the exact-replay check: while it is closed, a fresh
+//! `requestErasure` is `503 erasure-admissions-closed`, an exact retry of an
+//! admitted request keeps its answer, and `getErasure`, the erasure driver
+//! and its startup sweep never read it.
 
 use pos_core::{ErasureAdmissionsPortV1, ErasureAdmissionsStateV1};
 use pos_store::sqlite::SqliteStore;
@@ -48,9 +49,8 @@ pub enum ErasureAdmissionsCommandErrorV1 {
 /// Returns [`ErasureAdmissionsCommandErrorV1::Usage`] for any other
 /// arguments, the mode binding's refusal of an unbound store or of a store
 /// whose lock another process holds (a live `serve` for `close` and `open`),
-/// and
-/// [`ErasureAdmissionsCommandErrorV1::RecordUnavailable`] when the record
-/// cannot be read or written.
+/// and [`ErasureAdmissionsCommandErrorV1::RecordUnavailable`] when the
+/// record cannot be read or written.
 pub fn execute(arguments: &[String]) -> Result<String, ErasureAdmissionsCommandErrorV1> {
     let [command, sqlite_path] = arguments else {
         return Err(ErasureAdmissionsCommandErrorV1::Usage);

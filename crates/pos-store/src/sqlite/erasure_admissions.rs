@@ -66,14 +66,23 @@ fn write_admissions(
     })
 }
 
+/// The value `PRAGMA synchronous` reads back for `FULL`.
+const SYNCHRONOUS_FULL: i64 = 2;
+
 /// Change the record in one `BEGIN IMMEDIATE` transaction under
-/// `synchronous=FULL`; a failed step drops the transaction, which rolls it
-/// back.
+/// `synchronous=FULL`, read back before the transaction begins; a failed
+/// step drops the transaction, which rolls it back.
 fn change_admissions(
     conn: &mut Connection,
     state: ErasureAdmissionsStateV1,
 ) -> rusqlite::Result<ErasureAdmissionsStateV1> {
     conn.execute_batch("PRAGMA synchronous=FULL")
+        .and_then(|()| conn.query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0)))
+        .and_then(|level| {
+            (level == SYNCHRONOUS_FULL)
+                .then_some(())
+                .ok_or(rusqlite::Error::InvalidQuery)
+        })
         .map(|()| conn)
         .and_then(|conn| conn.transaction_with_behavior(TransactionBehavior::Immediate))
         .and_then(|transaction| {
@@ -96,6 +105,11 @@ impl ErasureAdmissionsPortV1 for SqliteStore {
     }
 
     /// Change the record, then restore the store's `synchronous=NORMAL`.
+    ///
+    /// The restore's own result is not reported, as in the mode-binding
+    /// adapter: once the transaction has committed the change is durable,
+    /// and the level only governs later writes, so a failed restore must not
+    /// turn a committed change into a reported failure.
     fn set_erasure_admissions(
         &mut self,
         state: ErasureAdmissionsStateV1,
@@ -105,3 +119,7 @@ impl ErasureAdmissionsPortV1 for SqliteStore {
         changed.map_err(Self::into_storage_error)
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

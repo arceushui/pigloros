@@ -317,12 +317,12 @@ erasure admissions (#1408), `open` reopens them, and `status` prints `Erasure ad
 so they refuse to run while `serve` holds the store: stop `serve`, change the record, and start
 `serve` again (a commit from another process would make a serving host fail closed, `getErasure`
 and the driver included; see [SQLite and host ownership](#sqlite-and-host-ownership)). `status`
-reads under the shared lock and also runs beside a live `serve`. Every verb refuses an unbound store
+takes the shared lock and only reads the record. Every verb refuses an unbound store
 and runs in every mode, Air-Gapped included. A store without
-the record is open. The erasure host reads the record on every submission: while it is closed a
-fresh `requestErasure` is `503 erasure-admissions-closed` (not retryable) and nothing is retained.
-An exact retry of an admitted request still answers its receipt, and `getErasure`, the driver and
-its startup sweep never read the record, so every admitted request still completes, also across a
+the record is open. The erasure host reads the record on every submission and applies it after the exact-replay
+check: while it is closed a fresh `requestErasure` is `503 erasure-admissions-closed` (not
+retryable) and nothing is retained, while an exact retry of an admitted request still answers its
+receipt. `getErasure`, the driver and its startup sweep never read the record, so every admitted request still completes, also across a
 restart. A record that cannot be read refuses fresh requests as a retryable
 `503 temporarily-unavailable`.
 
