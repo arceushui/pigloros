@@ -34,12 +34,9 @@ pos-conformance = { path = "../pos-conformance" }
 pos-crypto = { path = "../pos-crypto" }
 rusqlite = { workspace = true }
 
-# The loader's tests include the shared signing fixtures
-# (tests/support/signing.rs) via #[path]; cargo-shear does not attribute the
-# fixture's imports to this package. Keep these required dev-dependencies;
-# restrict the false-positive exception to them.
-[package.metadata.cargo-shear]
-ignored = ["ed25519-dalek", "pos-conformance", "pos-crypto"]
+# The loader's tests include shared signing fixtures
+# (tests/support/signing.rs) via #[path]. cargo-shear follows that module edge,
+# so these required dev-dependencies need no ignore metadata.
 
 [lints]
 workspace = true
