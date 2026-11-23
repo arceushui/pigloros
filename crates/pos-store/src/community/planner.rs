@@ -1033,7 +1033,7 @@ fn authority_rows<D: CommunityStoreDomainV1>(
 
 /// One `Available` CAV1 key row per key, in `(owner, role, epoch)` order.
 #[cfg(target_os = "linux")]
-fn key_rows(keys: &[&CommunityKeyIntentV1]) -> Vec<CommunityKeyViewRowV1> {
+pub(super) fn key_rows(keys: &[&CommunityKeyIntentV1]) -> Vec<CommunityKeyViewRowV1> {
     let mut rows: Vec<CommunityKeyViewRowV1> = keys
         .iter()
         .map(|key| key.key_view_row(CommunityKeyStateV1::Available))
