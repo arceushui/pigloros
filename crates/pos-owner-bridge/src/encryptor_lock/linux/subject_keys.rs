@@ -225,6 +225,11 @@ impl SubjectEncryptorLock {
     /// P3a staging record first. On failure before the rename, this owner's
     /// `.tmp` file is removed; an error after the rename leaves the canonical
     /// file with an unconfirmed outcome. Either state is what P5 recovers.
+    /// The one exception is a failure while the freshly created `.tmp` is
+    /// still being checked (for example a process umask that makes it
+    /// non-`0600`): that `.tmp` is left behind, refuses later staging of the
+    /// same name, and is cleared by P5 recovery. The owner process must run
+    /// with a umask that permits `0600`.
     ///
     /// # Errors
     /// Returns `Unavailable(InterfaceUnavailable)` for input above 4,096 bytes,
@@ -294,7 +299,9 @@ impl SubjectEncryptorLock {
     /// List `subject-keys.v1` and read every regular file, as ADR-137 D2 step 4
     /// requires.
     ///
-    /// Admits the directory as staging does. At most 4,096 entries other than
+    /// Admits the directory as staging does, so this call creates
+    /// `subject-keys.v1` and synchronizes its parent when absent; it is not a
+    /// pure read. At most 4,096 entries other than
     /// `.` and `..` are accepted. Entries are returned sorted by name bytes.
     /// Each entry is inspected without following symlinks. A regular file of
     /// any name is opened with `O_NOFOLLOW`, its identity is rechecked, and
