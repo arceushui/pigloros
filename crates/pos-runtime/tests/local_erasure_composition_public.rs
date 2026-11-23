@@ -7222,9 +7222,9 @@ fn driver_memory_host(case: &Case) -> TestResult<ErasureExecutionHostV1> {
 }
 
 /// A store a fixture seeds before its host opens over it.
-trait SeedStore: EventStore + ErasureInventoryPersistencePortV1 {}
+trait SeedStore: EventStore + ErasureInventoryPersistencePortV1 + ErasureAdmissionsPortV1 {}
 
-impl<T: EventStore + ErasureInventoryPersistencePortV1> SeedStore for T {}
+impl<T: EventStore + ErasureInventoryPersistencePortV1 + ErasureAdmissionsPortV1> SeedStore for T {}
 
 /// The store adapter a test runs over.
 #[derive(Clone, Copy, Debug)]
@@ -9440,6 +9440,52 @@ fn the_projection_follows_a_driven_request() -> TestResult {
     Ok(())
 }
 
+/// #1407 (ADR-136 follow-up F2): the store's redaction generation is 0
+/// until the first ELCG1 commits, never decreases while a request is
+/// driven, and rises again with the next request's ELCG1; every projection
+/// reads the same store-wide value. Each ELCG1 still carries its own
+/// request's attempt position, 2 for attempt 0 (Q8).
+#[test]
+fn the_redaction_generation_rises_across_requests() -> TestResult {
+    let store = driver_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let redaction = |host: &mut ErasureExecutionHostV1, key: u8| -> TestResult<u64> {
+        Ok(projection(host, actor(), key)?
+            .ok_or("no projection")?
+            .redaction_generation)
+    };
+    let mut previous = redaction(&mut host, 1)?;
+    assert_eq!(previous, 0);
+    loop {
+        let step = driver().step(&mut host, request_of(1)?)?;
+        if step == LocalErasureStepV1::Idle {
+            break;
+        }
+        let current = redaction(&mut host, 1)?;
+        assert!(current >= previous, "{step:?}");
+        previous = current;
+    }
+    assert_eq!(previous, 1);
+    submitted(&mut host, 2, ErasureScopeV1::ConsentedSharedData)?;
+    assert_eq!(redaction(&mut host, 2)?, 1);
+    finalized(driver().drive(&mut host, request_of(2)?)?)?;
+    assert_eq!(redaction(&mut host, 1)?, 2);
+    assert_eq!(redaction(&mut host, 2)?, 2);
+    let mut records = store
+        .sqlite()?
+        .retained_erasure_objects("ELCG1", 16)?
+        .iter()
+        .map(|bytes| LocalErasureCacheGenerationV1::from_canonical_cbor(bytes))
+        .map(|record| record.map(|record| (record.request, record.generation)))
+        .collect::<Result<Vec<_>, _>>()?;
+    records.sort_unstable();
+    let mut expected = vec![(request_of(1)?, 2), (request_of(2)?, 2)];
+    expected.sort_unstable();
+    assert_eq!(records, expected);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
 // a subject-scoped export through core `export_timeline`, then erasure,
@@ -9551,3 +9597,151 @@ fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult 
 
 #[path = "local_erasure_composition/acceptance.rs"]
 mod acceptance;
+
+// ---------------------------------------------------------------------------
+// ADR-136 follow-up F3 (#1408): the operator's admissions record closes
+// fresh Local submissions only. An exact replay, the driver and its startup
+// sweep never read it, so every admitted request still freezes and
+// completes.
+// ---------------------------------------------------------------------------
+
+use pos_core::{ErasureAdmissionsPortV1, ErasureAdmissionsStateV1};
+
+impl LocalStore {
+    /// Write the operator's admissions record while no host is open, as the
+    /// offline `piglor-gateway erasure-admissions` writer does.
+    fn set_admissions(&self, state: ErasureAdmissionsStateV1) -> TestResult {
+        self.sqlite()?.set_erasure_admissions(state)?;
+        Ok(())
+    }
+
+    /// Submit request 1 for private subject data on a host composed of
+    /// `case`, and return its admission.
+    fn admitted(&self, case: &Case) -> TestResult<pos_runtime::LocalErasureAdmittedV1> {
+        let mut host = self.host(case, 4_096)?;
+        let admitted = host
+            .command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        Ok(admitted)
+    }
+}
+
+/// #1408: while the record is closed, a fresh submission is refused
+/// `OperatorClosed` on both adapters. The Memory store is closed before its
+/// host owns it.
+#[test]
+fn a_closed_record_refuses_a_fresh_submission() -> TestResult {
+    for adapter in ADAPTERS {
+        let (mut fixture, previous) =
+            Fixture::local(adapter, &GrantShape::standard(), 4_096, |store| {
+                Ok(store.set_erasure_admissions(ErasureAdmissionsStateV1::Closed)?)
+            })?;
+        assert_eq!(previous, ErasureAdmissionsStateV1::Open, "{adapter:?}");
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::OperatorClosed),
+            "{adapter:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #1408 on `SQLite`, closed and reopened behind the host: the exact replay
+/// of an admitted request still answers its state and the same key with
+/// another body its conflict; a fresh request is refused before the
+/// subject checks and retains nothing; reopening admits it to the subject
+/// checks again.
+#[test]
+fn a_closed_record_answers_the_exact_replay_and_retains_nothing() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let state = store.admitted(&local_case()?)?;
+    store.set_admissions(ErasureAdmissionsStateV1::Closed)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    {
+        let mut sender = host.command_sender()?;
+        assert_eq!(
+            sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+            Ok(state)
+        );
+        assert_eq!(
+            sender.submit_local_erasure(&submission(1, ErasureScopeV1::ConsentedSharedData)?),
+            Err(LocalErasureSubmitErrorV1::Host(
+                ErasureHostErrorV1::Conflict
+            ))
+        );
+    }
+    // Request 1 still holds the subject, yet the closed record answers
+    // first, so the refusal is not `Concurrent`.
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::OperatorClosed,
+    )?;
+    drop(host);
+    store.set_admissions(ErasureAdmissionsStateV1::Open)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Concurrent)
+    );
+    Ok(())
+}
+
+/// #1408 on `SQLite`: a request admitted before the record closed survives
+/// the startup sweep, freezes and completes on a host restarted while it is
+/// closed, which still refuses a fresh request of the released subject.
+#[test]
+fn an_admitted_request_freezes_and_completes_while_admissions_are_closed() -> TestResult {
+    let store = driver_store()?;
+    {
+        let mut host = store.host(&driver_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::ConsentedSharedData)?;
+    }
+    store.set_admissions(ErasureAdmissionsStateV1::Closed)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    assert!(matches!(
+        LocalErasureDriverV1::sweep(&mut host),
+        LocalErasureSweepV1::Swept(_)
+    ));
+    let steps = driven_steps(&mut host, |_| false)?;
+    assert_eq!(steps[0], LocalErasureStepV1::Authorized);
+    assert_eq!(steps[1], LocalErasureStepV1::Frozen);
+    let receipt = finalized(steps.last().cloned().ok_or("no step")?)?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::OperatorClosed)
+    );
+    Ok(())
+}
+
+/// #1408 on `SQLite`: a record the host cannot read (a row the `CHECK`
+/// refuses, written with the checks off) fails closed for a fresh request
+/// as `AdapterFailure`, retaining nothing, while the exact replay is still
+/// answered.
+#[test]
+fn an_unreadable_record_fails_closed_for_a_fresh_submission_only() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let state = store.admitted(&local_case()?)?;
+    rusqlite::Connection::open(&store.path)?.execute_batch(
+        "PRAGMA ignore_check_constraints = ON;
+         INSERT INTO erasure_admissions (singleton, closed) VALUES (1, 'unreadable');",
+    )?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Ok(state)
+    );
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AdapterFailure),
+    )
+}

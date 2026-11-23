@@ -245,8 +245,15 @@ def json_body(value: object) -> dict:
     return {"json": value}
 
 
+# The one response header an observation carries (#1407): every Gateway answer, problems
+# included, is `Cache-Control: no-store` (the client-cache rule of the Gateway v1 contract).
+NO_STORE = {"cache-control": "no-store"}
+
+
 def observed(status: int, body: object) -> dict:
-    return {"status": status, "body": body}
+    """The observation of a sent exchange: its status, its `cache-control` header and its
+    normalized body."""
+    return {"status": status, "headers": NO_STORE, "body": body}
 
 
 def problem_titles() -> dict[str, str]:
@@ -745,7 +752,8 @@ def admission_receipt(key: str) -> dict:
 
 def submitted_erasure() -> dict:
     """The `Erasure` of a submitted private-subject-data request no driver advanced: generation
-    0, no obligation yet, the exact claim, and the ERS1 state digest normalized away."""
+    0, no obligation yet, the exact claim, the ERS1 state digest normalized away, and the
+    store's redaction generation 0, as no ELCG1 has committed (#1407)."""
     return {
         "acknowledgements": {"classes": [], "positive": 0, "required": 0},
         "availability": {"state": "available", "withheld": []},
@@ -765,6 +773,7 @@ def submitted_erasure() -> dict:
             "profile_kind": "gateway-mode-v1",
         },
         "provenance": {"digest": "<hash>", "origin": "host-derived"},
+        "redaction_generation": 0,
         "replay_claim": "exact",
         "retained_classes": RETAINED_CLASSES,
         "schema_id": "urn:pigloros:gateway:v1:schema:erasure",
@@ -1305,6 +1314,14 @@ def family_schema(family: str) -> dict:
                 "required": ["status", "body"],
                 "properties": {
                     "status": {"type": "integer", "minimum": 100, "maximum": 599},
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["cache-control"],
+                        "properties": {
+                            "cache-control": {"type": "string", "pattern": "^[ -~]{0,256}$"}
+                        },
+                    },
                     "body": {
                         "oneOf": [
                             {"const": "non-json"},

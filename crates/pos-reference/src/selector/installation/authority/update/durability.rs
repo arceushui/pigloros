@@ -945,6 +945,23 @@ mod tests {
         Ok(())
     }
 
+    /// A failed SIR1 rename counts as pending recovery although no SIR1
+    /// exists; the selector then heals through a normal open.
+    #[test]
+    fn a_failed_sir1_rename_is_pending_recovery_without_a_sir1() -> TestResult {
+        let (_staging_directory, staging_root, owner) = durable_root()?;
+        let staging = open_staging_directory(&staging_root, owner)?;
+        let removed = tempfile::tempdir()?;
+        let root = File::open(removed.path())?;
+        fs::remove_dir(removed.path())?;
+        assert!(matches!(
+            write_recovery(&staging, &root, owner, b"recovery"),
+            Err(InstallationUpdateCommitError::RecoveryPending(_))
+        ));
+        assert!(!removed.path().join(RECOVERY_NAME).exists());
+        Ok(())
+    }
+
     #[test]
     fn recovery_write_and_identity_checks_fail_closed() -> TestResult {
         let (directory, root, owner) = durable_root()?;

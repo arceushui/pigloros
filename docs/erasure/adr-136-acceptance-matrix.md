@@ -5,7 +5,9 @@ It maps each bullet of the ADR-136 acceptance tests to the public-seam tests
 that cover it. Slice C6a (#1469) covers tests 1 to 7 at the runtime seams.
 Slice C6b (#1470) adds tests 8 to 10 and the Gateway parts of test 2. Slice
 C6c (#1471) adds test 11: key-less recovery by every consumer, and the served
-lifecycle suite in every serve mode.
+lifecycle suite in every serve mode. Follow-up F3 (#1408) adds the
+operator's closure of `requestErasure`; it is not an ADR-136 test bullet, so
+it has its own section and is not counted in the summary.
 
 ## Summary
 
@@ -70,6 +72,12 @@ Each entry names its owner decision and the rows it explains.
 | `LED` | `apps/piglor-ledger/src/lib.rs`, the module `keyless_erasure_tests` |
 | `EXP` | `apps/pos-experiment/src/lib.rs`, the module `keyless_erasure_tests` |
 | `ADP` | `apps/pos-gateway-conformance-adapter/src/subject/execute.rs` (in-crate tests) |
+| `ADM` | `crates/pos-store/tests/erasure_admissions.rs` |
+| `RDG` | `crates/pos-store/tests/erasure_redaction_generation.rs` |
+| `HTTP` | `apps/piglor-gateway/src/http.rs` (in-crate tests) |
+| `GCC` | `scripts/test_check_gateway_contract.py` |
+| `GAP` | `apps/pos-gateway-conformance-adapter/tests/adapter_public.rs` |
+| `CMD` | `apps/piglor-gateway/src/erasure_admissions/tests.rs`, the `erasure-admissions` command |
 
 A served test `T` of `E` or `EA` that runs in every serve mode is the module
 `T` with the three tests `T::local`, `T::managed_local_fork_admission` and
@@ -272,6 +280,7 @@ Every other `LEC` test runs on one adapter, for the reason given.
 | Recipient-export catalog | `a_consented_freeze_covers_the_store_target_and_each_export_grantee`, `an_export_after_the_erasure_reports_its_unavailable_artifact` |
 | Held reader | `a_transient_negative_is_retried_until_it_succeeds`, `the_local_replica_runs_last_and_a_held_store_is_a_transient_negative` |
 | Write behind the host, `Attempted` and executor fixtures | `a_partial_failure_retries_only_while_its_subject_is_free`, `a_revoked_pinned_bundle_signs_nothing_and_frees_its_subject`, `an_owner_the_pinned_bundle_does_not_name_acknowledges_nothing`, `a_retry_pins_only_the_frozen_bundle_and_completes_at_its_reached_position`, `a_complete_request_frees_its_subject`, `an_unreadable_complete_request_never_holds_its_subject`, `an_unreadable_rejected_request_never_holds_its_subject`, `attempt_0_is_refused_once_its_bundle_is_revoked_and_rotated`, `every_owner_class_commits_its_effect_and_elo1_at_the_host_seam`, `the_outbox_replays_only_unacknowledged_commands`, `a_replica_check_that_cannot_read_the_store_is_a_host_error`, `an_unreadable_key_registry_commits_no_owner_result`, `a_key_destroyed_under_another_authorization_binds_its_existing_receipt`, `only_a_dispatched_key_command_destroys_and_only_under_an_open_fence`, `a_consistent_command_outside_the_attempt_is_not_dispatched`, `an_artifact_is_redacted_only_once_every_key_it_depends_on_is_tombstoned`, `a_frozen_request_whose_bundle_is_revoked_no_longer_holds_its_subject`, `an_undecodable_admission_fails_the_submission_closed`, `a_submission_without_a_binding_epoch_retains_nothing`, `the_root_grant_must_match_the_composition_and_name_the_operation` |
+| Close and reopen with the operator's admissions record written behind the host (#1408) | `a_closed_record_answers_the_exact_replay_and_retains_nothing`, `an_admitted_request_freezes_and_completes_while_admissions_are_closed`, `an_unreadable_record_fails_closed_for_a_fresh_submission_only` |
 | No store, or composition only (Memory) | `composition_errors_have_stable_payload_free_messages`, `the_compiled_policy_carries_the_owner_constants`, `the_classification_is_exactly_the_owner_table`, `a_bundle_owner_of_another_class_is_unencodable`, `a_host_without_an_authority_has_no_outbox`, `a_key_less_root_skips_only_the_execution_binding`, `a_bundle_without_its_erasure_host_timeline_is_a_mismatch` |
 
 Moved onto the two-adapter `Fixture` in C6a: `a_local_submission_is_derived_idempotent_and_bound_to_its_body`, `a_subject_has_one_pre_terminal_request`, `the_subject_quota_admits_exactly_its_share`, `the_quota_is_shared_by_the_principals_actors`, `authorization_names_the_requests_own_evidence`, `a_root_grant_admits_the_last_position_of_its_window`, `the_closure_bound_is_exact_at_submit_and_freeze`, `the_key_and_backup_bound_is_exact_at_submit`, `the_key_list_is_bounded_on_its_own`, `the_signer_signs_a_freeze_only_of_an_authorized_request_and_its_body`, `the_signer_signs_only_the_committed_receipt_body`, `a_refused_signature_defers_the_step`, `advance_commits_one_transition_per_call_until_idle`, `advance_passes_over_a_request_it_cannot_step`, `the_projection_never_tells_an_unknown_id_from_another_subjects`, the plain-submission tests (`the_authority_recomputes_every_eraz1_rule_of_a_plain_submission`, `the_authority_recomputes_every_erq1_field_of_a_plain_submission`, `a_plain_submission_cannot_bypass_the_subject_checks`), and the `local_authority` fixture tests (`the_local_authority_refuses_an_unbound_freeze`, `the_local_authority_recomputes_every_fork_scope_extension`, `the_local_authority_refuses_an_unknown_attempt_or_unpinned_acknowledgement`, `a_receipt_needs_an_active_attempt_and_correction_and_resolution_are_refused`, `destruction_goes_only_to_an_owner_the_bundle_names`, `committed_freeze_evidence_pins_one_policy_and_trust`, `recovery_needs_a_resolvable_bundle_and_the_issue_position`).
@@ -324,8 +333,16 @@ served only over `SQLite`.
 
 Owner 2026-11-20: mapped, no new adapter compositions or fixture
 regeneration. The Gateway client conformance layer keeps its erasure cases
-`pos.10`, `den.10`, `den.11`, `den.12`, `res.2` and `mal.6`. The two
-refusals without a conformance case are covered by these tests:
+`pos.10`, `den.10`, `den.11`, `den.12`, `res.2` and `mal.6`.
+
+Owner 2026-11-23, for #1407 only: the gateway-client-conformance fixtures
+and oracles are regenerated, overriding the no-regeneration rule above. The
+observation gains its optional `headers` member (`cache-control` only), so
+every expected exchange now carries `Cache-Control: no-store`, and the
+`pos.10` erasure read carries `redaction_generation: 0`. No composition is
+added: there is still no driven-erasure composition. See *Follow-up F2*.
+
+The two refusals without a conformance case are covered by these tests:
 
 | Refusal | Tests |
 |---|---|
@@ -399,3 +416,97 @@ runtime-seam rows hold in every mode.
 | The managed mode's Fork admission service | `EA::the_fork_admission_service_forks_into_and_beside_an_erasure` | `SQLite` | Test 2 through the service: the child inherits its parent's owner (the actor's root's child is the actor's, the other actor's root's child is the other actor's), and the post-freeze refusal is an ADR errata (see the deviations). |
 | Air-Gapped passes the same suite with the bundled TPS1 | The same ten suite functions, each `::air_gapped` | `SQLite` | The projection discloses `gateway-mode-air-gapped-v1`. The consent test asserts the same `403 revoked` and exact-retry `200` as Local: an Air-Gapped binding only fixes the authorizer's revocation-freshness claim to current (D10), which every serve composition already holds. |
 | The Local serve mode (the baseline of both) | The same ten suite functions, each `::local` | `SQLite` | |
+
+## Follow-up F3: closing `requestErasure` (#1408)
+
+The operator closes new erasure admissions durably with
+`piglor-gateway erasure-admissions close <sqlite-path>` and reopens them
+with `open`; `status` prints the record. `close` and `open` hold the
+store's exclusive mode lock, so they refuse to run beside a live `serve`
+(owner decision of 2026-11-23: a foreign commit would make the serving host
+fail closed, `getErasure` and the driver included, until it restarts); the
+operator stops `serve`, changes the record and starts `serve` again.
+`status` takes the shared lock and only reads the record. Every verb runs in every execution
+mode. The record is
+one singleton row (`erasure_admissions`), absent meaning open. The Local
+erasure host reads it on every submission and applies it after the
+exact-replay check, so only a fresh request is refused: `LocalErasureSubmitErrorV1::OperatorClosed`,
+which the Gateway answers `503 erasure-admissions-closed`, not retryable.
+`getErasure`, the driver and its startup sweep never read it.
+
+| Bullet | Test | Adapters | Note |
+|---|---|---|---|
+| A store without the record is open; each change returns the state it replaced | `ADM::a_store_without_the_record_is_open`; `ADM::each_change_returns_the_state_it_replaced` | both | |
+| A closed record survives a reopen of the store file, and `open` restores | `ADM::a_closed_record_survives_a_reopen_and_open_restores` | `SQLite` | |
+| An unreadable record fails and is left unchanged | `ADM::an_unreadable_record_fails_and_is_left_unchanged` | `SQLite` | A row the `CHECK` refuses, written with the checks off. |
+| A closed record refuses a fresh submission with the new variant | `LEC::a_closed_record_refuses_a_fresh_submission` | both | The Memory store is closed before its host owns it. |
+| An exact replay of an installed request is still answered while closed, and a refused fresh submission retains nothing | `LEC::a_closed_record_answers_the_exact_replay_and_retains_nothing` | `SQLite` | The refusal comes before the subject checks; reopening lets the next request reach them again. |
+| An admitted request still freezes and completes while closed, after the startup sweep | `LEC::an_admitted_request_freezes_and_completes_while_admissions_are_closed` | `SQLite` | |
+| A record the host cannot read fails closed | `LEC::an_unreadable_record_fails_closed_for_a_fresh_submission_only` | `SQLite` | `ErasureHostErrorV1::AdapterFailure` for a fresh request (a retryable `503 temporarily-unavailable` at the Gateway); the exact replay is still answered. |
+| Closed admissions refuse `POST` with `503 erasure-admissions-closed`; `GET` answers and the admitted request reaches its first receipt; both hold after a restart; reopened, `POST` gives `202` | `E::closed_admissions_refuse_new_erasures_and_finish_admitted_ones`; `E::every_submit_refusal_has_its_answer` | `SQLite`; none | Local serve mode. The command runs between serves. |
+| `close`, `open` and `status` output; Air-Gapped stores accepted; a served store refuses `close`/`open` but answers `status`; unbound, locked and unreadable stores and other arguments refused | `CMD::close_open_and_status_report_the_record`; `CMD::an_air_gapped_store_closes_and_reopens`; `CMD::unbound_locked_and_unreadable_stores_are_refused`; `CMD::a_serving_store_refuses_changes_but_answers_status`; `CMD::other_arguments_are_a_usage_error`; `apps/piglor-gateway/src/main.rs::erasure_admissions_subcommand_is_dispatched_by_the_binary_entrypoint` | `SQLite` | |
+
+## Follow-up F2: the supported client-cache contract (#1407)
+
+The Gateway v1 contract states the client-cache rule (README, *Client
+cache*): every response the Gateway's router produces carries
+`Cache-Control: no-store`, a supported
+client never persists a managed representation, and it re-reads and drops
+its copies once `getErasure` shows `client-cache-signal` positive. RFC 9111
+§5.2.2.5 makes `no-store` alone insufficient for privacy, so the client rule
+carries the guarantee; `Clear-Site-Data` is a precedent only and never sent.
+One router layer (`http::finish`) adds the header to every answer of every
+router, problems, unrouted paths and the non-v1 routes `/`, `/ledger` and
+`/health` included. A connection-level error the HTTP server writes before
+routing, and a connection closed after a handler panic, carry no
+representation and so no header. `openapi.json` declares it `required` on every operation
+response through the shared `components/headers/CacheControl` (`const:
+"no-store"`), and the baseline freezes it.
+
+The store's redaction generation is a new store-wide counter: the number of
+ELCG1 cache generations the store has committed. `commit_local_owner_effect`
+raises it by one in the same adapter transaction that newly retains an
+ELCG1 (`PreparedLocalOwnerEffectV1::raises_redaction_generation`); a repeated
+ELCG1 retains nothing new and raises nothing, and a generation that cannot
+be raised fails the commit, so neither changes. Both adapters cap it at
+`REDACTION_GENERATION_MAX_V1` (2^53-1), the JSON-safe `maximum` the schema
+declares. `SQLite` keeps it in the singleton table
+`erasure_redaction_generation` (absent until the first commit, validated
+like the other erasure tables) and fails closed on a stored value that is
+negative or above the cap, and on a missing row while the store still
+retains an ELCG1, which would otherwise read 0 and let the counter
+decrease; `MemoryStore` keeps it for the instance's life, like its other
+erasure records, and cannot lose it. The per-request ELCG1
+`generation` is unchanged (the attempt's admitted position, 2 for attempt 0).
+`getErasure` always carries it as `redaction_generation` when a Local
+erasure composition serves it, 0 before any commit; the schema keeps the
+member optional for append-only compatibility. A projection whose counter
+read fails is a closed host error, never an `Erasure` without the member.
+
+The counter is store-wide by the owner's decision: `getErasure` discloses
+to one subject how many client-cache redactions the host has committed,
+across every subject. Every caller of `getErasure` on a Local host is an
+actor of its one Local Principal, so no other Principal learns it.
+
+Wholly erased resources keep their refusals: a frozen Timeline is
+`403 deleted` and an erased revision `410 deleted`. The contract states that
+`availability.withheld[{member, reason: "deleted"}]` with state `partial` or
+`unavailable` applies to a representation that mixes erased and kept
+members; no served representation does today.
+
+| Bullet | Test | Adapters | Note |
+|---|---|---|---|
+| Every response carries `Cache-Control: no-store`: a `200`, a `202`, problems, the unprovisioned `401`, `404`s, a `405`, a redirect and the non-v1 routes | `HTTP::every_router_marks_every_answer_no_store`; `HTTP::every_protected_route_refuses_an_unprovisioned_host_before_its_body`; every `E` and `EA` test through `Served::send` and `status_of` | Memory; `SQLite` | `Served::send` fails any answer without exactly `no-store`, so every served erasure test checks it on each answer. |
+| The golden disclosure check scans the new header and passes | `EA::the_served_partition_freezes_only_the_actors_lineage` (`Disclosure::check`) | `SQLite` | `no-store` carries neither a digest nor a ULID token. |
+| After the first receipt `redaction_generation` has risen, it never decreases across successive reads and a restart, the claim is weakened and the frozen Timeline's Events are `403 deleted` | `E::each_admission_wakes_the_driver_and_a_partial_failure_admits_the_next` | `SQLite` | Every serve mode. It counts one ELCG1 per request at each first receipt (1, then 2). |
+| A served projection carries `redaction_generation: 0` before any commit | `E::get_erasure_answers_one_not_found` | `SQLite` | Every serve mode. |
+| The counter starts at 0, rises exactly once per new ELCG1 commit and for no other effect, a repeated ELCG1 raises nothing, and a refused commit changes nothing | `RDG::each_new_cache_generation_raises_it_once_on_both_adapters` | both | |
+| A `SQLite` counter persists across a reopen | `RDG::a_sqlite_generation_survives_a_reopen` | `SQLite` | |
+| A counter that cannot be raised rolls the ELCG1 commit back; an unreadable one fails closed | `RDG::a_sqlite_generation_that_cannot_be_raised_rolls_the_commit_back`; `RDG::an_unreadable_sqlite_generation_fails_closed`; `crates/pos-store/src/memory/local_erasure.rs::a_generation_that_cannot_be_raised_refuses_the_commit` | both | Both refuse past `REDACTION_GENERATION_MAX_V1` (2^53-1); one below it still rises to it. |
+| A persisted `SQLite` counter above the cap fails closed | `RDG::a_sqlite_generation_above_the_bound_fails_closed` | `SQLite` | `2^53` and `i64::MAX` both read as an error. |
+| A lost `SQLite` counter row beside a retained ELCG1 fails closed: the read errors and the next ELCG1 commit rolls back | `RDG::a_lost_sqlite_generation_row_fails_closed`; `crates/pos-store/src/sqlite/local_erasure.rs::a_lost_generation_row_beside_an_elcg1_fails_closed` | `SQLite` | Memory cannot lose it. |
+| A failed counter read fails the projection with a payload-free host error | `crates/pos-runtime/src/erasure_host.rs::a_failed_redaction_generation_read_fails_the_projection` | Memory (fault store) | `ErasureHostErrorV1::AdapterFailure`. |
+| Only an ELCG1 raises it | `LER::each_owner_effect_retains_only_its_own_record` | none | |
+| The counter rises across two requests; each ELCG1 keeps `generation` 2 for attempt 0 | `LEC::the_redaction_generation_rises_across_requests` | `SQLite` | |
+| The contract declares the header on every response and the optional member; an example that states `headers` states them exactly | `GCC::test_every_response_is_declared_no_store`; `GCC::test_the_redaction_generation_is_an_optional_erasure_member`; `GCC::test_an_example_states_its_response_headers_exactly` | none | New examples `client-cache-erasure-redacted`, `client-cache-frozen-timeline-deleted` and `client-cache-unrouted-path`, frozen by `--freeze`; no frozen example was edited. |
+| The conformance observation carries `cache-control` only, every field line joined with `, ` | `GAP::an_observation_carries_the_cache_control_header_only`; `GAP::every_cache_control_line_is_observed`; `GAP::every_family_meets_its_oracle_identically_in_local_and_air_gapped`; `apps/pos-gateway-conformance-adapter/tests/provider_dispatch_public.rs` | Memory; `SQLite` | The regenerated fixtures expect `no-store` on every sent exchange. |

@@ -1,6 +1,8 @@
 //! The selector's `RecoveryPending` state (ADR-069 R12 §8).
 //!
-//! While a SIR1 is pending the selector exposes no evaluator pathname. Its
+//! The selector enters this state at activation with a SIR1 found, or when a
+//! live update fails after its SIR1 commit (the overdue path). While a SIR1
+//! is pending the selector exposes no evaluator pathname. Its
 //! administrative listener stays bound and answers each root connection with
 //! the mode-1 challenge of the pending transaction. Any SIU1 other than the
 //! byte-identical pending one is rejected and changes nothing.
