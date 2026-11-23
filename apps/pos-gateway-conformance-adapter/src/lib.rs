@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 //! The gateway-client-conformance subject adapter of apps/piglor-gateway (provider contract
 //! 2.0.0, Redmine #1295).

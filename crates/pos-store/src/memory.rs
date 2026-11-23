@@ -79,9 +79,9 @@ use pos_core::{
     ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionSnapshotV1, ManifestOwnerLinkAncestorV1, ManifestOwnerLinkCutIdentityV1,
-    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, OwnerIdV1, PersistedAuthorityV1,
-    PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PreparedLocalCutOwnerCommitV1,
+    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, OwnerConsentV2PermitV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PreparedLocalCutOwnerCommitV1,
     PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
     PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
     ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
@@ -262,7 +262,7 @@ pub struct MemoryStore {
     /// Immutable `geo.cell` Event-to-snapshot links.
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     /// Trusted Gateway authority bound to this adapter's protected append port.
-    consent_authority_permit: Option<ConsentAppendPermit>,
+    consent_permits: crate::ConsentPermitBinding,
     /// Host-owned erasure containment gate for protected Timeline operations.
     erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host. The constructor's
@@ -807,7 +807,7 @@ impl MemoryStore {
             geographic_cell_dedup: HashMap::new(),
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
-            consent_authority_permit: None,
+            consent_permits: crate::ConsentPermitBinding::default(),
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
             erasure_gate,
@@ -1397,7 +1397,7 @@ impl MemoryStore {
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         if gateway_consent {
-            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+            let bound_permit = self.consent_permits.gateway().ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
             })?;
             let permit = permit.ok_or_else(|| {
@@ -3379,8 +3379,15 @@ impl MemoryStore {
         if head.as_u64() != cut {
             return Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary);
         }
-        let meta = TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name);
-        let child = Timeline::new(meta);
+        // ADR-136 §1: the admitted child inherits the parent's owner.
+        let owner = self
+            .timelines
+            .get(&parent_id)
+            .and_then(|state| state.timeline.meta.owner);
+        let child = Timeline::new(TimelineMeta {
+            owner,
+            ..TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name)
+        });
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent_id, Seq::from_u64(cut))
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)?;
@@ -5744,16 +5751,14 @@ impl EventStore for MemoryStore {
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
-        match self.consent_authority_permit {
-            Some(existing) if existing != permit => Err(CoreError::Storage(
-                "Gateway consent authority is already bound".to_owned(),
-            )),
-            Some(_) => Ok(()),
-            None => {
-                self.consent_authority_permit = Some(permit);
-                Ok(())
-            }
-        }
+        self.consent_permits.bind_gateway(permit)
+    }
+
+    fn bind_owner_consent_v2_permit(
+        &mut self,
+        permit: OwnerConsentV2PermitV1,
+    ) -> Result<(), CoreError> {
+        self.consent_permits.bind_owner(permit)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {

@@ -46,15 +46,21 @@ fn signer_key_id(seed: [u8; 32]) -> String {
     local_erasure_signer_key_id_v1(&SigningKey::from_bytes(&seed).verifying_key().to_bytes())
 }
 
-/// A Gateway store bound to the Local mode, with or without its Local
-/// Principal.
+/// A Gateway store bound to a compiled execution mode, with or without its
+/// Local Principal.
 pub(crate) struct Fixture {
     pub(crate) directory: tempfile::TempDir,
     pub(crate) path: String,
 }
 
 impl Fixture {
+    /// A store bound to the Local mode.
     pub(crate) fn new(principal: bool) -> TestResult<Self> {
+        Self::in_mode(principal, GatewayModeProfileIdV1::Local)
+    }
+
+    /// A store bound to the compiled `mode`, as the first `serve` binds it.
+    pub(crate) fn in_mode(principal: bool, mode: GatewayModeProfileIdV1) -> TestResult<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory
             .path()
@@ -62,10 +68,7 @@ impl Fixture {
             .to_str()
             .ok_or("temporary path is not UTF-8")?
             .to_owned();
-        bind_test_store(
-            &mut SqliteStore::open(&path)?,
-            GatewayModeProfileIdV1::Local,
-        )?;
+        bind_test_store(&mut SqliteStore::open(&path)?, mode)?;
         if principal {
             let provision = LocalPrincipalProvisionV1::from_toml(PRINCIPAL)?;
             let mut host = open_recovered_erasure_host(

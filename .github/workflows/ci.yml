@@ -526,7 +526,7 @@ jobs:
         with:
           toolchain: 1.97.1
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-nextest@0.9.146
           fallback: none
@@ -602,7 +602,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: reference-evaluator-release
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -655,7 +655,7 @@ jobs:
           git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" remote add origin https://github.com/systemd/systemd.git
           git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" fetch --depth=2 origin f1d0952a125b96b7ab2f1ff29a87448ade8ac29b
           git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" checkout --detach FETCH_HEAD
-          curl --fail --location --retry 3 --max-time 60 \
+          curl --fail --location --retry 3 --retry-all-errors --max-time 60 \
             https://github.com/seccomp/libseccomp/releases/download/v2.6.1/libseccomp-2.6.1.tar.gz \
             --output "$SYSTEMD_SCS1_LIBSECCOMP_ARCHIVE"
       - name: Reproduce production SCS1 and exercise materializer rejection boundaries
@@ -677,7 +677,7 @@ jobs:
         run: python3 scripts/generate_erasure_conformance_fixtures.py --check
       - name: Check the gateway conformance fixture generator and its outputs
         run: python3 scripts/generate_gateway_conformance_fixtures.py --check
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.12.11
       - name: Install the pinned Gateway contract validator
@@ -712,7 +712,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: conformance-materialization
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -784,7 +784,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: conformance-non-linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -1028,16 +1028,16 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-llvm-cov
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-nextest@0.9.146
           fallback: none
       - name: Install covgate
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: covgate@0.2.0
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
@@ -1167,7 +1167,7 @@ jobs:
         with:
           toolchain: 1.97.1
       - name: Install cargo-crap
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-crap@0.2.2
       - name: Download hosted LCOV
@@ -1288,6 +1288,7 @@ jobs:
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/local_erasure_composition/tests.rs'
           --exclude 'src/erasure/tests.rs'
+          --exclude 'src/erasure/tests/acceptance.rs'
           --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/community/memory_domain/tests.rs'
           --exclude 'src/community/initialize/tests.rs'
@@ -1355,6 +1356,7 @@ jobs:
           --exclude 'src/local_erasure_provision/tests.rs'
           --exclude 'src/local_erasure_composition/tests.rs'
           --exclude 'src/erasure/tests.rs'
+          --exclude 'src/erasure/tests/acceptance.rs'
           --exclude 'src/mode_profile/tests.rs'
           --exclude 'src/community/memory_domain/tests.rs'
           --exclude 'src/community/initialize/tests.rs'
@@ -1398,13 +1400,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-audit
       - name: cargo audit
         run: cargo audit
       - name: Install cargo-deny
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-deny
       - name: cargo deny check
@@ -1417,7 +1419,7 @@ jobs:
           set -euo pipefail
           cargo metadata --locked --all-features --format-version 1 \
             | python3 scripts/check_wasmtime_feature_pin.py
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-shear
       - name: cargo shear (strict)
@@ -1844,7 +1846,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build Docker image (no push)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
@@ -1882,7 +1884,7 @@ jobs:
           toolchain: 1.97.1
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: wasm-pack@0.15.0
       - name: Check world-client WASM contract
@@ -1908,7 +1910,7 @@ jobs:
           toolchain: 1.97.1
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: wasm-pack@0.15.0
       - id: setup-chrome
@@ -2297,10 +2299,10 @@ jobs:
           toolchain: 1.97.1
 
       - name: Install cargo-modules
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-modules
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: modules
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -2335,7 +2337,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Install cargo-depgraph
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-depgraph
       - name: Install graphviz

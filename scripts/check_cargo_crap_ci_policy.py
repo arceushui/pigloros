@@ -22,7 +22,7 @@ from ci_stage_policy import (
 
 
 CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-INSTALL_ACTION = "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32"
+INSTALL_ACTION = "taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519"
 UPLOAD_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 DOWNLOAD_ACTION = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
@@ -110,6 +110,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/local_erasure_provision/tests.rs",
     "src/local_erasure_composition/tests.rs",
     "src/erasure/tests.rs",
+    "src/erasure/tests/acceptance.rs",
     "src/mode_profile/tests.rs",
     "src/community/memory_domain/tests.rs",
     "src/community/initialize/tests.rs",
