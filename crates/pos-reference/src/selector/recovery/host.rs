@@ -49,6 +49,9 @@ pub(crate) type ExecutableDigest =
 pub(crate) type ProcessControlGroup =
     fn(NonZeroU64) -> Result<String, crate::selector::SelectorBoundaryError>;
 
+/// One process's `/proc/<pid>/stat` record.
+pub(crate) type ProcessStat = fn(u64) -> io::Result<String>;
+
 /// The selector's clock. Production reads [`Instant::now`]; tests inject one
 /// so that every bound is asserted against it, not wall time (R12 I10).
 pub(crate) type RecoveryClock = Arc<dyn Fn() -> Instant + Send + Sync>;
@@ -61,6 +64,7 @@ pub(crate) struct RecoveryHost {
     cgroup2: fn(&File) -> bool,
     executable_digest: ExecutableDigest,
     control_group: ProcessControlGroup,
+    process_stat: ProcessStat,
     clock: RecoveryClock,
 }
 
@@ -83,6 +87,7 @@ impl RecoveryHost {
             cgroup2: is_cgroup2,
             executable_digest,
             control_group: crate::selector::runtime_lifecycle::process_control_group,
+            process_stat: read_process_stat,
             clock: Arc::new(Instant::now),
         }
     }
@@ -103,6 +108,7 @@ impl RecoveryHost {
             cgroup2,
             executable_digest,
             control_group: crate::selector::runtime_lifecycle::process_control_group,
+            process_stat: read_process_stat,
             clock,
         }
     }
@@ -115,6 +121,18 @@ impl RecoveryHost {
     pub(crate) fn with_control_group(self, control_group: ProcessControlGroup) -> Self {
         Self {
             control_group,
+            ..self
+        }
+    }
+
+    /// The same view, reading each process's `/proc/<pid>/stat` record
+    /// through `process_stat`.
+    #[cfg(test)]
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn with_process_stat(self, process_stat: ProcessStat) -> Self {
+        Self {
+            process_stat,
             ..self
         }
     }
@@ -135,10 +153,11 @@ impl RecoveryHost {
     /// with the recorded PID and start ticks fails closed; a recycled PID
     /// (other start ticks) proves the original absent and is never signalled.
     pub(super) fn require_process_absent(
+        &self,
         pid: u64,
         start_time_ticks: u64,
     ) -> Result<(), RecoveryError> {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or_else(
+        (self.process_stat)(pid).map_or_else(
             |error| {
                 require(
                     error.kind() == io::ErrorKind::NotFound,
@@ -457,6 +476,11 @@ pub(super) fn leaf_name(endpoint_id: [u8; 16]) -> OsString {
     }
     leaf.push_str(".sock");
     OsString::from(leaf)
+}
+
+/// The `/proc/<pid>/stat` record of `pid`.
+fn read_process_stat(pid: u64) -> io::Result<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
 }
 
 /// The start-time ticks (field 22) of one `/proc/<pid>/stat` record.
