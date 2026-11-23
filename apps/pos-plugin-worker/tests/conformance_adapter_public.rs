@@ -91,7 +91,7 @@ const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 /// literal (`MEASURED_POSITIVE_USAGE`) at and one below its budget; keep the two in step.
 const POSITIVE_USAGE: ResourceUsage = ResourceUsage {
     memory_bytes: 1_179_648,
-    cpu_fuel: 42_604,
+    cpu_fuel: 42_610,
     host_calls: 6,
     event_count: 2,
     output_bytes: 16,
@@ -103,7 +103,7 @@ const POSITIVE_USAGE: ResourceUsage = ResourceUsage {
 /// The usage of `pos.1`, one committed pass of the Rust guest.
 const RUST_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
     memory_bytes: 1_179_648,
-    cpu_fuel: 21_238,
+    cpu_fuel: 21_241,
     host_calls: 3,
     event_count: 1,
     output_bytes: 8,
@@ -140,7 +140,7 @@ const NO_USAGE: ResourceUsage = ResourceUsage {
 /// Rust guest over the same 34-byte `del.1` observation, which costs more fuel than the 17-byte
 /// observation of `pos.1`; the two sub-cases measure the same.
 const DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
-    cpu_fuel: 21_510,
+    cpu_fuel: 21_513,
     ..RUST_ONE_PASS_USAGE
 };
 

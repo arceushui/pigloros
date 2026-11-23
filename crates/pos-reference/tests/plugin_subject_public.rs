@@ -35,7 +35,7 @@ const IND1_DIGEST: &str = "92adc8f0b327b091f85e847d3fa1f7cb46e16bdd74f389d79b2e6
 /// asserts the same literal on the real worker (`POSITIVE_USAGE`); keep the two in step.
 const MEASURED_POSITIVE_USAGE: ResourceUsage = ResourceUsage {
     memory_bytes: 1_179_648,
-    cpu_fuel: 42_604,
+    cpu_fuel: 42_610,
     host_calls: 6,
     event_count: 2,
     output_bytes: 16,
@@ -48,7 +48,7 @@ const MEASURED_POSITIVE_USAGE: ResourceUsage = ResourceUsage {
 /// the real worker for `pos.1` and for `independent-evaluation` (`ind.3`).
 const MEASURED_RUST_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
     memory_bytes: 1_179_648,
-    cpu_fuel: 21_238,
+    cpu_fuel: 21_241,
     host_calls: 3,
     event_count: 1,
     output_bytes: 8,
@@ -74,7 +74,7 @@ const MEASURED_USAGE: [ResourceUsage; 7] = [
 /// The usage of `deletion-redaction`, measured on the real worker: `del.1` and `del.2` are each
 /// one committed pass of the Rust guest over the longer `del.1` observation.
 const MEASURED_DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
-    cpu_fuel: 21_510,
+    cpu_fuel: 21_513,
     ..MEASURED_RUST_ONE_PASS_USAGE
 };
 

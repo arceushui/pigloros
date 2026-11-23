@@ -3,8 +3,8 @@ use super::*;
 type TestResult = Result<(), String>;
 
 /// The profile digest of the constant runtime under the V1 ceilings, from the
-/// generator-independent EPF1 computation (`b3sum` over the 1,636-byte body).
-const CONSTANT_DIGEST: &str = "22cca8490ea2f97e6a1a8705dbad28b8b09cc0393982a65435a2358f16e8000b";
+/// independent EPF1 computation in `generate_plugin_conformance_fixtures.py`.
+const CONSTANT_DIGEST: &str = "7fdec8a9bfb0d6b2dead92618679d7883acc454879fe5dced9585d0d6893263a";
 
 /// The ADR-061 revision 7 vector R7-D1 digest.
 const R7_D1_DIGEST: &str = "9df81ceb0d029665c3317e72736385b21af951200babd30cbbfc7d0a8d11e100";
@@ -65,10 +65,10 @@ fn the_constant_runtime_passes_the_validating_constructor() -> TestResult {
     )
     .map_err(|error| format!("{error:?}"))?;
     assert_eq!(constant, rebuilt, "the constant violates its own table");
-    assert_eq!(constant.wasmtime_version(), "49.0.6");
+    assert_eq!(constant.wasmtime_version(), "50.0.3");
     assert_eq!(constant.resolved_features().len(), 6);
     assert_eq!(constant.engine().max_wasm_stack, 524_288);
-    assert_eq!(constant.trap_table().len(), 50, "one row per trap code");
+    assert_eq!(constant.trap_table().len(), 54, "one row per trap code");
     Ok(())
 }
 
