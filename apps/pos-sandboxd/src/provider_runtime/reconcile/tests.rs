@@ -18,8 +18,8 @@ use tokio::time::Instant;
 use zbus::OwnedObjectPath;
 
 use super::{
-    ledger, open_staging, prepare_host, prepare_with, retained_floor, sweep_staging, Reconcile,
-    ReconcileError,
+    ledger, open_capture_store, open_staging, prepare_host, prepare_with, retained_floor,
+    sweep_captures, sweep_staging, Reconcile, ReconcileError,
 };
 use crate::provider_runtime::tests::{
     bind_as_provider, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
@@ -120,6 +120,106 @@ fn the_sweep_removes_staged_inputs_and_refuses_anything_else() -> TestResult {
     assert_eq!(
         ReconcileError::Staging.to_string(),
         "the provider staging directory could not be swept"
+    );
+    Ok(())
+}
+
+/// A published capture's name: 64 lowercase hexadecimal characters.
+fn published() -> String {
+    "5e".repeat(32)
+}
+
+/// A crash temporary of the published capture.
+fn temporary() -> String {
+    format!(".partial-{}-{}", published(), "0a".repeat(16))
+}
+
+#[test]
+fn the_capture_store_is_created_private_and_refused_when_unsafe() -> TestResult {
+    let (directory, held, owner) = private_directory()?;
+    let captures = directory.path().join("captures");
+    // Absent: created with mode 0700 with both retention directories, then
+    // reopened as it is.
+    let (root, _store) = open_capture_store(&held, owner).ok_or("not created")?;
+    assert_eq!(root.metadata()?.mode() & 0o7777, 0o700);
+    for child in ["responses", "transcripts"] {
+        assert_eq!(fs::metadata(captures.join(child))?.mode() & 0o7777, 0o700);
+    }
+    let (reopened, _store) = open_capture_store(&held, owner).ok_or("not reopened")?;
+    assert_eq!(reopened.metadata()?.ino(), root.metadata()?.ino());
+    // Another owner and another mode of the root are refused, though the
+    // store itself would accept a root that is only not group-writable.
+    assert!(open_capture_store(&held, owner + 1).is_none());
+    fs::set_permissions(&captures, fs::Permissions::from_mode(0o750))?;
+    assert!(open_capture_store(&held, owner).is_none());
+    fs::set_permissions(&captures, fs::Permissions::from_mode(0o700))?;
+    // A retention directory of another mode, or a symlink, is refused.
+    for child in ["responses", "transcripts"] {
+        let path = captures.join(child);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        assert!(open_capture_store(&held, owner).is_none());
+        fs::remove_dir(&path)?;
+        symlink(directory.path(), &path)?;
+        assert!(open_capture_store(&held, owner).is_none());
+        fs::remove_file(&path)?;
+        fs::write(&path, b"")?;
+        assert!(open_capture_store(&held, owner).is_none());
+        fs::remove_file(&path)?;
+    }
+    // A symlinked root and a regular file are refused.
+    let target = directory.path().join("target");
+    fs::rename(&captures, &target)?;
+    symlink(&target, &captures)?;
+    assert!(open_capture_store(&held, owner).is_none());
+    fs::remove_file(&captures)?;
+    fs::write(&captures, b"")?;
+    assert!(open_capture_store(&held, owner).is_none());
+    assert!(captures.is_file());
+    Ok(())
+}
+
+#[test]
+fn the_capture_sweep_removes_temporaries_keeps_records_and_refuses_the_rest() -> TestResult {
+    let (directory, held, owner) = private_directory()?;
+    let (root, store) = open_capture_store(&held, owner).ok_or("not created")?;
+    let path = directory.path().join("captures");
+    sweep_captures(&root, &store)?;
+    // A temporary is unlinked; a published record is kept byte for byte.
+    let record = path.join("transcripts").join(published());
+    fs::write(&record, b"record")?;
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o400))?;
+    for child in ["responses", "transcripts"] {
+        fs::write(path.join(child).join(temporary()), b"partial")?;
+    }
+    sweep_captures(&root, &store)?;
+    assert_eq!(fs::read_dir(path.join("responses"))?.count(), 0);
+    assert_eq!(fs::read(&record)?, b"record");
+    // Any other entry of the root or of a retention directory fails closed
+    // and is kept.
+    for name in ["notes", "staging"] {
+        fs::write(path.join(name), b"")?;
+        assert!(matches!(
+            sweep_captures(&root, &store),
+            Err(ReconcileError::Captures)
+        ));
+        assert!(path.join(name).is_file());
+        fs::remove_file(path.join(name))?;
+    }
+    fs::write(path.join("responses").join("notes"), b"")?;
+    assert!(matches!(
+        sweep_captures(&root, &store),
+        Err(ReconcileError::Captures)
+    ));
+    assert!(path.join("responses").join("notes").is_file());
+    // A root descriptor that is no directory cannot be listed.
+    fs::write(directory.path().join("file"), b"")?;
+    assert!(matches!(
+        sweep_captures(&File::open(directory.path().join("file"))?, &store),
+        Err(ReconcileError::Captures)
+    ));
+    assert_eq!(
+        ReconcileError::Captures.to_string(),
+        "the network capture store could not be swept"
     );
     Ok(())
 }
@@ -234,6 +334,19 @@ fn directory(path: &str, mode: u32) -> TestResult {
     Ok(())
 }
 
+/// The provider state directories a reconciling host holds.
+fn provider_state() -> TestResult {
+    directory("/run/pigloros", 0o755)?;
+    for path in [
+        "/run/pigloros/sandbox",
+        "/run/pigloros/sandbox/registry",
+        "/run/pigloros/sandbox/attempts",
+    ] {
+        directory(path, 0o700)?;
+    }
+    directory(&format!("{SANDBOX_ARTIFACT_ROOT}/images"), 0o755)
+}
+
 #[test]
 fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     if !in_isolated_root(
@@ -249,15 +362,7 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
         prepare_host(&authority),
         Err(ProviderRuntimeError::HostUnavailable)
     ));
-    directory("/run/pigloros", 0o755)?;
-    for path in [
-        "/run/pigloros/sandbox",
-        "/run/pigloros/sandbox/registry",
-        "/run/pigloros/sandbox/attempts",
-    ] {
-        directory(path, 0o700)?;
-    }
-    directory(&format!("{SANDBOX_ARTIFACT_ROOT}/images"), 0o755)?;
+    provider_state()?;
     let staging = Path::new("/run/pigloros/sandbox/staging");
     let servers = Mutex::new(Vec::new());
     let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
@@ -302,6 +407,12 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
         0o700,
         "step 7 creates the staging directory"
     );
+    let captures = Path::new(SANDBOX_ARTIFACT_ROOT).join("captures");
+    assert_eq!(
+        fs::metadata(&captures)?.mode() & 0o7777,
+        0o700,
+        "step 7 creates the capture store"
+    );
     fs::write(staging.join(STAGED), b"input")?;
     let refused = host.reconcile();
     assert!(matches!(
@@ -320,16 +431,26 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
     assert!(matches!(host.reconcile(), Err(ReconcileError::Staging)));
     fs::remove_dir(staging.join("directory"))?;
-    // A clean host: the staging directory is emptied and the lifecycle
-    // holds the registry for the life of the process.
+    // An entry of the capture store that is neither a published record nor
+    // a temporary fails reconciliation closed, after the staging sweep.
+    fs::write(captures.join("responses").join(temporary()), b"partial")?;
+    fs::write(captures.join("notes"), b"")?;
+    let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
+    assert!(matches!(host.reconcile(), Err(ReconcileError::Captures)));
+    assert!(captures.join("notes").is_file());
+    fs::remove_file(captures.join("notes"))?;
+    // A clean host: the staging directory is emptied, the capture temporary
+    // removed, and the lifecycle holds the registry for the life of the
+    // process.
     let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
     let lifecycle = host.reconcile()?;
     // Each step 7 subscribed, and each reconciliation listed the units.
     assert_eq!(
         calls.each_ref().map(|count| count.load(Ordering::SeqCst)),
-        [3, 3]
+        [4, 4]
     );
     assert_eq!(fs::read_dir(staging)?.count(), 0);
+    assert_eq!(fs::read_dir(captures.join("responses"))?.count(), 0);
     assert!(SystemdAttemptRegistry::open().is_err());
     drop(lifecycle);
     assert!(SystemdAttemptRegistry::open().is_ok());

@@ -3,9 +3,12 @@
 //!
 //! [`prepare_host`] runs step 7 before any socket exists: it connects the
 //! single system bus, opens the exclusive [`SystemdAttemptRecovery`], which
-//! keeps the registry lock, and opens or creates the input staging directory
-//! `/run/pigloros/sandbox/staging/` (UID 0, mode `0700`). A failure exits the
-//! runtime before it binds.
+//! keeps the registry lock, opens or creates the input staging directory
+//! `/run/pigloros/sandbox/staging/` (UID 0, mode `0700`), and opens or
+//! creates the network capture store `/var/lib/pigloros/sandbox/captures/`
+//! beneath the held SIC1 artifact root, without crossing a link or a mount
+//! (UID 0, mode `0700`, R11 Amendment 1 §5.4). A failure exits the runtime
+//! before it binds.
 //!
 //! [`Reconcile::reconcile`] then runs once the runtime is bound and serving
 //! in state `Starting`:
@@ -31,8 +34,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use pos_reference::sandbox_provider_protocol::NetworkCaptureStore;
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
-use rustix::fs::{fchmod, mkdirat, openat2, statat, unlinkat, AtFlags, Dir, FileType, Mode};
+use rustix::fs::{
+    fchmod, mkdirat, openat2, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags,
+};
 use rustix::io::Errno;
 use tokio::runtime::Runtime;
 use tokio::time::Instant;
@@ -49,8 +55,17 @@ use crate::{
 
 /// The staging directory's name beneath `/run/pigloros/sandbox`.
 const STAGING: &str = "staging";
-/// The staging directory's exact mode.
-const STAGING_MODE: u32 = 0o700;
+/// The network capture store's name beneath the held SIC1 artifact root.
+const CAPTURES: &str = "captures";
+/// The store's only entries: its two retention directories.
+const CAPTURE_DIRECTORIES: [&[u8]; 2] = [b"responses", b"transcripts"];
+/// The capture store root's open flags (R11 Amendment 1 §5.4).
+const CAPTURES_OPEN: OFlags = DIRECTORY_OPEN.union(OFlags::NOFOLLOW);
+/// Its resolution beneath the artifact root: no link, magic link or mount
+/// crossing (item P11).
+const CAPTURES_RESOLVE: ResolveFlags = RESOLVE.union(ResolveFlags::NO_XDEV);
+/// The exact mode of the staging directory and the capture store root.
+const PRIVATE_MODE: u32 = 0o700;
 /// The owner of every provider directory.
 const ROOT: u32 = 0;
 /// The fixed ADR-069 §9 restart bound.
@@ -67,6 +82,11 @@ pub(super) enum ReconcileError {
     /// could not be swept (R11 §5.3).
     #[error("the provider staging directory could not be swept")]
     Staging,
+    /// The capture store holds an entry that is neither a published record
+    /// nor an unpublished temporary, or could not be swept (R11 Amendment 1
+    /// §5.4).
+    #[error("the network capture store could not be swept")]
+    Captures,
     /// The registry owner could not open over the reconciled registry.
     #[error(transparent)]
     Registry(#[from] SystemdAttemptRegistryError),
@@ -83,14 +103,16 @@ pub(super) trait Reconcile: Send + 'static {
 
 /// The host side of restart reconciliation, bound before any socket exists:
 /// the bus and its runtime, the exclusive recovery owner, the held staging
-/// directory, the orphan sweep `network`, the egress probe `egress` and the
-/// SPI1 values that open admission.
+/// directory and capture store, the orphan sweep `network`, the egress probe
+/// `egress` and the SPI1 values that open admission.
 pub(super) struct HostReconciliation<N, P> {
     // The bus connection is dropped before the runtime that drives it.
     transport: SystemdTransientUnitTransport,
     runtime: Runtime,
     recovery: SystemdAttemptRecovery,
     staging: File,
+    captures: File,
+    store: NetworkCaptureStore,
     network: N,
     egress: P,
     cleanup: CleanupBudget,
@@ -141,7 +163,8 @@ fn netlink_network(
 /// Step 7 with the bus `connect` yields, and the orphan sweep and egress
 /// probe that `network` builds for the SPI1 attempt range and egress probe.
 /// The bus is connected, then the recovery owner opened, then the staging
-/// directory opened or created; any failure refuses the whole step.
+/// directory and the capture store opened or created; any failure refuses
+/// the whole step.
 pub(super) fn prepare_with<N, P, E>(
     (admitted, installation, _): &RuntimeAuthority,
     connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
@@ -164,12 +187,18 @@ pub(super) fn prepare_with<N, P, E>(
                 .ok()
                 .and_then(|sandbox| open_staging(&sandbox, ROOT)),
         )
+        .zip(open_capture_store(
+            admitted.bootstrap().installed().artifact_root(),
+            ROOT,
+        ))
         .map(
-            |(((runtime, transport), recovery), staging)| HostReconciliation {
+            |((((runtime, transport), recovery), staging), (captures, store))| HostReconciliation {
                 transport,
                 runtime,
                 recovery,
                 staging,
+                captures,
+                store,
                 network,
                 egress,
                 cleanup: installation.cleanup_budget(),
@@ -197,6 +226,7 @@ where
             ))
             .map_err(ReconcileError::from)
             .and_then(|reconciled| sweep_staging(&self.staging).map(|()| reconciled))
+            .and_then(|reconciled| sweep_captures(&self.captures, &self.store).map(|()| reconciled))
             .and_then(|reconciled| {
                 SystemdAttemptRegistry::open()
                     .map_err(ReconcileError::from)
@@ -239,27 +269,97 @@ fn ledger(limits: StagingLimits, floor: ControlFloor) -> StagingLedger {
 /// creating it with mode `0700` when absent. It must be a directory that
 /// `owner` owns, of mode exactly `0700`, reached without a symlink.
 fn open_staging(sandbox: &File, owner: u32) -> Option<File> {
-    let open = || openat2(sandbox, STAGING, DIRECTORY_OPEN, Mode::empty(), RESOLVE).map(File::from);
+    open_private(sandbox, STAGING, owner, (DIRECTORY_OPEN, RESOLVE))
+}
+
+/// Open the capture store's root beneath the held SIC1 `artifact_root` as
+/// [`open_staging`] does, crossing no mount either, then the store over it,
+/// which opens or creates its two retention directories (R11 Amendment 1
+/// §5.4). The exact mode is checked here, since the store's own root check
+/// is weaker.
+fn open_capture_store(artifact_root: &File, owner: u32) -> Option<(File, NetworkCaptureStore)> {
+    open_private(
+        artifact_root,
+        CAPTURES,
+        owner,
+        (CAPTURES_OPEN, CAPTURES_RESOLVE),
+    )
+    .and_then(|root| {
+        NetworkCaptureStore::open(&root)
+            .ok()
+            .map(|store| (root, store))
+    })
+}
+
+/// Open the directory `name` beneath `parent` with `(flags, resolve)`,
+/// creating it with mode `0700` when absent. It must be a directory that
+/// `owner` owns, of mode exactly `0700`.
+fn open_private(
+    parent: &File,
+    name: &str,
+    owner: u32,
+    (flags, resolve): (OFlags, ResolveFlags),
+) -> Option<File> {
+    let open = || openat2(parent, name, flags, Mode::empty(), resolve).map(File::from);
     open()
         .or_else(|error| {
             if error == Errno::NOENT {
                 // The umask may strip bits; the explicit mode is harmless.
-                mkdirat(sandbox, STAGING, Mode::from_raw_mode(STAGING_MODE))
+                mkdirat(parent, name, Mode::from_raw_mode(PRIVATE_MODE))
                     .and_then(|()| open())
                     .and_then(|created| {
-                        fchmod(&created, Mode::from_raw_mode(STAGING_MODE)).map(|()| created)
+                        fchmod(&created, Mode::from_raw_mode(PRIVATE_MODE)).map(|()| created)
                     })
             } else {
                 Err(error)
             }
         })
         .ok()
-        .filter(|staging| {
-            staging.metadata().is_ok_and(|metadata| {
+        .filter(|directory| {
+            directory.metadata().is_ok_and(|metadata| {
                 metadata.is_dir()
                     && metadata.uid() == owner
-                    && metadata.mode() & 0o7777 == STAGING_MODE
+                    && metadata.mode() & 0o7777 == PRIVATE_MODE
             })
+        })
+}
+
+/// The names in `directory`, without `.` and `..`.
+fn listed(directory: &File) -> Option<Vec<std::ffi::CString>> {
+    Dir::read_from(directory)
+        .and_then(|entries| {
+            entries
+                .map(|entry| entry.map(|entry| entry.file_name().to_owned()))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .ok()
+        .map(|names| {
+            names
+                .into_iter()
+                .filter(|name| name.to_bytes() != b"." && name.to_bytes() != b"..")
+                .collect()
+        })
+}
+
+/// Sweep the capture store after a restart (R11 Amendment 1 §5.4): its root
+/// may hold only its two retention directories, whose unpublished
+/// temporaries are removed and whose published records are kept.
+///
+/// # Errors
+/// [`ReconcileError::Captures`] for any other entry at either level, or one
+/// that cannot be read or removed.
+fn sweep_captures(root: &File, store: &NetworkCaptureStore) -> Result<(), ReconcileError> {
+    listed(root)
+        .filter(|names| {
+            names
+                .iter()
+                .all(|name| CAPTURE_DIRECTORIES.contains(&name.to_bytes()))
+        })
+        .ok_or(ReconcileError::Captures)
+        .and_then(|_| {
+            store
+                .sweep_unpublished()
+                .map_err(|_| ReconcileError::Captures)
         })
 }
 
@@ -271,29 +371,21 @@ fn open_staging(sandbox: &File, owner: u32) -> Option<File> {
 /// by 32 lowercase hexadecimal characters, or one that cannot be read or
 /// removed. Entries are removed in directory order until then.
 fn sweep_staging(staging: &File) -> Result<(), ReconcileError> {
-    Dir::read_from(staging)
-        .and_then(|entries| {
-            entries
-                .map(|entry| entry.map(|entry| entry.file_name().to_owned()))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(|_| ReconcileError::Staging)
+    listed(staging)
+        .ok_or(ReconcileError::Staging)
         .and_then(|names| {
-            names
-                .iter()
-                .filter(|name| name.to_bytes() != b"." && name.to_bytes() != b"..")
-                .try_for_each(|name| {
-                    let staged = staged_input_name(name.to_bytes())
-                        && statat(staging, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok_and(
-                            |metadata| {
-                                FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
-                            },
-                        );
-                    staged
-                        .then(|| unlinkat(staging, name.as_c_str(), AtFlags::empty()).ok())
-                        .flatten()
-                        .ok_or(ReconcileError::Staging)
-                })
+            names.iter().try_for_each(|name| {
+                let staged = staged_input_name(name.to_bytes())
+                    && statat(staging, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok_and(
+                        |metadata| {
+                            FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
+                        },
+                    );
+                staged
+                    .then(|| unlinkat(staging, name.as_c_str(), AtFlags::empty()).ok())
+                    .flatten()
+                    .ok_or(ReconcileError::Staging)
+            })
         })
 }
 

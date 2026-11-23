@@ -243,6 +243,107 @@ fn open_rejects_unsafe_roots_and_retention_directories() -> TestResult {
     Ok(())
 }
 
+/// A crash temporary's name for the record `name`.
+fn temporary(name: &str) -> String {
+    format!(".partial-{name}-{}", "0a".repeat(16))
+}
+
+#[test]
+fn the_restart_sweep_removes_only_unpublished_temporaries() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let plan = plan(0, REQUEST, RESPONSE)?;
+    let reply = captured(&plan, REQUEST, RESPONSE)?;
+    let digest = reply.transcript().ok_or("transcript")?.digest();
+    NetworkCaptureStore::open(&File::open(root.path())?)?.persist(&reply)?;
+    let response = hex(&hash(b"PiglorOS.NetworkResponseBytes.v1\0", RESPONSE));
+    // A crash between write_new and the publication left a temporary in
+    // each retention directory, with any mode.
+    for (directory, name) in [("responses", &response), ("transcripts", &hex(&digest))] {
+        let path = root.path().join(directory).join(temporary(name));
+        fs::write(&path, b"partial")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+    }
+    // A runtime restarts: a fresh store over the same root sweeps, keeps
+    // every published record byte for byte, and Replay still resolves.
+    let store = NetworkCaptureStore::open(&File::open(root.path())?)?;
+    store.sweep_unpublished()?;
+    for directory in ["responses", "transcripts"] {
+        assert_eq!(entries(&root.path().join(directory))?, 1);
+    }
+    assert_eq!(
+        fs::read(root.path().join("responses").join(&response))?,
+        RESPONSE
+    );
+    assert_eq!(
+        store.replay(ATTEMPT, &plan, digest)?.response_bytes(),
+        RESPONSE
+    );
+    // An empty store sweeps clean, and a second sweep changes nothing.
+    store.sweep_unpublished()?;
+    NetworkCaptureStore::open(&File::open(tempfile::tempdir()?.path())?)?.sweep_unpublished()?;
+    Ok(())
+}
+
+#[test]
+fn the_restart_sweep_fails_closed_on_anything_unexpected() -> TestResult {
+    let record = "0f".repeat(32);
+    let names = [
+        "notes".to_owned(),
+        record[1..].to_owned(),
+        record.to_uppercase(),
+        format!("{record}0"),
+        format!(".partial-{record}"),
+        format!(".partial-{record}-{}", "0A".repeat(16)),
+        format!(".partial-{record}-{}", "0a".repeat(15)),
+        format!(".partial-{record}_{}", "0a".repeat(16)),
+        format!(".partial-{}-{}", "0G".repeat(32), "0a".repeat(16)),
+        format!(".partial-{}", "0".repeat(97)),
+    ];
+    for directory in ["responses", "transcripts"] {
+        let root = tempfile::tempdir()?;
+        let store = NetworkCaptureStore::open(&File::open(root.path())?)?;
+        let path = root.path().join(directory);
+        // A name outside both grammars, as a regular file.
+        for name in &names {
+            fs::write(path.join(name), b"")?;
+            assert_unsafe(store.sweep_unpublished())?;
+            assert!(path.join(name).is_file(), "{name} was kept");
+            fs::remove_file(path.join(name))?;
+        }
+        // A published name of the wrong mode or link count, a directory and
+        // a symlink under either grammar.
+        let published = path.join(&record);
+        fs::write(&published, b"record")?;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o600))?;
+        assert_unsafe(store.sweep_unpublished())?;
+        fs::set_permissions(&published, fs::Permissions::from_mode(0o400))?;
+        store.sweep_unpublished()?;
+        let link = path.join("1f".repeat(32));
+        fs::hard_link(&published, &link)?;
+        assert_unsafe(store.sweep_unpublished())?;
+        fs::remove_file(&link)?;
+        fs::remove_file(&published)?;
+        for name in [record.clone(), temporary(&record)] {
+            fs::create_dir(path.join(&name))?;
+            assert_unsafe(store.sweep_unpublished())?;
+            fs::remove_dir(path.join(&name))?;
+            symlink(root.path(), path.join(&name))?;
+            assert_unsafe(store.sweep_unpublished())?;
+            assert!(path.join(&name).is_symlink());
+            fs::remove_file(path.join(&name))?;
+        }
+        // A temporary that cannot be removed is an I/O failure.
+        fs::write(path.join(temporary(&record)), b"partial")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        let refused = store.sweep_unpublished();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        if rustix::process::geteuid().as_raw() != 0 {
+            assert_io(refused)?;
+        }
+    }
+    Ok(())
+}
+
 fn captured(
     plan: &NetworkExchangePlan,
     request: &[u8],

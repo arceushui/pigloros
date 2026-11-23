@@ -519,6 +519,14 @@ impl InstalledSelectorState {
             .and_then(|metadata| Self::open_fixed_at(root, metadata.uid()))
     }
 
+    /// The held artifact root descriptor, beneath which the provider's
+    /// fixed-name siblings of SIC1 are opened (ADR-069 R11 §4.1 and
+    /// Amendment 1 §5.4).
+    #[must_use]
+    pub const fn artifact_root(&self) -> &File {
+        &self.root
+    }
+
     /// Returns SIC1's original canonical bytes.
     #[must_use]
     pub fn manifest_bytes(&self) -> &[u8] {
@@ -1242,7 +1250,16 @@ pub mod tests {
         kind: InstallationObjectKind,
         identity: [u8; 32],
     ) -> TestResult<std::path::PathBuf> {
-        let state = InstalledSelectorState::open_at_for_test(&File::open(root)?)?;
+        let held = File::open(root)?;
+        let state = InstalledSelectorState::open_at_for_test(&held)?;
+        // The state holds the very artifact root it was opened beneath.
+        assert_eq!(
+            (
+                state.artifact_root().metadata()?.dev(),
+                state.artifact_root().metadata()?.ino()
+            ),
+            (held.metadata()?.dev(), held.metadata()?.ino())
+        );
         let object = state
             .manifest()
             .objects()
