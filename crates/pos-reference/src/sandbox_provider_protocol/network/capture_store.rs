@@ -14,12 +14,14 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{
-    mkdirat, openat2, renameat_with, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags,
+    fchmod, mkdirat, openat2, renameat_with, statat, unlinkat, AtFlags, FileType, Mode, OFlags,
     RenameFlags, ResolveFlags,
 };
 use rustix::io::Errno;
 use rustix::process::geteuid;
 use rustix::rand::{getrandom, GetRandomFlags};
+
+use crate::held_directory::entry_names;
 
 use super::{
     content_digest, NetworkExchangePlan, NetworkExchangeReply, NetworkExchangeTranscript,
@@ -135,18 +137,19 @@ impl NetworkCaptureStore {
     ///
     /// A temporary is a regular file named `.partial-<64 lowercase hex>-<32
     /// lowercase hex>`: it was never evidence, and no Captured reply was
-    /// released for it. A published record is a regular file of this user,
-    /// mode `0400`, link count 1, named by its 64 lowercase hexadecimal
-    /// digest; its bytes are not read, since Replay verifies them on every
-    /// lookup. Entries are visited through the held directory descriptors.
+    /// released for it. A published record is a regular file that `owner`
+    /// owns (UID 0 for the provider runtime), of mode `0400` and link count
+    /// 1, named by its 64 lowercase hexadecimal digest; its bytes are not
+    /// read, since Replay verifies them on every lookup. Entries are visited
+    /// through the held directory descriptors.
     ///
     /// # Errors
     /// [`NetworkCaptureStoreError::UnsafeStore`] for any other entry, which is
     /// kept, and [`NetworkCaptureStoreError::Io`] when a directory cannot be
     /// listed or an entry inspected or removed. Entries are handled in
     /// directory order until then.
-    pub fn sweep_unpublished(&self) -> Result<(), NetworkCaptureStoreError> {
-        sweep(&self.responses).and_then(|()| sweep(&self.transcripts))
+    pub fn sweep_unpublished(&self, owner: u32) -> Result<(), NetworkCaptureStoreError> {
+        sweep(&self.responses, owner).and_then(|()| sweep(&self.transcripts, owner))
     }
 
     /// Resolve one retained exchange for offline Replay, without network I/O.
@@ -235,36 +238,19 @@ fn checked_directory(directory: &File, private: bool) -> Result<(), NetworkCaptu
         })
 }
 
-/// The names in `directory`, without `.` and `..`.
-fn names(directory: &File) -> io::Result<Vec<std::ffi::CString>> {
-    Dir::read_from(directory)
-        .and_then(|entries| {
-            entries
-                .map(|entry| entry.map(|entry| entry.file_name().to_owned()))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map(|names| {
-            names
-                .into_iter()
-                .filter(|name| name.to_bytes() != b"." && name.to_bytes() != b"..")
-                .collect()
-        })
-        .map_err(io::Error::from)
-}
-
-fn sweep(directory: &File) -> Result<(), NetworkCaptureStoreError> {
-    names(directory)
+fn sweep(directory: &File, owner: u32) -> Result<(), NetworkCaptureStoreError> {
+    entry_names(directory)
         .map_err(NetworkCaptureStoreError::Io)
         .and_then(|names| {
             names
                 .iter()
-                .try_for_each(|name| sweep_entry(directory, name))
+                .try_for_each(|name| sweep_entry(directory, name, owner))
         })
 }
 
 /// Unlink `name` if it is an unpublished temporary, keep it if it is a
-/// published record, and refuse it otherwise.
-fn sweep_entry(directory: &File, name: &CStr) -> Result<(), NetworkCaptureStoreError> {
+/// published record of `owner`, and refuse it otherwise.
+fn sweep_entry(directory: &File, name: &CStr, owner: u32) -> Result<(), NetworkCaptureStoreError> {
     statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(io::Error::from)
         .map_err(NetworkCaptureStoreError::Io)
@@ -277,7 +263,7 @@ fn sweep_entry(directory: &File, name: &CStr) -> Result<(), NetworkCaptureStoreE
                     .map_err(NetworkCaptureStoreError::Io)
             } else if regular
                 && lower_hex(name_bytes, 64)
-                && entry.st_uid == geteuid().as_raw()
+                && entry.st_uid == owner
                 && entry.st_mode & 0o7777 == 0o400
                 && entry.st_nlink == 1
             {
@@ -306,7 +292,7 @@ fn lower_hex(name: &[u8], length: usize) -> bool {
 fn retention_directory(root: &File, name: &str) -> Result<File, NetworkCaptureStoreError> {
     // An existing entry is accepted only after the checks below; any other
     // creation failure surfaces when the directory cannot be opened.
-    mkdirat(root, name, Mode::RWXU).ok();
+    let created = mkdirat(root, name, Mode::RWXU).is_ok();
     openat2(
         root,
         name,
@@ -314,6 +300,15 @@ fn retention_directory(root: &File, name: &str) -> Result<File, NetworkCaptureSt
         Mode::empty(),
         RESOLVE,
     )
+    .and_then(|directory| {
+        // The umask may strip bits from a new directory; restore exactly 0700
+        // (ADR-069 R11 Amendment 1 §5.4). An existing one is only checked.
+        if created {
+            fchmod(&directory, Mode::RWXU).map(|()| directory)
+        } else {
+            Ok(directory)
+        }
+    })
     .map(File::from)
     .map_err(io::Error::from)
     .map_err(NetworkCaptureStoreError::Io)

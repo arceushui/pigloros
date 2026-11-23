@@ -266,7 +266,7 @@ fn the_restart_sweep_removes_only_unpublished_temporaries() -> TestResult {
     // A runtime restarts: a fresh store over the same root sweeps, keeps
     // every published record byte for byte, and Replay still resolves.
     let store = NetworkCaptureStore::open(&File::open(root.path())?)?;
-    store.sweep_unpublished()?;
+    store.sweep_unpublished(owner())?;
     for directory in ["responses", "transcripts"] {
         assert_eq!(entries(&root.path().join(directory))?, 1);
     }
@@ -279,8 +279,15 @@ fn the_restart_sweep_removes_only_unpublished_temporaries() -> TestResult {
         RESPONSE
     );
     // An empty store sweeps clean, and a second sweep changes nothing.
-    store.sweep_unpublished()?;
-    NetworkCaptureStore::open(&File::open(tempfile::tempdir()?.path())?)?.sweep_unpublished()?;
+    store.sweep_unpublished(owner())?;
+    NetworkCaptureStore::open(&File::open(tempfile::tempdir()?.path())?)?
+        .sweep_unpublished(owner())?;
+    // A record of another owner fails closed and is kept.
+    assert_unsafe(store.sweep_unpublished(owner().wrapping_add(1)))?;
+    assert_eq!(
+        fs::read(root.path().join("responses").join(&response))?,
+        RESPONSE
+    );
     Ok(())
 }
 
@@ -306,7 +313,7 @@ fn the_restart_sweep_fails_closed_on_anything_unexpected() -> TestResult {
         // A name outside both grammars, as a regular file.
         for name in &names {
             fs::write(path.join(name), b"")?;
-            assert_unsafe(store.sweep_unpublished())?;
+            assert_unsafe(store.sweep_unpublished(owner()))?;
             assert!(path.join(name).is_file(), "{name} was kept");
             fs::remove_file(path.join(name))?;
         }
@@ -315,33 +322,38 @@ fn the_restart_sweep_fails_closed_on_anything_unexpected() -> TestResult {
         let published = path.join(&record);
         fs::write(&published, b"record")?;
         fs::set_permissions(&published, fs::Permissions::from_mode(0o600))?;
-        assert_unsafe(store.sweep_unpublished())?;
+        assert_unsafe(store.sweep_unpublished(owner()))?;
         fs::set_permissions(&published, fs::Permissions::from_mode(0o400))?;
-        store.sweep_unpublished()?;
+        store.sweep_unpublished(owner())?;
         let link = path.join("1f".repeat(32));
         fs::hard_link(&published, &link)?;
-        assert_unsafe(store.sweep_unpublished())?;
+        assert_unsafe(store.sweep_unpublished(owner()))?;
         fs::remove_file(&link)?;
         fs::remove_file(&published)?;
         for name in [record.clone(), temporary(&record)] {
             fs::create_dir(path.join(&name))?;
-            assert_unsafe(store.sweep_unpublished())?;
+            assert_unsafe(store.sweep_unpublished(owner()))?;
             fs::remove_dir(path.join(&name))?;
             symlink(root.path(), path.join(&name))?;
-            assert_unsafe(store.sweep_unpublished())?;
+            assert_unsafe(store.sweep_unpublished(owner()))?;
             assert!(path.join(&name).is_symlink());
             fs::remove_file(path.join(&name))?;
         }
         // A temporary that cannot be removed is an I/O failure.
         fs::write(path.join(temporary(&record)), b"partial")?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
-        let refused = store.sweep_unpublished();
+        let refused = store.sweep_unpublished(owner());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-        if rustix::process::geteuid().as_raw() != 0 {
+        if owner() != 0 {
             assert_io(refused)?;
         }
     }
     Ok(())
+}
+
+/// The effective user, who owns every record a test publishes.
+fn owner() -> u32 {
+    rustix::process::geteuid().as_raw()
 }
 
 fn captured(
