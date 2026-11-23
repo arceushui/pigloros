@@ -2231,8 +2231,8 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_image_is_refused_with_its_own_code() -> TestResult {
-        if !isolated("a_changed_image_is_refused_with_its_own_code")? {
+    fn a_changed_image_fails_the_installation_join_first() -> TestResult {
+        if !isolated("a_changed_image_fails_the_installation_join_first")? {
             return Ok(());
         }
         let staged = StagedInstallation::stage_execution()?;
@@ -2256,24 +2256,63 @@ mod tests {
         let mut byte = [0];
         root.file().read_exact_at(&mut byte, 0)?;
         byte[0] ^= 1;
-        // The held descriptor is read-only and the isolated root has no
-        // capabilities, so the owner makes the inode writable, writes it
-        // through a reopen and restores its 0400 mode.
+        // The held descriptor is read-only and the container drops every
+        // capability: its owner makes the same inode writable, writes it,
+        // and restores the mode.
         {
             use std::os::{fd::AsRawFd as _, unix::fs::PermissionsExt as _};
-            let mode = root.file().metadata()?.permissions();
-            root.file()
-                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            let path = format!("/proc/self/fd/{}", root.file().as_raw_fd());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
             std::fs::OpenOptions::new()
                 .write(true)
-                .open(format!("/proc/self/fd/{}", root.file().as_raw_fd()))?
+                .open(&path)?
                 .write_all_at(&byte, 0)?;
-            root.file().set_permissions(mode)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
         }
+        // SIC1 verifies every indexed object's bytes when the join opens it,
+        // so the change is refused at row 10, before the image check of row
+        // 11: the precedence base §4 orders. ImageIdentity itself is the
+        // image check's own refusal (see
+        // `an_image_check_failure_is_image_identity`).
         let (source, _selector) = source_pair(&staged, &ledger, &installation)?;
         let (_, error) = refused(admit(source, &ledger, &installation))?;
-        assert!(matches!(error, StagingError::ImageIdentity), "{error:?}");
+        assert!(
+            matches!(
+                error,
+                StagingError::Source(InstallationError::ArtifactInvalid)
+            ),
+            "{error:?}"
+        );
         assert_eq!(ledger.usage(), StagingUsage::default());
+        Ok(())
+    }
+
+    // Row 11: a proof no longer valid at host time fails the image check
+    // itself, in the retained snapshot and in the join, and both give
+    // ImageIdentity (SPE1 `9`).
+    #[test]
+    fn an_image_check_failure_is_image_identity() -> TestResult {
+        use std::time::UNIX_EPOCH;
+        let admitted = Arc::new(
+            crate::selector::installation::tests::admitted_state()?
+                .authenticate_bootstrap()?
+                .admit_provider()?,
+        );
+        let request = crate::provider_admission::tests::request_for(&admitted)?;
+        let expired = || UNIX_EPOCH + Duration::from_secs(2_200_000_000);
+        let valid = || UNIX_EPOCH + Duration::from_hours(500_000);
+        let fault = ProviderImageSnapshot::checked(Arc::clone(&admitted), request.clone(), expired)
+            .err()
+            .ok_or("an expired proof was admitted")?;
+        assert!(matches!(snapshot_fault(fault), StagingError::ImageIdentity));
+        let snapshot = ok(ProviderImageSnapshot::checked(admitted, request, valid))?;
+        let current = crate::selector::installation::tests::admitted_state()
+            .map_err(|_| InstallationError::Io);
+        let fault = snapshot
+            .join_current(current, expired)
+            .err()
+            .ok_or("an expired proof was joined")?;
+        assert!(matches!(join_fault(fault), StagingError::ImageIdentity));
         Ok(())
     }
 
