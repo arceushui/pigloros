@@ -57,9 +57,10 @@ pub struct LocalErasureProjectionV1 {
     pub positive: u64,
     /// The same counts per acknowledgement class, in class order.
     pub classes: Vec<LocalErasureClassCountV1>,
-    /// The store's redaction generation (ADR-136 follow-up F2, #1407): how
-    /// many ELCG1 cache generations the store has committed, across every
-    /// request. It is store-wide, never decreases, and is 0 before the
+    /// The store's redaction generation (ADR-136 follow-up F2, #1407).
+    ///
+    /// It counts the ELCG1 cache generations the store has committed, across
+    /// every request. It is store-wide, never decreases, and is 0 before the
     /// first commit.
     pub redaction_generation: u64,
 }
