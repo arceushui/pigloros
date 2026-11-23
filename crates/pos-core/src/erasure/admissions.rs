@@ -4,7 +4,7 @@
 //! One durable singleton per store says whether `requestErasure` admits new
 //! requests. A store without the record is open. The operator closes and
 //! reopens admissions offline with `piglor-gateway erasure-admissions`, and
-//! the Local erasure host reads the record on every fresh submission.
+//! the Local erasure host reads the record on every submission.
 //!
 //! Closing admissions refuses only fresh requests: the host reads the
 //! record before a submission but applies it after the exact-replay check,
