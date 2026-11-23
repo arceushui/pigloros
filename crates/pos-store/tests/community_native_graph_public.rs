@@ -141,6 +141,7 @@ impl Fixture {
                     SCHEMA,
                     hash(6),
                     self.initializer(slot),
+                    10,
                 )?)
             })
             .collect()
@@ -194,6 +195,7 @@ fn profile<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: 1_000,
                 metadata_not_after_micros: 1_000,
+                recording_not_after_micros: 1_000,
             },
         },
     )?)

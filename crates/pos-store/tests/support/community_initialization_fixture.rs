@@ -276,6 +276,7 @@ impl Roster {
                     SCHEMA,
                     hash(6),
                     self.initializer(),
+                    10,
                 )?)
             })
             .collect()
@@ -315,6 +316,7 @@ pub fn profile_until<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: HORIZON,
                 metadata_not_after_micros: HORIZON,
+                recording_not_after_micros: HORIZON,
             },
         },
     )?)

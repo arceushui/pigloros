@@ -2,8 +2,8 @@
 
 use super::quarantine_control::{encode_artifact_ref, read_artifact_ref};
 use super::{
-    bounded_bytes, bounded_text, canonical_end, digest, fixed_bytes, is_valid_community_id_v1,
-    read_hash, read_head, record_cursor, record_prefix, ArtifactRefV1,
+    bounded_bytes, bounded_text, canonical_end, digest, fixed_bytes, head_len,
+    is_valid_community_id_v1, read_hash, read_head, record_cursor, record_prefix, ArtifactRefV1,
     CommunityLifecycleErrorV1 as Error, Result, MAX_COMMUNITY_MEMBERS_V1,
     MAX_COMMUNITY_STATE_BYTES_V1,
 };
@@ -404,6 +404,50 @@ fn read_environment<'a>(cursor: &mut CborCursor<'a>) -> Result<Environment<'a>> 
     })
 }
 
+/// A pass CIN1's quoted length (revision 10, R10.3(3)), computed without
+/// copying the private payloads. CIN1 holds no unallocated value, so every
+/// field counts exactly; the provenance root `H(CIR1)` is a fixed-width
+/// digest that may not exist yet at quote time, so its value is ignored.
+///
+/// # Errors
+/// The [`CommunityPreparedInvocationV1::new`] errors of `input`.
+pub(super) fn quoted_invocation_len(
+    mut input: CommunityPreparedInvocationInputV1<'_>,
+) -> Result<usize> {
+    input.provenance_root = [0xff; 32];
+    CommunityPreparedInvocationV1::new(input).map(|record| encoded_len(record.as_input()))
+}
+
+/// Exact length of [`CommunityPreparedInvocationV1::to_canonical_cbor`].
+fn encoded_len(input: &CommunityPreparedInvocationInputV1<'_>) -> usize {
+    let bytes = |length: usize| head_len(length as u64) + length;
+    let reference = |reference: ArtifactRefV1| {
+        1 + head_len(u64::from(reference.schema_id)) + head_len(reference.byte_length) + 34
+    };
+    let position = input.timeline_position;
+    // Prefix (7), CMB1 (34), export kind (1), invocation ID (17), and the
+    // position's array head and Timeline ID (18).
+    7 + 34
+        + 1
+        + 17
+        + 18
+        + head_len(position.seq)
+        + head_len(position.tick)
+        + head_len(u64::from(position.scheduler_position))
+        + head_len(u64::from(input.output_base_ordinal))
+        + reference(input.principal_ref)
+        + reference(input.authorization_ref)
+        + reference(input.observation_snapshot_ref)
+        + bytes(input.observation_bytes.len())
+        + bytes(input.prior_state_bytes.len())
+        + bytes(input.deterministic_budget_id.len())
+        // Schema, execution profile, trust snapshot, random domain and
+        // provenance root digests.
+        + 5 * 34
+        + head_len(input.simulation_time)
+        + head_len(u64::from(input.watchdog_epochs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +503,8 @@ mod tests {
                     };
                     CommunityPreparedInvocationV1::new(input).and_then(|record| {
                         let encoded = record.to_canonical_cbor();
+                        assert_eq!(encoded.len(), encoded_len(&input));
+                        assert_eq!(quoted_invocation_len(input), Ok(encoded.len()));
                         assert!(encoded.len() <= record.staging_capacity());
                         assert!(
                             record.staging_capacity() <= MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1

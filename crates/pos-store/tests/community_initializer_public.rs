@@ -177,6 +177,7 @@ fn row<'a>(
         schema,
         hash(6),
         initializer,
+        10,
     )?)
 }
 
@@ -196,6 +197,7 @@ fn profile<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: 1_000,
                 metadata_not_after_micros: 1_000,
+                recording_not_after_micros: 1_000,
             },
         },
     )?)

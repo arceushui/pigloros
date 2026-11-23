@@ -113,6 +113,7 @@ impl<'r> Installed<'r> {
                 byte_length: 9,
                 digest: [7; 32],
             },
+            10,
         )?])
     }
 }
@@ -133,6 +134,7 @@ fn profile<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: HORIZON,
                 metadata_not_after_micros: HORIZON,
+                recording_not_after_micros: HORIZON,
             },
         },
     )?)
@@ -872,5 +874,44 @@ fn an_empty_fork_child_names_its_fork_chain_root_genesis() -> TestResult {
         prepare(&history, &installed, extra)?.err(),
         Some(Error::EvidenceUnavailable)
     );
+    Ok(())
+}
+
+#[test]
+fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> TestResult {
+    // Revision 10, R10.3(3) and (5): the Observation row counts 1 + g(r')
+    // nodes, r' + g(r') edges and the exact bytes of every record the
+    // materialization mints, with its unallocated ordinal at 9 bytes.
+    let installed = Installed::new(vec![RULE])?;
+    for events in [0, 1, 300] {
+        let history = history(events, EVENT_TYPE, None)?;
+        let mut input = honest(&history, history.root);
+        input.consumers = vec![consumer(0x50, Duration::from_micros(1))];
+        let sources = prepare(&history, &installed, input)??;
+        let registrations = vec![hash(0xcc); events];
+        let authority = [(history.root, hash(0x90))];
+        let mut widest = bindings(&registrations, &authority);
+        widest.producer_ordinal = u64::MAX;
+        let records = sources.finish(widest)?;
+        let groups = records.input_groups.len() as u64;
+        let bytes = sources.event_sources().map(<[u8]>::len).sum::<usize>()
+            + sources.observation_value().len()
+            + records.source_proof.len()
+            + records
+                .input_groups
+                .iter()
+                .map(|(group, node)| group.len() + node.len())
+                .sum::<usize>()
+            + records.observation_node.len();
+        let terms = sources.quote_terms()?;
+        assert_eq!(terms.terms.nodes, 1 + groups);
+        assert_eq!(terms.terms.edges, events.max(1) as u64 + groups);
+        assert_eq!(terms.terms.bytes, bytes as u64);
+        assert_eq!(
+            terms.node_ordinal,
+            records.observation_reference.node_ordinal
+        );
+        assert_eq!(terms.node_ordinal, u32::try_from(groups)?);
+    }
     Ok(())
 }

@@ -18,6 +18,7 @@ mod memory_domain;
 mod metadata_authority;
 mod native_graph;
 mod observation;
+mod pass_planner;
 mod planner;
 mod private_hash;
 mod protection;
@@ -56,6 +57,11 @@ pub use observation::{
     CommunityObservationInstallationV1, CommunityObservationMaterializationInputV1,
     CommunityObservationMaterializationV1, CommunityObservationPassV1,
     CommunityObservationRecordsV1, CommunityObservationSourcesV1,
+};
+pub use pass_planner::{
+    plan_community_pass_v1, CommunityPassDueV1, CommunityPassInstallationV1,
+    CommunityPassMemberViewV1, CommunityPassPlanV1, CommunityPassRequestV1,
+    CommunityPassStepInputsV1, CommunityPassViewV1,
 };
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
