@@ -1,5 +1,6 @@
-//! KOE1: the R9 §7.3 and §7.4 vectors, `observed_state_digest`, and the
-//! R9 §6 rules 1, 2 and 4 that the record alone decides.
+//! KOE1: the R9 §7.3 and §7.4 vectors as R14 §4.1 replaces KOE1-A,
+//! `observed_state_digest`, and the R9 §6 rules 1, 2 and 4 that the record
+//! alone decides. The R14 `network-readback` is in `network_readback`.
 
 use ciborium::value::Value;
 use pos_reference::sandbox_provider_protocol::{
@@ -17,15 +18,15 @@ use super::vectors::{
     SAU1_EVENT_11_AUTHORITY,
 };
 
-fn decode(bytes: &[u8]) -> Result<(), ProtocolError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<(), ProtocolError> {
     KernelObservationEvidence::from_canonical_cbor(bytes).map(|_| ())
 }
 
-fn digest(hex: &str) -> TestResult<[u8; 32]> {
+pub(super) fn digest(hex: &str) -> TestResult<[u8; 32]> {
     Ok(unhex(hex)?.as_slice().try_into()?)
 }
 
-const fn namespace(inode: u64) -> NamespaceIdentity {
+pub(super) const fn namespace(inode: u64) -> NamespaceIdentity {
     NamespaceIdentity {
         major: 0,
         minor: 4,
@@ -76,6 +77,7 @@ pub(super) fn vector_observation() -> ObservedKernelState {
             mount_id: 302,
             capacity_bytes: 1_048_576,
         }),
+        network_readback: None,
     }
 }
 
@@ -84,7 +86,7 @@ pub(super) fn provider_namespaces() -> [NamespaceIdentity; 6] {
     std::array::from_fn(|index| namespace(4_026_531_835 + index as u64))
 }
 
-fn vector_a_fields() -> TestResult<KernelObservationEvidenceFields> {
+pub(super) fn vector_a_fields() -> TestResult<KernelObservationEvidenceFields> {
     Ok(KernelObservationEvidenceFields {
         attempt_id: [0x11; 16],
         agr1_digest: [0x22; 32],
@@ -158,7 +160,7 @@ fn koe1_rule_1_envelope_size_types_and_devices() -> TestResult {
     let vector = unhex(KOE1_A)?;
     checks_envelope(&vector, decode)?;
     rejects_malformed_encodings(&vector, decode);
-    bounds_raw_size(4096, decode);
+    bounds_raw_size(64 * 1024, decode);
     rejects_every_retyped_node(&vector, decode)?;
     rejects_every_retyped_node(&unhex(KOE1_B)?, decode)?;
     for (path, value, accepted) in [

@@ -1070,6 +1070,9 @@ impl KernelObservation {
                 mount_id: work.mount_id,
                 capacity_bytes: work.capacity_bytes,
             }),
+            // No mode is served with a Local network readback yet: Local is
+            // refused before AGR1 (ADR-069 R14 §7, slice 1488-b0).
+            network_readback: None,
         }
     }
 }
