@@ -4,6 +4,8 @@
 //! state word only by compare-exchange, aborts a pending `WebAuthn` call before releasing, and
 //! releases everything when the host asks or the page deadline passes.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use pos_owner_bridge_codec::{
@@ -14,8 +16,11 @@ use pos_owner_bridge_codec::{
 use sha2::{Digest, Sha256};
 
 use super::buffers::{offset, state, Actor, Buffers, LogEntry, Role};
+use super::clock::FakeClock;
 use super::signer::{FixtureSigner, ReplyShape};
 use super::surface::{HookPhase, HostOp, PageModel};
+use crate::ceremony::timing::INTERACTION;
+use crate::{MonotonicClock, OwnerAuthenticatorPort, ReplyImage, RequestImage};
 
 /// The page polls the state word at this interval.
 pub const POLL: Duration = Duration::from_millis(20);
@@ -83,6 +88,43 @@ pub enum Tamper {
     LengthHuge,
     /// The payload is replaced by these raw bytes.
     Raw(Vec<u8>),
+}
+
+/// A native authenticator client that answers in place of the fixture signer.
+///
+/// It lets one authenticator enroll through the buffer protocol and unlock through
+/// `CeremonyDriver::run_direct`, so a test can show both paths reach `parse_and_verify` with the
+/// same reply (ADR-110 E20 LE).
+pub struct PageAuthenticator {
+    port: Rc<RefCell<dyn OwnerAuthenticatorPort>>,
+    clock: FakeClock,
+}
+
+impl PageAuthenticator {
+    /// Answer every ceremony with `port`, giving it the interaction bound on `clock`.
+    #[must_use]
+    pub const fn new(port: Rc<RefCell<dyn OwnerAuthenticatorPort>>, clock: FakeClock) -> Self {
+        Self { port, clock }
+    }
+
+    /// The reply payload `port` writes for the request buffer bytes `request`.
+    fn answer(&self, kind: CeremonyKind, request: &[u8]) -> Option<Vec<u8>> {
+        let mut image = RequestImage::zeroed();
+        image
+            .as_mut_bytes()
+            .iter_mut()
+            .zip(request)
+            .for_each(|(to, from)| *to = *from);
+        let mut reply = ReplyImage::zeroed();
+        reply.select(kind);
+        let deadline = self.clock.now() + INTERACTION;
+        let length = self
+            .port
+            .borrow_mut()
+            .perform(&image, &mut reply, deadline, &self.clock)
+            .ok()?;
+        reply.as_bytes().get(..length).map(<[u8]>::to_vec)
+    }
 }
 
 /// Everything configurable about the honest page.
@@ -204,6 +246,7 @@ struct Active {
     challenge: WebAuthnChallenge,
     prf_input: [u8; 32],
     user_handle: Option<[u8; 32]>,
+    request: Vec<u8>,
     responded: bool,
     done: bool,
 }
@@ -222,6 +265,7 @@ pub struct HonestPage {
     expired: bool,
     counter: u32,
     gets: usize,
+    authenticator: Option<PageAuthenticator>,
 }
 
 impl HonestPage {
@@ -246,7 +290,17 @@ impl HonestPage {
             expired: false,
             counter,
             gets: 0,
+            authenticator: None,
         })
+    }
+
+    /// Answer every ceremony with `authenticator` instead of the fixture signer.
+    #[must_use]
+    pub fn with_authenticator(self, authenticator: PageAuthenticator) -> Self {
+        Self {
+            authenticator: Some(authenticator),
+            ..self
+        }
     }
 
     fn schedule(&mut self, at: Duration, task: Task) {
@@ -410,6 +464,7 @@ impl HonestPage {
             challenge,
             prf_input,
             user_handle,
+            request: buffers.pair_at(request_pair).request.clone(),
             responded: false,
             done: false,
         })
@@ -455,6 +510,9 @@ impl HonestPage {
     }
 
     fn build_payload(&mut self, active: &Active) -> Option<Vec<u8>> {
+        if let Some(authenticator) = &self.authenticator {
+            return authenticator.answer(active.kind, &active.request);
+        }
         let derived = self.derived_prf(&active.prf_input);
         let mut shape = match active.kind {
             CeremonyKind::Create => ReplyShape {

@@ -5,6 +5,7 @@
 //! Behind the `test-support` feature, `fake` supplies a scripted page, `FakeSurface` and
 //! deterministic ports so full flows run without a `WebView`.
 
+pub mod authenticator;
 pub mod bridge;
 pub mod ceremony;
 pub mod channel;
@@ -27,6 +28,8 @@ pub mod unlock;
 #[path = "../tests/support/mod.rs"]
 pub mod encryptor_lock_test_support;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use authenticator::{DirectHost, OwnerAuthenticatorPort};
 pub use bridge::{BridgeConfig, OwnerBridge, RestartProgress};
 pub use enroll::{
     ConfirmedBinding, EnrollmentContext, EnrollmentPort, RootFingerprint, SealInputs,
