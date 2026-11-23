@@ -28,7 +28,9 @@ pub mod unlock;
 pub mod encryptor_lock_test_support;
 
 pub use bridge::{BridgeConfig, OwnerBridge, RestartProgress};
-pub use enroll::{ConfirmedBinding, EnrollmentContext, EnrollmentPort, RootFingerprint};
+pub use enroll::{
+    ConfirmedBinding, EnrollmentContext, EnrollmentPort, RootFingerprint, SealInputs,
+};
 pub use error::{
     BridgeError, ErrorClass, LifecycleCode, OwnerError, OwnerErrorKind, ProtocolCode,
     QuarantineCode, RejectedCode, UnavailableCode,
