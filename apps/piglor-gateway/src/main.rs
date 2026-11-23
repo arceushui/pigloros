@@ -144,15 +144,8 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
     credential_directory: Option<OsString>,
 ) -> Result<(), RunError> {
     match args.get(1).map(String::as_str) {
-        Some("owntracks") => {
-            let output = owntracks::execute(&args[2..])?;
-            output_stdout!("{output}");
-            Ok(())
-        }
-        Some("erasure-admissions") => {
-            let output = erasure_admissions::execute(&args[2..])?;
-            output_stdout!("{output}");
-            Ok(())
+        Some(command @ ("owntracks" | "erasure-admissions")) => {
+            operator_record_command(command, &args[2..])
         }
         Some("serve") => {
             let request = parse_serve_request(&args[2..])?;
@@ -188,6 +181,18 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
         }
         command => usage(command),
     }
+}
+
+/// Run an offline operator-record command, `owntracks` or
+/// `erasure-admissions`, and print its terminal output.
+fn operator_record_command(command: &str, arguments: &[String]) -> Result<(), RunError> {
+    let output = if command == "owntracks" {
+        owntracks::execute(arguments)?
+    } else {
+        erasure_admissions::execute(arguments)?
+    };
+    output_stdout!("{output}");
+    Ok(())
 }
 
 /// Print the command usage, or reject the retired `fork-admission-provision`
