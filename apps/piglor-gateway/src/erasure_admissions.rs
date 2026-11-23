@@ -2,12 +2,17 @@
 //! operator's durable switch for `requestErasure` (ADR-136 follow-up F3,
 //! #1408).
 //!
-//! The command writes the store's admissions record as an offline writer
-//! (ADR-134 §8): under the store's shared mode lock and attached to its
-//! execution-mode binding, so an unbound store is refused. Both verbs run
-//! in every execution mode, Air-Gapped included: closing only reduces what
-//! the host admits, and reopening restores the admission the mode already
-//! serves.
+//! `close` and `open` write the store's admissions record under the
+//! store's EXCLUSIVE mode lock, so they refuse to run while `serve` holds
+//! the store: the serving host owns its store, and a commit from another
+//! process would make it fail closed, `getErasure` and the erasure driver
+//! included, until it restarts. The operator stops `serve`, changes the
+//! record and starts `serve` again. `status` only reads the record, under
+//! the shared lock, so it also runs beside a live `serve`. Every verb
+//! attaches to the store's execution-mode binding (ADR-134 §8), so an
+//! unbound store is refused. Both changes run in every execution mode,
+//! Air-Gapped included: closing only reduces what the host admits, and
+//! reopening restores the admission the mode already serves.
 //!
 //! The Local erasure host reads the record on every fresh submission.
 //! While it is closed, a fresh `requestErasure` is
@@ -41,7 +46,9 @@ pub enum ErasureAdmissionsCommandErrorV1 {
 ///
 /// # Errors
 /// Returns [`ErasureAdmissionsCommandErrorV1::Usage`] for any other
-/// arguments, the mode binding's refusal of an unbound or locked store, and
+/// arguments, the mode binding's refusal of an unbound store or of a store
+/// whose lock another process holds (a live `serve` for `close` and `open`),
+/// and
 /// [`ErasureAdmissionsCommandErrorV1::RecordUnavailable`] when the record
 /// cannot be read or written.
 pub fn execute(arguments: &[String]) -> Result<String, ErasureAdmissionsCommandErrorV1> {
@@ -54,7 +61,12 @@ pub fn execute(arguments: &[String]) -> Result<String, ErasureAdmissionsCommandE
         "status" => None,
         _ => return Err(ErasureAdmissionsCommandErrorV1::Usage),
     };
-    bound_store(sqlite_path).and_then(|(_lock, mut store)| {
+    let lock = if change.is_some() {
+        GatewayModeStoreLockV1::exclusive(sqlite_path)
+    } else {
+        GatewayModeStoreLockV1::shared(sqlite_path)
+    };
+    bound_store(lock, sqlite_path).and_then(|(_lock, mut store)| {
         match change {
             Some(state) => store.set_erasure_admissions(state).map(|previous| {
                 format!(
@@ -71,14 +83,14 @@ pub fn execute(arguments: &[String]) -> Result<String, ErasureAdmissionsCommandE
     })
 }
 
-/// Open the store at `sqlite_path` as an offline writer: under its shared
-/// mode lock, attached to its execution-mode binding. Every bound mode is
-/// accepted. The lock lives as long as the returned guard.
+/// Open the store at `sqlite_path` under `lock`, attached to its
+/// execution-mode binding. Every bound mode is accepted. The lock lives as
+/// long as the returned guard.
 fn bound_store(
+    lock: Result<GatewayModeStoreLockV1, GatewayModeErrorV1>,
     sqlite_path: &str,
 ) -> Result<(GatewayModeStoreLockV1, SqliteStore), ErasureAdmissionsCommandErrorV1> {
-    GatewayModeStoreLockV1::shared(sqlite_path)
-        .map_err(ErasureAdmissionsCommandErrorV1::from)
+    lock.map_err(ErasureAdmissionsCommandErrorV1::from)
         .and_then(|lock| {
             SqliteStore::open(sqlite_path)
                 .map(|store| (lock, store))

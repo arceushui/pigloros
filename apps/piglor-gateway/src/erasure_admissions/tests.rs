@@ -114,10 +114,10 @@ fn unbound_locked_and_unreadable_stores_are_refused() -> TestResult {
     let bound_directory = tempfile::tempdir()?;
     let bound = store_in(&bound_directory, Some(GatewayModeProfileIdV1::Local))?;
     let migrating = GatewayModeStoreLockV1::exclusive(&bound)?;
-    let locked = run(&["close", bound.as_str()])
-        .err()
-        .ok_or("a locked store")?;
-    assert!(locked.to_string().contains("lock"), "{locked}");
+    for verb in ["close", "open", "status"] {
+        let locked = run(&[verb, bound.as_str()]).err().ok_or("a locked store")?;
+        assert!(locked.to_string().contains("lock"), "{verb}: {locked}");
+    }
     drop(migrating);
 
     let garbage = directory.path().join("garbage.sqlite3");
@@ -149,5 +149,31 @@ fn unbound_locked_and_unreadable_stores_are_refused() -> TestResult {
         |row| row.get(0),
     )?;
     assert_eq!(stored, "unreadable");
+    Ok(())
+}
+
+/// A live `serve` holds the store's shared lock for its lifetime: `close`
+/// and `open` refuse to commit beside it, since a foreign commit would make
+/// the serving host fail closed, and leave the record unchanged, while
+/// `status` still reads it.
+#[test]
+fn a_serving_store_refuses_changes_but_answers_status() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = store_in(&directory, Some(GatewayModeProfileIdV1::Local))?;
+    let serving = GatewayModeStoreLockV1::shared(&path)?;
+    for verb in ["close", "open"] {
+        let refused = run(&[verb, path.as_str()]).err().ok_or("a served store")?;
+        assert_eq!(
+            refused.to_string(),
+            "store execution-mode lock is unavailable",
+            "{verb}"
+        );
+    }
+    assert_eq!(run(&["status", path.as_str()])?, "Erasure admissions: open");
+    drop(serving);
+    assert_eq!(
+        run(&["close", path.as_str()])?,
+        "Erasure admissions closed (were open)"
+    );
     Ok(())
 }

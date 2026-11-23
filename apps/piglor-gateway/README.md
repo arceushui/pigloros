@@ -73,10 +73,10 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
   omits the capability.
 
 - **One lock per store.** `serve` and the offline writers (`owntracks pair|rotate|revoke`,
-  `erasure-admissions close|open`, `provision-local-fork-authority`, `provision-local-principal`,
-  `provision-local-erasure`) hold a
+  `provision-local-fork-authority`, `provision-local-principal`, `provision-local-erasure`) hold a
   shared non-blocking lock on
-  `<sqlite-path>.gateway-mode.lock`; `migrate-mode` holds it exclusively. Offline writers need a
+  `<sqlite-path>.gateway-mode.lock`; `migrate-mode` and `erasure-admissions close|open` hold it
+  exclusively. Offline writers need a
   store a first `serve` has bound, and never bind one. An Air-Gapped store refuses `owntracks pair`
   and `rotate`. Only Gateway processes write a bound store; other hosts, such as `pos-experiment`,
   are refused.
@@ -313,8 +313,12 @@ store command and holds every other Gateway request for its duration**, which gr
 **Closing admissions.** `piglor-gateway erasure-admissions close <sqlite-path>` durably closes new
 erasure admissions (#1408), `open` reopens them, and `status` prints `Erasure admissions: open` or
 `closed`. `close` and `open` print one audit line naming the previous and the new state, such as
-`Erasure admissions closed (were open)`. The command is an offline writer (see
-[Execution mode](#execution-mode)) and runs in every mode, Air-Gapped included. A store without
+`Erasure admissions closed (were open)`. `close` and `open` take the store's exclusive mode lock,
+so they refuse to run while `serve` holds the store: stop `serve`, change the record, and start
+`serve` again (a commit from another process would make a serving host fail closed, `getErasure`
+and the driver included; see [SQLite and host ownership](#sqlite-and-host-ownership)). `status`
+reads under the shared lock and also runs beside a live `serve`. Every verb refuses an unbound store
+and runs in every mode, Air-Gapped included. A store without
 the record is open. The erasure host reads the record on every submission: while it is closed a
 fresh `requestErasure` is `503 erasure-admissions-closed` (not retryable) and nothing is retained.
 An exact retry of an admitted request still answers its receipt, and `getErasure`, the driver and

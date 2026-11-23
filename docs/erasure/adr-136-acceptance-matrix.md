@@ -409,8 +409,13 @@ runtime-seam rows hold in every mode.
 
 The operator closes new erasure admissions durably with
 `piglor-gateway erasure-admissions close <sqlite-path>` and reopens them
-with `open`; `status` prints the record. The command is an offline writer
-under the store's shared mode lock, in every execution mode. The record is
+with `open`; `status` prints the record. `close` and `open` hold the
+store's exclusive mode lock, so they refuse to run beside a live `serve`
+(owner decision of 2026-11-23: a foreign commit would make the serving host
+fail closed, `getErasure` and the driver included, until it restarts); the
+operator stops `serve`, changes the record and starts `serve` again.
+`status` reads under the shared lock. Every verb runs in every execution
+mode. The record is
 one singleton row (`erasure_admissions`), absent meaning open. The Local
 erasure host reads it on every submission, after the exact-replay check, so
 only a fresh request is refused: `LocalErasureSubmitErrorV1::OperatorClosed`,
@@ -427,4 +432,4 @@ which the Gateway answers `503 erasure-admissions-closed`, not retryable.
 | An admitted request still freezes and completes while closed, after the startup sweep | `LEC::an_admitted_request_freezes_and_completes_while_admissions_are_closed` | `SQLite` | |
 | A record the host cannot read fails closed | `LEC::an_unreadable_record_fails_closed_for_a_fresh_submission_only` | `SQLite` | `ErasureHostErrorV1::AdapterFailure` for a fresh request (a retryable `503 temporarily-unavailable` at the Gateway); the exact replay is still answered. |
 | Closed admissions refuse `POST` with `503 erasure-admissions-closed`; `GET` answers and the admitted request reaches its first receipt; both hold after a restart; reopened, `POST` gives `202` | `E::closed_admissions_refuse_new_erasures_and_finish_admitted_ones`; `E::every_submit_refusal_has_its_answer` | `SQLite`; none | Local serve mode. The command runs between serves. |
-| `close`, `open` and `status` output; Air-Gapped stores accepted; unbound, locked and unreadable stores and other arguments refused | `CMD::close_open_and_status_report_the_record`; `CMD::an_air_gapped_store_closes_and_reopens`; `CMD::unbound_locked_and_unreadable_stores_are_refused`; `CMD::other_arguments_are_a_usage_error`; `apps/piglor-gateway/src/main.rs::erasure_admissions_subcommand_is_dispatched_by_the_binary_entrypoint` | `SQLite` | |
+| `close`, `open` and `status` output; Air-Gapped stores accepted; a served store refuses `close`/`open` but answers `status`; unbound, locked and unreadable stores and other arguments refused | `CMD::close_open_and_status_report_the_record`; `CMD::an_air_gapped_store_closes_and_reopens`; `CMD::unbound_locked_and_unreadable_stores_are_refused`; `CMD::a_serving_store_refuses_changes_but_answers_status`; `CMD::other_arguments_are_a_usage_error`; `apps/piglor-gateway/src/main.rs::erasure_admissions_subcommand_is_dispatched_by_the_binary_entrypoint` | `SQLite` | |
