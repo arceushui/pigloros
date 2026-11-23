@@ -1,0 +1,42 @@
+[package]
+name = "pos-local-erasure-loader"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Shared deployment-trust, Local Principal and credential loader of the Local erasure authority (ADR-136; #1450)"
+
+[dependencies]
+pos-core = { path = "../pos-core" }
+pos-runtime = { path = "../pos-runtime" }
+pos-store = { path = "../pos-store" }
+blake3 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+ulid = { workspace = true }
+zeroize = { workspace = true }
+
+# The systemd credential directory and the deployment trust state store are
+# Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["fs", "process", "std"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# The shared signing fixtures (tests/support/signing.rs) and the store
+# faults of the loader's own tests.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ed25519-dalek = { workspace = true }
+pos-conformance = { path = "../pos-conformance" }
+pos-crypto = { path = "../pos-crypto" }
+rusqlite = { workspace = true }
+
+# The loader's tests include shared signing fixtures
+# (tests/support/signing.rs) via #[path]. cargo-shear follows that module edge,
+# so these required dev-dependencies need no ignore metadata.
+
+[lints]
+workspace = true

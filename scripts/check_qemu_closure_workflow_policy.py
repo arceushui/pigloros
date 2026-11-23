@@ -25,10 +25,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ".github/workflows/qemu-closure-evidence.yml"
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 UPLOAD = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
-CACHE_RESTORE = "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
-CACHE_SAVE = "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
-KERNEL_CACHE = "${{ runner.temp }}/qemu-kernel-cache"
-KERNEL_KEY = "${{ steps.kernel-key.outputs.key }}"
+# Only the steps that read or write the kernel cache release get a token.
+RELEASE_ENV = {"GH_TOKEN": "${{ github.token }}", "GH_REPO": "${{ github.repository }}"}
+KERNEL_CACHE_DIR = '"${RUNNER_TEMP}/qemu-kernel-cache"'
 EVIDENCE = '"${RUNNER_TEMP}/qemu-closure-evidence"'
 # github.sha is the merge commit that the pull_request run actually tests.
 ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
@@ -39,9 +38,9 @@ PRODUCER_SHA256 = {
     "scripts/check_asan_ci_policy.py": "d8f34a83538f034127fd2ee0e0e9e89aa9843741fa3228f3c30d164a5d17d2ed",
     "scripts/ci_stage_policy.py": "1ff0e611958501bfef1bfb54ea4016c129ed717d01de23a51cf8f7bf2cfd373e",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
-    "scripts/install-pinned-nix.sh": "6ceb5c5e07c875e421beed6d58da4a157c67b7476c9ac799c5284c93f2f94f8d",
+    "scripts/install-pinned-nix.sh": "f8935b411c586d0fdebf1c24aca650459bd166593ab3025ed0df05e4e2012a72",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
-    "scripts/qemu-kernel-cache.sh": "2b5ca03c3b2bf53fdef051b20478980f0a82a0c79e9b812e3d704ef87407b3f0",
+    "scripts/qemu-kernel-cache.sh": "9fabec0f9d07827bdf60ae6ea2ca245c24637929590c2256fb14a264aef78eb9",
     "scripts/qemu-closure-evidence.sh": "7f9dc68a4fb67e20e21f8bd40cf36b4c0c0335fa4e0c6d69416194941f73c091",
     "scripts/check_qemu_closure_evidence.py": "77a82f944d01c5514f16dfd180899e32a83243005f7dee96f063abf3d12700ac",
     "deploy/nixos/flake.nix": "cfd9e71e22b18412dab4e3bc4d8a10ff702dcab3284f41c542a83947bce85e69",
@@ -58,8 +57,6 @@ PRODUCER_SHA256 = {
 CHECKOUT_STEP = {"uses": CHECKOUT, "with": {"persist-credentials": False}}
 INSTALL_NIX_STEP = {"name": "Install the hash-pinned Nix release",
                     "run": "bash scripts/install-pinned-nix.sh"}
-KERNEL_KEY_STEP = {"name": "Name the kernel cache entry", "id": "kernel-key",
-                   "run": 'bash scripts/qemu-kernel-cache.sh key "${EVIDENCE_ARCHITECTURE}" >>"${GITHUB_OUTPUT}"'}
 ARCHITECTURES = {"fail-fast": False, "matrix": {"include": [
     {"architecture": "x86_64", "runner": "ubuntu-24.04"},
     {"architecture": "aarch64", "runner": "ubuntu-24.04-arm"},
@@ -94,7 +91,6 @@ EXPECTED = {
             "scripts/install-pinned-nix.sh",
             "scripts/qemu-kernel-cache.sh",
         ]},
-        "schedule": [{"cron": "23 4 * * *"}],
     },
     "permissions": {"contents": "read"},
     "concurrency": {"group": "qemu-closure-evidence-${{ github.ref }}", "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"},
@@ -126,17 +122,20 @@ EXPECTED = {
                 CHECKOUT_STEP,
                 EXPECTED_SDK_HEADROOM_STEP,
                 INSTALL_NIX_STEP,
-                KERNEL_KEY_STEP,
-                {"name": "Restore the signed kernel built on main", "id": "kernel-cache",
-                 "uses": CACHE_RESTORE, "with": {"path": KERNEL_CACHE, "key": KERNEL_KEY}},
+                {"name": "Fetch the signed kernel built on main", "id": "kernel-cache", "env": RELEASE_ENV,
+                 "run": 'if ! bash scripts/qemu-kernel-cache.sh fetch "${EVIDENCE_ARCHITECTURE}"'
+                        f' {KERNEL_CACHE_DIR} >>"${{GITHUB_OUTPUT}}"; then\n'
+                        "  echo '::warning::qemu-kernel-cache fetch failed: building the kernel from source.'\n"
+                        "  echo 'hit=false' >>\"${GITHUB_OUTPUT}\"\n"
+                        "fi\n"},
                 {"name": "Note a kernel cache miss",
-                 "if": "${{ steps.kernel-cache.outputs.cache-hit != 'true' }}",
+                 "if": "${{ steps.kernel-cache.outputs.hit != 'true' }}",
                  "run": "echo 'qemu-kernel-cache miss, so the kernel is built from source.'"
                         ' >>"${GITHUB_STEP_SUMMARY}"'},
                 {"name": "Import the signed kernel",
-                 "if": "${{ steps.kernel-cache.outputs.cache-hit == 'true' }}",
+                 "if": "${{ steps.kernel-cache.outputs.hit == 'true' }}",
                  "run": 'if ! bash scripts/qemu-kernel-cache.sh import "${EVIDENCE_ARCHITECTURE}"'
-                        ' "${RUNNER_TEMP}/qemu-kernel-cache"; then\n'
+                        f' {KERNEL_CACHE_DIR}; then\n'
                         "  echo '::warning::qemu-kernel-cache refused: building the kernel from source.'\n"
                         "  echo 'qemu-kernel-cache refused: the kernel was built from source.'"
                         ' >>"${GITHUB_STEP_SUMMARY}"\n'
@@ -186,6 +185,7 @@ EXPECTED = {
             "needs": "policy",
             "if": "${{ github.event_name != 'pull_request' }}",
             "environment": "qemu-kernel-cache",
+            "permissions": {"contents": "write"},
             "strategy": ARCHITECTURES,
             "runs-on": "${{ matrix.runner }}",
             "timeout-minutes": 345,
@@ -194,24 +194,24 @@ EXPECTED = {
                 CHECKOUT_STEP,
                 EXPECTED_SDK_HEADROOM_STEP,
                 INSTALL_NIX_STEP,
-                KERNEL_KEY_STEP,
-                {"name": "Restore the kernel cache entry", "id": "kernel-restore", "uses": CACHE_RESTORE,
-                 "with": {"path": KERNEL_CACHE, "key": KERNEL_KEY}},
-                {"name": "Verify the cached kernel",
-                 "if": "${{ steps.kernel-restore.outputs.cache-hit == 'true' }}",
-                 "run": 'bash scripts/qemu-kernel-cache.sh verify "${EVIDENCE_ARCHITECTURE}"'
-                        ' "${RUNNER_TEMP}/qemu-kernel-cache"'},
+                {"name": "Fetch the published kernel", "id": "kernel-fetch", "env": RELEASE_ENV,
+                 "run": 'bash scripts/qemu-kernel-cache.sh fetch "${EVIDENCE_ARCHITECTURE}"'
+                        f' {KERNEL_CACHE_DIR} >>"${{GITHUB_OUTPUT}}"'},
+                {"name": "Verify the published kernel",
+                 "if": "${{ steps.kernel-fetch.outputs.hit == 'true' }}",
+                 "run": f'bash scripts/qemu-kernel-cache.sh verify "${{EVIDENCE_ARCHITECTURE}}" {KERNEL_CACHE_DIR}'},
                 {"name": "Build the kernel",
-                 "if": "${{ steps.kernel-restore.outputs.cache-hit != 'true' }}",
+                 "if": "${{ steps.kernel-fetch.outputs.hit != 'true' }}",
                  "run": 'bash scripts/qemu-kernel-cache.sh build "${EVIDENCE_ARCHITECTURE}"'},
                 {"name": "Sign the kernel",
-                 "if": "${{ steps.kernel-restore.outputs.cache-hit != 'true' }}",
+                 "if": "${{ steps.kernel-fetch.outputs.hit != 'true' }}",
                  "env": {"QEMU_KERNEL_CACHE_SIGNING_KEY": "${{ secrets.QEMU_KERNEL_CACHE_SIGNING_KEY }}"},
-                 "run": 'bash scripts/qemu-kernel-cache.sh export "${EVIDENCE_ARCHITECTURE}"'
-                        ' "${RUNNER_TEMP}/qemu-kernel-cache"'},
-                {"name": "Save the signed kernel",
-                 "if": "${{ steps.kernel-restore.outputs.cache-hit != 'true' }}",
-                 "uses": CACHE_SAVE, "with": {"path": KERNEL_CACHE, "key": KERNEL_KEY}},
+                 "run": f'bash scripts/qemu-kernel-cache.sh export "${{EVIDENCE_ARCHITECTURE}}" {KERNEL_CACHE_DIR}'},
+                {"name": "Publish the signed kernel",
+                 "if": "${{ steps.kernel-fetch.outputs.hit != 'true' }}", "env": RELEASE_ENV,
+                 "run": f'bash scripts/qemu-kernel-cache.sh publish "${{EVIDENCE_ARCHITECTURE}}" {KERNEL_CACHE_DIR}'},
+                {"name": "Prune week-old kernel assets", "env": RELEASE_ENV,
+                 "run": 'bash scripts/qemu-kernel-cache.sh prune "${EVIDENCE_ARCHITECTURE}"'},
             ],
         },
     },

@@ -211,6 +211,20 @@ impl AttemptLimitEventSnapshot {
         (self.monotonic_seconds, self.monotonic_nanoseconds)
     }
 
+    /// The capture time in `CLOCK_MONOTONIC` nanoseconds (ADR-069 R9 §4.1);
+    /// `None` for a negative component or a sum above `u64::MAX`, which is
+    /// an unreadable time: a provider fault (R9 Amendment 1 change F).
+    pub(crate) fn observed_at_ns(&self) -> Option<u64> {
+        u64::try_from(self.monotonic_seconds)
+            .ok()
+            .zip(u64::try_from(self.monotonic_nanoseconds).ok())
+            .and_then(|(seconds, nanoseconds)| {
+                seconds
+                    .checked_mul(1_000_000_000)
+                    .and_then(|whole| whole.checked_add(nanoseconds))
+            })
+    }
+
     /// Compare two snapshots of one bound cgroup using checked counter deltas.
     ///
     /// The caller must capture the baseline before releasing the launcher and

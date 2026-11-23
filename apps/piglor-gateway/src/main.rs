@@ -22,7 +22,6 @@ macro_rules! output_stderr {
 
 use piglor_gateway::local_erasure_composition::{
     LocalErasureDriverTaskV1, LocalErasureServeInputsV1, LocalErasureServeV1, LocalErasureStartV1,
-    DEPLOYMENT_TRUST_STATE_PATH,
 };
 #[cfg(target_os = "linux")]
 use piglor_gateway::local_erasure_provision::{
@@ -49,6 +48,7 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
+use pos_local_erasure_loader::deployment_trust::DEPLOYMENT_TRUST_STATE_PATH;
 use pos_store::StoreConfig;
 use std::{
     collections::BTreeSet,

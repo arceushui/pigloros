@@ -12,8 +12,6 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod action_admission_tests;
 pub mod authorization;
-#[cfg(target_os = "linux")]
-pub mod deployment_trust;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
@@ -34,6 +32,14 @@ pub mod local_erasure_composition;
 pub mod local_erasure_composition;
 #[cfg(target_os = "linux")]
 pub mod local_erasure_provision;
+// Test-only. The Local erasure signing fixtures under the loader's
+// `tests/support`, shared with the loader and the key-less root tests; the
+// items are `pub` so every test that includes them may use a subset.
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../../../crates/pos-local-erasure-loader/tests/support/signing.rs"]
+pub mod local_erasure_signing_fixture;
 #[cfg(target_os = "linux")]
 pub mod local_fork_authentication;
 #[cfg(target_os = "linux")]
@@ -4088,7 +4094,7 @@ fn build_proposed_action(
     capability: &str,
 ) -> Result<ProposedAction, ActionRejected> {
     validate_world_action_route(event_type, capability).and_then(|()| {
-        serde_json::from_value::<GatewayWorldActionPayload>(payload.clone())
+        GatewayWorldActionPayload::deserialize(payload)
             .map_err(|_| {
                 ActionRejected::DomainValidationFailed("invalid world.action.v1 payload".to_owned())
             })
@@ -4115,7 +4121,7 @@ struct GatewayWorldActionPayload {
     actor_entity_id: EntityId,
     body_entity_id: EntityId,
     action_kind: String,
-    params: [serde_json::Value; 2],
+    params: [serde_json::Number; 2],
     action_scope: u8,
     catalogue_version: u32,
     tick: u64,
@@ -4157,11 +4163,10 @@ impl GatewayWorldActionPayload {
 }
 
 fn encode_gateway_actuator_params(
-    params: &[serde_json::Value; 2],
+    params: &[serde_json::Number; 2],
 ) -> Result<Vec<u8>, ActionRejected> {
-    let component = |value: &serde_json::Value| {
-        value
-            .as_number()
+    let component = |value: &serde_json::Number| {
+        Some(value)
             .filter(|number| number.is_f64())
             .and_then(serde_json::Number::as_f64)
             .ok_or_else(|| {
@@ -4835,7 +4840,7 @@ mod tests {
         let gateway = memory_gw();
         for host_timeline in [
             local_principal::local_principal_consent_timeline(),
-            local_principal::local_principal_authority_timeline(),
+            pos_local_erasure_loader::local_principal::local_principal_authority_timeline(),
         ] {
             assert!(matches!(
                 gateway

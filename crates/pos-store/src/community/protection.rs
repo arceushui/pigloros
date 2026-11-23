@@ -158,6 +158,13 @@ impl CommunityArtifactProtectorV1 {
         })
     }
 
+    /// The suboperation's key and its CCI1 key-vault copy descriptor, for
+    /// the atomic commit that retains them.
+    #[cfg(target_os = "linux")]
+    pub(super) fn into_parts(self) -> (VaultKeyV1, CommunityCopyInventoryV1) {
+        (self.key, self.copy)
+    }
+
     /// The scope cohort this suboperation protects.
     pub(super) const fn cohort(&self) -> &CommunityProtectionCohortV1 {
         &self.cohort

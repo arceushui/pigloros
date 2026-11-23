@@ -42,7 +42,7 @@ pub struct CommunitySharedCountsV1 {
 }
 
 impl CommunitySharedCountsV1 {
-    const fn values(self) -> [u64; 4] {
+    pub(super) const fn values(self) -> [u64; 4] {
         [
             self.nodes,
             self.edges,
@@ -218,7 +218,7 @@ impl CommunityBudgetQuoteV1 {
     }
 }
 
-fn read_counts(cursor: &mut CborCursor<'_>) -> Result<CommunitySharedCountsV1> {
+pub(super) fn read_counts(cursor: &mut CborCursor<'_>) -> Result<CommunitySharedCountsV1> {
     cursor.fixed(&[0x84]).map_err(Error::from).and_then(|()| {
         read_uints(cursor).map(|[nodes, edges, declared_inputs, encoded_record_bytes]| {
             CommunitySharedCountsV1 {
