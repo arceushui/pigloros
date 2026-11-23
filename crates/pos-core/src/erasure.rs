@@ -2745,9 +2745,10 @@ pub enum ErasureProtectedEffectDispositionV1 {
     Rollback,
 }
 
-/// The largest store redaction generation (ADR-136 follow-up F2, #1407):
-/// `2^53 - 1`, the largest JSON-safe integer, which the Gateway contract
-/// declares as the `redaction_generation` maximum of `Erasure`. Every
+/// The largest store redaction generation (ADR-136 follow-up F2, #1407).
+///
+/// It is `2^53 - 1`, the largest JSON-safe integer, which the Gateway
+/// contract declares as the `redaction_generation` maximum of `Erasure`. Every
 /// adapter refuses to raise the generation past it, so no store answers a
 /// value a JSON client cannot represent exactly.
 pub const REDACTION_GENERATION_MAX_V1: u64 = (1 << 53) - 1;

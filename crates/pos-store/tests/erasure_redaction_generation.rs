@@ -127,10 +127,8 @@ fn sqlite_path(directory: &tempfile::TempDir, name: &str) -> Result<String, &'st
 fn each_new_cache_generation_raises_it_once_on_both_adapters() -> TestResult {
     generation_contract(&mut MemoryStore::new())?;
     let directory = tempdir()?;
-    generation_contract(&mut SqliteStore::open(&sqlite_path(
-        &directory,
-        "generation.sqlite3",
-    )?)?)
+    let mut store = SqliteStore::open(&sqlite_path(&directory, "generation.sqlite3")?)?;
+    generation_contract(&mut store)
 }
 
 #[test]
