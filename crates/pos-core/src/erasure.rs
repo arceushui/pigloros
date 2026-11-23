@@ -2745,6 +2745,14 @@ pub enum ErasureProtectedEffectDispositionV1 {
     Rollback,
 }
 
+/// The largest store redaction generation (ADR-136 follow-up F2, #1407).
+///
+/// It is `2^53 - 1`, the largest JSON-safe integer, which the Gateway
+/// contract declares as the `redaction_generation` maximum of `Erasure`. Every
+/// adapter refuses to raise the generation past it, so no store answers a
+/// value a JSON client cannot represent exactly.
+pub const REDACTION_GENERATION_MAX_V1: u64 = (1 << 53) - 1;
+
 pub trait ErasureInventoryPersistencePortV1 {
     /// Read every durable erasure head and Timeline/Fork ID atomically.
     ///
@@ -2869,10 +2877,32 @@ pub trait ErasureInventoryPersistencePortV1 {
     /// captured, deleted and equal to the ELXW1, or already withdrawn with
     /// exactly this ELXW1, and [`ErasureErrorV1::ReceiptCommitFailed`] when
     /// its durable commit is refused. Nothing is committed on error.
+    ///
+    /// A commit that newly retains an ELCG1 cache generation also raises the
+    /// store's redaction generation ([`Self::redaction_generation`]) by one
+    /// in the same transaction (ADR-136 follow-up F2, #1407); repeating a
+    /// committed ELCG1 retains nothing new and raises nothing. A redaction
+    /// generation already at [`REDACTION_GENERATION_MAX_V1`], or one the
+    /// adapter cannot read, cannot be raised: the commit fails with
+    /// [`ErasureErrorV1::ReceiptCommitFailed`], and neither is changed.
     fn commit_local_owner_effect(
         &mut self,
         prepared: PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+
+    /// The store's redaction generation (ADR-136 follow-up F2, #1407).
+    ///
+    /// It counts the ELCG1 cache generations the store has committed, 0 before the first. It never
+    /// decreases, also across a reopen of a durable store, and never exceeds
+    /// [`REDACTION_GENERATION_MAX_V1`].
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when the generation cannot be
+    /// read, including a durable value above [`REDACTION_GENERATION_MAX_V1`]
+    /// and a durable store that lost its generation while it still retains
+    /// a committed ELCG1: either would answer a value the Gateway contract
+    /// cannot carry or one lower than an answer already given.
+    fn redaction_generation(&self) -> Result<u64, ErasureErrorV1>;
 
     /// Read the write-once erasure store identity.
     ///
@@ -8052,6 +8082,10 @@ mod coverage_paths {
             &mut self,
             _prepared: PreparedLocalOwnerEffectV1,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
             Err(ErasureErrorV1::ProvenanceMissing)
         }
 

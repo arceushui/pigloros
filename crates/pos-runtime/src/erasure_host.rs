@@ -7077,6 +7077,7 @@ mod tests {
         BeginForkReplayPanic,
         ExportScanFailure,
         ExportScanRow,
+        RedactionGeneration,
         Passthrough,
     }
 
@@ -7702,6 +7703,13 @@ mod tests {
             prepared: pos_core::PreparedLocalOwnerEffectV1,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
             self.inner.commit_local_owner_effect(prepared)
+        }
+
+        fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
+            if self.fault == FaultModeV1::RedactionGeneration {
+                return Err(ErasureErrorV1::ReceiptCommitFailed);
+            }
+            self.inner.redaction_generation()
         }
 
         fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
@@ -10422,6 +10430,163 @@ mod tests {
 
     fn fault_store(fault: FaultModeV1) -> FaultStoreV1 {
         fault_store_with_control(fault).0
+    }
+
+    /// A Local preparation the projection never asks: it refuses everything.
+    #[cfg(target_os = "linux")]
+    struct RefusingPreparationV1;
+
+    #[cfg(target_os = "linux")]
+    impl LocalErasurePreparationV1 for RefusingPreparationV1 {
+        fn authenticate_submission(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _principal_ref: ErasureReferenceV1,
+            _actor: EntityId,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn submissions_open(&self) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn submission_fits(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _actor: EntityId,
+            _scope: ErasureScopeV1,
+        ) -> Result<bool, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn prepare_freeze(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _request: ErasureReferenceV1,
+        ) -> Result<PreparedFreezeV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn prepare_attempt(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _erq1: &ErasureRequestV1,
+            _progress: &ErasureRecordedProgressV1,
+        ) -> Result<Option<(ErasureRetryAdmissionV1, Vec<u8>)>, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn prepare_receipt(
+            &self,
+            _erq1: &ErasureRequestV1,
+            _progress: &ErasureRecordedProgressV1,
+        ) -> Result<(ErasureReceiptInputV1, Vec<Vec<u8>>), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn holds_subject(
+            &self,
+            _view: &dyn ErasureAuthorityReadViewV1,
+            _state: &ErasureVerifiedStateV1,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// The `getErasure` projection of one Local request on a host over a
+    /// fault store in `fault`: the request of `principal` as `actor` is
+    /// submitted and rejected through the coordinator, its ELADM1 retained
+    /// and a Local submission binding installed, so the projection reads
+    /// every part before the store's redaction generation.
+    #[cfg(target_os = "linux")]
+    fn local_projection_under(
+        fault: FaultModeV1,
+    ) -> Result<Option<LocalErasureProjectionV1>, ErasureHostErrorV1> {
+        let principal = PrincipalRefV1::try_new([69; 16], "projection.local")
+            .map_err(|_| ErasureHostErrorV1::AuthorizationDenied)?;
+        let actor = EntityId::new();
+        let erasure_id = ulid::Ulid::from_bytes([70; 16]);
+        let request = local_principal_reference(&principal)
+            .and_then(|principal_ref| local_erasure_subject_v1(principal_ref, actor))
+            .and_then(|subject| {
+                local_erasure_request_v1(erasure_id).map(|request| (subject, request))
+            })
+            .and_then(|(subject, request)| {
+                ErasureRequestV1::new(ErasureRequestInputV1 {
+                    request,
+                    subject,
+                    scope: ErasureScopeV1::PrivateSubjectData,
+                    selectors: vec![reference(3)],
+                    requester: reference(4),
+                    authorization: reference(5),
+                    policy: reference(6),
+                    request_position: 9,
+                    horizon_position: 20,
+                    provenance: reference(7),
+                })
+            })
+            .map_err(map_erasure_error)?;
+        let mut store = fault_store(fault);
+        let authority = Arc::new(RejectedCoordinatorAuthorityV1::default());
+        {
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                authority.as_ref(),
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
+            let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+            coordinator
+                .submit(request.clone(), request.provenance())
+                .map_err(map_erasure_error)?;
+            coordinator
+                .reject(request.reference(), reference(31))
+                .map_err(map_erasure_error)?;
+        }
+        LocalErasureAdmissionV1 {
+            request: request.reference(),
+            trust: reference(71),
+            mode_profile: reference(72),
+            binding_epoch: 1,
+        }
+        .to_canonical_cbor()
+        .and_then(|eladm1| {
+            store.retain_erasure_object(&eladm1, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
+        })
+        .map_err(map_erasure_error)?;
+        let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))?;
+        host.authority = Some(authority);
+        host.coordinator = Some(reference(30));
+        host.install_inventory_from_coordinator(4)?;
+        host.local_submission = Some(LocalErasureSubmissionBindingV1 {
+            principal_grant: Hash::from_bytes([73; 32]),
+            authority_timeline: TimelineId::new(),
+            authority_registry_digest: reference(74),
+            policy: reference(75),
+            store_request_reserve: 1,
+            preparation: Arc::new(RefusingPreparationV1),
+            trust: reference(71),
+            owners: Vec::new(),
+        });
+        let mut sender = host.command_sender()?;
+        sender.local_erasure_projection(&principal, actor, erasure_id)
+    }
+
+    /// #1407 (M1): a store whose redaction generation cannot be read fails
+    /// the projection with the mapped, payload-free host error rather than
+    /// answer one without it; the same fixture with every read forwarded
+    /// projects generation 0, so the fault is the only difference.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_redaction_generation_read_fails_the_projection() -> Result<(), ErasureHostErrorV1> {
+        let projection = local_projection_under(FaultModeV1::Passthrough)?
+            .ok_or(ErasureHostErrorV1::Conflict)?;
+        assert_eq!(projection.redaction_generation, 0);
+        assert_eq!(
+            local_projection_under(FaultModeV1::RedactionGeneration),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        Ok(())
     }
 
     type DeliveryAuthorityV1 = (
