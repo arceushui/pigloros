@@ -335,6 +335,40 @@ pub enum SelectorBoundaryError {
     Io,
 }
 
+/// Closed failures of the fixed installation as the execute port reads it.
+///
+/// They cover opening SIC1, authenticating and admitting its authority,
+/// reconstructing a case and checking an image (ADR-069 R11 Amendment 1
+/// §7.5, "Unrepresentable at the port").
+///
+/// Only the selector-socket paths and selector-ID entropy produce
+/// [`SelectorBoundaryError::SelectorUnavailable`], and the port calls
+/// neither, so it has no counterpart here:
+///
+/// ```compile_fail
+/// let _ = pos_reference::selector::InstallationError::SelectorUnavailable;
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum InstallationError {
+    /// Path ownership, mode, type, identity, or digest is invalid.
+    #[error("sandbox selector identity or artifact is invalid")]
+    ArtifactInvalid,
+    /// Bounded local I/O failed.
+    #[error("sandbox selector I/O failed")]
+    Io,
+}
+
+/// Every installation failure is the selector-boundary failure of the same
+/// name.
+impl From<InstallationError> for SelectorBoundaryError {
+    fn from(error: InstallationError) -> Self {
+        match error {
+            InstallationError::ArtifactInvalid => Self::ArtifactInvalid,
+            InstallationError::Io => Self::Io,
+        }
+    }
+}
+
 fn connect_at(
     path: &Path,
     expected_uid: u32,

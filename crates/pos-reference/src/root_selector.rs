@@ -561,21 +561,24 @@ impl RootSelectorRuntime {
         let administrator = OwnedAdministratorListener::bind()?;
         open_recovery_directory()
             .and_then(|recovery_directory| {
-                InstalledSelectorState::open_fixed().map(|installed| {
-                    (
-                        NormalOpen {
-                            recovery_directory: Arc::new(recovery_directory),
-                            port,
-                            executable_digest,
-                            recovery_host,
-                        },
-                        installed,
-                    )
-                })
+                InstalledSelectorState::open_fixed()
+                    .map_err(SelectorBoundaryError::from)
+                    .map(|installed| {
+                        (
+                            NormalOpen {
+                                recovery_directory: Arc::new(recovery_directory),
+                                port,
+                                executable_digest,
+                                recovery_host,
+                            },
+                            installed,
+                        )
+                    })
             })
             .and_then(|(opening, installed)| match installed {
                 FixedInstallation::Admissible(installed) => installed
                     .authenticate_bootstrap()
+                    .map_err(SelectorBoundaryError::from)
                     .and_then(|bootstrap| opening.open(&administrator, bootstrap)),
                 FixedInstallation::RecoveryPending(installed) => require_absent_evaluator_endpoint(
                     Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET),
@@ -839,25 +842,28 @@ impl RootSelectorComposition {
             executable_digest,
             ..
         } = opening;
-        bootstrap.admit_provider().and_then(|admitted| {
-            runtime_start::start_provider_runtime(&*port, &admitted, executable_digest).map(
-                |(transport, runtime)| Self {
-                    service: RootSelectorService {
-                        admission_time: SystemTime::now,
-                        admission: SelectorAdmission::new(admitted, runtime),
-                        transport: SelectedProviderTransport::new(transport),
-                        peer_uid: ROOT_UID,
-                        evaluation_namespaces: EvaluationNamespaceBindings::default(),
-                        recovery_directory,
-                        recovery_owner: ROOT_UID,
+        bootstrap
+            .admit_provider()
+            .map_err(SelectorBoundaryError::from)
+            .and_then(|admitted| {
+                runtime_start::start_provider_runtime(&*port, &admitted, executable_digest).map(
+                    |(transport, runtime)| Self {
+                        service: RootSelectorService {
+                            admission_time: SystemTime::now,
+                            admission: SelectorAdmission::new(admitted, runtime),
+                            transport: SelectedProviderTransport::new(transport),
+                            peer_uid: ROOT_UID,
+                            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                            recovery_directory,
+                            recovery_owner: ROOT_UID,
+                        },
+                        updates: Mutex::new(()),
+                        live_update_timeout: LIVE_UPDATE_TIMEOUT,
+                        lifecycle: port,
+                        executable_digest,
                     },
-                    updates: Mutex::new(()),
-                    live_update_timeout: LIVE_UPDATE_TIMEOUT,
-                    lifecycle: port,
-                    executable_digest,
-                },
-            )
-        })
+                )
+            })
     }
 
     /// Evaluates one already-accepted root peer without binding any socket.
@@ -954,6 +960,7 @@ impl RootSelectorComposition {
         let previous = &admission.admitted;
         successor
             .admit_provider()
+            .map_err(SelectorBoundaryError::from)
             .and_then(|successor| {
                 runtime_start::start_provider_runtime(
                     &*self.lifecycle,
@@ -2111,7 +2118,10 @@ fn read_installed(
     identity: [u8; 32],
     limit: u64,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
-    installed.artifact(kind, identity)?.read_control(limit)
+    installed
+        .artifact(kind, identity)
+        .and_then(|artifact| artifact.read_control(limit))
+        .map_err(SelectorBoundaryError::from)
 }
 
 fn selector_execute_bytes(
@@ -2132,6 +2142,7 @@ fn selector_execute_bytes(
                 ]),
                 nonce,
             )
+            .map_err(SelectorBoundaryError::from)
         })
         .and_then(|request| request.to_canonical_cbor().map_err(artifact_invalid))
 }

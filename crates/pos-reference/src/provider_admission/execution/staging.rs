@@ -4,7 +4,7 @@ use super::super::HeldImageAdmission;
 use super::{
     AdmittedProviderExecution, ExecuteRefusal, FailedInput, GrantFailure, GrantedExecution,
     IssuedGrant, OutputReservationRefused, PreparedProviderExecution, ProviderExecutionPolicy,
-    RefusalCause, StagingCharge, StagingError,
+    RecheckError, RefusalCause, StagingCharge, StagingError,
 };
 #[cfg(test)]
 use super::{StagingLedger, StagingLimits, StagingUsage};
@@ -66,8 +66,8 @@ impl<'a> AdmittedEntry<'a> {
     /// Recheck fixed installation and the live control floor before launch.
     ///
     /// # Errors
-    /// Refuses changed authority or raised control floors.
-    pub fn recheck(&self) -> Result<(), StagingError> {
+    /// Refuses changed authority, raised control floors or a closed ledger.
+    pub fn recheck(&self) -> Result<(), RecheckError> {
         self.execution.recheck().map(|_| ())
     }
 }
@@ -220,10 +220,11 @@ impl<C> StagedInput<C> {
     ///
     /// `sign` receives the sealed AGR1 record and returns it signed under
     /// the runtime-attestation key, verified before emission (ADR-069 R9
-    /// §5). Before signing, and again after it immediately before the
-    /// write, the held-image join, the control floor, both deadlines and the
-    /// premature bytes are checked; then `convert` receives the claim and
-    /// the AGR1 digest. On success the conversion's value is returned with
+    /// §5). Before signing, the initial control deadline, the held-image
+    /// join and the control floor are checked. After signing, immediately
+    /// before the write, the held-image join, the control floor, both
+    /// deadlines and the premature bytes are checked; then `convert`
+    /// receives the claim and the AGR1 digest. On success the conversion's value is returned with
     /// the input that is now owed.
     ///
     /// # Errors

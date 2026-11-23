@@ -274,7 +274,7 @@ mod cases {
                 Ok(())
             } else {
                 persisted.set(fs::read(&path).is_ok_and(|bytes| bytes.starts_with(b"PAI3")));
-                Err(StagingError::AuthorityChanged)
+                Err(RecheckError::AuthorityChanged)
             }
         });
         assert_eq!(checked, 2);

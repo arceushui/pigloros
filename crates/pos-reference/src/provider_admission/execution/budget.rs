@@ -183,12 +183,13 @@ impl StagingLedger {
             attempt_ceiling,
             queue_ceiling,
         } = policy;
+        // R11 Amendment 1 §7.5 row R order: 2, 6, 14, then 12.
         if bytes > input_ceiling {
             return Err(StagingError::InputTooLarge);
         }
         let mut state = self.shared.state();
-        state.ensure_open()?;
         check_floor(state.usage.floor, authority)?;
+        state.ensure_open()?;
         if state.usage.attempts >= intersection(&state.attempt_ceilings, attempt_ceiling) {
             return Err(StagingError::AttemptsExhausted);
         }
@@ -279,9 +280,7 @@ pub(super) struct AttemptSlot {
 impl AttemptSlot {
     pub(super) fn recheck(&self, authority: AdmittedAuthority) -> Result<(), StagingError> {
         let state = self.shared.state();
-        state
-            .ensure_open()
-            .and_then(|()| check_floor(state.usage.floor, authority))
+        check_floor(state.usage.floor, authority).and_then(|()| state.ensure_open())
     }
 
     pub(super) fn output(
@@ -636,6 +635,49 @@ mod tests {
         ));
         drop((slot, input));
         assert_eq!(ledger.usage().attempts, 0);
+        Ok(())
+    }
+
+    // R11 Amendment 1 §7.5 row R: an input above its ceiling (2), then the
+    // floor (6), then the closed ledger (14), then the full one (12).
+    #[test]
+    fn reservation_refusals_follow_row_r_order() -> TestResult {
+        let ledger = new_ledger(10);
+        let full = ledger.reserve_storage(10)?;
+        assert!(matches!(
+            ledger.prepare_with(authority(1, 1), policy(101, 1, 1)),
+            Err(StagingError::InputTooLarge)
+        ));
+        ledger.raise_floor(ControlFloor {
+            revocation_epoch: 2,
+            policy_epoch: 0,
+        });
+        assert!(matches!(
+            ledger.prepare_with(authority(1, 1), policy(101, 1, 1)),
+            Err(StagingError::InputTooLarge)
+        ));
+        assert!(matches!(
+            ledger.prepare_with(authority(1, 1), policy(1, 1, 1)),
+            Err(StagingError::BelowControlFloor)
+        ));
+        let (slot, input) = {
+            drop(full);
+            ledger.prepare_with(authority(2, 1), policy(1, 1, 1))?
+        };
+        ledger.close_for_reconciliation();
+        assert!(matches!(
+            ledger.prepare_with(authority(1, 1), policy(1, 1, 1)),
+            Err(StagingError::BelowControlFloor)
+        ));
+        assert!(matches!(
+            slot.recheck(authority(1, 1)),
+            Err(StagingError::BelowControlFloor)
+        ));
+        assert!(matches!(
+            ledger.prepare_with(authority(2, 1), policy(1, 1, 1)),
+            Err(StagingError::CleanupFailed)
+        ));
+        drop((slot, input));
         Ok(())
     }
 
