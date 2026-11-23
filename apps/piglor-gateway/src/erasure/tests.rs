@@ -1185,10 +1185,9 @@ async fn closed_admissions_refuse_new_erasures_and_finish_admitted_ones() -> Tes
     let id = erasure_id(actor, "erasure-1")?.to_string();
     assert_eq!(served.read(actor, &id).await?.status, StatusCode::OK);
     let observed = served.receipted(actor, &id).await?;
-    assert_eq!(
-        observed.last().ok_or("no projection")?["state"],
-        "partial-failure"
-    );
+    // The actor owns no Timeline, so every target of its closure is one a
+    // Local owner destroys and the request completes.
+    assert_eq!(observed.last().ok_or("no projection")?["state"], "complete");
     // The subject is released, and the record still refuses.
     let refused = served
         .request(actor, "erasure-2", "consented-shared-data")
