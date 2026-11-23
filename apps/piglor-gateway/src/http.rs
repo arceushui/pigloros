@@ -2186,6 +2186,56 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(problem["code"], "resource-limit-exceeded");
     }
 
+    #[tokio::test]
+    async fn flagged_json_routes_bound_bytes_and_nesting_before_conversion() {
+        let actor = EntityId::new();
+        let app = authority_test_app(actor);
+        let actor = actor.to_string();
+        let id = EntityId::new();
+        for path in [
+            "/v1/me/erasures".to_owned(),
+            "/v1/preferences".to_owned(),
+            "/v1/option-specs".to_owned(),
+            "/v1/scenario-rooms".to_owned(),
+            format!("/v1/scenario-rooms/{id}/revisions"),
+            format!("/v1/timelines/{id}/actions"),
+        ] {
+            for (body, expected) in [
+                (
+                    " ".repeat(MAX_HTTP_BODY_BYTES + 1),
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                ),
+                (
+                    format!("{{\"payload\":{}null{}}}", "[".repeat(200), "]".repeat(200)),
+                    StatusCode::BAD_REQUEST,
+                ),
+            ] {
+                let (status, _, problem) = raw_request(
+                    app.clone(),
+                    "POST",
+                    &path,
+                    &[
+                        ("content-type", "application/json"),
+                        (crate::operation::ACTOR_ENTITY_HEADER, &actor),
+                        ("idempotency-key", "bounded-request"),
+                    ],
+                    Some(Body::from(body)),
+                )
+                .await;
+                assert_eq!(status, expected, "{path}: {problem}");
+                assert_eq!(
+                    problem["code"],
+                    if expected == StatusCode::PAYLOAD_TOO_LARGE {
+                        "resource-limit-exceeded"
+                    } else {
+                        "invalid-request"
+                    },
+                    "{path}: {problem}"
+                );
+            }
+        }
+    }
+
     /// ADR-134 §8: a stale-binding refusal answers `503`, then stops serving.
     #[tokio::test]
     async fn a_stale_binding_response_stops_the_serve_loop(
