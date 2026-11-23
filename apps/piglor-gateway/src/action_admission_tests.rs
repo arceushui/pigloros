@@ -120,6 +120,54 @@ fn payload(actor: EntityId, body: EntityId, tick: u64) -> serde_json::Value {
     })
 }
 
+#[tokio::test]
+async fn deeply_nested_action_fields_are_rejected() -> TestResult {
+    let fixture = fixture(&StoreConfig::Memory).await?;
+    for field in ["a", "params"] {
+        let mut nested = serde_json::Value::Null;
+        for _ in 0..50_000 {
+            nested = serde_json::Value::Array(vec![nested]);
+        }
+        let value = if field == "params" {
+            serde_json::Value::Array(vec![nested, serde_json::json!(0.0)])
+        } else {
+            nested
+        };
+        let mut body = payload(fixture.actor, fixture.body, 1);
+        body.as_object_mut()
+            .ok_or("expected object")?
+            .insert(field.into(), value);
+        let result = fixture
+            .gateway
+            .submit_json_action(
+                &fixture.timeline.to_string(),
+                &fixture.actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &body,
+                CAPABILITY,
+            )
+            .await;
+        let mut nested = body[field].take();
+        if field == "params" {
+            nested = nested.as_array_mut().ok_or("expected params")?.remove(0);
+        }
+        // Dismantle the adversarial array iteratively so test cleanup is bounded.
+        while let serde_json::Value::Array(mut children) = nested {
+            nested = children.pop().ok_or("expected nested element")?;
+        }
+        assert!(matches!(
+            result,
+            Err(GatewayError::ActionRejected(
+                pos_core::ActionRejected::DomainValidationFailed(_)
+            ))
+        ));
+        assert_eq!(committed_events(&fixture).await?, 0);
+    }
+    fixture.gateway.shutdown().await?;
+    drop(fixture);
+    Ok(())
+}
+
 fn proposal(fixture: &Fixture, tick: u64) -> TestResult<ProposedAction> {
     Ok(crate::build_proposed_action(
         fixture.actor,
