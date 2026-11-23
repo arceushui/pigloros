@@ -10,21 +10,31 @@
 
 mod attestation;
 mod extractor;
+#[cfg(target_os = "linux")]
+mod initialize;
 mod initializer;
 mod lifecycle_authority;
 mod memory_domain;
 mod metadata_authority;
 mod native_graph;
+mod observation;
 mod planner;
 mod private_hash;
 mod protection;
+#[cfg(target_os = "linux")]
+mod quarantine;
 mod sealer;
 mod store_domain;
 mod vault;
 
 pub use extractor::{
-    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
-    CommunityArtifactRecordInputV1,
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1,
+    CommunityArtifactBatchInputV1, CommunityArtifactBatchV1, CommunityArtifactRecordInputV1,
+    CommunityControlBatchInputV1,
+};
+#[cfg(target_os = "linux")]
+pub use initialize::{
+    CommunityInitializationContextV1, CommunityInitializationReceiptV1, CommunityInitializeCallV1,
 };
 pub use initializer::CommunityInitializerOwnerV1;
 pub use lifecycle_authority::{
@@ -43,6 +53,13 @@ pub use native_graph::{
     CommunityAssembledRecordV1, CommunityInitializationGraphInputV1,
     CommunityInitializationGraphV1, CommunityInitializationMemberV1,
 };
+pub use observation::{
+    prepare_community_observation_v1, CommunityObservationBindingsV1,
+    CommunityObservationConsumerV1, CommunityObservationEventV1,
+    CommunityObservationInstallationV1, CommunityObservationMaterializationInputV1,
+    CommunityObservationMaterializationV1, CommunityObservationPassV1,
+    CommunityObservationRecordsV1, CommunityObservationSourcesV1,
+};
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
     CommunityInitializationEvidenceInputV1, CommunityInitializationInstallationV1,
@@ -52,4 +69,10 @@ pub use planner::{
 pub use protection::{
     CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,
     CommunityRecordEvidenceV1,
+};
+#[cfg(target_os = "linux")]
+pub use quarantine::{
+    CommunityPreExecutionFailureInputV1, CommunityPreExecutionFailureV1,
+    CommunityPreExecutionTrustV1, CommunityQuarantineContextV1, CommunityQuarantineReceiptV1,
+    CommunitySetReasonCallV1,
 };

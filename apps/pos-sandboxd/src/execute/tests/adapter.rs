@@ -137,15 +137,19 @@ impl FakeHost {
                 systemd.push(held);
             }
         }
-        let held = self
+        let mut held = self
             .systemd_held
             .lock()
             .map(|held| held.iter().map(number).collect::<Vec<_>>())
             .unwrap_or_default();
+        if let Ok(watched) = self.adapter_stdout.lock() {
+            held.extend(watched.iter().map(number));
+        }
         let done = Arc::clone(&self.adapter_done);
         let report = Arc::clone(&self.stdio_report);
         let released = Arc::clone(&self.released);
         let kept = Arc::clone(&self.systemd_held);
+        let stdout = Arc::clone(&self.adapter_stdout);
         let reads_input = script.input == InputUse::Read;
         let adapter = move || {
             let identities = (identity(&input), identity(&output));
@@ -183,8 +187,13 @@ impl FakeHost {
                 report.input = read;
             }
             if script.never_finish {
+                let output = StdOwnedFd::from(output);
+                // A duplicate lets the fake's kill watch the channel.
+                if let (Ok(watched), Ok(mut stdout)) = (output.try_clone(), stdout.lock()) {
+                    stdout.push(watched);
+                }
                 if let Ok(mut kept) = kept.lock() {
-                    kept.push(StdOwnedFd::from(output));
+                    kept.push(output);
                 }
                 return;
             }
@@ -298,7 +307,7 @@ async fn a_complete_framed_output_is_captured_after_the_whole_input_was_fed() ->
     // The adapter read exactly the verified input, after the release only.
     assert_eq!(report.input, INPUT);
     assert_eq!(report.released_before_input, Some(true));
-    let fed = execution.adapter.input();
+    let fed = execution.adapter.input().ok_or("the feed was not timed")?;
     assert_eq!((fed.expected_bytes, fed.accepted_bytes), (5, 5));
     assert!(fed.complete);
     assert_eq!(fed.deadline - fed.start, 1_000_000_000);
@@ -426,6 +435,10 @@ struct Ending {
     faults: &'static [Fault],
     /// Cancel the attempt as it is released.
     cancel: bool,
+    /// Report an activation so long ago that the watchdog's `D + G` has
+    /// passed when the release arrives: the supervision ends at its first
+    /// poll, as on a host that stalled the provider after the release.
+    late: bool,
 }
 
 /// What a hung Local adapter does on FD 3.
@@ -451,6 +464,10 @@ impl Ending {
             ..StdioScript::default()
         });
         scenario.host.faults.extend_from_slice(self.faults);
+        if self.late {
+            let stalled = u64::try_from(2 * NANOSECONDS_PER_SECOND).unwrap_or_default();
+            scenario.host.activated = Some(monotonic_now_ns().saturating_sub(stalled));
+        }
         if self.cancel {
             scenario.barrier.cancel_on_release = Some(Arc::new(AttemptCancel::new()));
         }
@@ -586,6 +603,7 @@ async fn every_unacknowledged_kill_aborts_the_capture() -> TestResult {
         local: Some(Fd3::Silent),
         faults: &[Fault::Kill],
         cancel: true,
+        ..Ending::default()
     };
     assert_eq!(
         captured_at(
@@ -595,6 +613,17 @@ async fn every_unacknowledged_kill_aborts_the_capture() -> TestResult {
             }
         )
         .await?,
+        ABORTED
+    );
+    // The supervision ends at its first poll, before the capture was ever
+    // told the channel is readable; the kill answers once the queued output
+    // was read, so the abort keeps it.
+    let late = Ending {
+        late: true,
+        ..unkilled
+    };
+    assert_eq!(
+        captured_at(late, AttemptEnding::WatchdogKillFailed).await?,
         ABORTED
     );
     Ok(())
@@ -676,7 +705,11 @@ async fn an_adapter_that_closes_stdin_leaves_the_feed_incomplete() -> TestResult
     };
     let limits = limits(100, 1_000, GENEROUS_WATCHDOG_MS);
     let run = StdioRun::with(script, TestPayload::with_input(INPUT), limits).await?;
-    let fed = run.execution()?.adapter.input();
+    let fed = run
+        .execution()?
+        .adapter
+        .input()
+        .ok_or("the feed was not timed")?;
     // EPIPE: nothing was accepted, and the feed stopped well before its deadline.
     assert_eq!((fed.expected_bytes, fed.accepted_bytes), (5, 0));
     assert!(!fed.complete);
@@ -692,7 +725,11 @@ async fn a_zero_input_window_is_a_literal_zero_window() -> TestResult {
     };
     let limits = limits(100, 0, GENEROUS_WATCHDOG_MS);
     let run = StdioRun::with(script, TestPayload::with_input(INPUT), limits).await?;
-    let fed = run.execution()?.adapter.input();
+    let fed = run
+        .execution()?
+        .adapter
+        .input()
+        .ok_or("the feed was not timed")?;
     // The closed window stops the feed before its first write.
     assert_eq!(fed.deadline, fed.start);
     assert_eq!(fed.accepted_bytes, 0);
@@ -712,7 +749,11 @@ async fn an_input_the_adapter_never_reads_closes_the_feed_at_its_deadline() -> T
     let input = vec![0x5a; 4 * 1024 * 1024];
     let limits = limits(100, 50, 400);
     let run = StdioRun::with(script, TestPayload::with_input(&input), limits).await?;
-    let fed = run.execution()?.adapter.input();
+    let fed = run
+        .execution()?
+        .adapter
+        .input()
+        .ok_or("the feed was not timed")?;
     assert_eq!(fed.expected_bytes, input.len() as u64);
     assert!(fed.accepted_bytes < fed.expected_bytes);
     assert!(fed.finish >= fed.deadline);

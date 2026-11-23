@@ -1,0 +1,29 @@
+{
+  "name": "client-cache-frozen-timeline-deleted",
+  "operation_id": "listEvents",
+  "request": {
+    "path": {
+      "timeline_id": "01JC0GATEWAYF1XTVRET1ME001"
+    },
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 403,
+    "headers": {
+      "Cache-Control": "no-store"
+    },
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:deleted",
+      "title": "Deleted",
+      "status": 403,
+      "detail": "the Timeline is frozen for erasure",
+      "instance": "/v1/timelines/{timeline_id}/events",
+      "code": "deleted",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

@@ -343,3 +343,54 @@ fn scope_parser_refuses_incomplete_nonpreferred_and_wrong_grammar() -> TestResul
     }
     Ok(())
 }
+
+#[test]
+fn scope_set_preimage_is_the_exact_ordered_member_array() -> TestResult {
+    let rows = [member()];
+    let expected = encode(&Value::Array(vec![Value::Array(vec![
+        bytes(&[5; 32]),
+        bytes(&[6; 16]),
+        bytes(&[7; 32]),
+        bytes(&[8; 32]),
+        uint(9),
+    ])]))?;
+    assert_eq!(
+        Members::from_members(&rows).to_canonical_cbor()?.as_slice(),
+        expected.as_slice()
+    );
+    assert_eq!(
+        Members::from_members(&[]).to_canonical_cbor()?.as_slice(),
+        [0x80]
+    );
+    let mut second = member();
+    second.scope_reference = hash(6);
+    assert_eq!(
+        Members::from_members(&[second, member()])
+            .to_canonical_cbor()
+            .err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut zero = member();
+    zero.owner_reference = Hash::zero();
+    assert_eq!(
+        Members::from_members(&[zero]).to_canonical_cbor().err(),
+        Some(Error::InvalidBinding)
+    );
+    let full: Vec<Member> = (0..=u16::try_from(MAX_MEMBERS)?)
+        .map(|index| {
+            let mut row = member();
+            let mut reference = [5; 32];
+            reference[..2].copy_from_slice(&index.to_be_bytes());
+            row.scope_reference = Hash::from_bytes(reference);
+            row
+        })
+        .collect();
+    assert!(Members::from_members(&full[..MAX_MEMBERS])
+        .to_canonical_cbor()
+        .is_ok());
+    assert_eq!(
+        Members::from_members(&full).to_canonical_cbor().err(),
+        Some(Error::BoundsExceeded)
+    );
+    Ok(())
+}

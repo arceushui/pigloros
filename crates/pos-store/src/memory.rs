@@ -79,9 +79,9 @@ use pos_core::{
     ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionSnapshotV1, ManifestOwnerLinkAncestorV1, ManifestOwnerLinkCutIdentityV1,
-    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, OwnerIdV1, PersistedAuthorityV1,
-    PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PreparedLocalCutOwnerCommitV1,
+    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, OwnerConsentV2PermitV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PreparedLocalCutOwnerCommitV1,
     PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
     PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
     ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
@@ -122,6 +122,8 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+#[cfg(target_os = "linux")]
+mod community_artifacts;
 mod composition_fallback_registry;
 mod counterfactual_store;
 mod fork_attribution_authority_import;
@@ -260,7 +262,7 @@ pub struct MemoryStore {
     /// Immutable `geo.cell` Event-to-snapshot links.
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     /// Trusted Gateway authority bound to this adapter's protected append port.
-    consent_authority_permit: Option<ConsentAppendPermit>,
+    consent_permits: crate::ConsentPermitBinding,
     /// Host-owned erasure containment gate for protected Timeline operations.
     erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host. The constructor's
@@ -346,6 +348,10 @@ pub struct MemoryStore {
     erasure_retained_objects: BTreeMap<ErasureReferenceV1, String>,
     /// The write-once erasure store identity (ADR-136 §4).
     erasure_store_identity: Option<Hash>,
+    /// The redaction generation: how many ELCG1 cache generations the store
+    /// committed (ADR-136 follow-up F2, #1407). Like every other erasure
+    /// record of a `MemoryStore`, it lives as long as the instance.
+    redaction_generation: u64,
     /// Exact immutable artifact bytes and ARD1 rows visible in each local owner catalog.
     artifact_registrations: BTreeMap<Hash, ArtifactRegistrationCatalogRowV1>,
     /// Unique immutable identity index for `(owner, class, artifact digest)`.
@@ -403,6 +409,8 @@ pub struct MemoryStore {
     mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1,
     /// Gateway-managed Preference and `OptionSpec` revisions (#304).
     gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1,
+    /// The operator's Local erasure admissions record (#1408).
+    erasure_admissions: pos_core::ErasureAdmissionsStateV1,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -805,7 +813,7 @@ impl MemoryStore {
             geographic_cell_dedup: HashMap::new(),
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
-            consent_authority_permit: None,
+            consent_permits: crate::ConsentPermitBinding::default(),
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
             erasure_gate,
@@ -850,6 +858,7 @@ impl MemoryStore {
             erasure_evidence: BTreeMap::new(),
             erasure_retained_objects: BTreeMap::new(),
             erasure_store_identity: None,
+            redaction_generation: 0,
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
@@ -878,6 +887,7 @@ impl MemoryStore {
             erasure_fork_recovery_proofs: BTreeMap::new(),
             mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1::default(),
             gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1::default(),
+            erasure_admissions: pos_core::ErasureAdmissionsStateV1::Open,
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -886,6 +896,13 @@ impl MemoryStore {
     #[must_use]
     pub fn with_hasher(hasher: Box<dyn Hasher>) -> Self {
         Self::with_default_components(hasher)
+    }
+
+    /// The store's pinned Hasher, the one its Event chains are built with.
+    /// The community observation owner re-derives chain hashes with it
+    /// (ADR-129 revision 9, R9.3 and R9.6).
+    pub(crate) fn event_hasher(&self) -> &dyn Hasher {
+        self.hasher.as_ref()
     }
 
     /// Construct a store with a deterministic or host-provided admission clock.
@@ -1395,7 +1412,7 @@ impl MemoryStore {
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         if gateway_consent {
-            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+            let bound_permit = self.consent_permits.gateway().ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
             })?;
             let permit = permit.ok_or_else(|| {
@@ -3377,8 +3394,15 @@ impl MemoryStore {
         if head.as_u64() != cut {
             return Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary);
         }
-        let meta = TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name);
-        let child = Timeline::new(meta);
+        // ADR-136 §1: the admitted child inherits the parent's owner.
+        let owner = self
+            .timelines
+            .get(&parent_id)
+            .and_then(|state| state.timeline.meta.owner);
+        let child = Timeline::new(TimelineMeta {
+            owner,
+            ..TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name)
+        });
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent_id, Seq::from_u64(cut))
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)?;
@@ -3955,6 +3979,10 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         prepared: pos_core::PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         self.local_erasure_commit_owner_effect(&prepared)
+    }
+
+    fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
+        Ok(self.redaction_generation)
     }
 
     fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
@@ -5625,6 +5653,21 @@ impl pos_core::LocalReplicaResidualPortV1 for MemoryStore {
     }
 }
 
+/// The admissions record of a `MemoryStore` lives as long as its instance
+/// (#1408).
+impl pos_core::ErasureAdmissionsPortV1 for MemoryStore {
+    fn erasure_admissions(&self) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+        Ok(self.erasure_admissions)
+    }
+
+    fn set_erasure_admissions(
+        &mut self,
+        state: pos_core::ErasureAdmissionsStateV1,
+    ) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+        Ok(std::mem::replace(&mut self.erasure_admissions, state))
+    }
+}
+
 impl EventStore for MemoryStore {
     fn commit_artifact_registration_batch(
         &mut self,
@@ -5742,16 +5785,14 @@ impl EventStore for MemoryStore {
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
-        match self.consent_authority_permit {
-            Some(existing) if existing != permit => Err(CoreError::Storage(
-                "Gateway consent authority is already bound".to_owned(),
-            )),
-            Some(_) => Ok(()),
-            None => {
-                self.consent_authority_permit = Some(permit);
-                Ok(())
-            }
-        }
+        self.consent_permits.bind_gateway(permit)
+    }
+
+    fn bind_owner_consent_v2_permit(
+        &mut self,
+        permit: OwnerConsentV2PermitV1,
+    ) -> Result<(), CoreError> {
+        self.consent_permits.bind_owner(permit)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {

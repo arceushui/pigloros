@@ -1916,6 +1916,12 @@ fn each_owner_effect_retains_only_its_own_record() -> TestResult {
         assert_eq!(prepared.owner_result().tag(), "ELO1");
         assert!(prepared.key_tombstone().is_none());
         assert!(prepared.existing_tombstone().is_none());
+        // #1407: only the ELCG1 raises the store's redaction generation.
+        assert_eq!(
+            prepared.raises_redaction_generation(),
+            tag == "ELCG1",
+            "{tag}"
+        );
     }
     assert_eq!(
         prepared_elo1(&PreparedLocalOwnerEffectV1::new(

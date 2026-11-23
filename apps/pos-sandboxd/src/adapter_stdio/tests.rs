@@ -143,7 +143,7 @@ async fn descriptors_the_reactor_refuses_feed_and_capture_nothing() -> TestResul
     // A regular file cannot be registered with epoll.
     let file = tempfile::tempfile()?;
     let payload: Arc<dyn AttemptPayload> = Arc::new(TestPayload::default());
-    let (accepted, _) = feed(
+    let accepted = feed(
         file.try_clone()?.into(),
         &payload,
         None,
@@ -164,7 +164,7 @@ async fn an_unreadable_input_stops_the_feed() -> TestResult {
         fail_read: true,
         ..TestPayload::default()
     });
-    let (accepted, _) = feed(provider.input, &payload, None, std::future::pending()).await;
+    let accepted = feed(provider.input, &payload, None, std::future::pending()).await;
     assert_eq!(accepted, 0);
     Ok(())
 }
@@ -173,9 +173,8 @@ async fn an_unreadable_input_stops_the_feed() -> TestResult {
 async fn a_feed_without_a_representable_deadline_runs_until_it_completes() -> TestResult {
     let (unit, provider) = open_channels()?;
     let payload: Arc<dyn AttemptPayload> = Arc::new(TestPayload::with_input(b"input"));
-    let (accepted, finish) = feed(provider.input, &payload, None, std::future::pending()).await;
+    let accepted = feed(provider.input, &payload, None, std::future::pending()).await;
     assert_eq!(accepted, 5);
-    assert!(finish > 0);
     let mut read = [0; 5];
     let (input, _, _) = unit.into_parts();
     assert_eq!(rustix::io::read(&input, &mut read)?, 5);
@@ -258,7 +257,7 @@ fn the_provider_only_writes_stdin_and_only_reads_stdout() {
         [Some("read_output".to_owned()), Some("drain".to_owned())]
     );
     // The feed holds only the stdin end and the capture only the stdout end.
-    assert!(production.contains("provider.input,\n            &payload,"));
+    assert!(production.contains("timed_feed(\n            provider.input,\n            &payload,"));
     assert!(production.contains("capture(provider.output,"));
 }
 
@@ -431,7 +430,7 @@ async fn the_feed_reads_the_input_in_chunks_of_64_kib() -> TestResult {
         reads: std::sync::Mutex::default(),
     });
     let payload = Arc::clone(&recorded) as Arc<dyn AttemptPayload>;
-    let (accepted, _) = feed(provider.input, &payload, None, std::future::pending()).await;
+    let accepted = feed(provider.input, &payload, None, std::future::pending()).await;
     assert_eq!(accepted, 65_541);
     assert_eq!(
         *recorded.reads.lock().map_err(|_| "poisoned read log")?,
@@ -450,7 +449,7 @@ async fn a_window_closing_as_the_feed_starts_writes_nothing() -> TestResult {
     tokio::time::advance(Duration::from_micros(500)).await;
     let payload: Arc<dyn AttemptPayload> = Arc::new(TestPayload::with_input(b"input"));
     let deadline = tokio::time::Instant::now();
-    let (accepted, _) = feed(
+    let accepted = feed(
         provider.input,
         &payload,
         Some(deadline),
@@ -471,4 +470,126 @@ fn the_shared_test_payload_reserves_as_often_as_it_is_asked() {
     let payload = crate::test_fixtures::shared_test_payload();
     let charges: Vec<_> = (0..2_000).map(|_| payload.reserve_output()).collect();
     assert!(charges.iter().all(|charge| matches!(charge, Some(Ok(_)))));
+}
+
+/// A clock that cannot report the time.
+fn broken_clock() -> io::Result<u64> {
+    Err(io::ErrorKind::InvalidData.into())
+}
+
+/// A clock that reports the feed's start and then cannot report its finish.
+///
+/// `MonotonicClock` is a plain `fn`, so the read count is a process-wide
+/// static: the first read succeeds and every later read fails. It must stay
+/// the only test in its process that uses this clock; that holds under both
+/// nextest and `cargo test`.
+fn clock_failing_after_one_read() -> io::Result<u64> {
+    static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+        Ok(1_000)
+    } else {
+        broken_clock()
+    }
+}
+
+/// Run the feed and the capture of `input` with `clock`, the unit closing
+/// its stdout at once; the feed's record and what reached the unit's stdin.
+async fn run_with(clock: MonotonicClock, input: &[u8]) -> TestResult<(AdapterIo, Vec<u8>)> {
+    let (unit, provider) = open_channels()?;
+    let (stdin, stdout, _) = unit.into_parts();
+    drop(stdout);
+    let charge = crate::StagingLedger::new(crate::StagingLimits { aggregate_bytes: 0 })
+        .reserve_storage(0)?;
+    let channels = AdapterChannels {
+        provider,
+        payload: Arc::new(TestPayload::with_input(input)),
+        output_limit: 10,
+        input_window_ms: 60_000,
+        charge,
+        clock,
+    };
+    let (_ended, on_end) = watch::channel(None);
+    let io = channels.run(on_end).await;
+    let mut fed = vec![0; input.len() + 1];
+    let read = rustix::io::read(&stdin, &mut fed)?;
+    fed.truncate(read);
+    Ok((io, fed))
+}
+
+// R9 Amendment 1 change F: an unreadable feed start never starts the feed
+// and closes its write end; either unreadable time leaves `adapter-input`
+// unreadable, never a substitute time.
+#[tokio::test]
+async fn an_unreadable_feed_start_never_starts_the_feed() -> TestResult {
+    let (io, fed) = run_with(broken_clock, b"input").await?;
+    assert_eq!(io.input(), None);
+    // End of file: nothing was written and the write end is closed.
+    assert!(fed.is_empty());
+    assert_eq!(io.output().capture().accepted_bytes, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_feed_finish_leaves_the_feed_untimed() -> TestResult {
+    let (io, fed) = run_with(clock_failing_after_one_read, b"input").await?;
+    assert_eq!(io.input(), None);
+    assert_eq!(fed, b"input");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_readable_clock_times_the_feed() -> TestResult {
+    let (io, fed) = run_with(crate::launcher::clock::monotonic_ns, b"input").await?;
+    let input = io.input().ok_or("the feed was not timed")?;
+    assert_eq!((input.expected_bytes, input.accepted_bytes), (5, 5));
+    assert_eq!(input.deadline - input.start, 60_000_000_000);
+    assert!(input.start <= input.finish && input.complete);
+    assert_eq!(fed, b"input");
+    Ok(())
+}
+
+/// The output records cut a multi-chunk capture at exact 1 MiB offsets,
+/// each record carrying its own index, offset and bytes, contiguous from
+/// index zero and accepted by the selector's stream validator.
+#[test]
+fn output_records_cut_the_capture_at_every_chunk_offset() -> TestResult {
+    use pos_reference::sandbox_provider_protocol::{PayloadDirection, PayloadStreamValidator};
+    let chunk = SandboxPayloadChunk::CHUNK_BYTES;
+    let bytes: Vec<u8> = (0..2 * chunk + 3)
+        .map(|byte| byte.to_le_bytes()[0])
+        .collect();
+    let charge = crate::StagingLedger::new(crate::StagingLimits { aggregate_bytes: 0 })
+        .reserve_storage(0)?;
+    let released = ReleasedOutput {
+        bytes: bytes.clone(),
+        charge,
+    };
+    let records = released.into_records([2; 32], [3; 16], [4; 16])?;
+    assert_eq!(records.records().len(), 3);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(OUTPUT_DOMAIN);
+    hasher.update(&bytes);
+    let mut validator = PayloadStreamValidator::new(
+        [2; 32],
+        [3; 16],
+        [4; 16],
+        PayloadDirection::Output,
+        PayloadDescriptor {
+            byte_length: bytes.len() as u64,
+            digest: *hasher.finalize().as_bytes(),
+        },
+    )?;
+    for (index, record) in records.records().iter().enumerate() {
+        let decoded = SandboxPayloadChunk::from_canonical_cbor(record)?;
+        let start = index * chunk;
+        assert_eq!(decoded.index, index as u64);
+        assert_eq!(decoded.offset, start as u64);
+        assert_eq!(
+            decoded.bytes,
+            bytes[start..(start + chunk).min(bytes.len())]
+        );
+        validator.accept(&decoded)?;
+    }
+    validator.finish()?;
+    Ok(())
 }

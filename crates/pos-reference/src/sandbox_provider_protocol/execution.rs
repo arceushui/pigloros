@@ -107,6 +107,60 @@ impl SandboxPayloadChunk {
         chunk.validate(fields).map(|()| chunk)
     }
 
+    /// The size of every SBC1 chunk but a payload's final one (ADR-069 §4).
+    pub const CHUNK_BYTES: usize = PAYLOAD_CHUNK_BYTES;
+
+    /// The canonical SBC1 record at `index` of one output payload (ADR-069
+    /// §4): `bytes`, at offset `index` times [`Self::CHUNK_BYTES`], bound to
+    /// `parent_digest`, the SPY1 self-digest, and to the request and
+    /// attempt. A payload's chunks are contiguous from index zero, and each
+    /// but the final one is exactly [`Self::CHUNK_BYTES`] long; an empty
+    /// payload has no records.
+    ///
+    /// # Errors
+    /// Refuses a zero parent digest, empty or oversized bytes, and an index
+    /// of 128 or more.
+    pub fn output_record(
+        parent_digest: [u8; 32],
+        request_id: [u8; 16],
+        attempt_id: [u8; 16],
+        index: u64,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        index
+            .checked_mul(PAYLOAD_CHUNK_BYTES as u64)
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+            .and_then(|offset| {
+                Self {
+                    parent_digest,
+                    request_id,
+                    attempt_id,
+                    direction: PayloadDirection::Output,
+                    index,
+                    offset,
+                    bytes,
+                    chunk_digest: [0; 32],
+                }
+                .encoded()
+            })
+    }
+
+    /// Self-digest this chunk, validate it and encode it.
+    fn encoded(mut self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = self.unsigned_value();
+        record_digest("SBC1", &Value::Array(unsigned.to_vec()))
+            .and_then(|digest| {
+                self.chunk_digest = digest;
+                self.validate(&unsigned)
+            })
+            .and_then(|()| {
+                encode(&Value::Array(vec![
+                    Value::Array(unsigned.to_vec()),
+                    bytes_value(&self.chunk_digest),
+                ]))
+            })
+    }
+
     fn validate(&self, fields: &[Value; 9]) -> Result<(), SandboxProviderProtocolError> {
         let expected_offset = self
             .index

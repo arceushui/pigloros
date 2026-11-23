@@ -13,6 +13,11 @@ use owner_session::SubjectOwnerLocks;
 pub use owner_session::{SubjectOwnerExclusiveGuard, SubjectOwnerSharedGuard};
 
 pub use store_file::store_file_id;
+pub use subject_keys::{
+    SubjectKeyArtifactContent, SubjectKeyArtifactEntry, SubjectKeyArtifactKind,
+    SubjectKeyArtifactName, SubjectKeyArtifactSlot, MAX_SUBJECT_KEY_ARTIFACT_BYTES,
+    MAX_SUBJECT_KEY_ARTIFACT_ENTRIES,
+};
 
 const LOCK_NAME: &str = "pigloros.subject-encryptor.v1.lock";
 const FILE_FLAGS: OFlags = OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
@@ -149,9 +154,11 @@ fn validate_file_identity(directory: &OwnedFd, name: &str, file: &impl AsFd) -> 
     })
 }
 
+mod commit;
 mod nonce_ledger;
 mod owner_session;
 mod store_file;
+mod subject_keys;
 
 #[cfg(test)]
 mod tests;

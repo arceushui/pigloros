@@ -30,6 +30,11 @@
         "responses": {
           "200": {
             "description": "The Gateway is ready.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -40,6 +45,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`: the store executor or erasure host is not ready.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -65,6 +75,11 @@
         "responses": {
           "200": {
             "description": "The public Prediction Ledger.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -110,6 +125,11 @@
         "responses": {
           "201": {
             "description": "The registered prediction.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -120,6 +140,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -130,6 +155,11 @@
           },
           "403": {
             "description": "`unauthorized`: ledger writes are disabled.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -140,6 +170,11 @@
           },
           "422": {
             "description": "`invalid-request`: the prediction is invalid.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -156,6 +191,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -168,6 +206,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`: no ledger store.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -213,6 +256,11 @@
         "responses": {
           "201": {
             "description": "The created Timeline.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -223,6 +271,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -233,6 +286,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and operation) or `revoked`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -256,11 +314,19 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
           "503": {
             "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -330,6 +396,11 @@
         "responses": {
           "200": {
             "description": "One page in Timeline Order.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -340,6 +411,11 @@
           },
           "400": {
             "description": "`invalid-request`: a malformed query, ID, limit or cursor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -350,6 +426,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -360,6 +441,11 @@
           },
           "403": {
             "description": "`unauthorized`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -370,6 +456,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -380,6 +471,11 @@
           },
           "409": {
             "description": "`append-conflict`: the cursor belongs to an older inventory generation.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -390,6 +486,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: one Event exceeds the response bound.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -400,6 +501,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -416,6 +522,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -460,6 +569,11 @@
         "responses": {
           "201": {
             "description": "The committed Event.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -470,6 +584,11 @@
           },
           "200": {
             "description": "An exact retry: the originally committed Event.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -480,6 +599,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -490,6 +614,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -500,6 +629,11 @@
           },
           "403": {
             "description": "`unauthorized`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -510,6 +644,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -520,6 +659,11 @@
           },
           "409": {
             "description": "`idempotency-conflict` or `append-conflict`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -530,6 +674,11 @@
           },
           "422": {
             "description": "`invalid-request` or `admission-rejected`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -540,6 +689,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -556,6 +710,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -606,6 +763,11 @@
         "responses": {
           "201": {
             "description": "The committed Society Signal Event.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -616,6 +778,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -626,6 +793,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and operation, or the signal's `entity_id` is not the `x-piglor-actor-entity` actor) or `revoked`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -636,6 +808,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -652,6 +829,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -664,6 +844,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -704,6 +889,11 @@
         "responses": {
           "200": {
             "description": "Accepted, duplicate, or an empty body.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -720,6 +910,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -758,6 +951,11 @@
         "responses": {
           "200": {
             "description": "The caller's own session.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -768,6 +966,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -778,6 +981,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and `session.read`) or `revoked` (the session authority was revoked or expired).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -794,6 +1002,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -806,6 +1017,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -855,6 +1071,11 @@
         "responses": {
           "201": {
             "description": "The committed first revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -865,6 +1086,11 @@
           },
           "200": {
             "description": "An exact retry (the same `Idempotency-Key` and request): the revision it committed.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -875,6 +1101,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -885,6 +1116,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -895,6 +1131,11 @@
           },
           "403": {
             "description": "`unauthorized` (including a `persona` participant the Principal's grant does not cover), `revoked` or `consent-invalid` (a `privacy_export_ref` that names no consent granted to the Principal). The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -905,6 +1146,11 @@
           },
           "409": {
             "description": "`idempotency-conflict`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -915,6 +1161,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -925,6 +1176,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -935,6 +1191,11 @@
           },
           "422": {
             "description": "`admission-rejected`: a plugin the deployment does not bundle at exactly that version, a rule whose first segment names no requested plugin, or a `governance_ref` that names no governance record of the host.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -945,6 +1206,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -997,6 +1263,11 @@
         "responses": {
           "201": {
             "description": "The committed new revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1007,6 +1278,11 @@
           },
           "200": {
             "description": "An exact retry, or a derive whose `parent_revision` is no longer the head and whose descriptor equals the revision already derived from that parent (ADR-041 section 7): the existing revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1017,6 +1293,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1027,6 +1308,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1037,6 +1323,11 @@
           },
           "403": {
             "description": "`unauthorized`, `revoked` or `consent-invalid`, as for `createScenarioRoom`. The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1047,6 +1338,11 @@
           },
           "409": {
             "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1057,6 +1353,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1067,6 +1368,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1077,6 +1383,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: no such room or `parent_revision`, identical for a missing and a protected room.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1087,6 +1398,11 @@
           },
           "422": {
             "description": "`admission-rejected`, as for `createScenarioRoom`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1097,6 +1413,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1139,6 +1460,11 @@
         "responses": {
           "200": {
             "description": "The revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1149,6 +1475,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1159,6 +1490,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1169,6 +1505,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1179,6 +1520,11 @@
           },
           "403": {
             "description": "`unauthorized` or `revoked`: the authority decision precedes any lookup.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1189,6 +1535,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1199,6 +1550,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`: the denial-record bound; retryable, with `Retry-After`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1251,6 +1607,11 @@
         "responses": {
           "201": {
             "description": "The new revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1261,6 +1622,11 @@
           },
           "200": {
             "description": "An exact retry: the original revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1271,6 +1637,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key` or a violated admission rule) or `unsupported-version` (a `schema_version` other than 1).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1281,6 +1652,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1291,6 +1667,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and `preference.create`) or `revoked`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1301,6 +1682,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: the parent is unknown, erased or of another subject.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1311,6 +1697,11 @@
           },
           "409": {
             "description": "`idempotency-conflict` (the key was used for another request) or `append-conflict` (`parent` is no longer the head).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1321,6 +1712,11 @@
           },
           "410": {
             "description": "`deleted`: an exact retry of a request whose revision its subject erased.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1331,6 +1727,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1354,11 +1755,19 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
           "503": {
             "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1404,6 +1813,11 @@
         "responses": {
           "200": {
             "description": "The revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1414,6 +1828,11 @@
           },
           "400": {
             "description": "`invalid-request`: the path does not name a canonical revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1424,6 +1843,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1434,6 +1858,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and `preference.read`) or `revoked`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1444,6 +1873,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing revision and one of another subject; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1454,6 +1888,11 @@
           },
           "410": {
             "description": "`deleted`: the subject erased this revision; answered only to its subject.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1477,11 +1916,19 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
           "503": {
             "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1534,6 +1981,11 @@
         "responses": {
           "201": {
             "description": "The new revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1544,6 +1996,11 @@
           },
           "200": {
             "description": "An exact retry: the original revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1554,6 +2011,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key` or a violated admission rule) or `unsupported-version` (a `schema_version` other than 1).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1564,6 +2026,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1574,6 +2041,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and `option-spec.create`) or `revoked`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1584,6 +2056,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: the parent is unknown, erased or of another subject.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1594,6 +2071,11 @@
           },
           "409": {
             "description": "`idempotency-conflict` (the key was used for another request) or `append-conflict` (`parent` is no longer the head).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1604,6 +2086,11 @@
           },
           "410": {
             "description": "`deleted`: an exact retry of a request whose revision its subject erased.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1614,6 +2101,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1637,11 +2129,19 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
           "503": {
             "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1687,6 +2187,11 @@
         "responses": {
           "200": {
             "description": "The revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1697,6 +2202,11 @@
           },
           "400": {
             "description": "`invalid-request`: the path does not name a canonical revision.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1707,6 +2217,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1717,6 +2232,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and `option-spec.read`) or `revoked`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1727,6 +2247,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing revision and one of another subject; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1737,6 +2262,11 @@
           },
           "410": {
             "description": "`deleted`: the subject erased this revision; answered only to its subject.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1760,11 +2290,19 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             }
           },
           "503": {
             "description": "`temporarily-unavailable` (retryable): the revision store is unavailable, or the host cannot vouch for its revocation state or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1809,6 +2347,11 @@
         "responses": {
           "202": {
             "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1819,6 +2362,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1829,6 +2377,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1839,6 +2392,11 @@
           },
           "403": {
             "description": "`unauthorized` or `consent-invalid`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1849,6 +2407,11 @@
           },
           "409": {
             "description": "`idempotency-conflict`, `incompatible-profile` or `artifact-untrusted`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1859,6 +2422,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1869,6 +2437,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1879,6 +2452,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: an input revision is unknown or protected.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1889,6 +2467,11 @@
           },
           "422": {
             "description": "`admission-rejected`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1923,6 +2506,11 @@
         "responses": {
           "200": {
             "description": "The preview.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1933,6 +2521,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1943,6 +2536,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1953,6 +2551,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2000,6 +2603,11 @@
         "responses": {
           "201": {
             "description": "The committed Event receipt with its next Projection cursor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2010,6 +2618,11 @@
           },
           "200": {
             "description": "An exact retry: the original receipt; approval is not re-run.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2020,6 +2633,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2030,6 +2648,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2040,6 +2663,11 @@
           },
           "403": {
             "description": "`unauthorized` or `consent-invalid`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2050,6 +2678,11 @@
           },
           "409": {
             "description": "`idempotency-conflict` or `append-conflict`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2060,6 +2693,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2070,6 +2708,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2080,6 +2723,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2090,6 +2738,11 @@
           },
           "422": {
             "description": "`admission-rejected` or `approval-rejected`: nothing committed.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2100,6 +2753,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`: commit indeterminate; retry with the same key to resolve the original outcome.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2159,6 +2817,11 @@
         "responses": {
           "200": {
             "description": "One Projection page.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2169,6 +2832,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2179,6 +2847,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2189,6 +2862,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2199,6 +2877,11 @@
           },
           "409": {
             "description": "`append-conflict` (stale cursor) or `mixed-fork-generation`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2246,6 +2929,11 @@
         "responses": {
           "202": {
             "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2256,6 +2944,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2266,6 +2959,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2276,6 +2974,11 @@
           },
           "403": {
             "description": "`unauthorized` or `consent-invalid`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2286,6 +2989,11 @@
           },
           "409": {
             "description": "`idempotency-conflict`, `incompatible-profile`, `dependency-graph-incomplete` or `mixed-fork-generation`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2296,6 +3004,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2306,6 +3019,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2316,6 +3034,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2326,6 +3049,11 @@
           },
           "422": {
             "description": "`admission-rejected`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2360,6 +3088,11 @@
         "responses": {
           "200": {
             "description": "The ensemble.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2370,6 +3103,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2380,6 +3118,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2390,6 +3133,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2434,6 +3182,11 @@
         "responses": {
           "202": {
             "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2444,6 +3197,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2454,6 +3212,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2464,6 +3227,11 @@
           },
           "403": {
             "description": "`unauthorized` or `consent-invalid`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2474,6 +3242,11 @@
           },
           "409": {
             "description": "`idempotency-conflict`, `incompatible-profile`, `artifact-untrusted` or `replay-claim-insufficient`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2484,6 +3257,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2494,6 +3272,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2504,6 +3287,11 @@
           },
           "404": {
             "description": "`artifact-missing` or `not-found-or-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2538,6 +3326,11 @@
         "responses": {
           "200": {
             "description": "The Replay.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2548,6 +3341,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2558,6 +3356,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2568,6 +3371,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2605,6 +3413,11 @@
         "responses": {
           "200": {
             "description": "The evidence page.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2615,6 +3428,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2625,6 +3443,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2635,6 +3458,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2645,6 +3473,11 @@
           },
           "409": {
             "description": "`counterfactual-incomplete` or `append-conflict` (stale cursor).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2689,6 +3522,11 @@
         "responses": {
           "202": {
             "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2699,6 +3537,11 @@
           },
           "400": {
             "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2709,6 +3552,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2719,6 +3567,11 @@
           },
           "403": {
             "description": "`unauthorized` or `consent-invalid`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2729,6 +3582,11 @@
           },
           "409": {
             "description": "`idempotency-conflict`, `mixed-fork-generation` or `counterfactual-incomplete`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2739,6 +3597,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2749,6 +3612,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2759,6 +3627,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2796,6 +3669,11 @@
         "responses": {
           "200": {
             "description": "The export.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2806,6 +3684,11 @@
           },
           "400": {
             "description": "`invalid-request` or `unsupported-version`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2816,6 +3699,11 @@
           },
           "401": {
             "description": "`unauthenticated`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2826,6 +3714,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2836,6 +3729,11 @@
           },
           "409": {
             "description": "`append-conflict`: stale cursor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2888,6 +3786,11 @@
         "responses": {
           "201": {
             "description": "The revocation this request recorded.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2898,6 +3801,11 @@
           },
           "200": {
             "description": "The consent was already revoked: its original revocation. An exact retry after a recorded revocation answers this way.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2908,6 +3816,11 @@
           },
           "400": {
             "description": "`invalid-request`, including a missing or malformed `Idempotency-Key`.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2918,6 +3831,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2928,6 +3846,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and `consent.revoke`) or `revoked` (the Principal's grant was revoked or expired).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2938,6 +3861,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: the Principal holds no such consent, or the acting entity is neither its subject nor its grantee; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2948,6 +3876,11 @@
           },
           "409": {
             "description": "`idempotency-conflict`: the `Idempotency-Key` already named another consent.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2958,6 +3891,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: the request body exceeds the Gateway body bound.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2974,6 +3912,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -2986,6 +3927,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state, read its consents or record the denial evidence.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3010,7 +3956,7 @@
         "tags": [
           "erasure"
         ],
-        "description": "Request the erasure of the acting subject's own data in one destruction-eligible scope class (#309, ADR-136 §3 and §7), under the `erasure.request` grant. The subject is the Local Principal acting as `x-piglor-actor-entity`; its data is the root Timelines the actor created and their Forks. The operation is consent-exempt. A malformed body, a body whose `impact_acknowledged` is not `true` and a missing or malformed `Idempotency-Key` are `400 invalid-request` before the authority decision; after the decision a scope class the deployment always retains is `400 erasure-scope-retained`. The `202` admission receipt names the erasure (`request_id` = `operation_id` = the `erasure_id`, derived from the Principal, the actor and the key), the BLAKE3 digest of the key, and binds the policy, the trust bundle and the execution-mode profile of the submission; an exact retry answers the same receipt bytes, also after a restart, a bundle rotation or a mode migration. The receipt never claims that anything was erased: `getErasure` reports the progress. A Gateway without a Local erasure composition answers `503`.",
+        "description": "Request the erasure of the acting subject's own data in one destruction-eligible scope class (#309, ADR-136 §3 and §7), under the `erasure.request` grant. The subject is the Local Principal acting as `x-piglor-actor-entity`; its data is the root Timelines the actor created and their Forks. The operation is consent-exempt. A malformed body, a body whose `impact_acknowledged` is not `true` and a missing or malformed `Idempotency-Key` are `400 invalid-request` before the authority decision; after the decision a scope class the deployment always retains is `400 erasure-scope-retained`. The `202` admission receipt names the erasure (`request_id` = `operation_id` = the `erasure_id`, derived from the Principal, the actor and the key), the BLAKE3 digest of the key, and binds the policy, the trust bundle and the execution-mode profile of the submission; an exact retry answers the same receipt bytes, also after a restart, a bundle rotation or a mode migration. The receipt never claims that anything was erased: `getErasure` reports the progress. A Gateway without a Local erasure composition answers `503`, and while the operator has closed erasure admissions a fresh request is `503 erasure-admissions-closed`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -3038,6 +3984,11 @@
         "responses": {
           "202": {
             "description": "Admitted (or the original admission of an exact retry). The receipt never claims that anything was erased.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -3048,6 +3999,11 @@
           },
           "400": {
             "description": "`invalid-request` (a malformed body, `impact_acknowledged` not `true`, or a missing or malformed `Idempotency-Key`), `erasure-scope-retained` (a scope class the deployment always retains, answered after the authority decision) or `erasure-scope-too-large` (the subject's closure exceeds `erasure_closure_targets`; nothing was requested).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3058,6 +4014,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3068,6 +4029,11 @@
           },
           "403": {
             "description": "`unauthorized` (no grant covers the actor and `erasure.request`) or `revoked` (the Principal's grant was revoked or expired).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3078,6 +4044,11 @@
           },
           "409": {
             "description": "`idempotency-conflict` (the `Idempotency-Key` named another scope), `incompatible-profile`, or `erasure-quota-exhausted` (the subject used its lifetime share of `erasure_store_requests`; not retryable).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3088,6 +4059,11 @@
           },
           "413": {
             "description": "`resource-limit-exceeded`: the request body exceeds the Gateway body bound.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3104,6 +4080,9 @@
                   "type": "integer",
                   "minimum": 1
                 }
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
               }
             },
             "content": {
@@ -3115,7 +4094,12 @@
             }
           },
           "503": {
-            "description": "`temporarily-unavailable`: the Gateway serves no Local erasure, or its trust admission has expired, so new erasures are closed (both not retryable); or the host cannot vouch for its revocation state, record the denial evidence or reach its erasure store (retryable).",
+            "description": "`erasure-admissions-closed`: the operator closed new erasure admissions with `piglor-gateway erasure-admissions close` (not retryable; an exact retry of an admitted request is still answered). `temporarily-unavailable`: the Gateway serves no Local erasure, or its trust admission has expired, so new erasures are closed (both not retryable); or the host cannot vouch for its revocation state, record the denial evidence or reach its erasure store (retryable).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3158,6 +4142,11 @@
         "responses": {
           "200": {
             "description": "The erasure.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -3168,6 +4157,11 @@
           },
           "400": {
             "description": "`invalid-request`: `erasure_id` is not a canonical ULID.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3178,6 +4172,11 @@
           },
           "401": {
             "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3188,6 +4187,11 @@
           },
           "404": {
             "description": "`not-found-or-unavailable`: identical for an unknown id, another subject's id and a refused decision, including one over the denial-record bound; it never enumerates.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3198,6 +4202,11 @@
           },
           "429": {
             "description": "`resource-limit-exceeded` (retryable, without `Retry-After`): the store executor is saturated. A refused read past the denial-record bound answers the `404` instead.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3208,6 +4217,11 @@
           },
           "500": {
             "description": "`internal-safe-failure`: the erasure was admitted under an execution-mode profile this Gateway does not compile.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3218,6 +4232,11 @@
           },
           "503": {
             "description": "`temporarily-unavailable` (retryable): the host cannot vouch for its revocation state, record the denial evidence, or read the erasure.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControl"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3318,7 +4337,8 @@
               "internal-safe-failure",
               "erasure-scope-retained",
               "erasure-scope-too-large",
-              "erasure-quota-exhausted"
+              "erasure-quota-exhausted",
+              "erasure-admissions-closed"
             ]
           },
           "schema_id": {
@@ -6828,7 +7848,7 @@
       "Erasure": {
         "$id": "urn:pigloros:gateway:v1:schema:erasure",
         "type": "object",
-        "description": "The authenticated subject's own erasure (ADR-136 §7). `state` is the lifecycle of its verified ERS1 head; `generation` is the head's ERS1 ordinal times 2^16 plus the acknowledgements committed in the active attempt; every attempt closes with a new ERS1 state, so it never decreases; `provenance.digest` is the raw ERS1 state digest; `mode_profile` is the execution-mode binding the erasure was submitted under. `acknowledgements.required` counts the frozen obligations (0 before the access freeze) and `positive` the positive acknowledgements of the effective inventory, also per acknowledgement class in `classes`. The ADR-060 lifecycle is monotonic, a `complete` erasure has as many positive acknowledgements as required, destroyed values are never reconstructed and the ReplayClaim never strengthens: these are runtime obligations that a single document cannot show, not schema rules.",
+        "description": "The authenticated subject's own erasure (ADR-136 §7). `state` is the lifecycle of its verified ERS1 head; `generation` is the head's ERS1 ordinal times 2^16 plus the acknowledgements committed in the active attempt; every attempt closes with a new ERS1 state, so it never decreases; `provenance.digest` is the raw ERS1 state digest; `redaction_generation` is the store-wide count of committed client-cache redaction generations, which never decreases; `mode_profile` is the execution-mode binding the erasure was submitted under. `acknowledgements.required` counts the frozen obligations (0 before the access freeze) and `positive` the positive acknowledgements of the effective inventory, also per acknowledgement class in `classes`. The ADR-060 lifecycle is monotonic, a `complete` erasure has as many positive acknowledgements as required, destroyed values are never reconstructed and the ReplayClaim never strengthens: these are runtime obligations that a single document cannot show, not schema rules.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -6942,6 +7962,12 @@
           },
           "external_copies": {
             "const": "not-covered"
+          },
+          "redaction_generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "The store's redaction generation (ADR-136 follow-up F2, #1407): how many client-cache redaction generations (ELCG1) the store has committed, across every erasure of every subject. It is store-wide, never decreases, also across a restart, and is 0 before the first. A Gateway serving a Local erasure composition always carries it; a client compares it with the value it last saw and, when it rose, re-reads before it trusts any copy (README, *Client cache*)."
           }
         },
         "unevaluatedProperties": false
@@ -7051,12 +8077,27 @@
     "responses": {
       "Problem": {
         "description": "A failure of the problem-types.json registry.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControl"
+          }
+        },
         "content": {
           "application/problem+json": {
             "schema": {
               "$ref": "#/components/schemas/Problem"
             }
           }
+        }
+      }
+    },
+    "headers": {
+      "CacheControl": {
+        "description": "The supported client-cache rule (ADR-136 follow-up F2, #1407): every response, problems included, is `no-store`, so no cache may store it. RFC 9111 §5.2.2.5 does not make `no-store` sufficient for privacy: a supported client also never persists a managed representation and drops its copies once an erasure's `client-cache-signal` is positive (README, *Client cache*).",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "const": "no-store"
         }
       }
     },

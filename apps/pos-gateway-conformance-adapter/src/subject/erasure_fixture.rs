@@ -13,11 +13,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer as _, SigningKey};
-use piglor_gateway::deployment_trust::{load_deployment_trust_v1, RELEASE_TRUST_CREDENTIAL_NAME};
-use piglor_gateway::local_erasure_composition::{
-    LocalErasureServeInputsV1, LocalErasureServeV1, LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME,
-    LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME,
-};
+use piglor_gateway::local_erasure_composition::{LocalErasureServeInputsV1, LocalErasureServeV1};
 use piglor_gateway::local_erasure_provision::{
     provision_local_erasure, LocalErasureProvisionRequestV1, LOCAL_ERASURE_SIGNER_CREDENTIAL_NAME,
 };
@@ -29,6 +25,12 @@ use pos_core::{
     LocalErasureBundleSignatureV1, LocalErasureBundleV1, PrincipalRefV1,
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
+use pos_local_erasure_loader::deployment_trust::{
+    load_deployment_trust_v1, RELEASE_TRUST_CREDENTIAL_NAME,
+};
+use pos_local_erasure_loader::{
+    LOCAL_ERASURE_BUNDLE_CREDENTIAL_NAME, LOCAL_ERASURE_BUNDLE_SIGNATURE_CREDENTIAL_NAME,
+};
 use pos_runtime::{ErasureExecutionHostV1, LocalErasureSignerRotationV1, LocalErasureSubmissionV1};
 use pos_store::trust_policy_registry::{DeploymentTrustPolicyRegistryV1, OperatorReleaseTrustV1};
 

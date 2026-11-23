@@ -18,7 +18,7 @@ use crate::{
 /// The negative-probe digest `IssuedGrant::fixture` admits (HCP1 ordinal 7).
 const NEGATIVE_PROBE: [u8; 32] = [0x97; 32];
 
-pub(super) fn sign(ended: &EndedAttempt<String>) -> Result<RetainedResponse, ResponseFault> {
+pub(super) fn sign(ended: EndedAttempt<String>) -> Result<RetainedResponse, ResponseFault> {
     let public = signing_key().verifying_key();
     ended.signed_response(&signer(), AdmittedRuntimeKey::new(KEY_ID, &public))
 }
@@ -56,7 +56,7 @@ fn a_completed_response_carries_the_output_descriptor() -> TestResult {
     let grant = signed_grant()?;
     let (digest, bytes) = (grant.grant.grant_digest(), grant.bytes.clone());
     let retained = sign(
-        &Released {
+        Released {
             grant: Some(grant),
             ..Released::default()
         }
@@ -76,7 +76,7 @@ fn a_completed_response_carries_the_output_descriptor() -> TestResult {
 #[test]
 fn a_released_failure_ends_the_chain_with_its_code() -> TestResult {
     let retained = sign(
-        &Released {
+        Released {
             grant: Some(signed_grant()?),
             output: Some(vec![0; 100]),
             ceiling: true,
@@ -119,7 +119,7 @@ fn a_denied_release_is_event_13() -> TestResult {
         progress,
         (cleanup(true)?, Some(CLEANED_AT)),
     );
-    let retained = sign(&ended)?;
+    let retained = sign(ended)?;
     let (result, events) = verified(&retained)?;
     assert_eq!(events, [11, 13, 10]);
     assert_eq!(
@@ -157,7 +157,7 @@ fn a_failed_observation_is_bound_by_events_11_and_13() -> TestResult {
         progress,
         (cleanup(true)?, Some(CLEANED_AT)),
     );
-    let retained = sign(&ended)?;
+    let retained = sign(ended)?;
     let koe1 = retained.records().observed();
     assert!(matches!(
         koe1.fields().status,
@@ -186,7 +186,7 @@ fn a_withdrawn_attempt_is_one_cancelled_event() -> TestResult {
         AttemptProgress::Withdrawn,
         (Ok(None), Some(CLEANED_AT)),
     );
-    let (result, events) = verified(&sign(&ended)?)?;
+    let (result, events) = verified(&sign(ended)?)?;
     assert_eq!(events, [1]);
     assert_eq!(result.outcome, SandboxTerminalOutcome::Cancelled);
     Ok(())
@@ -202,10 +202,10 @@ fn every_fault_emits_nothing() -> TestResult {
         ..Released::default()
     }
     .ended()?;
-    assert!(matches!(sign(&unrecorded), Err(ResponseFault::Evidence(_))));
+    assert!(matches!(sign(unrecorded), Err(ResponseFault::Evidence(_))));
     let filler = Released::default().ended()?;
     assert!(matches!(
-        sign(&filler),
+        sign(filler),
         Err(ResponseFault::Sign(RuntimeSignerError::Protocol(_)))
     ));
     let ended = Released {
@@ -219,6 +219,11 @@ fn every_fault_emits_nothing() -> TestResult {
         ended.signed_response(&other_id, AdmittedRuntimeKey::new(KEY_ID, &public)),
         Err(ResponseFault::Sign(RuntimeSignerError::KeyIdMismatch))
     ));
+    let ended = Released {
+        grant: Some(signed_grant()?),
+        ..Released::default()
+    }
+    .ended()?;
     let other_key = KeyFileRuntimeSigner::from_signing_key(
         ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
         KEY_ID.to_owned(),
@@ -247,7 +252,7 @@ pub(super) const fn timed_out_transfer() -> TransferRecord {
 #[test]
 fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
     let first = sign(
-        &Released {
+        Released {
             grant: Some(signed_grant()?),
             ..Released::default()
         }
@@ -255,7 +260,7 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
     )?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    let successor = first.successor(timed_out_transfer(), &signer(), admitted)?;
+    let successor = first.successor(Some(timed_out_transfer()), &signer(), admitted)?;
     let (result, events) = verified(&successor)?;
     assert_eq!(events, [11, 12, 10]);
     assert_eq!(
@@ -293,17 +298,21 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
         ..timed_out_transfer()
     };
     let failed = sign(
-        &Released {
+        Released {
             grant: Some(signed_grant()?),
             service: None,
             ..Released::default()
         }
         .ended()?,
     )?;
+    // A successor or a failed attempt is never re-issued, whether or not
+    // the transfer's times could be read.
     for (response, transfer) in [
-        (&successor, timed_out_transfer()),
-        (&first, complete),
-        (&failed, timed_out_transfer()),
+        (&successor, Some(timed_out_transfer())),
+        (&first, Some(complete)),
+        (&failed, Some(timed_out_transfer())),
+        (&successor, None),
+        (&failed, None),
     ] {
         assert!(matches!(
             response.successor(transfer, &signer(), admitted),
@@ -311,8 +320,14 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
         ));
     }
     assert!(matches!(
-        first.successor(unordered, &signer(), admitted),
+        first.successor(Some(unordered), &signer(), admitted),
         Err(ResponseFault::Evidence(EvidenceFault::Record(_)))
+    ));
+    // An `output-transfer` time the clock could not report is a provider
+    // fault, never a substitute time (R9 Amendment 1 change F).
+    assert!(matches!(
+        first.successor(None, &signer(), admitted),
+        Err(ResponseFault::Evidence(EvidenceFault::Clock))
     ));
     // The transfer must carry the retained 70 bytes and start after the
     // cleanup finished.
@@ -326,7 +341,7 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
     };
     for transfer in [shorter, early] {
         assert!(matches!(
-            first.successor(transfer, &signer(), admitted),
+            first.successor(Some(transfer), &signer(), admitted),
             Err(ResponseFault::Evidence(EvidenceFault::UnboundTransfer))
         ));
     }
@@ -335,7 +350,7 @@ fn a_timed_out_output_transfer_is_reissued_once() -> TestResult {
         start: CLEANED_AT,
         ..timed_out_transfer()
     };
-    verified(&first.successor(at_cleanup, &signer(), admitted)?)?;
+    verified(&first.successor(Some(at_cleanup), &signer(), admitted)?)?;
     Ok(())
 }
 

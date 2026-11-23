@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a problem with PiglorOS.
+labels: [bug]
+body:
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: What happened?
+      description: Say which part of PiglorOS you were using and what went wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Include any commands, inputs, and setup needed to see the problem.
+        If it happens intermittently, say how often.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: >-
+        Include the PiglorOS version or commit and your operating system.
+        If you built from source, include your Rust version.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: >-
+        Include any error messages, logs, or screenshots that help explain the
+        problem. Remove secrets and personal data before posting.
