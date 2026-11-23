@@ -163,6 +163,14 @@ pub struct CommunityPassDueV1<'a> {
 /// Steps 4b–4g of the R10.7 table, in order; the first failing check
 /// returns.
 ///
+/// Two composition preconditions come first; they are not R10.7 steps.
+/// The installed State limits must cover the roster (a composition error,
+/// `InvalidBinding`), and the view must carry one member per roster row
+/// (`EvidenceUnavailable`, as R8.1(8) step 3b treats a roster mismatch).
+/// The caller (A4c) must supply `view.members` in roster order, each with
+/// the CMB1 digest that the generation's CGI1 `ordered_CMB1_digests` lists
+/// for that row; the planner does not re-derive the CMB1s.
+///
 /// # Errors
 /// Returns `InvalidBinding` when the installed State limits do not cover
 /// the roster; `EvidenceUnavailable` when the view's members do not cover

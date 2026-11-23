@@ -676,11 +676,13 @@ impl CommunityObservationSourcesV1 {
     }
 
     /// The R10.3(5) Observation row of the pass quote: `1 + g(r')` nodes,
-    /// `r' + g(r')` edges, and the exact bytes of the COV1, the new CES1s,
-    /// the CPE1 and every CIB1 and CPN1 of the materialization, with its
-    /// unallocated producer ordinal at the widest form (R10.3(3)). Stage 2
-    /// runs on fixed-width placeholders for the values the Reserve pipeline
-    /// has not derived yet; its records are measured, never kept.
+    /// `r' + g(r')` edges, and an upper bound on its bytes: the COV1, the
+    /// CPE1, every CIB1 and CPN1 of the materialization with its
+    /// unallocated producer ordinal at the widest form (R10.3(3)), and every
+    /// row's CES1. A CES1 the Reserve pipeline reuses (R9.2) is counted
+    /// too, so the row over-quotes by its bytes; it never under-quotes.
+    /// Stage 2 runs on fixed-width placeholders for the values the Reserve
+    /// pipeline has not derived yet; its records are measured, never kept.
     ///
     /// # Errors
     /// The record errors of stage 2.

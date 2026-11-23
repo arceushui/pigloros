@@ -723,3 +723,36 @@ fn minted_observation_terms_count_against_the_per_record_node_limit() -> TestRes
     assert_eq!(fit(spare + 2)?, Some(Error::CapacityExhausted));
     Ok(())
 }
+
+#[test]
+fn minted_observation_terms_count_against_the_per_record_edge_limit() -> TestResult {
+    // R10.4(1): the per-record edge limit is exactly 262,144. State edges at
+    // the limit fit; the recording's one Measurement edge then gives 19; one
+    // more State edge gives 14.
+    let fixture = Fixture::new(1)?;
+    let bindings = fixture.bindings()?;
+    let members = [quote_member(&bindings[0], &fixture.payload, &[], true)];
+    let base = CommunityPassQuoteV1::new(quote_input(&members, Some(OBSERVATION)))?;
+    let [_, edges_limit, _] = COMMUNITY_SHARED_RECORD_LIMITS_V1;
+    assert_eq!(edges_limit, 262_144);
+    let spare = edges_limit - base.total_terms().edges;
+    let observation = |extra: u64| CommunityPassObservationV1 {
+        terms: CommunityPassTermsV1 {
+            edges: OBSERVATION.terms.edges + extra,
+            ..OBSERVATION.terms
+        },
+        ..OBSERVATION
+    };
+    let quote = |extra| CommunityPassQuoteV1::new(quote_input(&members, Some(observation(extra))));
+    let fitting = quote(spare)?;
+    assert_eq!(fitting.total_terms().edges, 262_144);
+    assert_eq!(fitting.require_fit().err(), None);
+    let over = quote(spare + 1)?;
+    assert_eq!(over.total_terms().edges, 262_145);
+    assert_eq!(over.require_fit().err(), Some(Error::RecordingUnavailable));
+    assert_eq!(
+        quote(spare + 2)?.require_fit().err(),
+        Some(Error::CapacityExhausted)
+    );
+    Ok(())
+}

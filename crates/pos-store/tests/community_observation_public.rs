@@ -879,9 +879,9 @@ fn an_empty_fork_child_names_its_fork_chain_root_genesis() -> TestResult {
 
 #[test]
 fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> TestResult {
-    // Revision 10, R10.3(3) and (5): the Observation row counts 1 + g(r')
-    // nodes, r' + g(r') edges and the exact bytes of every record the
-    // materialization mints, with its unallocated ordinal at 9 bytes.
+    // Revision 10, R10.3(3) and (5): the Observation row's nodes, edges and
+    // bytes, derived from the decoded stage-2 records minted at the widest
+    // producer ordinal, not from the row formula.
     let installed = Installed::new(vec![RULE])?;
     for events in [0, 1, 300] {
         let history = history(events, EVENT_TYPE, None)?;
@@ -893,7 +893,21 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
         let mut widest = bindings(&registrations, &authority);
         widest.producer_ordinal = u64::MAX;
         let records = sources.finish(widest)?;
-        let groups = records.input_groups.len() as u64;
+        let observation = CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?;
+        let mut nodes = 1;
+        let mut edges = 0;
+        match observation.as_input().input_index {
+            CommunityInputIndexV1::Direct(inputs) => edges += inputs.len(),
+            CommunityInputIndexV1::Grouped { groups, .. } => edges += groups.len(),
+            CommunityInputIndexV1::Empty => {}
+        }
+        for (_group, node) in &records.input_groups {
+            let node = CommunityNativeNodeV1::from_canonical_cbor(node)?;
+            nodes += 1;
+            if let CommunityInputIndexV1::Direct(inputs) = node.as_input().input_index {
+                edges += inputs.len();
+            }
+        }
         let bytes = sources.event_sources().map(<[u8]>::len).sum::<usize>()
             + sources.observation_value().len()
             + records.source_proof.len()
@@ -904,14 +918,16 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
                 .sum::<usize>()
             + records.observation_node.len();
         let terms = sources.quote_terms()?;
-        assert_eq!(terms.terms.nodes, 1 + groups);
-        assert_eq!(terms.terms.edges, events.max(1) as u64 + groups);
+        assert_eq!(terms.terms.nodes, nodes);
+        assert_eq!(terms.terms.edges, edges as u64);
         assert_eq!(terms.terms.bytes, bytes as u64);
+        assert_eq!(terms.node_ordinal, observation.as_input().node_ordinal);
         assert_eq!(
-            terms.node_ordinal,
-            records.observation_reference.node_ordinal
+            CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?
+                .as_input()
+                .producer_ordinal,
+            u64::MAX
         );
-        assert_eq!(terms.node_ordinal, u32::try_from(groups)?);
     }
     Ok(())
 }
