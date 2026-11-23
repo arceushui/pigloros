@@ -937,7 +937,8 @@ impl CeremonyDriver {
     /// release and exit windows nor the §5.5 states apply. The challenge time to live, the
     /// enrollment budget and the interaction bound do: the interaction bound starts here, at
     /// the first CTAP command, and the port must cancel the authenticator by the deadline it is
-    /// given. A driver runs once; on any failure its ceremony slots are wiped.
+    /// given. A driver runs once: a second call is refused and changes nothing; any other
+    /// failure wipes the ceremony slots.
     ///
     /// # Errors
     ///
@@ -950,6 +951,9 @@ impl CeremonyDriver {
         port: &mut dyn OwnerAuthenticatorPort,
         clock: &dyn MonotonicClock,
     ) -> Result<Verified, BridgeError> {
+        if self.phase != Phase::Opening {
+            return Err(UNEXPECTED_STATE);
+        }
         let outcome = self.direct(port, clock);
         if outcome.is_ok() {
             self.slots.wipe_buffers();
@@ -966,9 +970,6 @@ impl CeremonyDriver {
         port: &mut dyn OwnerAuthenticatorPort,
         clock: &dyn MonotonicClock,
     ) -> Result<Verified, BridgeError> {
-        if self.phase != Phase::Opening {
-            return Err(UNEXPECTED_STATE);
-        }
         let started = clock.now();
         self.first_past_empty = Some(started);
         if let Some(error) = self

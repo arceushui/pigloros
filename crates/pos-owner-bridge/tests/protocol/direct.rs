@@ -209,7 +209,7 @@ fn a_direct_get_returns_the_prf_and_runs_only_once() -> TestResult {
         again,
         Err(BridgeError::Protocol(ProtocolCode::UnexpectedState))
     );
-    assert_eq!(*driver.prf(), [0; 32]);
+    assert_eq!(*driver.prf(), derived_prf(&bytes32(0x60)));
     assert_eq!(port.deadlines.len(), 1);
     Ok(())
 }
