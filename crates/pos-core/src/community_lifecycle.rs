@@ -119,6 +119,7 @@ pub use event_source::{
     MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1, MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
 };
 pub use failure::{
+    community_decision_provenance_digest_v1, CommunityDecisionProvenanceInputV1,
     CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
     CommunityPassFailureV1,
 };
@@ -218,8 +219,9 @@ pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
 };
 pub use quarantine::{
-    CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
-    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
+    community_quarantine_delta_digest_v1, community_quarantine_reason_v1,
+    CommunityQuarantineDeltaRowV1, CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1,
+    CommunityQuarantineReasonV1, CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
     CommunityQuarantineRevisionV1,
 };
 pub use quarantine_control::{

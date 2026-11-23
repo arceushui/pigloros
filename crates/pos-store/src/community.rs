@@ -22,13 +22,16 @@ mod pass_planner;
 mod planner;
 mod private_hash;
 mod protection;
+#[cfg(target_os = "linux")]
+mod quarantine;
 mod sealer;
 mod store_domain;
 mod vault;
 
 pub use extractor::{
-    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
-    CommunityArtifactRecordInputV1,
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1,
+    CommunityArtifactBatchInputV1, CommunityArtifactBatchV1, CommunityArtifactRecordInputV1,
+    CommunityControlBatchInputV1,
 };
 #[cfg(target_os = "linux")]
 pub use initialize::{
@@ -72,4 +75,10 @@ pub use planner::{
 pub use protection::{
     CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,
     CommunityRecordEvidenceV1,
+};
+#[cfg(target_os = "linux")]
+pub use quarantine::{
+    CommunityPreExecutionFailureInputV1, CommunityPreExecutionFailureV1,
+    CommunityPreExecutionTrustV1, CommunityQuarantineContextV1, CommunityQuarantineReceiptV1,
+    CommunitySetReasonCallV1,
 };
