@@ -37,8 +37,8 @@ use super::{
     verify::Extent,
 };
 use crate::{
-    PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRegistry, ATTEMPT_ROOT_OPEN,
-    ATTEMPT_ROOT_RESOLVE,
+    PlannedAttemptIntent, StagingError, StagingLedger, StagingLimits, SystemdAttemptRegistry,
+    ATTEMPT_ROOT_OPEN, ATTEMPT_ROOT_RESOLVE,
 };
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -1497,9 +1497,9 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
                 &tree.prepared,
                 Some(&activated),
                 || Err(if below_floor {
-                    StagingError::BelowControlFloor
+                    RecheckError::Ledger(StagingError::BelowControlFloor)
                 } else {
-                    StagingError::AuthorityChanged
+                    RecheckError::AuthorityChanged
                 })
             ),
             Err(ImageActivationError::EvidenceMismatch)

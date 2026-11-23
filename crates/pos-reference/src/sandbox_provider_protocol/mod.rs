@@ -112,13 +112,14 @@ pub use launch::{
     FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields,
 };
 pub use operations::{
-    RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,
-    SandboxDescribeRequest, SandboxDescribeResponse, SandboxDescribeResponseFields,
-    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
-    SandboxReconcileRequest, SandboxReconcileResponse,
+    RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancelResponseFields,
+    SandboxCancellationResult, SandboxDescribeRequest, SandboxDescribeResponse,
+    SandboxDescribeResponseFields, SandboxLocalError, SandboxLocalErrorCode,
+    SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
+    SandboxReconcileResponse,
 };
 pub use signing::{
-    Agr1, Rca1, Rls1, RuntimeSigned, Sau1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Verified,
+    Agr1, Rca1, Rls1, RuntimeSigned, Sau1, Scy1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Verified,
 };
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,

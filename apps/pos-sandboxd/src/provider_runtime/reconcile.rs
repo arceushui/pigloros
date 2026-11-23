@@ -268,6 +268,7 @@ where
                             namespaces,
                             budget,
                             closed: AtomicBool::new(false),
+                            cancelled: std::sync::Mutex::default(),
                             transport,
                             runtime,
                         }

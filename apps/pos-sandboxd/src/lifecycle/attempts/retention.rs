@@ -224,6 +224,27 @@ impl<I> AttemptLifecycle<I> {
         }
     }
 
+    /// Record that `response`, the stored response of `attempt_id`, is now
+    /// delivered whole, as one connection is about to write its SPY1 or an
+    /// SCY1 binds its digest; no re-issue replaces it from then on. `false`
+    /// when it is no longer the stored response: it was re-issued
+    /// meanwhile, and must not be delivered.
+    pub fn claim_delivery(&self, attempt_id: [u8; 16], response: &Arc<RetainedResponse>) -> bool {
+        let attempts = lock(&self.attempts);
+        let stored = matches!(
+            attempts.get(&attempt_id),
+            Some(Slot::Ended {
+                response: Retained::Signed(current),
+                ..
+            }) if Arc::ptr_eq(current, response)
+        );
+        if stored {
+            response.mark_delivered();
+        }
+        drop(attempts);
+        stored
+    }
+
     /// Re-issue the retained Completed response of the attempt after its
     /// output transfer timed out (R9 §4.7), and retain the successor in its
     /// place. `transfer` must carry the retained output and start after the
@@ -238,6 +259,8 @@ impl<I> AttemptLifecycle<I> {
     ///
     /// # Errors
     /// Those of [`AttemptLifecycle::terminal_response`];
+    /// [`AttemptLifecycleError::ResponseDelivered`] once the stored response
+    /// was delivered whole, which keeps it;
     /// [`AttemptLifecycleError::Response`] with
     /// [`ResponseFault::Evidence`] for a response that cannot be re-issued
     /// with `transfer`, which keeps the retained response, unless the fault
@@ -333,7 +356,10 @@ fn superseded(
 ) -> Option<Result<Arc<RetainedResponse>, AttemptLifecycleError>> {
     match (response, expected) {
         (Retained::Pending, None) => None,
-        (Retained::Signed(current), Some(expected)) if Arc::ptr_eq(current, expected) => None,
+        // A delivered response is kept: the selector may hold its SPY1.
+        (Retained::Signed(current), Some(expected)) if Arc::ptr_eq(current, expected) => current
+            .delivered()
+            .then_some(Err(AttemptLifecycleError::ResponseDelivered)),
         (Retained::Signed(current), _) => Some(Ok(Arc::clone(current))),
         (Retained::Faulted | Retained::Pending, _) => {
             Some(Err(AttemptLifecycleError::ResponseUnavailable))

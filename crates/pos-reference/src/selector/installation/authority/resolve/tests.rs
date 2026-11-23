@@ -11,13 +11,13 @@ use super::{AuthorityResolution, InstalledAuthorityObjects};
 use crate::sandbox_provider_protocol::RevocationUpdateRequest;
 use crate::selector::installation::tests::updates::{complete_live_update, UpdateFixture};
 use crate::selector::installation::tests::{materialize_root_selector_state, TestResult};
-use crate::selector::SelectorBoundaryError;
+use crate::selector::InstallationError;
 
 fn resolve_in(
     directory: &Path,
     rcu1: &[u8],
     resolution: AuthorityResolution,
-) -> TestResult<Result<InstalledAuthorityObjects, SelectorBoundaryError>> {
+) -> TestResult<Result<InstalledAuthorityObjects, InstallationError>> {
     let root = File::open(directory)?;
     let owner = root.metadata()?.uid();
     Ok(InstalledAuthorityObjects::resolve_at(

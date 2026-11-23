@@ -13,9 +13,10 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use pos_reference::sandbox_provider_protocol::{
     PayloadDescriptor, PayloadDirection, PayloadStreamValidator, RuntimeSigned,
+    SandboxCancelResponse, SandboxCancelResponseFields, SandboxCancellationResult,
     SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxPayloadChunk,
     SandboxProviderError, SandboxProviderErrorCode, SandboxProviderErrorFields,
-    SandboxProviderProtocolError, Sdy1, SelfDigested, Spe1,
+    SandboxProviderProtocolError, Scy1, Sdy1, SelfDigested, Spe1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -580,5 +581,88 @@ fn output_records_are_the_contiguous_sbc1_chunks_a_selector_accepts() -> TestRes
             Some(SandboxProviderProtocolError::FieldOutOfBounds)
         );
     }
+    Ok(())
+}
+
+fn cancel_fields(result: SandboxCancellationResult) -> SandboxCancelResponseFields {
+    SandboxCancelResponseFields {
+        request_id: [1; 16],
+        attempt_id: [2; 16],
+        result,
+        terminal_spy1_digest: [3; 32],
+        runtime_attestation_key_id: KEY_ID.to_owned(),
+    }
+}
+
+#[test]
+fn scy1_matches_the_oracle_and_the_decoder_for_both_results() -> TestResult {
+    for (result, code) in [
+        (SandboxCancellationResult::AlreadyTerminal, 0),
+        (SandboxCancellationResult::CancelledAndCleaned, 1),
+    ] {
+        let record: SelfDigested<Scy1> =
+            SandboxCancelResponse::self_digested(cancel_fields(result))?;
+        assert_eq!(record.key_id(), KEY_ID);
+        assert_eq!(record.body(), &cancel_fields(result));
+        assert!(record
+            .signature_message()
+            .starts_with(b"PiglorOS.SCY1.Signature.v1\0"));
+        let response = SandboxCancelResponse::new(sign(record)?, &signing_key().verifying_key())?;
+        let encoded = response.to_canonical_cbor()?;
+        let expected = oracle(
+            "SCY1",
+            vec![
+                Value::Text("SCY1".to_owned()),
+                int(1),
+                bytes(&[1; 16]),
+                bytes(&[2; 16]),
+                int(code),
+                bytes(&[3; 32]),
+                Value::Text(KEY_ID.to_owned()),
+            ],
+        )?;
+        assert_eq!(encoded, expected);
+        let decoded = SandboxCancelResponse::from_canonical_cbor(&encoded)?;
+        assert_eq!(decoded, response);
+        decoded.verify_signature(&signing_key().verifying_key())?;
+        assert_eq!(decoded.result, result);
+    }
+    Ok(())
+}
+
+#[test]
+fn scy1_refuses_zero_identities_a_zero_spy1_and_a_foreign_key() -> TestResult {
+    let fields = || cancel_fields(SandboxCancellationResult::CancelledAndCleaned);
+    for fields in [
+        SandboxCancelResponseFields {
+            request_id: [0; 16],
+            ..fields()
+        },
+        SandboxCancelResponseFields {
+            attempt_id: [0; 16],
+            ..fields()
+        },
+        SandboxCancelResponseFields {
+            terminal_spy1_digest: [0; 32],
+            ..fields()
+        },
+        SandboxCancelResponseFields {
+            runtime_attestation_key_id: String::new(),
+            ..fields()
+        },
+    ] {
+        assert_eq!(
+            SandboxCancelResponse::self_digested(fields).err(),
+            Some(SandboxProviderProtocolError::FieldOutOfBounds)
+        );
+    }
+    let other = SigningKey::from_bytes(&[9; 32]);
+    let record = SandboxCancelResponse::self_digested(fields())?;
+    let foreign = other.sign(&record.signature_message()).to_bytes();
+    let verified = record.verify(foreign, &other.verifying_key())?;
+    assert_eq!(
+        SandboxCancelResponse::new(verified, &signing_key().verifying_key()).err(),
+        Some(SandboxProviderProtocolError::SignatureInvalid)
+    );
     Ok(())
 }

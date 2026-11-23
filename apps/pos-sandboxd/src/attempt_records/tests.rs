@@ -210,6 +210,33 @@ fn start() -> String {
     "attempt".to_owned()
 }
 
+/// A Completed response with output, signed by the test key and retained
+/// in `lifecycle` for [`ATTEMPT`].
+pub(super) fn completed_retained(
+    lifecycle: &crate::AttemptLifecycle,
+) -> TestResult<std::sync::Arc<crate::RetainedResponse>> {
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    lifecycle.failed_granted(
+        &pos_reference::provider_admission::execution::FailedInput::fixture(ATTEMPT, digest),
+    )?;
+    let output = crate::StagingLedger::new(crate::StagingLimits {
+        aggregate_bytes: 1024,
+    });
+    let ended = Released {
+        grant: Some(grant),
+        output_ledger: Some(output),
+        ..Released::default()
+    }
+    .ended()?;
+    let public = signing_key().verifying_key();
+    Ok(lifecycle.retain_response(
+        ended,
+        &signer(),
+        crate::AdmittedRuntimeKey::new(KEY_ID, &public),
+    )?)
+}
+
 /// What one released attempt observed; the default is a Completed run.
 struct Released {
     baseline: [Vec<u8>; 4],

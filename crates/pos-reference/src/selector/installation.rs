@@ -23,7 +23,7 @@ use ed25519_dalek::VerifyingKey;
 use rustix::fs::{fchmod, mkdirat, openat2, statat, AtFlags, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 
-use super::{SelectorBoundaryError, SANDBOX_SELECTOR_SOCKET};
+use super::{InstallationError, SANDBOX_SELECTOR_SOCKET};
 use crate::evaluator_protocol::{
     array, array_values, decode_canonical, encode, fixed_bytes, text, uint, ProtocolError,
 };
@@ -398,12 +398,12 @@ impl HeldInstallationArtifact {
     /// # Errors
     /// Returns an error if the caller's bound does not cover the indexed file
     /// or the retained descriptor cannot be read exactly.
-    pub fn read_control(&self, maximum: u64) -> Result<Vec<u8>, SelectorBoundaryError> {
+    pub fn read_control(&self, maximum: u64) -> Result<Vec<u8>, InstallationError> {
         if self.object.byte_length > maximum {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
+            return Err(InstallationError::ArtifactInvalid);
         }
         usize::try_from(self.object.byte_length)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .map_err(|_| InstallationError::ArtifactInvalid)
             .and_then(|capacity| {
                 read_exact_file(
                     PositionalReader::new(&self.file),
@@ -439,7 +439,7 @@ impl InstalledSelectorState {
     /// # Errors
     /// Returns an error for unsafe ancestry, links, ownership, permissions,
     /// canonical SIC1 failures, missing indexed objects, or content mismatch.
-    pub fn open() -> Result<Self, SelectorBoundaryError> {
+    pub fn open() -> Result<Self, InstallationError> {
         fixed_artifact_root().and_then(|artifact_root| Self::open_at(&artifact_root))
     }
 
@@ -448,14 +448,14 @@ impl InstalledSelectorState {
     /// # Errors
     /// Returns the [`Self::open`] errors, and rejects a recovery pathname that
     /// cannot be inspected.
-    pub(crate) fn open_fixed() -> Result<FixedInstallation, SelectorBoundaryError> {
+    pub(crate) fn open_fixed() -> Result<FixedInstallation, InstallationError> {
         fixed_artifact_root().and_then(|artifact_root| Self::open_fixed_at(&artifact_root, 0))
     }
 
     fn open_fixed_at(
         root: &File,
         expected_owner: u32,
-    ) -> Result<FixedInstallation, SelectorBoundaryError> {
+    ) -> Result<FixedInstallation, InstallationError> {
         validate_directory(root, expected_owner)
             .and_then(|()| pending_recovery_exists(root))
             .and_then(|pending| {
@@ -469,17 +469,17 @@ impl InstalledSelectorState {
             })
     }
 
-    fn open_at(root: &File) -> Result<Self, SelectorBoundaryError> {
+    fn open_at(root: &File) -> Result<Self, InstallationError> {
         Self::open_at_for_owner(root, 0)
     }
 
-    fn open_at_for_owner(root: &File, expected_owner: u32) -> Result<Self, SelectorBoundaryError> {
+    fn open_at_for_owner(root: &File, expected_owner: u32) -> Result<Self, InstallationError> {
         validate_directory(root, expected_owner)
             .and_then(|()| ensure_no_pending_recovery(root))
             .and_then(|()| Self::open_current_at(root, expected_owner))
     }
 
-    fn open_current_at(root: &File, expected_owner: u32) -> Result<Self, SelectorBoundaryError> {
+    fn open_current_at(root: &File, expected_owner: u32) -> Result<Self, InstallationError> {
         open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT, expected_owner)
             .and_then(|manifest_file| read_complete_file(&manifest_file, MANIFEST_LIMIT))
             .and_then(|manifest_bytes| Self::open_recorded_at(root, manifest_bytes, expected_owner))
@@ -494,7 +494,7 @@ impl InstalledSelectorState {
         root: &File,
         manifest_bytes: Vec<u8>,
         expected_owner: u32,
-    ) -> Result<Self, SelectorBoundaryError> {
+    ) -> Result<Self, InstallationError> {
         InstallationManifest::from_canonical_cbor(&manifest_bytes)
             .map_err(artifact_invalid)
             .and_then(|manifest| {
@@ -510,16 +510,16 @@ impl InstalledSelectorState {
     }
 
     #[cfg(test)]
-    pub(crate) fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
+    pub(crate) fn open_at_for_test(root: &File) -> Result<Self, InstallationError> {
         root.metadata()
-            .map_err(|_| SelectorBoundaryError::Io)
+            .map_err(|_| InstallationError::Io)
             .and_then(|metadata| Self::open_at_for_owner(root, metadata.uid()))
     }
 
     #[cfg(test)]
     pub(crate) fn open_fixed_at_for_test(
         root: &File,
-    ) -> Result<FixedInstallation, SelectorBoundaryError> {
+    ) -> Result<FixedInstallation, InstallationError> {
         root.metadata()
             .map_err(io_failure)
             .and_then(|metadata| Self::open_fixed_at(root, metadata.uid()))
@@ -537,10 +537,10 @@ impl InstalledSelectorState {
     /// runtime), of mode exactly `0700`.
     ///
     /// # Errors
-    /// Returns [`SelectorBoundaryError::Io`] when it cannot be opened or
+    /// Returns [`InstallationError::Io`] when it cannot be opened or
     /// created, including through a link, a mount or a non-directory, and
-    /// [`SelectorBoundaryError::ArtifactInvalid`] for another owner or mode.
-    pub fn open_capture_store_root(&self, owner: u32) -> Result<File, SelectorBoundaryError> {
+    /// [`InstallationError::ArtifactInvalid`] for another owner or mode.
+    pub fn open_capture_store_root(&self, owner: u32) -> Result<File, InstallationError> {
         let open = || {
             openat2(
                 &self.root,
@@ -574,8 +574,16 @@ impl InstalledSelectorState {
                             && metadata.mode() & 0o7777 == CAPTURE_STORE_MODE.bits()
                     })
                     .then_some(directory)
-                    .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                    .ok_or(InstallationError::ArtifactInvalid)
             })
+    }
+
+    /// This state as if its SIC1 `installation-digest` were `digest`, every
+    /// other object and authority digest unchanged.
+    #[cfg(test)]
+    pub(crate) const fn with_installation_digest(mut self, digest: [u8; 32]) -> Self {
+        self.manifest.digest = digest;
+        self
     }
 
     /// Returns SIC1's original canonical bytes.
@@ -598,10 +606,10 @@ impl InstalledSelectorState {
         &self,
         kind: InstallationObjectKind,
         identity: [u8; 32],
-    ) -> Result<&HeldInstallationArtifact, SelectorBoundaryError> {
+    ) -> Result<&HeldInstallationArtifact, InstallationError> {
         self.artifacts
             .get(&(kind, identity))
-            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+            .ok_or(InstallationError::ArtifactInvalid)
     }
 }
 
@@ -609,16 +617,14 @@ fn open_indexed_artifacts(
     root: &File,
     manifest: &InstallationManifest,
     expected_owner: u32,
-) -> Result<
-    BTreeMap<(InstallationObjectKind, [u8; 32]), HeldInstallationArtifact>,
-    SelectorBoundaryError,
-> {
+) -> Result<BTreeMap<(InstallationObjectKind, [u8; 32]), HeldInstallationArtifact>, InstallationError>
+{
     manifest
         .objects()
         .iter()
         .try_fold(BTreeMap::new(), |mut artifacts, object| {
             root.try_clone()
-                .map_err(|_| SelectorBoundaryError::Io)
+                .map_err(|_| InstallationError::Io)
                 .and_then(|directory_root| {
                     open_directory_chain(
                         directory_root,
@@ -647,33 +653,33 @@ fn open_indexed_artifacts(
                             );
                             Ok(artifacts)
                         } else {
-                            Err(SelectorBoundaryError::ArtifactInvalid)
+                            Err(InstallationError::ArtifactInvalid)
                         }
                     })
                 })
         })
 }
 
-fn ensure_no_pending_recovery(root: &File) -> Result<(), SelectorBoundaryError> {
+fn ensure_no_pending_recovery(root: &File) -> Result<(), InstallationError> {
     match statat(root, RECOVERY_NAME, AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => Ok(()),
-        _ => Err(SelectorBoundaryError::ArtifactInvalid),
+        _ => Err(InstallationError::ArtifactInvalid),
     }
 }
 
 /// Any node at the recovery pathname is a pending SIR1; the recovery loader
 /// then requires it to be the exact root-owned record.
-fn pending_recovery_exists(root: &File) -> Result<bool, SelectorBoundaryError> {
+fn pending_recovery_exists(root: &File) -> Result<bool, InstallationError> {
     statat(root, RECOVERY_NAME, AtFlags::SYMLINK_NOFOLLOW)
         .map(|_| true)
         .or_else(|error| {
             (error == rustix::io::Errno::NOENT)
                 .then_some(false)
-                .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                .ok_or(InstallationError::ArtifactInvalid)
         })
 }
 
-fn fixed_artifact_root() -> Result<File, SelectorBoundaryError> {
+fn fixed_artifact_root() -> Result<File, InstallationError> {
     File::open("/")
         .map_err(io_failure)
         .and_then(|filesystem_root| {
@@ -684,12 +690,12 @@ fn fixed_artifact_root() -> Result<File, SelectorBoundaryError> {
         })
 }
 
-fn io_failure<T>(_: T) -> SelectorBoundaryError {
-    SelectorBoundaryError::Io
+fn io_failure<T>(_: T) -> InstallationError {
+    InstallationError::Io
 }
 
-fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
-    SelectorBoundaryError::ArtifactInvalid
+fn artifact_invalid<T>(_: T) -> InstallationError {
+    InstallationError::ArtifactInvalid
 }
 
 fn manifest_digest(unsigned: &Value) -> Result<[u8; 32], ProtocolError> {
@@ -774,11 +780,11 @@ pub(crate) fn open_directory_chain(
     mut directory: File,
     relative: &Path,
     expected_owner: u32,
-) -> Result<File, SelectorBoundaryError> {
+) -> Result<File, InstallationError> {
     validate_directory(&directory, expected_owner)?;
     for component in relative.components() {
         let Component::Normal(name) = component else {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
+            return Err(InstallationError::ArtifactInvalid);
         };
         directory = openat2(
             &directory,
@@ -790,22 +796,22 @@ pub(crate) fn open_directory_chain(
                 .union(ResolveFlags::NO_MAGICLINKS),
         )
         .map(File::from)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .map_err(|_| InstallationError::ArtifactInvalid)?;
         validate_directory(&directory, expected_owner)?;
     }
     Ok(directory)
 }
 
-fn validate_directory(directory: &File, expected_owner: u32) -> Result<(), SelectorBoundaryError> {
+fn validate_directory(directory: &File, expected_owner: u32) -> Result<(), InstallationError> {
     directory
         .metadata()
-        .map_err(|_| SelectorBoundaryError::Io)
+        .map_err(|_| InstallationError::Io)
         .and_then(|metadata| {
             if !metadata.is_dir()
                 || metadata.uid() != expected_owner
                 || metadata.mode() & 0o022 != 0
             {
-                Err(SelectorBoundaryError::ArtifactInvalid)
+                Err(InstallationError::ArtifactInvalid)
             } else {
                 Ok(())
             }
@@ -818,7 +824,7 @@ fn open_immutable_file(
     required_mode: u32,
     maximum: u64,
     expected_owner: u32,
-) -> Result<File, SelectorBoundaryError> {
+) -> Result<File, InstallationError> {
     openat2(
         directory,
         name,
@@ -829,10 +835,10 @@ fn open_immutable_file(
             .union(ResolveFlags::NO_MAGICLINKS),
     )
     .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    .map_err(|_| InstallationError::ArtifactInvalid)
     .and_then(|file| {
         file.metadata()
-            .map_err(|_| SelectorBoundaryError::Io)
+            .map_err(|_| InstallationError::Io)
             .and_then(|metadata| {
                 if !metadata.is_file()
                     || metadata.uid() != expected_owner
@@ -841,7 +847,7 @@ fn open_immutable_file(
                     || metadata.len() == 0
                     || metadata.len() > maximum
                 {
-                    Err(SelectorBoundaryError::ArtifactInvalid)
+                    Err(InstallationError::ArtifactInvalid)
                 } else {
                     Ok(file)
                 }
@@ -849,11 +855,11 @@ fn open_immutable_file(
     })
 }
 
-fn read_complete_file(file: &File, maximum: u64) -> Result<Vec<u8>, SelectorBoundaryError> {
+fn read_complete_file(file: &File, maximum: u64) -> Result<Vec<u8>, InstallationError> {
     file.metadata()
-        .map_err(|_| SelectorBoundaryError::Io)
+        .map_err(|_| InstallationError::Io)
         .and_then(|metadata| {
-            usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            usize::try_from(metadata.len()).map_err(|_| InstallationError::ArtifactInvalid)
         })
         .and_then(|capacity| read_exact_file(PositionalReader::new(file), maximum + 1, capacity))
 }
@@ -902,42 +908,39 @@ fn read_exact_file(
     reader: impl Read,
     maximum: u64,
     capacity: usize,
-) -> Result<Vec<u8>, SelectorBoundaryError> {
+) -> Result<Vec<u8>, InstallationError> {
     let mut bytes = Vec::with_capacity(capacity);
     reader
         .take(maximum)
         .read_to_end(&mut bytes)
-        .map_err(|_| SelectorBoundaryError::Io)
+        .map_err(|_| InstallationError::Io)
         .and({
             if bytes.len() == capacity {
                 Ok(bytes)
             } else {
-                Err(SelectorBoundaryError::ArtifactInvalid)
+                Err(InstallationError::ArtifactInvalid)
             }
         })
 }
 
-fn digest_complete_file(
-    file: &File,
-    expected_length: u64,
-) -> Result<[u8; 32], SelectorBoundaryError> {
+fn digest_complete_file(file: &File, expected_length: u64) -> Result<[u8; 32], InstallationError> {
     digest_reader(PositionalReader::new(file), expected_length)
 }
 
 fn digest_reader(
     mut reader: impl Read,
     expected_length: u64,
-) -> Result<[u8; 32], SelectorBoundaryError> {
+) -> Result<[u8; 32], InstallationError> {
     let mut remaining = expected_length;
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut hasher = blake3::Hasher::new();
     while remaining != 0 {
         let maximum = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
         let Ok(read) = reader.read(&mut buffer[..maximum]) else {
-            return Err(SelectorBoundaryError::Io);
+            return Err(InstallationError::Io);
         };
         if read == 0 {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
+            return Err(InstallationError::ArtifactInvalid);
         }
         hasher.update(&buffer[..read]);
         remaining -= read as u64;
@@ -945,8 +948,8 @@ fn digest_reader(
     let mut extra = [0_u8; 1];
     match reader.read(&mut extra) {
         Ok(0) => Ok(*hasher.finalize().as_bytes()),
-        Ok(_) => Err(SelectorBoundaryError::ArtifactInvalid),
-        Err(_) => Err(SelectorBoundaryError::Io),
+        Ok(_) => Err(InstallationError::ArtifactInvalid),
+        Err(_) => Err(InstallationError::Io),
     }
 }
 
@@ -1938,13 +1941,13 @@ pub mod tests {
         // Another owner or any other mode is refused.
         assert_eq!(
             state.open_capture_store_root(owner.wrapping_add(1)).err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
+            Some(InstallationError::ArtifactInvalid)
         );
         for mode in [0o750, 0o500, 0o1700] {
             fs::set_permissions(&captures, fs::Permissions::from_mode(mode))?;
             assert_eq!(
                 state.open_capture_store_root(owner).err(),
-                Some(SelectorBoundaryError::ArtifactInvalid)
+                Some(InstallationError::ArtifactInvalid)
             );
         }
         fs::set_permissions(&captures, fs::Permissions::from_mode(0o700))?;
@@ -1955,14 +1958,14 @@ pub mod tests {
         symlink(&target, &captures)?;
         assert_eq!(
             state.open_capture_store_root(owner).err(),
-            Some(SelectorBoundaryError::Io)
+            Some(InstallationError::Io)
         );
         assert!(captures.is_symlink());
         fs::remove_file(&captures)?;
         fs::write(&captures, b"")?;
         assert_eq!(
             state.open_capture_store_root(owner).err(),
-            Some(SelectorBoundaryError::Io)
+            Some(InstallationError::Io)
         );
         assert!(captures.is_file());
         Ok(())
@@ -2015,7 +2018,7 @@ pub mod tests {
         std::thread::scope(|scope| -> TestResult {
             let readers: Vec<_> = (0..8)
                 .map(|_| {
-                    scope.spawn(|| -> Result<(), SelectorBoundaryError> {
+                    scope.spawn(|| -> Result<(), InstallationError> {
                         barrier.wait();
                         for _ in 0..64 {
                             assert_eq!(artifact.read_control(8192)?, bytes);
@@ -2039,12 +2042,12 @@ pub mod tests {
         artifact.file().set_len(2)?;
         assert_eq!(
             artifact.read_control(3),
-            Err(SelectorBoundaryError::ArtifactInvalid)
+            Err(InstallationError::ArtifactInvalid)
         );
         artifact.file().set_len(4)?;
         assert_eq!(
             artifact.read_control(3),
-            Err(SelectorBoundaryError::ArtifactInvalid)
+            Err(InstallationError::ArtifactInvalid)
         );
 
         // The retained production file is read-only. A write-only replacement
@@ -2054,7 +2057,7 @@ pub mod tests {
             file: fs::OpenOptions::new().write(true).open(temporary.path())?,
             object: artifact.object,
         };
-        assert_eq!(unreadable.read_control(3), Err(SelectorBoundaryError::Io));
+        assert_eq!(unreadable.read_control(3), Err(InstallationError::Io));
         Ok(())
     }
 
@@ -2119,8 +2122,8 @@ pub mod tests {
             InstalledSelectorState::open_fixed_at_for_test(&root)?,
             FixedInstallation::RecoveryPending(_)
         ));
-        assert_eq!(io_failure(()), SelectorBoundaryError::Io);
-        assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
+        assert_eq!(io_failure(()), InstallationError::Io);
+        assert_eq!(artifact_invalid(()), InstallationError::ArtifactInvalid);
         Ok(())
     }
 
@@ -2136,10 +2139,10 @@ pub mod tests {
             *blake3::hash(&[9; 4]).as_bytes()
         );
         let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
-        assert_eq!(digest_reader(write_only, 1), Err(SelectorBoundaryError::Io));
+        assert_eq!(digest_reader(write_only, 1), Err(InstallationError::Io));
 
         let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
-        assert_eq!(digest_reader(write_only, 0), Err(SelectorBoundaryError::Io));
+        assert_eq!(digest_reader(write_only, 0), Err(InstallationError::Io));
         Ok(())
     }
 
@@ -2184,7 +2187,7 @@ pub mod tests {
                 authenticated_state_with(operators, revoked)?.authenticate_bootstrap()?;
             assert_eq!(
                 bootstrap.trust_policy_operator_key(),
-                Err(SelectorBoundaryError::ArtifactInvalid)
+                Err(InstallationError::ArtifactInvalid)
             );
         }
         Ok(())
@@ -2324,7 +2327,7 @@ pub mod tests {
             let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
             assert_eq!(
                 bootstrap.resolve_installed_case(&request, 0),
-                Err(SelectorBoundaryError::ArtifactInvalid)
+                Err(InstallationError::ArtifactInvalid)
             );
         }
         let request = EvaluationRequest::from_canonical_cbor(
@@ -2334,7 +2337,7 @@ pub mod tests {
             authenticated_state_with(Vec::new(), Vec::new())?.authenticate_bootstrap()?;
         assert_eq!(
             without_operator.resolve_installed_case(&request, 0),
-            Err(SelectorBoundaryError::ArtifactInvalid)
+            Err(InstallationError::ArtifactInvalid)
         );
         Ok(())
     }
@@ -2375,7 +2378,7 @@ pub mod tests {
         std::thread::scope(|scope| -> TestResult {
             let readers: Vec<_> = (0..2)
                 .map(|_| {
-                    scope.spawn(|| -> Result<(), SelectorBoundaryError> {
+                    scope.spawn(|| -> Result<(), InstallationError> {
                         barrier.wait();
                         for _ in 0..2 {
                             assert_eq!(bootstrap.resolve_installed_case(&request, 0)?, expected);

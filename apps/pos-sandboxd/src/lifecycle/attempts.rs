@@ -167,6 +167,11 @@ pub enum AttemptLifecycleError {
     /// quarantined and restart reconciliation recovers.
     #[error("the attempt's terminal response is unavailable")]
     ResponseUnavailable,
+    /// The stored response was already delivered whole, so it is kept and
+    /// not re-issued (base ADR-069 §4: every connection receives the same
+    /// stored response).
+    #[error("the attempt's terminal response was already delivered")]
+    ResponseDelivered,
     /// A repeated execute carries other EVR1 or SPX1 bytes than the attempt
     /// was admitted with (ADR-069 §4; SPE1 16 `RequestIdentityConflict`).
     #[error("the repeated execute differs from the attempt's request")]

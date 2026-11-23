@@ -7,7 +7,7 @@ use std::time::Duration;
 use ciborium::value::Value;
 use pos_reference::provider_admission::execution::StagingError;
 use pos_reference::sandbox_provider_protocol::SandboxProviderErrorCode as Code;
-use pos_reference::selector::SelectorBoundaryError;
+use pos_reference::selector::InstallationError;
 
 use super::{lifecycle_answer, payload_length, staging_code, transfer_output, Answer, Transfer};
 use crate::AttemptLifecycleError;
@@ -19,7 +19,7 @@ fn every_refusal_before_agr1_has_its_section_7_5_code() {
     let cases = [
         (StagingError::InvalidSource, Some(Code::AuthorityMismatch)),
         (
-            StagingError::Source(SelectorBoundaryError::ArtifactInvalid),
+            StagingError::Source(InstallationError::ArtifactInvalid),
             Some(Code::AuthorityMismatch),
         ),
         (
@@ -55,7 +55,7 @@ fn every_refusal_before_agr1_has_its_section_7_5_code() {
             Some(Code::SandboxUnavailable),
         ),
         (
-            StagingError::Source(SelectorBoundaryError::Io),
+            StagingError::Source(InstallationError::Io),
             Some(Code::SandboxUnavailable),
         ),
         // R9 §5: a signing fault emits nothing.
@@ -221,12 +221,16 @@ mod served {
     use pos_reference::provider_admission::execution::{ExecutePeer, ExecuteSource};
     use pos_reference::provider_admission::test_support::StagedInstallation;
     use pos_reference::sandbox_provider_protocol::{
-        SandboxExecuteRequest, SandboxProviderError, SandboxProviderErrorCode as Code,
+        AdmissionGrant, RequestAuthority, SandboxCancelRequest, SandboxCancelResponse,
+        SandboxCancellationResult, SandboxExecuteRequest, SandboxProviderError,
+        SandboxProviderErrorCode as Code, SandboxProviderResult,
     };
 
     use super::TestResult;
     use crate::provider_runtime::port::ExecutePort;
-    use crate::provider_runtime::serving::{Admission, Responder, FENCED, REVOKED};
+    use crate::provider_runtime::serving::{
+        Admission, RequestIdentity, Responder, EXECUTE, FENCED, REVOKED,
+    };
     use crate::provider_runtime::tests::{
         bind_as_provider, in_isolated_root, install_spi1, spi1, test_port, RUNTIME_SEED,
     };
@@ -482,6 +486,241 @@ mod served {
             refused(&answered(&responder, Admission::Answered, false)?)?,
             (Code::SandboxUnavailable, id)
         );
+        drop(staged);
+        Ok(())
+    }
+
+    /// Every record `deliver` writes to a fresh connection for `response`
+    /// under `identity`, the window `window`.
+    fn delivered(
+        responder: &Responder<'_>,
+        port: &ExecutePort,
+        (identity, response): (RequestIdentity, &Arc<crate::RetainedResponse>),
+        granted: bool,
+        window: Duration,
+    ) -> TestResult<Vec<Vec<u8>>> {
+        served(&[], false, |stream| {
+            responder.deliver_within(port, &stream, (identity, response), granted, window);
+        })
+    }
+
+    /// The execute identity of the attempt `response` answers.
+    fn identity_of(response: &crate::RetainedResponse) -> TestResult<RequestIdentity> {
+        let grant =
+            AdmissionGrant::from_canonical_cbor(response.frames().next().ok_or("no AGR1")?)?;
+        Ok(RequestIdentity {
+            operation: EXECUTE,
+            request_id: grant.request_id,
+            request_digest: [0x5d; 32],
+            attempt_id: Some(grant.attempt_id),
+        })
+    }
+
+    /// An SCQ1 for `attempt_id` under the AGR1 `agr1_digest`.
+    fn cancel_request(attempt_id: [u8; 16], agr1_digest: [u8; 32], id: u8) -> SandboxCancelRequest {
+        SandboxCancelRequest {
+            request: RequestAuthority {
+                request_id: [id; 16],
+                apt1_digest: [1; 32],
+                policy_epoch: 1,
+                nonce: [id; 16],
+            },
+            attempt_id,
+            agr1_digest,
+            request_digest: [id; 32],
+        }
+    }
+
+    /// Base §4: a recovery connection that delivered the stored response
+    /// whole keeps it, so the abandoned connection's later output timeout
+    /// re-issues nothing; without a delivery the timeout re-issues it.
+    #[test]
+    fn a_response_delivered_by_a_joined_connection_is_never_reissued() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::a_response_delivered_by_a_joined_connection_is_never_reissued",
+        )? {
+            return Ok(());
+        }
+        let _staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let limits = StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        };
+        let (_tree, port_value) = test_port(limits)?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 4);
+        let first = port(&open)?;
+        let stored = first
+            .lifecycle
+            .completed_for_test()
+            .map_err(|error| error.to_string())?;
+        let identity = identity_of(&stored)?;
+        let attempt = identity.attempt_id.ok_or("no attempt")?;
+        // B, the joined recovery connection, receives every frame, SPY1 last.
+        let frames: Vec<Vec<u8>> = stored.frames().map(<[u8]>::to_vec).collect();
+        let joined = delivered(&responder, first, (identity, &stored), false, TIMEOUT)?;
+        assert_eq!(joined, frames);
+        // A, abandoned during its output, times out: nothing is re-issued,
+        // and A got no SPY1.
+        let abandoned = delivered(&responder, first, (identity, &stored), true, Duration::ZERO)?;
+        assert_eq!(
+            abandoned.len(),
+            frames.len() - 1 - stored.output().0.len() - 1
+        );
+        assert!(Arc::ptr_eq(
+            &first
+                .lifecycle
+                .terminal_response(attempt, stored.agr1_digest())?,
+            &stored
+        ));
+        // Undelivered, the same timeout re-issues the response.
+        let (_fresh_tree, fresh) = test_port(limits)?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(fresh)));
+        let responder = Responder::new(&admitted, &signer, &open, 4);
+        let fresh = port(&open)?;
+        let stored = fresh
+            .lifecycle
+            .completed_for_test()
+            .map_err(|error| error.to_string())?;
+        delivered(&responder, fresh, (identity, &stored), true, Duration::ZERO)?;
+        assert!(!fresh
+            .lifecycle
+            .terminal_response(attempt, stored.agr1_digest())
+            .is_ok_and(|current| Arc::ptr_eq(&current, &stored)));
+        Ok(())
+    }
+
+    /// This request cancels an admitted attempt awaiting its input: SCY1
+    /// `1`, once its input ends and its response is signed.
+    fn cancels_an_attempt_awaiting_its_input(
+        responder: &Responder<'_>,
+        port: &ExecutePort,
+        staged: &StagedInstallation,
+        (signer, key): (&KeyFileRuntimeSigner, crate::AdmittedRuntimeKey<'_>),
+    ) -> TestResult {
+        let soon = || Instant::now() + Duration::from_secs(5);
+        let source = [staged.evaluation(), staged.request()];
+        let (server, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        peer.write_all(&framed(&source)?)?;
+        let signing = signer;
+        std::thread::scope(|scope| -> TestResult {
+            let serving = scope.spawn(|| responder.answer(server, Admission::Answered, None));
+            let mut prefix = [0; 4];
+            peer.read_exact(&mut prefix)?;
+            let mut bytes = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+            peer.read_exact(&mut bytes)?;
+            let grant = AdmissionGrant::from_canonical_cbor(&bytes)?;
+            let cancelling = scope.spawn(move || {
+                port.cancel(
+                    &cancel_request(grant.attempt_id, grant.grant_digest(), 6),
+                    soon(),
+                    (signing, key),
+                )
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            peer.shutdown(std::net::Shutdown::Write)?;
+            let answered = cancelling
+                .join()
+                .map_err(|_| "cancel panicked")?
+                .map_err(|code| format!("{code:?}"))?;
+            serving.join().map_err(|_| "serving panicked")?;
+            let scy1 = SandboxCancelResponse::from_canonical_cbor(&answered)?;
+            assert_eq!(scy1.result, SandboxCancellationResult::CancelledAndCleaned);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// SCY1 (base §4, §10): `0` binds the SPY1 of an attempt already
+    /// terminal and delivers it, so no later timeout re-issues it; an exact
+    /// repeat gets the same bytes; `1` binds the SPY1 of the attempt this
+    /// request cancelled; an unknown attempt is `15`; an attempt with no
+    /// SPY1 by the deadline is `11`.
+    #[test]
+    fn cancel_binds_the_terminal_spy1_and_delivers_it() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::cancel_binds_the_terminal_spy1_and_delivers_it",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 4);
+        let port = port(&open)?;
+        let key = responder.key();
+        let soon = || Instant::now() + Duration::from_secs(5);
+        // Already terminal: 0, bound to the stored SPY1.
+        let stored = port
+            .lifecycle
+            .completed_for_test()
+            .map_err(|error| error.to_string())?;
+        let identity = identity_of(&stored)?;
+        let attempt = identity.attempt_id.ok_or("no attempt")?;
+        let request = cancel_request(attempt, stored.agr1_digest(), 3);
+        let answered = port
+            .cancel(&request, soon(), (&*signer, key))
+            .map_err(|code| format!("{code:?}"))?;
+        let scy1 = SandboxCancelResponse::from_canonical_cbor(&answered)?;
+        scy1.verify_signature(key.key())?;
+        assert_eq!(scy1.result, SandboxCancellationResult::AlreadyTerminal);
+        let terminal = SandboxProviderResult::from_canonical_cbor(stored.response().result)?;
+        assert_eq!(scy1.terminal_spy1_digest, terminal.result_digest());
+        // An exact repeat gets the same bytes; the SCY1 delivered the
+        // response, so a later output timeout keeps it.
+        assert_eq!(
+            port.cancel(&request, soon(), (&*signer, key))
+                .map_err(|code| format!("{code:?}"))?,
+            answered
+        );
+        delivered(&responder, port, (identity, &stored), true, Duration::ZERO)?;
+        assert!(Arc::ptr_eq(
+            &port
+                .lifecycle
+                .terminal_response(attempt, stored.agr1_digest())?,
+            &stored
+        ));
+        // A signer that cannot sign under the admitted key emits nothing.
+        let foreign = KeyFileRuntimeSigner::from_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
+            "foreign".to_owned(),
+        );
+        assert_eq!(
+            port.cancel(
+                &cancel_request(attempt, stored.agr1_digest(), 7),
+                soon(),
+                (&foreign, key)
+            ),
+            Err(None)
+        );
+        // An unknown attempt, and one under another AGR1.
+        assert_eq!(
+            port.cancel(
+                &cancel_request([0x33; 16], [0x34; 32], 4),
+                soon(),
+                (&*signer, key)
+            ),
+            Err(Some(Code::UnknownAttempt))
+        );
+        // An attempt that awaits its input past the deadline has no SPY1.
+        port.lifecycle.granted_for_test([0x77; 16], [0x78; 32])?;
+        assert_eq!(
+            port.cancel(
+                &cancel_request([0x77; 16], [0x78; 32], 5),
+                Instant::now() + Duration::from_millis(50),
+                (&*signer, key)
+            ),
+            Err(Some(Code::SandboxUnavailable))
+        );
+        cancels_an_attempt_awaiting_its_input(&responder, port, &staged, (&signer, key))?;
         drop(staged);
         Ok(())
     }

@@ -25,7 +25,7 @@ use crate::{
         AdmissionLedger, LaunchFailure, PayloadDescriptor, SandboxExecutionMode, SandboxLimit,
         SelectorGrantCommitment, TransferRecord,
     },
-    selector::SelectorBoundaryError,
+    selector::InstallationError,
 };
 
 use super::{AdmittedAuthority, ProviderImageSnapshot};
@@ -51,6 +51,22 @@ pub use budget::{ControlFloor, StagingCharge, StagingLedger, StagingLimits, Stag
 /// ```compile_fail
 /// let _ = pos_reference::provider_admission::execution::StagingError::ConnectionChanged;
 /// ```
+///
+/// A changed authority is refused only by the release recheck, after AGR1,
+/// with [`RecheckError::AuthorityChanged`]; it is not a pre-AGR1 refusal
+/// (R11 Amendment 1 §7.5):
+///
+/// ```compile_fail
+/// let _ = pos_reference::provider_admission::execution::StagingError::AuthorityChanged;
+/// ```
+///
+/// Its installation failures are an [`InstallationError`], so the
+/// selector-socket `SelectorUnavailable` cannot reach the port:
+///
+/// ```compile_fail
+/// use pos_reference::{provider_admission::execution::StagingError, selector};
+/// let _ = StagingError::Source(selector::SelectorBoundaryError::SelectorUnavailable);
+/// ```
 #[derive(Debug, thiserror::Error)]
 pub enum StagingError {
     /// The two source records do not identify the independently resolved case.
@@ -71,7 +87,9 @@ pub enum StagingError {
     /// The signed AGR1 failed the provider's own commitment check.
     #[error("the signed grant differs from the derived commitment")]
     GrantCommitmentMismatch,
-    /// The reconstructed execution mode is not one this provider serves.
+    /// The reconstructed execution mode is not one this provider serves:
+    /// SPE1 `8` (R11 Amendment 1 §7.5 row 9). Not in that amendment's §5
+    /// list of `StagingError` changes; an ADR erratum candidate.
     #[error("the execution mode is not supported")]
     CapabilityMissing,
     /// The image or the provider binary failed its identity check.
@@ -86,10 +104,6 @@ pub enum StagingError {
     /// The admitted epochs are below the live provider control floor.
     #[error("admission is below the provider control floor")]
     BelowControlFloor,
-    /// A current installation no longer matches the admitted authority, at
-    /// the release recheck of an admitted execution.
-    #[error("installed authority differs from the admitted authority")]
-    AuthorityChanged,
     /// The candidate or a live attempt forbids another attempt.
     #[error("staging attempt slots are exhausted")]
     AttemptsExhausted,
@@ -110,10 +124,23 @@ pub enum StagingError {
     Incomplete,
     /// Fixed-installation admission failed.
     #[error(transparent)]
-    Source(#[from] SelectorBoundaryError),
+    Source(#[from] InstallationError),
     /// A stream or descriptor operation failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// Why the release recheck of an admitted execution refused (ADR-122
+/// Amendment 1 invariant 1(d)).
+#[derive(Debug, thiserror::Error)]
+pub enum RecheckError {
+    /// The current installation no longer matches the admitted authority.
+    #[error("installed authority differs from the admitted authority")]
+    AuthorityChanged,
+    /// The live ledger refused: a raised control floor, or a ledger closed
+    /// after a cleanup failure.
+    #[error(transparent)]
+    Ledger(StagingError),
 }
 
 /// Why an exchange was refused before its AGR1 write began.
@@ -138,6 +165,11 @@ pub struct ExecuteRefusal<E = Infallible> {
 
 impl<E> ExecuteRefusal<E> {
     /// The execute stream and why it was refused.
+    ///
+    /// The stream may still carry the shortened read and write timeouts of
+    /// the exchange's own deadlines, possibly already expired. Serving must
+    /// set the SPE1 refusal's own write deadline on it explicitly before
+    /// writing (journal 22582).
     #[must_use]
     pub fn into_parts(self) -> (UnixStream, RefusalCause<E>) {
         (self.stream, self.cause)
@@ -151,6 +183,8 @@ pub enum GrantFailure<E = Infallible> {
     Refused(Box<ExecuteRefusal<E>>),
     /// The write began and failed. No byte follows: SPE1 cannot follow AGR1
     /// (base ADR-069 §4), and the selector never authenticated a grant.
+    /// The stream was dropped with the exchange, and the provider keeps no
+    /// clone of it, so the selector reads EOF after the partial frame.
     Interrupted(StagingError),
 }
 
@@ -529,7 +563,13 @@ struct Execution {
     input_deadline: Instant,
     window: TransferWindow,
     clock: Clock,
+    connection: ConnectionIdentity,
 }
+
+/// An execute connection's `fstat` `(st_dev, st_ino)`, recorded by the
+/// source reader before the first source byte (ADR-122 Amendment 1
+/// invariant 2).
+type ConnectionIdentity = (u64, u64);
 
 /// Derived policy, the caller's lifecycle claim and atomic reservations,
 /// before any adapter input is admitted. It owns the execute stream.
@@ -567,6 +607,7 @@ pub struct AdmittedProviderExecution {
     authority: AdmittedAuthority,
     grant: IssuedGrant,
     transfer: Option<TransferRecord>,
+    connection: ConnectionIdentity,
     // The descriptor pins staged storage even after its private name is unlinked.
     // Close owned resources before releasing bytes, then the counted attempt.
     _input: StagingCharge,

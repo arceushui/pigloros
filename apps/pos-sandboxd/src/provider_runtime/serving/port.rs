@@ -33,13 +33,12 @@ use pos_reference::provider_admission::execution::{
     PreparedProviderExecution, RefusalCause, SourceRefusal, StagingError, UnchargedSource,
 };
 use pos_reference::sandbox_provider_protocol::{
-    SandboxPayloadChunk, SandboxProviderErrorCode, TransferRecord,
+    SandboxCancelRequest, SandboxPayloadChunk, SandboxProviderErrorCode, TransferRecord,
 };
-use pos_reference::selector::SelectorBoundaryError;
+use pos_reference::selector::InstallationError;
 
 use super::{
-    close_answered, unserved_reader, Deadlined, Refusal, RequestIdentity, Responder,
-    RESPONSE_DEADLINE,
+    close_answered, Deadlined, Refusal, RequestIdentity, Responder, CANCEL, RESPONSE_DEADLINE,
 };
 use crate::provider_runtime::port::{serves, ExecutePort};
 use crate::{sign_verified, AttemptLifecycleError, ExchangeClaim, RetainedResponse};
@@ -93,8 +92,7 @@ const fn staging_code(error: &StagingError) -> Option<SandboxProviderErrorCode> 
     use SandboxProviderErrorCode as Code;
     match error {
         StagingError::SignerFault | StagingError::GrantCommitmentMismatch => None,
-        StagingError::InvalidSource
-        | StagingError::Source(SelectorBoundaryError::ArtifactInvalid) => {
+        StagingError::InvalidSource | StagingError::Source(InstallationError::ArtifactInvalid) => {
             Some(Code::AuthorityMismatch)
         }
         StagingError::CapabilityMissing => Some(Code::ProviderCapabilityMissing),
@@ -189,22 +187,45 @@ impl Responder<'_> {
                     Self::conclude(&stream, self.refuse(Refusal::UNIDENTIFIED));
                 }
                 Err(SourceRefusal::Uncharged(handed)) => self.serve_handoff(handed),
-                Err(SourceRefusal::NotExecute(other)) => self.answer_other(other),
+                Err(SourceRefusal::NotExecute(other)) => self.answer_other(port, other),
             }
         }
     }
 
     /// Another operation on the execute socket: its first record, then the
     /// rest of the request up to its EOF, under the unchanged deadline.
-    fn answer_other(&self, other: OtherRequest) {
+    fn answer_other(&self, port: &ExecutePort, other: OtherRequest) {
         let (stream, first, until) = other.into_parts();
         let classified = self.classify_single(&first);
         io::copy(&mut Deadlined::until(&stream, until), &mut io::sink()).ok();
         let response = match classified {
+            Ok(identity) if identity.operation == CANCEL => {
+                self.answer_cancel(port, &first, identity, until)
+            }
             Ok(identity) => self.answer_identity(identity),
             Err(refusal) => self.refuse(refusal),
         };
         Self::conclude(&stream, response);
+    }
+
+    /// The SCY1 of an authenticated SCQ1 for an attempt the port may hold,
+    /// or its SPE1; nothing when the SCY1 cannot be signed (R9 §5).
+    fn answer_cancel(
+        &self,
+        port: &ExecutePort,
+        record: &[u8],
+        identity: RequestIdentity,
+        until: Instant,
+    ) -> Option<Vec<u8>> {
+        SandboxCancelRequest::from_canonical_cbor(record)
+            .ok()
+            .and_then(|request| {
+                port.cancel(&request, until, (&**self.signer, self.key()))
+                    .map_or_else(
+                        |code| code.and_then(|code| self.authenticated(identity, code)),
+                        Some,
+                    )
+            })
     }
 
     /// A connection whose source charge the ledger refused, waiting for an
@@ -214,7 +235,7 @@ impl Responder<'_> {
     fn serve_handoff(&self, handed: UnchargedSource) {
         let until = handed.deadline();
         let Some(permit) = self.refusals.wait(until) else {
-            return Self::conclude(&handed.into_stream(), self.refuse(unserved_reader()));
+            return self.unserved(&handed.into_stream());
         };
         let closed = handed.closed();
         let (stream, frames) = handed.read_rest();
@@ -380,15 +401,32 @@ impl Responder<'_> {
         port: &ExecutePort,
         stream: &UnixStream,
         identity: RequestIdentity,
-        response: &RetainedResponse,
+        response: &Arc<RetainedResponse>,
         granted: bool,
     ) {
+        let window =
+            Duration::from_millis(response.grant().effective_limits()[TRANSFER_WINDOW_ID].value);
+        self.deliver_within(port, stream, (identity, response), granted, window);
+    }
+
+    /// [`Self::deliver`] with the output transfer bounded by `window`.
+    ///
+    /// SPY1 is written only once the lifecycle recorded this response as
+    /// delivered, which no re-issue may then replace; a response replaced
+    /// meanwhile gets no SPY1 on this connection (base §4).
+    fn deliver_within(
+        &self,
+        port: &ExecutePort,
+        stream: &UnixStream,
+        (identity, response): (RequestIdentity, &Arc<RetainedResponse>),
+        granted: bool,
+        window: Duration,
+    ) {
+        let attempt_id = identity.attempt_id.unwrap_or_default();
         let frames: Vec<&[u8]> = response.frames().collect();
         let (outputs, expected) = response.output();
         let result = frames.len() - 1;
         let head = &frames[usize::from(granted)..result - outputs.len()];
-        let window =
-            Duration::from_millis(response.grant().effective_limits()[TRANSFER_WINDOW_ID].value);
         let mut writing = Deadlined::new(stream, RESPONSE_DEADLINE);
         let written = head
             .iter()
@@ -403,17 +441,19 @@ impl Responder<'_> {
             )
         });
         match transferred {
-            Some(Transfer::Complete) => {
+            Some(Transfer::Complete) if port.lifecycle.claim_delivery(attempt_id, response) => {
                 write_frame(
                     &mut Deadlined::new(stream, RESPONSE_DEADLINE),
                     frames[result],
                 )
                 .ok();
             }
+            // No byte of SPY1 was written here: the response may be
+            // re-issued, unless another connection or an SCY1 delivered it.
             Some(Transfer::TimedOut(record)) => {
                 port.lifecycle
                     .reissue_response(
-                        identity.attempt_id.unwrap_or_default(),
+                        attempt_id,
                         response.agr1_digest(),
                         record,
                         &**self.signer,
@@ -421,7 +461,7 @@ impl Responder<'_> {
                     )
                     .ok();
             }
-            Some(Transfer::Broken) | None => {}
+            Some(Transfer::Complete | Transfer::Broken) | None => {}
         }
         close_answered(stream);
     }

@@ -671,3 +671,14 @@ pub use response::{ResponseFault, RetainedResponse};
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+#[cfg(test)]
+impl crate::AttemptLifecycle {
+    /// A Completed response with output, signed by the test runtime key and
+    /// retained for the test attempt, for the serving tests.
+    pub(crate) fn completed_for_test(
+        &self,
+    ) -> Result<std::sync::Arc<RetainedResponse>, Box<dyn std::error::Error + Send + Sync>> {
+        tests::completed_retained(self)
+    }
+}

@@ -53,9 +53,25 @@ pub struct RetainedResponse {
     chain: Vec<SandboxAuditRecord>,
     encoded: Encoded,
     output: Option<RetainedOutput>,
+    // Set, under the lifecycle's attempts lock, once a connection writes
+    // its SPY1 or an SCY1 binds it: no re-issue may then replace it.
+    delivered: std::sync::atomic::AtomicBool,
 }
 
 impl RetainedResponse {
+    /// Record that this response is delivered whole: a connection writes
+    /// its SPY1, or an SCY1 binds its digest. The lifecycle calls this
+    /// under its attempts lock, while this is the stored response.
+    pub(crate) fn mark_delivered(&self) {
+        self.delivered
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether this response was delivered whole, so a re-issue must keep it.
+    pub(crate) fn delivered(&self) -> bool {
+        self.delivered.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The self-digest of the AGR1 the response answers.
     #[must_use]
     pub const fn agr1_digest(&self) -> [u8; 32] {
@@ -600,6 +616,7 @@ fn assemble<R: RuntimeAttestationSigner>(
             chain,
             encoded,
             output,
+            delivered: std::sync::atomic::AtomicBool::new(false),
         })
         .map_err(Into::into)
 }

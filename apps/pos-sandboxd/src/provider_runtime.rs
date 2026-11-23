@@ -66,7 +66,7 @@ use pos_reference::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
 use pos_reference::selector::installation::{InstallationObjectKind, InstalledSelectorState};
-use pos_reference::selector::SelectorBoundaryError;
+use pos_reference::selector::InstallationError;
 
 use crate::{
     AttemptLifecycle, KeyFileRuntimeSigner, ProviderInstallation, ProviderInstallationError,
@@ -91,7 +91,7 @@ const MAX_SLOTS: u64 = 256;
 pub enum ProviderStartupError {
     /// Step 2: SIC1 is missing, invalid, pending recovery or not admitted.
     #[error(transparent)]
-    Installation(#[from] SelectorBoundaryError),
+    Installation(#[from] InstallationError),
     /// Step 3: `/proc/self/exe` is not the held SIC1 provider executable.
     #[error("the running executable is not the admitted provider binary")]
     SelfBinding,

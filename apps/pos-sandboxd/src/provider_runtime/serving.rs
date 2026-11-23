@@ -512,7 +512,7 @@ impl<'a> Responder<'a> {
         );
         let until = reading.until;
         let Some(permit) = permit.or_else(|| self.refusals.wait(until)) else {
-            return Self::conclude(stream, self.refuse(unserved_reader()));
+            return self.unserved(stream);
         };
         let classified = self.classify(&mut reading);
         drop(permit);
@@ -567,6 +567,19 @@ impl<'a> Responder<'a> {
         code: SandboxProviderErrorCode,
     ) -> Option<Vec<u8>> {
         self.refuse(Refusal::Authenticated { identity, code })
+    }
+
+    /// Answer a connection that waited for an uncharged reader until its
+    /// initial control deadline and was never read: the item P13 answer,
+    /// recorded in diagnostics as a provider-side stall (R11 Amendment 1
+    /// §7.5, owner decision 2026-11-24).
+    fn unserved(&self, stream: &UnixStream) {
+        writeln!(
+            io::stderr(),
+            "pos-sandboxd: provider-side stall: an execute connection waited for an uncharged reader until its initial control deadline"
+        )
+        .ok();
+        Self::conclude(stream, self.refuse(unserved_reader()));
     }
 
     /// Write `response`, if any, under its own deadline, then send server
@@ -811,7 +824,7 @@ const fn accepting(answered: usize, room: bool, pool: usize) -> bool {
 /// its initial control deadline and was never read (R11 Amendment 1 §7.5,
 /// invariant 30): no identity was authenticated, so SPE1 can encode only
 /// code `0` with null identities. This is the single place that answer is
-/// chosen (item P13).
+/// chosen (item P13, accepted as option (a) on 2026-11-24).
 const fn unserved_reader() -> Refusal {
     Refusal::UNIDENTIFIED
 }

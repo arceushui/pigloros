@@ -13,6 +13,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxProviderResult, SandboxReconcileRequest, SelfDigested,
 };
 
+use super::super::completed_retained;
 use super::super::{
     signed_grant, signer, signing_key, Released, TestResult, AGR1, ATTEMPT, KEY_ID,
 };
@@ -867,5 +868,49 @@ fn racing_retentions_keep_the_first_stored_response() -> TestResult {
             assert!(Arc::ptr_eq(&first?, &second?));
         }
     }
+    Ok(())
+}
+
+/// Base §4: once a connection delivered the stored response whole, or an
+/// SCY1 bound it, an output timeout elsewhere re-issues nothing and the
+/// stored response stays; a response replaced meanwhile cannot be claimed.
+#[test]
+fn a_delivered_response_is_never_reissued() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let retained = completed_retained(&lifecycle)?;
+    let digest = retained.agr1_digest();
+    // Not delivered yet: another attempt or a stale response is refused.
+    assert!(!lifecycle.claim_delivery([1; 16], &retained));
+    assert!(lifecycle.claim_delivery(ATTEMPT, &retained));
+    assert!(matches!(
+        lifecycle.reissue_response(
+            ATTEMPT,
+            digest,
+            Some(timed_out_transfer()),
+            &signer(),
+            admitted
+        ),
+        Err(AttemptLifecycleError::ResponseDelivered)
+    ));
+    assert!(Arc::ptr_eq(
+        &lifecycle.terminal_response(ATTEMPT, digest)?,
+        &retained
+    ));
+    // An undelivered response is re-issued, and the replaced one can no
+    // longer be claimed.
+    let (_directory, lifecycle, _ledger) = self::lifecycle()?;
+    let retained = completed_retained(&lifecycle)?;
+    let successor = lifecycle.reissue_response(
+        ATTEMPT,
+        retained.agr1_digest(),
+        Some(timed_out_transfer()),
+        &signer(),
+        admitted,
+    )?;
+    assert!(!Arc::ptr_eq(&successor, &retained));
+    assert!(!lifecycle.claim_delivery(ATTEMPT, &retained));
+    assert!(lifecycle.claim_delivery(ATTEMPT, &successor));
     Ok(())
 }
