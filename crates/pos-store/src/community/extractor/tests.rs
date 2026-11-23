@@ -32,7 +32,7 @@ use super::super::protection::{
 };
 use super::{
     extract, heights, prepare_community_artifact_batch_v1, read_root, resolve_children,
-    CommunityArtifactBatchInputV1, CommunityArtifactRecordInputV1,
+    CommunityArtifactBatchFormV1, CommunityArtifactBatchInputV1, CommunityArtifactRecordInputV1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -287,10 +287,12 @@ fn prepare_counted(
 ) -> Fallible<Result<(), Error>> {
     let (head, root) = head_and_root(members, roots, graph_counts)?;
     let records = inputs(records);
-    Ok(
-        prepare_community_artifact_batch_v1(&SEAL, batch(&records, &head, &root), &[key])
-            .map(|_| ()),
+    Ok(prepare_community_artifact_batch_v1(
+        &SEAL,
+        CommunityArtifactBatchFormV1::Closure(batch(&records, &head, &root)),
+        &[key],
     )
+    .map(|_| ()))
 }
 
 /// Authenticate and read each of `records` on its own, stopping before any
