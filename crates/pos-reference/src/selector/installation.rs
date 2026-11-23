@@ -20,7 +20,8 @@ use std::path::{Component, Path};
 
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
-use rustix::fs::{openat2, statat, AtFlags, Mode, OFlags, ResolveFlags};
+use rustix::fs::{fchmod, mkdirat, openat2, statat, AtFlags, Mode, OFlags, ResolveFlags};
+use rustix::io::Errno;
 
 use super::{SelectorBoundaryError, SANDBOX_SELECTOR_SOCKET};
 use crate::evaluator_protocol::{
@@ -36,6 +37,11 @@ const SANDBOX_RECOVERY_SOCKET_ROOT: &str = "/run/pigloros/sandbox-selector-recov
 pub(crate) const MANIFEST_NAME: &str = "installation.cbor";
 pub(super) const RECOVERY_NAME: &str = "installation-update.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
+/// The provider's network capture store beneath the artifact root (ADR-069
+/// R11 Amendment 1 §5.4).
+const CAPTURE_STORE_NAME: &str = "captures";
+/// The capture store root's exact mode.
+const CAPTURE_STORE_MODE: Mode = Mode::RWXU;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
 
@@ -519,12 +525,57 @@ impl InstalledSelectorState {
             .and_then(|metadata| Self::open_fixed_at(root, metadata.uid()))
     }
 
-    /// The held artifact root descriptor, beneath which the provider's
-    /// fixed-name siblings of SIC1 are opened (ADR-069 R11 §4.1 and
-    /// Amendment 1 §5.4).
-    #[must_use]
-    pub const fn artifact_root(&self) -> &File {
-        &self.root
+    /// Opens, or creates, the provider's network capture store root
+    /// `captures/`, a fixed-name sibling of SIC1 beneath the held artifact
+    /// root (ADR-069 R11 Amendment 1 §5.4). Only this one directory is
+    /// reachable: the artifact root descriptor itself is never exposed.
+    ///
+    /// It is resolved beneath the root without crossing a symlink, a magic
+    /// link or a mount, and opened with `O_NOFOLLOW`. When absent it is
+    /// created with mode `0700`, then set to `0700` against the umask. It
+    /// must be a directory that `owner` owns (UID 0 for the provider
+    /// runtime), of mode exactly `0700`.
+    ///
+    /// # Errors
+    /// Returns [`SelectorBoundaryError::Io`] when it cannot be opened or
+    /// created, including through a link, a mount or a non-directory, and
+    /// [`SelectorBoundaryError::ArtifactInvalid`] for another owner or mode.
+    pub fn open_capture_store_root(&self, owner: u32) -> Result<File, SelectorBoundaryError> {
+        let open = || {
+            openat2(
+                &self.root,
+                CAPTURE_STORE_NAME,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_XDEV,
+            )
+            .map(File::from)
+        };
+        open()
+            .or_else(|error| {
+                if error == Errno::NOENT {
+                    mkdirat(&self.root, CAPTURE_STORE_NAME, CAPTURE_STORE_MODE)
+                        .and_then(|()| open())
+                        .and_then(|created| fchmod(&created, CAPTURE_STORE_MODE).map(|()| created))
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(io_failure)
+            .and_then(|directory| {
+                directory
+                    .metadata()
+                    .is_ok_and(|metadata| {
+                        metadata.is_dir()
+                            && metadata.uid() == owner
+                            && metadata.mode() & 0o7777 == CAPTURE_STORE_MODE.bits()
+                    })
+                    .then_some(directory)
+                    .ok_or(SelectorBoundaryError::ArtifactInvalid)
+            })
     }
 
     /// Returns SIC1's original canonical bytes.
@@ -1250,16 +1301,7 @@ pub mod tests {
         kind: InstallationObjectKind,
         identity: [u8; 32],
     ) -> TestResult<std::path::PathBuf> {
-        let held = File::open(root)?;
-        let state = InstalledSelectorState::open_at_for_test(&held)?;
-        // The state holds the very artifact root it was opened beneath.
-        assert_eq!(
-            (
-                state.artifact_root().metadata()?.dev(),
-                state.artifact_root().metadata()?.ino()
-            ),
-            (held.metadata()?.dev(), held.metadata()?.ino())
-        );
+        let state = InstalledSelectorState::open_at_for_test(&File::open(root)?)?;
         let object = state
             .manifest()
             .objects()
@@ -1875,6 +1917,54 @@ pub mod tests {
         let manifest_path = root.join(MANIFEST_NAME);
         fs::write(&manifest_path, encode_manifest(unsigned(objects))?)?;
         fs::set_permissions(manifest_path, fs::Permissions::from_mode(0o400))?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_capture_store_root_is_created_private_and_refused_when_unsafe() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        write_state(temporary.path())?;
+        let root = File::open(temporary.path())?;
+        let owner = root.metadata()?.uid();
+        let state = InstalledSelectorState::open_at_for_test(&root)?;
+        let captures = temporary.path().join("captures");
+        // Absent: created with mode 0700, then reopened as it is.
+        let created = state.open_capture_store_root(owner)?;
+        assert_eq!(created.metadata()?.mode() & 0o7777, 0o700);
+        assert_eq!(
+            state.open_capture_store_root(owner)?.metadata()?.ino(),
+            created.metadata()?.ino()
+        );
+        // Another owner or any other mode is refused.
+        assert_eq!(
+            state.open_capture_store_root(owner.wrapping_add(1)).err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        for mode in [0o750, 0o500, 0o1700] {
+            fs::set_permissions(&captures, fs::Permissions::from_mode(mode))?;
+            assert_eq!(
+                state.open_capture_store_root(owner).err(),
+                Some(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+        fs::set_permissions(&captures, fs::Permissions::from_mode(0o700))?;
+        // A symlink, even to a private directory, and a regular file are
+        // refused, and nothing replaces them.
+        let target = temporary.path().join("target");
+        fs::rename(&captures, &target)?;
+        symlink(&target, &captures)?;
+        assert_eq!(
+            state.open_capture_store_root(owner).err(),
+            Some(SelectorBoundaryError::Io)
+        );
+        assert!(captures.is_symlink());
+        fs::remove_file(&captures)?;
+        fs::write(&captures, b"")?;
+        assert_eq!(
+            state.open_capture_store_root(owner).err(),
+            Some(SelectorBoundaryError::Io)
+        );
+        assert!(captures.is_file());
         Ok(())
     }
 
