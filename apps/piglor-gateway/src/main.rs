@@ -45,7 +45,8 @@ use piglor_gateway::startup::{
     stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
 };
 use piglor_gateway::{
-    owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
+    erasure_admissions, owntracks, router_for_addr, AppState, Gateway, LedgerConfig,
+    LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
 use pos_local_erasure_loader::deployment_trust::DEPLOYMENT_TRUST_STATE_PATH;
@@ -148,6 +149,11 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             output_stdout!("{output}");
             Ok(())
         }
+        Some("erasure-admissions") => {
+            let output = erasure_admissions::execute(&args[2..])?;
+            output_stdout!("{output}");
+            Ok(())
+        }
         Some("serve") => {
             let request = parse_serve_request(&args[2..])?;
             let credentials = request
@@ -193,12 +199,13 @@ fn usage(command: Option<&str>) -> Result<(), RunError> {
                 .into(),
         );
     }
-    output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority] [--require-local-erasure]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>] [--rotation routine|compromise]|version>");
+    output_stderr!("Usage: piglor-gateway <owntracks|erasure-admissions|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority] [--require-local-erasure]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|provision-local-erasure <sqlite-path> --issued-by <key-id> --signer-owner <owner-id> --out <absolute-path> [--expiry <unix-seconds>] [--signer-epoch <epoch>] [--rotation routine|compromise]|version>");
     output_stderr!("  profiles: gateway-mode-local-v1, gateway-mode-air-gapped-v1");
     output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
     output_stderr!("  owntracks status <sqlite-path>");
     output_stderr!("  owntracks rotate <sqlite-path> <owner-key-path>");
     output_stderr!("  owntracks revoke <sqlite-path>");
+    output_stderr!("  erasure-admissions close|open|status <sqlite-path>");
     output_stderr!(
         "  serve --profile gateway-mode-local-v1 127.0.0.1:8080           # Memory store"
     );
@@ -1564,6 +1571,55 @@ mod tests {
         )
         .test_ok()?;
         drop(std::fs::remove_file(database));
+
+        Ok(())
+    }
+
+    /// #1408: the binary dispatches `erasure-admissions` to its command,
+    /// which a store the first `serve` bound accepts.
+    #[test]
+    fn erasure_admissions_subcommand_is_dispatched_by_the_binary_entrypoint(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = std::env::temp_dir().join(format!(
+            "piglor-gw-erasure-admissions-dispatch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .test_ok()?
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).test_ok()?;
+        let database = directory.join("gateway.db").display().to_string();
+        run_with_args_and_shutdown(
+            &[
+                String::from("piglor-gateway"),
+                String::from("serve"),
+                String::from("--profile"),
+                String::from("gateway-mode-local-v1"),
+                String::from("127.0.0.1:0"),
+                database.clone(),
+            ],
+            Box::pin(async {
+                tokio::task::yield_now().await;
+            }),
+        )
+        .test_ok()?;
+        let admissions = |verb: &str| {
+            run_with_args_and_shutdown(
+                &[
+                    String::from("piglor-gateway"),
+                    String::from("erasure-admissions"),
+                    verb.to_owned(),
+                    database.clone(),
+                ],
+                Box::pin(async {}),
+            )
+        };
+        admissions("close").test_ok()?;
+        admissions("status").test_ok()?;
+        let usage = admissions("reopen").test_err()?;
+        assert!(usage.to_string().starts_with("Usage:"), "{usage}");
+        std::fs::remove_dir_all(directory).test_ok()?;
 
         Ok(())
     }

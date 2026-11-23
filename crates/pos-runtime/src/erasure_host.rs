@@ -56,9 +56,9 @@ use pos_core::{
 };
 use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
-    local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureRequestInputV1,
-    ErasureScopeV1, LocalErasureAdmissionV1, LocalErasureAuthorizationV1,
-    LocalErasureIdempotencyV1, LocalErasureSelectorV1, PrincipalRefV1,
+    local_erasure_requester_v1, local_erasure_subject_v1, EntityId, ErasureAdmissionsPortV1 as _,
+    ErasureAdmissionsStateV1, ErasureRequestInputV1, ErasureScopeV1, LocalErasureAdmissionV1,
+    LocalErasureAuthorizationV1, LocalErasureIdempotencyV1, LocalErasureSelectorV1, PrincipalRefV1,
     ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 #[cfg(target_os = "linux")]
@@ -207,6 +207,7 @@ trait ErasureHostStore:
     + ForkEventProvenanceAuthorityPortV1
     + ForkReplayAuthorityReadPortV1
     + pos_core::LocalReplicaResidualPortV1
+    + pos_core::ErasureAdmissionsPortV1
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -230,7 +231,8 @@ where
         + ForkEventPermitIssuerPortV1
         + ForkEventProvenanceAuthorityPortV1
         + ForkReplayAuthorityReadPortV1
-        + pos_core::LocalReplicaResidualPortV1,
+        + pos_core::LocalReplicaResidualPortV1
+        + pos_core::ErasureAdmissionsPortV1,
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -919,6 +921,12 @@ pub enum LocalErasureSubmitErrorV1 {
     /// has expired (owner decision D3 of 2026-11-18 on #1413); only the
     /// exact replay of an installed request is still answered.
     AdmissionsClosed,
+    /// The operator closed new admissions with the durable store record
+    /// that `piglor-gateway erasure-admissions close` writes (ADR-136
+    /// follow-up F3, #1408). Only the exact replay of an installed request
+    /// is still answered; every admitted request still freezes and
+    /// completes.
+    OperatorClosed,
     /// The host has no Local erasure composition (D9).
     Unserved,
     /// The host refused or failed the submission.
@@ -4580,8 +4588,9 @@ impl ErasureCommandSenderV1<'_> {
     /// or subject. A request with that id already installed then answers
     /// its state and its retained ELADM1 when its ELIDEM1 binds the same
     /// body, and is a conflict otherwise; this exact replay is answered even
-    /// once new admissions have closed, since expiry closes new admissions
-    /// only. A fresh request needs new admissions open, must pass the
+    /// once new admissions have closed, since expiry and the operator's
+    /// admissions record (#1408) close new admissions only. A fresh request
+    /// needs the operator's record open and new admissions open, must pass the
     /// per-subject checks against the installed inventory, and the
     /// authority must find the closure within its bound; only then does the
     /// host retain its ERAZ1, ELSEL1, ELIDEM1 and ELADM1, build ERQ1 and
@@ -4593,7 +4602,9 @@ impl ErasureCommandSenderV1<'_> {
     ///
     /// # Errors
     /// Returns [`LocalErasureSubmitErrorV1::Unserved`] on a host without a
-    /// Local composition, [`LocalErasureSubmitErrorV1::AdmissionsClosed`]
+    /// Local composition, [`LocalErasureSubmitErrorV1::OperatorClosed`]
+    /// for a fresh request while the operator's admissions record is
+    /// closed, [`LocalErasureSubmitErrorV1::AdmissionsClosed`]
     /// for a fresh request once the installed TPS1 or the bundle has
     /// expired, [`LocalErasureSubmitErrorV1::Concurrent`] while another
     /// request of the subject is pre-terminal or has an active attempt,
@@ -4606,9 +4617,11 @@ impl ErasureCommandSenderV1<'_> {
     /// root grant the authority does not authorize at the chain head,
     /// refuse with [`ErasureHostErrorV1::AuthorizationDenied`]; an
     /// Idempotency-Key reused for another body, a retained-only scope, or a
-    /// binding epoch of zero is a [`ErasureHostErrorV1::Conflict`]; and an
+    /// binding epoch of zero is a [`ErasureHostErrorV1::Conflict`]; an
     /// installed request without its ELADM1 is
-    /// [`ErasureHostErrorV1::RecoveryUnavailable`].
+    /// [`ErasureHostErrorV1::RecoveryUnavailable`]; and an admissions
+    /// record that cannot be read refuses a fresh request with
+    /// [`ErasureHostErrorV1::AdapterFailure`].
     pub fn submit_local_erasure(
         &mut self,
         submission: &LocalErasureSubmissionV1,
@@ -4641,6 +4654,25 @@ impl ErasureCommandSenderV1<'_> {
         );
         let preparation = &binding.preparation;
         let request = &records.request;
+        // The operator's admissions record (#1408). It is read here, before
+        // the view borrows the host, and applied only after the exact-replay
+        // check below, so a replay keeps its normal answer while admissions
+        // are closed. A record that cannot be read fails closed for a fresh
+        // request as `AdapterFailure`: of the existing host errors, it is
+        // the payload-free error of an owned store adapter that failed,
+        // which is exactly what happened; the request is not frozen,
+        // conflicting or unauthorized, and the recovered inventory is still
+        // sound. The Gateway answers it as a retryable `503`.
+        let operator = self
+            .host
+            .store
+            .host_store()
+            .erasure_admissions()
+            .map_err(|_| LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AdapterFailure))
+            .and_then(|admissions| match admissions {
+                ErasureAdmissionsStateV1::Open => Ok(()),
+                ErasureAdmissionsStateV1::Closed => Err(LocalErasureSubmitErrorV1::OperatorClosed),
+            });
         // `Some` is the answer to an exact replay, with the policy its
         // installed ERQ1 pins; `None` admits a fresh request whose records
         // may now be retained.
@@ -4660,6 +4692,9 @@ impl ErasureCommandSenderV1<'_> {
                         .ok_or(LocalErasureSubmitErrorV1::Host(
                             ErasureHostErrorV1::Conflict,
                         )));
+                }
+                if let Err(refusal) = operator {
+                    return Ok(Err(refusal));
                 }
                 if preparation.submissions_open().is_err() {
                     return Ok(Err(LocalErasureSubmitErrorV1::AdmissionsClosed));
@@ -7627,6 +7662,19 @@ mod tests {
     impl pos_core::LocalReplicaResidualPortV1 for FaultStoreV1 {
         fn purge_local_replica_residue(&mut self) -> Result<(), ErasureErrorV1> {
             pos_core::LocalReplicaResidualPortV1::purge_local_replica_residue(&mut self.inner)
+        }
+    }
+
+    impl pos_core::ErasureAdmissionsPortV1 for FaultStoreV1 {
+        fn erasure_admissions(&self) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+            pos_core::ErasureAdmissionsPortV1::erasure_admissions(&self.inner)
+        }
+
+        fn set_erasure_admissions(
+            &mut self,
+            state: pos_core::ErasureAdmissionsStateV1,
+        ) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+            pos_core::ErasureAdmissionsPortV1::set_erasure_admissions(&mut self.inner, state)
         }
     }
 

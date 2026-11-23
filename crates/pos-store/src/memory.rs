@@ -405,6 +405,8 @@ pub struct MemoryStore {
     mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1,
     /// Gateway-managed Preference and `OptionSpec` revisions (#304).
     gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1,
+    /// The operator's Local erasure admissions record (#1408).
+    erasure_admissions: pos_core::ErasureAdmissionsStateV1,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -880,6 +882,7 @@ impl MemoryStore {
             erasure_fork_recovery_proofs: BTreeMap::new(),
             mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1::default(),
             gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1::default(),
+            erasure_admissions: pos_core::ErasureAdmissionsStateV1::Open,
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -5631,6 +5634,21 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
 impl pos_core::LocalReplicaResidualPortV1 for MemoryStore {
     fn purge_local_replica_residue(&mut self) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ReplicaNegativeAcknowledgement)
+    }
+}
+
+/// The admissions record of a `MemoryStore` lives as long as its instance
+/// (#1408).
+impl pos_core::ErasureAdmissionsPortV1 for MemoryStore {
+    fn erasure_admissions(&self) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+        Ok(self.erasure_admissions)
+    }
+
+    fn set_erasure_admissions(
+        &mut self,
+        state: pos_core::ErasureAdmissionsStateV1,
+    ) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+        Ok(std::mem::replace(&mut self.erasure_admissions, state))
     }
 }
 

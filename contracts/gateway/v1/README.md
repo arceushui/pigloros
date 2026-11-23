@@ -205,6 +205,12 @@ Each needs its own grant, `erasure.request` (resource `erasure`) or `erasure.rea
   of the Local Principal (`erasure_store_requests`); the next is `409 erasure-quota-exhausted`,
   which a retry never clears. A Gateway without a Local erasure composition, or whose trust
   admission has expired, answers a non-retryable `503 temporarily-unavailable`.
+- **Operator closure.** The operator can close new erasure admissions durably with
+  `piglor-gateway erasure-admissions close <sqlite-path>` and reopen them with `open` (#1408).
+  While they are closed, a fresh request is a non-retryable `503 erasure-admissions-closed` and
+  nothing is requested; only reopening clears it. An exact retry of an admitted request still
+  answers its receipt, and `getErasure` and the completion of admitted requests continue, also
+  across a restart.
 - **Projection.** An `Erasure` is answered only to its subject: an unknown id, another
   subject's id, a refused decision (also one past the denial-record bound, which only a refused
   caller reaches) and a Gateway without a Local erasure composition all answer the same
@@ -229,7 +235,9 @@ Every failure body has `type` (`urn:pigloros:gateway:v1:problem:<code>`), `title
 it never echoes an identifier; a request no route matches carries its request path. A protected
 lookup answers `not-found-or-unavailable` and never reveals whether the resource exists.
 `retryable: true` means an identical retry may succeed. The registry is open: a client handles a
-`code` it does not know by its HTTP status and `retryable` and never fails on it (rule 5).
+`code` it does not know by its HTTP status and `retryable` and never fails on it (rule 5). A
+`503` is not always transient: `erasure-admissions-closed` stays until the operator reopens
+erasure admissions, so it is not retryable.
 
 Every loopback operation except `/health` and the public Ledger reads is protected by the host's
 Local Principal (#1361): loopback reachability is the trust boundary, there is no credential

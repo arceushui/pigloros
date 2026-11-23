@@ -4263,6 +4263,8 @@ pub use registration_commit::{
     PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
     MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
 };
+mod admissions;
+pub use admissions::{ErasureAdmissionsPortV1, ErasureAdmissionsStateV1};
 mod local_replica;
 pub use local_replica::LocalReplicaResidualPortV1;
 mod rejoin;

@@ -224,6 +224,13 @@ fn submit_refusal(error: LocalErasureSubmitErrorV1) -> ProblemV1 {
             StatusCode::BAD_REQUEST,
             "the erasure scope exceeds the Local erasure limit",
         ),
+        // The operator closed admissions (#1408): only reopening clears it,
+        // so a retry alone never succeeds.
+        LocalErasureSubmitErrorV1::OperatorClosed => ProblemV1::new(
+            ProblemCodeV1::ErasureAdmissionsClosed,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the operator closed erasure admissions on this host",
+        ),
         LocalErasureSubmitErrorV1::AdmissionsClosed | LocalErasureSubmitErrorV1::Unserved => {
             ProblemV1::new(
                 ProblemCodeV1::TemporarilyUnavailable,

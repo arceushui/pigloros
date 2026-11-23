@@ -18,6 +18,7 @@ mod e2e_determinism;
 // Public so its crate-only items satisfy `unreachable_pub` and
 // `clippy::redundant_pub_crate`, as `host_timelines` below.
 pub mod erasure;
+pub mod erasure_admissions;
 pub mod executor;
 // Public so its crate-only items satisfy both `unreachable_pub` and
 // `clippy::redundant_pub_crate`: in a private module `pub(crate)` trips the
