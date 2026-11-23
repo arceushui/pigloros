@@ -986,8 +986,13 @@ mod cases {
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
         assert!(matches!(
-            runtime.lifecycle.join([1; 16], [0x77; 32]).await,
-            Err(AttemptLifecycleError::RequestConflict)
+            // Other bytes conflict at once, never after a wait.
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                runtime.lifecycle.join([1; 16], [0x77; 32])
+            )
+            .await,
+            Ok(Err(AttemptLifecycleError::RequestConflict))
         ));
         let joined = runtime.lifecycle.join([1; 16], REQUEST);
         let ran = async {
@@ -1627,8 +1632,8 @@ mod cases {
             Err(AttemptLifecycleError::RequestConflict)
         ));
         assert!(matches!(
-            lifecycle.join([1; 16], [0x77; 32]).await,
-            Err(AttemptLifecycleError::RequestConflict)
+            tokio::time::timeout(Duration::from_secs(1), lifecycle.join([1; 16], [0x77; 32])).await,
+            Ok(Err(AttemptLifecycleError::RequestConflict))
         ));
         // The test seam leaves the lifecycle's diagnostics intact.
         assert!(format!("{lifecycle:?}").contains("BeginHook"));

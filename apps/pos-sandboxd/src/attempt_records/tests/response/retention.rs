@@ -456,8 +456,12 @@ async fn an_exact_repeat_replays_the_stored_full_response() -> TestResult {
     let digest = grant.grant.grant_digest();
     lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
     assert!(matches!(
-        lifecycle.join(ATTEMPT, [0x77; 32]).await,
-        Err(AttemptLifecycleError::RequestConflict)
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            lifecycle.join(ATTEMPT, [0x77; 32])
+        )
+        .await,
+        Ok(Err(AttemptLifecycleError::RequestConflict))
     ));
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
@@ -670,6 +674,16 @@ fn a_retained_response_is_never_signed_again() -> TestResult {
     assert!(lifecycle
         .retain_response(unsignable, &signer(), admitted)
         .is_err());
+    // The stored fault is the answer for its own grant: nothing is signed.
+    let counting = Counting {
+        signer: signer(),
+        signed: std::cell::Cell::new(0),
+    };
+    assert!(matches!(
+        lifecycle.retain_response(completed()?, &counting, admitted),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    assert_eq!(counting.signed.get(), 0);
     assert!(matches!(
         lifecycle.retain_response(Released::default().ended()?, &signer(), admitted),
         Err(AttemptLifecycleError::GrantMismatch)
