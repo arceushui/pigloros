@@ -24,7 +24,7 @@ const DIRECTORY_OPEN: OFlags = OFlags::RDONLY
 /// mount crossing (§5.4, item P11). `NO_SYMLINKS` already implies
 /// `NO_MAGICLINKS` and refuses a final symlink as `O_NOFOLLOW` does; §5.4
 /// names all three, so all three are kept.
-const BENEATH: ResolveFlags = ResolveFlags::BENEATH
+const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
@@ -63,7 +63,7 @@ pub fn entry_names(directory: &File) -> io::Result<Vec<CString>> {
 /// Returns the I/O error when it cannot be opened or created, including
 /// through a link, a mount crossing or a non-directory.
 pub fn open_or_create_beneath(parent: &File, name: &str) -> io::Result<File> {
-    let open = || openat2(parent, name, DIRECTORY_OPEN, Mode::empty(), BENEATH).map(File::from);
+    let open = || openat2(parent, name, DIRECTORY_OPEN, Mode::empty(), RESOLVE).map(File::from);
     open()
         .or_else(|error| {
             if error == Errno::NOENT {
@@ -160,7 +160,9 @@ mod tests {
     #[test]
     fn no_mount_is_crossed() -> TestResult {
         // `/proc` is always its own mount beneath `/`, and it exists, so
-        // nothing is created.
+        // nothing is created. This needs a mounted procfs: without one the
+        // open fails with another error and the test fails loudly, never
+        // passing falsely.
         let held = File::open("/")?;
         assert_eq!(
             open_or_create_beneath(&held, "proc")
