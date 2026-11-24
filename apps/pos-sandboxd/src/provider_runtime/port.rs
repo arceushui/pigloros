@@ -374,8 +374,9 @@ mod tests {
     }
 
     /// Base §4 and the R11 repeat rule: only an exact repeat of the
-    /// attempt's last SCQ1 gets its SCY1 bytes again; an SCQ1 with another
-    /// request ID and digest is a new request, answered with its own SCY1.
+    /// attempt's last SCQ1 gets its SCY1 bytes again, from the stored
+    /// answer; an SCQ1 with another request ID and digest is a new request,
+    /// answered with its own SCY1.
     #[test]
     fn only_an_exact_repeat_of_the_last_scq1_replays_its_scy1(
     ) -> crate::provider_runtime::tests::TestResult {
@@ -412,6 +413,18 @@ mod tests {
         };
         let first = cancel(3)?;
         assert_eq!(cancel(3)?, first);
+        // The repeat is answered from the stored SCY1, never signed again: a
+        // signer that cannot sign under the admitted key still replays it,
+        // and execute admission stays open.
+        let foreign = KeyFileRuntimeSigner::from_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
+            "foreign".to_owned(),
+        );
+        assert_eq!(
+            port.cancel(&request(3), until(), (&foreign, key)),
+            Ok(first.clone())
+        );
+        assert!(port.open());
         let next = cancel(4)?;
         assert_ne!(next, first);
         let answered = SandboxCancelResponse::from_canonical_cbor(&next)?;
