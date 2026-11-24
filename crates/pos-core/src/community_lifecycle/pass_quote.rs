@@ -444,12 +444,8 @@ const fn split(state: bool, total: bool) -> Result<()> {
 
 /// The R11.3(4) State depth bound `max(D, 3 + max(D, 3))`.
 const fn state_depth(selected: CommunityGraphCountsV1) -> u64 {
-    let base = if selected.maximum_depth > 3 {
-        selected.maximum_depth
-    } else {
-        3
-    };
-    base.saturating_add(3)
+    // max(D, 3) + 3, written without a comparison.
+    selected.maximum_depth.saturating_sub(3).saturating_add(6)
 }
 
 /// `counts` plus `additions`, at depth `depth`.

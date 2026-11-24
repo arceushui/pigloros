@@ -1033,7 +1033,14 @@ fn the_state_depth_bound_is_three_above_the_selected_depth_or_three() -> TestRes
     let bindings = fixture.bindings()?;
     let members = [quote_member(&bindings[0], &fixture.payload, &[], false)];
     let quote = CommunityPassQuoteV1::new(quote_input(&members, None))?;
-    for (selected, expected) in [(0, 6), (3, 6), (4, 7), (10, 13)] {
+    for (selected, expected) in [
+        (0, 6),
+        (2, 6),
+        (3, 6),
+        (4, 7),
+        (10, 13),
+        (u64::MAX - 10, u64::MAX - 7),
+    ] {
         let demand = quote.demand(domain(
             CommunityGraphCountsV1 {
                 maximum_depth: selected,
@@ -1044,6 +1051,18 @@ fn the_state_depth_bound_is_three_above_the_selected_depth_or_three() -> TestRes
         assert_eq!(demand.graph()[0].maximum_depth, expected);
         assert_eq!(demand.graph()[1].maximum_depth, expected + 1);
     }
+    // Both bounds saturate at the widest depth.
+    let widest = quote.demand(domain(
+        CommunityGraphCountsV1 {
+            maximum_depth: u64::MAX,
+            ..SELECTED
+        },
+        0,
+    ))?;
+    assert_eq!(
+        widest.graph().map(|graph| graph.maximum_depth),
+        [u64::MAX; 2]
+    );
     Ok(())
 }
 
