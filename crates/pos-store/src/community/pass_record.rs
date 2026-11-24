@@ -33,8 +33,18 @@ impl CommunityPassStatusV1 {
     }
 }
 
+/// The counters a pass's quote was built over and its materialization's
+/// actual additions.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CommunityPassCountsV1 {
+    /// The counters the quote was built over (R10.3(6)).
+    pub prior: CommunitySharedCountsV1,
+    /// The minted materialization's actual additions, if the pass minted one.
+    pub materialization: Option<CommunitySharedCountsV1>,
+}
+
 /// The facts a Reserve retains about its pass.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommunityReservedPassV1 {
     /// The CPR1 fields, the CPK1 and `H(CRI1)` included.
     pub reservation: CommunityReservationInputV1,
@@ -66,6 +76,9 @@ pub(super) struct CommunityPassRecordV1 {
 
 impl MemoryCommunityDomainV1 {
     /// The pass reserved under `(T, reservation_operation_id)`, in any status.
+    ///
+    /// Records stay in the index for ever, so `unresolved_pass` scans every
+    /// pass of T: O(passes of T), to revisit in A5.
     pub(super) fn pass_record(
         &self,
         timeline: TimelineId,
@@ -111,9 +124,12 @@ impl MemoryCommunityDomainV1 {
         &self,
         timeline: TimelineId,
         reservation_operation_id: [u8; 16],
-    ) -> Option<(CommunitySharedCountsV1, Option<CommunitySharedCountsV1>)> {
+    ) -> Option<CommunityPassCountsV1> {
         self.pass_record(timeline, reservation_operation_id)
-            .map(|record| (record.prior_shared_counts, record.materialization))
+            .map(|record| CommunityPassCountsV1 {
+                prior: record.prior_shared_counts,
+                materialization: record.materialization,
+            })
     }
 
     /// Whether the `run_pass` call that reserved the pass is still running.

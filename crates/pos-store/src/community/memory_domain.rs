@@ -20,14 +20,14 @@ use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
-use super::erasure_budget::CommunityErasureContextV1;
+use super::erasure_budget::{CommunityErasureContextV1, CommunityPendingReservationV1};
 #[cfg(target_os = "linux")]
 use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 #[cfg(target_os = "linux")]
 use super::pass_record::CommunityPassRecordV1;
 #[cfg(target_os = "linux")]
-use super::pass_state::{CommunityPassStateV1, CommunityPendingReservationV1};
+use super::pass_state::CommunityPassStateV1;
 use super::private_hash::scope_set_digest;
 #[cfg(target_os = "linux")]
 use super::quarantine::{CommittedQuarantineControlV1, QuarantineLedgerV1};

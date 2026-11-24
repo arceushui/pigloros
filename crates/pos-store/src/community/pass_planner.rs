@@ -47,7 +47,7 @@ use pos_core::{EntityId, Hash, TimelineId};
 
 use super::erasure_budget::{
     CommunityErasureActorV1, CommunityErasureBudgetPortV1, CommunityErasureBudgetV1,
-    CommunityPendingErasureV1,
+    CommunityPendingErasureV1, CommunityPendingReservationV1,
 };
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
@@ -607,7 +607,12 @@ pub(super) fn trace_room(
     rows: u64,
     reserve: u64,
 ) -> Option<u64> {
-    let used = actor.targets + pending.targets + actor.quarantine_reserve + reserve + 2 * rows;
+    let held = CommunityPendingReservationV1::for_pass(rows, reserve);
+    let used = actor
+        .targets
+        .saturating_add(pending.targets)
+        .saturating_add(actor.quarantine_reserve)
+        .saturating_add(held.targets);
     COMMUNITY_ERASURE_TARGET_LINE_V1
         .checked_sub(used)
         .and_then(|targets| {
@@ -615,15 +620,16 @@ pub(super) fn trace_room(
                 .rows
                 .iter()
                 .try_fold(targets / 2, |room, (affected, committed)| {
-                    let added = if *affected == timeline {
-                        rows + reserve / 2
-                    } else {
-                        0
-                    };
+                    let added = if *affected == timeline { held.rows } else { 0 };
                     let pending = pending.rows.get(affected).copied().unwrap_or(0);
-                    let held = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
+                    let quarantine = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
                     COMMUNITY_ERASURE_ROW_LIMIT_V1
-                        .checked_sub(committed + pending + added + held)
+                        .checked_sub(
+                            committed
+                                .saturating_add(pending)
+                                .saturating_add(added)
+                                .saturating_add(quarantine),
+                        )
                         .map(|free| {
                             if *affected == timeline {
                                 room.min(free)

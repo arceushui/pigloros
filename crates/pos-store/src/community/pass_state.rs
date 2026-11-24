@@ -7,8 +7,8 @@
 //! writers ([`super::pass_writer`]: Reserve, and the Commit and Abort
 //! transitions that A5 and A4e-2 call) add the rest; the retained-outcome,
 //! control-operation, closure, observation, scope-row and
-//! pending-reservation reads serve what the state holds. [`CommunityPassReadPortV1`] reads them all under the
-//! caller's guard.
+//! pending-reservation reads serve what the state holds.
+//! [`CommunityPassReadPortV1`] reads them all under the caller's guard.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -117,15 +117,6 @@ impl CommunityPassStateV1 {
 
 /// The magic of a native node record.
 const CPN1: [u8; 4] = *b"CPN1";
-
-/// One unresolved reservation's worst-case demand (R13.1(4)): the pass
-/// rows and `F_p` it still holds, in targets and in rows bound to its
-/// Timeline.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CommunityPendingReservationV1 {
-    pub(super) targets: u64,
-    pub(super) rows: u64,
-}
 
 impl CommunityPassReadPortV1 for MemoryCommunityDomainV1 {
     fn recorded_set_counters(&self, timeline: TimelineId) -> CommunitySharedCountsV1 {

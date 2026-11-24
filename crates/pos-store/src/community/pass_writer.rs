@@ -22,6 +22,15 @@
 //! it. Abort and `SetReason` never count and are never refused for a cap or
 //! the budget: an Abort only has to bind no more rows than its pending entry
 //! holds (R13.1(5)).
+//!
+//! The writer refuses only a reservation id that is still pending. It does
+//! not refuse another pending reservation of the same T under a different
+//! id (4c, code 7), nor a replay of an id that already resolved: both rely
+//! on the planner's step 4a and 4c, which the pipeline runs first.
+//!
+//! A token is consumed by its apply, and every apply re-validates against
+//! the domain it is applied to, so a token staged twice, or staged before
+//! the entry or the state changed, is refused instead of applied twice.
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
@@ -29,14 +38,13 @@ use pos_core::community_lifecycle::{
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash, TimelineId};
 
-use super::erasure_budget::CommunityErasureBudgetPortV1;
+use super::erasure_budget::{CommunityErasureBudgetPortV1, CommunityPendingReservationV1};
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::pass_planner::{
     admit_caps, trace_room, CommunityPassCapsV1, CommunityPassReadPortV1,
     CommunityQuarantineIndexV1,
 };
 use super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1};
-use super::pass_state::CommunityPendingReservationV1;
 
 /// The observation materialization a Reserve mints (R9.7), as its stage-1
 /// quote derived it.
@@ -129,17 +137,22 @@ pub struct CommunityCommitInputV1 {
 pub struct CommunityStagedCommitV1(CommunityCommitInputV1);
 
 /// An Abort that fits its pending entry and awaits its apply.
-#[derive(Clone, Copy)]
 pub struct CommunityStagedAbortV1 {
     key: (TimelineId, [u8; 16]),
+    rows: u64,
 }
 
 impl MemoryCommunityDomainV1 {
     /// Re-check a Reserve at the writer (R10.7 step 5j) and stage it.
     ///
     /// # Errors
-    /// Returns `InvalidBinding` when the minted rows exceed the pass rows,
-    /// `Conflict` for a reservation identity already pending and
+    /// Returns `InvalidBinding` when the minted rows exceed the pass rows or
+    /// when the record's CPK1 Timeline or generation, or its predecessor
+    /// head, differs from the call's T, G or `selected_head`; `Conflict` for
+    /// a reservation identity already recorded, resolved or not; and
+    /// `PassUnresolved` (7) for another unresolved pass of T. These come
+    /// first, as R10.7 steps 4a and 4c precede 5j; the byte-equal
+    /// bound-content compare of R8.1(7) is the call layer's. Then
     /// `EvidenceUnavailable` for a Timeline with no pass state; then in the
     /// step-5j order `StaleGeneration` (5), `StaleFrontier` (6) for a moved
     /// head, moved counters or a budget the pending reservations now fill,
@@ -162,8 +175,8 @@ impl MemoryCommunityDomainV1 {
         {
             return Err(Error::InvalidBinding);
         }
-        // A resolved identity is a replay, not a new operation (R8.1(7)).
-        if self.pass_records.contains_key(&key) {
+        // A recorded identity, resolved or not, is a replay (R8.1(7)).
+        if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
             return Err(Error::Conflict);
         }
         if self.unresolved_pass(input.timeline).is_some() {
@@ -198,13 +211,12 @@ impl MemoryCommunityDomainV1 {
         .map(|()| {
             // The materialization's rows bind in the Reserve transaction;
             // the entry holds only the rest and `F_p` (R13.1(4)).
-            let pass_rows = input.pass_rows - bound;
             CommunityStagedReserveV1 {
                 key,
-                entry: CommunityPendingReservationV1 {
-                    targets: 2 * pass_rows + input.failure_reserve,
-                    rows: pass_rows + input.failure_reserve / 2,
-                },
+                entry: CommunityPendingReservationV1::for_pass(
+                    input.pass_rows - bound,
+                    input.failure_reserve,
+                ),
                 record: CommunityPassRecordV1 {
                     reserved: input.pass,
                     prior_shared_counts: input.prior_shared_counts,
@@ -246,19 +258,32 @@ impl MemoryCommunityDomainV1 {
     /// records: one more retained outcome, the pending entry and, for a
     /// minted materialization, its additions to the counters, the closure
     /// terms and scope rows a reuse reads and one more control operation.
+    ///
+    /// # Errors
+    /// Returns `Conflict` when the reservation identity is pending already,
+    /// and `EvidenceUnavailable` when the Timeline has no pass state; the
+    /// domain is unchanged.
     pub fn apply_reserve(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
         staged: CommunityStagedReserveV1,
-    ) {
+    ) -> Result<(), Error> {
         let (timeline, _) = staged.key;
+        if self.pending_reservations.contains_key(&staged.key)
+            || self.pass_records.contains_key(&staged.key)
+        {
+            return Err(Error::Conflict);
+        }
+        if !self.pass_states.contains_key(&timeline) {
+            return Err(Error::EvidenceUnavailable);
+        }
         self.pending_reservations.insert(staged.key, staged.entry);
         self.pass_records.insert(staged.key, staged.record);
         self.pass_states.entry(timeline).and_modify(|state| {
             let counts = state.generations.entry(state.generation).or_default();
-            counts.outcomes += 1;
+            counts.outcomes = counts.outcomes.saturating_add(1);
             if let Some(minted) = staged.minted {
-                counts.materializations += 1;
+                counts.materializations = counts.materializations.saturating_add(1);
                 state.counters = add_counts(state.counters, minted.additions);
                 state.observations.insert(minted.reference, minted.graph);
                 state
@@ -266,10 +291,14 @@ impl MemoryCommunityDomainV1 {
                     .insert(minted.scope_reference, minted.scope);
             }
         });
+        Ok(())
     }
 
     /// Check a Commit against its pending entry: it binds no more rows than
     /// the entry holds (R13.1(4)).
+    ///
+    /// It does not require the pass to be Sealed: that rule is A5's, which
+    /// reads the record's status before it stages the Commit.
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a reservation with no pending entry or
@@ -290,38 +319,41 @@ impl MemoryCommunityDomainV1 {
     /// the counters, selected graph, head and closure advance, the
     /// materialization's records are in the closure and an Annotation CPN1
     /// is one more control operation each.
+    ///
+    /// # Errors
+    /// Returns the [`Self::stage_commit`] refusals again: the entry must
+    /// still be pending and still hold the rows bound; the domain is
+    /// unchanged.
     pub fn apply_commit(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
         staged: CommunityStagedCommitV1,
-    ) {
+    ) -> Result<(), Error> {
         let input = staged.0;
-        self.pending_reservations
-            .remove(&(input.timeline, input.reservation_operation_id));
-        self.set_pass_status(
-            input.timeline,
-            input.reservation_operation_id,
-            CommunityPassStatusV1::Committed,
-        );
-        self.pass_states.entry(input.timeline).and_modify(|state| {
-            state.counters = add_counts(state.counters, input.additions);
-            state.graph = input.graph;
-            state.head = input.selected_head;
-            state.closure.extend(input.closure);
-            if let Some(observation) = input.observation {
-                state.observations.remove(&observation);
-            }
-            state.scope_rows.extend(input.scope_rows);
-            state
-                .generations
-                .entry(state.generation)
-                .or_default()
-                .annotations += input.annotations;
-        });
+        let key = (input.timeline, input.reservation_operation_id);
+        self.entry_of(key, input.bound_rows).map(|()| {
+            self.pending_reservations.remove(&key);
+            self.set_pass_status(key.0, key.1, CommunityPassStatusV1::Committed);
+            self.pass_states.entry(input.timeline).and_modify(|state| {
+                state.counters = add_counts(state.counters, input.additions);
+                state.graph = input.graph;
+                state.head = input.selected_head;
+                state.closure.extend(input.closure);
+                if let Some(observation) = input.observation {
+                    state.observations.remove(&observation);
+                }
+                state.scope_rows.extend(input.scope_rows);
+                let counts = state.generations.entry(state.generation).or_default();
+                counts.annotations = counts.annotations.saturating_add(input.annotations);
+            });
+        })
     }
 
     /// Check an Abort against its pending entry: it registers no more rows
     /// than the entry holds, and no cap or budget refuses it (R13.1(5)).
+    ///
+    /// It does not check the live call: an Abort of a pass whose `run_pass`
+    /// call is live gives 15 in A4e-2 (R8.3(3)), from the record's `live`.
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a reservation with no pending entry or
@@ -335,28 +367,46 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<CommunityStagedAbortV1, Error> {
         let key = (timeline, reservation_operation_id);
         self.entry_of(key, registered_rows)
-            .map(|()| CommunityStagedAbortV1 { key })
+            .map(|()| CommunityStagedAbortV1 {
+                key,
+                rows: registered_rows,
+            })
     }
 
     /// Apply a staged Abort: the entry is replaced by the rows it
     /// registered. The retained outcome, the materialization's counters,
     /// control operation and closure terms stay, so the next pass reuses
     /// its records (R13.1(4)).
+    ///
+    /// # Errors
+    /// Returns the [`Self::stage_abort`] refusals again: the entry must
+    /// still be pending and still hold the rows registered; the domain is
+    /// unchanged.
     pub fn apply_abort(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
-        staged: CommunityStagedAbortV1,
-    ) {
-        self.pending_reservations.remove(&staged.key);
-        self.set_pass_status(staged.key.0, staged.key.1, CommunityPassStatusV1::Aborted);
+        staged: &CommunityStagedAbortV1,
+    ) -> Result<(), Error> {
+        let CommunityStagedAbortV1 { key, rows } = *staged;
+        self.entry_of(key, rows).map(|()| {
+            self.pending_reservations.remove(&key);
+            self.set_pass_status(key.0, key.1, CommunityPassStatusV1::Aborted);
+        })
     }
 
     fn entry_of(&self, key: (TimelineId, [u8; 16]), rows: u64) -> Result<(), Error> {
         if !self.pass_states.contains_key(&key.0) {
             return Err(Error::EvidenceUnavailable);
         }
+        // A pending entry belongs to an unresolved pass (R13.1(4)); the
+        // Sealed-before-Commit rule is A5's and the live-call 15 is
+        // A4e-2's, both on the record's status and `live` flag.
+        let unresolved = self
+            .pass_records
+            .get(&key)
+            .is_some_and(|record| record.status.unresolved());
         match self.pending_reservations.get(&key) {
-            Some(entry) if rows <= entry.rows => Ok(()),
+            Some(entry) if unresolved && rows <= entry.rows => Ok(()),
             _ => Err(Error::InvalidBinding),
         }
     }

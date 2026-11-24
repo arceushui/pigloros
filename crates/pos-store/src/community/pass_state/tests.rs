@@ -17,10 +17,10 @@ use pos_core::{
 };
 use ulid::Ulid;
 
-use super::{
-    CommunityGenerationCountsV1, CommunityPassStateV1, CommunityPendingReservationV1, EMPTY_GRAPH,
+use super::{CommunityGenerationCountsV1, CommunityPassStateV1, EMPTY_GRAPH};
+use crate::community::erasure_budget::{
+    CommunityErasureBudgetPortV1, CommunityPendingReservationV1,
 };
-use crate::community::erasure_budget::CommunityErasureBudgetPortV1;
 use crate::community::pass_planner::CommunityPassReadPortV1;
 use crate::community::MemoryCommunityDomainV1;
 use crate::memory::MemoryStore;
