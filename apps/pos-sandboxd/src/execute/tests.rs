@@ -1128,6 +1128,29 @@ async fn air_gapped_and_fork_attempts_get_only_the_release_descriptor() -> TestR
     Ok(())
 }
 
+/// The Replay plan the daemon port derives for empty plans (#1488-a): no
+/// exchange to resolve, so the attempt gets only the release descriptor
+/// and no transcript, and no byte reaches the adapter (G3).
+#[tokio::test]
+async fn a_replay_with_no_exchanges_is_evidence_only() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    let execution = scenario
+        .run(
+            SandboxExecutionMode::Replay,
+            ModePlan::Replay {
+                exchanges: Vec::new(),
+            },
+        )
+        .await??;
+    assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
+    assert!(matches!(execution.network, NetworkEvidence::Replay(_)));
+    assert!(execution.network.transcript_digests().is_empty());
+    assert_eq!(execution.network.termination(), None);
+    assert_eq!(scenario.host.observed().descriptors, names(&[RELEASE]));
+    assert_eq!(scenario.host.observed().families, (true, Vec::new()));
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_unit_runs_the_launcher_in_launch_barrier_mode() -> TestResult {
     let mut scenario = Scenario::new()?;
