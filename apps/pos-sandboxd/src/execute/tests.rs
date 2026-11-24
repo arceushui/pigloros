@@ -1130,7 +1130,7 @@ async fn air_gapped_and_fork_attempts_get_only_the_release_descriptor() -> TestR
 
 /// The Replay plan the daemon port derives for empty plans (#1488-a): no
 /// exchange to resolve, so the attempt gets only the release descriptor
-/// and no transcript, and no byte reaches the adapter (G3).
+/// (no host-service descriptor) and records no transcript.
 #[tokio::test]
 async fn a_replay_with_no_exchanges_is_evidence_only() -> TestResult {
     let mut scenario = Scenario::new()?;

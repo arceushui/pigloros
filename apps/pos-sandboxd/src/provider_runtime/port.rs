@@ -11,7 +11,9 @@
 //! The port serves the `AirGapped`, `Fork` and `Replay` modes; a `Local` case
 //! is refused with SPE1 `8 ProviderCapabilityMissing` (R11 Amendment 1 §7.5
 //! row 9) until #1488 serves it. Replay is evidence-only with empty plans
-//! (#1488 journal 23125, G3): no FD 3 and no bytes reach the adapter. Each admitted attempt's launcher barrier is the production
+//! (#1488 journal 23125, G3): no FD 3 and no bytes reach the adapter.
+//!
+//! Each admitted attempt's launcher barrier is the production
 //! [`ProviderReleaseBarrier`] over the runtime key, the manager's unit
 //! identity and the kernel readback, with the attempt's own cancellation in
 //! its `AuthorityCheck`.
