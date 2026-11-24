@@ -20,6 +20,8 @@ use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
+use super::erasure_budget::CommunityErasureContextV1;
+#[cfg(target_os = "linux")]
 use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::private_hash::scope_set_digest;
@@ -172,6 +174,12 @@ pub struct MemoryCommunityDomainV1 {
     /// key (A5.3(5)).
     #[cfg(target_os = "linux")]
     pub(super) quarantine_controls: BTreeMap<(TimelineId, [u8; 16]), CommittedQuarantineControlV1>,
+    /// Each initialized Timeline's quarantine reserve inputs (ADR-129
+    /// revision 13, R13.1(5)): its contexts' roster members and its active
+    /// `(member, reason)` pairs, a T-keyed view of the quarantine index
+    /// updated in the same transactions.
+    #[cfg(target_os = "linux")]
+    pub(super) erasure_contexts: BTreeMap<TimelineId, CommunityErasureContextV1>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -216,6 +224,8 @@ impl MemoryCommunityDomainV1 {
                 quarantine_index: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 quarantine_controls: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                erasure_contexts: BTreeMap::new(),
             })
         }
     }

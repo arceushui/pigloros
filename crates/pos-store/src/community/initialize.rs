@@ -188,6 +188,9 @@ pub(super) struct StagedInitializationV1 {
     read_selection: Hash,
     /// The inventory generation CAU1 read (G5): the swap's expected value.
     inventory_generation: u64,
+    /// The roster members, whose quarantine reserve the context holds
+    /// (ADR-129 revision 13, R13.1(5)).
+    members: u64,
 }
 
 /// The read-only inputs of the staging steps.
@@ -780,6 +783,13 @@ impl MemoryCommunityDomainV1 {
                     selection,
                     receipt,
                     read_selection: operation.selection_address,
+                    members: operation
+                        .context
+                        .installation
+                        .profile
+                        .as_input()
+                        .roster
+                        .len() as u64,
                 }
             })
     }
@@ -886,6 +896,7 @@ impl MemoryCommunityDomainV1 {
         );
         self.selection = Some((metadata_id, staged.selection));
         self.inventory_generation += 1;
+        self.count_erasure_context(staged.key.0, staged.members);
         self.initializations.insert(staged.key, staged.committed);
         Ok(staged.receipt)
     }
