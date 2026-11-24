@@ -806,6 +806,13 @@ fn children(count: usize) -> Vec<ArtifactChildEdgeV1> {
         .collect()
 }
 
+/// A fresh random COE1 nonce: the sizes never depend on its bytes.
+fn random_nonce() -> Fallible<[u8; 12]> {
+    let mut nonce = getrandom::u64()?.to_le_bytes().to_vec();
+    nonce.extend(getrandom::u32()?.to_le_bytes());
+    Ok(nonce.try_into().map_err(|_| "a 12-byte nonce")?)
+}
+
 /// The actual protected COW1 and ARD1 sizes of a `plaintext`-byte record
 /// with `count` children, through the real envelope, CAR1, COW1 and ARD1
 /// constructors.
@@ -814,7 +821,7 @@ fn protected_sizes(plaintext: usize, count: usize) -> Fallible<(u64, u64)> {
     let ciphertext = vec![0; plaintext + 16];
     let content = CommunityEncryptedEnvelopeV1::new(
         header(ArtifactKind::StateContent)?,
-        [2; 12],
+        random_nonce()?,
         &ciphertext,
     )?
     .to_canonical_cbor();
@@ -831,7 +838,7 @@ fn protected_sizes(plaintext: usize, count: usize) -> Fallible<(u64, u64)> {
     let sealed = vec![0; proof.len() + 16];
     let proof = CommunityEncryptedEnvelopeV1::new(
         header(ArtifactKind::ClassificationProof)?,
-        [3; 12],
+        random_nonce()?,
         &sealed,
     )?
     .to_canonical_cbor();

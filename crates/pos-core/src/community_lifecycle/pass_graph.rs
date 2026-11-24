@@ -30,7 +30,9 @@ const PLACEHOLDER: Hash = Hash::from_bytes([0xff; 32]);
 const CHILD_BYTES: u64 = 71;
 
 /// The AEAD tag every COE1 ciphertext carries.
-const TAG_BYTES: u64 = 16;
+const TAG_BYTES: u64 = TAG_LEN as u64;
+/// The AEAD tag as a ciphertext length.
+const TAG_LEN: usize = 16;
 
 /// `[registrations, edges, keys, registration_bytes, artifact_bytes]` that
 /// records add to an ARD1 closure. Depth is bounded separately (R11.3(4)).
@@ -95,9 +97,9 @@ impl CommunityProtectionSizesV1 {
         header.and_then(|content| {
             proof_len(&content).and_then(|proof| {
                 registration_len(&content).and_then(|registration| {
-                    CommunityEncryptedEnvelopeV1::new(content, [0; 12], &[0; 16]).map(|envelope| {
+                    CommunityEncryptedEnvelopeV1::encoded_len(&content, TAG_LEN).map(|envelope| {
                         Self {
-                            envelope: envelope.to_canonical_cbor().len() as u64,
+                            envelope,
                             proof,
                             registration,
                         }
