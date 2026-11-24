@@ -13,6 +13,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxProviderResult, SandboxReconcileRequest, SelfDigested,
 };
 
+use super::super::completed_retained;
 use super::super::{
     signed_grant, signer, signing_key, Released, TestResult, AGR1, ATTEMPT, KEY_ID,
 };
@@ -129,7 +130,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
         ..timed_out_transfer()
     };
     assert!(matches!(
-        lifecycle.reissue_response(ATTEMPT, digest, Some(complete), &signer(), admitted),
+        lifecycle.reissue_response(ATTEMPT, &retained, Some(complete), &signer(), admitted),
         Err(AttemptLifecycleError::Response(ResponseFault::Evidence(
             EvidenceFault::NotReissuable
         )))
@@ -140,7 +141,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     ));
     let successor = lifecycle.reissue_response(
         ATTEMPT,
-        digest,
+        &retained,
         Some(timed_out_transfer()),
         &signer(),
         admitted,
@@ -163,7 +164,7 @@ fn the_response_is_retained_served_reissued_and_released() -> TestResult {
     assert!(matches!(
         lifecycle.reissue_response(
             ATTEMPT,
-            digest,
+            &retained,
             Some(timed_out_transfer()),
             &signer(),
             admitted
@@ -190,13 +191,17 @@ impl RuntimeAttestationSigner for Racing<'_> {
 
     fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
         self.winner.get_or_init(|| {
-            self.lifecycle.reissue_response(
-                ATTEMPT,
-                self.agr1_digest,
-                Some(timed_out_transfer()),
-                &self.signer,
-                self.admitted,
-            )
+            self.lifecycle
+                .terminal_response(ATTEMPT, self.agr1_digest)
+                .and_then(|stored| {
+                    self.lifecycle.reissue_response(
+                        ATTEMPT,
+                        &stored,
+                        Some(timed_out_transfer()),
+                        &self.signer,
+                        self.admitted,
+                    )
+                })
         });
         self.signer.sign(record)
     }
@@ -217,7 +222,7 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
     .ended()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    lifecycle.retain_response(ended, &signer(), admitted)?;
+    let retained = lifecycle.retain_response(ended, &signer(), admitted)?;
     let racing = Racing {
         lifecycle: &lifecycle,
         agr1_digest: digest,
@@ -227,7 +232,7 @@ fn the_first_concurrent_reissue_to_store_wins() -> TestResult {
     };
     let returned = lifecycle.reissue_response(
         ATTEMPT,
-        digest,
+        &retained,
         Some(timed_out_transfer()),
         &racing,
         admitted,
@@ -289,7 +294,7 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
     .ended()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    lifecycle.retain_response(ended, &signer(), admitted)?;
+    let retained = lifecycle.retain_response(ended, &signer(), admitted)?;
     let foreign = KeyFileRuntimeSigner::from_signing_key(
         ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
         KEY_ID.to_owned(),
@@ -297,7 +302,7 @@ fn an_unsignable_successor_quarantines_the_lifecycle() -> TestResult {
     assert!(matches!(
         lifecycle.reissue_response(
             ATTEMPT,
-            digest,
+            &retained,
             Some(timed_out_transfer()),
             &foreign,
             admitted
@@ -330,10 +335,10 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
     .ended()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
-    lifecycle.retain_response(ended, &signer(), admitted)?;
+    let retained = lifecycle.retain_response(ended, &signer(), admitted)?;
     assert!(ledger.reserve_storage(0).is_ok());
     assert!(matches!(
-        lifecycle.reissue_response(ATTEMPT, digest, None, &signer(), admitted),
+        lifecycle.reissue_response(ATTEMPT, &retained, None, &signer(), admitted),
         Err(AttemptLifecycleError::Response(ResponseFault::Evidence(
             EvidenceFault::Clock
         )))
@@ -346,7 +351,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
     assert!(matches!(
         lifecycle.reissue_response(
             ATTEMPT,
-            digest,
+            &retained,
             Some(timed_out_transfer()),
             &signer(),
             admitted
@@ -504,7 +509,7 @@ async fn an_exact_repeat_replays_the_stored_full_response() -> TestResult {
     // A re-issued successor is not Completed and carries no output.
     let successor = lifecycle.reissue_response(
         ATTEMPT,
-        digest,
+        &retained,
         Some(timed_out_transfer()),
         &signer(),
         admitted,
@@ -608,9 +613,28 @@ fn a_reissue_releases_the_output_once_its_frames_are_written() -> TestResult {
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     let serving = lifecycle.retain_response(ended, &signer(), admitted)?;
     let frames = serving.frames().map(<[u8]>::to_vec).collect::<Vec<_>>();
+    // The transport's view: the grant answered, and the output records,
+    // which come right before SPY1, with the payload bytes they carry.
+    assert_eq!(serving.grant().digest(), digest);
+    let (records, expected) = serving.output();
+    assert!(!records.is_empty());
+    assert_eq!(
+        records,
+        &frames[frames.len() - 1 - records.len()..frames.len() - 1]
+    );
+    assert_eq!(
+        expected,
+        serving
+            .records()
+            .termination()
+            .fields()
+            .output_capture
+            .map(|capture| capture.accepted_bytes)
+            .ok_or("no capture")?
+    );
     lifecycle.reissue_response(
         ATTEMPT,
-        digest,
+        &serving,
         Some(timed_out_transfer()),
         &signer(),
         admitted,
@@ -848,5 +872,153 @@ fn racing_retentions_keep_the_first_stored_response() -> TestResult {
             assert!(Arc::ptr_eq(&first?, &second?));
         }
     }
+    Ok(())
+}
+
+/// Base §4: once a connection delivered the stored response whole, or an
+/// SCY1 bound it, an output timeout elsewhere re-issues nothing and the
+/// stored response stays; a response replaced meanwhile cannot be claimed.
+#[test]
+fn a_delivered_response_is_never_reissued() -> TestResult {
+    let (_directory, lifecycle, ledger) = lifecycle()?;
+    let public = signing_key().verifying_key();
+    let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
+    let retained = completed_retained(&lifecycle)?;
+    let digest = retained.agr1_digest();
+    // Not delivered yet: another attempt or a stale response is refused.
+    assert!(!lifecycle.claim_delivery([1; 16], &retained));
+    assert!(lifecycle.claim_delivery(ATTEMPT, &retained));
+    assert!(matches!(
+        lifecycle.reissue_response(
+            ATTEMPT,
+            &retained,
+            Some(timed_out_transfer()),
+            &signer(),
+            admitted
+        ),
+        Err(AttemptLifecycleError::ResponseDelivered)
+    ));
+    assert!(Arc::ptr_eq(
+        &lifecycle.terminal_response(ATTEMPT, digest)?,
+        &retained
+    ));
+    // A successor that faults is discarded for a delivered response: no
+    // fault replaces it and nothing is quarantined.
+    let foreign = crate::KeyFileRuntimeSigner::from_signing_key(
+        ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+        KEY_ID.to_owned(),
+    );
+    assert!(matches!(
+        lifecycle.reissue_response(
+            ATTEMPT,
+            &retained,
+            Some(timed_out_transfer()),
+            &foreign,
+            admitted
+        ),
+        Err(AttemptLifecycleError::ResponseDelivered)
+    ));
+    assert!(Arc::ptr_eq(
+        &lifecycle.terminal_response(ATTEMPT, digest)?,
+        &retained
+    ));
+    assert!(ledger.reserve_storage(0).is_ok());
+    // For an undelivered response the same fault is a provider fault.
+    let (_faulted_directory, faulted, faulted_ledger) = self::lifecycle()?;
+    let undelivered = completed_retained(&faulted)?;
+    assert!(faulted
+        .reissue_response(
+            ATTEMPT,
+            &undelivered,
+            Some(timed_out_transfer()),
+            &foreign,
+            admitted
+        )
+        .is_err());
+    assert!(matches!(
+        faulted.terminal_response(ATTEMPT, undelivered.agr1_digest()),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    assert!(faulted_ledger.reserve_storage(0).is_err());
+    // An undelivered response is re-issued, and the replaced one can no
+    // longer be claimed.
+    let (_directory, lifecycle, _ledger) = self::lifecycle()?;
+    let retained = completed_retained(&lifecycle)?;
+    let successor = lifecycle.reissue_response(
+        ATTEMPT,
+        &retained,
+        Some(timed_out_transfer()),
+        &signer(),
+        admitted,
+    )?;
+    assert!(!Arc::ptr_eq(&successor, &retained));
+    // A connection still holding the replaced response re-issues nothing
+    // from the successor: it gets the winner back, which stays stored and
+    // undelivered, even when its own successor faults.
+    for signing in [&signer(), &foreign] {
+        assert!(Arc::ptr_eq(
+            &lifecycle.reissue_response(
+                ATTEMPT,
+                &retained,
+                Some(timed_out_transfer()),
+                signing,
+                admitted
+            )?,
+            &successor
+        ));
+    }
+    assert!(Arc::ptr_eq(
+        &lifecycle.terminal_response(ATTEMPT, successor.agr1_digest())?,
+        &successor
+    ));
+    assert!(!successor.delivered());
+    assert!(!lifecycle.claim_delivery(ATTEMPT, &retained));
+    assert!(lifecycle.claim_delivery(ATTEMPT, &successor));
+    Ok(())
+}
+
+/// A cancellation waits for the response its attempt settles on, by the
+/// attempt's AGR1: none for an attempt never known, a refusal for another
+/// AGR1, and while the response is pending the wait lasts until it is
+/// retained, which wakes it. On paused time: a wait that should not
+/// happen advances the clock to its bound and fails at once.
+#[tokio::test(start_paused = true)]
+async fn a_cancellation_waits_for_the_response_its_attempt_settles_on() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    assert!(lifecycle
+        .settled_response(ATTEMPT, [1; 32])
+        .await?
+        .is_none());
+    let pending = super::super::completed_pending(&lifecycle)?;
+    let digest = pending.agr1_digest;
+    // Refused at once, before any wait on the pending response.
+    let before = tokio::time::Instant::now();
+    assert!(matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            lifecycle.settled_response(ATTEMPT, [1; 32])
+        )
+        .await,
+        Ok(Err(AttemptLifecycleError::GrantMismatch))
+    ));
+    assert_eq!(tokio::time::Instant::now(), before);
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        lifecycle.settled_response(ATTEMPT, digest)
+    )
+    .await
+    .is_err());
+    let (waited, retained) = tokio::join!(lifecycle.settled_response(ATTEMPT, digest), async {
+        tokio::task::yield_now().await;
+        super::super::retain_pending(pending, &lifecycle)
+    });
+    let retained = retained?;
+    assert!(waited?.is_some_and(|waited| Arc::ptr_eq(&waited, &retained)));
+    // A reconciled attempt is unknown.
+    lifecycle.reconcile(&reconcile(digest))?;
+    assert!(matches!(
+        lifecycle.settled_response(ATTEMPT, digest).await,
+        Err(AttemptLifecycleError::UnknownAttempt)
+    ));
     Ok(())
 }

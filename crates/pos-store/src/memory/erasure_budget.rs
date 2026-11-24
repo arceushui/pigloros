@@ -140,6 +140,11 @@ impl MemoryStore {
         })
     }
 
+    /// `affected(A)` (R13.1(1)) of `actor`, from the committed topology.
+    pub(crate) fn community_affected_scope(&self, actor: EntityId) -> BTreeSet<TimelineId> {
+        self.affected(actor, &self.fork_children())
+    }
+
     /// The owners of `timeline` and of each of its `fork_point` ancestors.
     fn scope_actors(&self, timeline: TimelineId) -> Result<BTreeSet<EntityId>, Error> {
         let mut actors = BTreeSet::new();

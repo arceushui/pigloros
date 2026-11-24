@@ -379,12 +379,12 @@ fn a_first_pass_observes_at_most_the_r13_3_event_history() -> TestResult {
 #[test]
 fn rows_of_any_class_refuse_a_community_row_while_targets_fit() -> TestResult {
     // I130's second bound: consented rows cost no target but fill T's view
-    // list; at 4,096 rows with the pass's rows and F_p rows it still fits,
-    // one more gives 14.
+    // list; at 4,096 rows with the pass's rows, F_p rows and the context's
+    // F_q rows (4n, revision 14 RN.3) it still fits, one more gives 14.
     let mut world = World::new(1, false)?;
     let quoted = world.plan(timeline(), None)??;
     let [state, _] = quoted.demand().erasure_rows();
-    let held = state + quoted.demand().failure_reserve() / 2;
+    let held = state + quoted.demand().failure_reserve() / 2 + 4;
     let consented = (0..ROWS - 5 - held)
         .map(|seed| {
             erasure_row(

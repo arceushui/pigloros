@@ -53,6 +53,7 @@ fn budgeted(actors: &[(EntityId, u64)], rows: &[(TimelineId, u64)]) -> Port {
             })
             .collect(),
         rows: rows.iter().copied().collect(),
+        quarantine_rows: BTreeMap::new(),
     };
     port
 }
@@ -170,6 +171,28 @@ fn every_rows_u_stays_within_4096_with_the_new_rows_on_t_alone() -> TestResult {
     let room = LINE - RESERVE - 6 - 2 * 21 - 2 * 7;
     let port = budgeted(&[(ACTOR, room)], &[(timeline(), full - 9)]);
     assert_eq!(trace(&port)?, Ok(7));
+    Ok(())
+}
+
+#[test]
+fn the_unspent_quarantine_rows_count_on_every_affected_timeline() -> TestResult {
+    // ADR-129 revision 14, RN.3 and O10: `F_q^rows(U)` joins `rows(U)`, T's
+    // pending and new rows, for T and for every other affected Timeline.
+    let actors = [(ACTOR, 0)];
+    let full = ROWS - 21 - 3;
+    let rows = [(timeline(), full - 4), (other_timeline(), ROWS - 4)];
+    // On T one row too many only breaks the recording; on another
+    // Timeline it breaks the State demand too, as any `rows(U)` does.
+    for (held, fits, over) in [
+        (timeline(), Ok(0), Error::RecordingUnavailable),
+        (other_timeline(), Ok(4), Error::CapacityExhausted),
+    ] {
+        let mut port = budgeted(&actors, &rows);
+        port.budget.quarantine_rows.insert(held, 4);
+        assert_eq!(trace(&port)?, fits);
+        port.budget.quarantine_rows.insert(held, 5);
+        assert_eq!(trace(&port)?, Err(over));
+    }
     Ok(())
 }
 

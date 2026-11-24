@@ -96,6 +96,21 @@ impl RuntimeSigned for Sdy1 {
     }
 }
 
+/// SCY1, the signed `cancel` response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Scy1 {}
+
+impl runtime_signed_sealed::Sealed for Scy1 {}
+
+impl RuntimeSigned for Scy1 {
+    const MAGIC: &'static str = "SCY1";
+    type Body = super::SandboxCancelResponseFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
 /// SPR1, the attempt receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Spr1 {}

@@ -114,6 +114,12 @@ pub struct CommunityAssembledRecordV1 {
 }
 
 impl CommunityAssembledRecordV1 {
+    /// The record's plaintext length, the encoded size the CBQ1 counts.
+    #[cfg(target_os = "linux")]
+    pub(super) const fn plaintext_length(&self) -> u64 {
+        self.plaintext_length
+    }
+
     /// The owning record's four-byte magic.
     #[must_use]
     pub const fn record_magic(&self) -> [u8; 4] {
@@ -184,6 +190,8 @@ pub struct CommunityInitializationGraphV1 {
     selected_head: Zeroizing<Vec<u8>>,
     selected_head_digest: Hash,
     graph_root: Zeroizing<Vec<u8>>,
+    #[cfg(target_os = "linux")]
+    graph_counts: CommunityGraphCountsV1,
     generation_admission: Zeroizing<Vec<u8>>,
 }
 
@@ -311,6 +319,13 @@ impl CommunityInitializationGraphV1 {
     #[must_use]
     pub fn graph_root(&self) -> &[u8] {
         &self.graph_root
+    }
+
+    /// The CGR1 `graph_counts`: the selected closure of the initial
+    /// frontier (ADR-129 revision 11, R11.3(1)).
+    #[cfg(target_os = "linux")]
+    pub(super) const fn graph_counts(&self) -> CommunityGraphCountsV1 {
+        self.graph_counts
     }
 
     /// The canonical CGA1 original generation result.
@@ -740,6 +755,8 @@ fn finish(
                             selected_head,
                             selected_head_digest,
                             graph_root: graph_root.to_canonical_cbor(),
+                            #[cfg(target_os = "linux")]
+                            graph_counts,
                             generation_admission: admission.to_canonical_cbor(),
                         })
                     })
