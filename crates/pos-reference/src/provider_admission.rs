@@ -168,7 +168,7 @@ impl ProviderImageSnapshot {
         clock: fn() -> SystemTime,
     ) -> Result<Self, InstallationError> {
         check_authority(&admitted, &request)?;
-        Self::checked(admitted, request, clock).map_err(SnapshotFault::into_boundary)
+        Self::checked(admitted, request, clock).map_err(SnapshotFault::into_error)
     }
 
     /// The snapshot of a request whose authority was already checked: the
@@ -292,7 +292,7 @@ impl ProviderImageSnapshot {
     /// root-verity-sig JSON, or a proof no longer valid at host time.
     pub fn admit_held_image(&self) -> Result<HeldImageAdmission<'_>, InstallationError> {
         self.join_current(InstalledSelectorState::open(), SystemTime::now)
-            .map_err(JoinFault::into_boundary)
+            .map_err(JoinFault::into_error)
     }
 
     /// [`Self::admit_held_image`] against the `current` installation at
@@ -340,7 +340,7 @@ pub(crate) enum JoinFault {
 }
 
 impl JoinFault {
-    const fn into_boundary(self) -> InstallationError {
+    const fn into_error(self) -> InstallationError {
         match self {
             Self::Authority(error) | Self::Image(error) => error,
         }
@@ -357,7 +357,7 @@ pub(crate) enum SnapshotFault {
 }
 
 impl SnapshotFault {
-    const fn into_boundary(self) -> InstallationError {
+    const fn into_error(self) -> InstallationError {
         match self {
             Self::Image(error) | Self::Launch(error) => error,
         }
@@ -1117,7 +1117,7 @@ pub mod tests {
         )?;
         let admission = snapshot
             .join_current(current(), fixture_time)
-            .map_err(JoinFault::into_boundary)?;
+            .map_err(JoinFault::into_error)?;
         assert!(std::ptr::eq(admission.snapshot(), &raw const snapshot));
         assert_eq!(admission.proof(), snapshot.proof());
         assert_eq!(format!("{admission:?}"), "HeldImageAdmission { .. }");
@@ -1147,7 +1147,7 @@ pub mod tests {
         assert_ne!(
             snapshot
                 .join_current(current(), later)
-                .map_err(JoinFault::into_boundary)?
+                .map_err(JoinFault::into_error)?
                 .proof(),
             snapshot.proof()
         );
@@ -1185,7 +1185,7 @@ pub mod tests {
         )?;
         snapshot
             .join_current(fixture.installed(), fixture_time)
-            .map_err(JoinFault::into_boundary)?;
+            .map_err(JoinFault::into_error)?;
 
         // SIR1 is durable before any RCU1 is sent, so reopening fails closed.
         let committed = fixture.commit_live_update()?;
@@ -1218,7 +1218,7 @@ pub mod tests {
         )?;
         let admission = admission
             .join_current(current(), fixture_time)
-            .map_err(JoinFault::into_boundary)?;
+            .map_err(JoinFault::into_error)?;
         assert!(admission.recheck_with(Ok(successor)).is_err());
         Ok(())
     }
@@ -1259,7 +1259,7 @@ pub mod tests {
         // The release recheck.
         let admission = snapshot
             .join_current(current(), fixture_time)
-            .map_err(JoinFault::into_boundary)?;
+            .map_err(JoinFault::into_error)?;
         assert_eq!(
             admission.recheck_with(changed()),
             Err(InstallationError::ArtifactInvalid)
@@ -1276,7 +1276,7 @@ pub mod tests {
         )?;
         let admission = snapshot
             .join_current(current(), fixture_time)
-            .map_err(JoinFault::into_boundary)?;
+            .map_err(JoinFault::into_error)?;
         assert_eq!(admission.recheck_with(current())?, admission.authority());
         assert!(admission.recheck_with(Err(InstallationError::Io)).is_err());
         Ok(())

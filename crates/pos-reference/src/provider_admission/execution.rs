@@ -140,7 +140,34 @@ pub enum RecheckError {
     /// The live ledger refused: a raised control floor, or a ledger closed
     /// after a cleanup failure.
     #[error(transparent)]
-    Ledger(StagingError),
+    Ledger(RecheckLedgerError),
+}
+
+/// The live ledger's refusal of a recheck of an attempt it already
+/// counts: only the floor and the closed ledger apply, so no reservation
+/// refusal can be carried:
+///
+/// ```compile_fail
+/// let _ = pos_reference::provider_admission::execution::RecheckLedgerError::AggregateExceeded;
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RecheckLedgerError {
+    /// The admitted epochs are below the live provider control floor.
+    #[error("admission is below the provider control floor")]
+    BelowControlFloor,
+    /// A failed private-file cleanup permanently closed this live ledger.
+    #[error("staging admission is closed after a cleanup failure")]
+    CleanupFailed,
+}
+
+/// A recheck refusal before AGR1 is the staging refusal of the same name.
+impl From<RecheckLedgerError> for StagingError {
+    fn from(refused: RecheckLedgerError) -> Self {
+        match refused {
+            RecheckLedgerError::BelowControlFloor => Self::BelowControlFloor,
+            RecheckLedgerError::CleanupFailed => Self::CleanupFailed,
+        }
+    }
 }
 
 /// Why an exchange was refused before its AGR1 write began.

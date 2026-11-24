@@ -861,8 +861,8 @@ impl<C> PreparedProviderExecution<C> {
     /// launch policy and derives the commitment. Then `claim` takes the
     /// caller's lifecycle claim (port step A), and the deadlines, the clock,
     /// the connection identity, the premature bytes, the policy-bound
-    /// reservation and the case buffers follow (row R). The pending-control slot is released once
-    /// the reservation is published.
+    /// reservation and the case buffers follow (row R). The pending-control
+    /// slot is released once the reservation is published.
     ///
     /// # Errors
     /// An [`ExecuteRefusal`] that returns the stream with the first failure,
@@ -1050,7 +1050,12 @@ impl<C> PreparedProviderExecution<C> {
     /// the premature bytes (R11 Amendment 1 §7.5 row W).
     fn before_write(&self) -> Result<(), StagingError> {
         joined(&self.execution.source.snapshot)
-            .and_then(|image| self.execution.slot.recheck(image.authority()))
+            .and_then(|image| {
+                self.execution
+                    .slot
+                    .recheck(image.authority())
+                    .map_err(StagingError::from)
+            })
             .and_then(|()| control_left(self.initial_deadline))
             .and_then(|()| window_left(self.execution.input_deadline))
             .and_then(|()| require_grant_turn(&self.stream))
@@ -1337,6 +1342,11 @@ impl AdmittedProviderExecution {
     /// source reader before its first source byte: the identity of the one
     /// stream this exchange read, wrote AGR1 to and received input from
     /// (ADR-122 Amendment 1 invariant 2, T7).
+    ///
+    /// A read-only view (change C allows those). No serving code reads it
+    /// yet, but it is public on purpose: as `pub(crate)` the identity would
+    /// be read only by tests, so the field would be dead code in the
+    /// library.
     #[must_use]
     pub const fn connection(&self) -> (u64, u64) {
         self.connection
@@ -3163,7 +3173,9 @@ mod tests {
         });
         assert!(matches!(
             verified.entry().recheck(),
-            Err(RecheckError::Ledger(StagingError::BelowControlFloor))
+            Err(RecheckError::Ledger(
+                super::super::RecheckLedgerError::BelowControlFloor
+            ))
         ));
         drop((verified, execution, stream));
         assert_eq!(ledger.usage().reserved_bytes, 0);

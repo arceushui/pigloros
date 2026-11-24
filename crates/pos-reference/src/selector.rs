@@ -437,6 +437,18 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn installation_errors_keep_their_names_at_the_selector_boundary() {
+        assert_eq!(
+            SelectorBoundaryError::from(InstallationError::ArtifactInvalid),
+            SelectorBoundaryError::ArtifactInvalid
+        );
+        assert_eq!(
+            SelectorBoundaryError::from(InstallationError::Io),
+            SelectorBoundaryError::Io
+        );
+    }
+
     struct FailingReader;
 
     impl Read for FailingReader {

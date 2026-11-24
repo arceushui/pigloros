@@ -224,8 +224,8 @@ impl<C> StagedInput<C> {
     /// join and the control floor are checked. After signing, immediately
     /// before the write, the held-image join, the control floor, both
     /// deadlines and the premature bytes are checked; then `convert`
-    /// receives the claim and the AGR1 digest. On success the conversion's value is returned with
-    /// the input that is now owed.
+    /// receives the claim and the AGR1 digest. On success the conversion's
+    /// value is returned with the input that is now owed.
     ///
     /// # Errors
     /// [`GrantFailure::Refused`] before the write began, with the stream:
