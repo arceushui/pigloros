@@ -281,3 +281,30 @@ fn koe1_rule_4_mount_device_is_the_mapper_and_namespaces_are_isolated() -> TestR
     );
     Ok(())
 }
+
+/// The CBOR preflight alone refuses nesting deeper than 32 and a
+/// collection of more than 512 entries (`FieldOutOfBounds`); one level or
+/// entry fewer passes it and reaches the typed reader, which refuses the
+/// shape (`InvalidEncoding`).
+#[test]
+fn koe1_rule_1_preflight_bounds_nesting_and_collection_size() -> TestResult {
+    let vector = unhex(KOE1_A)?;
+    // KOE1 `work` sits at depth 3: the wrapper, the unsigned fields and the
+    // observation enclose it.
+    let nested = |levels: usize| (0..levels).fold(integer(0), |inner, _| Value::Array(vec![inner]));
+    for (work, expected) in [
+        (nested(29), ProtocolError::InvalidEncoding),
+        (nested(30), ProtocolError::FieldOutOfBounds),
+        (
+            Value::Array(vec![integer(0); 512]),
+            ProtocolError::InvalidEncoding,
+        ),
+        (
+            Value::Array(vec![integer(0); 513]),
+            ProtocolError::FieldOutOfBounds,
+        ),
+    ] {
+        assert_eq!(decode(&with(&vector, &[7, 11], work)?), Err(expected));
+    }
+    Ok(())
+}
