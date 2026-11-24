@@ -182,24 +182,20 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<RecoveredErasureV1, ErasureErrorV1> {
-        self.records
-            .iter()
-            .find(|record| record.request.reference() == request)
-            .cloned()
-            .map_or_else(
-                || {
-                    self.port
-                        .read_manifest(request)
-                        .and_then(|stored| stored.ok_or(ErasureErrorV1::ProvenanceMissing))
-                        .and_then(|stored| {
-                            RecoveredErasureV1::recover(
-                                &self.port, &self.port, &self.port, request, &stored,
-                            )
-                            .map_err(super::RecoveryFailureV1::error)
-                        })
-                },
-                Ok,
-            )
+        self.records.get(&request).cloned().map_or_else(
+            || {
+                self.port
+                    .read_manifest(request)
+                    .and_then(|stored| stored.ok_or(ErasureErrorV1::ProvenanceMissing))
+                    .and_then(|stored| {
+                        RecoveredErasureV1::recover(
+                            &self.port, &self.port, &self.port, request, &stored,
+                        )
+                        .map_err(super::RecoveryFailureV1::error)
+                    })
+            },
+            Ok,
+        )
     }
 
     fn commit(

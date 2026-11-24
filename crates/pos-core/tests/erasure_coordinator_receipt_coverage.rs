@@ -85,8 +85,16 @@ fn request(
     scope: ErasureScopeV1,
     selectors: Vec<ErasureReferenceV1>,
 ) -> Result<ErasureRequestV1, ErasureErrorV1> {
+    request_with_reference(reference(1), scope, selectors)
+}
+
+fn request_with_reference(
+    request_reference: ErasureReferenceV1,
+    scope: ErasureScopeV1,
+    selectors: Vec<ErasureReferenceV1>,
+) -> Result<ErasureRequestV1, ErasureErrorV1> {
     fixture_request(erasure_support::RequestFixtureInput {
-        request: reference(1),
+        request: request_reference,
         subject: reference(2),
         scope,
         selectors,
@@ -443,18 +451,11 @@ fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
 fn coordinator_request_for(
     request_reference: ErasureReferenceV1,
 ) -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: request_reference,
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(20)],
-        requester: reference(3),
-        authorization: reference(4),
-        policy: reference(5),
-        request_position: 10,
-        horizon_position: 20,
-        provenance: reference(6),
-    })
+    request_with_reference(
+        request_reference,
+        ErasureScopeV1::PrivateSubjectData,
+        vec![reference(20)],
+    )
 }
 
 fn sequence_reference(seed: usize) -> ErasureReferenceV1 {
