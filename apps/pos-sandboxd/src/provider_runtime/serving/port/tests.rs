@@ -1475,9 +1475,10 @@ mod served {
         std::thread::scope(|scope| -> TestResult {
             let serving = scope.spawn(|| responder.answer(server, Admission::Busy, reader));
             await_freed(|| responder.refusals.has_room())?;
+            // The control place is taken after the reader place is freed.
+            await_freed(|| !responder.control.has_room())?;
             assert!(!serving.is_finished());
             assert!(!responder.answered.has_room());
-            assert!(!responder.control.has_room());
             pending
                 .retain(&port.lifecycle)
                 .map_err(|error| error.to_string())?;
