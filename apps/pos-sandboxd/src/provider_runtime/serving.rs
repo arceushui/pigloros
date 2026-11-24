@@ -550,10 +550,11 @@ impl<'a> Responder<'a> {
         } else {
             SandboxProviderErrorCode::AdmissionBusy
         };
+        // A place is taken only by an exact repeat the port may join.
         let joining = self
             .open_port()
             .filter(|_| identity.operation == EXECUTE)
-            .zip(self.joins.wait(Instant::now()));
+            .and_then(|port| Some(port).zip(self.joins.wait(Instant::now())));
         match joining {
             Some((port, _place)) => match Self::join(port, identity, until) {
                 Join::Fresh => Self::conclude(stream, self.authenticated(identity, code)),

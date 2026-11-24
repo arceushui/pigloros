@@ -391,9 +391,11 @@ impl Responder<'_> {
         // refuse only an input of another attempt or AGR1, which ends the
         // awaited attempt faulted and quarantines the lifecycle, and a fence
         // or cancellation since the conversion never refuses them (item
-        // P8); `retain_response` refuses only a response that cannot be
-        // assembled or signed, which quarantines it too. No response exists
-        // to write: nothing is emitted (R9 §5).
+        // P8). `retain_response` refuses a response that cannot be
+        // assembled or signed, which quarantines the lifecycle, or an
+        // attempt this exchange no longer holds under its AGR1 (unknown or
+        // mismatched), a provider bug that stores nothing. No response
+        // exists to write: nothing is emitted (R9 §5).
         if let Ok(response) = response {
             self.deliver(port, &stream, identity, &response, true);
         }

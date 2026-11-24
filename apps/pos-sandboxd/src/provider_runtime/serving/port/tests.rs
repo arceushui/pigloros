@@ -197,6 +197,9 @@ fn an_output_transfer_that_runs_out_of_its_window_records_how_far_it_got() -> Te
 #[test]
 fn an_output_transfer_to_a_closed_peer_is_broken() -> TestResult {
     let (provider, selector) = UnixStream::pair()?;
+    // A test forking concurrently may hold a duplicate of the peer: the
+    // shutdown closes the connection whatever holds it.
+    selector.shutdown(std::net::Shutdown::Both)?;
     drop(selector);
     assert_eq!(
         transfer_output(
@@ -662,6 +665,11 @@ mod served {
         let (server, mut peer) = UnixStream::pair()?;
         rustix::net::sockopt::set_socket_send_buffer_size(&server, 1)?;
         peer.set_read_timeout(Some(TIMEOUT))?;
+        // B blocks before its SPY1 only while its writes outrun the minimum
+        // send buffer. The kernel charges each queued write's whole buffer,
+        // not its payload, so no byte count pins this: the `is_finished`
+        // assertion below does, and fails if a smaller response stops
+        // blocking B, rather than letting the race pass vacuously.
         std::thread::scope(|scope| -> TestResult {
             let writing = scope.spawn(|| {
                 responder.deliver_within(port, &server, (identity, &second), false, TIMEOUT);
