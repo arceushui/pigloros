@@ -29,21 +29,22 @@ let
   # workspace and the fixtures it compiles in are in its source.
   rustToolchain = pkgs.rust_1_97.packages.prebuilt;
   rustPlatform = pkgs.makeRustPlatform { inherit (rustToolchain) rustc cargo; };
+  source = lib.fileset.toSource {
+    root = repository;
+    fileset = lib.fileset.unions [
+      (repository + "/Cargo.toml")
+      (repository + "/Cargo.lock")
+      (repository + "/apps")
+      (repository + "/crates")
+      (repository + "/plugins")
+      # pos-reference's test-support fixtures embed these at compile time.
+      (repository + "/fixtures/conformance")
+    ];
+  };
   conformance = rustPlatform.buildRustPackage {
     pname = "pos-sandboxd-conformance";
     version = "0";
-    src = lib.fileset.toSource {
-      root = repository;
-      fileset = lib.fileset.unions [
-        (repository + "/Cargo.toml")
-        (repository + "/Cargo.lock")
-        (repository + "/apps")
-        (repository + "/crates")
-        (repository + "/plugins")
-        # pos-reference's test-support fixtures embed these at compile time.
-        (repository + "/fixtures/conformance")
-      ];
-    };
+    src = source;
     cargoLock.lockFile = repository + "/Cargo.lock";
     cargoBuildFlags = [
       "--package"
@@ -55,6 +56,44 @@ let
     auditable = false;
     doCheck = false;
     meta.mainProgram = "pos-sandboxd-conformance";
+  };
+
+  # The two executables the unit runs inside the activated EROFS root, which
+  # holds nothing but the image's own files: statically linked, so that no
+  # loader or library is needed there. buildRustPackage always passes
+  # `--target`, so the flag reaches neither build scripts nor proc macros.
+  # build-images.sh refuses an executable that is not a static ELF file of
+  # the architecture.
+  staticExecutable =
+    { package, binary }:
+    rustPlatform.buildRustPackage {
+      pname = binary;
+      version = "0";
+      src = source;
+      cargoLock.lockFile = repository + "/Cargo.lock";
+      cargoBuildFlags = [
+        "--package"
+        package
+        "--bin"
+        binary
+      ];
+      buildInputs = [ pkgs.glibc.static ];
+      env.RUSTFLAGS = "-C target-feature=+crt-static";
+      auditable = false;
+      doCheck = false;
+      meta.mainProgram = binary;
+    };
+  # The image's /adapter (#444 owner decision, 2026-11-25): its first mode,
+  # honest, reads one EAI1 attempt and writes one EAO1 observation.
+  adapter = staticExecutable {
+    package = "pos-sandbox-evidence-adapter";
+    binary = "pos-sandbox-evidence-adapter";
+  };
+  # The provider executable is the release launcher: the provider binds it
+  # into the unit as /.pigloros/release-launcher (`launch-barrier` mode).
+  launcher = staticExecutable {
+    package = "pos-sandboxd";
+    binary = "pos-sandboxd";
   };
 
   # The part (b) SIM1 DDIs for this architecture, built offline from the
@@ -73,6 +112,8 @@ let
         TRUSTED_CERTIFICATE = ../dev-trust/root-hash-dev-test.crt;
         UNTRUSTED_KEY = ../dev-trust/root-hash-untrusted-dev-test.key;
         UNTRUSTED_CERTIFICATE = ../dev-trust/root-hash-untrusted-dev-test.crt;
+        ADAPTER = "${adapter}/bin/pos-sandbox-evidence-adapter";
+        LAUNCHER = "${launcher}/bin/pos-sandboxd";
       }
       ''
         bash ${./build-images.sh} ${

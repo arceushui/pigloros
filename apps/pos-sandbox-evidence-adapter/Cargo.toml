@@ -1,0 +1,24 @@
+[package]
+name = "pos-sandbox-evidence-adapter"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The adapter the #444 QEMU evidence DDI carries as `/adapter` (ADR-069
+# EAI1/EAO1): a small `[[bin]]` whose argument selects one fixed behavior,
+# `honest` first. It is built statically, so it runs inside the activated
+# EROFS root, which holds nothing else. It speaks the pos-reference codec;
+# pos-reference does not import it.
+[[bin]]
+name = "pos-sandbox-evidence-adapter"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+pos-reference = { path = "../../crates/pos-reference" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

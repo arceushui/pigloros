@@ -4,7 +4,8 @@
 //! `pos-sandboxd-conformance` binary. One run is one case:
 //!
 //! 1. `ConformanceCase::stage` stages the signed test installation around
-//!    one caller-built SIM1 DDI and its signer certificate
+//!    one caller-built SIM1 DDI, its signer certificate and the exact bytes
+//!    and arguments of the image's `/adapter`
 //!    (`StagedInstallation::stage_image`, dev/test trust domain).
 //! 2. [`activate`] admits that image through the production
 //!    `ProviderImageSnapshot`, commits a planned attempt in the fixed
@@ -55,8 +56,12 @@ const HOST_ARCHITECTURE: SandboxArchitecture = SandboxArchitecture::Aarch64;
 /// Why a case could not reach activation, or its report could not be written.
 #[derive(Debug, thiserror::Error)]
 pub enum ConformanceError {
-    /// The arguments are not `IMAGE CERTIFICATE_DER KEY_DESCRIPTION`.
-    #[error("usage: pos-sandboxd-conformance IMAGE CERTIFICATE_DER KEY_DESCRIPTION")]
+    /// The arguments are not `IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER
+    /// [ADAPTER_ARGUMENT...]`.
+    #[error(
+        "usage: pos-sandboxd-conformance IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER \
+         [ADAPTER_ARGUMENT...]"
+    )]
     Usage,
     /// An input file, the control input or the report failed.
     #[error("conformance I/O failed: {0}")]
@@ -72,30 +77,41 @@ pub enum ConformanceError {
     Registry(#[from] SystemdAttemptRegistryError),
 }
 
-/// One case's image, signer certificate and kernel key description.
+/// One case's image, signer certificate, kernel key description, and the
+/// adapter the image's `/adapter` holds, with its signed argument vector.
 #[derive(Debug)]
 struct ConformanceCase {
     image: Vec<u8>,
     certificate: Vec<u8>,
     key_description: String,
+    adapter: Vec<u8>,
+    adapter_arguments: Vec<String>,
 }
 
 impl ConformanceCase {
-    /// Read `IMAGE CERTIFICATE_DER KEY_DESCRIPTION`.
+    /// Read `IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER
+    /// [ADAPTER_ARGUMENT...]`.
     ///
     /// # Errors
-    /// Returns [`ConformanceError::Usage`] for another argument count or a
-    /// description that is not UTF-8, and [`ConformanceError::Io`] when a
+    /// Returns [`ConformanceError::Usage`] for fewer arguments or text
+    /// arguments that are not UTF-8, and [`ConformanceError::Io`] when a
     /// file cannot be read.
     fn from_arguments(arguments: &[OsString]) -> Result<Self, ConformanceError> {
-        let [image, certificate, description] = arguments else {
+        let [image, certificate, description, adapter, adapter_arguments @ ..] = arguments else {
             return Err(ConformanceError::Usage);
         };
         let key_description = description.to_str().ok_or(ConformanceError::Usage)?;
+        let adapter_arguments = adapter_arguments
+            .iter()
+            .map(|argument| argument.to_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(ConformanceError::Usage)?;
         Ok(Self {
             image: fs::read(image)?,
             certificate: fs::read(certificate)?,
             key_description: key_description.to_owned(),
+            adapter: fs::read(adapter)?,
+            adapter_arguments,
         })
     }
 
@@ -112,6 +128,8 @@ impl ConformanceCase {
             image: &self.image,
             certificate: &self.certificate,
             key_description: &self.key_description,
+            executable: &self.adapter,
+            arguments: &self.adapter_arguments,
         })
         .map_err(|error| ConformanceError::Stage(error.to_string()))
     }
@@ -194,7 +212,8 @@ pub fn release(mount: VerifiedRootMount, directory: &PreparedAttemptDirectory) -
     })
 }
 
-/// Run one case from `IMAGE CERTIFICATE_DER KEY_DESCRIPTION`.
+/// Run one case from `IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER
+/// [ADAPTER_ARGUMENT...]`.
 ///
 /// Its report lines are, in order: the activation (`mounted` with
 /// `describe`'s text, or `refused` with the error), the release (`detached`,

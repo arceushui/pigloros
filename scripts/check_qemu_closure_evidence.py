@@ -22,6 +22,10 @@ packaged NixOS 26.05 closure and on both architectures:
 Part (b) runs the production admission, registry and activation path
 (`pos-sandboxd-conformance`) against the packaged mountfsd and kernel:
 
+- the executables: the image's /adapter and the launcher are real static ELF
+  executables of the architecture (no PT_INTERP, so they run inside a root
+  that holds nothing else, and never the 7-byte stand-in), and the signed
+  positive image carries the adapter's bytes exactly once;
 - the images: wrong-key carries the positive image's root hash and salt,
   and tampered differs from positive in exactly one root data byte;
 - positive: an image signed by the trusted key mounts as read-only EROFS
@@ -145,7 +149,13 @@ HOST_FILES = {
 }
 # Part (b): the images the guest ran, copied from the recorded store path.
 HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-offset", "positive.der",
-                    "wrong-key.der", "root-hash.txt"}
+                    "wrong-key.der", "root-hash.txt", "adapter", "launcher"}
+# The unit runs these inside a root that holds only the image's own files.
+ELF_MACHINES = {"x86_64": 62, "aarch64": 183}
+PT_INTERP = 3
+# Far above any stand-in: a real static Rust executable is megabytes.
+MIN_EXECUTABLE_BYTES = 100_000
+ADAPTER_ARGUMENT = "honest"
 GUEST_FILES = {
     "status", "collector", "boot-id", "mountinfo", "uname-machine", "uname-release", "systemctl-version", "current-system",
     "booted-system", "booted-kernel", "systemd-package", "detect-virt-vm",
@@ -952,9 +962,43 @@ def report_lines(evidence: Evidence, case: str) -> list[list[str]]:
 
 
 def check_arguments(evidence: Evidence, case: str, images: str, signer: str, description: str) -> None:
-    expected = f"{images}/{case if case != 'verity-d' else 'wrong-key'}.raw\n{images}/{signer}.der\n{description}\n"
+    expected = (f"{images}/{case if case != 'verity-d' else 'wrong-key'}.raw\n{images}/{signer}.der\n"
+                f"{description}\n{images}/adapter\n{ADAPTER_ARGUMENT}\n")
     if evidence.text(f"guest/cases/{case}/arguments") != expected:
-        raise EvidenceError(f"the {case} driver did not get the recorded image, signer and description")
+        raise EvidenceError(f"the {case} driver did not get the recorded image, signer, description "
+                            "and adapter")
+
+
+def static_executable(data: bytes, architecture: str, name: str) -> None:
+    """Require a real static ELF executable of the architecture, not a stand-in."""
+    if len(data) < MIN_EXECUTABLE_BYTES or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        raise EvidenceError(f"the {name} is not a 64-bit little-endian ELF executable")
+    kind, machine = struct.unpack_from("<HH", data, 16)
+    if kind not in (2, 3) or machine != ELF_MACHINES[architecture]:
+        raise EvidenceError(f"the {name} is not an executable for {architecture}")
+    offset, = struct.unpack_from("<Q", data, 32)
+    size, count = struct.unpack_from("<HH", data, 54)
+    if size < 56 or offset + size * count > len(data):
+        raise EvidenceError(f"the {name} has a malformed program header table")
+    if any(struct.unpack_from("<I", data, offset + index * size)[0] == PT_INTERP for index in range(count)):
+        raise EvidenceError(f"the {name} is dynamically linked, so it cannot run inside the image's root")
+
+
+def check_executables(evidence: Evidence, architecture: str, positive: bytes) -> dict:
+    """The image's /adapter and the launcher are the real static executables.
+
+    The root is uncompressed EROFS, so the adapter's bytes occur verbatim in
+    the signed positive image exactly once. The staged SIM1 binds their
+    digest, and the positive case only mounts if activation read them back.
+    """
+    adapter = evidence.raw("host/images/adapter")
+    launcher = evidence.raw("host/images/launcher")
+    static_executable(adapter, architecture, "adapter")
+    static_executable(launcher, architecture, "launcher")
+    if positive.count(adapter) != 1:
+        raise EvidenceError("the positive image does not carry the adapter exactly once")
+    return {"adapter_sha256": hashlib.sha256(adapter).hexdigest(), "adapter_bytes": len(adapter),
+            "launcher_sha256": hashlib.sha256(launcher).hexdigest()}
 
 
 def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]) -> dict:
@@ -1097,7 +1141,7 @@ def check_mountfsd_reply(evidence: Evidence, image_size: int) -> dict:
             "cold_mountimage_seconds": recorded_seconds(evidence, "mountfsd-reply", "mountimage")}
 
 
-def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
+def check_cases(evidence: Evidence, architecture: str, paths: dict, trusted: tuple[bytes, str],
                 untrusted: tuple[bytes, str]) -> dict:
     """#444 part (b): real MountImage, readback, failure closure and cleanup."""
     if evidence.raw("host/images/positive.der") != trusted[0] \
@@ -1128,6 +1172,7 @@ def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
                      evidence.text("guest/cases/kernel-log")):
         raise EvidenceError("the kernel log shows no dm-verity data block corruption")
     return {
+        "executables": check_executables(evidence, architecture, positive),
         "root_hash": root_hash, "salt": salt, "tampered_offset": int(offset),
         **{case: check_mounted_case(evidence, case, verity) for case in MOUNTED_CASES},
         **{case: check_refused_case(evidence, case) for case in ("wrong-key", "verity-d")},
@@ -1298,7 +1343,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "compiled_in_certificate_list": check_certificate_list(evidence, der),
         "verity_d": check_verity_d(evidence, paths["systemd"]),
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
-        "mount_image_cases": check_cases(evidence, paths, (der, description), untrusted),
+        "mount_image_cases": check_cases(evidence, architecture, paths, (der, description), untrusted),
         "private_network": check_network(evidence),
     }
 
