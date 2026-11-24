@@ -1,6 +1,7 @@
-//! TME1: the R10 §8.3 vectors, the R9 §4.6.2 parser, the R9 §4.6.3 and
-//! R10 §4.8 shape tables, and R9 §6 rules 1, 2, 7 and 9 within the record,
-//! as R10 §7 extends them.
+//! TME1: the R10 §8.3 vectors as R14 §4.5 replaces them, the R14 §4.6
+//! vectors, the R9 §4.6.2 parser, the R9 §4.6.3 and R10 §4.8 shape tables,
+//! and R9 §6 rules 1, 2, 7 and 9 within the record, as R10 §7 and R14 §3.5
+//! extend them.
 
 use std::num::NonZeroU64;
 
@@ -23,7 +24,7 @@ use super::oracle::{
 use super::vectors::{
     KOE1_A, KOE1_A_DIGEST, KOE1_B_DIGEST, RQE1_A, SAU1_EVENT_1_AUTHORITY, SAU1_EVENT_2_AUTHORITY,
     TME1_A, TME1_A_DIGEST, TME1_B, TME1_B_DIGEST, TME1_C, TME1_C_DIGEST, TME1_D, TME1_D_DIGEST,
-    TME1_E, TME1_E_DIGEST, TME1_F, TME1_F_DIGEST,
+    TME1_E, TME1_E_DIGEST, TME1_F, TME1_F_DIGEST, TME1_G, TME1_G_DIGEST, TME1_H, TME1_H_DIGEST,
 };
 
 pub(super) fn decode(bytes: &[u8]) -> Result<(), ProtocolError> {
@@ -230,6 +231,23 @@ fn vector_f_fields() -> TestResult<TerminationEvidenceFields> {
     })
 }
 
+/// TME1-G: a Local attempt's network could not be set up (R14 §4.6).
+fn vector_g_fields() -> TestResult<TerminationEvidenceFields> {
+    Ok(TerminationEvidenceFields {
+        launch_failure: Some(LaunchFailure::NetworkSetupFailed),
+        terminal_code: Some(TerminalCode::IpcFailure),
+        ..vector_f_fields()?
+    })
+}
+
+/// TME1-H: a Replay attempt's capture was unavailable (R14 §4.6).
+fn vector_h_fields() -> TestResult<TerminationEvidenceFields> {
+    Ok(TerminationEvidenceFields {
+        launch_failure: Some(LaunchFailure::ReplayUnavailable),
+        ..vector_f_fields()?
+    })
+}
+
 fn transfer(values: [u64; 5], complete: bool) -> Value {
     let mut entries = values.map(integer).to_vec();
     entries.push(Value::Bool(complete));
@@ -290,6 +308,8 @@ fn tme1_vectors_decode_and_encode_byte_for_byte() -> TestResult {
         (TME1_D, TME1_D_DIGEST, vector_d_fields()?),
         (TME1_E, TME1_E_DIGEST, vector_e_fields()?),
         (TME1_F, TME1_F_DIGEST, vector_f_fields()?),
+        (TME1_G, TME1_G_DIGEST, vector_g_fields()?),
+        (TME1_H, TME1_H_DIGEST, vector_h_fields()?),
     ] {
         let bytes = unhex(vector)?;
         let decoded = TerminationEvidence::from_canonical_cbor(&bytes)?;
@@ -407,6 +427,8 @@ fn tme1_rule_1_envelope_size_and_types() -> TestResult {
         unhex(TME1_D)?,
         unhex(TME1_E)?,
         unhex(TME1_F)?,
+        unhex(TME1_G)?,
+        unhex(TME1_H)?,
         every_field_present()?,
         at_progress(0)?,
         with(&at_progress(1)?, &[7], integer(2))?,
@@ -431,7 +453,7 @@ fn tme1_rule_2_zero_identities_and_closed_codes() -> TestResult {
         (vec![21, 1], integer(0)),
         (vec![6], integer(3)),
         (vec![6], integer(256)),
-        (vec![7], integer(6)),
+        (vec![7], integer(8)),
         (vec![8], integer(6)),
         (vec![12], integer(3)),
         (vec![13, 0], integer(11)),
@@ -518,6 +540,8 @@ fn tme1_rule_2_shape_at_progress_0() -> TestResult {
             (vec![change(&[7], integer(3))], true),
             (vec![change(&[7], integer(4))], true),
             (vec![change(&[7], integer(5))], true),
+            (vec![change(&[7], integer(6))], true),
+            (vec![change(&[7], integer(7))], true),
             (vec![change(&[27], vector_field(27)?)], false),
             (vec![change(&[8], integer(0))], false),
             (
@@ -567,6 +591,8 @@ fn tme1_rule_2_shape_at_progress_1() -> TestResult {
             (vec![change(&[7], integer(3))], false),
             (vec![change(&[7], integer(4))], false),
             (vec![change(&[7], integer(5))], false),
+            (vec![change(&[7], integer(6))], false),
+            (vec![change(&[7], integer(7))], false),
             (vec![change(&[27], vector_field(27)?)], false),
             // A null start job is missing evidence (code 2), not a shape
             // error (owner reading G1, Redmine #443 journal 22723).
@@ -906,5 +932,20 @@ fn tme1_r10_rule_9_the_feed_lies_within_the_released_run() -> TestResult {
         decode(&with(&unhex(TME1_F)?, &[27], vector_field(27)?)?),
         Err(ProtocolError::InconsistentFields)
     );
+    Ok(())
+}
+
+/// R14 §4.6: launch failures 6 and 7 require progress 0, so TME1-G at
+/// progress 1 (a start job, no unit) is refused.
+#[test]
+fn tme1_r14_launch_failures_6_and_7_require_progress_0() -> TestResult {
+    for vector in [TME1_G, TME1_H] {
+        let started = edit(&unhex(vector)?, |fields| {
+            fields[6] = integer(1);
+            fields[8] = integer(0);
+            Ok(())
+        })?;
+        assert_eq!(decode(&started), Err(ProtocolError::InconsistentFields));
+    }
     Ok(())
 }
