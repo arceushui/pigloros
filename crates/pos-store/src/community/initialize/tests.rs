@@ -302,7 +302,9 @@ fn the_commit_publishes_and_retains_the_whole_initialization() -> TestResult {
 /// counters carry T's recorded-set nodes, edges and declared inputs, and the
 /// initialization adds its own two CPN1 nodes and edges per member. The
 /// selected graph is the CGR1's, and the key reads count the three retained
-/// keys. Only the three seedable counters are asserted exactly.
+/// keys. The history seeds only nodes, edges and declared inputs, so those
+/// three are asserted against the history; the byte counter is asserted
+/// against the initialization's own plaintext total alone.
 #[test]
 fn the_history_seeds_the_quote_and_the_pass_state() -> TestResult {
     let roster = Roster::release_one()?;
@@ -820,10 +822,12 @@ fn a_fork_child_has_no_history_seed_yet() -> TestResult {
     // A store that refuses the read is unavailable evidence.
     let store = std::mem::replace(&mut domain.store, MemoryStore::new());
     domain.store = store.without_erasure_gate();
-    assert_eq!(
-        domain.history_counts(target()).err(),
-        Some(Error::EvidenceUnavailable)
-    );
+    for timeline in [target(), child] {
+        assert_eq!(
+            domain.history_counts(timeline).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
     Ok(())
 }
 

@@ -704,8 +704,9 @@ impl MemoryCommunityDomainV1 {
     /// outcome: unavailable evidence.
     ///
     /// # Errors
-    /// Returns `InvalidBinding` for a Fork child, and `EvidenceUnavailable`
-    /// when the store cannot read the Timeline or its counts.
+    /// Returns `EvidenceUnavailable` when the store cannot read the Timeline
+    /// or its counts, judged first, and then `InvalidBinding` for a Fork
+    /// child.
     fn history_counts(&self, timeline: TimelineId) -> Result<CommunitySharedCountsV1, Error> {
         self.store
             .get_timeline(timeline)
