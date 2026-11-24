@@ -728,7 +728,7 @@ impl KeyRegistryStateV1 {
             pending_destructions: BTreeMap::new(),
             version: KeyRegistryFormatVersionV1,
             reserved_material: None,
-            registration_index_valid: true,
+            registration_index_valid: false,
         }
     }
 
