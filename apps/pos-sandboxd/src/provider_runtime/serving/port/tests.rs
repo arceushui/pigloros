@@ -229,6 +229,7 @@ mod served {
         SandboxProviderErrorCode as Code, SandboxProviderResult, SandboxReconcileRequest,
     };
 
+    use super::super::{transfer_output, Transfer};
     use super::TestResult;
     use crate::provider_runtime::port::ExecutePort;
     use crate::provider_runtime::serving::{
@@ -505,17 +506,43 @@ mod served {
     }
 
     /// Every record `deliver` writes to a fresh connection for `response`
-    /// under `identity`, the window `window`.
+    /// under `identity`, its output sent by `transfer`.
     fn delivered(
         responder: &Responder<'_>,
         port: &ExecutePort,
         (identity, response): (RequestIdentity, &Arc<crate::RetainedResponse>),
         granted: bool,
-        window: Duration,
+        transfer: impl FnOnce(&UnixStream, &[Vec<u8>], u64) -> Transfer + Send,
     ) -> TestResult<Vec<Vec<u8>>> {
         served(&[], false, |stream| {
-            responder.deliver_within(port, &stream, (identity, response), granted, window);
+            responder.deliver_within(port, &stream, (identity, response), granted, transfer);
         })
+    }
+
+    /// An output transfer that timed out before it accepted a byte, timed
+    /// after the fixture's cleanup finished, whatever this host's clock
+    /// reads.
+    fn timed_out(_: &UnixStream, _: &[Vec<u8>], expected: u64) -> Transfer {
+        Transfer::TimedOut(Some(
+            pos_reference::sandbox_provider_protocol::TransferRecord {
+                start: 3_000_000_000_000,
+                deadline: 3_002_000_000_000,
+                finish: 3_002_000_000_000,
+                expected_bytes: expected,
+                accepted_bytes: 0,
+                complete: false,
+            },
+        ))
+    }
+
+    /// The output transfer itself, within [`TIMEOUT`].
+    fn complete(stream: &UnixStream, records: &[Vec<u8>], expected: u64) -> Transfer {
+        transfer_output(
+            stream,
+            records,
+            (expected, TIMEOUT),
+            crate::launcher::clock::monotonic_ns,
+        )
     }
 
     /// The execute identity of the attempt `response` answers.
@@ -574,11 +601,11 @@ mod served {
         let attempt = identity.attempt_id.ok_or("no attempt")?;
         // B, the joined recovery connection, receives every frame, SPY1 last.
         let frames: Vec<Vec<u8>> = stored.frames().map(<[u8]>::to_vec).collect();
-        let joined = delivered(&responder, first, (identity, &stored), false, TIMEOUT)?;
+        let joined = delivered(&responder, first, (identity, &stored), false, complete)?;
         assert_eq!(joined, frames);
         // A, abandoned during its output, times out: nothing is re-issued,
         // and A got no SPY1.
-        let abandoned = delivered(&responder, first, (identity, &stored), true, Duration::ZERO)?;
+        let abandoned = delivered(&responder, first, (identity, &stored), true, timed_out)?;
         assert_eq!(
             abandoned.len(),
             frames.len() - 1 - stored.output().0.len() - 1
@@ -598,14 +625,14 @@ mod served {
             .lifecycle
             .completed_for_test()
             .map_err(|error| error.to_string())?;
-        delivered(&responder, fresh, (identity, &stored), true, Duration::ZERO)?;
+        delivered(&responder, fresh, (identity, &stored), true, timed_out)?;
         assert!(!fresh
             .lifecycle
             .terminal_response(attempt, stored.agr1_digest())
             .is_ok_and(|current| Arc::ptr_eq(&current, &stored)));
         // B still holds the replaced response: it may write its output, but
         // never its SPY1.
-        let late = delivered(&responder, fresh, (identity, &stored), false, TIMEOUT)?;
+        let late = delivered(&responder, fresh, (identity, &stored), false, complete)?;
         assert_eq!(late.len(), frames.len() - 1);
         assert_eq!(late, frames[..frames.len() - 1]);
         Ok(())
@@ -627,10 +654,10 @@ mod served {
         Ok(frames)
     }
 
-    /// Base §4: while B is blocked writing the re-issued response R2, A,
-    /// whose transfer of the replaced R1 timed out, re-issues nothing from
-    /// R2: its successor of R1 is discarded, R2 stays stored, and B writes
-    /// R2's SPY1 once its peer reads again.
+    /// Base §4: while B stands mid-response with the re-issued R2, between
+    /// its head and its output, A, whose transfer of the replaced R1 timed
+    /// out, re-issues nothing from R2: its successor of R1 is discarded, R2
+    /// stays stored, and B writes R2's SPY1 once it goes on.
     #[test]
     fn a_stale_reissue_never_replaces_the_response_another_connection_writes() -> TestResult {
         if !in_isolated_root(
@@ -659,30 +686,33 @@ mod served {
                 .terminal_response(attempt, first.agr1_digest())
         };
         // Another connection's output transfer of R1 timed out: R2.
-        delivered(&responder, port, (identity, &first), true, Duration::ZERO)?;
+        delivered(&responder, port, (identity, &first), true, timed_out)?;
         let second = current()?;
         assert!(!Arc::ptr_eq(&second, &first));
         let (server, mut peer) = UnixStream::pair()?;
-        rustix::net::sockopt::set_socket_send_buffer_size(&server, 1)?;
         peer.set_read_timeout(Some(TIMEOUT))?;
-        // B blocks before its SPY1 only while its writes outrun the minimum
-        // send buffer. The kernel charges each queued write's whole buffer,
-        // not its payload, so no byte count pins this: the `is_finished`
-        // assertion below does, and fails if a smaller response stops
-        // blocking B, rather than letting the race pass vacuously.
+        // B writes R2's head, then stops at its output until A is done.
+        let (at_output, reached) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel::<()>();
+        let held = move |stream: &UnixStream, records: &[Vec<u8>], expected| {
+            at_output.send(()).ok();
+            resumed.recv().ok();
+            complete(stream, records, expected)
+        };
         std::thread::scope(|scope| -> TestResult {
             let writing = scope.spawn(|| {
-                responder.deliver_within(port, &server, (identity, &second), false, TIMEOUT);
+                responder.deliver_within(port, &server, (identity, &second), false, held);
             });
-            std::thread::sleep(Duration::from_millis(100));
-            assert!(!writing.is_finished(), "B blocks mid-response");
+            reached.recv_timeout(TIMEOUT)?;
+            assert!(!writing.is_finished(), "B stands at its output");
             assert!(!second.delivered());
             // A times out on R1 while B writes R2; its peer already ended
             // its write side, so A ends at once.
             let (abandoned, other) = UnixStream::pair()?;
             other.shutdown(std::net::Shutdown::Write)?;
-            responder.deliver_within(port, &abandoned, (identity, &first), true, Duration::ZERO);
+            responder.deliver_within(port, &abandoned, (identity, &first), true, timed_out);
             assert!(Arc::ptr_eq(&current()?, &second));
+            resume.send(())?;
             peer.shutdown(std::net::Shutdown::Write)?;
             let frames = read_frames(&mut peer)?;
             writing.join().map_err(|_| "B panicked")?;
@@ -886,7 +916,7 @@ mod served {
                 .map_err(|code| format!("{code:?}"))?,
             answered
         );
-        delivered(&responder, port, (identity, &stored), true, Duration::ZERO)?;
+        delivered(&responder, port, (identity, &stored), true, timed_out)?;
         assert!(Arc::ptr_eq(
             &port
                 .lifecycle
