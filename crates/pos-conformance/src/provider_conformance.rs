@@ -113,7 +113,7 @@ pub enum ExpectedPublicOutcome {
         /// The accepted SAU1 terminal event codes.
         codes: &'static [u8],
     },
-    /// An SPE1 refusal with this code.
+    /// An SPE1 refusal with one of these codes.
     Refused(&'static [SandboxProviderErrorCodeV1]),
 }
 
@@ -303,6 +303,9 @@ pub struct ProviderRun {
 }
 
 /// The provider could not run the case at all.
+///
+/// [`run_suite`] reports it only as [`FailureReason::NotRun`]: the reason is
+/// visible to direct callers of [`ProviderUnderTest::run_case`] alone.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("the provider could not run the case: {0}")]
 pub struct ProviderRunError(pub String);
@@ -331,7 +334,9 @@ pub enum FailureReason {
     TerminalCode,
     /// An attempt was refused with an unexpected SPE1 code.
     Refusal,
-    /// Concurrent attempts shared or omitted an attempt identity.
+    /// An answer lacks its authenticated identity (an `attempt_id` on a result,
+    /// a `request_id` on a refusal), also for a single attempt, or concurrent
+    /// attempts share an attempt identity.
     AttemptIdentity,
     /// Owned resources remained after the case.
     ResourceLeak,
@@ -463,6 +468,9 @@ pub struct SuiteReport {
 }
 
 /// Run every case against the provider.
+///
+/// A case the provider cannot run is recorded as [`FailureReason::NotRun`];
+/// its [`ProviderRunError`] reason is not kept in the report.
 pub fn run_suite(
     provider: &mut impl ProviderUnderTest,
     architecture: SandboxArchitectureV1,

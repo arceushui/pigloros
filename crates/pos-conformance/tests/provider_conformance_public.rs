@@ -733,3 +733,35 @@ fn every_verdict_and_architecture_round_trips() -> TestResult {
     assert_eq!(ReportArchitecture::REQUIRED.len(), 2);
     Ok(())
 }
+
+/// A provider that refuses with the second accepted code of each refusal case.
+struct AlternateRefusals;
+
+impl ProviderUnderTest for AlternateRefusals {
+    fn run_case(&mut self, case: ProviderConformanceCase) -> Result<ProviderRun, ProviderRunError> {
+        let mut run = faithful_run(case);
+        let alternate = match case {
+            ProviderConformanceCase::MissingHostFeature => {
+                Some(SandboxProviderErrorCodeV1::ProviderCapabilityMissing)
+            }
+            ProviderConformanceCase::RevokedBeforeAdmission => {
+                Some(SandboxProviderErrorCodeV1::AuthorityMismatch)
+            }
+            _ => None,
+        };
+        if let Some(code) = alternate {
+            run.attempts[0].public = ObservedPublic::Refused(code);
+        }
+        Ok(run)
+    }
+}
+
+#[test]
+fn the_second_accepted_refusal_codes_pass_the_whole_suite() -> TestResult {
+    let reports = [
+        run_suite(&mut AlternateRefusals, SandboxArchitectureV1::X86_64),
+        run_suite(&mut AlternateRefusals, SandboxArchitectureV1::Aarch64),
+    ];
+    verify_gate(&reports)?;
+    Ok(())
+}
