@@ -7,28 +7,50 @@ use pos_crypto::subject_key::{SubjectKeyWrapV1, SubjectPrfOutputV1, SubjectRootK
 use pos_owner_bridge::fake::clock::FakeRandom;
 use pos_owner_bridge::{SecureRandom, UnavailableCode};
 use pos_owner_bridge_codec::PrfInput;
+use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
 use super::{confirm, seal, EnrollmentCandidate, Sealing, WRAP};
 
-const PRF: [u8; 32] = [0x40; 32];
+/// `N` bytes derived one-way from `label`, so no literal key material is used.
+fn derived<const N: usize>(label: &str) -> [u8; N] {
+    let mut out = [0_u8; N];
+    for (counter, chunk) in (0_u8..).zip(out.chunks_mut(32)) {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        hasher.update([counter]);
+        for (dst, src) in chunk.iter_mut().zip(hasher.finalize().iter()) {
+            *dst = *src;
+        }
+    }
+    out
+}
+
+fn prf() -> [u8; 32] {
+    derived("sealing prf")
+}
+
+fn prf_input() -> [u8; 32] {
+    derived("sealing prf input")
+}
+
 const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
 
-const fn sealing() -> Sealing<'static> {
+fn sealing() -> Sealing<'static> {
     Sealing {
         subject: EntityId::from_ulid(Ulid::from_bytes([0x10; 16])),
         epoch: 3,
         credential_id: &CREDENTIAL_ID,
-        prf_input: PrfInput::from_bytes([0x60; 32]),
+        prf_input: PrfInput::from_bytes(prf_input()),
     }
 }
 
 /// A sealed candidate, after checking that it confirms to its own fingerprint.
 fn sealed() -> Option<EnrollmentCandidate> {
-    seal(&mut FakeRandom::seeded(9), sealing(), &PRF)
+    seal(&mut FakeRandom::seeded(9), sealing(), &prf())
         .ok()
         .map(|(candidate, sealed)| {
-            assert_eq!(confirm(&candidate, &PRF).ok(), Some(sealed));
+            assert_eq!(confirm(&candidate, &prf()).ok(), Some(sealed));
             candidate
         })
 }
@@ -43,7 +65,7 @@ fn tampered(offset: usize) -> Option<EnrollmentCandidate> {
         })
         .and_then(|bytes| SubjectKeyWrapV1::from_bytes(&bytes).ok())
         .map(|wrap| EnrollmentCandidate {
-            root: SubjectRootKeyV1::from_bytes([0; 32]),
+            root: SubjectRootKeyV1::from_bytes(derived("tampered candidate root")),
             wrap,
         })
 }
@@ -54,10 +76,10 @@ fn the_sealed_wrap_binds_its_inputs_and_opens_under_the_sealing_prf_only() {
         let params = candidate.wrap.params();
         assert_eq!(params.rp_id, "localhost");
         assert_eq!(params.credential_id, CREDENTIAL_ID);
-        assert_eq!(params.prf_input, [0x60; 32]);
+        assert_eq!(params.prf_input, prf_input());
         assert_eq!(params.epoch, 3);
         assert_eq!(params.subject_id, sealing().subject);
-        confirm(&candidate, &[0x41; 32]).err()
+        confirm(&candidate, &derived("wrong sealing prf")).err()
     });
     assert_eq!(opened, Some(Some(WRAP)));
 }
@@ -71,7 +93,7 @@ fn a_tampered_tag_or_wrap_field_fails_the_open() {
     // 48-byte string with a 2-byte head, so the byte 50 before the last is
     // the last byte of the 12-byte wrap nonce.
     for offset in [length - 1, length - 51] {
-        let opened = tampered(offset).map(|candidate| confirm(&candidate, &PRF).err());
+        let opened = tampered(offset).map(|candidate| confirm(&candidate, &prf()).err());
         assert_eq!(opened, Some(Some(WRAP)));
     }
 }
@@ -91,7 +113,7 @@ impl SecureRandom for Counting {
 #[test]
 fn one_draw_splits_into_root_wrap_salt_subkey_salt_and_nonce_in_order() {
     let drawn: Vec<u8> = (0_u8..108).collect();
-    let checked = seal(&mut Counting, sealing(), &PRF)
+    let checked = seal(&mut Counting, sealing(), &prf())
         .ok()
         .map(|(candidate, _)| {
             let params = candidate.wrap.params();
@@ -101,7 +123,7 @@ fn one_draw_splits_into_root_wrap_salt_subkey_salt_and_nonce_in_order() {
             let expected = SubjectRootKeyV1::from_bytes(std::array::from_fn(|index| drawn[index]));
             let opened = candidate
                 .wrap
-                .open(&SubjectPrfOutputV1::from_bytes(PRF))
+                .open(&SubjectPrfOutputV1::from_bytes(prf()))
                 .ok();
             assert_eq!(
                 opened.map(|root| root.material_digest()),
@@ -115,7 +137,7 @@ fn one_draw_splits_into_root_wrap_salt_subkey_salt_and_nonce_in_order() {
 #[test]
 fn a_randomness_failure_is_a_wrap_failure() {
     assert_eq!(
-        seal(&mut FakeRandom::failing_after(9, 0), sealing(), &PRF).err(),
+        seal(&mut FakeRandom::failing_after(9, 0), sealing(), &prf()).err(),
         Some(WRAP)
     );
 }

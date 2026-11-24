@@ -8,7 +8,22 @@ use pos_owner_adapter::enrollment::{
     EnrollmentStore, SubjectKeyRegistration, VolatileEnrollmentStore,
 };
 use pos_owner_bridge::{OwnerError, OwnerErrorKind};
+use sha2::{Digest, Sha256};
 use ulid::Ulid;
+
+/// `N` bytes derived one-way from `label`, so no literal key material is used.
+fn derived<const N: usize>(label: &str) -> [u8; N] {
+    let mut out = [0_u8; N];
+    for (counter, chunk) in (0_u8..).zip(out.chunks_mut(32)) {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        hasher.update([counter]);
+        for (dst, src) in chunk.iter_mut().zip(hasher.finalize().iter()) {
+            *dst = *src;
+        }
+    }
+    out
+}
 
 const FILE: SubjectStoreFileIdV1 = SubjectStoreFileIdV1::Linux {
     device: 7,
@@ -27,7 +42,7 @@ fn registration(epoch: u64) -> SubjectKeyRegistration {
         owner_id: OWNER.to_owned(),
         subject_id: subject(0x10),
         epoch,
-        root_material_digest: [0x33; 32],
+        root_material_digest: derived("registration root material digest"),
     }
 }
 

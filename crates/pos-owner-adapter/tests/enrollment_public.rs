@@ -36,6 +36,20 @@ use pos_owner_bridge_codec::{decode_subject_credential_binding, SubjectId};
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
+/// `N` bytes derived one-way from `label`, so no literal key material is used.
+fn derived<const N: usize>(label: &str) -> [u8; N] {
+    let mut out = [0_u8; N];
+    for (counter, chunk) in (0_u8..).zip(out.chunks_mut(32)) {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        hasher.update([counter]);
+        for (dst, src) in chunk.iter_mut().zip(hasher.finalize().iter()) {
+            *dst = *src;
+        }
+    }
+    out
+}
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Bridge = OwnerBridge<FakeHost, FakeRandom, FakeClock>;
 
@@ -162,7 +176,7 @@ fn row(subject: SubjectId, epoch: u64) -> SubjectNonceLedgerRowV1 {
     SubjectNonceLedgerRowV1 {
         owner_id: owner(subject),
         epoch,
-        root_material_digest: [0x77; 32],
+        root_material_digest: derived("row root material digest"),
         store_file_id: FILE,
         data_next: 5,
         bootstrap_next: 6,
@@ -176,13 +190,17 @@ fn wrap_fixture(subject: SubjectId, epoch: u64, credential_id: &[u8]) -> TestRes
         epoch,
         rp_id: "localhost".to_owned(),
         credential_id: credential_id.to_vec(),
-        prf_input: [1; 32],
-        wrap_salt: [2; 32],
-        subkey_salt: [3; 32],
-        wrap_nonce: [4; 12],
+        prf_input: derived("wrap fixture prf input"),
+        wrap_salt: derived("wrap fixture wrap salt"),
+        subkey_salt: derived("wrap fixture subkey salt"),
+        wrap_nonce: derived("wrap fixture wrap nonce"),
     };
-    let root = SubjectRootKeyV1::from_bytes([5; 32]);
-    let wrap = SubjectKeyWrapV1::seal(params, &root, &SubjectPrfOutputV1::from_bytes([6; 32]))?;
+    let root = SubjectRootKeyV1::from_bytes(derived("wrap fixture root"));
+    let wrap = SubjectKeyWrapV1::seal(
+        params,
+        &root,
+        &SubjectPrfOutputV1::from_bytes(derived("wrap fixture prf output")),
+    )?;
     Ok(wrap.to_bytes())
 }
 
@@ -462,7 +480,7 @@ fn a_confirmation_under_another_prf_fails_the_open_and_abandons() -> TestResult 
         before_commit: Box::new(|| commits += 1),
     };
     let page = HonestConfig {
-        substitute_get_prf: Some([0x33; 32]),
+        substitute_get_prf: Some(derived("substituted prf output")),
         ..honest()
     };
     assert_eq!(enroll(page, &context, &mut port)?, Err(WRAP));
