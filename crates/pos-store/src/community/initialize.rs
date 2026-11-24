@@ -928,8 +928,9 @@ impl MemoryCommunityDomainV1 {
     /// generation once.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` when either compared value moved, and
-    /// the ARD1 publication refusal; each leaves the domain unchanged.
+    /// Returns `EvidenceUnavailable` when either compared value moved,
+    /// `Conflict` when the Timeline already has pass state, and the ARD1
+    /// publication refusal; each leaves the domain unchanged.
     pub(super) fn commit(
         &mut self,
         staged: StagedInitializationV1,

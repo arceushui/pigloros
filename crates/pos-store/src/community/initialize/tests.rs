@@ -642,6 +642,7 @@ fn initialize_checks_the_rows_bound_with_its_quarantine_rows() -> TestResult {
 /// R13.1(3): the targets line holds the actor's targets, its pending
 /// reservations, the existing contexts' `F_q`, the `5n` rows at two targets
 /// each and the new context's `8n` targets: 20 + 16 more for two members.
+/// One existing one-member context holds 8 more targets.
 #[test]
 fn initialize_checks_the_targets_line_with_its_quarantine_targets() -> TestResult {
     let line = COMMUNITY_ERASURE_TARGET_LINE_V1;
@@ -649,13 +650,14 @@ fn initialize_checks_the_targets_line_with_its_quarantine_targets() -> TestResul
         let roster = Roster::release_one()?;
         let mut case = Case::owned(&roster)?;
         let domain = &mut case.domain.world.domain;
+        domain.count_erasure_context(target(), 1);
         let base = domain.erasure_budget(target())?.actors[0].targets;
         // Community rows cost two targets each.
-        let filled = (line - 36 - base) / 2;
+        let filled = (line - 36 - 8 - base) / 2;
         domain
             .store
             .bind_erasure_rows_for_test(target(), community_rows(1_000, filled)?);
-        let slack = line - 36 - base - 2 * filled;
+        let slack = line - 36 - 8 - base - 2 * filled;
         // A pending reservation holds the rest, and one target more.
         domain.pending_reservations.insert(
             (target(), [9; 16]),
@@ -671,6 +673,67 @@ fn initialize_checks_the_targets_line_with_its_quarantine_targets() -> TestResul
         if !allowed {
             assert_eq!(result.err(), Some(Error::CapacityExhausted));
         }
+    }
+    Ok(())
+}
+
+/// R13.1(3): the check holds for every actor of the scope, each with its own
+/// pending reservations. A Fork child's scope holds its owner and its
+/// parent's: only the child's owner, who also owns an unrelated Timeline, is
+/// at the line, either through that Timeline's rows or through a pending
+/// reservation on it.
+#[test]
+fn the_budget_check_holds_for_every_actor_of_the_scope() -> TestResult {
+    let line = COMMUNITY_ERASURE_TARGET_LINE_V1;
+    let child = TimelineId::from_ulid(ulid::Ulid::from_bytes([0x78; 16]));
+    let unrelated = TimelineId::from_ulid(ulid::Ulid::from_bytes([0x79; 16]));
+    let second = EntityId::from_ulid(ulid::Ulid::from_bytes([0x7a; 16]));
+    for (pending, allowed, via_rows) in [
+        (0, true, true),
+        (1, false, true),
+        (0, true, false),
+        (1, false, false),
+    ] {
+        let roster = Roster::release_one()?;
+        let mut case = Case::owned(&roster)?;
+        let domain = &mut case.domain.world.domain;
+        for (id, owner, fork_point) in [
+            (child, second, Some((target(), Seq::ZERO))),
+            (unrelated, second, None),
+        ] {
+            domain.store.create_timeline_with_meta(TimelineMeta {
+                id,
+                owner: Some(owner),
+                fork_point,
+                ..TimelineMeta::root("scoped")
+            })?;
+        }
+        let scope = domain.erasure_budget(child)?;
+        let base = scope
+            .actors
+            .iter()
+            .find(|actor| actor.actor == second)
+            .map(|actor| actor.targets)
+            .ok_or("the child's owner is in its scope")?;
+        assert_eq!(scope.actors.len(), 2);
+        let room = line - 36 - base;
+        let (filled, held) = if via_rows { (room / 2, 0) } else { (0, room) };
+        domain
+            .store
+            .bind_erasure_rows_for_test(unrelated, community_rows(2_000, filled)?);
+        let slack = if via_rows { room % 2 } else { held };
+        domain.pending_reservations.insert(
+            (unrelated, [9; 16]),
+            CommunityPendingReservationV1 {
+                targets: slack + pending,
+                rows: 0,
+            },
+        );
+        assert_eq!(
+            domain.check_initialize_budget(child, 2).is_ok(),
+            allowed,
+            "{via_rows}/{pending}"
+        );
     }
     Ok(())
 }

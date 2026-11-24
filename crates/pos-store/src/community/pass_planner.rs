@@ -569,8 +569,9 @@ fn erasure_budget<P: CommunityPassReadPortV1>(
 
 /// The trace rows one actor's budget still admits after binding `rows`
 /// to `timeline` and holding the `reserve` targets of `F_p`, or `None` when
-/// they do not fit.
-fn trace_room(
+/// they do not fit. `initialize` checks its context with the same rows
+/// (`5n`) and reserve (`F_q`'s `8n` targets).
+pub(super) fn trace_room(
     budget: &CommunityErasureBudgetV1,
     actor: &CommunityErasureActorV1,
     pending: &CommunityPendingErasureV1,

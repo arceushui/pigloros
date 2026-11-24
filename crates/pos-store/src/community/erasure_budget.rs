@@ -14,16 +14,13 @@ use std::collections::BTreeMap;
 
 use pos_core::community_lifecycle::CommunityLifecycleErrorV1 as Error;
 #[cfg(target_os = "linux")]
-use pos_core::community_lifecycle::{
-    COMMUNITY_ERASURE_ROW_LIMIT_V1, COMMUNITY_ERASURE_TARGET_LINE_V1,
-    COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1,
-};
+use pos_core::community_lifecycle::COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1;
 use pos_core::{EntityId, TimelineId};
 
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
 #[cfg(target_os = "linux")]
-use super::pass_planner::CommunityPassReadPortV1;
+use super::pass_planner::{trace_room, CommunityPassReadPortV1};
 
 /// The store domain's committed erasure budget, read under the guard
 /// (ADR-129 revision 13, R13.1(2)).
@@ -166,27 +163,13 @@ impl MemoryCommunityDomainV1 {
         let rows = 5 * members;
         let reserve = COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * members;
         self.erasure_budget(timeline).and_then(|budget| {
-            let targets_fit = budget.actors.iter().all(|actor| {
+            // The context's `5n` rows and `F_q` fit exactly like a pass's
+            // rows and `F_p` (R13.1(3)): one implementation of the bound.
+            let fits = budget.actors.iter().all(|actor| {
                 let pending = self.pending_erasure_demand(actor.actor);
-                actor.targets + pending.targets + actor.quarantine_reserve + reserve + 2 * rows
-                    <= COMMUNITY_ERASURE_TARGET_LINE_V1
+                trace_room(&budget, actor, &pending, timeline, rows, reserve).is_some()
             });
-            let rows_fit = budget.rows.iter().all(|(affected, committed)| {
-                let added = if *affected == timeline {
-                    rows + reserve / 2
-                } else {
-                    0
-                };
-                let pending: u64 = self
-                    .pending_reservations
-                    .iter()
-                    .filter(|((pending, _), _)| pending == affected)
-                    .map(|(_, entry)| entry.rows)
-                    .sum();
-                let held = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
-                committed + pending + held + added <= COMMUNITY_ERASURE_ROW_LIMIT_V1
-            });
-            if targets_fit && rows_fit {
+            if fits {
                 Ok(())
             } else {
                 Err(Error::CapacityExhausted)
