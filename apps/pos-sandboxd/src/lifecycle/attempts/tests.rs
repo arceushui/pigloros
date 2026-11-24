@@ -2560,6 +2560,60 @@ mod cases {
             Ok(())
         }
 
+        /// ADR-069 R15 §3.6 item 3 and N9: `conclude` closes the provider's
+        /// `/work` handle, with or without a bound cgroup, before the
+        /// teardown's `StopUnit`. The handle is a pipe's write end, so the
+        /// read end sees EOF exactly once no descriptor of it is open.
+        #[tokio::test]
+        async fn conclude_closes_the_work_handle_before_teardown() -> TestResult {
+            use std::io::Read as _;
+            for bound in [true, false] {
+                let fixture = manager(1).await?;
+                let (reader, writer) = std::io::pipe()?;
+                rustix::fs::fcntl_setfl(&reader, rustix::fs::OFlags::NONBLOCK)?;
+                let observation = crate::KernelObservation::fixture([0x11; 16]);
+                let observed = crate::ObservedUnit::with_work_for_test(
+                    &observation,
+                    File::from(std::os::fd::OwnedFd::from(writer)),
+                );
+                let release = crate::ReleaseOutcome::new(
+                    None,
+                    Some((observed, observation.fixture_evidence()?)),
+                    None,
+                );
+                let mut reader = reader;
+                let mut byte = [0; 1];
+                // Held open until `conclude`.
+                assert!(reader.read(&mut byte).is_err());
+                let mut progress = AttemptProgress::Executed {
+                    started: SystemdVerifiedStart::for_test(
+                        TransientServiceUnitName::from_attempt_id([1; 16])?,
+                        "/org/freedesktop/systemd1/unit/attempt",
+                    )?,
+                    ending: AttemptEnding::CgroupEmpty,
+                    network: NetworkEvidence::None,
+                    evidence: ResourceEvidence::new(None, release),
+                    adapter: crate::test_fixtures::adapter_io().ok_or("no empty charge")?,
+                };
+                let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
+                conclude(
+                    &fixture.transport,
+                    &mut progress,
+                    &unit,
+                    bound.then_some(&fixture.bound),
+                    Instant::now() + Duration::from_millis(100),
+                )
+                .await;
+                assert_eq!(reader.read(&mut byte)?, 0, "bound: {bound}");
+                let AttemptProgress::Executed { evidence, .. } = progress else {
+                    return Err("the progress changed".into());
+                };
+                assert!(evidence.release().work().is_none());
+                assert_eq!(evidence.terminal().is_some(), bound);
+            }
+            Ok(())
+        }
+
         #[tokio::test]
         async fn a_failure_after_the_bind_is_concluded_without_a_result() -> TestResult {
             let fixture = manager(1).await?;

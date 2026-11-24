@@ -1342,6 +1342,12 @@ mod served {
             refused(&answer(&busy, Admission::Answered)?)?,
             (Code::AdmissionBusy, Some([0x74; 16]))
         );
+        // With no execute place and no uncharged reader free either, the
+        // refusal is not written: zero bytes.
+        let reader = responder.refusals.wait(Instant::now());
+        assert!(reader.is_some());
+        assert!(answer(&busy, Admission::Answered)?.is_empty());
+        drop(reader);
         drop(held);
         signing_fault_and_revocation(&responder, port, (&reconcile, &busy), attempt)?;
         drop(staged);
@@ -1393,11 +1399,7 @@ mod served {
                 responder.answer_placed(server, Admission::Answered, None, place);
             });
             // The hand-off frees the execute place before the wait ends.
-            let deadline = Instant::now() + TIMEOUT;
-            while !responder.answered.has_room() {
-                assert!(Instant::now() < deadline, "the place was never freed");
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            await_freed(|| responder.answered.has_room())?;
             assert!(!serving.is_finished());
             pending
                 .retain(&port.lifecycle)
@@ -1408,6 +1410,85 @@ mod served {
             assert_eq!(answered.result, SandboxCancellationResult::AlreadyTerminal);
             Ok(())
         })?;
+        drop(staged);
+        Ok(())
+    }
+
+    /// Wait, within [`TIMEOUT`], until `freed` holds.
+    fn await_freed(freed: impl Fn() -> bool) -> TestResult {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            std::thread::sleep(Duration::from_millis(5));
+            if freed() {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err("the place was never freed".into());
+            }
+        }
+    }
+
+    /// Invariant 16: with every execute worker held, an SCQ1 read by a
+    /// refusal reader (`answer_busy`) is answered from the control pool. Its
+    /// reader place is freed while it waits, and execute capacity is
+    /// unchanged.
+    #[test]
+    fn a_busy_cancellation_frees_its_reader_place_and_leaves_execute_capacity() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::a_busy_cancellation_frees_its_reader_place_and_leaves_execute_capacity",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let authority = (
+            admitted.bootstrap().policy().policy_digest(),
+            admitted.bootstrap().policy().policy_epoch(),
+        );
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 1);
+        let port = port(&open)?;
+        let pending = port
+            .lifecycle
+            .completed_pending_for_test()
+            .map_err(|error| error.to_string())?;
+        let cancel = control_record(
+            "SCQ1",
+            authority,
+            [0x76; 16],
+            (pending.attempt_id, pending.agr1_digest),
+        )?;
+        // Execute is saturated: its one worker place is held.
+        let execute = responder.answered.take();
+        assert!(execute.is_some());
+        let (server, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        peer.write_all(&framed(&[&cancel])?)?;
+        peer.shutdown(std::net::Shutdown::Write)?;
+        let reader = responder.refusals.wait(Instant::now());
+        assert!(reader.is_some() && !responder.refusals.has_room());
+        std::thread::scope(|scope| -> TestResult {
+            let serving = scope.spawn(|| responder.answer(server, Admission::Busy, reader));
+            await_freed(|| responder.refusals.has_room())?;
+            assert!(!serving.is_finished());
+            assert!(!responder.answered.has_room());
+            assert!(!responder.control.has_room());
+            pending
+                .retain(&port.lifecycle)
+                .map_err(|error| error.to_string())?;
+            let frames = read_frames(&mut peer)?;
+            serving.join().map_err(|_| "serving panicked")?;
+            let answered = SandboxCancelResponse::from_canonical_cbor(&frames[0])?;
+            assert_eq!(answered.result, SandboxCancellationResult::AlreadyTerminal);
+            Ok(())
+        })?;
+        assert!(responder.control.has_room());
+        drop(execute);
         drop(staged);
         Ok(())
     }
