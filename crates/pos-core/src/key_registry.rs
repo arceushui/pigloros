@@ -676,10 +676,6 @@ struct KeyRegistryStateSemanticView<'a> {
     version: &'a KeyRegistryFormatVersionV1,
 }
 
-#[expect(
-    clippy::missing_fields_in_debug,
-    reason = "derived registration cache is not semantic registry state"
-)]
 impl fmt::Debug for KeyRegistryStateV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let semantic = self.semantic_view();
@@ -704,7 +700,7 @@ impl PartialEq for KeyRegistryStateV1 {
 impl Eq for KeyRegistryStateV1 {}
 
 impl KeyRegistryStateV1 {
-    fn semantic_view(&self) -> KeyRegistryStateSemanticView<'_> {
+    const fn semantic_view(&self) -> KeyRegistryStateSemanticView<'_> {
         KeyRegistryStateSemanticView {
             records: &self.records,
             active: &self.active,
