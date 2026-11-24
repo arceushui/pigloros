@@ -28,9 +28,14 @@
 //! id (4c, code 7), nor a replay of an id that already resolved: both rely
 //! on the planner's step 4a and 4c, which the pipeline runs first.
 //!
-//! A token is consumed by its apply, and every apply re-validates against
-//! the domain it is applied to, so a token staged twice, or staged before
-//! the entry or the state changed, is refused instead of applied twice.
+//! The pipeline is single-writer: it stages and then applies under one
+//! guard, so the stage re-checks still hold at the apply. An apply
+//! re-validates only what is cheap to check: the pass state and the entry
+//! (Reserve also refuses another pending reservation of the same T, code 7).
+//! It does not re-run the budget, caps, head or counters compares; a token
+//! staged before another operation changed them is for the pipeline to
+//! discard. A Reserve replayed after its resolution finds no entry to
+//! resolve and a Commit or Abort does the same, so they are refused too.
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
@@ -232,7 +237,8 @@ impl MemoryCommunityDomainV1 {
     ///
     /// # Errors
     /// Returns `Conflict` when the reservation identity is pending already,
-    /// and `EvidenceUnavailable` when the Timeline has no pass state; the
+    /// `PassUnresolved` (7) when another reservation of T is pending, and
+    /// `EvidenceUnavailable` when the Timeline has no pass state; the
     /// domain is unchanged.
     pub fn apply_reserve(
         &mut self,
@@ -242,6 +248,14 @@ impl MemoryCommunityDomainV1 {
         let (timeline, _) = staged.key;
         if self.pending_reservations.contains_key(&staged.key) {
             return Err(Error::Conflict);
+        }
+        if self
+            .pending_reservations
+            .range((timeline, [0; 16])..=(timeline, [u8::MAX; 16]))
+            .next()
+            .is_some()
+        {
+            return Err(Error::PassUnresolved);
         }
         if !self.pass_states.contains_key(&timeline) {
             return Err(Error::EvidenceUnavailable);
@@ -280,7 +294,8 @@ impl MemoryCommunityDomainV1 {
         .map(|()| CommunityStagedCommitV1(input))
     }
 
-    /// Apply a staged Commit: the entry is replaced by the rows it bound,
+    /// Apply a staged Commit: the entry is removed, the rows it bound are
+    /// the pipeline's own batch's,
     /// the counters, selected graph, head and closure advance, the
     /// materialization's records are in the closure and an Annotation CPN1
     /// is one more control operation each.
@@ -334,8 +349,8 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// Apply a staged Abort: the entry is replaced by the rows it
-    /// registered. The retained outcome, the materialization's counters,
+    /// Apply a staged Abort: the entry is removed, and the rows it
+    /// registered are bound by the pipeline's own batch. The retained outcome, the materialization's counters,
     /// control operation and closure terms stay, so the next pass reuses
     /// its records (R13.1(4)).
     ///
