@@ -113,6 +113,7 @@ impl<'r> Installed<'r> {
                 byte_length: 9,
                 digest: [7; 32],
             },
+            10,
         )?])
     }
 }
@@ -133,6 +134,7 @@ fn profile<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: HORIZON,
                 metadata_not_after_micros: HORIZON,
+                recording_not_after_micros: HORIZON,
             },
         },
     )?)
@@ -872,5 +874,60 @@ fn an_empty_fork_child_names_its_fork_chain_root_genesis() -> TestResult {
         prepare(&history, &installed, extra)?.err(),
         Some(Error::EvidenceUnavailable)
     );
+    Ok(())
+}
+
+#[test]
+fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> TestResult {
+    // Revision 10, R10.3(3) and (5): the Observation row's nodes, edges and
+    // bytes, derived from the decoded stage-2 records minted at the widest
+    // producer ordinal, not from the row formula.
+    let installed = Installed::new(vec![RULE])?;
+    for events in [0, 1, 300] {
+        let history = history(events, EVENT_TYPE, None)?;
+        let mut input = honest(&history, history.root);
+        input.consumers = vec![consumer(0x50, Duration::from_micros(1))];
+        let sources = prepare(&history, &installed, input)??;
+        let registrations = vec![hash(0xcc); events];
+        let authority = [(history.root, hash(0x90))];
+        let mut widest = bindings(&registrations, &authority);
+        widest.producer_ordinal = u64::MAX;
+        let records = sources.finish(widest)?;
+        let observation = CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?;
+        let mut nodes = 1;
+        let mut edges = 0;
+        match observation.as_input().input_index {
+            CommunityInputIndexV1::Direct(inputs) => edges += inputs.len(),
+            CommunityInputIndexV1::Grouped { groups, .. } => edges += groups.len(),
+            CommunityInputIndexV1::Empty => {}
+        }
+        for (_group, node) in &records.input_groups {
+            let node = CommunityNativeNodeV1::from_canonical_cbor(node)?;
+            nodes += 1;
+            if let CommunityInputIndexV1::Direct(inputs) = node.as_input().input_index {
+                edges += inputs.len();
+            }
+        }
+        let bytes = sources.event_sources().map(<[u8]>::len).sum::<usize>()
+            + sources.observation_value().len()
+            + records.source_proof.len()
+            + records
+                .input_groups
+                .iter()
+                .map(|(group, node)| group.len() + node.len())
+                .sum::<usize>()
+            + records.observation_node.len();
+        let terms = sources.quote_terms()?;
+        assert_eq!(terms.terms.nodes, nodes);
+        assert_eq!(terms.terms.edges, edges as u64);
+        assert_eq!(terms.terms.bytes, bytes as u64);
+        assert_eq!(terms.node_ordinal, observation.as_input().node_ordinal);
+        assert_eq!(
+            CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?
+                .as_input()
+                .producer_ordinal,
+            u64::MAX
+        );
+    }
     Ok(())
 }

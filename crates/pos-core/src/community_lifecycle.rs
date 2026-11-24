@@ -37,6 +37,7 @@ mod native_node;
 mod observation;
 mod original_provenance;
 mod owner_binding;
+mod pass_quote;
 mod prepared;
 mod profile;
 mod progress;
@@ -166,9 +167,9 @@ pub use materialization::{
 };
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use member_progress::{
-    CommunityCarriedEventV1, CommunityCarriedEventsIterV1, CommunityCarriedEventsV1,
-    CommunityFactualNodeReferenceV1, CommunityMemberProgressInputV1, CommunityMemberProgressV1,
-    CommunityProgressReferenceV1, MAX_COMMUNITY_CARRIED_EVENTS_V1,
+    community_member_due_v1, CommunityCarriedEventV1, CommunityCarriedEventsIterV1,
+    CommunityCarriedEventsV1, CommunityFactualNodeReferenceV1, CommunityMemberProgressInputV1,
+    CommunityMemberProgressV1, CommunityProgressReferenceV1, MAX_COMMUNITY_CARRIED_EVENTS_V1,
 };
 pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchemaV1};
 pub use metadata_scope::{
@@ -197,6 +198,10 @@ pub use owner_binding::{
     CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
     CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
 };
+pub use pass_quote::{
+    CommunityPassObservationV1, CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1,
+    CommunityPassQuoteV1, CommunityPassTermsV1,
+};
 pub use prepared::{
     CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
     TimelinePositionV1, MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
@@ -204,7 +209,9 @@ pub use prepared::{
 pub use profile::{
     community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
-    COMMUNITY_FOLD_BUDGET_MICROS_V1, COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+    COMMUNITY_CONTROL_OPERATIONS_V1, COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1,
+    COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_FOLD_BUDGET_MICROS_V1,
+    COMMUNITY_INITIALIZER_SET_SCHEMA_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
     COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 pub use progress::CommunityHostProgressV1;
@@ -355,6 +362,20 @@ fn validate_coordinates(timeline: TimelineId, generation: [u8; 16]) -> Result<()
         Err(CommunityLifecycleErrorV1::InvalidBinding)
     } else {
         Ok(())
+    }
+}
+
+/// The largest admissible horizon, `i64::MAX`: the widest encoding of an
+/// evidence horizon unknown at quote time (revision 10, R10.3(3)).
+const WIDEST_HORIZON_MICROS: u64 = u64::MAX / 2;
+
+/// A CPK1 whose unallocated ordinal is counted at its widest form, 9 bytes
+/// (revision 10, R10.3(3)). It is a quote placeholder, never a pass key.
+const fn widest_pass_key(timeline: TimelineId, generation: [u8; 16]) -> CommunityPassKeyV1 {
+    CommunityPassKeyV1 {
+        timeline,
+        generation,
+        ordinal: u64::MAX,
     }
 }
 

@@ -611,7 +611,7 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
         byte_length: 5,
         digest: [6; 32],
     };
-    let roster = [tuple.profile_member("entry", &key, schema, initializer)?];
+    let roster = [tuple.profile_member("entry", &key, schema, initializer, 10)?];
     assert_eq!(
         roster[0].digests(),
         [
@@ -622,6 +622,13 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
     );
     assert!(std::ptr::eq(roster[0].implementation(), &raw const key));
     assert_eq!(roster[0].initializer(), initializer);
+    assert_eq!(roster[0].cadence_interval_ns(), 10);
+    assert_eq!(
+        tuple
+            .profile_member("entry", &key, schema, initializer, 0)
+            .err(),
+        Some(Error::InvalidBinding)
+    );
     let input = CommunityDurableProfileInputV1 {
         backend: CommunityDurableBackendV1::RetainedMemory,
         execution_profile_digest: Hash::from_bytes(
@@ -635,6 +642,7 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
             recovery_window_micros: 10,
             quarantine_not_after_micros: 11,
             metadata_not_after_micros: 12,
+            recording_not_after_micros: 13,
         },
     };
     let durable = CommunityDurableProfileV1::new(input)?;
@@ -657,14 +665,14 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
     ] {
         assert_eq!(
             tuple
-                .profile_member("entry", &foreign, schema, initializer)
+                .profile_member("entry", &foreign, schema, initializer, 10)
                 .err(),
             Some(Error::InvalidBinding)
         );
     }
     assert_eq!(
         tuple
-            .profile_member("invalid/entry", &key, schema, initializer)
+            .profile_member("invalid/entry", &key, schema, initializer, 10)
             .err(),
         Some(Error::InvalidBinding)
     );
@@ -700,8 +708,8 @@ fn state_limits_are_each_named_cnt1_state_bytes_in_roster_order() -> TestResult 
         digest: [6; 32],
     };
     let roster = [
-        first.profile_member("entry-a", &key, schema, initializer)?,
-        second.profile_member("entry-b", &key, schema, initializer)?,
+        first.profile_member("entry-a", &key, schema, initializer, 10)?,
+        second.profile_member("entry-b", &key, schema, initializer, 10)?,
     ];
     let durable = CommunityDurableProfileV1::new(CommunityDurableProfileInputV1 {
         backend: CommunityDurableBackendV1::RetainedMemory,
@@ -714,6 +722,7 @@ fn state_limits_are_each_named_cnt1_state_bytes_in_roster_order() -> TestResult 
             recovery_window_micros: 10,
             quarantine_not_after_micros: 11,
             metadata_not_after_micros: 12,
+            recording_not_after_micros: 13,
         },
     })?;
     let tuples = [first, second];

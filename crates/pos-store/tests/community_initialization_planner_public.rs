@@ -199,6 +199,7 @@ impl Fixture {
                     SCHEMA,
                     TUPLES[slot],
                     self.initializer(slot),
+                    10,
                 )?)
             })
             .collect()
@@ -220,6 +221,7 @@ fn profile<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: HORIZON,
                 metadata_not_after_micros: HORIZON,
+                recording_not_after_micros: HORIZON,
             },
         },
     )?)
@@ -862,6 +864,7 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
                 SCHEMA,
                 TUPLES[0],
                 fixture.initializer(state),
+                10,
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
@@ -1005,6 +1008,7 @@ fn a_thirteen_member_quote_has_the_hand_computed_bytes() -> TestResult {
                 SCHEMA,
                 TUPLES[0],
                 fixture.initializer(0),
+                10,
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
