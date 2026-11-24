@@ -45,7 +45,7 @@ use pos_core::community_lifecycle::{
 };
 use pos_core::store::EventStore;
 use pos_core::{
-    ArtifactRegistrationPersistencePortV1, AuthorityGranteeV1, AuthorityTrustRootSealV1,
+    ArtifactRegistrationPersistencePortV1, AuthorityGranteeV1, AuthorityTrustRootSealV1, CoreError,
     FactualPrefixReadPortV1, Hash, TimelineId,
 };
 use zeroize::Zeroizing;
@@ -217,6 +217,8 @@ struct MintedV1 {
     /// The actual recorded-set counts of T's history, which seed the
     /// counters (R10.3(6)).
     history: CommunitySharedCountsV1,
+    /// The roster length.
+    members: u64,
 }
 
 /// The CAU1 of one initialization with its COA1s and CMI1s.
@@ -682,6 +684,7 @@ impl MemoryCommunityDomainV1 {
                                                     graph,
                                                     batch,
                                                     history,
+                                                    members: roster,
                                                 })
                                             },
                                         )
@@ -696,7 +699,9 @@ impl MemoryCommunityDomainV1 {
     /// The store counts a Timeline's own set only, not a Fork child's
     /// inherited prefix, which the seed of a Fork child must include. Until
     /// the Fork slice reads that prefix, a Fork child is refused rather than
-    /// undercounted.
+    /// undercounted. Like the graph's logical-head read, every store refusal
+    /// (an absent or erasure-fenced Timeline, a storage failure) is one
+    /// outcome: unavailable evidence.
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a Fork child, and `EvidenceUnavailable`
@@ -704,26 +709,24 @@ impl MemoryCommunityDomainV1 {
     fn history_counts(&self, timeline: TimelineId) -> Result<CommunitySharedCountsV1, Error> {
         self.store
             .get_timeline(timeline)
-            .ok()
-            .flatten()
-            .ok_or(Error::EvidenceUnavailable)
+            .and_then(|found| found.ok_or(CoreError::TimelineNotFound(timeline)))
             .and_then(|found| {
-                if found.meta.fork_point.is_some() {
-                    Err(Error::InvalidBinding)
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|()| {
                 self.store
                     .factual_set_counts(timeline)
-                    .or(Err(Error::EvidenceUnavailable))
+                    .map(|counts| (found.meta.fork_point.is_some(), counts))
             })
-            .map(|counts| CommunitySharedCountsV1 {
-                nodes: counts.nodes as u64,
-                edges: counts.edges as u64,
-                declared_inputs: counts.inputs as u64,
-                encoded_record_bytes: 0,
+            .or(Err(Error::EvidenceUnavailable))
+            .and_then(|(fork_child, counts)| {
+                if fork_child {
+                    Err(Error::InvalidBinding)
+                } else {
+                    Ok(CommunitySharedCountsV1 {
+                        nodes: counts.nodes as u64,
+                        edges: counts.edges as u64,
+                        declared_inputs: counts.inputs as u64,
+                        encoded_record_bytes: 0,
+                    })
+                }
             })
     }
 
@@ -791,6 +794,7 @@ impl MemoryCommunityDomainV1 {
             graph,
             batch,
             history,
+            members,
         } = minted;
         let (mut cohort_key, cohort_copy) = protector.into_parts();
         key_copy(operation, &key)
@@ -827,13 +831,6 @@ impl MemoryCommunityDomainV1 {
             .map(|(selection, receipt)| {
                 key.close();
                 cohort_key.close();
-                let members = operation
-                    .context
-                    .installation
-                    .profile
-                    .as_input()
-                    .roster
-                    .len() as u64;
                 StagedInitializationV1 {
                     pass_state: CommunityPassStateV1::initialized(history, &graph),
                     key: (operation.timeline(), operation.call.form.operation_id),

@@ -10,7 +10,8 @@ use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1, CommunitySelectionV1,
 };
 use pos_core::community_lifecycle::{
-    CommunityBudgetQuoteV1, CommunitySharedCountsV1, COMMUNITY_ERASURE_TARGET_LINE_V1,
+    CommunityBudgetQuoteV1, CommunityMaterializationV1, CommunitySharedCountsV1,
+    COMMUNITY_ERASURE_TARGET_LINE_V1,
 };
 use pos_core::store::EventStore;
 use pos_core::RecordedSetCountsV1;
@@ -343,7 +344,18 @@ fn the_history_seeds_the_quote_and_the_pass_state() -> TestResult {
     let maxima = quote.as_input();
     assert_eq!(counters.nodes - prior.nodes, maxima.maximum_required_nodes);
     assert_eq!(counters.edges - prior.edges, maxima.maximum_required_edges);
-    assert!(counters.encoded_record_bytes > 0);
+    // The history reports no bytes, so the counter is the initialization's
+    // own: the ten CMI1s (after the two CMB1s, COB1, CGI1, CSB1, CBQ1, CPV1
+    // and CAU1) name each record's plaintext length.
+    let mut total = 0;
+    for sealed in &committed.records[8..18] {
+        let plaintext = key.open(sealed)?;
+        total += CommunityMaterializationV1::from_canonical_cbor(&plaintext)?
+            .as_input()
+            .plaintext_length;
+    }
+    assert!(total > 0);
+    assert_eq!(counters.encoded_record_bytes, total);
     assert_eq!(state.graph.registrations, 10);
     assert_eq!(domain.live_keys(), 3);
     Ok(())
@@ -805,6 +817,13 @@ fn a_fork_child_has_no_history_seed_yet() -> TestResult {
         Some(Error::EvidenceUnavailable)
     );
     assert!(domain.history_counts(target()).is_ok());
+    // A store that refuses the read is unavailable evidence.
+    let store = std::mem::replace(&mut domain.store, MemoryStore::new());
+    domain.store = store.without_erasure_gate();
+    assert_eq!(
+        domain.history_counts(target()).err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }
 
