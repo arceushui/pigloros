@@ -22,7 +22,7 @@ use super::{
 };
 use crate::provider_runtime::tests::{
     bind_as_provider, cancellation_context, in_isolated_root, install_spi1, revocation_update,
-    spi1, test_lifecycle, TestResult, RUNTIME_SEED,
+    spi1, test_port, TestResult, RUNTIME_SEED,
 };
 use crate::provider_runtime::{AdmissionState, LiveAttempts};
 use crate::{AdmittedRuntimeKey, KeyFileRuntimeSigner};
@@ -380,8 +380,10 @@ fn the_live_view_is_the_fenced_lifecycle() -> TestResult {
         runtime.block_on(LiveAttempts(&starting).attempt_states()),
         Some(Vec::new())
     );
-    let (directory, lifecycle) = test_lifecycle()?;
-    let open = OnceLock::from(AdmissionState::Open { lifecycle });
+    let (directory, port) = test_port(crate::StagingLimits {
+        aggregate_bytes: 1 << 30,
+    })?;
+    let open = OnceLock::from(AdmissionState::Open(Box::new(port)));
     assert_eq!(
         runtime.block_on(LiveAttempts(&open).attempt_states()),
         Some(Vec::new())

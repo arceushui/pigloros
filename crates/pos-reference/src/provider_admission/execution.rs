@@ -30,7 +30,9 @@ use crate::{
 
 use super::{AdmittedAuthority, ProviderImageSnapshot};
 
-pub use source::{ExecutePeer, ExecuteSource, SourceFrames, SourceRefusal, UnchargedSource};
+pub use source::{
+    ExecutePeer, ExecuteSource, OtherRequest, SourceFrames, SourceRefusal, UnchargedSource,
+};
 pub use staging::{
     AdmittedEntry, GrantedInput, StagedInput, StagingDirectory, VerifiedStagedInput,
 };
