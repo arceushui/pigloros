@@ -96,9 +96,12 @@ pub use evidence::{
     AdmissionLedger, AttemptEvidence, AttemptEvidenceContext, AttemptResponse, BlockIdentity,
     CgroupEmptyBasis, CgroupSources, CleanupRecord, DbusProperty, DbusValue, DeviceNumber,
     EffectiveLimitRecord, KernelObservationEvidence, KernelObservationEvidenceFields,
-    KernelObservationStatus, LocalNetworkRecord, NamespaceIdentity, ObservedKernelState,
-    OutputCaptureRecord, RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields,
-    RootMount, TerminationEvidence, TerminationEvidenceFields, TransferRecord,
+    KernelObservationStatus, LocalNetworkReadback, LocalNetworkRecord, NamespaceIdentity,
+    ObservedKernelState, OutputCaptureRecord, ReadbackFirewallBase, ReadbackFirewallChain,
+    ReadbackFirewallHook, ReadbackFirewallPolicy, ReadbackFirewallRule, ReadbackPrefix,
+    ReadbackRoute, ReadbackVethEnd, RequestedConfigurationEvidence,
+    RequestedConfigurationEvidenceFields, RootMount, TerminationEvidence,
+    TerminationEvidenceFields, TransferRecord,
 };
 pub use execution::{
     AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, ExecuteAuthority,

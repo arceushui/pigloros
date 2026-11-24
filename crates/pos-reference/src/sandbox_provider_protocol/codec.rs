@@ -178,7 +178,10 @@ pub(super) fn preflight(bytes: &[u8]) -> Result<(), SandboxProviderProtocolError
         let additional = initial & 0x1f;
         let count = length(bytes, index, additional)?;
         match major {
-            0 => Ok(()),
+            // Negative integers are well-formed; a field that is unsigned
+            // refuses them when it is decoded (ADR-069 R14 §3.1 has a
+            // signed nftables priority).
+            0 | 1 => Ok(()),
             2 | 3 => {
                 let count = usize::try_from(count)
                     .map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)?;

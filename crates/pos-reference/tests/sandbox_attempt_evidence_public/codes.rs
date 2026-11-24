@@ -1,4 +1,5 @@
-//! Every closed R9 and R10 code converts to and from exactly its number.
+//! Every closed R9, R10 and R14 code converts to and from exactly its
+//! number.
 
 use std::fmt::Debug;
 use std::ops::RangeInclusive;
@@ -31,7 +32,7 @@ where
 #[test]
 fn every_closed_code_is_its_r9_number() {
     closed::<AttemptProgressCode>(0..=2);
-    closed::<LaunchFailure>(0..=5);
+    closed::<LaunchFailure>(0..=7);
     closed::<StartJobResult>(0..=5);
     closed::<Contradiction>(0..=2);
     closed::<ServiceResultCode>(0..=10);
