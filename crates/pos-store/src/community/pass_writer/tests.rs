@@ -696,6 +696,35 @@ fn every_actor_of_the_scope_must_fit() -> TestResult {
     Ok(())
 }
 
+type Snapshot = (
+    Vec<(TimelineId, [u8; 16], u64, u64)>,
+    u64,
+    u64,
+    u64,
+    usize,
+    usize,
+);
+
+/// Everything a refused apply must leave alone: the pending ledger, the
+/// retained counts, the counters and the observation and scope-row terms.
+fn snapshot(domain: &MemoryCommunityDomainV1) -> Result<Snapshot, Box<dyn std::error::Error>> {
+    let state = domain.pass_states.get(&id(1)).ok_or("state")?;
+    Ok((
+        domain
+            .pending_reservations
+            .iter()
+            .map(|((timeline, operation), entry)| {
+                (*timeline, *operation, entry.targets, entry.rows)
+            })
+            .collect(),
+        domain.retained_pass_outcomes(id(1), GENERATION),
+        domain.control_operations(id(1), GENERATION),
+        domain.recorded_set_counters(id(1)).nodes,
+        state.observations.len(),
+        state.scope_rows.len(),
+    ))
+}
+
 /// The composition preconditions are judged in a fixed order: a bad
 /// binding, then a pending identity, then a Timeline with no state.
 #[test]
@@ -759,10 +788,12 @@ fn a_token_staged_twice_applies_once() -> TestResult {
     let first = domain.stage_reserve(input())?;
     let second = domain.stage_reserve(input())?;
     domain.apply_reserve(&SEAL, first)?;
+    let before = snapshot(&domain)?;
     assert_eq!(
         domain.apply_reserve(&SEAL, second).err(),
         Some(Error::Conflict)
     );
+    assert_eq!(snapshot(&domain)?, before);
     assert_eq!(domain.retained_pass_outcomes(id(1), GENERATION), 1);
 
     let first = domain.stage_commit(commit_input())?;
@@ -875,10 +906,12 @@ fn a_second_pending_reservation_of_t_refuses_the_apply() -> TestResult {
     let first = domain.stage_reserve(other(0x40))?;
     let second = domain.stage_reserve(other(0x41))?;
     domain.apply_reserve(&SEAL, first)?;
+    let before = snapshot(&domain)?;
     assert_eq!(
         domain.apply_reserve(&SEAL, second).err(),
         Some(Error::PassUnresolved)
     );
+    assert_eq!(snapshot(&domain)?, before);
     // The bounds of the identity range hold: the lowest and highest
     // identities of T are T's too.
     for edge in [[0; 16], [u8::MAX; 16]] {
