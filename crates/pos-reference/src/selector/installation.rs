@@ -36,6 +36,11 @@ const SANDBOX_RECOVERY_SOCKET_ROOT: &str = "/run/pigloros/sandbox-selector-recov
 pub(crate) const MANIFEST_NAME: &str = "installation.cbor";
 pub(super) const RECOVERY_NAME: &str = "installation-update.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
+/// The provider's network capture store beneath the artifact root (ADR-069
+/// R11 Amendment 1 §5.4).
+const CAPTURE_STORE_NAME: &str = "captures";
+/// The capture store root's exact mode.
+const CAPTURE_STORE_MODE: u32 = 0o700;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
 
@@ -517,6 +522,36 @@ impl InstalledSelectorState {
         root.metadata()
             .map_err(io_failure)
             .and_then(|metadata| Self::open_fixed_at(root, metadata.uid()))
+    }
+
+    /// Opens, or creates, the provider's network capture store root
+    /// `captures/`, a fixed-name sibling of SIC1 beneath the held artifact
+    /// root (ADR-069 R11 Amendment 1 §5.4). Only this one directory is
+    /// reachable: the artifact root descriptor itself is never exposed.
+    ///
+    /// It is resolved beneath the root without crossing a symlink, a magic
+    /// link or a mount, and opened with `O_NOFOLLOW`. When absent it is
+    /// created with mode `0700`, then set to `0700` against the umask. It
+    /// must be a directory that `owner` owns (UID 0 for the provider
+    /// runtime), of mode exactly `0700`.
+    ///
+    /// # Errors
+    /// Returns [`InstallationError::Io`] when it cannot be opened or
+    /// created, including through a link, a mount or a non-directory, and
+    /// [`InstallationError::ArtifactInvalid`] for another owner or mode.
+    pub fn open_capture_store_root(&self, owner: u32) -> Result<File, InstallationError> {
+        crate::held_directory::open_or_create_beneath(&self.root, CAPTURE_STORE_NAME)
+            .map_err(io_failure)
+            .and_then(|directory| {
+                directory
+                    .metadata()
+                    // `O_DIRECTORY` already refused anything but a directory.
+                    .is_ok_and(|metadata| {
+                        metadata.uid() == owner && metadata.mode() & 0o7777 == CAPTURE_STORE_MODE
+                    })
+                    .then_some(directory)
+                    .ok_or(InstallationError::ArtifactInvalid)
+            })
     }
 
     /// This state as if its SIC1 `installation-digest` were `digest`, every
@@ -1861,6 +1896,54 @@ pub mod tests {
         let manifest_path = root.join(MANIFEST_NAME);
         fs::write(&manifest_path, encode_manifest(unsigned(objects))?)?;
         fs::set_permissions(manifest_path, fs::Permissions::from_mode(0o400))?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_capture_store_root_is_created_private_and_refused_when_unsafe() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        write_state(temporary.path())?;
+        let root = File::open(temporary.path())?;
+        let owner = root.metadata()?.uid();
+        let state = InstalledSelectorState::open_at_for_test(&root)?;
+        let captures = temporary.path().join("captures");
+        // Absent: created with mode 0700, then reopened as it is.
+        let created = state.open_capture_store_root(owner)?;
+        assert_eq!(created.metadata()?.mode() & 0o7777, 0o700);
+        assert_eq!(
+            state.open_capture_store_root(owner)?.metadata()?.ino(),
+            created.metadata()?.ino()
+        );
+        // Another owner or any other mode is refused.
+        assert_eq!(
+            state.open_capture_store_root(owner.wrapping_add(1)).err(),
+            Some(InstallationError::ArtifactInvalid)
+        );
+        for mode in [0o750, 0o500, 0o1700] {
+            fs::set_permissions(&captures, fs::Permissions::from_mode(mode))?;
+            assert_eq!(
+                state.open_capture_store_root(owner).err(),
+                Some(InstallationError::ArtifactInvalid)
+            );
+        }
+        fs::set_permissions(&captures, fs::Permissions::from_mode(0o700))?;
+        // A symlink, even to a private directory, and a regular file are
+        // refused, and nothing replaces them.
+        let target = temporary.path().join("target");
+        fs::rename(&captures, &target)?;
+        symlink(&target, &captures)?;
+        assert_eq!(
+            state.open_capture_store_root(owner).err(),
+            Some(InstallationError::Io)
+        );
+        assert!(captures.is_symlink());
+        fs::remove_file(&captures)?;
+        fs::write(&captures, b"")?;
+        assert_eq!(
+            state.open_capture_store_root(owner).err(),
+            Some(InstallationError::Io)
+        );
+        assert!(captures.is_file());
         Ok(())
     }
 
