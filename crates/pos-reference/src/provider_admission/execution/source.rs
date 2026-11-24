@@ -23,7 +23,7 @@ use crate::{
         installation::{
             authority::AdmittedSelectorProvider, InstalledSelectorState, PositionalReader,
         },
-        SelectorBoundaryError,
+        InstallationError,
     },
     selector_protocol::execute_request_for_case,
 };
@@ -32,10 +32,11 @@ use super::super::{
     AdmittedAuthority, HeldImageAdmission, JoinFault, ProviderImageSnapshot, SnapshotFault,
 };
 use super::{
-    budget::ControlSlot, AdmittedProviderExecution, Clock, ExecuteRefusal, Execution,
-    ExecutionSource, FailedInput, GrantFailure, GrantedExecution, GrantedFacts, IssuedGrant,
-    OutputReservationRefused, PreparedProviderExecution, ProviderExecutionPolicy, RefusalCause,
-    RetainedCase, StagingCharge, StagingError, StagingLedger, TransferWindow,
+    budget::ControlSlot, AdmittedProviderExecution, Clock, ConnectionIdentity, ExecuteRefusal,
+    Execution, ExecutionSource, FailedInput, GrantFailure, GrantedExecution, GrantedFacts,
+    IssuedGrant, OutputReservationRefused, PreparedProviderExecution, ProviderExecutionPolicy,
+    RecheckError, RefusalCause, RetainedCase, StagingCharge, StagingError, StagingLedger,
+    TransferWindow,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -289,12 +290,10 @@ impl ExecutePeer {
     }
 
     /// Accept `stream` only if its peer's UID is this process's effective
-    /// UID, for unprivileged tests of serving.
-    ///
-    /// # Errors
-    /// Returns the stream of any other or unreadable peer, unread.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn of_test_user(stream: UnixStream) -> Result<Self, UnixStream> {
+    /// UID. It bypasses the UID 0 check, so only this crate's own unit
+    /// tests have it.
+    #[cfg(test)]
+    fn of_test_user(stream: UnixStream) -> Result<Self, UnixStream> {
         Self::of_uid(stream, rustix::process::geteuid().as_raw())
     }
 
@@ -312,8 +311,9 @@ impl ExecutePeer {
 /// and charged before allocation (ADR-122 Amendment 1 change A).
 ///
 /// Only [`Self::read`] creates one. It owns the execute stream from then
-/// on, holds a pending-control slot, and carries the absolute initial
-/// control deadline the read started, the instant SPX1 completed and the
+/// on, holds a pending-control slot, and carries the connection identity
+/// recorded before the first source byte, the absolute initial control
+/// deadline the read started, the instant SPX1 completed and the
 /// `CLOCK_MONOTONIC` sample taken after it. It has no public constructor,
 /// no `Clone` and no serialization:
 ///
@@ -341,6 +341,7 @@ pub struct ExecuteSource {
     spx_completed: Instant,
     input_start: io::Result<u64>,
     clock: Clock,
+    connection: io::Result<ConnectionIdentity>,
 }
 
 /// Why the single read yielded no [`ExecuteSource`].
@@ -436,8 +437,9 @@ fn uncharged_frame(reader: &mut impl Read, pending: Option<usize>) -> Option<Vec
 }
 
 impl ExecuteSource {
-    /// Read EVR1 then SPX1 from `peer` under the initial control deadline
-    /// of the `admitted` startup BHC1 (ID 16), charging a pending-control
+    /// Record the connection's `fstat` identity, then read EVR1 then SPX1
+    /// from `peer` under the initial control deadline of the `admitted`
+    /// startup BHC1 (ID 16), charging a pending-control
     /// slot (ID 13) and each declared frame length to `ledger` before
     /// allocating it. Then sample the SPX1-completion instant and
     /// `CLOCK_MONOTONIC`, in that order, and check that nothing follows
@@ -470,6 +472,11 @@ impl ExecuteSource {
         clock: Clock,
     ) -> Result<Self, SourceRefusal> {
         let ExecutePeer { mut stream } = peer;
+        // Recorded before the first source byte; an unreadable identity is
+        // carried to admission, which refuses it with `Io`.
+        let connection = rustix::fs::fstat(&stream)
+            .map(|stat| (stat.st_dev, stat.st_ino))
+            .map_err(io::Error::from);
         let Some(deadlines) = TransferDeadlines::new(&stream, control_milliseconds) else {
             return Err(SourceRefusal::Malformed(stream));
         };
@@ -522,6 +529,7 @@ impl ExecuteSource {
             spx_completed,
             input_start,
             clock,
+            connection,
         })
     }
 
@@ -539,6 +547,11 @@ impl ExecuteSource {
 
     /// Give up the source: its slot and charges are released, and the
     /// stream is returned for a refusal.
+    ///
+    /// The stream may still carry the shortened read timeout of the single
+    /// read's initial deadline, possibly already expired. Serving must set
+    /// the SPE1 refusal's own write deadline on it explicitly before writing
+    /// (journal 22582).
     #[must_use]
     pub fn into_stream(self) -> UnixStream {
         self.stream
@@ -555,10 +568,10 @@ struct Reconstructed {
 
 /// An image-check refusal: a different image or binary is `ImageIdentity`
 /// (SPE1 `9`), an I/O failure stays an installation failure (`11`).
-const fn image_fault(error: SelectorBoundaryError) -> StagingError {
+const fn image_fault(error: InstallationError) -> StagingError {
     match error {
-        SelectorBoundaryError::ArtifactInvalid => StagingError::ImageIdentity,
-        error => StagingError::Source(error),
+        InstallationError::ArtifactInvalid => StagingError::ImageIdentity,
+        InstallationError::Io => StagingError::Source(InstallationError::Io),
     }
 }
 
@@ -591,7 +604,7 @@ fn joined(snapshot: &ProviderImageSnapshot) -> Result<HeldImageAdmission<'_>, St
 fn reconstruct(
     (evaluation, request): (&[u8], &[u8]),
     installation: &Arc<AdmittedSelectorProvider>,
-    open: impl FnOnce() -> Result<InstalledSelectorState, SelectorBoundaryError>,
+    open: impl FnOnce() -> Result<InstalledSelectorState, InstallationError>,
     supports: impl FnOnce(ExecutionMode) -> bool,
 ) -> Result<Reconstructed, StagingError> {
     let evaluation = EvaluationRequest::from_canonical_cbor(evaluation).map_err(invalid)?;
@@ -653,10 +666,12 @@ struct Received {
     spx_completed: Instant,
     input_start: io::Result<u64>,
     clock: Clock,
+    connection: io::Result<ConnectionIdentity>,
 }
 
-/// R11 Amendment 1 §7.5 row R: the deadlines, the clock and the premature
-/// bytes, then the case buffers and the policy-bound reservation.
+/// R11 Amendment 1 §7.5 row R: the deadlines, the clock, the connection
+/// identity and the premature bytes, then the policy-bound reservation and
+/// the case buffers.
 fn reserve(
     checked: Reconstructed,
     received: Received,
@@ -675,19 +690,23 @@ fn reserve(
         spx_completed,
         input_start,
         clock,
+        connection,
     } = received;
     control_left(deadlines.initial)?;
     let input_deadline = deadlines.input(spx_completed, policy.limit(16))?;
     window_left(input_deadline)?;
     let start = input_start?;
+    let connection = connection?;
     require_grant_turn(stream)?;
+    // The input ceiling and the floor before any reservation, then the
+    // closed and full ledger (rows 2, 6, 14, 12).
+    let (slot, input) = ledger.prepare(authority, &policy)?;
     let expected = ledger
         .reserve_storage(case_buffer_bytes(&attempt))
         .map(|charge| RetainedCase {
             attempt,
             _charge: charge,
         })?;
-    let (slot, input) = ledger.prepare(authority, &policy)?;
     Ok((
         Execution {
             source: Arc::new(ExecutionSource {
@@ -702,6 +721,7 @@ fn reserve(
             input_deadline,
             window: TransferWindow::new(spx_completed, start, input_deadline),
             clock,
+            connection,
         },
         deadlines.initial,
     ))
@@ -782,9 +802,9 @@ impl<C> PreparedProviderExecution<C> {
     /// digest, authority); checks the image and binary identity; admits the
     /// launch policy and derives the commitment. Then `claim` takes the
     /// caller's lifecycle claim (port step A), and the deadlines, the clock,
-    /// the premature bytes, the case buffers and the policy-bound
-    /// reservation follow (row R). The pending-control slot is released once
-    /// the reservation is published.
+    /// the connection identity, the premature bytes, the policy-bound
+    /// reservation and the case buffers follow (row R). The pending-control
+    /// slot is released once the reservation is published.
     ///
     /// # Errors
     /// An [`ExecuteRefusal`] that returns the stream with the first failure,
@@ -810,7 +830,7 @@ impl<C> PreparedProviderExecution<C> {
         source: ExecuteSource,
         ledger: &StagingLedger,
         installation: &Arc<AdmittedSelectorProvider>,
-        open: impl FnOnce() -> Result<InstalledSelectorState, SelectorBoundaryError>,
+        open: impl FnOnce() -> Result<InstalledSelectorState, InstallationError>,
         supports: impl FnOnce(ExecutionMode) -> bool,
         claim: impl FnOnce(&SandboxExecuteRequest) -> Result<C, E>,
     ) -> Result<Self, Box<ExecuteRefusal<E>>> {
@@ -823,6 +843,7 @@ impl<C> PreparedProviderExecution<C> {
             spx_completed,
             input_start,
             clock,
+            connection,
         } = source;
         let admitted = reconstruct(
             (&evaluation.bytes, &request.bytes),
@@ -843,6 +864,7 @@ impl<C> PreparedProviderExecution<C> {
                 spx_completed,
                 input_start,
                 clock,
+                connection,
             };
             reserve(checked, received, ledger, &stream)
                 .map(|reserved| (reserved, claimed))
@@ -886,9 +908,11 @@ impl<C> PreparedProviderExecution<C> {
         }
     }
 
-    /// The AGR1 signed by `sign` and its admitted facts, once the held-image
-    /// join and the floor passed before signing (ADR-122 Amendment 1
-    /// invariant 1b).
+    /// The AGR1 signed by `sign` and its admitted facts, once the initial
+    /// control deadline, the held-image join and the floor passed before
+    /// signing (ADR-122 Amendment 1 invariant 1b). The input window and the
+    /// premature bytes are checked only after signing, in
+    /// [`Self::before_write`].
     fn signed_grant<S>(
         &self,
         sign: impl FnOnce(SelfDigested<Agr1>) -> Result<Verified<Agr1>, S>,
@@ -968,7 +992,12 @@ impl<C> PreparedProviderExecution<C> {
     /// the premature bytes (R11 Amendment 1 §7.5 row W).
     fn before_write(&self) -> Result<(), StagingError> {
         joined(&self.execution.source.snapshot)
-            .and_then(|image| self.execution.slot.recheck(image.authority()))
+            .and_then(|image| {
+                self.execution
+                    .slot
+                    .recheck(image.authority())
+                    .map_err(StagingError::from)
+            })
             .and_then(|()| control_left(self.initial_deadline))
             .and_then(|()| window_left(self.execution.input_deadline))
             .and_then(|()| require_grant_turn(&self.stream))
@@ -1118,6 +1147,7 @@ impl GrantedExecution {
                     authority,
                     grant,
                     transfer,
+                    connection: execution.connection,
                     _input: execution.input,
                     slot: execution.slot,
                 })
@@ -1250,15 +1280,36 @@ impl AdmittedProviderExecution {
         self.transfer
     }
 
+    /// The execute connection's `fstat` `(st_dev, st_ino)`, recorded by the
+    /// source reader before its first source byte: the identity of the one
+    /// stream this exchange read, wrote AGR1 to and received input from
+    /// (ADR-122 Amendment 1 invariant 2, T7).
+    ///
+    /// A read-only view (change C allows those). No serving code reads it
+    /// yet, but it is public on purpose: as `pub(crate)` the identity would
+    /// be read only by tests, so the field would be dead code in the
+    /// library.
+    #[must_use]
+    pub const fn connection(&self) -> (u64, u64) {
+        self.connection
+    }
+
     /// Recheck current installation and the live provider control floor.
     ///
     /// # Errors
-    /// Refuses stale or substituted authority and raised control floors.
-    pub fn recheck(&self) -> Result<AdmittedAuthority, StagingError> {
+    /// [`RecheckError::AuthorityChanged`] for stale or substituted
+    /// authority; [`RecheckError::Ledger`] for a raised control floor or a
+    /// closed ledger.
+    pub fn recheck(&self) -> Result<AdmittedAuthority, RecheckError> {
         self.image_admission()
             .recheck_authority()
-            .map_err(|_| StagingError::AuthorityChanged)
-            .and_then(|authority| self.slot.recheck(authority).map(|()| authority))
+            .map_err(|_| RecheckError::AuthorityChanged)
+            .and_then(|authority| {
+                self.slot
+                    .recheck(authority)
+                    .map(|()| authority)
+                    .map_err(RecheckError::Ledger)
+            })
     }
 
     /// Read exactly from the descriptor whose complete case was verified.
@@ -1784,29 +1835,27 @@ mod tests {
     #[test]
     fn refusals_name_their_cause_and_the_image_code() {
         assert!(matches!(
-            image_fault(SelectorBoundaryError::ArtifactInvalid),
+            image_fault(InstallationError::ArtifactInvalid),
             StagingError::ImageIdentity
         ));
         assert!(matches!(
-            image_fault(SelectorBoundaryError::Io),
-            StagingError::Source(SelectorBoundaryError::Io)
+            image_fault(InstallationError::Io),
+            StagingError::Source(InstallationError::Io)
         ));
         assert!(matches!(
-            snapshot_fault(SnapshotFault::Image(SelectorBoundaryError::ArtifactInvalid)),
+            snapshot_fault(SnapshotFault::Image(InstallationError::ArtifactInvalid)),
             StagingError::ImageIdentity
         ));
         assert!(matches!(
-            snapshot_fault(SnapshotFault::Launch(
-                SelectorBoundaryError::ArtifactInvalid
-            )),
-            StagingError::Source(SelectorBoundaryError::ArtifactInvalid)
+            snapshot_fault(SnapshotFault::Launch(InstallationError::ArtifactInvalid)),
+            StagingError::Source(InstallationError::ArtifactInvalid)
         ));
         assert!(matches!(
-            join_fault(JoinFault::Authority(SelectorBoundaryError::ArtifactInvalid)),
-            StagingError::Source(SelectorBoundaryError::ArtifactInvalid)
+            join_fault(JoinFault::Authority(InstallationError::ArtifactInvalid)),
+            StagingError::Source(InstallationError::ArtifactInvalid)
         ));
         assert!(matches!(
-            join_fault(JoinFault::Image(SelectorBoundaryError::ArtifactInvalid)),
+            join_fault(JoinFault::Image(InstallationError::ArtifactInvalid)),
             StagingError::ImageIdentity
         ));
         assert!(closed(&StagingError::CleanupFailed));
@@ -2080,6 +2129,46 @@ mod tests {
             .ok_or("clock range")?;
         let (_, error) = refused(admit(source, &ledger, &installation))?;
         assert!(matches!(error, StagingError::ControlExpired), "{error:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn installation_digest_identity_and_clock_refusals_release_everything() -> TestResult {
+        if !isolated("installation_digest_identity_and_clock_refusals_release_everything")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let installation = startup()?;
+        let ledger = StagingLedger::new(LARGE);
+        // T3: a current SIC1 whose installation digest alone differs from the
+        // retained one is refused at the factory's join, before any
+        // reservation.
+        let (source, _selector) = source_pair(&staged, &ledger, &installation)?;
+        let (_, error) = refused(PreparedProviderExecution::admit_with(
+            source,
+            &ledger,
+            &installation,
+            || InstalledSelectorState::open().map(|state| state.with_installation_digest([2; 32])),
+            |_| true,
+            |_| Ok::<(), Infallible>(()),
+        ))?;
+        assert!(
+            matches!(
+                error,
+                StagingError::Source(crate::selector::InstallationError::ArtifactInvalid)
+            ),
+            "{error:?}"
+        );
+        assert_eq!(ledger.usage(), StagingUsage::default());
+        // An unreadable connection identity refuses with `Io`.
+        let (mut source, _selector) = source_pair(&staged, &ledger, &installation)?;
+        source.connection = Err(io::Error::other("fstat"));
+        let (_, error) = refused(admit(source, &ledger, &installation))?;
+        assert!(
+            matches!(&error, StagingError::Io(error) if error.to_string() == "fstat"),
+            "{error:?}"
+        );
+        assert_eq!(ledger.usage(), StagingUsage::default());
         // The unreadable SPX1-completion clock refuses before AGR1.
         let (provider, mut selector) = UnixStream::pair()?;
         staged.write_source(&mut selector)?;
@@ -2104,8 +2193,56 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_image_is_refused_with_its_own_code() -> TestResult {
-        if !isolated("a_changed_image_is_refused_with_its_own_code")? {
+    fn the_floor_and_a_closed_ledger_precede_a_full_aggregate() -> TestResult {
+        if !isolated("the_floor_and_a_closed_ledger_precede_a_full_aggregate")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let installation = startup()?;
+        let ledger = StagingLedger::new(LARGE);
+        // A source read while there was room, then an aggregate filled to
+        // its cap.
+        let full =
+            |ledger: &StagingLedger| -> TestResult<(ExecuteSource, UnixStream, StagingCharge)> {
+                let (source, selector) = source_pair(&staged, ledger, &installation)?;
+                let rest = LARGE.aggregate_bytes - ledger.usage().reserved_bytes;
+                Ok((source, selector, ledger.reserve_storage(rest)?))
+            };
+        let (source, _selector, filler) = full(&ledger)?;
+        let (_, error) = refused(admit(source, &ledger, &installation))?;
+        assert!(
+            matches!(error, StagingError::AggregateExceeded),
+            "{error:?}"
+        );
+        drop(filler);
+        // Row R: the floor (6) before any reservation (12).
+        let (source, _selector, filler) = full(&ledger)?;
+        ledger.raise_floor(super::super::ControlFloor {
+            revocation_epoch: u64::MAX,
+            policy_epoch: u64::MAX,
+        });
+        let (_, error) = refused(admit(source, &ledger, &installation))?;
+        assert!(
+            matches!(error, StagingError::BelowControlFloor),
+            "{error:?}"
+        );
+        // And before the closed ledger (14).
+        drop(filler);
+        let (source, _selector, filler) = full(&ledger)?;
+        ledger.close_for_reconciliation();
+        let (_, error) = refused(admit(source, &ledger, &installation))?;
+        assert!(
+            matches!(error, StagingError::BelowControlFloor),
+            "{error:?}"
+        );
+        drop(filler);
+        assert_eq!(ledger.usage().reserved_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_changed_image_fails_the_installation_join_first() -> TestResult {
+        if !isolated("a_changed_image_fails_the_installation_join_first")? {
             return Ok(());
         }
         let staged = StagedInstallation::stage_execution()?;
@@ -2129,18 +2266,63 @@ mod tests {
         let mut byte = [0];
         root.file().read_exact_at(&mut byte, 0)?;
         byte[0] ^= 1;
-        // The held descriptor is read-only; root writes the same inode.
+        // The held descriptor is read-only and the container drops every
+        // capability: its owner makes the same inode writable, writes it,
+        // and restores the mode.
         {
-            use std::os::fd::AsRawFd as _;
+            use std::os::{fd::AsRawFd as _, unix::fs::PermissionsExt as _};
+            let path = format!("/proc/self/fd/{}", root.file().as_raw_fd());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
             std::fs::OpenOptions::new()
                 .write(true)
-                .open(format!("/proc/self/fd/{}", root.file().as_raw_fd()))?
+                .open(&path)?
                 .write_all_at(&byte, 0)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
         }
+        // SIC1 verifies every indexed object's bytes when the join opens it,
+        // so the change is refused at row 10, before the image check of row
+        // 11: the precedence base §4 orders. ImageIdentity itself is the
+        // image check's own refusal (see
+        // `an_image_check_failure_is_image_identity`).
         let (source, _selector) = source_pair(&staged, &ledger, &installation)?;
         let (_, error) = refused(admit(source, &ledger, &installation))?;
-        assert!(matches!(error, StagingError::ImageIdentity), "{error:?}");
+        assert!(
+            matches!(
+                error,
+                StagingError::Source(InstallationError::ArtifactInvalid)
+            ),
+            "{error:?}"
+        );
         assert_eq!(ledger.usage(), StagingUsage::default());
+        Ok(())
+    }
+
+    // Row 11: a proof no longer valid at host time fails the image check
+    // itself, in the retained snapshot and in the join, and both give
+    // ImageIdentity (SPE1 `9`).
+    #[test]
+    fn an_image_check_failure_is_image_identity() -> TestResult {
+        use std::time::UNIX_EPOCH;
+        let admitted = Arc::new(
+            crate::selector::installation::tests::admitted_state()?
+                .authenticate_bootstrap()?
+                .admit_provider()?,
+        );
+        let request = crate::provider_admission::tests::request_for(&admitted)?;
+        let expired = || UNIX_EPOCH + Duration::from_secs(2_200_000_000);
+        let valid = || UNIX_EPOCH + Duration::from_hours(500_000);
+        let fault = ProviderImageSnapshot::checked(Arc::clone(&admitted), request.clone(), expired)
+            .err()
+            .ok_or("an expired proof was admitted")?;
+        assert!(matches!(snapshot_fault(fault), StagingError::ImageIdentity));
+        let snapshot = ok(ProviderImageSnapshot::checked(admitted, request, valid))?;
+        let current = crate::selector::installation::tests::admitted_state()
+            .map_err(|_| InstallationError::Io);
+        let fault = snapshot
+            .join_current(current, expired)
+            .err()
+            .ok_or("an expired proof was joined")?;
+        assert!(matches!(join_fault(fault), StagingError::ImageIdentity));
         Ok(())
     }
 
@@ -2240,6 +2422,31 @@ mod tests {
         );
         assert!(converted);
         drop(selector);
+        assert_eq!(ledger.usage(), StagingUsage::default());
+
+        // L7: an interrupted write drops the stream, and no clone of it
+        // survives, so the selector reads EOF after the bytes it was sent.
+        // A full, nonblocking send buffer makes the AGR1 write fail.
+        let (prepared, mut selector) = prepared_pair(&staged, &ledger)?;
+        let filler = prepared.stream.try_clone()?;
+        filler.set_nonblocking(true)?;
+        let mut sent = 0;
+        while let Ok(written) = (&filler).write(&[0; 4096]) {
+            sent += written;
+        }
+        drop(filler);
+        let result = prepared.grant(StagedInstallation::sign_grant, |(), _| {
+            Ok::<(), Infallible>(())
+        });
+        assert!(
+            matches!(result, Err(GrantFailure::Interrupted(StagingError::Io(_)))),
+            "{result:?}"
+        );
+        selector.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let mut received = Vec::new();
+        selector.read_to_end(&mut received)?;
+        assert!(received.len() >= sent && sent > 0);
+        assert!(received[..sent].iter().all(|byte| *byte == 0));
         assert_eq!(ledger.usage(), StagingUsage::default());
         Ok(())
     }
@@ -2749,18 +2956,12 @@ mod tests {
     }
 
     /// The staged exchange read once, admitted, staged and granted, with
-    /// the selector end and the provider end's identity before the read.
+    /// the selector end.
     fn granted_input(
         staged: &StagedInstallation,
         ledger: &StagingLedger,
-    ) -> TestResult<(
-        tempfile::TempDir,
-        super::super::GrantedInput,
-        UnixStream,
-        rustix::fs::Stat,
-    )> {
+    ) -> TestResult<(tempfile::TempDir, super::super::GrantedInput, UnixStream)> {
         let (provider, mut selector) = UnixStream::pair()?;
-        let identity = rustix::fs::fstat(&provider)?;
         staged.write_source(&mut selector)?;
         let installation = startup()?;
         let source = ok(ExecuteSource::read(
@@ -2774,7 +2975,7 @@ mod tests {
         let ((), granted) = ok(input.send_grant(StagedInstallation::sign_grant, |(), _| {
             Ok::<(), Infallible>(())
         }))?;
-        Ok((temporary, granted, selector, identity))
+        Ok((temporary, granted, selector))
     }
 
     #[test]
@@ -2784,7 +2985,7 @@ mod tests {
         }
         let staged = StagedInstallation::stage_execution()?;
         let ledger = StagingLedger::new(LARGE);
-        let (_temporary, granted, mut selector, identity) = granted_input(&staged, &ledger)?;
+        let (_temporary, granted, mut selector) = granted_input(&staged, &ledger)?;
         let grant = frame(&mut selector, &ledger)?;
         let sent_grant =
             crate::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(&grant.bytes)?;
@@ -2795,11 +2996,12 @@ mod tests {
         selector.shutdown(std::net::Shutdown::Write)?;
         let (verified, stream) = granted.receive();
         let verified = ok(verified)?;
-        // T7: the stream AGR1 was written to is the connection the reader read.
+        // T7: the stream AGR1 was written to and input received from has the
+        // identity the reader recorded before its first source byte.
         let returned = rustix::fs::fstat(&stream)?;
         assert_eq!(
-            (returned.st_dev, returned.st_ino),
-            (identity.st_dev, identity.st_ino)
+            verified.entry().retain().connection(),
+            (returned.st_dev, returned.st_ino)
         );
         let expected_request = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
         assert_eq!(verified.len(), staged.input().len() as u64);
@@ -2875,7 +3077,9 @@ mod tests {
         });
         assert!(matches!(
             verified.entry().recheck(),
-            Err(StagingError::BelowControlFloor)
+            Err(RecheckError::Ledger(
+                super::super::RecheckLedgerError::BelowControlFloor
+            ))
         ));
         drop((verified, execution, stream));
         assert_eq!(ledger.usage().reserved_bytes, 0);
