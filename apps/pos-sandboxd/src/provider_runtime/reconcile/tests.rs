@@ -364,37 +364,119 @@ fn creates_a_private_store_under_a_strict_umask(
     Ok(())
 }
 
-/// Invariant 38: an unsafe capture store fails step 7 closed, as a root or
-/// a retention directory of another mode, a symlinked root (through the
-/// whole startup: no socket, no READY=1) and a non-directory root. The
-/// store is left as it was.
+/// One unsafe capture store: `break_store` makes it from a sound store,
+/// `repair` restores the sound store, and `through_startup` runs the whole
+/// `provider-runtime` startup over it instead of step 7 alone.
+struct UnsafeStore {
+    break_store: fn(&Path) -> std::io::Result<()>,
+    repair: fn(&Path) -> std::io::Result<()>,
+    through_startup: bool,
+}
+
+/// Invariant 38's unsafe stores: a root or a retention directory of another
+/// mode, a symlinked root and a non-directory root.
+const UNSAFE_STORES: [UnsafeStore; 4] = [
+    UnsafeStore {
+        break_store: |captures| fs::set_permissions(captures, fs::Permissions::from_mode(0o755)),
+        repair: |captures| fs::set_permissions(captures, fs::Permissions::from_mode(0o700)),
+        through_startup: false,
+    },
+    UnsafeStore {
+        break_store: |captures| {
+            fs::set_permissions(
+                captures.join("responses"),
+                fs::Permissions::from_mode(0o755),
+            )
+        },
+        repair: |captures| {
+            fs::set_permissions(
+                captures.join("responses"),
+                fs::Permissions::from_mode(0o700),
+            )
+        },
+        through_startup: false,
+    },
+    UnsafeStore {
+        break_store: |captures| {
+            fs::rename(captures, moved(captures)).and_then(|()| symlink(moved(captures), captures))
+        },
+        repair: restore_root,
+        through_startup: true,
+    },
+    UnsafeStore {
+        break_store: |captures| {
+            fs::rename(captures, moved(captures)).and_then(|()| fs::write(captures, b""))
+        },
+        repair: restore_root,
+        through_startup: false,
+    },
+];
+
+/// Where a test moves the sound store root aside.
+fn moved(captures: &Path) -> std::path::PathBuf {
+    captures.with_file_name("moved")
+}
+
+/// Replace whatever is at `captures` by the root moved aside.
+fn restore_root(captures: &Path) -> std::io::Result<()> {
+    fs::remove_file(captures).and_then(|()| fs::rename(moved(captures), captures))
+}
+
+/// Invariant 38: every unsafe store fails step 7 closed, and is left sound.
 fn refuses_an_unsafe_store(
     authority: &RuntimeAuthority,
     captures: &Path,
     servers: &Mutex<Vec<zbus::Connection>>,
     calls: &Arc<[AtomicUsize; 2]>,
 ) -> TestResult {
-    let refused = || {
-        matches!(
-            prepare_with(authority, fake_bus(servers, calls), clean_network),
-            Err(ProviderRuntimeError::HostUnavailable)
-        )
+    UNSAFE_STORES
+        .iter()
+        .try_for_each(|store| refuses_one(store, authority, captures, (servers, calls)))
+}
+
+/// Break the store as `store` says, check step 7 refuses it, then repair it.
+fn refuses_one(
+    store: &UnsafeStore,
+    authority: &RuntimeAuthority,
+    captures: &Path,
+    (servers, calls): (&Mutex<Vec<zbus::Connection>>, &Arc<[AtomicUsize; 2]>),
+) -> TestResult {
+    (store.break_store)(captures)?;
+    let refused = if store.through_startup {
+        serves_nothing_over_an_unsafe_store(servers, calls)
+    } else {
+        step_7_refuses(authority, servers, calls)
     };
-    for path in [captures.to_owned(), captures.join("responses")] {
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-        assert!(refused());
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-    }
-    let moved = Path::new(SANDBOX_ARTIFACT_ROOT).join("moved");
-    fs::rename(captures, &moved)?;
-    symlink(&moved, captures)?;
-    serves_nothing_over_an_unsafe_store(servers, calls)?;
-    fs::remove_file(captures)?;
-    fs::write(captures, b"")?;
-    assert!(refused());
-    fs::remove_file(captures)?;
-    fs::rename(&moved, captures)?;
-    Ok(())
+    (store.repair)(captures)?;
+    refused
+}
+
+/// Step 7 alone refuses with `HostUnavailable`.
+fn step_7_refuses(
+    authority: &RuntimeAuthority,
+    servers: &Mutex<Vec<zbus::Connection>>,
+    calls: &Arc<[AtomicUsize; 2]>,
+) -> TestResult {
+    matches!(
+        prepare_with(authority, fake_bus(servers, calls), clean_network),
+        Err(ProviderRuntimeError::HostUnavailable)
+    )
+    .then_some(())
+    .ok_or_else(|| "step 7 accepted an unsafe capture store".into())
+}
+
+/// The abstract notification socket a refused startup must never notify.
+const NOTIFY: &str = "@pigloros-capture-store-notify";
+
+/// A service manager listening on [`NOTIFY`], waiting 200 ms for a datagram.
+fn notify_manager() -> std::io::Result<UnixDatagram> {
+    SocketAddr::from_abstract_name(&NOTIFY[1..])
+        .and_then(|address| UnixDatagram::bind_addr(&address))
+        .and_then(|manager| {
+            manager
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .map(|()| manager)
+        })
 }
 
 /// Run the whole `provider-runtime` startup over a capture store step 7
@@ -404,8 +486,7 @@ fn serves_nothing_over_an_unsafe_store(
     servers: &Mutex<Vec<zbus::Connection>>,
     calls: &Arc<[AtomicUsize; 2]>,
 ) -> TestResult {
-    const NOTIFY: &str = "@pigloros-capture-store-notify";
-    let manager = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(&NOTIFY[1..])?)?;
+    let manager = notify_manager()?;
     let authority = bind_as_provider()??;
     let (execute, control) = authority
         .0
@@ -423,7 +504,6 @@ fn serves_nothing_over_an_unsafe_store(
         ProviderRuntimeError::HostUnavailable
     );
     assert!(endpoints.iter().all(|endpoint| !endpoint.exists()));
-    manager.set_read_timeout(Some(Duration::from_millis(200)))?;
     assert!(manager.recv(&mut [0; 16]).is_err(), "READY=1 was sent");
     Ok(())
 }
