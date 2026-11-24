@@ -77,6 +77,8 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
 
 fn state() -> CommunityPassStateV1 {
     CommunityPassStateV1 {
+        generation: GENERATION,
+        head: hash(30),
         counters: CommunitySharedCountsV1 {
             nodes: 1,
             edges: 2,

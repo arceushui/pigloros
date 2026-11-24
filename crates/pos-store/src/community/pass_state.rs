@@ -4,10 +4,10 @@
 //! Everything here is domain-private and has no wire form. Initialization
 //! creates T's state: the cumulative recorded-set counters (R10.3(6)) and
 //! the selected CGR1 counts of the Initial frontier (R11.3(1)). The pass
-//! writers (A4c-2 Reserve, A5 Commit, A4e-2 Abort) add the rest, and until
-//! they exist the retained-outcome, control-operation, closure, observation,
-//! scope-row and pending-reservation reads serve what the state holds,
-//! which is nothing. [`CommunityPassReadPortV1`] reads them all under the
+//! writers ([`super::pass_writer`]: Reserve, and the Commit and Abort
+//! transitions that A5 and A4e-2 call) add the rest; the retained-outcome,
+//! control-operation, closure, observation, scope-row and
+//! pending-reservation reads serve what the state holds. [`CommunityPassReadPortV1`] reads them all under the
 //! caller's guard.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,6 +52,11 @@ impl CommunityGenerationCountsV1 {
 
 /// One Timeline's pass state.
 pub(super) struct CommunityPassStateV1 {
+    /// T's active generation G (R10.5).
+    pub(super) generation: [u8; 16],
+    /// `H(CSH1)`, T's selected head: the head and frontier a Reserve must
+    /// still find (R10.7 step 5j).
+    pub(super) head: Hash,
     /// The cumulative recorded-set counters (R10.3(6)).
     pub(super) counters: CommunitySharedCountsV1,
     /// The selected CGR1 `graph_counts` (R11.3(1)).
@@ -79,6 +84,7 @@ impl CommunityPassStateV1 {
     /// The store reports no byte count for the history, so the byte
     /// counter starts at the initialization's own bytes.
     pub(super) fn initialized(
+        generation: [u8; 16],
         history: CommunitySharedCountsV1,
         graph: &CommunityInitializationGraphV1,
     ) -> Self {
@@ -92,6 +98,8 @@ impl CommunityPassStateV1 {
             .map(CommunityAssembledRecordV1::plaintext_length)
             .fold(0_u64, u64::saturating_add);
         Self {
+            generation,
+            head: graph.selected_head_digest(),
             counters: CommunitySharedCountsV1 {
                 nodes: history.nodes.saturating_add(nodes),
                 edges: history.edges.saturating_add(nodes),
