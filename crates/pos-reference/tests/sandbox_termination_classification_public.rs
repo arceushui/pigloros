@@ -1,6 +1,6 @@
 //! The ADR-069 R9 §4.6.5 totality obligation for the public terminal
 //! classifier, with the R10 §4.8 rows for the stdin feed and launch failures
-//! 3 to 5.
+//! 3 to 5, and the R14 §3.4 rows for launch failures 6 and 7.
 //!
 //! An independent oracle restates R9's candidate table and R10's added rows, the D5 contradiction
 //! order and the literal `Completed` conditions with the closed numeric codes,
@@ -83,7 +83,7 @@ const PROGRESS: [AttemptProgressCode; 3] = [
     AttemptProgressCode::StartedNotReleased,
     AttemptProgressCode::Released,
 ];
-const LAUNCH: [Option<LaunchFailure>; 7] = [
+const LAUNCH: [Option<LaunchFailure>; 9] = [
     None,
     Some(LaunchFailure::RootNotActivated),
     Some(LaunchFailure::PreStartRecheckFailed),
@@ -91,6 +91,8 @@ const LAUNCH: [Option<LaunchFailure>; 7] = [
     Some(LaunchFailure::OutputReservationRefused),
     Some(LaunchFailure::StdioChannelFailed),
     Some(LaunchFailure::AdmissionClosed),
+    Some(LaunchFailure::NetworkSetupFailed),
+    Some(LaunchFailure::ReplayUnavailable),
 ];
 const START: [Option<StartJobResult>; 7] = [
     None,
@@ -400,8 +402,13 @@ fn oracle_watchdog_reached(facts: &TerminationFacts) -> bool {
 fn oracle_code_two(facts: &TerminationFacts, contradiction: Option<u8>) -> bool {
     let result = code_of(facts.service, |service| service.result as u8);
     let ending = code_of(facts.ending, |ending| ending as u8);
+    // A zero (absent) `D` is no deadline to time out before (R9 Amendment 1
+    // change G).
     let enforcement = (in_set(ending, &[1, 2, 6, 7]) && result != Some(3))
-        || (result == Some(3) && facts.terminal.is_some() && !oracle_watchdog_reached(facts));
+        || (result == Some(3)
+            && facts.terminal.is_some()
+            && facts.watchdog_deadline.is_some()
+            && !oracle_watchdog_reached(facts));
     contradiction.is_some()
         || facts.cleanup as u8 == 1
         || in_set(
@@ -444,7 +451,7 @@ fn oracle_code_ten(facts: &TerminationFacts) -> bool {
         &[1, 2, 3, 4, 5, 10],
     ) || in_set(
         code_of(facts.launch_failure, |failure| failure as u8),
-        &[0, 1, 3],
+        &[0, 1, 3, 7],
     ) || in_set(code_of(facts.start_job, |job| job as u8), &[1, 2, 3, 4, 5])
         || [2, 3].contains(&(facts.requested as u8))
         || (result.is_some_and(|result| ![0, 3, 7, 9].contains(&result)) && exec == Some(0))
@@ -480,7 +487,10 @@ fn oracle_candidates(facts: &TerminationFacts, contradiction: Option<u8>) -> [bo
             code_of(facts.barrier_failure, |failure| failure as u8),
             &[0, 6, 8, 9, 12],
         ) || in_set(network, &[0, 3, 4])
-            || code_of(facts.launch_failure, |failure| failure as u8) == Some(4),
+            || in_set(
+                code_of(facts.launch_failure, |failure| failure as u8),
+                &[4, 6],
+            ),
         oracle_code_ten(facts),
     ]
 }
@@ -679,13 +689,13 @@ fn with_observation(
 // ---------------------------------------------------------------------------
 // Exhaustive tests.
 
-#[test]
-fn every_lifecycle_code_and_status_is_placed_exactly_once() {
-    let (points, fallbacks) = exhaust(
+/// The lifecycle dimensions with `launch` as the launch failures.
+fn lifecycle(launch: &[Option<LaunchFailure>]) -> (usize, usize) {
+    exhaust(
         &completed(),
         &[
             dimension(&PROGRESS, |facts, value| facts.progress = value),
-            dimension(&LAUNCH, |facts, value| facts.launch_failure = value),
+            dimension(launch, |facts, value| facts.launch_failure = value),
             dimension(&START, |facts, value| facts.start_job = value),
             dimension(&BARRIERS, |facts, value| facts.barrier_failure = value),
             dimension(&CANCEL, |facts, value| facts.cancel_source = value),
@@ -693,9 +703,19 @@ fn every_lifecycle_code_and_status_is_placed_exactly_once() {
             dimension(&REQUESTED, |facts, value| facts.requested = value),
             dimension(&OBSERVATIONS, |facts, value| facts.observed = value),
         ],
-    );
-    assert_eq!(points, 3 * 7 * 7 * 14 * 3 * 3 * 4 * 3);
+    )
+}
+
+#[test]
+fn every_lifecycle_code_and_status_is_placed_exactly_once() {
+    let (points, fallbacks) = lifecycle(&LAUNCH);
+    assert_eq!(points, 3 * 9 * 7 * 14 * 3 * 3 * 4 * 3);
     assert!(fallbacks > 0);
+    // R14 §5 invariant 8: launch failures 6 and 7 are candidates at every
+    // point, so they add no fallback point.
+    let (r10_points, r10_fallbacks) = lifecycle(&LAUNCH[..7]);
+    assert_eq!(r10_points, 3 * 7 * 7 * 14 * 3 * 3 * 4 * 3);
+    assert_eq!(fallbacks, r10_fallbacks);
 }
 
 #[test]
@@ -720,7 +740,7 @@ fn every_unit_phase_value_and_watchdog_class_is_placed_exactly_once() {
             dimension(&services, |facts, value| facts.service = value),
             dimension(&ENDINGS, |facts, value| facts.ending = value),
             // The watchdog agreement: at `D - G` exactly, one below it, or
-            // `D` unreadable.
+            // `D` zero (unreadable or not read).
             dimension(&[Some(true), Some(false), None], |facts, reached| {
                 facts.watchdog_deadline = reached
                     .and_then(|reached| NonZeroU64::new(TERMINAL_AT + GRACE + u64::from(!reached)));
@@ -1599,6 +1619,87 @@ fn an_unreadable_activation_is_missing_evidence_once_a_unit_exists() {
     assert_eq!(revoked.classify().code(), Some(TerminalCode::Cancelled));
 }
 
+// R9 Amendment 1 change G: a zero `watchdog-deadline` is missing evidence
+// only after a done start job with `unit` present; otherwise it selects no
+// code of its own, and it is never an enforcement disagreement.
+#[test]
+fn a_zero_watchdog_deadline_is_missing_evidence_only_after_a_done_start_with_a_unit() {
+    let started = |start_job| TerminationFacts {
+        progress: AttemptProgressCode::StartedNotReleased,
+        start_job: Some(start_job),
+        watchdog_deadline: None,
+        service: None,
+        ending: None,
+        output_capture: None,
+        adapter_input_complete: None,
+        ..completed()
+    };
+    // A failed start job: `D` was not read, and the zero keeps code 10.
+    let failed = started(StartJobResult::Failed);
+    check(&failed);
+    let classification = failed.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::ProtocolFailure));
+    assert!(!classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+    assert!(!classification.quarantined());
+    // A done start job with `unit` present: an unreadable `D` is code 2.
+    let done = started(StartJobResult::Done);
+    check(&done);
+    let classification = done.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::CleanupFailed));
+    assert!(classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+    assert!(classification.quarantined());
+    // A done start job whose readback failed before any cgroup was bound:
+    // `unit` is null, `D` was not read, and the RQE1 status keeps code 10.
+    for requested in [
+        RequestedConfigurationStatus::Mismatch,
+        RequestedConfigurationStatus::ReadbackUnavailable,
+    ] {
+        let unbound = TerminationFacts {
+            unit: None,
+            baseline: None,
+            terminal: None,
+            work_after: None,
+            requested,
+            observed: KernelObservationFacts::NotReached,
+            ..started(StartJobResult::Done)
+        };
+        check(&unbound);
+        let classification = unbound.classify();
+        assert_eq!(classification.code(), Some(TerminalCode::ProtocolFailure));
+        assert!(!classification
+            .candidates()
+            .contains(TerminalCode::CleanupFailed));
+        assert!(!classification.quarantined());
+    }
+    // A systemd timeout with a terminal snapshot and a zero `D` is no
+    // enforcement disagreement: after a failed start job nothing is code 2.
+    let timed_out_failed = TerminationFacts {
+        service: Some(service(ServiceResultCode::Timeout, MainExitCode::Killed, 9)),
+        ..started(StartJobResult::Failed)
+    };
+    check(&timed_out_failed);
+    let classification = timed_out_failed.classify();
+    assert!(!classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+    assert!(!classification.candidates().contains(TerminalCode::Watchdog));
+    assert!(!classification.quarantined());
+    // The same timeout with a nonzero `D` below `D - G` is one.
+    let disagreeing = TerminationFacts {
+        watchdog_deadline: NonZeroU64::new(TERMINAL_AT + GRACE + 1),
+        ..timed_out_failed
+    };
+    check(&disagreeing);
+    assert!(disagreeing
+        .classify()
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+}
+
 /// Make the terminal snapshot contradict the baseline: 0 none, 1 identity,
 /// 2 time, 3 a telemetry counter going down.
 const fn contradict(facts: &mut TerminationFacts, kind: u8) {
@@ -1708,6 +1809,9 @@ fn r10_feed_capture_and_pre_start_rows_select_their_codes() {
         ),
         (launch(LaunchFailure::StdioChannelFailed), vec![9], false),
         (launch(LaunchFailure::AdmissionClosed), vec![2], true),
+        // R14 §4.6: TME1-G and TME1-H.
+        (launch(LaunchFailure::NetworkSetupFailed), vec![9], false),
+        (launch(LaunchFailure::ReplayUnavailable), vec![10], false),
     ] {
         check(&facts);
         assert_eq!(candidate_codes(&facts), candidates, "{facts:?}");

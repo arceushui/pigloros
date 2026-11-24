@@ -234,7 +234,8 @@ impl<P: ProviderLifecyclePort + ?Sized> ProviderTerminationAuthority<P> {
                     })
             })
             .and_then(|control_group| {
-                RecoveryHost::require_process_absent(pid, ticks)
+                self.host
+                    .require_process_absent(pid, ticks)
                     .and_then(|()| self.host.require_cgroup_absent(&control_group))
             })
     }

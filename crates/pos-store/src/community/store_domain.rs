@@ -20,10 +20,16 @@ use pos_core::community_lifecycle::{
     community_authority_bindings_digest_v1, CommunityAuthorityViewRowV1, CommunityClockLatchV1,
     CommunityLifecycleErrorV1 as Error,
 };
+use pos_core::hasher::Hasher;
+use pos_core::store::EventStore;
+#[cfg(target_os = "linux")]
+use pos_core::trusted_clock::open_release_guard;
 use pos_core::trusted_clock::{
     reserve_trusted_clock, GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
     WaitBudgetV1,
 };
+#[cfg(target_os = "linux")]
+use pos_core::WallTime;
 use pos_core::{
     AuthorityPersistencePortV1, AuthorizationRequestV1, CapabilityGrantV1, Hash,
     PersistedAuthorityV1,
@@ -67,6 +73,30 @@ pub trait CommunityStoreDomainV1 {
         wall: &mut dyn TrustedWallSourceV1,
         mono: &mut dyn GuardMonotonicSourceV1,
     ) -> Result<TrustedClockReservationV1, Error>;
+
+    /// The final writer's decision-bound check on this domain's own clock
+    /// (A5.4; owner decision on #560, 2026-11-20, item 1).
+    ///
+    /// It opens the ADR-112 release guard for `reservation`, the operation's
+    /// one reservation, and takes the writer's time as the reservation
+    /// sample `t_r` plus the `mono` time elapsed since the guard start.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` when the guard cannot open, the
+    /// monotonic source rolls back, or the writer's time is at or after
+    /// `bound` (A5.5).
+    #[cfg(target_os = "linux")]
+    fn check_writer_bound(
+        &mut self,
+        reservation: TrustedClockReservationV1,
+        mono: &mut dyn GuardMonotonicSourceV1,
+        bound: WallTime,
+    ) -> Result<(), Error>;
+
+    /// The domain's own Event history and the pinned Hasher its chains are
+    /// built with: the store-side re-check of an observation (ADR-129
+    /// revision 9, R9.6). Reads keep the store's own erasure fences.
+    fn event_history(&self) -> (&dyn EventStore, &dyn Hasher);
 
     /// The domain's current community inventory generation (owner decision
     /// on #560, note 22722, G5): 0 at bootstrap, incremented once per
@@ -183,6 +213,36 @@ impl CommunityStoreDomainV1 for MemoryCommunityDomainV1 {
         reserve_trusted_clock(&mut self.clock, wall, mono, &mut WaitBudgetV1::new(), None)
             .ok()
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn check_writer_bound(
+        &mut self,
+        reservation: TrustedClockReservationV1,
+        mono: &mut dyn GuardMonotonicSourceV1,
+        bound: WallTime,
+    ) -> Result<(), Error> {
+        open_release_guard(&mut self.clock, reservation, &mut WaitBudgetV1::new(), mono)
+            .ok()
+            .and_then(|guard| {
+                mono.mark()
+                    .checked_elapsed_since(guard.guard_started_at())
+                    .map(|elapsed| {
+                        let elapsed = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+                        guard
+                            .reservation()
+                            .sampled_at()
+                            .as_micros()
+                            .saturating_add(elapsed)
+                    })
+            })
+            .filter(|now| *now < bound.as_micros())
+            .map(drop)
+            .ok_or(Error::EvidenceUnavailable)
+    }
+
+    fn event_history(&self) -> (&dyn EventStore, &dyn Hasher) {
+        (&self.store, self.store.event_hasher())
     }
 
     fn inventory_generation(&self) -> u64 {

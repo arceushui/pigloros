@@ -243,6 +243,24 @@ impl<'a> CommunityEncryptedEnvelopeV1<'a> {
         }
     }
 
+    /// The exact [`Self::to_canonical_cbor`] length of a COE1 of `header`
+    /// and a `ciphertext_len`-byte ciphertext, which needs no nonce.
+    ///
+    /// # Errors
+    /// Refuses the lengths [`Self::new`] refuses: without the 16-byte tag or
+    /// above the 3 MiB payload cap.
+    pub fn encoded_len(header: &CommunityArtifactHeaderV1, ciphertext_len: usize) -> Result<u64> {
+        if (16..=MAX_CIPHERTEXT).contains(&ciphertext_len) {
+            let mut prefix = Vec::new();
+            record_prefix(&mut prefix, 5, *b"COE1");
+            let bstr = |length: usize| head_len(length as u64) + length;
+            let header = header.to_canonical_cbor().len();
+            Ok((prefix.len() + bstr(header) + bstr(12) + bstr(ciphertext_len)) as u64)
+        } else {
+            Err(Error::BoundsExceeded)
+        }
+    }
+
     /// Borrow the structural header; current authority is still unverified.
     #[must_use]
     pub const fn header(&self) -> &CommunityArtifactHeaderV1 {

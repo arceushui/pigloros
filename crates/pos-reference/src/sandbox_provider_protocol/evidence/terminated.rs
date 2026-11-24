@@ -1,5 +1,6 @@
 //! TME1, the termination evidence of ADR-069 R9 §4.6, with the R10 §4.8
-//! stdin feed `adapter-input` and launch failures 3 to 5.
+//! stdin feed `adapter-input` and launch failures 3 to 5, and the R14 §3.4
+//! launch failures 6 and 7.
 
 use std::num::NonZeroU64;
 
@@ -418,7 +419,8 @@ impl TerminationEvidenceFields {
     }
 
     /// Progress 0: no unit and nothing after it; only a root activation,
-    /// pre-start recheck, output reservation or stdio channel failure.
+    /// pre-start recheck, output reservation, stdio channel, network setup
+    /// or replay failure. Their modes are the verifier's (R14 rule 2).
     const fn not_started_shape(&self) -> bool {
         !matches!(self.launch_failure, Some(LaunchFailure::UnitRefFailed))
             && self.start_job.is_none()

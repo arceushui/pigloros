@@ -122,7 +122,7 @@ pub use scheduled_admission::ScheduledPassAdmissionV1;
 pub use staged_catalogue::is_reviewed_staged_factory;
 pub use staged_catalogue::{
     fold_detached_candidate_v1, HostProjectionProviderV1, StagedGrowthBoundV1,
-    StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1, MAX_STAGED_CALLBACK_BOUND_V1,
+    StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1,
 };
 
 /// Recover an exact owner-admission retry from durable state without a live

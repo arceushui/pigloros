@@ -61,7 +61,7 @@ fn traps() -> Vec<Trap> {
 }
 fn runtime() -> Fallible<Runtime> {
     Ok(Runtime::new(
-        "49.0.6".into(),
+        "50.0.3".into(),
         vec!["z-feature".into(), "a-feature".into()],
         engine(),
         traps(),
@@ -116,7 +116,7 @@ fn profile_value() -> Value {
             uint(16_384),
         ]),
         Value::Array(vec![
-            text("49.0.6"),
+            text("50.0.3"),
             Value::Array(vec![text("a-feature"), text("z-feature")]),
             Value::Array(vec![uint(524_288), Value::Bool(true), Value::Bool(true)]),
             Value::Array(vec![
@@ -226,7 +226,7 @@ fn equivalent_runtime_order_reconstructs_same_canonical_tuple() -> TestResult {
     let mut runtime_traps = traps();
     runtime_traps.reverse();
     let reordered = Runtime::new(
-        "49.0.6".into(),
+        "50.0.3".into(),
         vec!["a-feature".into(), "z-feature".into()],
         engine(),
         runtime_traps,
@@ -249,7 +249,7 @@ fn tuple_refuses_missing_foreign_profile_and_zero_release_identities() -> TestRe
         Tuple::new(&negotiated, &missing).err(),
         Some(Error::InvalidBinding)
     );
-    let foreign = Runtime::new("49.0.6".into(), vec![], engine(), vec![])?;
+    let foreign = Runtime::new("50.0.3".into(), vec![], engine(), vec![])?;
     let foreign = Profile::new(Mode::Local, Ceilings::V1, Some(foreign));
     assert_eq!(
         Tuple::new(&negotiated, &foreign).err(),
@@ -611,7 +611,7 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
         byte_length: 5,
         digest: [6; 32],
     };
-    let roster = [tuple.profile_member("entry", &key, schema, initializer)?];
+    let roster = [tuple.profile_member("entry", &key, schema, initializer, 10)?];
     assert_eq!(
         roster[0].digests(),
         [
@@ -622,6 +622,13 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
     );
     assert!(std::ptr::eq(roster[0].implementation(), &raw const key));
     assert_eq!(roster[0].initializer(), initializer);
+    assert_eq!(roster[0].cadence_interval_ns(), 10);
+    assert_eq!(
+        tuple
+            .profile_member("entry", &key, schema, initializer, 0)
+            .err(),
+        Some(Error::InvalidBinding)
+    );
     let input = CommunityDurableProfileInputV1 {
         backend: CommunityDurableBackendV1::RetainedMemory,
         execution_profile_digest: Hash::from_bytes(
@@ -635,6 +642,7 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
             recovery_window_micros: 10,
             quarantine_not_after_micros: 11,
             metadata_not_after_micros: 12,
+            recording_not_after_micros: 13,
         },
     };
     let durable = CommunityDurableProfileV1::new(input)?;
@@ -657,15 +665,81 @@ fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_has
     ] {
         assert_eq!(
             tuple
-                .profile_member("entry", &foreign, schema, initializer)
+                .profile_member("entry", &foreign, schema, initializer, 10)
                 .err(),
             Some(Error::InvalidBinding)
         );
     }
     assert_eq!(
         tuple
-            .profile_member("invalid/entry", &key, schema, initializer)
+            .profile_member("invalid/entry", &key, schema, initializer, 10)
             .err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+#[test]
+fn state_limits_are_each_named_cnt1_state_bytes_in_roster_order() -> TestResult {
+    use pos_core::community_lifecycle::{
+        ArtifactRefV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
+        CommunityDurableProfileV1, CommunityProfileRetentionV1,
+    };
+    use pos_runtime::community_plugin_host::community_state_limits_v1;
+    let local = profile(Mode::Local)?;
+    let air_gapped = profile(Mode::AirGapped)?;
+    let first_negotiated = negotiated(&local)?;
+    let mut small = transport(&air_gapped);
+    small.limits.state_bytes = 4096;
+    let second_negotiated = rebuild(small, &air_gapped)?;
+    let first = Tuple::new(&first_negotiated, &local)?;
+    let second = Tuple::new(&second_negotiated, &air_gapped)?;
+    let first_limit = first_negotiated.limits().values().state_bytes;
+    assert_ne!(first_limit, 4096);
+    let key = ImplementationKeyV1::new(
+        "plugin-a".into(),
+        "host-v1".into(),
+        Hash::from_bytes([2; 32]),
+    )?;
+    let schema = Hash::from_bytes([3; 32]);
+    let initializer = ArtifactRefV1 {
+        schema_id: 4,
+        byte_length: 5,
+        digest: [6; 32],
+    };
+    let roster = [
+        first.profile_member("entry-a", &key, schema, initializer, 10)?,
+        second.profile_member("entry-b", &key, schema, initializer, 10)?,
+    ];
+    let durable = CommunityDurableProfileV1::new(CommunityDurableProfileInputV1 {
+        backend: CommunityDurableBackendV1::RetainedMemory,
+        execution_profile_digest: Hash::from_bytes(local.digest().ok_or("profile digest absent")?),
+        roster: &roster,
+        source_catalogue_digest: Hash::from_bytes([7; 32]),
+        authority_catalogue_digest: Hash::from_bytes([8; 32]),
+        retention: CommunityProfileRetentionV1 {
+            generation_not_after_micros: 9,
+            recovery_window_micros: 10,
+            quarantine_not_after_micros: 11,
+            metadata_not_after_micros: 12,
+            recording_not_after_micros: 13,
+        },
+    })?;
+    let tuples = [first, second];
+    assert_eq!(
+        community_state_limits_v1(&durable, &tuples)?,
+        vec![first_limit, 4096]
+    );
+    let swapped = [
+        Tuple::new(&second_negotiated, &air_gapped)?,
+        Tuple::new(&first_negotiated, &local)?,
+    ];
+    assert_eq!(
+        community_state_limits_v1(&durable, &swapped).err(),
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(
+        community_state_limits_v1(&durable, &tuples[..1]).err(),
         Some(Error::InvalidBinding)
     );
     Ok(())

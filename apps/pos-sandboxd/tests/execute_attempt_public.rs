@@ -30,8 +30,13 @@ use pos_sandboxd::{
 };
 
 use pos_reference::provider_admission::execution::{
-    InputRefusal, PreparedProviderExecution, StagingError, StagingUsage,
+    ExecutePeer, ExecuteSource, PreparedProviderExecution, RefusalCause, SourceRefusal,
+    StagingError, StagingUsage,
 };
+use pos_reference::selector::installation::{
+    authority::AdmittedSelectorProvider, InstalledSelectorState,
+};
+use std::{convert::Infallible, sync::Arc};
 use std::{
     io::{Read as _, Write as _},
     os::unix::net::UnixStream,
@@ -125,14 +130,94 @@ fn a_directory_for_another_image_is_rejected() -> TestResult {
     Ok(())
 }
 
+/// The provider admission a runtime retains at startup.
+fn startup() -> Result<Arc<AdmittedSelectorProvider>, BoxError> {
+    Ok(Arc::new(
+        InstalledSelectorState::open()?
+            .authenticate_bootstrap()?
+            .admit_provider()?,
+    ))
+}
+
 fn source_pair(
     staged: &StagedInstallation,
     ledger: &StagingLedger,
-) -> Result<(PreparedProviderExecution, UnixStream, UnixStream), BoxError> {
-    let (mut provider, mut selector) = UnixStream::pair()?;
+) -> Result<(PreparedProviderExecution, UnixStream), BoxError> {
+    let (provider, mut selector) = UnixStream::pair()?;
     staged.write_source(&mut selector)?;
-    let prepared = PreparedProviderExecution::receive(&mut provider, ledger)?;
-    Ok((prepared, provider, selector))
+    Ok((
+        StagedInstallation::admit_source(provider, ledger)?,
+        selector,
+    ))
+}
+
+/// The single read of what the selector end wrote to `provider`, then the
+/// factory: `Ok(None)` for an admitted exchange, else why it was refused.
+fn refusal(
+    provider: UnixStream,
+    ledger: &StagingLedger,
+    installation: &Arc<AdmittedSelectorProvider>,
+) -> Result<Option<String>, BoxError> {
+    let peer = ExecutePeer::authenticate(provider).map_err(|_| "the peer is not root")?;
+    let source = match ExecuteSource::read(peer, ledger, installation) {
+        Ok(source) => source,
+        Err(SourceRefusal::Malformed(_)) => return Ok(Some("malformed".to_owned())),
+        Err(SourceRefusal::Uncharged(handed)) => {
+            return Ok(Some(format!("uncharged, closed: {}", handed.closed())))
+        }
+    };
+    Ok(PreparedProviderExecution::admit(
+        source,
+        ledger,
+        installation,
+        |_| true,
+        |_| Ok::<(), Infallible>(()),
+    )
+    .err()
+    .map(|refused| match refused.into_parts().1 {
+        RefusalCause::Staging(error) => format!("{error:?}"),
+        RefusalCause::Claim(never) => match never {},
+    }))
+}
+
+fn staging_directory() -> Result<(tempfile::TempDir, pos_sandboxd::StagingDirectory), BoxError> {
+    let directory = tempfile::tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let held = fs::File::open(directory.path())?;
+    let staging = pos_sandboxd::StagingDirectory::from_held_directory(
+        held.try_clone()?,
+        held.metadata()?.uid(),
+    )?;
+    Ok((directory, staging))
+}
+
+/// The stream and error of a grant refused before its write began.
+fn refused_grant(
+    prepared: PreparedProviderExecution,
+    sign: impl FnOnce(
+        pos_reference::sandbox_provider_protocol::SelfDigested<
+            pos_reference::sandbox_provider_protocol::Agr1,
+        >,
+    ) -> std::io::Result<
+        pos_reference::sandbox_provider_protocol::Verified<
+            pos_reference::sandbox_provider_protocol::Agr1,
+        >,
+    >,
+) -> Result<(UnixStream, StagingError), BoxError> {
+    let (_directory, staging) = staging_directory()?;
+    let result = staging
+        .create_input([0x42; 16], prepared)
+        .map_err(|refusal| format!("{refusal:?}"))?
+        .send_grant(sign, |(), _| Ok::<(), Infallible>(()));
+    match result {
+        Err(pos_reference::provider_admission::execution::GrantFailure::Refused(refused)) => {
+            match refused.into_parts() {
+                (stream, RefusalCause::Staging(error)) => Ok((stream, error)),
+                (_, RefusalCause::Claim(never)) => match never {},
+            }
+        }
+        other => Err(format!("{other:?}").into()),
+    }
 }
 
 fn frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> TestResult {
@@ -149,6 +234,7 @@ fn altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservati
         return Ok(());
     }
     let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let installation = startup()?;
     let ledger = StagingLedger::new(StagingLimits {
         aggregate_bytes: 512 * 1024 * 1024,
     });
@@ -165,13 +251,13 @@ fn altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservati
     ];
     for request in changed {
         let request = request.map_err(|error| error.to_string())?;
-        let (mut provider, mut selector) = UnixStream::pair()?;
+        let (provider, mut selector) = UnixStream::pair()?;
         frame(&mut selector, staged.evaluation())?;
         frame(&mut selector, &request)?;
-        assert!(matches!(
-            PreparedProviderExecution::receive(&mut provider, &ledger),
-            Err(StagingError::InvalidSource)
-        ));
+        assert_eq!(
+            refusal(provider, &ledger, &installation)?,
+            Some(format!("{:?}", StagingError::InvalidSource))
+        );
         assert_eq!(ledger.usage(), StagingUsage::default());
     }
     for records in [
@@ -181,55 +267,34 @@ fn altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservati
         vec![staged.evaluation(), staged.request(), staged.request()],
         vec![],
     ] {
-        let (mut provider, mut selector) = UnixStream::pair()?;
+        let (provider, mut selector) = UnixStream::pair()?;
         for record in records {
             frame(&mut selector, record)?;
         }
         selector.shutdown(std::net::Shutdown::Write)?;
-        assert!(PreparedProviderExecution::receive(&mut provider, &ledger).is_err());
+        assert!(refusal(provider, &ledger, &installation)?.is_some());
         assert_eq!(ledger.usage(), StagingUsage::default());
     }
     let tiny = StagingLedger::new(StagingLimits { aggregate_bytes: 1 });
-    assert!(source_pair(&staged, &tiny).is_err());
+    let (provider, mut selector) = UnixStream::pair()?;
+    staged.write_source(&mut selector)?;
+    assert_eq!(
+        refusal(provider, &tiny, &installation)?.as_deref(),
+        Some("uncharged, closed: false")
+    );
     assert_eq!(tiny.usage(), StagingUsage::default());
     Ok(())
 }
 
 #[test]
-fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> TestResult {
-    if !require_isolated_root(
-        "grant_and_input_are_single_use_and_bound_to_the_original_connection",
-    )? {
+fn refused_signers_write_no_grant_and_a_failed_input_keeps_it() -> TestResult {
+    if !require_isolated_root("refused_signers_write_no_grant_and_a_failed_input_keeps_it")? {
         return Ok(());
     }
     let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
     let ledger = StagingLedger::new(StagingLimits {
         aggregate_bytes: 512 * 1024 * 1024,
     });
-    let (mut prepared, mut provider, _selector) = source_pair(&staged, &ledger)?;
-    let (mut foreign, _peer) = UnixStream::pair()?;
-    assert!(matches!(
-        prepared.send_grant(&mut foreign, StagedInstallation::sign_grant),
-        Err(StagingError::ConnectionChanged)
-    ));
-    // A signature that verified under another key than the admitted one.
-    assert!(matches!(
-        prepared.send_grant(&mut provider, |record| {
-            StagedInstallation::sign_grant_with(&[5; 32], record)
-        }),
-        Err(StagingError::InvalidSignature)
-    ));
-    assert!(matches!(
-        prepared.send_grant(&mut provider, |_| Err(std::io::Error::other(
-            "signer unavailable"
-        ))),
-        Err(StagingError::InvalidSignature)
-    ));
-    prepared.send_grant(&mut provider, StagedInstallation::sign_grant)?;
-    assert!(matches!(
-        prepared.send_grant(&mut provider, StagedInstallation::sign_grant),
-        Err(StagingError::GrantAlreadyIssued)
-    ));
     let directory = tempfile::tempdir()?;
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
     let held = fs::File::open(directory.path())?;
@@ -237,19 +302,48 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
         held.try_clone()?,
         held.metadata()?.uid(),
     )?;
-    let attempt_id = prepared.request().attempt_id;
-    // AGR1 was sent: a foreign input connection fails the admitted attempt,
+    // A signature that verified under another key than the admitted one,
+    // and a signer that failed: no AGR1 byte is written either way.
+    for foreign in [true, false] {
+        let (prepared, mut selector) = source_pair(&staged, &ledger)?;
+        let result = staging
+            .create_input([3; 16], prepared)
+            .map_err(|refusal| format!("{refusal:?}"))?
+            .send_grant(
+                |record| {
+                    if foreign {
+                        StagedInstallation::sign_grant_with(&[5; 32], record)
+                    } else {
+                        Err(std::io::Error::other("signer unavailable"))
+                    }
+                },
+                |(), _| Ok::<(), Infallible>(()),
+            );
+        let Err(pos_reference::provider_admission::execution::GrantFailure::Refused(refused)) =
+            result
+        else {
+            return Err(format!("{result:?}").into());
+        };
+        let (stream, cause) = refused.into_parts();
+        assert!(matches!(
+            cause,
+            RefusalCause::Staging(StagingError::SignerFault)
+        ));
+        drop(stream);
+        assert_eq!(selector.read(&mut [0])?, 0);
+        assert_eq!(ledger.usage(), StagingUsage::default());
+    }
+    // AGR1 was sent: an input that never comes fails the admitted attempt,
     // which keeps its grant, but no reservation.
-    let refused = staging
-        .create_input([1; 16], prepared)?
-        .receive(&mut foreign)
+    let (prepared, selector) = source_pair(&staged, &ledger)?;
+    let attempt_id = prepared.request().attempt_id;
+    let granted = StagedInstallation::grant_staged(&staging, [1; 16], prepared)?;
+    selector.shutdown(std::net::Shutdown::Write)?;
+    let failed = granted
+        .receive()
+        .0
         .err()
-        .ok_or("a foreign connection was admitted")?;
-    assert!(refused.to_string().contains("admitted input failed"));
-    let InputRefusal::Failed(failed) = refused else {
-        return Err("the grant was not retained".into());
-    };
-    assert!(matches!(failed.error(), StagingError::ConnectionChanged));
+        .ok_or("an empty input was admitted")?;
     assert_eq!(failed.attempt_id(), attempt_id);
     let grant = pos_reference::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(
         failed.grant().bytes(),
@@ -259,18 +353,6 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
     let transfer = failed.transfer().ok_or("no transfer")?;
     assert_eq!(transfer.accepted_bytes, 0);
     assert!(!transfer.complete);
-    assert_eq!(ledger.usage(), StagingUsage::default());
-    let (prepared, mut provider, _selector) = source_pair(&staged, &ledger)?;
-    let refused = staging
-        .create_input([2; 16], prepared)?
-        .receive(&mut provider)
-        .err()
-        .ok_or("an ungranted input was admitted")?;
-    assert_eq!(refused.to_string(), StagingError::GrantRequired.to_string());
-    assert!(matches!(
-        refused,
-        InputRefusal::NotGranted(StagingError::GrantRequired)
-    ));
     assert_eq!(ledger.usage(), StagingUsage::default());
     Ok(())
 }
@@ -298,10 +380,7 @@ fn incomplete_foreign_corrupt_or_duplicate_input_never_mints_an_entry() -> TestR
     let mut foreign = Vec::new();
     frame(&mut foreign, staged.request())?;
     for bytes in [Vec::new(), foreign, corrupt, duplicate] {
-        let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
-        prepared.send_grant(&mut provider, StagedInstallation::sign_grant)?;
-        selector.write_all(&bytes)?;
-        selector.shutdown(std::net::Shutdown::Write)?;
+        let (prepared, mut selector) = source_pair(&staged, &ledger)?;
         let directory = tempfile::tempdir()?;
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
         let held = fs::File::open(directory.path())?;
@@ -309,10 +388,10 @@ fn incomplete_foreign_corrupt_or_duplicate_input_never_mints_an_entry() -> TestR
             held.try_clone()?,
             held.metadata()?.uid(),
         )?;
-        assert!(staging
-            .create_input([1; 16], prepared)?
-            .receive(&mut provider)
-            .is_err());
+        let granted = StagedInstallation::grant_staged(&staging, [1; 16], prepared)?;
+        selector.write_all(&bytes)?;
+        selector.shutdown(std::net::Shutdown::Write)?;
+        assert!(granted.receive().0.is_err());
         assert_eq!(ledger.usage(), StagingUsage::default());
     }
     Ok(())
@@ -370,16 +449,19 @@ fn a_floor_raised_by_a_slow_signer_is_rechecked_before_any_grant_bytes() -> Test
     let ledger = StagingLedger::new(StagingLimits {
         aggregate_bytes: 512 * 1024 * 1024,
     });
-    let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
-    let error = prepared.send_grant(&mut provider, |message| {
+    let (prepared, mut selector) = source_pair(&staged, &ledger)?;
+    let (stream, error) = refused_grant(prepared, |message| {
         ledger.raise_floor(pos_sandboxd::ControlFloor {
             revocation_epoch: u64::MAX,
             policy_epoch: u64::MAX,
         });
         StagedInstallation::sign_grant(message)
-    });
-    assert!(matches!(error, Err(StagingError::BelowControlFloor)));
-    drop((prepared, provider));
+    })?;
+    assert!(
+        matches!(error, StagingError::BelowControlFloor),
+        "{error:?}"
+    );
+    drop(stream);
     assert_eq!(selector.read(&mut [0])?, 0);
     assert_eq!(ledger.usage().attempts, 0);
     assert_eq!(ledger.usage().reserved_bytes, 0);
@@ -395,13 +477,11 @@ fn extra_source_after_preparation_is_refused_before_any_grant_bytes() -> TestRes
     let ledger = StagingLedger::new(StagingLimits {
         aggregate_bytes: 512 * 1024 * 1024,
     });
-    let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
+    let (prepared, mut selector) = source_pair(&staged, &ledger)?;
     frame(&mut selector, staged.request())?;
-    assert!(matches!(
-        prepared.send_grant(&mut provider, StagedInstallation::sign_grant),
-        Err(StagingError::InvalidSource)
-    ));
-    drop((prepared, provider));
+    let (stream, error) = refused_grant(prepared, StagedInstallation::sign_grant)?;
+    assert!(matches!(error, StagingError::InvalidSource), "{error:?}");
+    drop(stream);
     assert!(match selector.read(&mut [0]) {
         Ok(length) => length == 0,
         Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
@@ -421,15 +501,15 @@ fn a_pending_installation_update_is_rechecked_after_signing_before_grant_output(
     let ledger = StagingLedger::new(StagingLimits {
         aggregate_bytes: 512 * 1024 * 1024,
     });
-    let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
+    let (prepared, mut selector) = source_pair(&staged, &ledger)?;
     let recovery = Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
         .join("installation-update.cbor");
-    let result = prepared.send_grant(&mut provider, |message| {
+    let (stream, error) = refused_grant(prepared, |message| {
         fs::write(&recovery, b"pending installation transaction")?;
         StagedInstallation::sign_grant(message)
-    });
-    assert!(matches!(result, Err(StagingError::Source(_))));
-    drop((prepared, provider));
+    })?;
+    assert!(matches!(error, StagingError::Source(_)), "{error:?}");
+    drop(stream);
     assert_eq!(selector.read(&mut [0])?, 0);
     assert_eq!(ledger.usage(), StagingUsage::default());
     Ok(())
@@ -465,8 +545,12 @@ fn admission_charges_actual_retained_bytes_and_no_hard_cap_maximum() -> TestResu
     let short = StagingLedger::new(StagingLimits {
         aggregate_bytes: expected.checked_sub(1).ok_or("empty fixture")?,
     });
+    let refused = source_pair(&staged, &short)
+        .err()
+        .ok_or("a short ledger admitted the exchange")?;
     assert!(
-        matches!(source_pair(&staged, &short), Err(error) if error.downcast_ref::<StagingError>().is_some_and(|error| matches!(error, StagingError::AggregateExceeded)))
+        refused.to_string().contains("AggregateExceeded"),
+        "{refused}"
     );
     assert_eq!(short.usage(), StagingUsage::default());
     Ok(())
@@ -483,7 +567,7 @@ fn private_staging_descriptor_exhaustion_releases_the_prepared_exchange() -> Tes
     let ledger = StagingLedger::new(StagingLimits {
         aggregate_bytes: 512 * 1024 * 1024,
     });
-    let (prepared, _provider, _selector) = source_pair(&staged, &ledger)?;
+    let (prepared, _selector) = source_pair(&staged, &ledger)?;
     let temporary = tempfile::tempdir()?;
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
     let held = fs::File::open(temporary.path())?;
@@ -501,7 +585,14 @@ fn private_staging_descriptor_exhaustion_releases_the_prepared_exchange() -> Tes
     )?;
     let result = staging.create_input([0x41; 16], prepared);
     rustix::process::setrlimit(rustix::process::Resource::Nofile, original)?;
-    assert!(matches!(result, Err(StagingError::Io(_))));
+    let refused = result
+        .map(drop)
+        .err()
+        .ok_or("the staging file was created")?;
+    assert!(matches!(
+        refused.into_parts().1,
+        RefusalCause::Staging(StagingError::Io(_))
+    ));
     assert_eq!(ledger.usage(), StagingUsage::default());
     assert_eq!(fs::read_dir(temporary.path())?.count(), 0);
     Ok(())

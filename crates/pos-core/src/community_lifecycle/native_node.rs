@@ -13,7 +13,7 @@ use super::input_reference::{
 use super::{
     bounded_text, canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates,
     read_hash, read_hashes, read_head, record_cursor, record_prefix, validate_coordinates,
-    validate_horizon, CommunityLifecycleErrorV1 as Error, Result,
+    validate_horizon, CommunityLifecycleErrorV1 as Error, Result, WIDEST_HORIZON_MICROS,
 };
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, Hash, RecordedDependencyClassV1, TimelineId,
@@ -240,6 +240,23 @@ impl CommunityInputIndexV1<'_> {
         }
     }
 
+    /// A `SourceGenesis` reference (revision 9, R9.3) is admitted only as
+    /// the single Event-source input of an Observation node.
+    fn check_genesis(self, kind: CommunityNativeNodeKindV1) -> Result<()> {
+        let genesis = match self {
+            Self::Direct(references) => references
+                .iter()
+                .filter(|row| matches!(row, Ok(CommunityTypedInputRefV1::SourceGenesis { .. })))
+                .count(),
+            _ => 0,
+        };
+        if genesis == 0 || (genesis == 1 && kind == CommunityNativeNodeKindV1::Observation) {
+            Ok(())
+        } else {
+            Err(Error::InvalidBinding)
+        }
+    }
+
     fn encode(self, out: &mut Vec<u8>) {
         match self {
             Self::Empty => out.extend_from_slice(&[0x81, 0]),
@@ -310,6 +327,50 @@ pub struct CommunityNativeNodeInputV1<'a> {
     pub evidence_not_after_micros: u64,
 }
 
+/// A reference to a pass node whose producer and node ordinals are not yet
+/// allocated, both at their widest encodings (revision 10, R10.3(3)). It is
+/// a quote placeholder, never a reference to a real node.
+pub(super) const fn widest_node_reference() -> CommunityNativeNodeReferenceV1 {
+    CommunityNativeNodeReferenceV1 {
+        store_incarnation: [0; 16],
+        producer_ordinal: u64::MAX,
+        node_ordinal: u32::MAX,
+        node_digest: Hash::zero(),
+    }
+}
+
+/// A pass CPN1's quoted length (revision 10, R10.3(3)) for `kind` and its
+/// exact input index: the unallocated producer and node ordinals and the
+/// unknown horizon at their widest encodings, every digest at its fixed
+/// width. The index is encoded as given, without validation.
+pub(super) fn quoted_node_len(
+    timeline: TimelineId,
+    generation: [u8; 16],
+    kind: CommunityNativeNodeKindV1,
+    input_index: CommunityInputIndexV1<'_>,
+) -> usize {
+    CommunityNativeNodeV1(CommunityNativeNodeInputV1 {
+        store_incarnation: [0; 16],
+        timeline,
+        generation,
+        producer_ordinal: u64::MAX,
+        node_ordinal: u32::MAX,
+        kind,
+        content: CommunityContentReferenceV1 {
+            record_magic: [0; 4],
+            logical_digest: Hash::zero(),
+        },
+        dependency_class: RecordedDependencyClassV1::EndogenousRecomputed,
+        input_index,
+        scope_binding_digest: Hash::zero(),
+        authorization_digest: Hash::zero(),
+        provenance_digest: Hash::zero(),
+        evidence_not_after_micros: WIDEST_HORIZON_MICROS,
+    })
+    .to_canonical_cbor()
+    .len()
+}
+
 /// Exact sixteen-field CPN1. Valid bytes prove neither existence nor use.
 pub struct CommunityNativeNodeV1<'a>(CommunityNativeNodeInputV1<'a>);
 
@@ -318,7 +379,8 @@ impl<'a> CommunityNativeNodeV1<'a> {
     ///
     /// # Errors
     /// Returns `InvalidBinding` for zero identities, a class or content magic
-    /// the kind forbids, a grouped input index under an `InputIndex` node,
+    /// the kind forbids, a grouped input index under an `InputIndex` node, a
+    /// `SourceGenesis` input outside an Observation or more than one of them,
     /// unordered or duplicate inputs, or a native input from another store
     /// incarnation or not strictly before this node; `BoundsExceeded` for
     /// input counts or the horizon outside their bounds.
@@ -334,6 +396,7 @@ impl<'a> CommunityNativeNodeV1<'a> {
                     input.node_ordinal,
                 )
             })
+            .and_then(|()| input.input_index.check_genesis(input.kind))
             .and_then(|()| validate_horizon(input.evidence_not_after_micros))
             .map(|()| Self(input))
     }

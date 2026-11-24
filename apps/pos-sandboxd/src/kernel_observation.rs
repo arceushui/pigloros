@@ -26,8 +26,8 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{
-    fstat, fstatfs, major, minor, open, openat, statx, AtFlags, Mode, OFlags, StatxFlags,
-    PROC_SUPER_MAGIC,
+    fstat, fstatfs, major, minor, open, openat, openat2, statx, AtFlags, Mode, OFlags,
+    ResolveFlags, StatxFlags, PROC_SUPER_MAGIC,
 };
 use rustix::io::Errno;
 use rustix::process::pidfd_open;
@@ -53,6 +53,12 @@ const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
 const READ: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC);
+/// A path handle, opened for its identity only.
+const PATH: OFlags = OFlags::PATH.union(OFlags::CLOEXEC);
+/// The launcher's own resolution of the adapter path: beneath the root,
+/// without any symlink or magic link (`launcher::adapter`).
+/// `RESOLVE_NO_SYMLINKS` implies `RESOLVE_NO_MAGICLINKS` (openat2(2)).
+const ADAPTER_RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 
 /// A kernel device number as `major:minor`, never a raw `st_dev`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -634,6 +640,9 @@ pub enum KernelObservationError {
     /// The target of `exe` could not be identified.
     #[error("the launcher executable could not be observed")]
     Executable,
+    /// The adapter could not be identified beneath the unit's root.
+    #[error("the adapter could not be observed beneath the unit root")]
+    Adapter,
     /// `cgroup.procs` could not be read.
     #[error("the bound cgroup's process list could not be read")]
     CgroupProcs,
@@ -777,6 +786,104 @@ fn launcher(procdir: BorrowedFd<'_>) -> Result<FdIdentity, KernelObservationErro
         inode: status.stx_ino,
     })
     .ok_or(KernelObservationError::Executable)
+}
+
+/// The mount ID and inode `statx` reported, if it reported the mount ID.
+fn fd_identity(mask: u32, mount_id: u64, inode: u64) -> Option<FdIdentity> {
+    StatxFlags::from_bits_retain(mask)
+        .contains(StatxFlags::MNT_ID)
+        .then_some(FdIdentity { mount_id, inode })
+}
+
+/// The mount ID and inode of `adapter_path` beneath the target of `root`.
+///
+/// `root` is a magic link, so it is followed (never `NOFOLLOW`), and its
+/// target is the unit's root in the unit's own mount namespace. The adapter
+/// path is then resolved beneath it exactly as the launcher resolves it, so
+/// the mount ID is the one the launcher sees, not the provider's.
+fn adapter(
+    procdir: BorrowedFd<'_>,
+    adapter_path: &str,
+) -> Result<FdIdentity, KernelObservationError> {
+    openat(
+        procdir,
+        "root",
+        PATH.union(OFlags::DIRECTORY),
+        Mode::empty(),
+    )
+    .and_then(|root| {
+        openat2(
+            root,
+            adapter_path.trim_start_matches('/'),
+            PATH,
+            Mode::empty(),
+            ADAPTER_RESOLVE,
+        )
+    })
+    .and_then(|adapter| {
+        statx(
+            adapter,
+            "",
+            AtFlags::EMPTY_PATH,
+            StatxFlags::INO.union(StatxFlags::MNT_ID),
+        )
+    })
+    .ok()
+    .and_then(|status| fd_identity(status.stx_mask, status.stx_mnt_id, status.stx_ino))
+    .ok_or(KernelObservationError::Adapter)
+}
+
+/// The adapter beneath the root of `anchor`'s process, read while `alive`
+/// shows that process alive before and after.
+fn adapter_of(
+    anchor: &ProcessAnchor,
+    adapter_path: &str,
+    alive: &dyn Fn(BorrowedFd<'_>) -> Result<(), KernelObservationError>,
+) -> Result<FdIdentity, KernelObservationError> {
+    alive(anchor.pidfd.as_fd())
+        .and_then(|()| adapter(anchor.procdir.as_fd(), adapter_path))
+        .and_then(|identity| alive(anchor.pidfd.as_fd()).map(|()| identity))
+}
+
+/// The main process of a started unit, anchored by the R9 §4.4 procedure:
+/// a pidfd and a `/proc/<MainPID>` directory proved to be procfs.
+///
+/// The release barrier reads the launcher's executable and the adapter
+/// through this one anchor, so both describe the same process.
+pub struct MainProcess {
+    anchor: ProcessAnchor,
+}
+
+impl MainProcess {
+    /// Anchor the process the manager reports as `main_pid`.
+    ///
+    /// # Errors
+    /// A failed `pidfd_open`, or a process directory that cannot be opened
+    /// or is not on procfs.
+    pub fn open(main_pid: u32) -> Result<Self, KernelObservationError> {
+        ProcessAnchor::open(PROC_PATHS.proc, main_pid).map(|anchor| Self { anchor })
+    }
+
+    /// The target of the process's `exe`, opened for reading.
+    ///
+    /// # Errors
+    /// [`KernelObservationError::Executable`] when it cannot be opened.
+    pub fn executable(&self) -> Result<File, KernelObservationError> {
+        openat(self.anchor.procdir.as_fd(), "exe", READ, Mode::empty())
+            .map(File::from)
+            .map_err(|_| KernelObservationError::Executable)
+    }
+
+    /// The adapter's mount ID and inode at `adapter_path` beneath the unit's
+    /// root, as `ReadyV1` binds them (owner decision 2026-11-21, #443
+    /// slice 9), read while the pidfd shows the process alive.
+    ///
+    /// # Errors
+    /// An exited process, or an adapter that cannot be identified beneath
+    /// the unit's root.
+    pub fn adapter(&self, adapter_path: &str) -> Result<FdIdentity, KernelObservationError> {
+        adapter_of(&self.anchor, adapter_path, &alive)
+    }
 }
 
 /// The mount ID and capacity of a held `/work` handle.
@@ -963,6 +1070,9 @@ impl KernelObservation {
                 mount_id: work.mount_id,
                 capacity_bytes: work.capacity_bytes,
             }),
+            // No mode is served with a Local network readback yet: Local is
+            // refused before AGR1 (ADR-069 R14 §7, slice 1488-b0).
+            network_readback: None,
         }
     }
 }

@@ -186,7 +186,7 @@ fn loopback_routes() -> Router<AppState> {
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
-/// whose `instance` is the matched route template.
+/// whose `instance` is the matched route template, and marks every answer `no-store`.
 fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> Router {
     routes
         .fallback(not_routed)
@@ -197,7 +197,20 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
             reject_unprovisioned,
         ))
         .layer(middleware::from_fn(problem_instance))
+        .layer(middleware::map_response(no_store))
         .with_state(state)
+}
+
+/// The supported client-cache rule (ADR-136 follow-up F2, #1407): the outermost layer of every
+/// router marks every answer, problems, redirects and the non-v1 routes included,
+/// `Cache-Control: no-store`, so no answer a client or intermediary receives may be stored. A
+/// managed representation can expose data a later erasure redacts, and RFC 9111 §5.2.2.5 leaves
+/// privacy to the client: the contract's client rule carries that guarantee.
+fn no_store(mut response: Response) -> std::future::Ready<Response> {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    std::future::ready(response)
 }
 
 /// The protected loopback routes, by method and route template.
@@ -1341,6 +1354,12 @@ mod tests {
                 .await
                 .test_ok();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
+            // #1407: the refusal is answered `no-store` like every answer.
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store",
+                "{route}"
+            );
         }
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -1548,6 +1567,71 @@ mod tests {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         })
+    }
+
+    /// #1407: the outermost layer of every router marks every answer
+    /// `Cache-Control: no-store`: the non-v1 routes, the root redirect, a
+    /// served v1 read, an unready `503`, an unrouted `404`, a `405`, the
+    /// public listener's refusal of a loopback-only route and the `OwnTracks`
+    /// route.
+    #[tokio::test]
+    async fn every_router_marks_every_answer_no_store() {
+        let owntracks = || {
+            router_for_addr(
+                "127.0.0.1:0".parse().test_ok(),
+                AppState {
+                    gateway: Gateway::new_with_owntracks_ingress_for_test(
+                        pos_store::memory::MemoryStore::new(),
+                        [0; 32],
+                    ),
+                    ledger_view: LedgerView::default(),
+                    ledger_write: LedgerWriteMode::Disabled,
+                },
+            )
+        };
+        for (app, method, uri, status) in [
+            (spectator_test_app(), "GET", "/", StatusCode::FOUND),
+            (spectator_test_app(), "GET", "/ledger", StatusCode::OK),
+            (spectator_test_app(), "GET", "/health", StatusCode::OK),
+            (spectator_test_app(), "GET", "/v1/ledger", StatusCode::OK),
+            (
+                spectator_test_app(),
+                "POST",
+                "/v1/timelines",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                test_app_with_ledger_view(LedgerView::default()),
+                "GET",
+                "/health",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (test_app(), "GET", "/v1/nowhere", StatusCode::NOT_FOUND),
+            (
+                test_app(),
+                "DELETE",
+                "/v1/timelines",
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (owntracks(), "POST", "/v1/bridges/owntracks", StatusCode::OK),
+        ] {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .test_ok(),
+                )
+                .await
+                .test_ok();
+            assert_eq!(response.status(), status, "{method} {uri}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store",
+                "{method} {uri}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2184,6 +2268,56 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(problem["code"], "resource-limit-exceeded");
+    }
+
+    #[tokio::test]
+    async fn flagged_json_routes_bound_bytes_and_nesting_before_conversion() {
+        let actor = EntityId::new();
+        let app = authority_test_app(actor);
+        let actor = actor.to_string();
+        let id = EntityId::new();
+        for path in [
+            "/v1/me/erasures".to_owned(),
+            "/v1/preferences".to_owned(),
+            "/v1/option-specs".to_owned(),
+            "/v1/scenario-rooms".to_owned(),
+            format!("/v1/scenario-rooms/{id}/revisions"),
+            format!("/v1/timelines/{id}/actions"),
+        ] {
+            for (body, expected) in [
+                (
+                    " ".repeat(MAX_HTTP_BODY_BYTES + 1),
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                ),
+                (
+                    format!("{{\"payload\":{}null{}}}", "[".repeat(200), "]".repeat(200)),
+                    StatusCode::BAD_REQUEST,
+                ),
+            ] {
+                let (status, _, problem) = raw_request(
+                    app.clone(),
+                    "POST",
+                    &path,
+                    &[
+                        ("content-type", "application/json"),
+                        (crate::operation::ACTOR_ENTITY_HEADER, &actor),
+                        ("idempotency-key", "bounded-request"),
+                    ],
+                    Some(Body::from(body)),
+                )
+                .await;
+                assert_eq!(status, expected, "{path}: {problem}");
+                assert_eq!(
+                    problem["code"],
+                    if expected == StatusCode::PAYLOAD_TOO_LARGE {
+                        "resource-limit-exceeded"
+                    } else {
+                        "invalid-request"
+                    },
+                    "{path}: {problem}"
+                );
+            }
+        }
     }
 
     /// ADR-134 §8: a stale-binding refusal answers `503`, then stops serving.

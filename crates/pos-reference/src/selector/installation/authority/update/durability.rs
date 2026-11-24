@@ -183,7 +183,11 @@ impl CommittedInstallationUpdate {
                         )
                     })
             })
-            .and_then(InstalledSelectorState::authenticate_bootstrap)
+            .and_then(|state| {
+                state
+                    .authenticate_bootstrap()
+                    .map_err(SelectorBoundaryError::from)
+            })
     }
 }
 
@@ -223,7 +227,11 @@ impl AdmittedSelectorProvider {
                         }
                     })
             })
-            .and_then(|owner| ensure_no_pending_recovery(&installed.root).map(|()| owner))
+            .and_then(|owner| {
+                ensure_no_pending_recovery(&installed.root)
+                    .map_err(SelectorBoundaryError::from)
+                    .map(|()| owner)
+            })
             .and_then(|owner| snapshot.verify_recovery_peer_reservation().map(|()| owner))
             .and_then(|owner| {
                 recovery_bytes(&update, &snapshot).map(|(bytes, digest)| (owner, bytes, digest))
@@ -332,7 +340,10 @@ fn synchronize_successor_records(
         .root
         .try_clone()
         .map_err(map_io_to_boundary_failure)
-        .and_then(|root| open_directory_chain(root, Path::new("authority"), owner))
+        .and_then(|root| {
+            open_directory_chain(root, Path::new("authority"), owner)
+                .map_err(SelectorBoundaryError::from)
+        })
         .and_then(|directory| {
             [
                 (
@@ -359,6 +370,7 @@ fn synchronize_successor_records(
                             object.byte_length(),
                             owner,
                         )
+                        .map_err(SelectorBoundaryError::from)
                     })
                     .and_then(|reopened| {
                         reopened
@@ -457,7 +469,10 @@ fn write_recovery(
         .and_then(|temporary| {
             u64::try_from(bytes.len())
                 .map_err(map_artifact_integrity_failure)
-                .and_then(|length| open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner))
+                .and_then(|length| {
+                    open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner)
+                        .map_err(SelectorBoundaryError::from)
+                })
                 .map_err(InstallationUpdateCommitError::RecoveryPending)
                 .map(|recovery| (temporary, recovery))
         })
@@ -503,7 +518,10 @@ pub(super) fn publish_successor(
         })
         .and_then(|()| verify_recovery_identity(root, owner, retained_recovery, recovery_bytes))
         .and_then(|()| remove_recovery_durably(root, owner))
-        .and_then(|()| InstalledSelectorState::open_at_for_owner(root, owner))
+        .and_then(|()| {
+            InstalledSelectorState::open_at_for_owner(root, owner)
+                .map_err(SelectorBoundaryError::from)
+        })
 }
 
 fn remove_recovery_durably(root: &File, owner: u32) -> Result<(), SelectorBoundaryError> {
@@ -636,9 +654,14 @@ pub(super) fn read_held_immutable(
                 Err(SelectorBoundaryError::ArtifactInvalid)
             } else {
                 open_immutable_file(root, name, 0o400, length, owner)
+                    .map_err(SelectorBoundaryError::from)
             }
         })
-        .and_then(|file| read_complete_file(&file, limit).map(|bytes| (file, bytes)))
+        .and_then(|file| {
+            read_complete_file(&file, limit)
+                .map_err(SelectorBoundaryError::from)
+                .map(|bytes| (file, bytes))
+        })
 }
 
 fn verify_recovery_identity(
@@ -649,9 +672,14 @@ fn verify_recovery_identity(
 ) -> Result<(), SelectorBoundaryError> {
     u64::try_from(expected_bytes.len())
         .map_err(map_artifact_integrity_failure)
-        .and_then(|length| open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner))
+        .and_then(|length| {
+            open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner)
+                .map_err(SelectorBoundaryError::from)
+        })
         .and_then(|current| verify_file_identity(retained, &current).map(|()| current))
-        .and_then(|current| read_complete_file(&current, RECOVERY_LIMIT as u64))
+        .and_then(|current| {
+            read_complete_file(&current, RECOVERY_LIMIT as u64).map_err(SelectorBoundaryError::from)
+        })
         .and_then(|current| {
             if current == expected_bytes {
                 Ok(())
@@ -914,6 +942,23 @@ mod tests {
             read_bounded_immutable(&root, "record", owner, 5),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
+        Ok(())
+    }
+
+    /// A failed SIR1 rename counts as pending recovery although no SIR1
+    /// exists; the selector then heals through a normal open.
+    #[test]
+    fn a_failed_sir1_rename_is_pending_recovery_without_a_sir1() -> TestResult {
+        let (_staging_directory, staging_root, owner) = durable_root()?;
+        let staging = open_staging_directory(&staging_root, owner)?;
+        let removed = tempfile::tempdir()?;
+        let root = File::open(removed.path())?;
+        fs::remove_dir(removed.path())?;
+        assert!(matches!(
+            write_recovery(&staging, &root, owner, b"recovery"),
+            Err(InstallationUpdateCommitError::RecoveryPending(_))
+        ));
+        assert!(!removed.path().join(RECOVERY_NAME).exists());
         Ok(())
     }
 

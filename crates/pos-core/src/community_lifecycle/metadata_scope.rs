@@ -66,6 +66,23 @@ impl<'a> CommunityScopeMembersV1<'a> {
         }
     }
 
+    /// The preferred scope-member array, the `ScopeSet` preimage (§3). The
+    /// rows must be valid and strictly ascending by their first four fields.
+    ///
+    /// # Errors
+    /// Returns `BoundsExceeded` for more than 2,048 rows and `InvalidBinding`
+    /// for a zero identity, an invalid horizon or unordered rows.
+    pub fn to_canonical_cbor(&self) -> Result<Zeroizing<Vec<u8>>> {
+        if self.len() > MAX_COMMUNITY_SCOPE_MEMBERS_V1 {
+            return Err(Error::BoundsExceeded);
+        }
+        validate_members(*self).map(|()| {
+            let mut out = Zeroizing::new(Vec::with_capacity(members_len(*self)));
+            encode_members(&mut out, *self);
+            out
+        })
+    }
+
     /// Whether no scope rows were supplied; this does not prove a public source.
     #[must_use]
     pub const fn is_empty(&self) -> bool {

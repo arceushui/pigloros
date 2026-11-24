@@ -1,8 +1,8 @@
 //! Exact retained CNT1; a tuple comparison never authenticates a release/owner.
 
 use pos_core::community_lifecycle::{
-    ArtifactRefV1, CommunityLifecycleErrorV1 as Error, CommunityMemberBindingInputV1,
-    CommunityMemberBindingV1, CommunityProfileMemberV1,
+    ArtifactRefV1, CommunityDurableProfileV1, CommunityLifecycleErrorV1 as Error,
+    CommunityMemberBindingInputV1, CommunityMemberBindingV1, CommunityProfileMemberV1,
 };
 use pos_core::{Hash, ImplementationKeyV1};
 use pos_crypto::plugin_execution::{
@@ -119,15 +119,19 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
     ///
     /// This row excludes the later CMB1/COB1 identities. The installed owner
     /// still verifies the actual State schema and admitted initializer source.
+    /// `cadence_interval_ns` is the member's identity-bound cadence interval
+    /// (ADR-129 revision 10, R10.1).
     ///
     /// # Errors
-    /// Rejects a foreign implementation, invalid entry or zero required identity.
+    /// Rejects a foreign implementation, invalid entry, zero required identity
+    /// or zero cadence interval.
     pub fn profile_member<'binding>(
         &self,
         stable_entry: &'binding str,
         implementation: &'binding ImplementationKeyV1,
         state_schema_digest: Hash,
         initializer: ArtifactRefV1,
+        cadence_interval_ns: u64,
     ) -> Result<CommunityProfileMemberV1<'binding>> {
         self.require_implementation(implementation).and_then(|()| {
             CommunityProfileMemberV1::new(
@@ -137,6 +141,7 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
                 state_schema_digest,
                 self.digest(),
                 initializer,
+                cadence_interval_ns,
             )
         })
     }
@@ -241,6 +246,38 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
             }
         })
     }
+}
+
+/// Each CDP1 roster row's CNT1 effective State limit in bytes, in roster order.
+///
+/// These are the CSC1 terms of the initialization CBQ1 byte maximum, the
+/// planner's installed `state_limit_bytes` (owner decision on #560, note
+/// 22891). `tuples` are the rows' actual CNT1s, in roster order; each one's
+/// digest must be its row's `CNT1_digest`, so no limit is taken from a CNT1
+/// the CDP1 does not name.
+///
+/// # Errors
+/// Returns `InvalidBinding` for a tuple count other than the roster's and for
+/// a tuple whose digest differs from its row's CNT1 digest.
+pub fn community_state_limits_v1(
+    profile: &CommunityDurableProfileV1<'_>,
+    tuples: &[CommunityNegotiatedTupleV1<'_>],
+) -> Result<Vec<u64>> {
+    let roster = profile.as_input().roster;
+    if roster.len() != tuples.len() {
+        return Err(Error::InvalidBinding);
+    }
+    roster
+        .iter()
+        .zip(tuples)
+        .map(|(row, tuple)| {
+            if row.digests()[2] == tuple.digest() {
+                Ok(tuple.negotiated.limits().values().state_bytes)
+            } else {
+                Err(Error::InvalidBinding)
+            }
+        })
+        .collect()
 }
 
 fn profile_body_digest(body: &[u8]) -> Hash {

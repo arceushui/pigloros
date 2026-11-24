@@ -282,6 +282,58 @@ impl StagedInstallation {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl StagedInstallation {
+    /// Read the source the selector end wrote to `provider` once and admit
+    /// it, as a runtime that retained the staged installation at startup
+    /// would: every mode is supported and no lifecycle claim is taken.
+    ///
+    /// # Errors
+    /// A peer that is not root, and any read or admission refusal.
+    pub fn admit_source(
+        provider: std::os::unix::net::UnixStream,
+        ledger: &super::execution::StagingLedger,
+    ) -> Result<super::execution::PreparedProviderExecution, String> {
+        use super::execution::{ExecutePeer, ExecuteSource, PreparedProviderExecution};
+        let installation = crate::selector::installation::InstalledSelectorState::open()
+            .and_then(crate::selector::installation::InstalledSelectorState::authenticate_bootstrap)
+            .and_then(crate::selector::installation::authority::AuthenticatedSelectorBootstrap::admit_provider)
+            .map(std::sync::Arc::new)
+            .map_err(|error| error.to_string())?;
+        let peer = ExecutePeer::authenticate(provider).map_err(|_| "the peer is not root")?;
+        let source = ExecuteSource::read(peer, ledger, &installation)
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        PreparedProviderExecution::admit(
+            source,
+            ledger,
+            &installation,
+            |_| true,
+            |_| Ok::<(), std::convert::Infallible>(()),
+        )
+        .map_err(|refusal| format!("{refusal:?}"))
+    }
+
+    /// Create the staging file of `prepared` as `name` in `staging`, then
+    /// write its AGR1 under the test runtime key.
+    ///
+    /// # Errors
+    /// Any refusal of the staging file or the grant.
+    pub fn grant_staged(
+        staging: &super::execution::StagingDirectory,
+        name: [u8; 16],
+        prepared: super::execution::PreparedProviderExecution,
+    ) -> Result<super::execution::GrantedInput, String> {
+        staging
+            .create_input(name, prepared)
+            .map_err(|refusal| format!("{refusal:?}"))?
+            .send_grant(Self::sign_grant, |(), _| {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .map(|((), granted)| granted)
+            .map_err(|failure| format!("{failure:?}"))
+    }
+}
+
 impl Drop for StagedInstallation {
     fn drop(&mut self) {
         let parent = Path::new(INSTALLATION_PARENT);

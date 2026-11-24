@@ -12,7 +12,7 @@ use crate::bounded_input::{
 };
 use crate::evaluator_protocol::IndependenceEvidence;
 
-const MAX_EVALUATOR_BINARY_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_EVALUATOR_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_EVALUATOR_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_EVALUATOR_PROVENANCE_BYTES: u64 = 4 * 1024;
 const MAX_DEPENDENCY_LOCK_BYTES: u64 = 16 * 1024 * 1024;

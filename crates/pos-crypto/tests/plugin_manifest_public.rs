@@ -531,6 +531,23 @@ fn every_descriptor_and_dependency_digest_is_revocable() -> TestResult {
     Ok(())
 }
 
+/// The projection's `pmf1_digest` is the unkeyed BLAKE3-256 of the complete
+/// PMF1 bytes, recomputed independently for two different releases.
+#[test]
+fn the_projection_pmf1_digest_is_the_blake3_of_the_complete_pmf1() -> TestResult {
+    for release in [
+        Release::new()?,
+        Release::sealed_with(24, &bytes([0x24; 32]))?,
+    ] {
+        let projection = release.project()??;
+        assert_eq!(
+            projection.pmf1_digest(),
+            *blake3::hash(&release.pmf1()).as_bytes()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn authorization_accessors_carry_field_24_and_exact_plugin_id_from_real_pmf1() -> TestResult {
     let evidence = evidence(Vec::new(), Vec::new(), 4)?;

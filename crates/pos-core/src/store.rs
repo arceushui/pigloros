@@ -2737,9 +2737,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut store = FlakyStore::new(FlakyMode::Healthy);
         let error = store
-            .bind_owner_consent_v2_permit(crate::consent::OwnerConsentV2PermitV1::from_nonce(
-                [3; 32],
-            ))
+            .bind_owner_consent_v2_permit(crate::owner_consent_v2_permit::fresh_permit()?)
             .test_err()?;
         assert_eq!(
             error.to_string(),

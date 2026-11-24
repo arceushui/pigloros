@@ -4,27 +4,30 @@
 //! (invariants 4 and 14).
 
 use std::cell::Cell;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::future::Future;
+use std::os::linux::net::SocketAddrExt;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT;
+use pos_reference::selector::installation::{InstalledSelectorState, SANDBOX_ARTIFACT_ROOT};
 use tokio::time::Instant;
 use zbus::OwnedObjectPath;
 
 use super::{
-    ledger, open_staging, prepare_host, prepare_with, retained_floor, sweep_staging, Reconcile,
-    ReconcileError,
+    capture_store_over, ledger, open_capture_store, open_staging, prepare_host, prepare_with,
+    retained_floor, sweep_captures, sweep_staging, Reconcile, ReconcileError, ROOT,
 };
 use crate::provider_runtime::tests::{
     bind_as_provider, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
 };
-use crate::provider_runtime::ProviderRuntimeError;
+use crate::provider_runtime::{serve_with, ProviderRuntimeError, RuntimeAuthority};
 use crate::test_fixtures::peer_connections;
 use crate::{
     ControlFloor, EgressProbe, EgressPropertyProbe, NetworkRange, OrphanNetworkCleanup,
@@ -120,6 +123,99 @@ fn the_sweep_removes_staged_inputs_and_refuses_anything_else() -> TestResult {
     assert_eq!(
         ReconcileError::Staging.to_string(),
         "the provider staging directory could not be swept"
+    );
+    Ok(())
+}
+
+/// A published capture's name: 64 lowercase hexadecimal characters.
+fn published() -> String {
+    "5e".repeat(32)
+}
+
+/// A crash temporary of the published capture.
+fn temporary() -> String {
+    format!(".partial-{}-{}", published(), "0a".repeat(16))
+}
+
+#[test]
+fn the_capture_store_opens_only_private_retention_directories() -> TestResult {
+    // The root's own checks are `open_capture_store_root`'s (pos-reference).
+    let (directory, held, _) = private_directory()?;
+    // Both retention directories are created with mode 0700 over the held
+    // root, then reopened as they are.
+    let (root, _store) = capture_store_over(held.try_clone()?).ok_or("not created")?;
+    assert_eq!(root.metadata()?.ino(), held.metadata()?.ino());
+    for child in ["responses", "transcripts"] {
+        let path = directory.path().join(child);
+        assert_eq!(fs::metadata(&path)?.mode() & 0o7777, 0o700);
+    }
+    capture_store_over(held.try_clone()?).ok_or("not reopened")?;
+    // A retention directory of another mode, a symlink or a file is refused.
+    for child in ["responses", "transcripts"] {
+        let path = directory.path().join(child);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        assert!(capture_store_over(held.try_clone()?).is_none());
+        fs::remove_dir(&path)?;
+        symlink(directory.path(), &path)?;
+        assert!(capture_store_over(held.try_clone()?).is_none());
+        fs::remove_file(&path)?;
+        fs::write(&path, b"")?;
+        assert!(capture_store_over(held.try_clone()?).is_none());
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn the_capture_sweep_removes_temporaries_keeps_records_and_refuses_the_rest() -> TestResult {
+    let (directory, _, owner) = private_directory()?;
+    let path = directory.path().join("captures");
+    fs::create_dir(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    let (root, store) = capture_store_over(File::open(&path)?).ok_or("not created")?;
+    sweep_captures(&root, &store, owner)?;
+    // A temporary is unlinked; a published record is kept byte for byte.
+    let record = path.join("transcripts").join(published());
+    fs::write(&record, b"record")?;
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o400))?;
+    for child in ["responses", "transcripts"] {
+        fs::write(path.join(child).join(temporary()), b"partial")?;
+    }
+    sweep_captures(&root, &store, owner)?;
+    assert_eq!(fs::read_dir(path.join("responses"))?.count(), 0);
+    assert_eq!(fs::read(&record)?, b"record");
+    // A record of another owner fails closed and is kept.
+    assert!(matches!(
+        sweep_captures(&root, &store, owner.wrapping_add(1)),
+        Err(ReconcileError::Captures)
+    ));
+    assert_eq!(fs::read(&record)?, b"record");
+    // Any other entry of the root or of a retention directory fails closed
+    // and is kept.
+    for name in ["notes", "staging"] {
+        fs::write(path.join(name), b"")?;
+        assert!(matches!(
+            sweep_captures(&root, &store, owner),
+            Err(ReconcileError::Captures)
+        ));
+        assert!(path.join(name).is_file());
+        fs::remove_file(path.join(name))?;
+    }
+    fs::write(path.join("responses").join("notes"), b"")?;
+    assert!(matches!(
+        sweep_captures(&root, &store, owner),
+        Err(ReconcileError::Captures)
+    ));
+    assert!(path.join("responses").join("notes").is_file());
+    // A root descriptor that is no directory cannot be listed.
+    fs::write(directory.path().join("file"), b"")?;
+    assert!(matches!(
+        sweep_captures(&File::open(directory.path().join("file"))?, &store, owner),
+        Err(ReconcileError::Captures)
+    ));
+    assert_eq!(
+        ReconcileError::Captures.to_string(),
+        "the network capture store could not be swept"
     );
     Ok(())
 }
@@ -234,6 +330,184 @@ fn directory(path: &str, mode: u32) -> TestResult {
     Ok(())
 }
 
+/// The provider state directories a reconciling host holds.
+fn provider_state() -> TestResult {
+    directory("/run/pigloros", 0o755)?;
+    for path in [
+        "/run/pigloros/sandbox",
+        "/run/pigloros/sandbox/registry",
+        "/run/pigloros/sandbox/attempts",
+    ] {
+        directory(path, 0o700)?;
+    }
+    directory(&format!("{SANDBOX_ARTIFACT_ROOT}/images"), 0o755)
+}
+
+/// Under a umask that strips the owner's bits, the store root and both
+/// retention directories are still created with mode exactly 0700. The
+/// isolated test is the only one in its process, so the umask is its own.
+fn creates_a_private_store_under_a_strict_umask(
+    installed: &InstalledSelectorState,
+    captures: &Path,
+) -> TestResult {
+    let umask = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let opened = open_capture_store(installed, ROOT);
+    rustix::process::umask(umask);
+    drop(opened.ok_or("the capture store was not created")?);
+    for path in [
+        captures.to_owned(),
+        captures.join("responses"),
+        captures.join("transcripts"),
+    ] {
+        assert_eq!(fs::metadata(path)?.mode() & 0o7777, 0o700);
+    }
+    Ok(())
+}
+
+/// One unsafe capture store: `break_store` makes it from a sound store,
+/// `repair` restores the sound store, and `through_startup` runs the whole
+/// `provider-runtime` startup over it instead of step 7 alone.
+struct UnsafeStore {
+    break_store: fn(&Path) -> std::io::Result<()>,
+    repair: fn(&Path) -> std::io::Result<()>,
+    through_startup: bool,
+}
+
+/// Invariant 38's unsafe stores: a root or a retention directory of another
+/// mode, a symlinked root and a non-directory root.
+const UNSAFE_STORES: [UnsafeStore; 4] = [
+    UnsafeStore {
+        break_store: |captures| fs::set_permissions(captures, fs::Permissions::from_mode(0o755)),
+        repair: |captures| fs::set_permissions(captures, fs::Permissions::from_mode(0o700)),
+        through_startup: false,
+    },
+    UnsafeStore {
+        break_store: |captures| {
+            fs::set_permissions(
+                captures.join("responses"),
+                fs::Permissions::from_mode(0o755),
+            )
+        },
+        repair: |captures| {
+            fs::set_permissions(
+                captures.join("responses"),
+                fs::Permissions::from_mode(0o700),
+            )
+        },
+        through_startup: false,
+    },
+    UnsafeStore {
+        break_store: |captures| {
+            fs::rename(captures, moved(captures)).and_then(|()| symlink(moved(captures), captures))
+        },
+        repair: restore_root,
+        through_startup: true,
+    },
+    UnsafeStore {
+        break_store: |captures| {
+            fs::rename(captures, moved(captures)).and_then(|()| fs::write(captures, b""))
+        },
+        repair: restore_root,
+        through_startup: false,
+    },
+];
+
+/// Where a test moves the sound store root aside.
+fn moved(captures: &Path) -> std::path::PathBuf {
+    captures.with_file_name("moved")
+}
+
+/// Replace whatever is at `captures` by the root moved aside.
+fn restore_root(captures: &Path) -> std::io::Result<()> {
+    fs::remove_file(captures).and_then(|()| fs::rename(moved(captures), captures))
+}
+
+/// Invariant 38: every unsafe store fails step 7 closed, and is left sound.
+fn refuses_an_unsafe_store(
+    authority: &RuntimeAuthority,
+    captures: &Path,
+    servers: &Mutex<Vec<zbus::Connection>>,
+    calls: &Arc<[AtomicUsize; 2]>,
+) -> TestResult {
+    UNSAFE_STORES
+        .iter()
+        .try_for_each(|store| refuses_one(store, authority, captures, (servers, calls)))
+}
+
+/// Break the store as `store` says, check step 7 refuses it, then repair it.
+fn refuses_one(
+    store: &UnsafeStore,
+    authority: &RuntimeAuthority,
+    captures: &Path,
+    (servers, calls): (&Mutex<Vec<zbus::Connection>>, &Arc<[AtomicUsize; 2]>),
+) -> TestResult {
+    (store.break_store)(captures)?;
+    let refused = if store.through_startup {
+        serves_nothing_over_an_unsafe_store(servers, calls)
+    } else {
+        step_7_refuses(authority, servers, calls)
+    };
+    (store.repair)(captures)?;
+    refused
+}
+
+/// Step 7 alone refuses with `HostUnavailable`.
+fn step_7_refuses(
+    authority: &RuntimeAuthority,
+    servers: &Mutex<Vec<zbus::Connection>>,
+    calls: &Arc<[AtomicUsize; 2]>,
+) -> TestResult {
+    matches!(
+        prepare_with(authority, fake_bus(servers, calls), clean_network),
+        Err(ProviderRuntimeError::HostUnavailable)
+    )
+    .then_some(())
+    .ok_or_else(|| "step 7 accepted an unsafe capture store".into())
+}
+
+/// The abstract notification socket a refused startup must never notify.
+const NOTIFY: &str = "@pigloros-capture-store-notify";
+
+/// A service manager listening on [`NOTIFY`], waiting 200 ms for a datagram.
+fn notify_manager() -> std::io::Result<UnixDatagram> {
+    SocketAddr::from_abstract_name(&NOTIFY[1..])
+        .and_then(|address| UnixDatagram::bind_addr(&address))
+        .and_then(|manager| {
+            manager
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .map(|()| manager)
+        })
+}
+
+/// Run the whole `provider-runtime` startup over a capture store step 7
+/// refuses: it exits with `HostUnavailable`, binds neither endpoint and
+/// never sends `READY=1` (invariant 38).
+fn serves_nothing_over_an_unsafe_store(
+    servers: &Mutex<Vec<zbus::Connection>>,
+    calls: &Arc<[AtomicUsize; 2]>,
+) -> TestResult {
+    let manager = notify_manager()?;
+    let authority = bind_as_provider()??;
+    let (execute, control) = authority
+        .0
+        .bootstrap()
+        .installed()
+        .manifest()
+        .provider_sockets();
+    let endpoints = [execute.to_owned(), control.to_owned()];
+    assert_eq!(
+        serve_with(
+            move || Ok(authority),
+            |authority| prepare_with(authority, fake_bus(servers, calls), clean_network),
+            Some(OsStr::new(NOTIFY)),
+        ),
+        ProviderRuntimeError::HostUnavailable
+    );
+    assert!(endpoints.iter().all(|endpoint| !endpoint.exists()));
+    assert!(manager.recv(&mut [0; 16]).is_err(), "READY=1 was sent");
+    Ok(())
+}
+
 #[test]
 fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     if !in_isolated_root(
@@ -244,26 +518,22 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     let staged = StagedInstallation::stage_execution()?;
     install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
     let authority = bind_as_provider()??;
-    // Step 7 on this host: the container has no system bus.
+    let (admitted, installation, _) = &authority;
+    let captures = Path::new(SANDBOX_ARTIFACT_ROOT).join("captures");
+    // Step 7 on this host: the container has no system bus, and a failed
+    // earlier step creates no capture store.
     assert!(matches!(
         prepare_host(&authority),
         Err(ProviderRuntimeError::HostUnavailable)
     ));
-    directory("/run/pigloros", 0o755)?;
-    for path in [
-        "/run/pigloros/sandbox",
-        "/run/pigloros/sandbox/registry",
-        "/run/pigloros/sandbox/attempts",
-    ] {
-        directory(path, 0o700)?;
-    }
-    directory(&format!("{SANDBOX_ARTIFACT_ROOT}/images"), 0o755)?;
+    assert!(!captures.exists(), "the capture store was created");
+    creates_a_private_store_under_a_strict_umask(admitted.bootstrap().installed(), &captures)?;
+    provider_state()?;
     let staging = Path::new("/run/pigloros/sandbox/staging");
     let servers = Mutex::new(Vec::new());
     let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     // A failed orphan sweep keeps admission closed; the staging directory
     // step 7 created is not swept.
-    let (admitted, installation, _) = &authority;
     let built = Cell::new(None);
     let host = prepare_with(&authority, fake_bus(&servers, &calls), |range, probe| {
         built.set(Some((range, probe)));
@@ -320,16 +590,34 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
     assert!(matches!(host.reconcile(), Err(ReconcileError::Staging)));
     fs::remove_dir(staging.join("directory"))?;
-    // A clean host: the staging directory is emptied and the lifecycle
+    refuses_an_unsafe_store(&authority, &captures, &servers, &calls)?;
+    // An entry of the capture store that is neither a published record nor
+    // a temporary fails reconciliation closed, after the staging sweep.
+    // Invariant 39: a published record survives every sweep.
+    let record = captures.join("transcripts").join(published());
+    fs::write(&record, b"record")?;
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o400))?;
+    fs::write(captures.join("responses").join(temporary()), b"partial")?;
+    fs::write(captures.join("notes"), b"")?;
+    let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
+    assert!(matches!(host.reconcile(), Err(ReconcileError::Captures)));
+    assert!(captures.join("notes").is_file());
+    fs::remove_file(captures.join("notes"))?;
+    // A clean host: the staging directory is emptied, the capture temporary
+    // removed, the published record kept byte for byte, and the lifecycle
     // holds the registry for the life of the process.
     let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
     let lifecycle = host.reconcile()?;
     // Each step 7 subscribed, and each reconciliation listed the units.
     assert_eq!(
         calls.each_ref().map(|count| count.load(Ordering::SeqCst)),
-        [3, 3]
+        [8, 4]
     );
     assert_eq!(fs::read_dir(staging)?.count(), 0);
+    assert_eq!(fs::read_dir(captures.join("responses"))?.count(), 0);
+    assert_eq!(fs::read(&record)?, b"record");
+    assert_eq!(fs::metadata(&record)?.mode() & 0o7777, 0o400);
+    assert_eq!(fs::read_dir(captures.join("transcripts"))?.count(), 1);
     assert!(SystemdAttemptRegistry::open().is_err());
     drop(lifecycle);
     assert!(SystemdAttemptRegistry::open().is_ok());

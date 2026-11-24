@@ -44,11 +44,14 @@ impl PendingRecoveryRuntimeKey {
     /// that breaks the SIC1 file rules or the 48 MiB bound, and a SIR1 whose
     /// envelope, self-digest, header or runtime key is malformed.
     pub fn read() -> Result<Self, SelectorBoundaryError> {
-        fixed_artifact_root().and_then(|root| Self::read_at(&root, 0))
+        fixed_artifact_root()
+            .map_err(SelectorBoundaryError::from)
+            .and_then(|root| Self::read_at(&root, 0))
     }
 
     fn read_at(root: &File, owner: u32) -> Result<Self, SelectorBoundaryError> {
         validate_directory(root, owner)
+            .map_err(SelectorBoundaryError::from)
             .and_then(|()| {
                 read_bounded_immutable(root, RECOVERY_NAME, owner, RECOVERY_LIMIT as u64)
             })
