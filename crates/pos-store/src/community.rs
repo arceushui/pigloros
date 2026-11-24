@@ -21,6 +21,8 @@ mod native_graph;
 mod observation;
 mod pass_planner;
 #[cfg(target_os = "linux")]
+mod pass_record;
+#[cfg(target_os = "linux")]
 mod pass_state;
 #[cfg(target_os = "linux")]
 mod pass_writer;
@@ -71,6 +73,8 @@ pub use pass_planner::{
     CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
     CommunityPassQuotedV1, CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
 };
+#[cfg(target_os = "linux")]
+pub use pass_record::{CommunityPassStatusV1, CommunityReservedPassV1};
 #[cfg(target_os = "linux")]
 pub use pass_writer::{
     CommunityCommitInputV1, CommunityMintedObservationV1, CommunityReserveInputV1,

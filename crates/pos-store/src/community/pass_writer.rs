@@ -35,6 +35,7 @@ use super::pass_planner::{
     admit_caps, trace_room, CommunityPassCapsV1, CommunityPassReadPortV1,
     CommunityQuarantineIndexV1,
 };
+use super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1};
 use super::pass_state::CommunityPendingReservationV1;
 
 /// The observation materialization a Reserve mints (R9.7), as its stage-1
@@ -83,6 +84,9 @@ pub struct CommunityReserveInputV1 {
     pub failure_reserve: u64,
     /// The materialization this call mints, or `None` for a reused one.
     pub minted: Option<CommunityMintedObservationV1>,
+    /// What the pass record keeps: the CPR1 fields, the quote and the
+    /// horizons (R8.1(7)).
+    pub pass: CommunityReservedPassV1,
 }
 
 /// A Reserve that passed every writer re-check and awaits its apply.
@@ -90,6 +94,7 @@ pub struct CommunityStagedReserveV1 {
     key: (TimelineId, [u8; 16]),
     entry: CommunityPendingReservationV1,
     minted: Option<CommunityMintedObservationV1>,
+    record: CommunityPassRecordV1,
 }
 
 /// One Commit's writer inputs (R10.3(6), R11.3, R13.1(4)).
@@ -149,8 +154,20 @@ impl MemoryCommunityDomainV1 {
             return Err(Error::InvalidBinding);
         }
         let key = (input.timeline, input.reservation_operation_id);
-        if self.pending_reservations.contains_key(&key) {
+        let reservation = input.pass.reservation;
+        let pass_key = reservation.pass_key;
+        if pass_key.timeline() != input.timeline
+            || pass_key.generation() != input.generation
+            || reservation.predecessor_head_digest != input.selected_head
+        {
+            return Err(Error::InvalidBinding);
+        }
+        // A resolved identity is a replay, not a new operation (R8.1(7)).
+        if self.pass_records.contains_key(&key) {
             return Err(Error::Conflict);
+        }
+        if self.unresolved_pass(input.timeline).is_some() {
+            return Err(Error::PassUnresolved);
         }
         let state = self
             .pass_states
@@ -187,6 +204,13 @@ impl MemoryCommunityDomainV1 {
                 entry: CommunityPendingReservationV1 {
                     targets: 2 * pass_rows + input.failure_reserve,
                     rows: pass_rows + input.failure_reserve / 2,
+                },
+                record: CommunityPassRecordV1 {
+                    reserved: input.pass,
+                    prior_shared_counts: input.prior_shared_counts,
+                    materialization: input.minted.as_ref().map(|minted| minted.additions),
+                    status: CommunityPassStatusV1::Reserved,
+                    live: true,
                 },
                 minted: input.minted,
             }
@@ -229,6 +253,7 @@ impl MemoryCommunityDomainV1 {
     ) {
         let (timeline, _) = staged.key;
         self.pending_reservations.insert(staged.key, staged.entry);
+        self.pass_records.insert(staged.key, staged.record);
         self.pass_states.entry(timeline).and_modify(|state| {
             let counts = state.generations.entry(state.generation).or_default();
             counts.outcomes += 1;
@@ -273,6 +298,11 @@ impl MemoryCommunityDomainV1 {
         let input = staged.0;
         self.pending_reservations
             .remove(&(input.timeline, input.reservation_operation_id));
+        self.set_pass_status(
+            input.timeline,
+            input.reservation_operation_id,
+            CommunityPassStatusV1::Committed,
+        );
         self.pass_states.entry(input.timeline).and_modify(|state| {
             state.counters = add_counts(state.counters, input.additions);
             state.graph = input.graph;
@@ -318,6 +348,7 @@ impl MemoryCommunityDomainV1 {
         staged: CommunityStagedAbortV1,
     ) {
         self.pending_reservations.remove(&staged.key);
+        self.set_pass_status(staged.key.0, staged.key.1, CommunityPassStatusV1::Aborted);
     }
 
     fn entry_of(&self, key: (TimelineId, [u8; 16]), rows: u64) -> Result<(), Error> {

@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
-    CommunityPassGraphTermsV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
-    CommunityScopeMemberV1, CommunitySharedCountsV1, COMMUNITY_CONTROL_OPERATIONS_V1,
+    CommunityPassGraphTermsV1, CommunityPassKeyV1, CommunityQuarantineReasonEvidenceV1,
+    CommunityQuarantineReasonV1, CommunityReservationInputV1, CommunityScopeMemberV1,
+    CommunitySharedCountsV1, COMMUNITY_CONTROL_OPERATIONS_V1,
     COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_ROW_LIMIT_V1,
     COMMUNITY_ERASURE_TARGET_LINE_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
 };
@@ -21,6 +22,7 @@ use ulid::Ulid;
 
 use super::super::erasure_budget::CommunityErasureBudgetPortV1;
 use super::super::pass_planner::CommunityPassReadPortV1;
+use super::super::pass_record::{CommunityPassStatusV1, CommunityReservedPassV1};
 use super::super::pass_state::{
     CommunityGenerationCountsV1, CommunityPassStateV1, CommunityPendingReservationV1,
 };
@@ -143,8 +145,8 @@ fn minted() -> CommunityMintedObservationV1 {
 }
 
 /// A Reserve of 24 pass rows with `F_p` of 4 targets, minting.
-fn input() -> CommunityReserveInputV1 {
-    CommunityReserveInputV1 {
+fn input() -> Result<CommunityReserveInputV1, Error> {
+    Ok(CommunityReserveInputV1 {
         timeline: id(1),
         generation: GENERATION,
         reservation_operation_id: OPERATION,
@@ -156,14 +158,47 @@ fn input() -> CommunityReserveInputV1 {
         pass_rows: 24,
         failure_reserve: 4,
         minted: Some(minted()),
-    }
+        pass: reserved_pass()?,
+    })
 }
 
-fn reuse() -> CommunityReserveInputV1 {
-    CommunityReserveInputV1 {
+/// A pass key of a nonzero coordinate.
+fn pass_key(
+    timeline: TimelineId,
+    generation: [u8; 16],
+    ordinal: u64,
+) -> Result<CommunityPassKeyV1, Error> {
+    CommunityPassKeyV1::new(timeline, generation, ordinal)
+}
+
+/// The record facts of the pass `input()?` reserves: ordinal 7, whose
+/// predecessor is the head T selects.
+fn reserved_pass() -> Result<CommunityReservedPassV1, Error> {
+    let reservation = CommunityReservationInputV1 {
+        pass_key: pass_key(id(1), GENERATION, 7)?,
+        request_digest: hash(80),
+        native_producer_ordinal: 5,
+        predecessor_head_digest: hash(30),
+        roster_digest: hash(81),
+        prepared_input_set_digest: hash(82),
+        profile_digest: hash(83),
+        evidence_not_after_micros: 9_000,
+    };
+    Ok(CommunityReservedPassV1 {
+        reservation,
+        cbq1_digest: hash(84),
+        quote_maxima: [1, 2, 3],
+        trace_rows: 6,
+        generation_horizon_micros: 9_000,
+        outcome_horizon_micros: 8_000,
+    })
+}
+
+fn reuse() -> Result<CommunityReserveInputV1, Error> {
+    Ok(CommunityReserveInputV1 {
         minted: None,
-        ..input()
-    }
+        ..input()?
+    })
 }
 
 fn pending(domain: &MemoryCommunityDomainV1) -> Option<(u64, u64)> {
@@ -205,7 +240,7 @@ const fn sum(a: CommunitySharedCountsV1, b: CommunitySharedCountsV1) -> Communit
 #[test]
 fn a_minting_reserve_advances_the_state_and_the_ledger() -> TestResult {
     let mut domain = domain()?;
-    let staged = domain.stage_reserve(input())?;
+    let staged = domain.stage_reserve(input()?)?;
     // Staging changes nothing.
     assert_eq!(pending(&domain), None);
     assert_eq!(domain.retained_pass_outcomes(id(1), GENERATION), 0);
@@ -235,7 +270,7 @@ fn a_minting_reserve_advances_the_state_and_the_ledger() -> TestResult {
 #[test]
 fn a_reusing_reserve_counts_an_outcome_only() -> TestResult {
     let mut domain = domain()?;
-    let staged = domain.stage_reserve(reuse())?;
+    let staged = domain.stage_reserve(reuse()?)?;
     domain.apply_reserve(&SEAL, staged);
     assert_eq!(pending(&domain), Some((52, 26)));
     assert_eq!(domain.retained_pass_outcomes(id(1), GENERATION), 1);
@@ -275,28 +310,28 @@ fn a_reserve_needs_state_a_fitting_materialization_and_a_new_identity() -> TestR
     let mut domain = domain()?;
     let elsewhere = CommunityReserveInputV1 {
         timeline: id(2),
-        ..input()
+        ..input()?
     };
     assert_eq!(
-        domain.stage_reserve(elsewhere).err(),
+        domain.stage_reserve(bound(elsewhere)?).err(),
         Some(Error::EvidenceUnavailable)
     );
     let exact = CommunityReserveInputV1 {
         pass_rows: 6,
-        ..input()
+        ..input()?
     };
     assert!(domain.stage_reserve(exact).is_ok());
     let over = CommunityReserveInputV1 {
         pass_rows: 5,
-        ..input()
+        ..input()?
     };
     assert_eq!(
         domain.stage_reserve(over).err(),
         Some(Error::InvalidBinding)
     );
-    let staged = domain.stage_reserve(input())?;
+    let staged = domain.stage_reserve(input()?)?;
     domain.apply_reserve(&SEAL, staged);
-    assert_eq!(domain.stage_reserve(input()).err(), Some(Error::Conflict));
+    assert_eq!(domain.stage_reserve(input()?).err(), Some(Error::Conflict));
     Ok(())
 }
 
@@ -333,10 +368,10 @@ fn the_writer_refuses_in_the_step_5j_order() -> TestResult {
         prior_shared_counts: counts(7),
         pass_rows: u64::MAX / 4,
         recording_not_after_micros: SAMPLE,
-        ..input()
+        ..input()?
     };
     let refusal = |domain: &MemoryCommunityDomainV1, input: &CommunityReserveInputV1| {
-        domain.stage_reserve(input.clone()).err()
+        bound(input.clone()).map_or_else(Some, |call| domain.stage_reserve(call).err())
     };
     assert_eq!(refusal(&domain, &every), Some(Error::StaleGeneration));
     every.generation = GENERATION;
@@ -370,7 +405,7 @@ fn only_an_active_reason_quarantines() -> TestResult {
         evidence_not_after_micros: RECORDING,
     };
     domain.quarantine_index.insert(hash(50), ledger(Vec::new()));
-    assert!(domain.stage_reserve(input()).is_ok());
+    assert!(domain.stage_reserve(input()?).is_ok());
     domain.quarantine_index.insert(
         hash(51),
         ledger(vec![CommunityQuarantineReasonEvidenceV1 {
@@ -379,7 +414,7 @@ fn only_an_active_reason_quarantines() -> TestResult {
         }]),
     );
     assert_eq!(
-        domain.stage_reserve(input()).err(),
+        domain.stage_reserve(input()?).err(),
         Some(Error::Quarantined)
     );
     Ok(())
@@ -411,17 +446,17 @@ fn the_control_operation_cap_refuses_a_minting_reserve_at_the_cap() -> TestResul
     let below = COMMUNITY_RETAINED_PASS_OUTCOMES_V1 - 1;
     // One below the cap: both counted kinds make up the count.
     set_counts(&mut domain, below, 1, COMMUNITY_CONTROL_OPERATIONS_V1 - 2);
-    assert!(domain.stage_reserve(input()).is_ok());
+    assert!(domain.stage_reserve(input()?).is_ok());
     set_counts(&mut domain, below, 1, COMMUNITY_CONTROL_OPERATIONS_V1 - 1);
     assert_eq!(
-        domain.stage_reserve(input()).err(),
+        domain.stage_reserve(input()?).err(),
         Some(Error::CapacityExhausted)
     );
     // A reused observation needs no control operation.
-    assert!(domain.stage_reserve(reuse()).is_ok());
+    assert!(domain.stage_reserve(reuse()?).is_ok());
     set_counts(&mut domain, COMMUNITY_RETAINED_PASS_OUTCOMES_V1, 0, 0);
     assert_eq!(
-        domain.stage_reserve(reuse()).err(),
+        domain.stage_reserve(reuse()?).err(),
         Some(Error::CapacityExhausted)
     );
     Ok(())
@@ -432,9 +467,10 @@ fn the_control_operation_cap_refuses_a_minting_reserve_at_the_cap() -> TestResul
 #[test]
 fn the_recording_horizon_is_judged_at_the_writer() -> TestResult {
     let domain = domain()?;
+    let base = input()?;
     let at = |recording_not_after_micros| CommunityReserveInputV1 {
         recording_not_after_micros,
-        ..input()
+        ..base.clone()
     };
     assert_eq!(
         domain.stage_reserve(at(RECORDING - 1)).err(),
@@ -462,12 +498,12 @@ fn the_writer_rereads_the_target_line_with_the_pending_ledger() -> TestResult {
     domain
         .pending_reservations
         .insert((id(2), [1; 16]), held(room));
-    assert!(domain.stage_reserve(input()).is_ok());
+    assert!(domain.stage_reserve(input()?).is_ok());
     domain
         .pending_reservations
         .insert((id(2), [1; 16]), held(room + 1));
     assert_eq!(
-        domain.stage_reserve(input()).err(),
+        domain.stage_reserve(input()?).err(),
         Some(Error::StaleFrontier)
     );
     Ok(())
@@ -487,17 +523,17 @@ fn the_writer_rereads_the_rows_line_of_t() -> TestResult {
     domain
         .pending_reservations
         .insert((id(2), [1; 16]), held(COMMUNITY_ERASURE_ROW_LIMIT_V1));
-    assert!(domain.stage_reserve(input()).is_ok());
+    assert!(domain.stage_reserve(input()?).is_ok());
     domain.pending_reservations.clear();
     domain
         .pending_reservations
         .insert((id(1), [1; 16]), held(room));
-    assert!(domain.stage_reserve(input()).is_ok());
+    assert!(domain.stage_reserve(input()?).is_ok());
     domain
         .pending_reservations
         .insert((id(1), [1; 16]), held(room + 1));
     assert_eq!(
-        domain.stage_reserve(input()).err(),
+        domain.stage_reserve(input()?).err(),
         Some(Error::StaleFrontier)
     );
     Ok(())
@@ -509,7 +545,7 @@ fn the_writer_rereads_the_rows_line_of_t() -> TestResult {
 #[test]
 fn a_commit_replaces_the_entry_and_advances_the_state() -> TestResult {
     let mut domain = domain()?;
-    let staged = domain.stage_reserve(input())?;
+    let staged = domain.stage_reserve(input()?)?;
     domain.apply_reserve(&SEAL, staged);
 
     let staged = domain.stage_commit(commit_input())?;
@@ -542,7 +578,7 @@ fn a_commit_replaces_the_entry_and_advances_the_state() -> TestResult {
 #[test]
 fn a_commit_without_an_observation_keeps_the_other_terms() -> TestResult {
     let mut domain = domain()?;
-    let staged = domain.stage_reserve(input())?;
+    let staged = domain.stage_reserve(input()?)?;
     domain.apply_reserve(&SEAL, staged);
     let commit = CommunityCommitInputV1 {
         observation: None,
@@ -565,7 +601,7 @@ fn a_commit_is_bounded_by_its_pending_entry() -> TestResult {
         domain.stage_commit(commit_input()).err(),
         Some(Error::InvalidBinding)
     );
-    let staged = domain.stage_reserve(input())?;
+    let staged = domain.stage_reserve(input()?)?;
     domain.apply_reserve(&SEAL, staged);
     let rows = |bound_rows| CommunityCommitInputV1 {
         bound_rows,
@@ -594,7 +630,7 @@ fn a_commit_is_bounded_by_its_pending_entry() -> TestResult {
 #[test]
 fn an_abort_leaves_the_materialization_counted_and_reusable() -> TestResult {
     let mut domain = domain()?;
-    let staged = domain.stage_reserve(input())?;
+    let staged = domain.stage_reserve(input()?)?;
     domain.apply_reserve(&SEAL, staged);
     // Every cap is full: an Abort is still allowed.
     set_counts(
@@ -639,7 +675,7 @@ fn a_refused_reserve_changes_nothing() -> TestResult {
     let domain = domain()?;
     let stale = CommunityReserveInputV1 {
         selected_head: hash(99),
-        ..input()
+        ..input()?
     };
     assert!(domain.stage_reserve(stale).is_err());
     assert_eq!(pending(&domain), None);
@@ -654,12 +690,15 @@ fn the_head_and_the_counters_are_each_compared() -> TestResult {
     let domain = domain()?;
     let head = CommunityReserveInputV1 {
         selected_head: hash(99),
-        ..input()
+        ..input()?
     };
-    assert_eq!(domain.stage_reserve(head).err(), Some(Error::StaleFrontier));
+    assert_eq!(
+        domain.stage_reserve(bound(head)?).err(),
+        Some(Error::StaleFrontier)
+    );
     let moved = CommunityReserveInputV1 {
         prior_shared_counts: counts(101),
-        ..input()
+        ..input()?
     };
     assert_eq!(
         domain.stage_reserve(moved).err(),
@@ -675,10 +714,9 @@ fn the_head_and_the_counters_are_each_compared() -> TestResult {
 fn every_actor_of_the_scope_must_fit() -> TestResult {
     let mut domain = domain()?;
     domain.pass_states.insert(id(2), pass_state());
-    let child = CommunityReserveInputV1 {
-        timeline: id(2),
-        ..input()
-    };
+    let mut child = input()?;
+    child.timeline = id(2);
+    child.pass.reservation.pass_key = CommunityPassKeyV1::new(id(2), GENERATION, 7)?;
     assert!(domain.stage_reserve(child.clone()).is_ok());
     domain.pending_reservations.insert(
         (id(1), [1; 16]),
@@ -691,5 +729,160 @@ fn every_actor_of_the_scope_must_fit() -> TestResult {
         domain.stage_reserve(child).err(),
         Some(Error::StaleFrontier)
     );
+    Ok(())
+}
+
+/// A second operation of T: another identity and pass key.
+fn other_operation(
+    domain: &MemoryCommunityDomainV1,
+) -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
+    let state = domain.pass_states.get(&id(1)).ok_or("state")?;
+    let mut other = input()?;
+    other.selected_head = state.head;
+    other.prior_shared_counts = state.counters;
+    other.reservation_operation_id = [0x77; 16];
+    other.pass.reservation.pass_key = CommunityPassKeyV1::new(id(1), GENERATION, 8)?;
+    other.pass.reservation.predecessor_head_digest = state.head;
+    Ok(other)
+}
+
+/// The record facts a caller binds to what it planned over: the input's
+/// Timeline, generation and head.
+fn bound(mut call: CommunityReserveInputV1) -> Result<CommunityReserveInputV1, Error> {
+    call.pass.reservation.pass_key = pass_key(call.timeline, call.generation, 7)?;
+    call.pass.reservation.predecessor_head_digest = call.selected_head;
+    Ok(call)
+}
+
+/// R8.1(7): the Reserve that applies indexes its pass by `(T, O)` with
+/// the CPR1 fields, the quote facts and the status Reserved, live.
+#[test]
+fn a_reserve_indexes_its_pass_reserved_and_live() -> TestResult {
+    let mut domain = domain()?;
+    assert_eq!(domain.pass_status(id(1), OPERATION), None);
+    assert!(!domain.pass_is_live(id(1), OPERATION));
+    assert!(domain.pass_reservation(id(1), OPERATION).is_none());
+    assert!(domain.pass_counters(id(1), OPERATION).is_none());
+    let staged = domain.stage_reserve(input()?)?;
+    assert!(domain.unresolved_pass(id(1)).is_none());
+    domain.apply_reserve(&SEAL, staged);
+
+    assert_eq!(
+        domain.pass_status(id(1), OPERATION),
+        Some(CommunityPassStatusV1::Reserved)
+    );
+    assert!(domain.pass_is_live(id(1), OPERATION));
+    let reservation = domain.pass_reservation(id(1), OPERATION).ok_or("cpr1")?;
+    assert!(reservation == reserved_pass()?.reservation);
+    let (prior, additions) = domain.pass_counters(id(1), OPERATION).ok_or("counts")?;
+    assert!(prior == counts(100));
+    assert!(additions.ok_or("additions")? == counts(10));
+    let record = domain.pass_record(id(1), OPERATION).ok_or("record")?;
+    assert_eq!(record.reserved.quote_maxima, [1, 2, 3]);
+    assert_eq!(record.reserved.cbq1_digest, hash(84));
+    assert_eq!(record.reserved.trace_rows, 6);
+    assert_eq!(record.reserved.generation_horizon_micros, 9_000);
+    assert_eq!(record.reserved.outcome_horizon_micros, 8_000);
+    assert!(domain.unresolved_pass(id(1)).is_some());
+    assert!(domain.unresolved_pass(id(2)).is_none());
+
+    domain.end_live_call(&SEAL, id(1), OPERATION);
+    assert!(!domain.pass_is_live(id(1), OPERATION));
+    // Ending a call of an unknown pass changes nothing.
+    domain.end_live_call(&SEAL, id(1), [0x01; 16]);
+    Ok(())
+}
+
+/// A reused observation records no additions.
+#[test]
+fn a_reusing_reserve_records_no_additions() -> TestResult {
+    let mut domain = domain()?;
+    let staged = domain.stage_reserve(reuse()?)?;
+    domain.apply_reserve(&SEAL, staged);
+    let (_, additions) = domain.pass_counters(id(1), OPERATION).ok_or("counts")?;
+    assert!(additions.is_none());
+    Ok(())
+}
+
+/// The record names the Timeline, generation and head the call planned
+/// over (R10.7 5j), and a replay or a second unresolved pass is refused
+/// (R8.1(7), code 7).
+#[test]
+fn the_index_refuses_replays_and_a_second_unresolved_pass() -> TestResult {
+    let mut domain = domain()?;
+    let mut elsewhere = input()?;
+    elsewhere.pass.reservation.pass_key = CommunityPassKeyV1::new(id(2), GENERATION, 7)?;
+    assert_eq!(
+        domain.stage_reserve(elsewhere).err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut regenerated = input()?;
+    regenerated.pass.reservation.pass_key = CommunityPassKeyV1::new(id(1), [0x21; 16], 7)?;
+    assert_eq!(
+        domain.stage_reserve(regenerated).err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut moved = input()?;
+    moved.pass.reservation.predecessor_head_digest = hash(99);
+    assert_eq!(
+        domain.stage_reserve(moved).err(),
+        Some(Error::InvalidBinding)
+    );
+
+    let staged = domain.stage_reserve(input()?)?;
+    domain.apply_reserve(&SEAL, staged);
+    assert_eq!(
+        domain.stage_reserve(other_operation(&domain)?).err(),
+        Some(Error::PassUnresolved)
+    );
+    // A Sealed pass is unresolved too.
+    assert!(domain.set_pass_status(id(1), OPERATION, CommunityPassStatusV1::Sealed));
+    assert_eq!(
+        domain.stage_reserve(other_operation(&domain)?).err(),
+        Some(Error::PassUnresolved)
+    );
+
+    let abort = domain.stage_abort(id(1), OPERATION, 0)?;
+    domain.apply_abort(&SEAL, abort);
+    assert_eq!(
+        domain.pass_status(id(1), OPERATION),
+        Some(CommunityPassStatusV1::Aborted)
+    );
+    assert!(!domain.pass_is_live(id(1), OPERATION));
+    // The resolved identity is a replay; a new one reserves.
+    assert_eq!(domain.stage_reserve(input()?).err(), Some(Error::Conflict));
+    assert!(domain.stage_reserve(other_operation(&domain)?).is_ok());
+    Ok(())
+}
+
+/// A Commit resolves the pass for good: no transition leaves a terminal
+/// status, and only Reserved reaches Sealed.
+#[test]
+fn a_commit_resolves_the_pass_and_statuses_only_move_forward() -> TestResult {
+    let mut domain = domain()?;
+    let staged = domain.stage_reserve(input()?)?;
+    domain.apply_reserve(&SEAL, staged);
+    assert!(!domain.set_pass_status(id(1), OPERATION, CommunityPassStatusV1::Reserved));
+    assert!(!domain.set_pass_status(id(1), [0x01; 16], CommunityPassStatusV1::Sealed));
+    assert!(domain.set_pass_status(id(1), OPERATION, CommunityPassStatusV1::Sealed));
+    assert!(domain.pass_is_live(id(1), OPERATION));
+    assert!(!domain.set_pass_status(id(1), OPERATION, CommunityPassStatusV1::Sealed));
+
+    let commit = domain.stage_commit(commit_input())?;
+    domain.apply_commit(&SEAL, commit);
+    assert_eq!(
+        domain.pass_status(id(1), OPERATION),
+        Some(CommunityPassStatusV1::Committed)
+    );
+    assert!(domain.unresolved_pass(id(1)).is_none());
+    assert!(!domain.pass_is_live(id(1), OPERATION));
+    for status in [
+        CommunityPassStatusV1::Aborted,
+        CommunityPassStatusV1::Sealed,
+        CommunityPassStatusV1::Committed,
+    ] {
+        assert!(!domain.set_pass_status(id(1), OPERATION, status));
+    }
+    assert!(domain.stage_reserve(other_operation(&domain)?).is_ok());
     Ok(())
 }
