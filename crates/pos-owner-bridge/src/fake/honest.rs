@@ -509,10 +509,15 @@ impl HonestPage {
         hasher.finalize().into()
     }
 
-    fn build_payload(&mut self, active: &Active) -> Option<Vec<u8>> {
+    /// The reply payload: the native authenticator's, when one answers, else the fixture's.
+    fn reply_payload(&mut self, active: &Active) -> Option<Vec<u8>> {
         if let Some(authenticator) = &self.authenticator {
             return authenticator.answer(active.kind, &active.request);
         }
+        self.build_payload(active)
+    }
+
+    fn build_payload(&mut self, active: &Active) -> Option<Vec<u8>> {
         let derived = self.derived_prf(&active.prf_input);
         let mut shape = match active.kind {
             CeremonyKind::Create => ReplyShape {
@@ -607,7 +612,7 @@ impl HonestPage {
         if self.config.cancel {
             return;
         }
-        let Some(payload) = self.build_payload(active) else {
+        let Some(payload) = self.reply_payload(active) else {
             buffers.cas(Actor::Page, pair, state::WRITING, state::FAILED);
             return;
         };

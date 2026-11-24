@@ -2,7 +2,7 @@
 //!
 //! The writer emits the CTAP2 canonical form for the values this crate sends; callers write map
 //! entries in canonical key order. The reader accepts only definite-length items of the major
-//! types CTAP2 uses (no tags, no floats), at most [`MAX_DEPTH`] levels deep, and refuses
+//! types CTAP2 uses (no tags, no floats), at most `MAX_DEPTH` levels deep, and refuses
 //! duplicate map keys. It does not require canonical encoding, because CTAP 2.1 does not require
 //! it of authenticator output (ADR-110 E20 LT6). Its input is bounded by the CTAPHID message
 //! limit.

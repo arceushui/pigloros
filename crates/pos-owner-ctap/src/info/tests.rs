@@ -33,6 +33,32 @@ fn texts(writer: &mut Writer, items: &[&str]) {
     }
 }
 
+fn options(writer: &mut Writer, options: &[(&str, bool)]) {
+    writer.map(options.len());
+    for (name, value) in options {
+        writer.text(name).boolean(*value);
+    }
+}
+
+fn protocols(writer: &mut Writer, protocols: &[u64]) {
+    writer.array(protocols.len());
+    for protocol in protocols {
+        writer.unsigned(*protocol);
+    }
+}
+
+fn algorithms(writer: &mut Writer, algorithms: &[(u64, &str)]) {
+    writer.array(algorithms.len());
+    for (magnitude, kind) in algorithms {
+        writer
+            .map(2)
+            .text("alg")
+            .negative(*magnitude)
+            .text("type")
+            .text(kind);
+    }
+}
+
 fn encode(info: Info) -> Vec<u8> {
     let entries =
         4 + usize::from(info.max_message.is_some()) + usize::from(info.algorithms.is_some());
@@ -41,27 +67,16 @@ fn encode(info: Info) -> Vec<u8> {
     texts(&mut writer, info.versions);
     writer.unsigned(2);
     texts(&mut writer, info.extensions);
-    writer.unsigned(4).map(info.options.len());
-    for (name, value) in info.options {
-        writer.text(name).boolean(*value);
-    }
+    writer.unsigned(4);
+    options(&mut writer, info.options);
     if let Some(size) = info.max_message {
         writer.unsigned(5).unsigned(size);
     }
-    writer.unsigned(6).array(info.protocols.len());
-    for protocol in info.protocols {
-        writer.unsigned(*protocol);
-    }
-    if let Some(algorithms) = info.algorithms {
-        writer.unsigned(10).array(algorithms.len());
-        for (magnitude, kind) in algorithms {
-            writer
-                .map(2)
-                .text("alg")
-                .negative(*magnitude)
-                .text("type")
-                .text(kind);
-        }
+    writer.unsigned(6);
+    protocols(&mut writer, info.protocols);
+    if let Some(listed) = info.algorithms {
+        writer.unsigned(10);
+        algorithms(&mut writer, listed);
     }
     writer.finish()
 }
