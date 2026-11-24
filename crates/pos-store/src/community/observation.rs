@@ -38,12 +38,12 @@ use pos_core::community_lifecycle::{
     CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1, CommunityNativeNodeReferencesV1,
     CommunityNativeNodeV1, CommunityObservationEventRowV1, CommunityObservationSourceInputV1,
     CommunityObservationSourceV1, CommunityObservationValueInputV1, CommunityObservationValueV1,
-    CommunityReducerBindingV1, CommunityScopeMemberV1, CommunityScopeMembersV1,
-    CommunitySourceCatalogueV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1,
-    COMMUNITY_FOLD_BUDGET_MICROS_V1, COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1,
-    MAX_COMMUNITY_DIRECT_INPUTS_V1, MAX_COMMUNITY_OBSERVATION_EVENTS_V1,
-    MAX_COMMUNITY_RECORDED_CONSUMERS_V1, MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
-    MAX_STAGED_CALLBACK_BOUND_V1,
+    CommunityPassObservationV1, CommunityPassTermsV1, CommunityReducerBindingV1,
+    CommunityScopeMemberV1, CommunityScopeMembersV1, CommunitySourceCatalogueV1,
+    CommunityTypedInputRefV1, CommunityTypedInputRefsV1, COMMUNITY_FOLD_BUDGET_MICROS_V1,
+    COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
+    MAX_COMMUNITY_OBSERVATION_EVENTS_V1, MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
+    MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 use pos_core::store::{EventReadBounds, EventStore, SeqRange};
 use pos_core::{
@@ -673,6 +673,60 @@ impl CommunityObservationSourcesV1 {
     #[must_use]
     pub fn owning_timelines(&self) -> &[TimelineId] {
         &self.owning_timelines
+    }
+
+    /// The R10.3(5) Observation row of the pass quote: `1 + g(r')` nodes,
+    /// `r' + g(r')` edges, and an upper bound on its bytes: the COV1, the
+    /// CPE1, every CIB1 and CPN1 of the materialization with its
+    /// unallocated producer ordinal at the widest form (R10.3(3)), and every
+    /// row's CES1. A CES1 the Reserve pipeline reuses (R9.2) is counted
+    /// too, so the row over-quotes by its bytes; it never under-quotes.
+    /// Stage 2 runs on fixed-width placeholders for the values the Reserve
+    /// pipeline has not derived yet; its records are measured, never kept.
+    ///
+    /// # Errors
+    /// The record errors of stage 2.
+    pub fn quote_terms(&self) -> Result<CommunityPassObservationV1, Error> {
+        let placeholder = Hash::from_bytes([0xff; 32]);
+        let registrations = vec![placeholder; self.sources.len()];
+        let authority: Vec<_> = self
+            .owning_timelines
+            .iter()
+            .map(|timeline| (*timeline, placeholder))
+            .collect();
+        self.finish(CommunityObservationBindingsV1 {
+            store_incarnation: [0xff; 16],
+            producer_ordinal: u64::MAX,
+            source_registrations: &registrations,
+            scope_binding_digest: placeholder,
+            provenance_digest: placeholder,
+            authority_rows: &authority,
+        })
+        .map(|records| {
+            let groups = records.input_groups.len() as u64;
+            let bytes = self
+                .sources
+                .iter()
+                .map(|source| source.bytes.len())
+                .chain(
+                    records
+                        .input_groups
+                        .iter()
+                        .map(|(group, node)| group.len() + node.len()),
+                )
+                .sum::<usize>()
+                + self.observation_value.len()
+                + records.source_proof.len()
+                + records.observation_node.len();
+            CommunityPassObservationV1 {
+                terms: CommunityPassTermsV1 {
+                    nodes: 1 + groups,
+                    edges: self.sources.len().max(1) as u64 + groups,
+                    bytes: bytes as u64,
+                },
+                node_ordinal: records.observation_reference.node_ordinal,
+            }
+        })
     }
 
     /// Stage 2: mint the CPE1 and the Observation CPN1 with its groups.

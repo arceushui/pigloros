@@ -66,6 +66,7 @@ fn durable_input<'a>(
             recovery_window_micros: 1,
             quarantine_not_after_micros: 1000,
             metadata_not_after_micros: 1000,
+            recording_not_after_micros: 1000,
         },
     })
 }
@@ -95,7 +96,7 @@ fn producer_binds_tuple_member_request_and_supplied_state_reference() -> TestRes
         state_content_digest: expected_content,
     };
     let member = tuple.member_binding("entry", &key, hash(3), expected_content, hash(6))?;
-    let roster = [tuple.profile_member("entry", &key, hash(3), initializer())?];
+    let roster = [tuple.profile_member("entry", &key, hash(3), initializer(), 10)?];
     let durable = DurableProfile::new(durable_input(&profile, &roster)?)?;
     let members = [hash(99), member.digest()];
     for source in [
@@ -189,6 +190,7 @@ fn producer_rejects_each_negotiated_member_or_state_substitution_independently()
             input.state_schema_digest,
             input.negotiated_tuple_digest,
             initializer(),
+            10,
         )?];
         let durable = DurableProfile::new(durable_input(&profile, &roster)?)?;
         let members = [changed.digest()];
@@ -219,7 +221,7 @@ fn producer_refuses_absent_member_foreign_profile_and_horizon_extension() -> Tes
     };
     let member =
         tuple.member_binding("entry", &key, hash(3), state.state_content_digest, hash(6))?;
-    let roster = [tuple.profile_member("entry", &key, hash(3), initializer())?];
+    let roster = [tuple.profile_member("entry", &key, hash(3), initializer(), 10)?];
     let input = durable_input(&profile, &roster)?;
     let durable = DurableProfile::new(input)?;
     let members = [member.digest()];
@@ -328,6 +330,7 @@ fn producer_checks_actual_profile_roster_and_its_initializer() -> TestResult {
             schema,
             cnt,
             initializer(),
+            10,
         )?];
         let durable = DurableProfile::new(durable_input(&profile, &roster)?)?;
         let request = Request::new(request_input(
@@ -346,8 +349,8 @@ fn producer_checks_actual_profile_roster_and_its_initializer() -> TestResult {
         digest: [99; 32],
         ..initializer()
     };
-    let original = [tuple.profile_member("entry", &key, hash(3), initializer())?];
-    let changed = [tuple.profile_member("entry", &key, hash(3), foreign_initializer)?];
+    let original = [tuple.profile_member("entry", &key, hash(3), initializer(), 10)?];
+    let changed = [tuple.profile_member("entry", &key, hash(3), foreign_initializer, 10)?];
     let original_profile = DurableProfile::new(durable_input(&profile, &original)?)?;
     let changed_profile = DurableProfile::new(durable_input(&profile, &changed)?)?;
     let request = Request::new(request_input(

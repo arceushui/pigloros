@@ -6,7 +6,7 @@
 //! prepared invocation's provenance root without a cycle. Valid bytes do not
 //! prove that any source exists, is current or has that scope.
 
-use super::input_reference::CommunityTypedInputRefsV1;
+use super::input_reference::{CommunityTypedInputRefV1, CommunityTypedInputRefsV1};
 use super::native_node::MAX_COMMUNITY_EXPANDED_INPUTS_V1;
 use super::{
     canonical_end, digest, encode_coordinates, read_coordinates, read_hash, record_cursor,
@@ -99,4 +99,24 @@ impl<'a> CommunitySourceClosureV1<'a> {
                 .and_then(|input| canonical_end(&cursor).and_then(|()| Self::new(input)))
         })
     }
+}
+
+/// A pass CIR1's quoted length for `inputs` (revision 10, R10.3(3)): the
+/// scope union digest at its fixed width. The record is encoded with an
+/// empty input array, whose one-byte head is replaced by the exact length
+/// of the `inputs` array, so no large staging copy is made.
+pub(super) fn quoted_closure_len(
+    timeline: TimelineId,
+    generation: [u8; 16],
+    inputs: &[CommunityTypedInputRefV1<'_>],
+) -> usize {
+    let framing = CommunitySourceClosureV1(CommunitySourceClosureInputV1 {
+        timeline,
+        generation,
+        inputs: CommunityTypedInputRefsV1::from_references(&[]),
+        source_scope_union_digest: Hash::zero(),
+    })
+    .to_canonical_cbor()
+    .len();
+    framing - 1 + CommunityTypedInputRefsV1::from_references(inputs).encoded_len()
 }
