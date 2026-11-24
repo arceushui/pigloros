@@ -55,7 +55,10 @@ impl PinBuffer {
     /// The PIN in Unicode NFC (CTAP 2.1 PS §6.5.1), in another zeroized buffer.
     ///
     /// There is none unless the PIN is UTF-8 whose NFC form has at least four code points and
-    /// fits in 63 bytes. Each code point passes through a zeroized 4-byte scratch buffer.
+    /// fits in 63 bytes. The UTF-8 encoding of each code point is written into a zeroized 4-byte
+    /// scratch buffer. Two copies are not wiped: the `unicode-normalization` iterator keeps its
+    /// pending code points in an internal recomposition buffer, and each `char` it yields is a
+    /// plain stack copy.
     pub(crate) fn normalized(&self) -> Option<Self> {
         let text = std::str::from_utf8(&self.bytes[..self.length]).ok()?;
         let mut nfc = Self::new();

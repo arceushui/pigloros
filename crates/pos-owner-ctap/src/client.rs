@@ -4,7 +4,7 @@
 //! `pinUvAuthToken` (built-in UV first, the PIN as fallback), and exactly one `makeCredential` or
 //! `getAssertion` that spends that token. Nothing PIN-equivalent outlives the call: the PIN, its
 //! hash, the ephemeral key, `Z`, the shared secret and the token are all wiped. The SHA-256
-//! state that hashed the PIN and the NFC iterator's internal buffer are not (see `pin`).
+//! state that hashed the PIN is not (see `pin`), nor are the NFC copies `prompt` documents.
 //!
 //! LS7's "nothing is retried automatically" means nothing beyond the authenticator's own UV
 //! retry count (owner decision 2026-11-24): a rejected built-in UV attempt is tried again inside

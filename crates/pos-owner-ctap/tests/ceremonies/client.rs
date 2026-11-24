@@ -271,6 +271,16 @@ fn the_pin_is_normalized_to_nfc_before_it_is_hashed() -> TestResult {
         rig.prompt.enter(entered.as_bytes());
         rig.create(&Ceremony::drawn("create"))?;
     }
+    let combining: String = ['e', '\u{301}', '1', '2'].iter().collect();
+    assert_eq!(combining.chars().count(), 4);
+    let mut rig = Rig::with_pin(false, combining.as_bytes());
+    rig.prompt.enter(combining.as_bytes());
+    let request = Ceremony::drawn("create").create_request()?;
+    assert_eq!(
+        rig.perform(&request, CeremonyKind::Create),
+        Err(CLIENT_FAILED)
+    );
+    assert_eq!(rig.commands(&KNOWN), [0, 1, 3]);
     let expanding: String = std::iter::repeat_n('\u{958}', 21).collect();
     assert_eq!(expanding.len(), 63);
     let mut rig = Rig::new(false);

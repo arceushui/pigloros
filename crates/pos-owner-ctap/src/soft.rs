@@ -352,11 +352,10 @@ impl SoftAuthenticator {
         client_data_hash: &[u8],
         permission: u64,
     ) -> bool {
-        let wanted = permission;
         let expected = self
             .token
             .take()
-            .filter(|token| token.permissions & wanted != 0)
+            .filter(|token| token.permissions & permission != 0)
             .map(|token| pin::authenticate(&token.value, &[client_data_hash]));
         expected.is_some_and(|expected| param.and_then(Value::bytes) == Some(&expected[..]))
     }
