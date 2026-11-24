@@ -258,21 +258,30 @@ impl<I> AttemptLifecycle<I> {
         stored
     }
 
-    /// Re-issue the retained Completed response of the attempt after its
-    /// output transfer timed out (R9 §4.7), and retain the successor in its
-    /// place. `transfer` must carry the retained output and start after the
-    /// cleanup finished; it is `None` when a time of the output transfer
+    /// Re-issue `expected`, the retained Completed response of the attempt
+    /// whose output transfer timed out on this connection (R9 §4.7), and
+    /// retain the successor in its place. `transfer` must carry the
+    /// connection's own transfer of that response's output, starting after
+    /// the cleanup finished; it is `None` when a time of the output transfer
     /// could not be read.
     ///
-    /// A successor that cannot be signed, or whose `output-transfer` time
-    /// could not be read (R9 Amendment 1 change F), is a provider fault (R9
-    /// §5): the stored response is replaced by a fault and stays
-    /// unavailable. Of two concurrent re-issues, the first to store wins,
-    /// and the other returns the winner's successor.
+    /// The successor is built from `expected`, never from a response
+    /// stored since, and stored only while, under the attempts lock,
+    /// `expected` is still the retained response and not delivered (base
+    /// §4). Otherwise it is discarded, whatever its signing or clock fault:
+    /// a response re-issued meanwhile is returned instead, the first
+    /// re-issue to store having won. A successor of a still-retained,
+    /// undelivered response that cannot be signed, or whose
+    /// `output-transfer` time could not be read (R9 Amendment 1 change F),
+    /// is a provider fault (R9 §5): the stored response is replaced by a
+    /// fault and stays unavailable.
     ///
     /// # Errors
-    /// Those of [`AttemptLifecycle::terminal_response`];
-    /// [`AttemptLifecycleError::ResponseDelivered`] once the stored response
+    /// [`AttemptLifecycleError::UnknownAttempt`] and
+    /// [`AttemptLifecycleError::GrantMismatch`] for an attempt that does not
+    /// retain a response of `expected`'s AGR1;
+    /// [`AttemptLifecycleError::ResponseUnavailable`] once its response
+    /// faulted; [`AttemptLifecycleError::ResponseDelivered`] once `expected`
     /// was delivered whole, which keeps it;
     /// [`AttemptLifecycleError::Response`] with
     /// [`ResponseFault::Evidence`] for a response that cannot be re-issued
@@ -283,21 +292,15 @@ impl<I> AttemptLifecycle<I> {
     pub fn reissue_response<R: RuntimeAttestationSigner>(
         &self,
         attempt_id: [u8; 16],
-        agr1_digest: [u8; 32],
+        expected: &Arc<RetainedResponse>,
         transfer: Option<TransferRecord>,
         signer: &R,
         admitted: AdmittedRuntimeKey<'_>,
     ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
-        let stored = self.terminal_response(attempt_id, agr1_digest)?;
-        split_refusal(stored.successor(transfer, signer, admitted))
+        let attempt = (attempt_id, expected.agr1_digest());
+        split_refusal(expected.successor(transfer, signer, admitted))
             .map_err(AttemptLifecycleError::from)
-            .and_then(|successor| {
-                self.store(
-                    (attempt_id, agr1_digest),
-                    Some(&stored),
-                    successor.map(Arc::new),
-                )
-            })
+            .and_then(|successor| self.store(attempt, Some(expected), successor.map(Arc::new)))
     }
 
     /// Retain `signed` for the ended attempt of `grant` whose response is

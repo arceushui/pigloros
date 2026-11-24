@@ -223,7 +223,7 @@ mod served {
     use pos_reference::sandbox_provider_protocol::{
         AdmissionGrant, RequestAuthority, SandboxCancelRequest, SandboxCancelResponse,
         SandboxCancellationResult, SandboxExecuteRequest, SandboxProviderError,
-        SandboxProviderErrorCode as Code, SandboxProviderResult,
+        SandboxProviderErrorCode as Code, SandboxProviderResult, SandboxReconcileRequest,
     };
 
     use super::TestResult;
@@ -380,6 +380,17 @@ mod served {
         let responder = Responder::new(&admitted, &signer, &open, 4);
         let first = answered(&responder, Admission::Answered, true)?;
         assert!(first.len() > 2);
+        assert_eq!(answered(&responder, Admission::Busy, false)?, first);
+        // With every busy join's place taken, the repeat waits for none: 12.
+        let places: Vec<_> = (0..4)
+            .map(|_| responder.joins.wait(Instant::now()))
+            .collect();
+        assert!(places.iter().all(Option::is_some));
+        assert_eq!(
+            refused(&answered(&responder, Admission::Busy, false)?)?,
+            (Code::AdmissionBusy, id)
+        );
+        drop(places);
         assert_eq!(answered(&responder, Admission::Busy, false)?, first);
         let conflicting = staged.changed_request(|request| request.request.nonce[0] ^= 1)?;
         let busy = served(&[staged.evaluation(), &conflicting], false, |stream| {
@@ -597,6 +608,142 @@ mod served {
         Ok(())
     }
 
+    /// The frames of a whole response read from `peer` to its EOF.
+    fn read_frames(peer: &mut UnixStream) -> TestResult<Vec<Vec<u8>>> {
+        let mut bytes = Vec::new();
+        peer.read_to_end(&mut bytes)?;
+        let mut rest = bytes.as_slice();
+        let mut frames = Vec::new();
+        while !rest.is_empty() {
+            let (prefix, tail) = rest.split_at_checked(4).ok_or("short frame")?;
+            let length = usize::try_from(u32::from_be_bytes(prefix.try_into()?))?;
+            let (record, tail) = tail.split_at_checked(length).ok_or("short record")?;
+            frames.push(record.to_vec());
+            rest = tail;
+        }
+        Ok(frames)
+    }
+
+    /// Base §4: while B is blocked writing the re-issued response R2, A,
+    /// whose transfer of the replaced R1 timed out, re-issues nothing from
+    /// R2: its successor of R1 is discarded, R2 stays stored, and B writes
+    /// R2's SPY1 once its peer reads again.
+    #[test]
+    fn a_stale_reissue_never_replaces_the_response_another_connection_writes() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::a_stale_reissue_never_replaces_the_response_another_connection_writes",
+        )? {
+            return Ok(());
+        }
+        let _staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 4);
+        let port = port(&open)?;
+        let first = port
+            .lifecycle
+            .completed_for_test()
+            .map_err(|error| error.to_string())?;
+        let identity = identity_of(&first)?;
+        let attempt = identity.attempt_id.ok_or("no attempt")?;
+        let current = || {
+            port.lifecycle
+                .terminal_response(attempt, first.agr1_digest())
+        };
+        // Another connection's output transfer of R1 timed out: R2.
+        delivered(&responder, port, (identity, &first), true, Duration::ZERO)?;
+        let second = current()?;
+        assert!(!Arc::ptr_eq(&second, &first));
+        let (server, mut peer) = UnixStream::pair()?;
+        rustix::net::sockopt::set_socket_send_buffer_size(&server, 1)?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        std::thread::scope(|scope| -> TestResult {
+            let writing = scope.spawn(|| {
+                responder.deliver_within(port, &server, (identity, &second), false, TIMEOUT);
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!writing.is_finished(), "B blocks mid-response");
+            assert!(!second.delivered());
+            // A times out on R1 while B writes R2; its peer already ended
+            // its write side, so A ends at once.
+            let (abandoned, other) = UnixStream::pair()?;
+            other.shutdown(std::net::Shutdown::Write)?;
+            responder.deliver_within(port, &abandoned, (identity, &first), true, Duration::ZERO);
+            assert!(Arc::ptr_eq(&current()?, &second));
+            peer.shutdown(std::net::Shutdown::Write)?;
+            let frames = read_frames(&mut peer)?;
+            writing.join().map_err(|_| "B panicked")?;
+            assert_eq!(
+                frames,
+                second.frames().map(<[u8]>::to_vec).collect::<Vec<_>>()
+            );
+            Ok(())
+        })?;
+        assert!(second.delivered());
+        Ok(())
+    }
+
+    /// Port steps 7 to W, the input, the run and the delivery: an admitted
+    /// attempt whose input arrives whole runs through the port, and the
+    /// connection receives its stored full response after its AGR1, SPY1
+    /// last, which is then delivered.
+    #[test]
+    fn an_admitted_attempt_runs_and_its_stored_response_follows_its_agr1() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::an_admitted_attempt_runs_and_its_stored_response_follows_its_agr1",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 4);
+        let port = port(&open)?;
+        let (server, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        staged.write_source(&mut peer)?;
+        let (grant, rest) = std::thread::scope(|scope| -> TestResult<_> {
+            let serving = scope.spawn(|| responder.answer(server, Admission::Answered, None));
+            let mut prefix = [0; 4];
+            peer.read_exact(&mut prefix)?;
+            let mut grant = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+            peer.read_exact(&mut grant)?;
+            staged.write_input(&mut peer)?;
+            peer.shutdown(std::net::Shutdown::Write)?;
+            let rest = read_frames(&mut peer)?;
+            serving.join().map_err(|_| "serving panicked")?;
+            Ok((grant, rest))
+        })?;
+        let decoded = AdmissionGrant::from_canonical_cbor(&grant)?;
+        let stored = port
+            .lifecycle
+            .terminal_response(decoded.attempt_id, decoded.grant_digest())?;
+        let frames: Vec<Vec<u8>> = stored.frames().map(<[u8]>::to_vec).collect();
+        assert_eq!(frames[0], grant);
+        assert_eq!(rest, frames[1..]);
+        assert!(stored.delivered());
+        // The run itself stops at its preparation in the container, which
+        // has no mountfsd: an admitted attempt that did not execute.
+        let result = SandboxProviderResult::from_canonical_cbor(stored.response().result)?;
+        assert_eq!(
+            result.outcome,
+            pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::UnavailableAfterAdmission
+        );
+        assert_eq!(result.agr1_digest, Some(decoded.grant_digest()));
+        drop(staged);
+        Ok(())
+    }
+
     /// A cancellation of an admitted attempt that awaits its input is
     /// recorded for its ending, which has no SPY1 yet: `11`, no fabricated
     /// SPY1 (until the N6 decision); the exchange still ends in its stored
@@ -606,12 +753,12 @@ mod served {
         port: &ExecutePort,
         staged: &StagedInstallation,
         (signer, key): (&KeyFileRuntimeSigner, crate::AdmittedRuntimeKey<'_>),
-    ) -> TestResult {
+    ) -> TestResult<AdmissionGrant> {
         let source = [staged.evaluation(), staged.request()];
         let (server, mut peer) = UnixStream::pair()?;
         peer.set_read_timeout(Some(TIMEOUT))?;
         peer.write_all(&framed(&source)?)?;
-        std::thread::scope(|scope| -> TestResult {
+        std::thread::scope(|scope| -> TestResult<AdmissionGrant> {
             let serving = scope.spawn(|| responder.answer(server, Admission::Answered, None));
             let mut prefix = [0; 4];
             peer.read_exact(&mut prefix)?;
@@ -631,7 +778,7 @@ mod served {
             peer.read_to_end(&mut rest)?;
             assert!(!rest.is_empty());
             serving.join().map_err(|_| "serving panicked")?;
-            Ok(())
+            Ok(grant)
         })
     }
 
@@ -738,19 +885,19 @@ mod served {
                 .terminal_response(attempt, stored.agr1_digest())?,
             &stored
         ));
-        // A signer that cannot sign under the admitted key emits nothing.
-        let foreign = KeyFileRuntimeSigner::from_signing_key(
-            ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
-            "foreign".to_owned(),
-        );
+        // Once the attempt is reconciled, its SCY1 is forgotten: a repeat
+        // names an unknown attempt.
+        port.lifecycle.reconcile(&SandboxReconcileRequest {
+            request: cancel_request(attempt, stored.agr1_digest(), 5).request,
+            attempt_id: attempt,
+            agr1_digest: stored.agr1_digest(),
+            request_digest: [5; 32],
+        })?;
         assert_eq!(
-            port.cancel(
-                &cancel_request(attempt, stored.agr1_digest(), 7),
-                soon(),
-                (&foreign, key)
-            ),
-            Err(None)
+            port.cancel(&request, soon(), (&*signer, key)),
+            Err(Some(Code::UnknownAttempt))
         );
+        assert!(port.cancelled.lock().map_err(|_| "poisoned")?.is_empty());
         // An unknown attempt, and one under another AGR1.
         assert_eq!(
             port.cancel(
@@ -761,7 +908,28 @@ mod served {
             Err(Some(Code::UnknownAttempt))
         );
         cancel_waits_for_a_pending_response((&signer, key))?;
-        cancels_an_attempt_awaiting_its_input(&responder, port, &staged, (&signer, key))?;
+        let grant =
+            cancels_an_attempt_awaiting_its_input(&responder, port, &staged, (&signer, key))?;
+        // A signer that cannot sign under the admitted key emits nothing and
+        // closes execute admission (R9 §5); the response stays delivered.
+        let foreign = KeyFileRuntimeSigner::from_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
+            "foreign".to_owned(),
+        );
+        assert!(port.open());
+        assert_eq!(
+            port.cancel(
+                &cancel_request(grant.attempt_id, grant.grant_digest(), 7),
+                soon(),
+                (&foreign, key)
+            ),
+            Err(None)
+        );
+        assert!(!port.open());
+        assert!(port
+            .lifecycle
+            .terminal_response(grant.attempt_id, grant.grant_digest())?
+            .delivered());
         drop(staged);
         Ok(())
     }

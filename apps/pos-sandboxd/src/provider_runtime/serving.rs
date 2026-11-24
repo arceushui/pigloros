@@ -30,9 +30,12 @@
 //! failure (journal 22582). Then `describe` gets the SDY1 of the startup
 //! authority in every state. Execute read uncharged gets SPE1 `11
 //! SandboxUnavailable`: the runtime is not `Open`, or its execute admission
-//! closed. Cancel and reconcile get SPE1 `11` while the runtime is
-//! `Starting` or `ReconcileFailed`, and SPE1 `15 UnknownAttempt` once it is
-//! `Open` (R11 §10 invariant 15). Whatever the request left unread is read
+//! closed. Cancel is answered by the port while its execute admission is
+//! open, gets `12` beyond the answered pool, and `11` otherwise: an
+//! attempt it names may be held by a port that was not consulted.
+//! Reconcile gets SPE1 `11` while the runtime is `Starting` or
+//! `ReconcileFailed`, and SPE1 `15 UnknownAttempt` once it is `Open` (R11
+//! §10 invariant 15). Whatever the request left unread is read
 //! first, so the peer sees the answer and a clean EOF. Each record is
 //! signed by the runtime key, verified before emission, written under its
 //! own short deadline and followed by server write EOF.
@@ -277,6 +280,10 @@ pub(super) struct Responder<'a> {
     peer_uid: u32,
     pool: usize,
     refusals: RefusalPool,
+    /// The joins of exact repeats beyond the answered pool (item P10): at
+    /// most `max(pool, 1)` wait and deliver at once, so a busy connection's
+    /// thread stays bounded like an uncharged read's (item P7).
+    joins: RefusalPool,
 }
 
 impl<'a> Responder<'a> {
@@ -312,6 +319,7 @@ impl<'a> Responder<'a> {
             peer_uid: ROOT_UID,
             pool,
             refusals: RefusalPool::new(pool),
+            joins: RefusalPool::new(pool),
         }
     }
 
@@ -527,8 +535,9 @@ impl<'a> Responder<'a> {
     }
 
     /// An authenticated request beyond the answered pool: an exact repeat
-    /// of an attempt the port holds joins it (item P10); any other request
-    /// gets `12`, or `14` once the ledger was `closed`.
+    /// of an attempt the port holds joins it (item P10) while a busy join's
+    /// place is free; any other request, and a repeat with none free, gets
+    /// `12`, or `14` once the ledger was `closed`.
     fn answer_busy(
         &self,
         stream: &UnixStream,
@@ -541,8 +550,12 @@ impl<'a> Responder<'a> {
         } else {
             SandboxProviderErrorCode::AdmissionBusy
         };
-        match self.open_port().filter(|_| identity.operation == EXECUTE) {
-            Some(port) => match Self::join(port, identity, until) {
+        let joining = self
+            .open_port()
+            .filter(|_| identity.operation == EXECUTE)
+            .zip(self.joins.wait(Instant::now()));
+        match joining {
+            Some((port, _place)) => match Self::join(port, identity, until) {
                 Join::Fresh => Self::conclude(stream, self.authenticated(identity, code)),
                 Join::Answer(answer) => self.reply(port, stream, identity, answer),
             },
@@ -735,10 +748,12 @@ impl<'a> Responder<'a> {
     }
 
     /// The SPE1 code of an authenticated execute, cancel or reconcile
-    /// request (module docs, R11 §7.1).
+    /// request the port does not answer (module docs, R11 §7.1). A cancel
+    /// names an attempt the port may hold, so without consulting it the
+    /// answer is `11`, never `15`.
     fn closed(&self, operation: u8) -> SandboxProviderErrorCode {
         match (self.admission.get(), operation) {
-            (Some(AdmissionState::Open { .. }), CANCEL | RECONCILE) => {
+            (Some(AdmissionState::Open { .. }), RECONCILE) => {
                 SandboxProviderErrorCode::UnknownAttempt
             }
             _ => SandboxProviderErrorCode::SandboxUnavailable,

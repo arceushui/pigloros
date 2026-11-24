@@ -53,7 +53,8 @@ pub(super) struct ExecutePort {
     /// Execute admission closed after a provider signing fault (R9 §5).
     pub(super) closed: AtomicBool,
     /// Each cancelled attempt's last SCQ1 digest and the SCY1 that answered
-    /// it, so an exact repeat gets the same result (base §4).
+    /// it, so an exact repeat gets the same result (base §4), while the
+    /// lifecycle still retains the attempt's response.
     pub(super) cancelled: Mutex<BTreeMap<[u8; 16], CancelAnswer>>,
     // The bus connection is dropped before the runtime that drives it.
     /// The single system bus transport.
@@ -78,10 +79,12 @@ const fn mode_plan(mode: SandboxExecutionMode) -> ModePlan {
     }
 }
 
-/// The SCY1 that answered an attempt's last SCQ1, by that request's digest.
+/// The SCY1 that answered an attempt's last SCQ1, by that request's digest,
+/// and the AGR1 of the attempt it names.
 #[derive(Debug)]
 pub(super) struct CancelAnswer {
     request_digest: [u8; 32],
+    agr1_digest: [u8; 32],
     scy1: Vec<u8>,
 }
 
@@ -179,14 +182,17 @@ impl ExecutePort {
     /// `11` when no terminal SPY1 exists to bind: an attempt that awaited
     /// its input, or one withdrawn before its run, which leave none yet (the
     /// N6 question on the SRY1 draft), one that has none by `until`, or one
-    /// re-issued just before it could be bound. `None` when the SCY1 cannot be signed under the
-    /// admitted key: nothing is emitted (R9 §5).
+    /// re-issued just before it could be bound. `None` when the SCY1 cannot
+    /// be built or signed under the admitted key: a provider fault, which
+    /// emits nothing and closes execute admission (R9 §5). The response it
+    /// would have bound stays delivered: no re-issue replaces it.
     pub(super) fn cancel(
         &self,
         request: &SandboxCancelRequest,
         until: Instant,
         (signer, key): (&KeyFileRuntimeSigner, AdmittedRuntimeKey<'_>),
     ) -> Result<Vec<u8>, Option<SandboxProviderErrorCode>> {
+        self.prune_cancelled();
         if let Some(repeated) = self.repeated_cancel(request) {
             return Ok(repeated);
         }
@@ -233,11 +239,28 @@ impl ExecutePort {
                     request.attempt_id,
                     CancelAnswer {
                         request_digest: request.request_digest,
+                        agr1_digest: request.agr1_digest,
                         scy1: bytes.clone(),
                     },
                 );
         })
-        .ok_or(None)
+        .ok_or_else(|| {
+            self.close();
+            None
+        })
+    }
+
+    /// Forget the SCY1 of every attempt whose response the lifecycle no
+    /// longer retains: it was reconciled, so a repeat of its SCQ1 is `15`.
+    fn prune_cancelled(&self) {
+        self.cancelled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|attempt_id, answer| {
+                self.lifecycle
+                    .terminal_response(*attempt_id, answer.agr1_digest)
+                    .is_ok()
+            });
     }
 
     /// The SCY1 that answered `request` before, if it is an exact repeat of

@@ -419,7 +419,7 @@ fn reads_a_record_above_one_mebibyte(key: &VerifyingKey) -> TestResult {
 fn answers_attempt_operations(
     key: &VerifyingKey,
     authority: Authority,
-    code: SandboxProviderErrorCode,
+    (cancelled, code): (SandboxProviderErrorCode, SandboxProviderErrorCode),
 ) -> TestResult {
     let cancel = attempt_request("SCQ1", authority)?;
     let decoded = SandboxCancelRequest::from_canonical_cbor(&cancel)?;
@@ -427,7 +427,7 @@ fn answers_attempt_operations(
         &exchange(&[&cancel])?,
         key,
         (2, [8; 16], decoded.request_digest, Some([9; 16])),
-        code,
+        cancelled,
     )?;
     let reconcile = attempt_request("SRQ1", authority)?;
     let decoded = SandboxReconcileRequest::from_canonical_cbor(&reconcile)?;
@@ -451,12 +451,13 @@ fn await_bound() -> TestResult {
     Ok(())
 }
 
-/// Send cancel requests until one gets SPE1 `15`: restart reconciliation
-/// opened admission.
+/// Send reconcile requests until one gets SPE1 `15`: restart
+/// reconciliation opened admission.
 fn await_open(key: &VerifyingKey, authority: Authority) -> TestResult {
     let deadline = Instant::now() + CLIENT_TIMEOUT;
-    let cancel = attempt_request("SCQ1", authority)?;
-    while refusal(&exchange(&[&cancel])?, key)?.code != SandboxProviderErrorCode::UnknownAttempt {
+    let reconcile = attempt_request("SRQ1", authority)?;
+    while refusal(&exchange(&[&reconcile])?, key)?.code != SandboxProviderErrorCode::UnknownAttempt
+    {
         if Instant::now() > deadline {
             return Err("admission never opened".into());
         }
@@ -535,9 +536,9 @@ fn binds_nothing_on_a_refusal(manager: &UnixDatagram) -> TestResult {
 
 /// Reconciliation opens admission, but a control exchange began earlier:
 /// execute admission stays closed for the life of the process (R11 D9), so
-/// execute is refused with 11 though the port is composed, cancel and
-/// reconcile name an unknown attempt (invariant 15), and describe still
-/// answers. The returned fixture must outlive the port.
+/// execute is refused with 11 though the port is composed, so is cancel,
+/// which the port does not answer, reconcile names an unknown attempt
+/// (invariant 15), and describe still answers. The returned fixture must outlive the port.
 fn serves_open_after_a_control_exchange(
     key: &VerifyingKey,
     retained: Authority,
@@ -549,7 +550,14 @@ fn serves_open_after_a_control_exchange(
     })?;
     reconciled.send(Ok(port))?;
     await_open(key, retained)?;
-    answers_attempt_operations(key, retained, SandboxProviderErrorCode::UnknownAttempt)?;
+    answers_attempt_operations(
+        key,
+        retained,
+        (
+            SandboxProviderErrorCode::SandboxUnavailable,
+            SandboxProviderErrorCode::UnknownAttempt,
+        ),
+    )?;
     let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
     assert_refused(
         &exchange(&[staged.evaluation(), staged.request()])?,
@@ -844,7 +852,14 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     );
     refuses_by_precedence(&key, retained)?;
     reads_a_record_above_one_mebibyte(&key)?;
-    answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
+    answers_attempt_operations(
+        &key,
+        retained,
+        (
+            SandboxProviderErrorCode::SandboxUnavailable,
+            SandboxProviderErrorCode::SandboxUnavailable,
+        ),
+    )?;
     refuses_execute_while_starting(&key, &staged)?;
     // A root control connection is closed with zero bytes.
     assert_silent(CONTROL, b"\0\0\0\x01x")?;
@@ -939,7 +954,14 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     let failed = OnceLock::from(AdmissionState::ReconcileFailed);
     let responder = Responder::new(&admitted, &signer, &failed, 4);
     while_serving(&responder, || {
-        answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
+        answers_attempt_operations(
+            &key,
+            retained,
+            (
+                SandboxProviderErrorCode::SandboxUnavailable,
+                SandboxProviderErrorCode::SandboxUnavailable,
+            ),
+        )?;
         let bytes = describe([6; 16], retained)?;
         SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
             .verify_signature(&key)?;

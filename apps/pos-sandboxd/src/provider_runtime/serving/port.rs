@@ -178,8 +178,9 @@ fn transfer_output(
 impl Responder<'_> {
     /// Serve an answered connection of an `Open` runtime through `port`.
     pub(super) fn serve_port(&self, port: &ExecutePort, stream: UnixStream) {
-        // Serving's peer check already passed; the reader takes only its
-        // root-peer value.
+        // Serving's peer check already passed on this socket, whose
+        // `SO_PEERCRED` is fixed at connect: the reader takes only its
+        // root-peer value, so this check cannot fail where that one passed.
         if let Ok(peer) = ExecutePeer::authenticate(stream) {
             match ExecuteSource::read(peer, &port.ledger, self.admitted) {
                 Ok(source) => self.execute(port, source),
@@ -385,7 +386,14 @@ impl Responder<'_> {
                 .record_failed_input(&failed)
                 .and_then(|ended| port.lifecycle.retain_response(ended, &**self.signer, key)),
         };
-        // A response that cannot be signed is a provider fault: nothing.
+        // After AGR1 every refusal is a provider fault, never a silent
+        // request failure (R11 §7.5): `admit` and `record_failed_input`
+        // refuse only an input of another attempt or AGR1, which ends the
+        // awaited attempt faulted and quarantines the lifecycle, and a fence
+        // or cancellation since the conversion never refuses them (item
+        // P8); `retain_response` refuses only a response that cannot be
+        // assembled or signed, which quarantines it too. No response exists
+        // to write: nothing is emitted (R9 §5).
         if let Ok(response) = response {
             self.deliver(port, &stream, identity, &response, true);
         }
@@ -441,27 +449,30 @@ impl Responder<'_> {
             )
         });
         match transferred {
-            Some(Transfer::Complete) if port.lifecycle.claim_delivery(attempt_id, response) => {
-                write_frame(
-                    &mut Deadlined::new(stream, RESPONSE_DEADLINE),
-                    frames[result],
-                )
-                .ok();
-            }
-            // No byte of SPY1 was written here: the response may be
-            // re-issued, unless another connection or an SCY1 delivered it.
-            Some(Transfer::TimedOut(record)) => {
-                port.lifecycle
-                    .reissue_response(
-                        attempt_id,
-                        response.agr1_digest(),
-                        record,
-                        &**self.signer,
-                        self.key(),
+            Some(Transfer::Complete) => {
+                if port.lifecycle.claim_delivery(attempt_id, response) {
+                    write_frame(
+                        &mut Deadlined::new(stream, RESPONSE_DEADLINE),
+                        frames[result],
                     )
                     .ok();
+                } else {
+                    writeln!(
+                        io::stderr(),
+                        "pos-sandboxd: an output transfer completed after its response was re-issued; the connection ends without SPY1"
+                    )
+                    .ok();
+                }
             }
-            Some(Transfer::Complete | Transfer::Broken) | None => {}
+            // No byte of SPY1 was written here: this connection's own
+            // response may be re-issued, unless another connection or an
+            // SCY1 delivered it, or it was re-issued already.
+            Some(Transfer::TimedOut(record)) => {
+                port.lifecycle
+                    .reissue_response(attempt_id, response, record, &**self.signer, self.key())
+                    .ok();
+            }
+            Some(Transfer::Broken) | None => {}
         }
         close_answered(stream);
     }
