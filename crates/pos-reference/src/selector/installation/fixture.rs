@@ -92,6 +92,10 @@ pub(crate) fn held_artifact(
     })
 }
 
+/// The seed of the fixture's runtime-attestation key (TRS1 role 3): the key
+/// that signs AGR1 grants and that a staged provider's key file holds.
+pub(crate) const RUNTIME_KEY_SEED: [u8; 32] = [4; 32];
+
 struct ProviderAuthority {
     root: SigningKey,
     policy: SigningKey,
@@ -107,7 +111,7 @@ fn provider_authority() -> ProviderAuthority {
         root: SigningKey::from_bytes(&[1; 32]),
         policy: SigningKey::from_bytes(&[2; 32]),
         release: SigningKey::from_bytes(&[3; 32]),
-        runtime: SigningKey::from_bytes(&[4; 32]),
+        runtime: SigningKey::from_bytes(&RUNTIME_KEY_SEED),
         reviewer: SigningKey::from_bytes(&[5; 32]),
         image: SigningKey::from_bytes(&[6; 32]),
         operator: SigningKey::from_bytes(&[12; 32]),

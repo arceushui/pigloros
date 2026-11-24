@@ -177,35 +177,84 @@ fn bad_provider_inputs_are_refused_and_leave_no_installation() -> TestResult {
     let good = inputs.provider();
     let too_long = vec![0_u8; 4097];
     let missing = Path::new("/tmp/no-such-provider-binary");
+    // Validation runs before anything is staged, so its refusals are told
+    // apart by their message from a later create or write failure.
     let refusals = [
-        StagedProvider {
-            key_file_name: "",
-            ..good
-        },
-        StagedProvider {
-            key_file_name: "..",
-            ..good
-        },
-        StagedProvider {
-            key_file_name: "a/b",
-            ..good
-        },
-        StagedProvider {
-            installation: &[],
-            ..good
-        },
-        StagedProvider {
-            installation: &too_long,
-            ..good
-        },
-        StagedProvider {
-            binary: missing,
-            ..good
-        },
+        (
+            StagedProvider {
+                key_file_name: "",
+                ..good
+            },
+            "plain file name",
+        ),
+        (
+            StagedProvider {
+                key_file_name: ".",
+                ..good
+            },
+            "plain file name",
+        ),
+        (
+            StagedProvider {
+                key_file_name: "..",
+                ..good
+            },
+            "plain file name",
+        ),
+        (
+            StagedProvider {
+                key_file_name: "a/b",
+                ..good
+            },
+            "plain file name",
+        ),
+        (
+            StagedProvider {
+                key_file_name: "a\0b",
+                ..good
+            },
+            "plain file name",
+        ),
+        (
+            StagedProvider {
+                installation: &[],
+                ..good
+            },
+            "between 1 and 4096",
+        ),
+        (
+            StagedProvider {
+                installation: &too_long,
+                ..good
+            },
+            "between 1 and 4096",
+        ),
     ];
-    for refused in refusals {
-        assert!(StagedInstallation::stage_provider(&refused).is_err());
+    for (refused, message) in refusals {
+        let error = StagedInstallation::stage_provider(&refused).err();
+        assert!(
+            error.is_some_and(|error| error.to_string().contains(message)),
+            "{message}"
+        );
         assert!(!Path::new(FIXED).exists());
+    }
+    assert!(StagedInstallation::stage_provider(&StagedProvider {
+        binary: missing,
+        ..good
+    })
+    .is_err());
+    assert!(!Path::new(FIXED).exists());
+
+    // The SPI1 bound is 1 to 4096 bytes inclusive: both ends stage.
+    for length in [1, 4096] {
+        let installation = vec![7_u8; length];
+        let staged = StagedInstallation::stage_provider(&StagedProvider {
+            installation: &installation,
+            ..good
+        })?;
+        let written = fs::read(Path::new(FIXED).join("sandbox/provider-installation.cbor"))?;
+        assert_eq!(written, installation);
+        drop(staged);
     }
 
     // An existing fixed installation is never adopted or replaced.

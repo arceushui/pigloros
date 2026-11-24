@@ -23,7 +23,7 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::fixture::{
     admitted_state, admitted_state_with_provider_binary, admitted_state_with_salt, ddi_fixture,
-    materialize_state, provider_executable_path, ImageSigning,
+    materialize_state, provider_executable_path, ImageSigning, RUNTIME_KEY_SEED,
 };
 use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
 
@@ -74,9 +74,6 @@ pub struct StagedProvider<'a> {
     /// The name SPI1 gives the runtime-attestation key file in `provider-keys/`.
     pub key_file_name: &'a str,
 }
-
-/// The seed of the staged runtime-attestation key (TRS1 role 3).
-const RUNTIME_KEY_SEED: [u8; 32] = [4; 32];
 
 /// The staged fixed installation, removed again when dropped.
 #[derive(Debug)]
@@ -341,7 +338,7 @@ impl StagedInstallation {
     /// # Errors
     /// None in practice: the signature verifies under its own key.
     pub fn sign_grant(record: SelfDigested<Agr1>) -> std::io::Result<Verified<Agr1>> {
-        Self::sign_grant_with(&[4; 32], record)
+        Self::sign_grant_with(&RUNTIME_KEY_SEED, record)
     }
 
     /// Sign the sealed AGR1 with the Ed25519 seed `seed` and verify it under
