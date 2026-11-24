@@ -11,10 +11,14 @@
 //!
 //! Failures write no EAO1 byte and end the process with a distinct code.
 
+pub mod fixture;
+pub mod probe;
+
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
+pub use fixture::{apply, After, Fixture};
 use pos_reference::adapter_transport::{read_attempt, write_observation};
 use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult};
 
@@ -23,6 +27,9 @@ use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, S
 pub enum Mode {
     /// Report the payload's BLAKE3 digest as the output.
     Honest,
+    /// A #216 malicious or limit fixture, which then reports honestly unless
+    /// it ends the run itself.
+    Fixture(Fixture),
 }
 
 impl Mode {
@@ -31,13 +38,30 @@ impl Mode {
     pub const fn argument(self) -> &'static str {
         match self {
             Self::Honest => "honest",
+            Self::Fixture(fixture) => fixture.id(),
         }
     }
 
-    fn parse(argument: &OsString) -> Option<Self> {
-        match argument.to_str() {
-            Some("honest") => Some(Self::Honest),
-            _ => None,
+    /// The bound argument that follows the mode, for the fixtures that take one.
+    #[must_use]
+    pub const fn bound(self) -> Option<u64> {
+        match self {
+            Self::Honest => None,
+            Self::Fixture(fixture) => fixture.bound(),
+        }
+    }
+
+    /// The mode the arguments select: `<mode-id>` or `<mode-id> <bound>`.
+    fn parse(arguments: &[OsString]) -> Option<Self> {
+        let (id, bound) = match arguments {
+            [id] => (id.to_str()?, None),
+            [id, bound] => (id.to_str()?, Some(bound.to_str()?.parse::<u64>().ok()?)),
+            _ => return None,
+        };
+        if id == "honest" {
+            bound.is_none().then_some(Self::Honest)
+        } else {
+            Fixture::parse(id, bound).map(Self::Fixture)
         }
     }
 }
@@ -46,7 +70,7 @@ impl Mode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AdapterRunError {
     /// The arguments are not exactly one known mode.
-    #[error("usage: pos-sandbox-evidence-adapter honest")]
+    #[error("usage: pos-sandbox-evidence-adapter MODE [BOUND]")]
     Usage,
     /// The EAI1 attempt stream does not decode.
     #[error("the EAI1 attempt stream is invalid")]
@@ -54,6 +78,12 @@ pub enum AdapterRunError {
     /// The EAO1 stream could not be written.
     #[error("the EAO1 observation stream could not be written")]
     Output,
+    /// A probe fixture's forbidden operation succeeded.
+    #[error("a forbidden operation was not denied")]
+    Escaped,
+    /// The crash fixture ended the run.
+    #[error("the adapter crashed on purpose")]
+    Crashed,
 }
 
 impl AdapterRunError {
@@ -64,6 +94,8 @@ impl AdapterRunError {
             Self::Usage => 64,
             Self::Wire => 2,
             Self::Output => 4,
+            Self::Escaped => 3,
+            Self::Crashed => 70,
         }
     }
 }
@@ -74,38 +106,38 @@ pub fn exit_code(result: Result<(), AdapterRunError>) -> ExitCode {
     result.map_or_else(|error| ExitCode::from(error.code()), |()| ExitCode::SUCCESS)
 }
 
-/// Select the mode from `arguments`, read one EAI1 stream from `reader`,
+/// Select the mode from `arguments` (`MODE` or `MODE BOUND`), read one EAI1 stream from `reader`,
 /// and write one EAO1 stream to `writer`.
 ///
 /// # Errors
-/// [`AdapterRunError::Usage`] for anything but one known mode argument,
+/// [`AdapterRunError::Usage`] for anything but one known mode and its bound,
 /// [`AdapterRunError::Wire`] for an attempt that does not decode and
 /// [`AdapterRunError::Output`] when the observation cannot be written.
 pub fn run(
     arguments: impl IntoIterator<Item = OsString>,
     reader: impl Read,
-    writer: impl Write,
+    mut writer: impl Write,
 ) -> Result<(), AdapterRunError> {
     let arguments: Vec<OsString> = arguments.into_iter().collect();
-    match arguments.as_slice() {
-        [argument] => Mode::parse(argument).ok_or(AdapterRunError::Usage),
-        _ => Err(AdapterRunError::Usage),
+    let mode = Mode::parse(&arguments).ok_or(AdapterRunError::Usage)?;
+    let attempt = read_attempt(reader).or(Err(AdapterRunError::Wire))?;
+    let after = match mode {
+        Mode::Honest => After::Report,
+        Mode::Fixture(fixture) => apply(fixture, &mut writer)?,
+    };
+    match after {
+        After::Written => Ok(()),
+        After::Report => {
+            write_observation(writer, &observe(mode, &attempt)).or(Err(AdapterRunError::Output))
+        }
     }
-    .and_then(|mode| {
-        read_attempt(reader)
-            .or(Err(AdapterRunError::Wire))
-            .map(|attempt| observe(mode, &attempt))
-    })
-    .and_then(|observation| {
-        write_observation(writer, &observation).or(Err(AdapterRunError::Output))
-    })
 }
 
 /// The observation `mode` reports for `attempt`.
 #[must_use]
 pub fn observe(mode: Mode, attempt: &CaseAttempt) -> SubjectObservation {
     match mode {
-        Mode::Honest => {
+        Mode::Honest | Mode::Fixture(_) => {
             let output = blake3::hash(&attempt.payload.bytes).as_bytes().to_vec();
             let usage = ResourceUsage {
                 output_bytes: output.len() as u64,
