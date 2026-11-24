@@ -666,47 +666,55 @@ pub struct KeyRegistryStateV1 {
     reserved_material: Option<HashSet<Hash>>,
 }
 
+#[derive(PartialEq)]
+struct KeyRegistryStateSemanticView<'a> {
+    records: &'a BTreeMap<KeyIdentityV1, KeyRecordV1>,
+    active: &'a BTreeMap<(OwnerIdV1, KeyRoleV1), KeyIdentityV1>,
+    tombstones: &'a BTreeMap<KeyIdentityV1, KeyTombstoneV1>,
+    highest_epoch: &'a BTreeMap<(OwnerIdV1, KeyRoleV1), u64>,
+    pending_destructions: &'a BTreeMap<KeyIdentityV1, KeyDestructionRequestV1>,
+    version: &'a KeyRegistryFormatVersionV1,
+}
+
 #[expect(
     clippy::missing_fields_in_debug,
     reason = "derived registration cache is not semantic registry state"
 )]
 impl fmt::Debug for KeyRegistryStateV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let semantic = self.semantic_view();
         formatter
             .debug_struct("KeyRegistryStateV1")
-            .field("records", &self.records)
-            .field("active", &self.active)
-            .field("tombstones", &self.tombstones)
-            .field("highest_epoch", &self.highest_epoch)
-            .field("pending_destructions", &self.pending_destructions)
-            .field("version", &self.version)
+            .field("records", semantic.records)
+            .field("active", semantic.active)
+            .field("tombstones", semantic.tombstones)
+            .field("highest_epoch", semantic.highest_epoch)
+            .field("pending_destructions", semantic.pending_destructions)
+            .field("version", semantic.version)
             .finish()
     }
 }
 
 impl PartialEq for KeyRegistryStateV1 {
     fn eq(&self, other: &Self) -> bool {
-        (
-            &self.records,
-            &self.active,
-            &self.tombstones,
-            &self.highest_epoch,
-            &self.pending_destructions,
-            &self.version,
-        ) == (
-            &other.records,
-            &other.active,
-            &other.tombstones,
-            &other.highest_epoch,
-            &other.pending_destructions,
-            &other.version,
-        )
+        self.semantic_view() == other.semantic_view()
     }
 }
 
 impl Eq for KeyRegistryStateV1 {}
 
 impl KeyRegistryStateV1 {
+    fn semantic_view(&self) -> KeyRegistryStateSemanticView<'_> {
+        KeyRegistryStateSemanticView {
+            records: &self.records,
+            active: &self.active,
+            tombstones: &self.tombstones,
+            highest_epoch: &self.highest_epoch,
+            pending_destructions: &self.pending_destructions,
+            version: &self.version,
+        }
+    }
+
     /// Decode the existing durable V1 CBOR snapshot with native work guards.
     ///
     /// The guard receives only checkpoints and exact logical materialization
@@ -772,18 +780,33 @@ impl KeyRegistryStateV1 {
             return Ok(());
         }
         self.validate()?;
-        self.reserved_material = Some(
-            self.records
-                .values()
-                .filter_map(|record| record.private_material_digest)
-                .chain(
-                    self.tombstones
-                        .values()
-                        .map(|tombstone| tombstone.destroyed_material_digest),
-                )
-                .collect(),
-        );
+        self.reserved_material = Some(self.reserved_material_digests().copied().collect());
         Ok(())
+    }
+
+    fn record_material_entries(
+        &self,
+    ) -> impl Iterator<Item = (&KeyIdentityV1, &KeyRecordV1, Option<&Hash>)> + '_ {
+        self.records
+            .iter()
+            .map(|(identity, record)| (identity, record, record.private_material_digest.as_ref()))
+    }
+
+    fn tombstone_material_entries(
+        &self,
+    ) -> impl Iterator<Item = (&KeyIdentityV1, &KeyTombstoneV1, &Hash)> + '_ {
+        self.tombstones.iter().map(|(identity, tombstone)| {
+            (identity, tombstone, &tombstone.destroyed_material_digest)
+        })
+    }
+
+    fn reserved_material_digests(&self) -> impl Iterator<Item = &Hash> + '_ {
+        self.record_material_entries()
+            .filter_map(|(_, _, digest)| digest)
+            .chain(
+                self.tombstone_material_entries()
+                    .map(|(_, _, digest)| digest),
+            )
     }
 
     fn validate_with_read_context(
@@ -811,7 +834,7 @@ impl KeyRegistryStateV1 {
         context: &mut ReadContext<'_>,
         reserved_material: &mut HashSet<Hash>,
     ) -> Result<(), KeyRegistryReadErrorV1> {
-        for (identity, record) in &self.records {
+        for (identity, record, material_digest) in self.record_material_entries() {
             context.step(|context| {
                 if record.identity != *identity {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
@@ -828,12 +851,10 @@ impl KeyRegistryStateV1 {
                 if !self.highest_epoch.contains_key(&scope) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-                if let Some(digest) = record.private_material_digest.as_ref() {
+                if let Some(digest) = material_digest {
                     reserve_material(reserved_material, digest, context)?;
                 }
-                if record.private_material_digest.is_none()
-                    && !self.tombstones.contains_key(identity)
-                {
+                if material_digest.is_none() && !self.tombstones.contains_key(identity) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
                 Ok(())
@@ -923,7 +944,7 @@ impl KeyRegistryStateV1 {
         context: &mut ReadContext<'_>,
         reserved_material: &mut HashSet<Hash>,
     ) -> Result<(), KeyRegistryReadErrorV1> {
-        for (identity, tombstone) in &self.tombstones {
+        for (identity, tombstone, digest) in self.tombstone_material_entries() {
             context.step(|context| {
                 let Some(record) = self.records.get(identity) else {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
@@ -934,11 +955,7 @@ impl KeyRegistryStateV1 {
                 if record.private_material_digest.is_some() {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-                reserve_material(
-                    reserved_material,
-                    &tombstone.destroyed_material_digest,
-                    context,
-                )
+                reserve_material(reserved_material, digest, context)
             })?;
         }
         Ok(())
