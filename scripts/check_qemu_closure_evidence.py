@@ -175,9 +175,10 @@ FALLBACK_DEVICES = {"tunl0", "sit0", "ip6tnl0", "gre0"}
 ROUTE_KINDS = {"local", "broadcast", "multicast", "unicast", "unreachable", "blackhole", "prohibit", "throw"}
 ROUTES4_ALLOWED = {"kinds": {"local": {"127.0.0.0/8", "127.0.0.1"},
                              "broadcast": {"127.0.0.0", "127.255.255.255"}},
-                   "unicast": set(), "main": set(), "required": {"127.0.0.0/8"}}
+                   "unicast": set(), "main": set(), "required": {"127.0.0.0/8"}, "src": {"127.0.0.1"}}
 ROUTES6_ALLOWED = {"kinds": {"local": {"::1", "::1/128"}, "multicast": {"ff00::/8"}},
-                   "unicast": {"::1", "::1/128"}, "main": {"::1", "::1/128"}, "required": {"::1", "::1/128"}}
+                   "unicast": {"::1", "::1/128"}, "main": {"::1", "::1/128"}, "required": {"::1", "::1/128"},
+                   "src": {"::1"}}
 LINK_NAME = re.compile(r"[0-9]+: ([^\s:@]+)(?:@\S+)?: ")
 CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
@@ -1158,26 +1159,36 @@ def address_set(evidence: Evidence, name: str) -> set[tuple[str, str, str]]:
 
 
 # The fields `ip route` prints after a loopback route's destination, with the
-# values each may take; `linkdown` stands alone. Anything else (`via`, `gateway`,
-# `nhid`, `encap`, `nexthop`, a global scope ...) is not the loopback's own.
+# values each may take; `linkdown` stands alone, `src` is the family's own
+# loopback address and `metric` is a short ASCII number. Anything else (`via`,
+# `gateway`, `nhid`, `encap`, `nexthop`, a global scope ...) is not the
+# loopback's own, and no field or flag may appear twice.
 ROUTE_FIELDS = {"dev": {"lo"}, "table": {"local", "main"}, "proto": {"kernel"}, "scope": {"host", "link"},
-                "src": {"127.0.0.1", "::1"}, "metric": None, "pref": {"medium"}}
+                "src": None, "metric": None, "pref": {"medium"}}
 ROUTE_FLAGS = {"linkdown"}
+METRIC_DIGITS = 10
 
 
-def route_fields(fields: list[str]) -> dict[str, str] | None:
-    """The `key value` pairs of a route's tail, or None if any field is foreign or repeated."""
+def route_fields(fields: list[str], src: set[str]) -> dict[str, str] | None:
+    """The `key value` pairs and flags of a route's tail, or None if any is foreign or repeated."""
     pairs, index = {}, 0
     while index < len(fields):
         key = fields[index]
+        if key in pairs:
+            return None
         if key in ROUTE_FLAGS:
+            pairs[key] = ""
             index += 1
             continue
-        if key not in ROUTE_FIELDS or key in pairs or index + 1 >= len(fields):
+        if key not in ROUTE_FIELDS or index + 1 >= len(fields):
             return None
         value = fields[index + 1]
-        allowed = ROUTE_FIELDS[key]
-        if (allowed is None and not value.isdigit()) or (allowed is not None and value not in allowed):
+        allowed = src if key == "src" else ROUTE_FIELDS[key]
+        if allowed is None:
+            valid = value.isascii() and value.isdigit() and len(value) <= METRIC_DIGITS
+        else:
+            valid = value in allowed
+        if not valid:
             return None
         pairs[key] = value
         index += 2
@@ -1202,7 +1213,7 @@ def require_loopback_routes(evidence: Evidence, name: str, family: dict) -> list
             raise EvidenceError(f"{name} holds a blank line")
         kind = fields[0] if fields[0] in ROUTE_KINDS else None
         destination = fields[1 if kind else 0] if len(fields) > 1 else ""
-        pairs = route_fields(fields[(2 if kind else 1):])
+        pairs = route_fields(fields[(2 if kind else 1):], family["src"])
         allowed = family["kinds"].get(kind, set()) if kind else family["unicast"]
         if kind:
             table_ok = pairs is not None and pairs.get("table") == "local"

@@ -1310,7 +1310,16 @@ class EvidenceTests(unittest.TestCase):
                 {f"{base}/fb-1/routes6": ROUTES6 + "local ::1 dev lo table local " + tail + "\n"}),
                "other than the loopback's own")
               for tail in ("dev eth0", "table main", "gateway fe80::1", "nhid 5", "encap ip id 1",
-                           "src 2001:db8::1", "scope global", "proto bgp", "metric x", "linkdown extra", "dev")],
+                           "src 2001:db8::1", "scope global", "proto bgp", "metric x", "linkdown extra", "dev",
+                           # A repeated flag; a non-ASCII digit; an unbounded metric; the IPv4
+                           # loopback as an IPv6 source; an allowed value on the wrong key.
+                           "linkdown linkdown", "metric ٧", "metric " + "1" * 11, "src 127.0.0.1",
+                           "dev local", "table lo", "scope table", "pref kernel")],
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 dev lo table local src ::1\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update(
+                {f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 dev lo table local metric 0 metric 1\n"}),
+             "other than the loopback's own"),
             (lambda f: f.update(
                 {f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 dev lo table local src 10.0.0.1\n"}),
              "other than the loopback's own"),
