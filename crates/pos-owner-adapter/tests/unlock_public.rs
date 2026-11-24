@@ -43,16 +43,12 @@ use zeroize::Zeroizing;
 
 /// `N` bytes derived one-way from `label`, so no literal key material is used.
 fn derived<const N: usize>(label: &str) -> [u8; N] {
-    let mut out = [0_u8; N];
-    for (counter, chunk) in (0_u8..).zip(out.chunks_mut(32)) {
+    std::array::from_fn(|index| {
         let mut hasher = Sha256::new();
         hasher.update(label.as_bytes());
-        hasher.update([counter]);
-        for (dst, src) in chunk.iter_mut().zip(hasher.finalize().iter()) {
-            *dst = *src;
-        }
-    }
-    out
+        hasher.update([u8::try_from(index / 32).unwrap_or(u8::MAX)]);
+        hasher.finalize()[index % 32]
+    })
 }
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
