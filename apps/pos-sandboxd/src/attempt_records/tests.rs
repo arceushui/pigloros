@@ -210,6 +210,32 @@ fn start() -> String {
     "attempt".to_owned()
 }
 
+/// The admission of [`ATTEMPT`] under the signed test grant, with a
+/// complete input, its AGR1 digest, and the signer and key of that grant.
+pub(super) fn signed_admission() -> TestResult<(
+    crate::AttemptAdmission,
+    [u8; 32],
+    crate::KeyFileRuntimeSigner,
+    ed25519_dalek::VerifyingKey,
+)> {
+    let grant = signed_grant()?;
+    let digest = grant.grant.grant_digest();
+    let input = TransferRecord {
+        start: 1,
+        deadline: 4,
+        finish: 3,
+        expected_bytes: 1,
+        accepted_bytes: 1,
+        complete: true,
+    };
+    Ok((
+        admission_of(Some(&grant), SandboxExecutionMode::AirGapped, Some(input)),
+        digest,
+        signer(),
+        signing_key().verifying_key(),
+    ))
+}
+
 /// A Completed response with output, signed by the test key and retained
 /// in `lifecycle` for [`ATTEMPT`].
 pub(super) fn completed_retained(

@@ -414,8 +414,8 @@ fn reads_a_record_above_one_mebibyte(key: &VerifyingKey) -> TestResult {
 }
 
 /// Cancel and reconcile pass step 6 and get SPE1 `code`: 11 while the
-/// runtime is `Starting` or `ReconcileFailed` (invariants 12 and 13), 15 once
-/// it is `Open` with no execute port (invariant 15).
+/// runtime is `Starting` or `ReconcileFailed` (invariants 12 and 13), 15 for
+/// an attempt the `Open` runtime's lifecycle does not hold (invariant 15).
 fn answers_attempt_operations(
     key: &VerifyingKey,
     authority: Authority,
@@ -536,9 +536,9 @@ fn binds_nothing_on_a_refusal(manager: &UnixDatagram) -> TestResult {
 
 /// Reconciliation opens admission, but a control exchange began earlier:
 /// execute admission stays closed for the life of the process (R11 D9), so
-/// execute is refused with 11 though the port is composed, so is cancel,
-/// which the port does not answer, reconcile names an unknown attempt
-/// (invariant 15), and describe still answers. The returned fixture must outlive the port.
+/// execute is refused with 11 though the port is composed, while cancel and
+/// reconcile are still answered from its lifecycle (ADR-069 R15 §3.3) and
+/// name an unknown attempt (invariant 15), and describe still answers. The returned fixture must outlive the port.
 fn serves_open_after_a_control_exchange(
     key: &VerifyingKey,
     retained: Authority,
@@ -554,7 +554,7 @@ fn serves_open_after_a_control_exchange(
         key,
         retained,
         (
-            SandboxProviderErrorCode::SandboxUnavailable,
+            SandboxProviderErrorCode::UnknownAttempt,
             SandboxProviderErrorCode::UnknownAttempt,
         ),
     )?;
@@ -1208,13 +1208,9 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
 fn the_execute_listener_is_polled_while_either_pool_has_room() {
     // A free answered slot alone, room for an uncharged reader alone, and
     // neither.
-    assert!(accepting(0, false, 1));
-    assert!(accepting(1, true, 1));
-    assert!(accepting(1, false, 2));
-    assert!(!accepting(1, false, 1));
-    // Pool 0 answers nobody, but the reader pool still has one place.
-    assert!(accepting(0, true, 0));
-    assert!(!accepting(0, false, 0));
+    assert!(accepting(true, false));
+    assert!(accepting(false, true));
+    assert!(!accepting(false, false));
 }
 
 #[test]

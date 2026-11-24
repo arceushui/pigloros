@@ -9,8 +9,53 @@
 //! any new read: while one waits the pool reports no room, and the acceptor
 //! does not poll the execute listener.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
+
+/// Exactly `bound` places, taken without waiting: the answered execute
+/// workers, and the separate control pool that answers cancel and
+/// reconcile (ADR-069 R15 N13), each of `min(BHC1 13, 256)`.
+#[derive(Debug)]
+pub(super) struct Places {
+    bound: usize,
+    taken: AtomicUsize,
+}
+
+/// One taken place; dropping it frees the place.
+#[derive(Debug)]
+pub(super) struct Place<'p>(&'p Places);
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        self.0.taken.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Places {
+    /// `bound` places, none taken.
+    pub(super) const fn new(bound: usize) -> Self {
+        Self {
+            bound,
+            taken: AtomicUsize::new(0),
+        }
+    }
+
+    /// Whether a place is free now.
+    pub(super) fn has_room(&self) -> bool {
+        self.taken.load(Ordering::Acquire) < self.bound
+    }
+
+    /// Take a free place; `None` when all are taken.
+    pub(super) fn take(&self) -> Option<Place<'_>> {
+        self.taken
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |taken| {
+                (taken < self.bound).then_some(taken + 1)
+            })
+            .ok()
+            .map(|_| Place(self))
+    }
+}
 
 /// The pool of at most `max(bound, 1)` uncharged readers.
 #[derive(Debug)]
@@ -92,6 +137,22 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn exactly_bound_places_are_taken_and_a_dropped_one_is_free_again() {
+        let none = Places::new(0);
+        assert!(!none.has_room());
+        assert!(none.take().is_none());
+        let places = Places::new(2);
+        let first = places.take();
+        assert!(first.is_some() && places.has_room());
+        let second = places.take();
+        assert!(second.is_some() && !places.has_room());
+        assert!(places.take().is_none());
+        drop(first);
+        assert!(places.has_room());
+        assert!(places.take().is_some());
+    }
 
     #[test]
     fn at_most_max_bound_one_read_at_once_and_a_waiter_blocks_new_reads() {

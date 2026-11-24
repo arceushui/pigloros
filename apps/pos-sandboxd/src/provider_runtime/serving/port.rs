@@ -3,7 +3,8 @@
 //!
 //! The connection's two source frames are read once, charged, by the
 //! pos-reference reader. A first record that is no EVR1 is another
-//! operation, answered as before. A refused charge hands the connection, at
+//! operation: describe is answered here, and cancel and reconcile are handed
+//! to the control pool (ADR-069 R15 N13). A refused charge hands the connection, at
 //! its stream position, to the bounded uncharged readers (item P7). Then:
 //!
 //! 1. steps 2 to 6 run on the decoded views, and the admission state is
@@ -33,12 +34,13 @@ use pos_reference::provider_admission::execution::{
     PreparedProviderExecution, RefusalCause, SourceRefusal, StagingError, UnchargedSource,
 };
 use pos_reference::sandbox_provider_protocol::{
-    SandboxCancelRequest, SandboxPayloadChunk, SandboxProviderErrorCode, TransferRecord,
+    SandboxPayloadChunk, SandboxProviderErrorCode, TransferRecord,
 };
 use pos_reference::selector::InstallationError;
 
 use super::{
-    close_answered, Deadlined, Refusal, RequestIdentity, Responder, CANCEL, RESPONSE_DEADLINE,
+    close_answered, Classified, Deadlined, Place, Refusal, RequestIdentity, Responder,
+    RESPONSE_DEADLINE,
 };
 use crate::provider_runtime::port::{serves, ExecutePort};
 use crate::{sign_verified, AttemptLifecycleError, ExchangeClaim, RetainedResponse};
@@ -176,8 +178,14 @@ fn transfer_output(
 }
 
 impl Responder<'_> {
-    /// Serve an answered connection of an `Open` runtime through `port`.
-    pub(super) fn serve_port(&self, port: &ExecutePort, stream: UnixStream) {
+    /// Serve an answered connection of an `Open` runtime through `port`,
+    /// holding its answered `place`.
+    pub(super) fn serve_port(
+        &self,
+        port: &ExecutePort,
+        stream: UnixStream,
+        place: Option<Place<'_>>,
+    ) {
         // Serving's peer check already passed on this socket, whose
         // `SO_PEERCRED` is fixed at connect: the reader takes only its
         // root-peer value, so this check cannot fail where that one passed.
@@ -188,45 +196,29 @@ impl Responder<'_> {
                     Self::conclude(&stream, self.refuse(Refusal::UNIDENTIFIED));
                 }
                 Err(SourceRefusal::Uncharged(handed)) => self.serve_handoff(handed),
-                Err(SourceRefusal::NotExecute(other)) => self.answer_other(port, other),
+                Err(SourceRefusal::NotExecute(other)) => self.answer_other(other, place),
             }
         }
     }
 
     /// Another operation on the execute socket: its first record, then the
-    /// rest of the request up to its EOF, under the unchanged deadline.
-    fn answer_other(&self, port: &ExecutePort, other: OtherRequest) {
+    /// rest of the request up to its EOF, under the unchanged deadline. A
+    /// cancel or reconcile is handed, with its answered `place`, to the
+    /// control pool.
+    fn answer_other(&self, other: OtherRequest, place: Option<Place<'_>>) {
         let (stream, first, until) = other.into_parts();
         let classified = self.classify_single(&first);
         io::copy(&mut Deadlined::until(&stream, until), &mut io::sink()).ok();
-        let response = match classified {
-            Ok(identity) if identity.operation == CANCEL => {
-                self.answer_cancel(port, &first, identity, until)
+        match classified {
+            Ok(Classified {
+                identity,
+                control: Some(control),
+            }) => self.answer_control(&stream, (identity, control), until, place),
+            Ok(Classified { identity, .. }) => {
+                Self::conclude(&stream, self.answer_identity(identity));
             }
-            Ok(identity) => self.answer_identity(identity),
-            Err(refusal) => self.refuse(refusal),
-        };
-        Self::conclude(&stream, response);
-    }
-
-    /// The SCY1 of an authenticated SCQ1 for an attempt the port may hold,
-    /// or its SPE1; nothing when the SCY1 cannot be signed (R9 §5).
-    fn answer_cancel(
-        &self,
-        port: &ExecutePort,
-        record: &[u8],
-        identity: RequestIdentity,
-        until: Instant,
-    ) -> Option<Vec<u8>> {
-        SandboxCancelRequest::from_canonical_cbor(record)
-            .ok()
-            .and_then(|request| {
-                port.cancel(&request, until, (&**self.signer, self.key()))
-                    .map_or_else(
-                        |code| code.and_then(|code| self.authenticated(identity, code)),
-                        Some,
-                    )
-            })
+            Err(refusal) => Self::conclude(&stream, self.refuse(refusal)),
+        }
     }
 
     /// A connection whose source charge the ledger refused, waiting for an

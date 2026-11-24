@@ -698,3 +698,51 @@ impl crate::AttemptLifecycle {
         tests::completed_retained(self)
     }
 }
+
+#[cfg(test)]
+impl AttemptAdmission {
+    /// The admission of the attempt records' test attempt under their
+    /// signed test grant, with that grant's signer and key, for the
+    /// lifecycle tests that sign a real response.
+    pub(crate) fn signed_for_test(
+    ) -> Result<crate::test_fixtures::SignedAdmission, Box<dyn std::error::Error + Send + Sync>>
+    {
+        tests::signed_admission().map(|(admission, digest, signer, key)| {
+            crate::test_fixtures::SignedAdmission {
+                admission,
+                digest,
+                signer,
+                key,
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+impl RetainedResponse {
+    /// A Completed response, signed by the test runtime key, retained by a
+    /// throwaway lifecycle: what the lifecycle tests retain for their fake
+    /// attempts.
+    pub(crate) fn signed_for_test(
+    ) -> Result<std::sync::Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let directory = tempfile::tempdir()?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        for child in ["registry", "attempts"] {
+            let path = directory.path().join(child);
+            std::fs::create_dir(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let parent = std::fs::File::open(directory.path())?;
+        let registry = crate::SystemdAttemptRegistry::from_runtime_directory(
+            &parent,
+            parent.metadata()?.uid(),
+        )?;
+        let ledger = crate::StagingLedger::new(crate::StagingLimits {
+            aggregate_bytes: 1024,
+        });
+        let lifecycle: crate::AttemptLifecycle =
+            crate::AttemptLifecycle::new(registry, ledger, &crate::ReconciledRestart::for_test());
+        lifecycle.completed_for_test()
+    }
+}

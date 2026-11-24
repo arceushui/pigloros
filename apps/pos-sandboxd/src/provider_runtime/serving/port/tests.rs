@@ -753,9 +753,9 @@ mod served {
     }
 
     /// A cancellation of an admitted attempt that awaits its input is
-    /// recorded for its ending, which has no SPY1 yet: `11`, no fabricated
-    /// SPY1 (until the N6 decision); the exchange still ends in its stored
-    /// response once its input ends.
+    /// recorded for its ending and waits, holding no lock, for the signed
+    /// response that ending gets (ADR-069 R15 §3.6 item 2(a)): its SCY1 `1`
+    /// binds that SPY1, never an immediate answer.
     fn cancels_an_attempt_awaiting_its_input(
         responder: &Responder<'_>,
         port: &ExecutePort,
@@ -773,19 +773,28 @@ mod served {
             let mut bytes = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
             peer.read_exact(&mut bytes)?;
             let grant = AdmissionGrant::from_canonical_cbor(&bytes)?;
-            assert_eq!(
-                port.cancel(
-                    &cancel_request(grant.attempt_id, grant.grant_digest(), 6),
-                    Instant::now() + TIMEOUT,
-                    (signer, key),
-                ),
-                Err(Some(Code::SandboxUnavailable))
-            );
+            let request = cancel_request(grant.attempt_id, grant.grant_digest(), 6);
+            let cancelling = scope.spawn(move || {
+                port.cancel(&request, (Instant::now() + TIMEOUT, TIMEOUT), (signer, key))
+            });
+            // The cancellation waits while the attempt awaits its input.
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!cancelling.is_finished());
             peer.shutdown(std::net::Shutdown::Write)?;
             let mut rest = Vec::new();
             peer.read_to_end(&mut rest)?;
             assert!(!rest.is_empty());
             serving.join().map_err(|_| "serving panicked")?;
+            let answered = cancelling
+                .join()
+                .map_err(|_| "cancel panicked")?
+                .map_err(|code| format!("{code:?}"))?;
+            let scy1 = SandboxCancelResponse::from_canonical_cbor(&answered)?;
+            assert_eq!(scy1.result, SandboxCancellationResult::CancelledAndCleaned);
+            let stored = port
+                .lifecycle
+                .terminal_response(grant.attempt_id, grant.grant_digest())?;
+            assert_eq!(scy1.terminal_spy1_digest, stored.terminal_digests().0);
             Ok(grant)
         })
     }
@@ -806,11 +815,22 @@ mod served {
         assert_eq!(
             late.cancel(
                 &cancel_request(pending.attempt_id, pending.agr1_digest, 8),
-                Instant::now() + Duration::from_millis(50),
+                (Instant::now() + Duration::from_millis(50), TIMEOUT),
                 (signer, key),
             ),
             Err(Some(Code::SandboxUnavailable))
         );
+        // A refusal is not recorded: once faulted, the same request is `14`.
+        late.lifecycle.fault_for_test(pending.attempt_id);
+        assert_eq!(
+            late.cancel(
+                &cancel_request(pending.attempt_id, pending.agr1_digest, 8),
+                (Instant::now() + Duration::from_millis(50), TIMEOUT),
+                (signer, key),
+            ),
+            Err(Some(Code::CleanupFailed))
+        );
+        assert_eq!(late.lifecycle.control_entries(pending.attempt_id), 0);
         let (_tree, port) = test_port(limits)?;
         let pending = port
             .lifecycle
@@ -821,7 +841,7 @@ mod served {
             let cancelling = scope.spawn(|| {
                 port.cancel(
                     &cancel_request(attempt, digest, 9),
-                    Instant::now() + TIMEOUT,
+                    (Instant::now() + TIMEOUT, TIMEOUT),
                     (signer, key),
                 )
             });
@@ -839,11 +859,12 @@ mod served {
         })
     }
 
-    /// SCY1 (base §4, §10): `0` binds the SPY1 of an attempt already
-    /// terminal and delivers it, so no later timeout re-issues it; an exact
-    /// repeat gets the same bytes; `1` binds the SPY1 of the attempt this
-    /// request cancelled; an unknown attempt is `15`; an attempt with no
-    /// SPY1 by the deadline is `11`.
+    /// SCY1 (base §4, §10; ADR-069 R15 §3.6 item 2): `0` binds the SPY1 of
+    /// an attempt already terminal and delivers it, so no later timeout
+    /// re-issues it; an exact repeat is answered from the current state, so
+    /// gets the same bytes; `1` binds the SPY1 of the attempt this request
+    /// cancelled; an unknown attempt is `15`; an attempt with no SPY1 by the
+    /// deadline is `11`.
     #[test]
     fn cancel_binds_the_terminal_spy1_and_delivers_it() -> TestResult {
         if !in_isolated_root(
@@ -862,7 +883,7 @@ mod served {
         let responder = Responder::new(&admitted, &signer, &open, 4);
         let port = port(&open)?;
         let key = responder.key();
-        let soon = || Instant::now() + Duration::from_secs(5);
+        let soon = || (Instant::now() + Duration::from_secs(5), TIMEOUT);
         // Already terminal: 0, bound to the stored SPY1.
         let stored = port
             .lifecycle
@@ -893,8 +914,7 @@ mod served {
                 .terminal_response(attempt, stored.agr1_digest())?,
             &stored
         ));
-        // Once the attempt is reconciled, its SCY1 is forgotten: a repeat
-        // names an unknown attempt.
+        // Once the attempt is reconciled, a repeat names an unknown attempt.
         port.lifecycle.reconcile(&SandboxReconcileRequest {
             request: cancel_request(attempt, stored.agr1_digest(), 5).request,
             attempt_id: attempt,
@@ -905,7 +925,6 @@ mod served {
             port.cancel(&request, soon(), (&*signer, key)),
             Err(Some(Code::UnknownAttempt))
         );
-        assert!(port.cancelled.lock().map_err(|_| "poisoned")?.is_empty());
         // An unknown attempt, and one under another AGR1.
         assert_eq!(
             port.cancel(
@@ -938,6 +957,253 @@ mod served {
             .lifecycle
             .terminal_response(grant.attempt_id, grant.grant_digest())?
             .delivered());
+        drop(staged);
+        Ok(())
+    }
+
+    /// An SCQ1 or SRQ1 under `authority` (the retained APT1 and epoch).
+    fn control_record(
+        magic: &str,
+        (apt1, epoch): ([u8; 32], u64),
+        request_id: [u8; 16],
+        (attempt, agr1): ([u8; 16], [u8; 32]),
+    ) -> TestResult<Vec<u8>> {
+        use ciborium::value::Value;
+        let bytes = |slice: &[u8]| Value::Bytes(slice.to_vec());
+        let unsigned = Value::Array(vec![
+            Value::Text(magic.to_owned()),
+            Value::Integer(1.into()),
+            Value::Array(vec![
+                bytes(&request_id),
+                bytes(&apt1),
+                Value::Integer(epoch.into()),
+                bytes(&[3; 16]),
+            ]),
+            bytes(&attempt),
+            bytes(&agr1),
+        ]);
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&unsigned, &mut encoded)?;
+        let mut preimage = format!("PiglorOS.{magic}.v1\0").into_bytes();
+        preimage.extend(&encoded);
+        let digest = blake3::hash(&preimage);
+        let mut record = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![unsigned, bytes(digest.as_bytes())]),
+            &mut record,
+        )?;
+        Ok(record)
+    }
+
+    /// The one record a connection answers to `record`, sent whole and
+    /// half-closed, answered by `serve`.
+    fn asked(record: &[u8], serve: impl FnOnce(UnixStream) + Send) -> TestResult<Vec<Vec<u8>>> {
+        let (server, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        peer.write_all(&framed(&[record])?)?;
+        peer.shutdown(std::net::Shutdown::Write)?;
+        std::thread::scope(|scope| {
+            let serving = scope.spawn(move || serve(server));
+            let frames = read_frames(&mut peer);
+            serving.join().map_err(|_| "serving panicked")?;
+            frames
+        })
+    }
+
+    /// An SRY1 signing fault and a revocation after step 6, for
+    /// [`cancel_and_reconcile_are_answered_from_the_control_pool`].
+    fn signing_fault_and_revocation(
+        responder: &Responder<'_>,
+        port: &ExecutePort,
+        (reconcile, busy): (&[u8], &[u8]),
+        attempt: [u8; 16],
+    ) -> TestResult {
+        let key = responder.key();
+        // An SRY1 that cannot be signed under the admitted key emits nothing
+        // and closes execute admission (R9 §5); the attempt stays reconciled.
+        let foreign = KeyFileRuntimeSigner::from_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
+            "foreign".to_owned(),
+        );
+        assert!(port.open());
+        assert_eq!(
+            port.reconcile(
+                &SandboxReconcileRequest::from_canonical_cbor(reconcile)?,
+                Instant::now() + TIMEOUT,
+                (&foreign, key),
+            ),
+            Err(None)
+        );
+        assert!(!port.open());
+        // Revoked after step 6: zero bytes.
+        responder.revocation.observer().advance(REVOKED);
+        let request = SandboxReconcileRequest::from_canonical_cbor(busy)?;
+        let identity = RequestIdentity {
+            operation: 3,
+            request_id: request.request.request_id,
+            request_digest: request.request_digest,
+            attempt_id: Some(attempt),
+        };
+        // The request was read already; the peer sees only EOF.
+        let (server, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        responder.answer_control(
+            &server,
+            (
+                identity,
+                crate::provider_runtime::serving::Control::Reconcile(request),
+            ),
+            Instant::now() + TIMEOUT,
+            None,
+        );
+        drop(server);
+        assert!(read_frames(&mut peer)?.is_empty());
+        Ok(())
+    }
+
+    /// ADR-069 R15 §3.3 and N13: cancel and reconcile are answered from the
+    /// control pool. An SRQ1 for an attempt with a signed response gets an
+    /// SRY1 over its retained evidence, replayed byte for byte; one read by
+    /// a refusal reader is handed off, not refused; a full control pool
+    /// gets `12`; and `Revoked` writes nothing.
+    #[test]
+    fn cancel_and_reconcile_are_answered_from_the_control_pool() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::cancel_and_reconcile_are_answered_from_the_control_pool",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let authority = (
+            admitted.bootstrap().policy().policy_digest(),
+            admitted.bootstrap().policy().policy_epoch(),
+        );
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 1);
+        let port = port(&open)?;
+        let key = responder.key();
+        let stored = port
+            .lifecycle
+            .completed_for_test()
+            .map_err(|error| error.to_string())?;
+        let attempt = identity_of(&stored)?.attempt_id.ok_or("no attempt")?;
+        let named = (attempt, stored.agr1_digest());
+        let (terminal, last_audit) = stored.terminal_digests();
+        let evidence = pos_reference::sandbox_provider_protocol::ReconciliationEvidence::new(
+            &pos_reference::sandbox_provider_protocol::ReconciliationEvidenceFields {
+                attempt_id: attempt,
+                agr1_digest: stored.agr1_digest(),
+                terminal_spy1_digest: terminal,
+                final_sau1_digest: last_audit,
+            },
+        )?;
+        let answer = |record: &[u8], admission| {
+            asked(record, |stream| responder.answer(stream, admission, None))
+        };
+        // An answered worker hands the SRQ1 to the control pool: SRY1.
+        let reconcile = control_record("SRQ1", authority, [0x71; 16], named)?;
+        let first = answer(&reconcile, Admission::Answered)?;
+        assert_eq!(first.len(), 1);
+        let reconciled = pos_reference::sandbox_provider_protocol::SandboxReconcileResponse::from_canonical_cbor(&first[0])?;
+        reconciled.verify_signature(key.key())?;
+        reconciled
+            .validate_for_request(&SandboxReconcileRequest::from_canonical_cbor(&reconcile)?)?;
+        assert_eq!(reconciled.reconciliation_evidence_digest, evidence.digest());
+        assert!(stored.delivered());
+        // An exact repeat gets the same bytes, a new request ID the same
+        // evidence digest.
+        assert_eq!(answer(&reconcile, Admission::Answered)?, first);
+        let other = control_record("SRQ1", authority, [0x72; 16], named)?;
+        let again = answer(&other, Admission::Busy)?;
+        let reconciled = pos_reference::sandbox_provider_protocol::SandboxReconcileResponse::from_canonical_cbor(&again[0])?;
+        assert_eq!(reconciled.reconciliation_evidence_digest, evidence.digest());
+        // A refusal reader hands an SCQ1 off as well: the reconciled
+        // attempt is unknown, not busy.
+        let cancel = control_record("SCQ1", authority, [0x73; 16], named)?;
+        assert_eq!(
+            refused(&answer(&cancel, Admission::Busy)?)?,
+            (Code::UnknownAttempt, Some([0x73; 16]))
+        );
+        // A full control pool gets 12, with the request's identities.
+        let held = responder.control.take();
+        assert!(held.is_some());
+        let busy = control_record("SRQ1", authority, [0x74; 16], named)?;
+        assert_eq!(
+            refused(&answer(&busy, Admission::Answered)?)?,
+            (Code::AdmissionBusy, Some([0x74; 16]))
+        );
+        drop(held);
+        signing_fault_and_revocation(&responder, port, (&reconcile, &busy), attempt)?;
+        drop(staged);
+        Ok(())
+    }
+
+    /// N13 and invariant 16: an SCQ1 read by an answered worker is handed
+    /// off at its stream position, which frees the worker's place while
+    /// the cancellation waits, holding no lock, for the response it binds.
+    #[test]
+    fn a_waiting_cancellation_frees_its_execute_place() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::a_waiting_cancellation_frees_its_execute_place",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let authority = (
+            admitted.bootstrap().policy().policy_digest(),
+            admitted.bootstrap().policy().policy_epoch(),
+        );
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 1);
+        let port = port(&open)?;
+        let pending = port
+            .lifecycle
+            .completed_pending_for_test()
+            .map_err(|error| error.to_string())?;
+        let cancel = control_record(
+            "SCQ1",
+            authority,
+            [0x75; 16],
+            (pending.attempt_id, pending.agr1_digest),
+        )?;
+        let (server, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        peer.write_all(&framed(&[&cancel])?)?;
+        peer.shutdown(std::net::Shutdown::Write)?;
+        let place = responder.answered.take();
+        assert!(place.is_some() && !responder.answered.has_room());
+        std::thread::scope(|scope| -> TestResult {
+            let serving = scope.spawn(|| {
+                responder.answer_placed(server, Admission::Answered, None, place);
+            });
+            // The hand-off frees the execute place before the wait ends.
+            let deadline = Instant::now() + TIMEOUT;
+            while !responder.answered.has_room() {
+                assert!(Instant::now() < deadline, "the place was never freed");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!serving.is_finished());
+            pending
+                .retain(&port.lifecycle)
+                .map_err(|error| error.to_string())?;
+            let frames = read_frames(&mut peer)?;
+            serving.join().map_err(|_| "serving panicked")?;
+            let answered = SandboxCancelResponse::from_canonical_cbor(&frames[0])?;
+            assert_eq!(answered.result, SandboxCancellationResult::AlreadyTerminal);
+            Ok(())
+        })?;
         drop(staged);
         Ok(())
     }

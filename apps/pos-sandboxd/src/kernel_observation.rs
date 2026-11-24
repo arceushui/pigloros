@@ -549,6 +549,11 @@ impl ObservedUnit {
     pub const fn work(&self) -> Option<&File> {
         self.work.as_ref()
     }
+
+    /// Take the `/work` handle, for the terminal reading that closes it.
+    pub(crate) const fn take_work(&mut self) -> Option<File> {
+        self.work.take()
+    }
 }
 
 /// The bound attempt cgroup, as the observation reads it.

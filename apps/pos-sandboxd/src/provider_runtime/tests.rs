@@ -373,7 +373,6 @@ pub(super) fn test_port(limits: StagingLimits) -> TestResult<(PortFixture, Execu
             Duration::from_millis(500),
         )?,
         closed: AtomicBool::new(false),
-        cancelled: std::sync::Mutex::default(),
         transport,
         runtime,
     };

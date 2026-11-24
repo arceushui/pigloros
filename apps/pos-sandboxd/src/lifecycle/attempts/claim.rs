@@ -147,8 +147,8 @@ impl<I> AttemptLifecycle<I> {
     ///
     /// # Errors
     /// [`AttemptLifecycleError::Fenced`] once the runtime was fenced;
-    /// [`AttemptLifecycleError::UnknownAttempt`] for a reconciled or
-    /// withdrawn attempt; [`AttemptLifecycleError::RequestConflict`] for a
+    /// [`AttemptLifecycleError::UnknownAttempt`] for a reconciled
+    /// (tombstoned) attempt; [`AttemptLifecycleError::RequestConflict`] for a
     /// known attempt, or a request ID claimed before, with other bytes;
     /// [`AttemptLifecycleError::AttemptKnown`] for a known attempt with the
     /// same bytes, which joins it instead; and
@@ -299,12 +299,17 @@ impl<'l, I, R: RuntimeAttestationSigner> AwaitedInput<'l, I, R> {
 }
 
 impl<'l, I, R: RuntimeAttestationSigner> AwaitedInput<'l, I, R> {
-    /// Take exclusive ownership of the attempt `input` admitted.
-    pub(super) fn admit_owned(self, input: I) -> Result<OwnedAttempt<'l, I>, AttemptLifecycleError>
+    /// Take exclusive ownership of the attempt `input` admitted; an owner
+    /// dropped before its run signs with this obligation's signer.
+    pub(super) fn admit_owned(
+        self,
+        input: I,
+    ) -> Result<OwnedAttempt<'l, I, R>, AttemptLifecycleError>
     where
         I: super::AdmittedInput,
     {
-        self.settle(|lifecycle| lifecycle.admit_input(input))
+        let signing = (self.signer, self.admitted);
+        self.settle(|lifecycle| lifecycle.admit_input(input, signing))
     }
 
     /// Record the attempt `failed` names as ended by its failed input.
@@ -320,7 +325,7 @@ impl<'l, R: RuntimeAttestationSigner> AwaitedInput<'l, VerifiedStagedInput, R> {
     /// Take exclusive ownership of the attempt `input` admitted.
     ///
     /// The lifecycle keeps the admission, and its staging reservation, until
-    /// the attempt is withdrawn before it started, its run is dropped part-way
+    /// the attempt ends before it started, its run is dropped part-way
     /// (after the lifecycle was quarantined), or it is reconciled after it
     /// ended clean. An attempt that ended with its cleanup unproved keeps it:
     /// its reconcile reports [`AttemptLifecycleError::CleanupFailed`]. A
@@ -337,7 +342,7 @@ impl<'l, R: RuntimeAttestationSigner> AwaitedInput<'l, VerifiedStagedInput, R> {
     pub fn admit(
         self,
         input: VerifiedStagedInput,
-    ) -> Result<OwnedAttempt<'l>, AttemptLifecycleError> {
+    ) -> Result<OwnedAttempt<'l, VerifiedStagedInput, R>, AttemptLifecycleError> {
         self.admit_owned(input)
     }
 
@@ -382,7 +387,8 @@ impl<I> AttemptLifecycle<I> {
             })
     }
 
-    /// [`Self::admit_input`] after the AGR1 of `input` was granted.
+    /// [`Self::admit_input`] after the AGR1 of `input` was granted, signing
+    /// with the test runtime key.
     pub(super) fn admit_granted(
         &self,
         input: I,
@@ -391,13 +397,32 @@ impl<I> AttemptLifecycle<I> {
         I: super::AdmittedInput,
     {
         self.granted_for_test(input.attempt_id(), input.grant_digest())
-            .and_then(|()| self.admit_input(input))
+            .and_then(|()| self.admit_input(input, test_signing()))
     }
+}
+
+/// The test runtime key's signer and admitted key.
+#[cfg(test)]
+pub(super) fn test_signing() -> (&'static KeyFileRuntimeSigner, AdmittedRuntimeKey<'static>) {
+    static SIGNER: std::sync::OnceLock<KeyFileRuntimeSigner> = std::sync::OnceLock::new();
+    static KEY: std::sync::OnceLock<ed25519_dalek::VerifyingKey> = std::sync::OnceLock::new();
+    let signing = || ed25519_dalek::SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED);
+    let signer = SIGNER.get_or_init(|| {
+        KeyFileRuntimeSigner::from_signing_key(
+            signing(),
+            crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
+        )
+    });
+    let key = KEY.get_or_init(|| signing().verifying_key());
+    (
+        signer,
+        AdmittedRuntimeKey::new(crate::test_fixtures::RUNTIME_KEY_ID, key),
+    )
 }
 
 #[cfg(test)]
 impl<I> AttemptLifecycle<I> {
-    /// The request IDs this runtime still knows, with their SPX1 digests.
+    /// The request IDs this runtime still knows, with their request digests.
     pub(super) fn lock_requests(&self) -> std::collections::BTreeMap<[u8; 16], [u8; 32]> {
         lock(&self.attempts).requests.clone()
     }
@@ -426,21 +451,12 @@ impl<'l, I> GrantWrite<'l, I> {
     /// [`Self::written`] with the test runtime key, whose interrupted input
     /// is the fixture failed input of `grant`.
     pub(crate) fn written_for_test(self, grant: [u8; 32]) -> AwaitedInput<'l, I> {
-        static SIGNER: std::sync::OnceLock<KeyFileRuntimeSigner> = std::sync::OnceLock::new();
-        static KEY: std::sync::OnceLock<ed25519_dalek::VerifyingKey> = std::sync::OnceLock::new();
-        let signing = || ed25519_dalek::SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED);
-        let signer = SIGNER.get_or_init(|| {
-            KeyFileRuntimeSigner::from_signing_key(
-                signing(),
-                crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
-            )
-        });
-        let key = KEY.get_or_init(|| signing().verifying_key());
+        let (signer, admitted) = test_signing();
         let attempt_id = self.held.attempt_id;
         self.written(
             Box::new(move || FailedInput::fixture(attempt_id, grant)),
             signer,
-            AdmittedRuntimeKey::new(crate::test_fixtures::RUNTIME_KEY_ID, key),
+            admitted,
         )
     }
 }

@@ -11,7 +11,8 @@ mod cases {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pos_reference::sandbox_provider_protocol::{
-        CancelSource, RequestAuthority, SandboxExecutionMode,
+        CancelSource, RequestAuthority, SandboxCancelRequest, SandboxCancellationResult,
+        SandboxExecutionMode, SandboxReconcileRequest,
     };
 
     use super::super::*;
@@ -72,6 +73,8 @@ mod cases {
         cancel_while_preparing: Option<Arc<std::sync::OnceLock<Arc<RunState>>>>,
         // The admitted facts belong to another directory.
         foreign: bool,
+        // A real admission under a signed AGR1, and that AGR1's digest.
+        signed: Option<(AttemptAdmission, [u8; 32])>,
     }
 
     impl FakeInput {
@@ -85,6 +88,7 @@ mod cases {
                 charge: None,
                 cancel_while_preparing: None,
                 foreign: false,
+                signed: None,
             }
         }
 
@@ -158,11 +162,16 @@ mod cases {
         }
 
         fn grant_digest(&self) -> [u8; 32] {
-            grant(self.id)
+            self.signed
+                .as_ref()
+                .map_or_else(|| grant(self.id), |(_, digest)| *digest)
         }
 
         fn admission(&self) -> AttemptAdmission {
-            crate::test_fixtures::attempt_admission(grant(self.id))
+            self.signed.as_ref().map_or_else(
+                || crate::test_fixtures::attempt_admission(grant(self.id)),
+                |(admission, _)| admission.clone(),
+            )
         }
 
         fn prepare(
@@ -513,9 +522,13 @@ mod cases {
         )?)
     }
 
-    const fn authority_of(id: u8) -> RequestAuthority {
+    /// A request of `[id; 16]` whose ID ends in `kind`, so it never reuses
+    /// the attempt's SPX1 request ID (`[id; 16]`) in the ledger.
+    const fn authority_of(id: u8, kind: u8) -> RequestAuthority {
+        let mut request_id = [id; 16];
+        request_id[15] = kind;
         RequestAuthority {
-            request_id: [id; 16],
+            request_id,
             apt1_digest: [1; 32],
             policy_epoch: 6,
             nonce: [id; 16],
@@ -524,7 +537,7 @@ mod cases {
 
     const fn cancel_request(id: u8, grant_digest: [u8; 32]) -> SandboxCancelRequest {
         SandboxCancelRequest {
-            request: authority_of(id),
+            request: authority_of(id, 0xca),
             attempt_id: [id; 16],
             agr1_digest: grant_digest,
             request_digest: [3; 32],
@@ -533,11 +546,30 @@ mod cases {
 
     const fn reconcile_request(id: u8, grant_digest: [u8; 32]) -> SandboxReconcileRequest {
         SandboxReconcileRequest {
-            request: authority_of(id),
+            request: authority_of(id, 0x5c),
             attempt_id: [id; 16],
             agr1_digest: grant_digest,
             request_digest: [4; 32],
         }
+    }
+
+    /// The reconciliation evidence of `[id; 16]` under `grant(id)` that binds
+    /// `signed`'s SPY1 and final SAU1 (ADR-069 R15 §3.2).
+    fn evidence_of(
+        id: u8,
+        signed: &crate::RetainedResponse,
+    ) -> TestResult<pos_reference::sandbox_provider_protocol::ReconciliationEvidence> {
+        let (terminal_spy1_digest, final_sau1_digest) = signed.terminal_digests();
+        Ok(
+            pos_reference::sandbox_provider_protocol::ReconciliationEvidence::new(
+                &pos_reference::sandbox_provider_protocol::ReconciliationEvidenceFields {
+                    attempt_id: [id; 16],
+                    agr1_digest: grant(id),
+                    terminal_spy1_digest,
+                    final_sau1_digest,
+                },
+            )?,
+        )
     }
 
     /// The completed cleanup of `ended`, or why there is none.
@@ -580,14 +612,25 @@ mod cases {
             assert!(!exists(&runtime.record(id)?));
         }
         for id in 1..=8 {
+            // Unsigned, it is not reconciled yet.
+            assert!(matches!(
+                runtime
+                    .lifecycle
+                    .reconcile(&reconcile_request(id, grant(id))),
+                Err(AttemptLifecycleError::ResponsePending)
+            ));
+            let signed = runtime.lifecycle.sign_for_test([id; 16])?;
             let reconciled = runtime
                 .lifecycle
                 .reconcile(&reconcile_request(id, grant(id)))?;
             assert_eq!(reconciled.attempt_id(), [id; 16]);
+            assert_eq!(reconciled.evidence(), &evidence_of(id, &signed)?);
             assert_eq!(
-                reconciled.intent().map(PlannedAttemptIntent::attempt_id),
-                Some([id; 16])
+                reconciled.evidence_digest(),
+                evidence_of(id, &signed)?.digest()
             );
+            // Reconciling delivered the response: no re-issue replaces it.
+            assert!(signed.delivered());
             // A repeated reconcile reports the same attempt, for its grant only.
             assert_eq!(
                 runtime
@@ -654,12 +697,13 @@ mod cases {
         // Nothing was committed, nothing quarantined.
         assert!(!exists(&runtime.record(1)?));
         assert!(runtime.admits()?);
-        // It is reconciled without an intent, then forgotten.
+        // Once its response is signed it is reconciled, then forgotten.
+        let signed = runtime.lifecycle.sign_for_test([1; 16])?;
         let reconciled = runtime
             .lifecycle
             .reconcile(&reconcile_request(1, grant(1)))?;
         assert_eq!(reconciled.attempt_id(), [1; 16]);
-        assert_eq!(reconciled.intent(), None);
+        assert_eq!(reconciled.evidence(), &evidence_of(1, &signed)?);
         assert!(matches!(
             runtime.lifecycle.cancel(&cancel_request(1, grant(1))).await,
             Err(AttemptLifecycleError::UnknownAttempt)
@@ -689,8 +733,9 @@ mod cases {
             lifecycle.cancel(&cancel_request(7, grant(7))).await?,
             SandboxCancellationResult::AlreadyTerminal
         );
+        let signed = lifecycle.sign_for_test([7; 16])?;
         let reconciled = lifecycle.reconcile(&reconcile_request(7, grant(7)))?;
-        assert_eq!(reconciled.intent(), None);
+        assert_eq!(reconciled.evidence(), &evidence_of(7, &signed)?);
         Ok(())
     }
 
@@ -835,6 +880,7 @@ mod cases {
             ));
             cleaned(&ended)?;
             assert!(!exists(&runtime.record(1)?));
+            runtime.lifecycle.sign_for_test([1; 16])?;
             runtime
                 .lifecycle
                 .reconcile(&reconcile_request(1, grant(1)))?;
@@ -857,6 +903,7 @@ mod cases {
         // cancellation next finds the attempt reconciled, not ended.
         let run_and_reconcile = async {
             let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+            runtime.lifecycle.sign_for_test([1; 16])?;
             runtime
                 .lifecycle
                 .reconcile(&reconcile_request(1, grant(1)))?;
@@ -1006,6 +1053,7 @@ mod cases {
                 runtime.lifecycle.terminal_response([1; 16], grant(1)),
                 Err(AttemptLifecycleError::ResponsePending)
             ));
+            runtime.lifecycle.sign_for_test([1; 16])?;
             runtime
                 .lifecycle
                 .reconcile(&reconcile_request(1, grant(1)))?;
@@ -1014,47 +1062,53 @@ mod cases {
         let (joined, ran) = tokio::join!(joined, ran);
         ran?;
         assert!(matches!(joined, Err(AttemptLifecycleError::UnknownAttempt)));
-        // A withdrawn attempt is unknown to a repeat as well.
+        // An owner dropped before its run ends the attempt; a response that
+        // cannot be signed leaves a repeat nothing to receive.
         drop(runtime.lifecycle.admit_granted(FakeInput::new(2))?);
         assert!(matches!(
             runtime.lifecycle.join([2; 16], REQUEST).await,
-            Err(AttemptLifecycleError::UnknownAttempt)
+            Err(AttemptLifecycleError::ResponseUnavailable)
         ));
         Ok(())
     }
 
+    /// An owner dropped before its run never tombstones its attempt (ADR-069
+    /// R15 §3.6 item 2(b)): the attempt ends with nothing committed and its
+    /// response is signed in `Drop`. The fake admissions cannot be signed,
+    /// so each response is a provider fault, which quarantines.
     #[tokio::test(start_paused = true)]
-    async fn an_owner_dropped_before_its_run_started_is_withdrawn() -> TestResult {
+    async fn an_owner_dropped_before_its_run_started_ends_its_attempt() -> TestResult {
         let runtime = Runtime::new()?;
         drop(runtime.lifecycle.admit_granted(runtime.charged(1)?)?);
         let fixture = manager(2).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         let owned = runtime.lifecycle.admit_granted(FakeInput::new(2))?;
         drop(Box::pin(owned.run_with(&steps, (), budget()?)));
-        // Nothing was committed, so nothing needs restart reconciliation.
+        // Nothing was committed, so nothing needs restart reconciliation,
+        // and the admissions were released.
         assert!(!exists(&runtime.record(1)?));
-        assert!(runtime.admits()?);
         assert_eq!(runtime.reserved(), 0);
-        // Each attempt had its one owner; it is withdrawn, with nothing to
-        // clean up, and no longer live.
+        assert!(!runtime.admits()?);
         for id in [1, 2] {
             assert!(matches!(
                 runtime.lifecycle.admit_granted(FakeInput::new(id)),
-                Err(AttemptLifecycleError::UnknownAttempt)
+                Err(AttemptLifecycleError::AttemptKnown)
             ));
-            let reconciled = runtime
-                .lifecycle
-                .reconcile(&reconcile_request(id, grant(id)))?;
-            assert_eq!(reconciled.attempt_id(), [id; 16]);
-            assert!(reconciled.intent().is_none());
             assert!(matches!(
                 runtime
                     .lifecycle
-                    .cancel(&cancel_request(id, grant(id)))
-                    .await,
-                Err(AttemptLifecycleError::UnknownAttempt)
+                    .reconcile(&reconcile_request(id, grant(id))),
+                Err(AttemptLifecycleError::ResponseUnavailable)
             ));
+            assert_eq!(
+                runtime
+                    .lifecycle
+                    .cancel(&cancel_request(id, grant(id)))
+                    .await?,
+                SandboxCancellationResult::AlreadyTerminal
+            );
         }
+        // An attempt that never ran is never in the snapshot.
         assert!(runtime
             .lifecycle
             .fence_and_snapshot()
@@ -1065,7 +1119,7 @@ mod cases {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_cancellation_withdraws_an_attempt_that_never_started() -> TestResult {
+    async fn a_cancellation_before_the_run_is_recorded_for_its_ending() -> TestResult {
         let runtime = Runtime::new()?;
         let fixture = manager(1).await?;
         let calls = fixture.calls();
@@ -1073,7 +1127,7 @@ mod cases {
         let owned = runtime.lifecycle.admit_granted(runtime.charged(1)?)?;
         assert_eq!(runtime.reserved(), 1);
         // The owner has not run it: the cancellation needs no wait, and the
-        // withdrawn admission is released at once.
+        // attempt is not tombstoned.
         assert_eq!(
             runtime
                 .lifecycle
@@ -1081,8 +1135,19 @@ mod cases {
                 .await?,
             SandboxCancellationResult::CancelledAndCleaned
         );
-        assert_eq!(runtime.reserved(), 0);
+        assert!(matches!(
+            runtime.lifecycle.reconcile(&reconcile_request(1, grant(1))),
+            Err(AttemptLifecycleError::AttemptActive)
+        ));
+        assert_eq!(runtime.reserved(), 1);
         let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+        // The run ended it with nothing committed, released its admission,
+        // and its response is pending.
+        assert_eq!(runtime.reserved(), 0);
+        assert!(matches!(
+            runtime.lifecycle.terminal_response([1; 16], grant(1)),
+            Err(AttemptLifecycleError::ResponsePending)
+        ));
         assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
         assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
         assert!(matches!(ended.cleanup(), Ok(None)));
@@ -1107,7 +1172,7 @@ mod cases {
         // attempt terminal.
         let lifecycle = &runtime.lifecycle;
         steps.after_cleanup = Some(Box::new(move || {
-            assert!(lifecycle.signal_cancel([1; 16], grant(1)).is_ok());
+            assert!(lifecycle.signal_for_test(&cancel_request(1, grant(1))));
         }));
         let ended = runtime.run(FakeInput::new(1), &steps).await?;
         assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
@@ -1350,6 +1415,7 @@ mod cases {
         let first = manager(1).await?;
         let steps = FixtureSteps::over(&first.transport, first.bound);
         cleaned(&runtime.run(FakeInput::new(1), &steps).await?)?;
+        runtime.lifecycle.sign_for_test([1; 16])?;
         runtime
             .lifecycle
             .reconcile(&reconcile_request(1, grant(1)))?;
@@ -1601,14 +1667,14 @@ mod cases {
         ));
         assert!(matches!(
             lifecycle.reconcile(&reconcile_request(1, grant(1))),
-            Err(AttemptLifecycleError::GrantMismatch)
+            Err(AttemptLifecycleError::UnknownAttempt)
         ));
         assert!(matches!(
             lifecycle.terminal_response([1; 16], grant(1)),
             Err(AttemptLifecycleError::UnknownAttempt)
         ));
         assert!(matches!(
-            lifecycle.admit_input(FakeInput::new(1)),
+            lifecycle.admit_input(FakeInput::new(1), super::super::claim::test_signing()),
             Err(AttemptLifecycleError::UnknownAttempt)
         ));
         // Released, the attempt can be claimed again.
@@ -1638,11 +1704,15 @@ mod cases {
         // The test seam leaves the lifecycle's diagnostics intact.
         assert!(format!("{lifecycle:?}").contains("BeginHook"));
         assert!(matches!(
-            lifecycle.admit_input(FakeInput::new(2).with_attempt([1; 16])),
+            lifecycle.admit_input(
+                FakeInput::new(2).with_attempt([1; 16]),
+                super::super::claim::test_signing()
+            ),
             Err(AttemptLifecycleError::GrantMismatch)
         ));
         let ended: EndedAttempt<()> = awaited.record_failed_admission(&FakeFailed(1))?;
         assert_eq!(ended.cancel_source(), None);
+        lifecycle.sign_for_test([1; 16])?;
         lifecycle.reconcile(&reconcile_request(1, grant(1)))?;
         assert!(matches!(
             lifecycle.claim([1; 16], [1; 16], REQUEST),
@@ -1681,7 +1751,9 @@ mod cases {
             .claim([1; 16], [1; 16], REQUEST)?
             .convert(grant(1))?
             .written_for_test(grant(1));
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let owned = runtime
+            .lifecycle
+            .admit_input(FakeInput::new(1), super::super::claim::test_signing())?;
         drop(awaited);
         assert!(runtime.admits()?);
         drop(owned);
@@ -1759,7 +1831,7 @@ mod cases {
         assert!(joined?.is_none());
         assert!(lifecycle.terminal_response([1; 16], grant(1)).is_err());
         assert!(matches!(
-            lifecycle.admit_input(FakeInput::new(1)),
+            lifecycle.admit_input(FakeInput::new(1), super::super::claim::test_signing()),
             Err(AttemptLifecycleError::UnknownAttempt)
         ));
         Ok(())
@@ -1786,6 +1858,7 @@ mod cases {
             for _ in 0..4 {
                 tokio::task::yield_now().await;
             }
+            lifecycle.sign_for_test([1; 16])?;
             lifecycle.reconcile(&reconcile_request(1, grant(1)))?;
             TestResult::Ok(())
         };
@@ -1834,11 +1907,13 @@ mod cases {
             lifecycle.join([3; 16], REQUEST).await,
             Err(AttemptLifecycleError::ResponseUnavailable)
         ));
-        assert!(lifecycle
-            .reconcile(&reconcile_request(3, grant(3)))?
-            .intent()
-            .is_none());
-        let owned = lifecycle.admit_input(FakeInput::new(1))?;
+        // A faulted response never reconciles (ADR-069 R15 §3.3).
+        assert!(matches!(
+            lifecycle.reconcile(&reconcile_request(3, grant(3))),
+            Err(AttemptLifecycleError::ResponseUnavailable)
+        ));
+        let owned =
+            lifecycle.admit_input(FakeInput::new(1), super::super::claim::test_signing())?;
         // A repeat that joined it wakes when the ending is recorded.
         let joined = lifecycle.join([1; 16], REQUEST);
         let ran = async {
@@ -1851,6 +1926,7 @@ mod cases {
                 lifecycle.terminal_response([1; 16], grant(1)),
                 Err(AttemptLifecycleError::ResponsePending)
             ));
+            lifecycle.sign_for_test([1; 16])?;
             lifecycle.reconcile(&reconcile_request(1, grant(1)))?;
             TestResult::Ok(ended)
         };
@@ -1906,18 +1982,35 @@ mod cases {
         Ok(())
     }
 
+    /// An attempt that ended before its run keeps its place under the cap
+    /// until it is reconciled (ADR-069 R15 §3.6 item 2): only reconcile
+    /// tombstones it.
     #[test]
-    fn a_withdrawn_attempt_frees_its_place_under_the_cap() -> TestResult {
+    fn only_a_reconciled_attempt_frees_its_place_under_the_cap() -> TestResult {
         let runtime = Runtime::new()?;
-        for number in 1..=255 {
+        for number in 1..=254 {
             started_and_dropped(&runtime, FakeInput::numbered(number))?;
         }
+        runtime
+            .lifecycle
+            .granted_for_test([0xfe; 16], grant(0xfe))?;
+        runtime
+            .lifecycle
+            .record_failed::<(), _>(&FakeFailed(0xfe))?;
         let last = runtime.lifecycle.admit_granted(FakeInput::numbered(256))?;
         assert!(matches!(
             runtime.lifecycle.admit_granted(FakeInput::numbered(257)),
             Err(AttemptLifecycleError::TooManyLiveAttempts)
         ));
         drop(last);
+        assert!(matches!(
+            runtime.lifecycle.admit_granted(FakeInput::numbered(257)),
+            Err(AttemptLifecycleError::TooManyLiveAttempts)
+        ));
+        runtime.lifecycle.sign_for_test([0xfe; 16])?;
+        runtime
+            .lifecycle
+            .reconcile(&reconcile_request(0xfe, grant(0xfe)))?;
         drop(runtime.lifecycle.admit_granted(FakeInput::numbered(257))?);
         Ok(())
     }
@@ -2236,11 +2329,12 @@ mod cases {
             // The admission is retained until the attempt is reconciled.
             assert_eq!(ledger.usage().attempts, 1);
             let reconcile = SandboxReconcileRequest {
-                request: authority_of(1),
+                request: authority_of(1, 0x5c),
                 attempt_id: request.attempt_id,
                 agr1_digest: grant_digest,
                 request_digest: [4; 32],
             };
+            lifecycle.sign_for_test(request.attempt_id)?;
             lifecycle.reconcile(&reconcile)?;
             assert_eq!(ledger.usage().attempts, 0);
             // A quarantined lifecycle refuses the next exchange before AGR1.
@@ -2340,13 +2434,14 @@ mod cases {
                 lifecycle.failed_granted(&failed),
                 Err(AttemptLifecycleError::AttemptKnown)
             ));
+            lifecycle.sign_for_test(failed.attempt_id())?;
             let reconciled = lifecycle.reconcile(&SandboxReconcileRequest {
-                request: authority_of(1),
+                request: authority_of(1, 0x5c),
                 attempt_id: failed.attempt_id(),
                 agr1_digest: failed.grant().digest(),
                 request_digest: [4; 32],
             })?;
-            assert_eq!(reconciled.intent(), None);
+            assert_eq!(reconciled.attempt_id(), failed.attempt_id());
             Ok(())
         }
     }
@@ -2610,6 +2705,408 @@ mod cases {
             .await;
             assert_eq!(calls.count()?, 0);
             Ok(())
+        }
+    }
+
+    /// ADR-069 R15: reconcile, cancel and the request ledger.
+    mod control {
+        use std::sync::Arc;
+
+        use super::*;
+        use crate::AdmittedRuntimeKey;
+
+        /// A runtime whose attempt `[id; 16]` ended by a failed input after
+        /// its AGR1, its response pending.
+        fn ended_pending(id: u8) -> TestResult<Runtime> {
+            let runtime = Runtime::new()?;
+            runtime.lifecycle.granted_for_test([id; 16], grant(id))?;
+            runtime.lifecycle.record_failed::<(), _>(&FakeFailed(id))?;
+            Ok(runtime)
+        }
+
+        /// A reconcile of `[id; 16]` with request ID `[n; 16]`.
+        fn reconcile_with(id: u8, n: u8) -> SandboxReconcileRequest {
+            let mut request = reconcile_request(id, grant(id));
+            request.request.request_id = [n; 16];
+            request.request_digest = [n; 32];
+            request
+        }
+
+        /// A cancel of `[id; 16]` with request ID `[n; 16]`.
+        fn cancel_with(id: u8, n: u8) -> SandboxCancelRequest {
+            let mut request = cancel_request(id, grant(id));
+            request.request.request_id = [n; 16];
+            request.request_digest = [n; 32];
+            request
+        }
+
+        /// Invariants 3 and 7: the tuple binds the retained AGR1, SPY1 and
+        /// final SAU1, is built once, and a repeat replays it: an exact one
+        /// byte for byte, a new request ID with the same digest. The
+        /// admission and response are released.
+        #[test]
+        fn the_evidence_is_built_once_and_replayed() -> TestResult {
+            let runtime = ended_pending(1)?;
+            let signed = runtime.lifecycle.sign_for_test([1; 16])?;
+            let first = runtime.lifecycle.reconcile(&reconcile_with(1, 0x61))?;
+            assert_eq!(first.evidence(), &evidence_of(1, &signed)?);
+            assert!(signed.delivered());
+            // The response was released with the slot.
+            assert_eq!(Arc::strong_count(&signed), 1);
+            assert!(matches!(
+                runtime.lifecycle.terminal_response([1; 16], grant(1)),
+                Err(AttemptLifecycleError::UnknownAttempt)
+            ));
+            assert_eq!(
+                runtime.lifecycle.reconcile(&reconcile_with(1, 0x61))?,
+                first
+            );
+            let again = runtime.lifecycle.reconcile(&reconcile_with(1, 0x62))?;
+            assert_eq!(again.evidence_digest(), first.evidence_digest());
+            assert_eq!(runtime.lifecycle.evidence_built(), 1);
+            // Each answered request ID is one entry; a repeat adds none.
+            assert_eq!(runtime.lifecycle.control_entries([1; 16]), 2);
+            // After reconcile, cancel and execute are unknown (R11
+            // Amendment 1 invariant 31).
+            assert!(!runtime.lifecycle.signal_for_test(&cancel_with(1, 0x63)));
+            assert!(matches!(
+                runtime.lifecycle.claim([1; 16], [0x64; 16], REQUEST),
+                Err(AttemptLifecycleError::UnknownAttempt)
+            ));
+            Ok(())
+        }
+
+        /// Invariants 8 and 13: refusals add no ledger entry, are answered
+        /// from the current state, and an attempt refused any number of
+        /// times reconciles later.
+        #[test]
+        fn refused_reconciles_record_nothing_and_a_clean_attempt_reconciles_later() -> TestResult {
+            let runtime = ended_pending(1)?;
+            for n in 0x61..0x6a {
+                assert!(matches!(
+                    runtime.lifecycle.reconcile(&reconcile_with(1, n)),
+                    Err(AttemptLifecycleError::ResponsePending)
+                ));
+            }
+            assert_eq!(runtime.lifecycle.control_entries([1; 16]), 0);
+            runtime.lifecycle.sign_for_test([1; 16])?;
+            runtime.lifecycle.reconcile(&reconcile_with(1, 0x70))?;
+            // A faulted response is refused as not proved clean.
+            let faulted = ended_pending(2)?;
+            faulted.lifecycle.fault_for_test([2; 16]);
+            assert!(matches!(
+                faulted.lifecycle.reconcile(&reconcile_with(2, 0x61)),
+                Err(AttemptLifecycleError::ResponseUnavailable)
+            ));
+            assert!(faulted.lifecycle.sign_for_test([2; 16]).is_err());
+            assert!(faulted.lifecycle.sign_for_test([9; 16]).is_err());
+            faulted.lifecycle.fault_for_test([9; 16]);
+            assert_eq!(faulted.lifecycle.control_entries([2; 16]), 0);
+            Ok(())
+        }
+
+        /// Invariant 13: one ledger for SPX1, SCQ1 and SRQ1. A recorded
+        /// request ID with other bytes is a conflict across operations,
+        /// and an exact repeat is answered.
+        #[tokio::test(start_paused = true)]
+        async fn a_recorded_request_id_with_other_bytes_conflicts_across_operations() -> TestResult
+        {
+            let runtime = ended_pending(1)?;
+            runtime.lifecycle.sign_for_test([1; 16])?;
+            // The SPX1 claim recorded `[1; 16]`.
+            let mut reused = reconcile_with(1, 0x61);
+            reused.request.request_id = [1; 16];
+            assert!(matches!(
+                runtime.lifecycle.reconcile(&reused),
+                Err(AttemptLifecycleError::RequestConflict)
+            ));
+            let mut cancel = cancel_with(1, 0x62);
+            cancel.request.request_id = [1; 16];
+            assert!(matches!(
+                runtime.lifecycle.cancel(&cancel).await,
+                Err(AttemptLifecycleError::RequestConflict)
+            ));
+            // An SCQ1 answered with SCY1 records its ID.
+            let cancel = cancel_with(1, 0x63);
+            assert_eq!(
+                runtime.lifecycle.cancel(&cancel).await?,
+                SandboxCancellationResult::AlreadyTerminal
+            );
+            runtime
+                .lifecycle
+                .bind_cancel(&cancel, Instant::now(), Duration::ZERO)
+                .await?;
+            let mut other = reconcile_with(1, 0x63);
+            other.request_digest = [0x77; 32];
+            assert!(matches!(
+                runtime.lifecycle.reconcile(&other),
+                Err(AttemptLifecycleError::RequestConflict)
+            ));
+            assert!(matches!(
+                runtime.lifecycle.claim([5; 16], [0x63; 16], REQUEST),
+                Err(AttemptLifecycleError::RequestConflict)
+            ));
+            // The exact repeat is answered from the current state.
+            assert_eq!(
+                runtime.lifecycle.cancel(&cancel).await?,
+                SandboxCancellationResult::AlreadyTerminal
+            );
+            runtime
+                .lifecycle
+                .bind_cancel(&cancel, Instant::now(), Duration::ZERO)
+                .await?;
+            assert_eq!(runtime.lifecycle.control_entries([1; 16]), 1);
+            Ok(())
+        }
+
+        /// Invariant 13: once an attempt holds four entries, a further
+        /// distinct ID is refused and adds nothing; exact repeats are still
+        /// answered, and entries never count toward the live bound.
+        #[tokio::test(start_paused = true)]
+        async fn a_fifth_distinct_control_request_id_is_refused() -> TestResult {
+            let runtime = ended_pending(1)?;
+            runtime.lifecycle.sign_for_test([1; 16])?;
+            let live = lock(&runtime.lifecycle.attempts).live;
+            for n in 0x61..0x64 {
+                let cancel = cancel_with(1, n);
+                runtime.lifecycle.cancel(&cancel).await?;
+                runtime
+                    .lifecycle
+                    .bind_cancel(&cancel, Instant::now(), Duration::ZERO)
+                    .await?;
+            }
+            assert_eq!(runtime.lifecycle.control_entries([1; 16]), 3);
+            runtime.lifecycle.reconcile(&reconcile_with(1, 0x64))?;
+            assert_eq!(runtime.lifecycle.control_entries([1; 16]), 4);
+            assert!(matches!(
+                runtime.lifecycle.reconcile(&reconcile_with(1, 0x65)),
+                Err(AttemptLifecycleError::ControlRequestsExhausted)
+            ));
+            assert!(matches!(
+                runtime.lifecycle.cancel(&cancel_with(1, 0x66)).await,
+                Err(AttemptLifecycleError::ControlRequestsExhausted)
+            ));
+            assert_eq!(runtime.lifecycle.control_entries([1; 16]), 4);
+            runtime.lifecycle.reconcile(&reconcile_with(1, 0x64))?;
+            // The reconciled attempt is no longer live; its entries stay with
+            // its tombstone and count toward nothing.
+            assert_eq!(lock(&runtime.lifecycle.attempts).live, live - 1);
+            Ok(())
+        }
+
+        /// Invariant 10: a cancellation of a granted attempt waits on the
+        /// slot, holding no lock, through its ending to its signed
+        /// response, and binds it delivered; a pending response at the
+        /// bound, a faulted one and an unproved cleanup are refused.
+        #[tokio::test(start_paused = true)]
+        async fn a_bound_cancellation_waits_for_the_signed_response() -> TestResult {
+            let runtime = Runtime::new()?;
+            runtime.lifecycle.granted_for_test([1; 16], grant(1))?;
+            let cancel = cancel_with(1, 0x61);
+            assert_eq!(
+                runtime.lifecycle.cancel(&cancel).await?,
+                SandboxCancellationResult::CancelledAndCleaned
+            );
+            let bound = runtime.lifecycle.bind_cancel(
+                &cancel,
+                Instant::now() + Duration::from_millis(10),
+                Duration::from_secs(5),
+            );
+            let settle = async {
+                // The wait holds no lock: the attempt still ends meanwhile.
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                }
+                let ended: EndedAttempt<()> = runtime.lifecycle.record_failed(&FakeFailed(1))?;
+                assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
+                // Past the bound counted from the request, within the one
+                // counted from the end.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                runtime.lifecycle.sign_for_test([1; 16])
+            };
+            let (bound, signed) = tokio::join!(bound, settle);
+            let signed = signed?;
+            assert!(Arc::ptr_eq(&bound?, &signed));
+            assert!(signed.delivered());
+            assert_eq!(runtime.lifecycle.control_entries([1; 16]), 1);
+            // Pending at the bound: refused, and nothing recorded.
+            let pending = ended_pending(2)?;
+            let cancel = cancel_with(2, 0x61);
+            pending.lifecycle.cancel(&cancel).await?;
+            assert!(matches!(
+                pending
+                    .lifecycle
+                    .bind_cancel(
+                        &cancel,
+                        Instant::now() + Duration::from_millis(5),
+                        Duration::ZERO
+                    )
+                    .await,
+                Err(AttemptLifecycleError::ResponsePending)
+            ));
+            pending.lifecycle.fault_for_test([2; 16]);
+            assert!(matches!(
+                pending
+                    .lifecycle
+                    .bind_cancel(&cancel, Instant::now(), Duration::ZERO)
+                    .await,
+                Err(AttemptLifecycleError::ResponseUnavailable)
+            ));
+            assert_eq!(pending.lifecycle.control_entries([2; 16]), 0);
+            Ok(())
+        }
+
+        /// Invariant 10: an unproved attempt and a reconciled one are
+        /// refused by the binding as well.
+        #[tokio::test(start_paused = true)]
+        async fn a_binding_refuses_unproved_and_reconciled_attempts() -> TestResult {
+            let fixture = manager(1).await?;
+            let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
+                .behaving(Behaviour::Substitutes);
+            let runtime = Runtime::new()?;
+            runtime.run(FakeInput::new(1), &steps).await?;
+            assert!(matches!(
+                runtime
+                    .lifecycle
+                    .bind_cancel(&cancel_with(1, 0x61), Instant::now(), Duration::ZERO)
+                    .await,
+                Err(AttemptLifecycleError::CleanupFailed)
+            ));
+            let reconciled = ended_pending(2)?;
+            reconciled.lifecycle.sign_for_test([2; 16])?;
+            reconciled.lifecycle.reconcile(&reconcile_with(2, 0x61))?;
+            assert!(matches!(
+                reconciled
+                    .lifecycle
+                    .bind_cancel(&cancel_with(2, 0x62), Instant::now(), Duration::ZERO)
+                    .await,
+                Err(AttemptLifecycleError::UnknownAttempt)
+            ));
+            Ok(())
+        }
+
+        /// R15 §3.3, N7: a pending response is awaited until the bound,
+        /// holding no lock; one that settles within it reconciles, one that
+        /// does not is `ResponsePending`.
+        #[tokio::test(start_paused = true)]
+        async fn a_reconcile_waits_for_a_pending_response_within_its_bound() -> TestResult {
+            let runtime = ended_pending(1)?;
+            let request = reconcile_with(1, 0x61);
+            let waiting = runtime
+                .lifecycle
+                .reconcile_within(&request, Instant::now() + Duration::from_secs(5));
+            let signing = async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                runtime.lifecycle.sign_for_test([1; 16])
+            };
+            let (reconciled, signed) = tokio::join!(waiting, signing);
+            let signed = signed?;
+            assert_eq!(reconciled?.evidence(), &evidence_of(1, &signed)?);
+            let late = ended_pending(2)?;
+            assert!(matches!(
+                late.lifecycle
+                    .reconcile_within(
+                        &reconcile_with(2, 0x61),
+                        Instant::now() + Duration::from_millis(5)
+                    )
+                    .await,
+                Err(AttemptLifecycleError::ResponsePending)
+            ));
+            // A replaced slot wakes the wait; the next look answers.
+            let replaced = ended_pending(3)?;
+            let request = reconcile_with(3, 0x61);
+            let waiting = replaced
+                .lifecycle
+                .reconcile_within(&request, Instant::now() + Duration::from_secs(5));
+            let faulting = async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                replaced.lifecycle.fault_for_test([3; 16]);
+            };
+            let (faulted, ()) = tokio::join!(waiting, faulting);
+            assert!(matches!(
+                faulted,
+                Err(AttemptLifecycleError::ResponseUnavailable)
+            ));
+            Ok(())
+        }
+
+        /// Invariant 10, N6 (i): an owner dropped before its run signs its
+        /// response in `Drop`: an `UnavailableAfterAdmission` by the code 2
+        /// fallback, `cleanup.result = 2`, which quarantines; the slot is
+        /// ended and signed, never reconciled, and the attempt reconciles.
+        #[test]
+        fn a_dropped_unstarted_owner_signs_its_unavailable_response() -> TestResult {
+            let crate::test_fixtures::SignedAdmission {
+                admission,
+                digest,
+                signer,
+                key: public,
+            } = AttemptAdmission::signed_for_test().map_err(|error| error.to_string())?;
+            let attempt = [0x5a; 16];
+            let runtime = Runtime::new()?;
+            let mut input = FakeInput::new(0x5a);
+            input.signed = Some((admission, digest));
+            runtime.lifecycle.granted_for_test(attempt, digest)?;
+            let owned = runtime.lifecycle.admit_input(
+                input,
+                (&signer, AdmittedRuntimeKey::new("runtime", &public)),
+            )?;
+            drop(owned);
+            let response = runtime.lifecycle.terminal_response(attempt, digest)?;
+            assert!(!runtime.admits()?);
+            let records = response.records();
+            assert!(records.classification().quarantined());
+            assert_eq!(
+                records.termination().fields().cleanup.result,
+                pos_reference::sandbox_provider_protocol::CleanupResult::NothingCommitted
+            );
+            assert_eq!(records.termination().fields().cancel_source, None);
+            let result = pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+                response.response().result,
+            )?;
+            result.verify_signature(&public)?;
+            assert_eq!(
+                result.outcome,
+                pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::UnavailableAfterAdmission
+            );
+            assert_eq!(result.result_digest(), response.terminal_digests().0);
+            let mut request = reconcile_with(0x5a, 0x61);
+            request.agr1_digest = digest;
+            assert!(runtime.lifecycle.reconcile(&request).is_ok());
+            // The same drop with a signer that cannot sign under the
+            // admitted key is a provider fault, with no panic.
+            let faulted = Runtime::new()?;
+            let mut input = FakeInput::new(0x5a);
+            let admission = AttemptAdmission::signed_for_test()
+                .map_err(|error| error.to_string())?
+                .admission;
+            input.signed = Some((admission, digest));
+            faulted.lifecycle.granted_for_test(attempt, digest)?;
+            let foreign = crate::KeyFileRuntimeSigner::from_signing_key(
+                ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
+                "runtime".to_owned(),
+            );
+            drop(faulted.lifecycle.admit_input(
+                input,
+                (&foreign, AdmittedRuntimeKey::new("runtime", &public)),
+            )?);
+            assert!(matches!(
+                faulted.lifecycle.terminal_response(attempt, digest),
+                Err(AttemptLifecycleError::ResponseUnavailable)
+            ));
+            assert!(!faulted.admits()?);
+            Ok(())
+        }
+
+        /// A slot other than a running one gives a run nothing to start.
+        #[test]
+        fn only_a_running_slot_starts() {
+            let mut ended = Slot::<FakeInput>::Claimed {
+                request: REQUEST,
+                request_id: [1; 16],
+                changed: tokio::sync::watch::channel(false).0,
+            };
+            assert!(ended.start().is_none());
         }
     }
 }

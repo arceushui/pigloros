@@ -15,8 +15,11 @@
 //!   exact unit is stopped first and its cgroup proved empty, the root is
 //!   released and its devices proved absent, the directories are removed and
 //!   the intent is deleted last.
-//! * [`AttemptLifecycle::cancel`] fences an attempt whose unit start was not
-//!   requested yet, signals a running execution, and waits for its cleanup.
+//! * [`AttemptLifecycle::cancel`] records the cancellation of an attempt
+//!   awaiting its input, fences one whose unit start was not requested yet,
+//!   signals a running execution, and waits for its cleanup;
+//!   [`AttemptLifecycle::bind_cancel`] then waits for its signed terminal
+//!   response and binds the SCY1 to it (ADR-069 R15 §3.6 item 2).
 //! * [`AttemptLifecycle::record_failed_input`] records an attempt whose
 //!   input failed after its AGR1 was sent: it ended with nothing committed,
 //!   and stays known until it is reconciled.
@@ -24,8 +27,17 @@
 //!   attempt it repeats: it waits while the attempt is active and receives
 //!   the stored full response, never a second AGR1 (ADR-069 §4).
 //! * [`AttemptLifecycle::reconcile`] reports an attempt whose cleanup was
-//!   proved, or that ended with nothing committed, releases its retained
-//!   admission, and forgets it: later requests for that attempt are unknown.
+//!   proved, or that ended with nothing committed, and whose signed terminal
+//!   response is retained: it builds the attempt's `reconciliation-evidence-v1`
+//!   once, releases the retained admission and response, and tombstones the
+//!   attempt with the evidence bytes (ADR-069 R15 §3.3 and §3.4). Later
+//!   cancel and execute requests for it are unknown; a repeated reconcile
+//!   replays the evidence.
+//!
+//! Only reconcile tombstones an attempt that has an AGR1: one cancelled or
+//! whose owner was dropped before its run ends with nothing committed and a
+//! signed or faulted response (R15 §3.6 item 2). One request ledger, per
+//! runtime, holds the request IDs of SPX1, SCQ1 and SRQ1 alike (R15 N11).
 //!
 //! Every cancel and reconcile request must name the attempt's AGR1 digest.
 //! Any failure to prove cleanup, and any run dropped after it started,
@@ -35,7 +47,7 @@
 //! ended keeps its admitted input, and with it its staging reservation, until
 //! it is reconciled. A run dropped part-way releases its input only after the
 //! lifecycle was quarantined, so no grant can use the freed reservation. An
-//! attempt withdrawn before it started releases its input at once.
+//! attempt that ended before it started releases its input at once.
 //!
 //! The ownership table and its tombstones live in memory, for this runtime
 //! only (owner decision, 2026-11-11). A restarted provider forgets them; that
@@ -59,15 +71,13 @@ use std::time::Duration;
 
 use pos_reference::provider_admission::execution::FailedInput;
 use pos_reference::sandbox_provider_protocol::{
-    CancelSource, NetworkCaptureStore, SandboxCancelRequest, SandboxCancellationResult,
-    SandboxReconcileRequest,
+    CancelSource, NetworkCaptureStore, ReconciliationEvidence,
 };
 use tokio::sync::watch;
 use tokio::time::Instant;
 
 use super::{finish_with, RootRelease};
 use crate::attempt_records::AttemptAdmission;
-use crate::ResponseFault;
 use crate::{
     AdapterIo, AdmittedAttempt, AttemptCancel, AttemptCleanupDeadlines, AttemptCleanupError,
     AttemptEnding, AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError,
@@ -80,6 +90,7 @@ use crate::{
     SystemdVerifiedStart, TransientServiceUnitName, UnitState, VerifiedRootMount,
     VerifiedStagedInput,
 };
+use crate::{AdmittedRuntimeKey, KeyFileRuntimeSigner, ResponseFault, RuntimeAttestationSigner};
 
 /// The most live attempts one snapshot carries (ADR-069 §4.1, RCC1).
 const MAX_LIVE_ATTEMPTS: usize = 256;
@@ -172,17 +183,23 @@ pub enum AttemptLifecycleError {
     /// stored response).
     #[error("the attempt's terminal response was already delivered")]
     ResponseDelivered,
-    /// A repeated execute carries other EVR1 or SPX1 bytes than the attempt
-    /// was admitted with (ADR-069 §4; SPE1 16 `RequestIdentityConflict`).
-    #[error("the repeated execute differs from the attempt's request")]
+    /// A request reuses a request ID this runtime recorded with other bytes,
+    /// or a repeated execute carries other EVR1 or SPX1 bytes than the
+    /// attempt was admitted with (ADR-069 §4, R15 N11; SPE1 16
+    /// `RequestIdentityConflict`).
+    #[error("the request differs from the one recorded under its identity")]
     RequestConflict,
+    /// The attempt already holds four cancel or reconcile request IDs, and
+    /// this request names a further one (ADR-069 R15 N11; SPE1 12).
+    #[error("the attempt holds its four cancel and reconcile request IDs")]
+    ControlRequestsExhausted,
 }
 
 /// How far an attempt got before its terminal cleanup.
 #[derive(Debug)]
 pub enum AttemptProgress<S> {
-    /// Cancellation was requested before the run started: nothing was
-    /// committed and nothing needs cleanup.
+    /// The run never started: it was cancelled first, or its owner was
+    /// dropped. Nothing was committed and nothing needs cleanup.
     Withdrawn,
     /// The input failed after AGR1 was sent: nothing was committed and
     /// nothing needs cleanup (TME1 progress 0, `input.complete = false`).
@@ -244,7 +261,7 @@ impl<S> AttemptProgress<S> {
 /// The terminal cleanup of an ended attempt.
 ///
 /// It is `Ok(None)` when the attempt ended before anything was committed:
-/// it was withdrawn, or its input failed (TME1 `cleanup.result = 2`).
+/// it never started its run, or its input failed (TME1 `cleanup.result = 2`).
 pub type AttemptCleanup = Result<Option<CompletedAttemptCleanup>, AttemptLifecycleError>;
 
 /// One attempt after its terminal cleanup.
@@ -328,11 +345,12 @@ impl<S> EndedAttempt<S> {
     }
 }
 
-/// An attempt reported clean and forgotten: its admission was released.
+/// An attempt reported clean and tombstoned: its admission and response
+/// were released, and its reconciliation evidence is retained.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciledAttempt {
     attempt_id: [u8; 16],
-    intent: Option<PlannedAttemptIntent>,
+    evidence: ReconciliationEvidence,
 }
 
 impl ReconciledAttempt {
@@ -342,11 +360,18 @@ impl ReconciledAttempt {
         self.attempt_id
     }
 
-    /// The planned ownership whose resources and intent were removed; `None`
-    /// for an attempt that ended before anything was committed.
+    /// The exact `reconciliation-evidence-v1` bytes the attempt retains,
+    /// built once at its first reconcile (ADR-069 R15 §3.4). No V1
+    /// operation sends them; only their digest leaves the provider.
     #[must_use]
-    pub const fn intent(&self) -> Option<&PlannedAttemptIntent> {
-        self.intent.as_ref()
+    pub const fn evidence(&self) -> &ReconciliationEvidence {
+        &self.evidence
+    }
+
+    /// SRY1 field 5: the digest of [`Self::evidence`].
+    #[must_use]
+    pub fn evidence_digest(&self) -> [u8; 32] {
+        self.evidence.digest()
     }
 }
 
@@ -709,7 +734,9 @@ fn settle_deadline(now: Instant, grace: Instant) -> Instant {
 /// Only a unit whose cgroup was bound was pinned: `RefUnit` precedes the
 /// binding. Its result, counters and `/work` usage are read, then its pin is
 /// released, so the teardown's absence wait can see it unloaded. The result
-/// is read for the invocation whose cgroup was bound.
+/// is read for the invocation whose cgroup was bound. The provider's `/work`
+/// handle is closed here in every case, before `StopUnit` (ADR-069 R15 §3.6
+/// item 3, N9).
 async fn conclude(
     transport: &SystemdTransientUnitTransport,
     progress: &mut AttemptProgress<SystemdVerifiedStart>,
@@ -720,18 +747,13 @@ async fn conclude(
     let Some((started, evidence)) = progress.reached() else {
         return;
     };
+    let work = evidence.take_work();
     let Some(cgroup) = cgroup else {
         return;
     };
     let invocation = cgroup.invocation_id();
     let terminal = transport
-        .conclude(
-            unit,
-            started.zip(invocation),
-            cgroup,
-            evidence.release().work(),
-            settle_by,
-        )
+        .conclude(unit, started.zip(invocation), cgroup, work, settle_by)
         .await;
     let bound = invocation.map(|invocation| (invocation, crate::UnitCgroup::identity(cgroup)));
     evidence.conclude(bound, terminal);
@@ -866,7 +888,7 @@ impl LiveAttemptIdentity {
 ///
 /// This is the exact identity handoff to the sealed recovery (#349), and
 /// the live attempt state of the provider's revocation responder (ADR-069
-/// R11 §8.1): an attempt that never ran (withdrawn before it started, or
+/// R11 §8.1): an attempt that never ran (ended before it started, or
 /// ended by a failed input) is never listed.
 ///
 /// Only [`AttemptLifecycle::fence_and_snapshot`] creates one, once per
@@ -946,12 +968,12 @@ enum Slot<I> {
         settled: watch::Sender<bool>,
         _input: Option<I>,
     },
-    /// Reconciled, or withdrawn before it started (`intent` is `None`):
-    /// cancel and execute requests for the attempt are unknown from now on,
-    /// and a repeated reconcile names the same grant.
+    /// Reconciled: cancel and execute requests for the attempt are unknown
+    /// from now on, and a repeated reconcile that names the same grant
+    /// replays `evidence`, built once (ADR-069 R15 §3.4).
     Reconciled {
         grant: [u8; 32],
-        intent: Option<PlannedAttemptIntent>,
+        evidence: ReconciliationEvidence,
     },
 }
 
@@ -965,24 +987,25 @@ enum Cleaned {
     /// decision of 2026-11-16 (Redmine #443, journal 22592) also uses it for
     /// a post-AGR1 input failure.
     NothingCommitted,
-    /// Cleanup was proved and this intent removed.
-    Proved(PlannedAttemptIntent),
-}
-
-impl Cleaned {
-    /// The removed intent; `None` when nothing was committed.
-    fn intent(&self) -> Result<Option<PlannedAttemptIntent>, AttemptLifecycleError> {
-        match self {
-            Self::Unproved => Err(AttemptLifecycleError::CleanupFailed),
-            Self::NothingCommitted => Ok(None),
-            Self::Proved(intent) => Ok(Some(intent.clone())),
-        }
-    }
+    /// Cleanup was proved and the intent removed.
+    Proved,
 }
 
 impl<I> Slot<I> {
     const fn is_live(&self) -> bool {
         !matches!(self, Self::Reconciled { .. })
+    }
+
+    /// Mark a running slot's run started and take its admission; `None` for
+    /// any other slot.
+    const fn start(&mut self) -> Option<I> {
+        match self {
+            Self::Running { started, input, .. } => {
+                *started = true;
+                input.take()
+            }
+            _ => None,
+        }
     }
 
     /// The AGR1 digest; `None` while only claimed.
@@ -997,13 +1020,19 @@ impl<I> Slot<I> {
     }
 }
 
-/// Every attempt of the runtime and how many of them are live.
+/// Every attempt of the runtime, how many of them are live, and the
+/// request ledger.
 #[derive(Debug)]
 struct Table<I> {
     slots: BTreeMap<[u8; 16], Slot<I>>,
     live: usize,
-    // The SPX1 digest each claimed request ID carried, for this runtime.
+    // The request ledger of this runtime (ADR-069 R15 N11): the request
+    // self-digest of each recorded SPX1, SCQ1 and SRQ1 request ID, whose
+    // domain names its operation.
     requests: BTreeMap<[u8; 16], [u8; 32]>,
+    // How many SCQ1 and SRQ1 entries each attempt holds; they live with its
+    // slot and tombstone, and never count toward `live`.
+    controls: BTreeMap<[u8; 16], u8>,
 }
 
 impl<I> Table<I> {
@@ -1012,6 +1041,7 @@ impl<I> Table<I> {
             slots: BTreeMap::new(),
             live: 0,
             requests: BTreeMap::new(),
+            controls: BTreeMap::new(),
         }
     }
 
@@ -1072,74 +1102,6 @@ impl<I> Table<I> {
         };
         self.set(attempt_id, ended)
     }
-
-    /// Withdraw an attempt that never started: it is no longer live.
-    fn withdraw(&mut self, attempt_id: [u8; 16], grant: [u8; 32]) -> Option<Slot<I>> {
-        self.set(
-            attempt_id,
-            Slot::Reconciled {
-                grant,
-                intent: None,
-            },
-        )
-    }
-}
-
-/// What a cancellation found.
-enum Signalled {
-    /// The attempt had already ended, clean.
-    Terminal,
-    /// The attempt had not started; it was withdrawn.
-    Withdrawn,
-    /// The attempt awaits its input; its ending records the cancellation.
-    Recorded,
-    /// The attempt runs; this wakes when it ended.
-    Running(watch::Receiver<bool>),
-}
-
-/// What a cancellation of `slot` under the AGR1 `grant_digest` finds, under
-/// the attempts lock: a started run is signalled and fenced, an unstarted
-/// one is to be withdrawn, and an attempt awaiting its input records it.
-fn signal<I>(
-    slot: Option<&mut Slot<I>>,
-    grant_digest: [u8; 32],
-) -> Result<Signalled, AttemptLifecycleError> {
-    match slot {
-        // A claim has no AGR1 a cancellation could name.
-        None | Some(Slot::Reconciled { .. } | Slot::Claimed { .. }) => {
-            Err(AttemptLifecycleError::UnknownAttempt)
-        }
-        Some(slot) if slot.agr1_digest() != Some(grant_digest) => {
-            Err(AttemptLifecycleError::GrantMismatch)
-        }
-        Some(Slot::Ended {
-            cleaned: Cleaned::Unproved,
-            ..
-        }) => Err(AttemptLifecycleError::CleanupFailed),
-        Some(Slot::Ended { .. }) => Ok(Signalled::Terminal),
-        Some(Slot::Granted { cancel, .. }) => {
-            // Nothing is committed before its input is admitted; its
-            // recorded ending carries the first cancellation.
-            cancel.get_or_insert(CancelSource::CancelRequest);
-            Ok(Signalled::Recorded)
-        }
-        Some(Slot::Running {
-            state,
-            ended,
-            started: true,
-            ..
-        }) => {
-            state.cancel(CancelSource::CancelRequest);
-            Ok(Signalled::Running(ended.clone()))
-        }
-        Some(Slot::Running { state, .. }) => {
-            // Its owner may still call run: the request it would read
-            // under this lock is already gone with the slot, but the
-            // cancel flag keeps every signal of this attempt consistent.
-            state.cancel(CancelSource::CancelRequest);
-            Ok(Signalled::Withdrawn)
-        }
-    }
 }
 
 /// Cancel the slot of `attempt_id` by revocation under the attempts lock:
@@ -1185,6 +1147,10 @@ pub struct AttemptLifecycle<I = VerifiedStagedInput> {
     // the cancellation is read under that lock (no production behaviour).
     #[cfg(test)]
     before_begin: BeginHook<I>,
+    // Test-only: how many reconciliation-evidence tuples were built, so a
+    // test can prove each attempt's is built once (ADR-069 R15 §3.4).
+    #[cfg(test)]
+    evidence_built: std::sync::atomic::AtomicUsize,
 }
 
 /// A test's step at the start of [`Claim::begin`].
@@ -1239,6 +1205,8 @@ impl<I> AttemptLifecycle<I> {
             attempts: Mutex::new(Table::new()),
             #[cfg(test)]
             before_begin: BeginHook(Mutex::new(None)),
+            #[cfg(test)]
+            evidence_built: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1247,118 +1215,6 @@ impl<I> AttemptLifecycle<I> {
     fn quarantine(&self) {
         self.registry.quarantine();
         self.ledger.close_for_reconciliation();
-    }
-
-    /// Cancel the attempt `request` names, and wait for its cleanup.
-    ///
-    /// An attempt that has not started is withdrawn at once and its admitted
-    /// input, with its staging reservation, released: nothing was committed.
-    /// An attempt that ended on its own while the request was waiting is
-    /// reported cancelled as well: cancellation outranks every other outcome
-    /// (ADR-069 §8). The wait is bounded by the attempt's watchdog and its
-    /// cleanup budget.
-    ///
-    /// # Errors
-    /// [`AttemptLifecycleError::UnknownAttempt`] and
-    /// [`AttemptLifecycleError::GrantMismatch`] refuse a request for another
-    /// attempt or grant; [`AttemptLifecycleError::CleanupFailed`] reports an
-    /// attempt whose cleanup was not proved.
-    pub async fn cancel(
-        &self,
-        request: &SandboxCancelRequest,
-    ) -> Result<SandboxCancellationResult, AttemptLifecycleError> {
-        let attempt_id = request.attempt_id;
-        let mut ended = match self.signal_cancel(attempt_id, request.agr1_digest)? {
-            Signalled::Terminal => return Ok(SandboxCancellationResult::AlreadyTerminal),
-            // Nothing was committed, so nothing remains to clean up.
-            Signalled::Withdrawn | Signalled::Recorded => {
-                return Ok(SandboxCancellationResult::CancelledAndCleaned)
-            }
-            Signalled::Running(ended) => ended,
-        };
-        // A dropped run ends the wait too; the slot then says what is known.
-        ended.wait_for(|ended| *ended).await.ok();
-        if self.ended_clean(attempt_id) {
-            Ok(SandboxCancellationResult::CancelledAndCleaned)
-        } else {
-            Err(AttemptLifecycleError::CleanupFailed)
-        }
-    }
-
-    /// Whether the attempt ended clean: its cleanup was proved, it ended
-    /// with nothing committed, or it was already reconciled.
-    fn ended_clean(&self, attempt_id: [u8; 16]) -> bool {
-        matches!(
-            lock(&self.attempts).get(&attempt_id),
-            Some(
-                Slot::Ended {
-                    cleaned: Cleaned::NothingCommitted | Cleaned::Proved(_),
-                    ..
-                } | Slot::Reconciled { .. }
-            )
-        )
-    }
-
-    /// Request the cancellation of an attempt under the attempts lock: a
-    /// started run is signalled and fenced, an unstarted one is withdrawn.
-    fn signal_cancel(
-        &self,
-        attempt_id: [u8; 16],
-        grant_digest: [u8; 32],
-    ) -> Result<Signalled, AttemptLifecycleError> {
-        let mut attempts = lock(&self.attempts);
-        let signalled = signal(attempts.slots.get_mut(&attempt_id), grant_digest)?;
-        let withdrawn = matches!(signalled, Signalled::Withdrawn)
-            .then(|| attempts.withdraw(attempt_id, grant_digest));
-        drop(attempts);
-        // The withdrawn admission is released outside the attempts lock.
-        drop(withdrawn);
-        Ok(signalled)
-    }
-
-    /// Report the attempt `request` names as reconciled, release its retained
-    /// admission and forget it. A repeated request reports it again.
-    ///
-    /// # Errors
-    /// [`AttemptLifecycleError::UnknownAttempt`] and
-    /// [`AttemptLifecycleError::GrantMismatch`] refuse a request for another
-    /// attempt or grant; [`AttemptLifecycleError::AttemptActive`] an attempt
-    /// that has not ended; [`AttemptLifecycleError::CleanupFailed`] one whose
-    /// cleanup was not proved.
-    pub fn reconcile(
-        &self,
-        request: &SandboxReconcileRequest,
-    ) -> Result<ReconciledAttempt, AttemptLifecycleError> {
-        let attempt_id = request.attempt_id;
-        let mut attempts = lock(&self.attempts);
-        let slot = attempts
-            .get(&attempt_id)
-            .ok_or(AttemptLifecycleError::UnknownAttempt)?;
-        let grant = request.agr1_digest;
-        if slot.agr1_digest() != Some(grant) {
-            return Err(AttemptLifecycleError::GrantMismatch);
-        }
-        let intent = match slot {
-            Slot::Reconciled { intent, .. } => {
-                return Ok(ReconciledAttempt {
-                    attempt_id,
-                    intent: intent.clone(),
-                })
-            }
-            Slot::Claimed { .. } | Slot::Granted { .. } | Slot::Running { .. } => {
-                return Err(AttemptLifecycleError::AttemptActive)
-            }
-            Slot::Ended { cleaned, .. } => cleaned.intent()?,
-        };
-        let reconciled = Slot::Reconciled {
-            grant,
-            intent: intent.clone(),
-        };
-        let released = attempts.set(attempt_id, reconciled);
-        drop(attempts);
-        // The retained admission is released outside the attempts lock.
-        drop(released);
-        Ok(ReconciledAttempt { attempt_id, intent })
     }
 
     /// Fence this runtime for recovery and snapshot its live attempts: the
@@ -1408,7 +1264,7 @@ impl<I> AttemptLifecycle<I> {
                 ended.push((
                     *attempt_id,
                     Arc::clone(state),
-                    matches!(cleaned, Cleaned::Proved(_)),
+                    matches!(cleaned, Cleaned::Proved),
                 ));
             }
         }
@@ -1528,8 +1384,14 @@ impl<I> AttemptLifecycle<I> {
         })
     }
 
-    /// Take exclusive ownership of `input`'s attempt.
-    fn admit_input(&self, input: I) -> Result<OwnedAttempt<'_, I>, AttemptLifecycleError>
+    /// Take exclusive ownership of `input`'s attempt. An owner dropped
+    /// before its run signs the attempt's response with `signer` under
+    /// `admitted` (ADR-069 R15 §3.6 item 2(b)).
+    fn admit_input<'l, R: RuntimeAttestationSigner>(
+        &'l self,
+        input: I,
+        (signer, admitted): (&'l R, AdmittedRuntimeKey<'l>),
+    ) -> Result<OwnedAttempt<'l, I, R>, AttemptLifecycleError>
     where
         I: AdmittedInput,
     {
@@ -1563,6 +1425,8 @@ impl<I> AttemptLifecycle<I> {
                 ended,
                 started: false,
                 finished: false,
+                signer,
+                admitted,
             },
         })
     }
@@ -1570,13 +1434,22 @@ impl<I> AttemptLifecycle<I> {
 
 /// The exclusive owner of one admitted attempt until it ended.
 ///
-/// Dropping it before its run started withdraws the attempt and releases its
-/// admission: nothing was committed. Dropping its run part-way quarantines
-/// the lifecycle first, then records the attempt as ended without proved
-/// cleanup and releases its admission.
+/// Dropping it before its run started ends the attempt with nothing
+/// committed and releases its admission, then signs and retains its
+/// terminal response in `Drop` (ADR-069 R15 §3.6 item 2(b)): an
+/// `UnavailableAfterAdmission` by the R9 §4.6.5 code 2 fallback, which
+/// quarantines, unless a cancellation was recorded first. The signer must be
+/// local and CPU-bound, and the owner is never dropped under the attempts
+/// lock. Dropping its run part-way quarantines the lifecycle first, then
+/// records the attempt as ended without proved cleanup and releases its
+/// admission.
 #[derive(Debug)]
-pub struct OwnedAttempt<'l, I = VerifiedStagedInput> {
-    claim: Claim<'l, I>,
+pub struct OwnedAttempt<
+    'l,
+    I = VerifiedStagedInput,
+    R: RuntimeAttestationSigner = KeyFileRuntimeSigner,
+> {
+    claim: Claim<'l, I, R>,
 }
 
 /// A started run: its claim and the admission it took.
@@ -1584,13 +1457,13 @@ pub struct OwnedAttempt<'l, I = VerifiedStagedInput> {
 /// Fields drop in declaration order, so a run dropped part-way quarantines
 /// the lifecycle through its claim before the admission, and with it the
 /// staging reservation, is released.
-struct Run<'l, I> {
-    claim: Claim<'l, I>,
+struct Run<'l, I, R: RuntimeAttestationSigner> {
+    claim: Claim<'l, I, R>,
     input: I,
 }
 
 #[derive(Debug)]
-struct Claim<'l, I> {
+struct Claim<'l, I, R: RuntimeAttestationSigner> {
     lifecycle: &'l AttemptLifecycle<I>,
     attempt_id: [u8; 16],
     grant: [u8; 32],
@@ -1602,31 +1475,29 @@ struct Claim<'l, I> {
     // nothing behind.
     started: bool,
     finished: bool,
+    // Signs the response of an owner dropped before its run.
+    signer: &'l R,
+    admitted: AdmittedRuntimeKey<'l>,
 }
 
-impl<I> Claim<'_, I> {
+impl<I, R: RuntimeAttestationSigner> Claim<'_, I, R> {
     /// Mark the run started, before its first commit, and take its
-    /// admission; `None` when the attempt was withdrawn first, or cancelled
-    /// before it began. A withdrawn claim has nothing to record; a cancelled
-    /// one still holding its slot is recorded as ended with nothing
-    /// committed, and its admission is released.
+    /// admission; `None` when it was cancelled before it began: it is then
+    /// recorded as ended with nothing committed, and its admission is
+    /// released.
     fn begin(&mut self) -> Option<I> {
         #[cfg(test)]
         self.lifecycle.before_begin.run(self.lifecycle);
         let mut attempts = lock(&self.lifecycle.attempts);
-        // Only a fence or a cancellation before the admission cancels an
-        // owner that still holds its slot (a cancellation of an admitted,
-        // unstarted attempt withdraws the slot). Both cancel under the
-        // attempts lock, so it is read under that lock too: a fence either
-        // sees this run started, and waits for it, or this run sees it.
+        // A fence or a cancellation cancels an owner that still holds its
+        // slot. Both cancel under the attempts lock, so it is read under
+        // that lock too: a fence either sees this run started, and waits
+        // for it, or this run sees it.
         let cancelled = self.state.cancel.source().is_some();
-        let mut input = match attempts.slots.get_mut(&self.attempt_id) {
-            Some(Slot::Running { started, input, .. }) => {
-                *started = true;
-                input.take()
-            }
-            _ => None,
-        };
+        let mut input = attempts
+            .slots
+            .get_mut(&self.attempt_id)
+            .and_then(Slot::start);
         let released = cancelled.then(|| input.take()).flatten().map(|input| {
             (
                 input,
@@ -1685,19 +1556,41 @@ impl<I> Claim<'_, I> {
         cancel_source
     }
 
-    /// Forget an owner that never started: nothing was committed, and its
-    /// admission is released.
-    fn withdraw(&mut self) {
+    /// End an owner dropped before its run: nothing was committed, its
+    /// admission is released, and its response is signed and retained here
+    /// (ADR-069 R15 §3.6 item 2(b)). With no cancellation recorded, its
+    /// facts match no R9 §4.6.5 candidate, so it is the code 2 fallback,
+    /// which quarantines; a signing or clock fault is `Faulted` and
+    /// quarantines (R9 Amendment 1 change F). Nothing here panics.
+    fn drop_unstarted(&mut self) {
         self.finished = true;
         let mut attempts = lock(&self.lifecycle.attempts);
-        let withdrawn = attempts.withdraw(self.attempt_id, self.grant);
+        let cancel_source = self.state.cancel.source();
+        let input = attempts
+            .slots
+            .get_mut(&self.attempt_id)
+            .and_then(Slot::start);
+        let replaced = attempts.set(self.attempt_id, self.unstarted_ending());
         drop(attempts);
-        drop(withdrawn);
+        // The admission is released outside the attempts lock.
+        drop((input, replaced));
+        let ended = EndedAttempt::<SystemdVerifiedStart> {
+            attempt_id: self.attempt_id,
+            admission: self.admission.clone(),
+            cancel_source,
+            progress: AttemptProgress::Withdrawn,
+            cleanup: Ok(None),
+            cleanup_finished_at: finished_at(),
+        };
+        drop(
+            self.lifecycle
+                .retain_response(ended, self.signer, self.admitted),
+        );
         self.ended.send_replace(true);
     }
 }
 
-impl<I> Drop for Claim<'_, I> {
+impl<I, R: RuntimeAttestationSigner> Drop for Claim<'_, I, R> {
     fn drop(&mut self) {
         if !self.finished {
             if self.started {
@@ -1706,7 +1599,7 @@ impl<I> Drop for Claim<'_, I> {
                 self.lifecycle.quarantine();
                 self.end(None, Cleaned::Unproved, Retained::Faulted);
             } else {
-                self.withdraw();
+                self.drop_unstarted();
             }
         }
     }
@@ -1732,7 +1625,7 @@ impl OwnedAttempt<'_> {
     }
 }
 
-impl<I> OwnedAttempt<'_, I> {
+impl<I, R: RuntimeAttestationSigner + Sync> OwnedAttempt<'_, I, R> {
     async fn run_with<S>(
         self,
         steps: &S,
@@ -1746,8 +1639,8 @@ impl<I> OwnedAttempt<'_, I> {
         let Self { mut claim } = self;
         let attempt_id = claim.attempt_id;
         let Some(input) = claim.begin() else {
-            // Only a cancellation withdraws an owner, and it recorded its
-            // source first.
+            // Only a cancellation ends an owner before its run, and it
+            // recorded its source first.
             return EndedAttempt {
                 attempt_id,
                 admission: claim.admission.clone(),
@@ -1774,9 +1667,11 @@ impl<I> OwnedAttempt<'_, I> {
         // The cleanup returned, proved or not (R9 §4.6.6).
         let cleanup_finished_at = finished_at();
         let (progress, cleanup) = ended;
-        let cleaned = cleanup.as_ref().map_or(Cleaned::Unproved, |done| {
-            Cleaned::Proved(done.intent().clone())
-        });
+        let cleaned = if cleanup.is_ok() {
+            Cleaned::Proved
+        } else {
+            Cleaned::Unproved
+        };
         if matches!(cleaned, Cleaned::Unproved) {
             run.claim.lifecycle.quarantine();
         }
@@ -1883,6 +1778,7 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
 }
 
 mod claim;
+mod control;
 mod retention;
 
 pub use claim::{AwaitedInput, ExchangeClaim, GrantWrite, InterruptedInput};

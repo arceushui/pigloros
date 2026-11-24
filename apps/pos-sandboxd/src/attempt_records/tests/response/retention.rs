@@ -364,7 +364,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
 /// A response for another AGR1 is refused and leaves the slot pending;
 /// reconciling a slot whose response never came clears it.
 #[test]
-fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
+fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles_once_signed() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let digest = signed_grant()?.grant.grant_digest();
     lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
@@ -385,13 +385,24 @@ fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
         lifecycle.terminal_response(ATTEMPT, digest),
         Err(AttemptLifecycleError::ResponsePending)
     ));
+    // A pending response is not reconciled yet (ADR-069 R15 §3.3).
+    assert!(matches!(
+        lifecycle.reconcile(&reconcile(digest)),
+        Err(AttemptLifecycleError::ResponsePending)
+    ));
+    lifecycle.retain_response(foreign, &signer(), admitted)?;
     lifecycle.reconcile(&reconcile(digest))?;
     assert!(matches!(
         lifecycle.terminal_response(ATTEMPT, digest),
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
+    let late = Released {
+        grant: Some(signed_grant()?),
+        ..Released::default()
+    }
+    .ended()?;
     assert!(matches!(
-        lifecycle.retain_response(foreign, &signer(), admitted),
+        lifecycle.retain_response(late, &signer(), admitted),
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     Ok(())

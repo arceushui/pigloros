@@ -18,8 +18,10 @@
 //!
 //! #1358 transports the response and its output. When the output transfer
 //! times out it calls [`AttemptLifecycle::reissue_response`], which retains
-//! the R9 §4.7 successor in place of the first response: #443 alone signs
-//! the evidence.
+//! the R9 §4.7 successor in place of the first response unless it was
+//! delivered: #443 alone signs the evidence. A delivered response is final,
+//! so the reconciliation evidence built from it equals what the selector
+//! accepted (ADR-069 R15 §3.5).
 
 use std::sync::Arc;
 
@@ -128,7 +130,7 @@ impl<I> AttemptLifecycle<I> {
     ///
     /// # Errors
     /// [`AttemptLifecycleError::UnknownAttempt`] once the attempt was
-    /// reconciled or withdrawn, also while the repeat waited;
+    /// reconciled, also while the repeat waited;
     /// [`AttemptLifecycleError::RequestConflict`] for other request bytes;
     /// and [`AttemptLifecycleError::ResponseUnavailable`] when no response
     /// will be signed.
@@ -224,24 +226,13 @@ impl<I> AttemptLifecycle<I> {
         }
     }
 
-    /// Whether the attempt of `agr1_digest` was granted and still awaits its
-    /// input: a cancellation of it is recorded for its ending, which has no
-    /// response yet.
-    pub fn awaits_input(&self, attempt_id: [u8; 16], agr1_digest: [u8; 32]) -> bool {
-        let attempts = lock(&self.attempts);
-        let awaiting = matches!(
-            attempts.get(&attempt_id),
-            Some(Slot::Granted { grant, .. }) if *grant == agr1_digest
-        );
-        drop(attempts);
-        awaiting
-    }
-
     /// Record that `response`, the stored response of `attempt_id`, is now
-    /// delivered whole, as one connection is about to write its SPY1 or an
-    /// SCY1 binds its digest; no re-issue replaces it from then on. `false`
-    /// when it is no longer the stored response: it was re-issued
-    /// meanwhile, and must not be delivered.
+    /// delivered, under the attempts lock, as one connection is about to
+    /// write the first byte of its SPY1; no re-issue replaces it from then
+    /// on (ADR-069 R15 §3.6 item 1). An SCY1 or a reconcile marks it under
+    /// the same lock. `false` when it is no longer the stored response: it
+    /// was re-issued meanwhile, or the attempt was reconciled, and its SPY1
+    /// must not be written.
     pub fn claim_delivery(&self, attempt_id: [u8; 16], response: &Arc<RetainedResponse>) -> bool {
         let attempts = lock(&self.attempts);
         let stored = matches!(
