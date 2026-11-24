@@ -2244,17 +2244,15 @@ mod cases {
             assert_eq!(ledger.usage().attempts, 0);
             // A quarantined lifecycle refuses the next exchange before AGR1.
             lifecycle.quarantine();
-            let (mut provider, mut selector) = std::os::unix::net::UnixStream::pair()?;
+            let (provider, mut selector) = std::os::unix::net::UnixStream::pair()?;
             installation.write_source(&mut selector)?;
             let refused =
-                pos_reference::provider_admission::execution::PreparedProviderExecution::receive(
-                    &mut provider,
-                    &ledger,
-                );
-            assert!(matches!(
-                refused,
-                Err(pos_reference::provider_admission::execution::StagingError::CleanupFailed)
-            ));
+                pos_reference::provider_admission::test_support::StagedInstallation::admit_source(
+                    provider, &ledger,
+                )
+                .err()
+                .ok_or("the quarantined ledger admitted an exchange")?;
+            assert!(refused.contains("closed: true"), "{refused}");
             Ok(())
         }
     }
@@ -2264,9 +2262,7 @@ mod cases {
         use std::io::Read as _;
         use std::os::unix::net::UnixStream;
 
-        use pos_reference::provider_admission::execution::{
-            InputRefusal, PreparedProviderExecution, StagingDirectory,
-        };
+        use pos_reference::provider_admission::execution::StagingDirectory;
         use pos_reference::provider_admission::test_support::StagedInstallation;
 
         use super::*;
@@ -2282,25 +2278,24 @@ mod cases {
             let held = File::open(directory.path())?;
             let staging =
                 StagingDirectory::from_held_directory(held, directory.path().metadata()?.uid())?;
-            let (mut provider, mut selector) = UnixStream::pair()?;
+            let (provider, mut selector) = UnixStream::pair()?;
             installation
                 .write_source(&mut selector)
                 .map_err(|error| error.to_string())?;
-            let mut prepared = PreparedProviderExecution::receive(&mut provider, ledger)?;
+            let prepared = StagedInstallation::admit_source(provider, ledger)?;
             let name = prepared.request().attempt_id;
-            prepared.send_grant(&mut provider, StagedInstallation::sign_grant)?;
+            let granted = StagedInstallation::grant_staged(&staging, name, prepared)?;
             let mut prefix = [0; 4];
             selector.read_exact(&mut prefix)?;
             let mut sent = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
             selector.read_exact(&mut sent)?;
             selector.shutdown(std::net::Shutdown::Write)?;
-            let received = staging.create_input(name, prepared)?.receive(&mut provider);
+            let received = granted.receive().0;
             match received {
-                Err(InputRefusal::Failed(failed)) => {
+                Err(failed) => {
                     assert_eq!(failed.grant().bytes(), sent.as_slice());
                     Ok(*failed)
                 }
-                Err(InputRefusal::NotGranted(error)) => Err(error.into()),
                 Ok(_) => Err("an empty input was admitted".into()),
             }
         }

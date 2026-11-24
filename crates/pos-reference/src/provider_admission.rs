@@ -14,6 +14,7 @@ use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt as _;
 use std::os::unix::fs::MetadataExt as _;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
@@ -29,7 +30,7 @@ use crate::selector::installation::authority::{
 use crate::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
 };
-use crate::selector::SelectorBoundaryError;
+use crate::selector::InstallationError;
 
 const CONTROL_LIMIT: u64 = 16 * 1024 * 1024;
 // ADR-087 activation step 1: little-endian EROFS superblock magic at byte
@@ -58,7 +59,7 @@ const VERITY_SIGNATURE_LIMIT: usize = 4 * 1024 * 1024;
 /// [`Self::admit_held_image`] joins it to the currently installed authority.
 #[derive(Debug)]
 pub struct ProviderImageSnapshot {
-    admitted: AdmittedSelectorProvider,
+    admitted: Arc<AdmittedSelectorProvider>,
     request: SandboxExecuteRequest,
     image: AdmittedSandboxImage,
     proof: VerifiedSandboxImageProof,
@@ -109,7 +110,7 @@ impl AdmittedProviderBinary {
 
 pub(crate) fn admitted_provider_binary(
     admitted: &AdmittedSelectorProvider,
-) -> Result<AdmittedProviderBinary, SelectorBoundaryError> {
+) -> Result<AdmittedProviderBinary, InstallationError> {
     let digest = admitted.provider().manifest().binary_digest;
     admitted
         .bootstrap()
@@ -140,7 +141,7 @@ impl ProviderImageSnapshot {
     /// root-verity-sig partition whose JSON is malformed or names another root
     /// hash or signature than SIM1, unaccepted launch policy, and invalid or
     /// time-expired CMS proofs.
-    pub fn open(request_bytes: &[u8]) -> Result<Self, SelectorBoundaryError> {
+    pub fn open(request_bytes: &[u8]) -> Result<Self, InstallationError> {
         SandboxExecuteRequest::from_canonical_cbor(request_bytes)
             .map_err(invalid)
             .and_then(|request| {
@@ -154,46 +155,65 @@ impl ProviderImageSnapshot {
         installed: InstalledSelectorState,
         request: SandboxExecuteRequest,
         clock: fn() -> SystemTime,
-    ) -> Result<Self, SelectorBoundaryError> {
+    ) -> Result<Self, InstallationError> {
         installed
             .authenticate_bootstrap()
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|admitted| Self::from_admitted(admitted, request, clock))
+            .and_then(|admitted| Self::from_admitted(Arc::new(admitted), request, clock))
     }
 
     fn from_admitted(
-        admitted: AdmittedSelectorProvider,
+        admitted: Arc<AdmittedSelectorProvider>,
         request: SandboxExecuteRequest,
         clock: fn() -> SystemTime,
-    ) -> Result<Self, SelectorBoundaryError> {
+    ) -> Result<Self, InstallationError> {
         check_authority(&admitted, &request)?;
-        admitted_provider_binary(&admitted).and_then(|binary| {
-            let CheckedImage { image, proof, .. } = check_image(&admitted, &request, clock)?;
-            let launch_bytes = admitted
-                .bootstrap()
-                .installed()
-                .artifact(
-                    InstallationObjectKind::LAUNCH_POLICY,
-                    request.authority.lps1_digest,
-                )?
-                .read_control(CONTROL_LIMIT)?;
-            admitted
-                .provider()
-                .admit_launch_policy(&launch_bytes, &image)
-                .map_err(invalid)
-                .and_then(|launch| {
-                    if launch.policy_digest != request.authority.lps1_digest {
-                        return Err(SelectorBoundaryError::ArtifactInvalid);
-                    }
-                    Ok(Self {
-                        admitted,
-                        request,
-                        image,
-                        proof,
-                        launch,
-                        binary,
-                    })
-                })
+        Self::checked(admitted, request, clock).map_err(SnapshotFault::into_error)
+    }
+
+    /// The snapshot of a request whose authority was already checked: the
+    /// image and provider-binary identity, then the launch policy, which
+    /// takes the checked image as input (ADR-069 R11 Amendment 1 §7.5, rows
+    /// 11 and 7b).
+    pub(crate) fn checked(
+        admitted: Arc<AdmittedSelectorProvider>,
+        request: SandboxExecuteRequest,
+        clock: fn() -> SystemTime,
+    ) -> Result<Self, SnapshotFault> {
+        let (binary, CheckedImage { image, proof, .. }) = admitted_provider_binary(&admitted)
+            .and_then(|binary| {
+                check_image(&admitted, &request, clock).map(|checked| (binary, checked))
+            })
+            .map_err(SnapshotFault::Image)?;
+        let launch = admitted
+            .bootstrap()
+            .installed()
+            .artifact(
+                InstallationObjectKind::LAUNCH_POLICY,
+                request.authority.lps1_digest,
+            )
+            .and_then(|launch| launch.read_control(CONTROL_LIMIT))
+            .and_then(|launch_bytes| {
+                admitted
+                    .provider()
+                    .admit_launch_policy(&launch_bytes, &image)
+                    .map_err(invalid)
+            })
+            .and_then(|launch| {
+                if launch.policy_digest == request.authority.lps1_digest {
+                    Ok(launch)
+                } else {
+                    Err(InstallationError::ArtifactInvalid)
+                }
+            })
+            .map_err(SnapshotFault::Launch)?;
+        Ok(Self {
+            admitted,
+            request,
+            image,
+            proof,
+            launch,
+            binary,
         })
     }
 
@@ -239,13 +259,13 @@ impl ProviderImageSnapshot {
 
     /// Runtime verifying key authenticated during provider admission.
     #[must_use]
-    pub const fn runtime_attestation_key(&self) -> &ed25519_dalek::VerifyingKey {
+    pub fn runtime_attestation_key(&self) -> &ed25519_dalek::VerifyingKey {
         self.admitted.provider().runtime_attestation_key()
     }
 
     /// Exact SCS1 selected by the admitted APT1/provider authority.
     #[must_use]
-    pub const fn syscall_set(&self) -> &crate::sandbox_provider_protocol::SandboxSyscallSet {
+    pub fn syscall_set(&self) -> &crate::sandbox_provider_protocol::SandboxSyscallSet {
         self.admitted.provider().syscall_set()
     }
 
@@ -270,30 +290,101 @@ impl ProviderImageSnapshot {
     /// Rejects pending recovery, stale or substituted authority, changed image
     /// inputs, a non-EROFS root, a mismatched verity superblock or
     /// root-verity-sig JSON, or a proof no longer valid at host time.
-    pub fn admit_held_image(&self) -> Result<HeldImageAdmission<'_>, SelectorBoundaryError> {
+    pub fn admit_held_image(&self) -> Result<HeldImageAdmission<'_>, InstallationError> {
         self.join_current(InstalledSelectorState::open(), SystemTime::now)
+            .map_err(JoinFault::into_error)
     }
 
-    fn join_current(
+    /// [`Self::admit_held_image`] against the `current` installation at
+    /// `clock`, naming which half of the join failed.
+    pub(crate) fn join_current(
         &self,
-        current: Result<InstalledSelectorState, SelectorBoundaryError>,
+        current: Result<InstalledSelectorState, InstallationError>,
         clock: fn() -> SystemTime,
-    ) -> Result<HeldImageAdmission<'_>, SelectorBoundaryError> {
-        current
-            .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|current| check_authority(&current, &self.request))
+    ) -> Result<HeldImageAdmission<'_>, JoinFault> {
+        current_authority(&self.admitted, &self.request, current)
+            .map_err(JoinFault::Authority)
             .and_then(|authority| {
-                check_image(&self.admitted, &self.request, clock).map(|checked| {
-                    HeldImageAdmission {
+                check_image(&self.admitted, &self.request, clock)
+                    .map_err(JoinFault::Image)
+                    .map(|checked| HeldImageAdmission {
                         snapshot: self,
                         root_image: checked.root_image,
-                        proof: std::sync::Arc::new(checked.proof),
+                        proof: Arc::new(checked.proof),
                         authority,
-                    }
-                })
+                    })
             })
     }
+
+    /// The authority half of the held-image join for a request not yet
+    /// snapshotted: `request` must name the `admitted` authority retained at
+    /// runtime startup, and then the `current` installation's (ADR-122
+    /// Amendment 1 change C).
+    pub(crate) fn join_authority(
+        admitted: &AdmittedSelectorProvider,
+        request: &SandboxExecuteRequest,
+        current: Result<InstalledSelectorState, InstallationError>,
+    ) -> Result<AdmittedAuthority, InstallationError> {
+        check_authority(admitted, request)
+            .and_then(|_| current_authority(admitted, request, current))
+    }
+}
+
+/// Which half of a held-image join refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JoinFault {
+    /// The current installation, its digest or its authority.
+    Authority(InstallationError),
+    /// The retained image or its proof at the join's host time.
+    Image(InstallationError),
+}
+
+impl JoinFault {
+    const fn into_error(self) -> InstallationError {
+        match self {
+            Self::Authority(error) | Self::Image(error) => error,
+        }
+    }
+}
+
+/// Which part of an authority-checked snapshot refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SnapshotFault {
+    /// The image or the provider binary.
+    Image(InstallationError),
+    /// The launch policy, which needs the checked image.
+    Launch(InstallationError),
+}
+
+impl SnapshotFault {
+    const fn into_error(self) -> InstallationError {
+        match self {
+            Self::Image(error) | Self::Launch(error) => error,
+        }
+    }
+}
+
+/// The `current` installation's authority for `request`, joined to the
+/// `admitted` installation retained at startup: refused unless the current
+/// SIC1 `installation-digest` is the retained one (ADR-122 Amendment 1
+/// change C), so every held-image recheck makes this check.
+fn current_authority(
+    admitted: &AdmittedSelectorProvider,
+    request: &SandboxExecuteRequest,
+    current: Result<InstalledSelectorState, InstallationError>,
+) -> Result<AdmittedAuthority, InstallationError> {
+    let retained = admitted.bootstrap().installed().manifest().digest();
+    current
+        .and_then(|current| {
+            if current.manifest().digest() == retained {
+                Ok(current)
+            } else {
+                Err(InstallationError::ArtifactInvalid)
+            }
+        })
+        .and_then(InstalledSelectorState::authenticate_bootstrap)
+        .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+        .and_then(|current| check_authority(&current, request))
 }
 
 /// One snapshot's retained image, admitted against current installed authority.
@@ -307,7 +398,7 @@ impl ProviderImageSnapshot {
 pub struct HeldImageAdmission<'snapshot> {
     snapshot: &'snapshot ProviderImageSnapshot,
     root_image: &'snapshot File,
-    proof: std::sync::Arc<VerifiedSandboxImageProof>,
+    proof: Arc<VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
 }
 
@@ -362,18 +453,15 @@ impl<'snapshot> HeldImageAdmission<'snapshot> {
     ///
     /// # Errors
     /// Rejects pending recovery and any stale or substituted authority.
-    pub fn recheck_authority(&self) -> Result<AdmittedAuthority, SelectorBoundaryError> {
+    pub fn recheck_authority(&self) -> Result<AdmittedAuthority, InstallationError> {
         self.recheck_with(InstalledSelectorState::open())
     }
 
     fn recheck_with(
         &self,
-        current: Result<InstalledSelectorState, SelectorBoundaryError>,
-    ) -> Result<AdmittedAuthority, SelectorBoundaryError> {
-        current
-            .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|current| check_authority(&current, &self.snapshot.request))
+        current: Result<InstalledSelectorState, InstallationError>,
+    ) -> Result<AdmittedAuthority, InstallationError> {
+        current_authority(&self.snapshot.admitted, &self.snapshot.request, current)
     }
 }
 
@@ -392,7 +480,7 @@ impl std::fmt::Debug for HeldImageAdmission<'_> {
 fn check_authority(
     admitted: &AdmittedSelectorProvider,
     request: &SandboxExecuteRequest,
-) -> Result<AdmittedAuthority, SelectorBoundaryError> {
+) -> Result<AdmittedAuthority, InstallationError> {
     let bootstrap = admitted.bootstrap();
     let provider = admitted.provider();
     let authority = &request.authority;
@@ -415,7 +503,7 @@ fn check_authority(
         authority.hcp1_digest,
     ];
     if expected != supplied || request.request.policy_epoch != bootstrap.policy().policy_epoch() {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+        return Err(InstallationError::ArtifactInvalid);
     }
     Ok(AdmittedAuthority {
         apt1_digest: authority.apt1_digest,
@@ -438,7 +526,7 @@ fn check_image<'a>(
     admitted: &'a AdmittedSelectorProvider,
     request: &SandboxExecuteRequest,
     clock: fn() -> SystemTime,
-) -> Result<CheckedImage<'a>, SelectorBoundaryError> {
+) -> Result<CheckedImage<'a>, InstallationError> {
     let installed = admitted.bootstrap().installed();
     let sim1 = installed
         .artifact(
@@ -448,7 +536,7 @@ fn check_image<'a>(
         .read_control(CONTROL_LIMIT)?;
     let manifest = SignedImageManifest::from_canonical_cbor(&sim1).map_err(invalid)?;
     if manifest.manifest_digest != request.authority.sim1_digest {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+        return Err(InstallationError::ArtifactInvalid);
     }
     let root_image = installed.artifact(
         InstallationObjectKind::ROOT_IMAGE,
@@ -519,10 +607,10 @@ fn check_image<'a>(
 fn check_erofs_root(
     root_image: &File,
     root: &PartitionDescriptor,
-) -> Result<(), SelectorBoundaryError> {
+) -> Result<(), InstallationError> {
     // Never read outside the admitted root partition.
     if root.length_bytes < EROFS_MAGIC_OFFSET + 4 {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+        return Err(InstallationError::ArtifactInvalid);
     }
     let mut magic = [0; 4];
     root_image
@@ -530,7 +618,7 @@ fn check_erofs_root(
         .map_err(invalid)
         .and_then(|()| {
             if magic != EROFS_MAGIC {
-                return Err(SelectorBoundaryError::ArtifactInvalid);
+                return Err(InstallationError::ArtifactInvalid);
             }
             Ok(())
         })
@@ -546,9 +634,9 @@ fn check_verity_superblock(
     root_image: &File,
     verity: &PartitionDescriptor,
     salt: &[u8; 32],
-) -> Result<(), SelectorBoundaryError> {
+) -> Result<(), InstallationError> {
     if verity.length_bytes < VERITY_SUPERBLOCK_PREFIX as u64 {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+        return Err(InstallationError::ArtifactInvalid);
     }
     let mut header = [0; VERITY_SUPERBLOCK_PREFIX];
     root_image
@@ -562,7 +650,7 @@ fn check_verity_superblock(
                 || header[80..82] != VERITY_SALT_SIZE
                 || header[88..] != *salt
             {
-                return Err(SelectorBoundaryError::ArtifactInvalid);
+                return Err(InstallationError::ArtifactInvalid);
             }
             Ok(())
         })
@@ -625,14 +713,14 @@ impl<'de> Visitor<'de> for JsonObject {
 ///
 /// systemd v260.2 rejects a raw DEL (0x7f) that `serde_json` accepts in a
 /// string, so it rejects here too.
-fn parse_verity_signature(text: &[u8]) -> Result<VeritySignatureJson, SelectorBoundaryError> {
+fn parse_verity_signature(text: &[u8]) -> Result<VeritySignatureJson, InstallationError> {
     if text.contains(&0x7f)
         || [text.first(), text.last()]
             .into_iter()
             .flatten()
             .any(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
     {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+        return Err(InstallationError::ArtifactInvalid);
     }
     let mut deserializer = serde_json::Deserializer::from_slice(text);
     deserializer
@@ -659,11 +747,11 @@ fn check_verity_signature(
     signature: &PartitionDescriptor,
     root_hash: &[u8; 32],
     proof: &[u8],
-) -> Result<(), SelectorBoundaryError> {
+) -> Result<(), InstallationError> {
     usize::try_from(signature.length_bytes)
         .ok()
         .filter(|length| *length <= VERITY_SIGNATURE_LIMIT)
-        .ok_or(SelectorBoundaryError::ArtifactInvalid)
+        .ok_or(InstallationError::ArtifactInvalid)
         .and_then(|length| {
             let mut bytes = vec![0; length];
             root_image
@@ -677,7 +765,7 @@ fn check_verity_signature(
                 .position(|byte| *byte == 0)
                 .unwrap_or(bytes.len());
             if bytes[end..].iter().any(|byte| *byte != 0) {
-                return Err(SelectorBoundaryError::ArtifactInvalid);
+                return Err(InstallationError::ArtifactInvalid);
             }
             parse_verity_signature(&bytes[..end])
         })
@@ -685,7 +773,7 @@ fn check_verity_signature(
             if !json.root_hash.eq_ignore_ascii_case(&lower_hex(root_hash))
                 || json.signature != base64(proof)
             {
-                return Err(SelectorBoundaryError::ArtifactInvalid);
+                return Err(InstallationError::ArtifactInvalid);
             }
             Ok(())
         })
@@ -725,8 +813,8 @@ fn base64(bytes: &[u8]) -> String {
     encoded
 }
 
-fn invalid<T>(_: T) -> SelectorBoundaryError {
-    SelectorBoundaryError::ArtifactInvalid
+fn invalid<T>(_: T) -> InstallationError {
+    InstallationError::ArtifactInvalid
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1016,8 +1104,8 @@ pub mod tests {
         Ok(())
     }
 
-    fn current() -> Result<InstalledSelectorState, SelectorBoundaryError> {
-        admitted_state().map_err(|_| SelectorBoundaryError::Io)
+    fn current() -> Result<InstalledSelectorState, InstallationError> {
+        admitted_state().map_err(|_| InstallationError::Io)
     }
 
     #[test]
@@ -1027,7 +1115,9 @@ pub mod tests {
             request_fixture()?,
             fixture_time,
         )?;
-        let admission = snapshot.join_current(current(), fixture_time)?;
+        let admission = snapshot
+            .join_current(current(), fixture_time)
+            .map_err(JoinFault::into_error)?;
         assert!(std::ptr::eq(admission.snapshot(), &raw const snapshot));
         assert_eq!(admission.proof(), snapshot.proof());
         assert_eq!(format!("{admission:?}"), "HeldImageAdmission { .. }");
@@ -1055,7 +1145,10 @@ pub mod tests {
         );
         let later = || fixture_time() + Duration::from_secs(1);
         assert_ne!(
-            snapshot.join_current(current(), later)?.proof(),
+            snapshot
+                .join_current(current(), later)
+                .map_err(JoinFault::into_error)?
+                .proof(),
             snapshot.proof()
         );
         Ok(())
@@ -1090,7 +1183,9 @@ pub mod tests {
             request_fixture()?,
             fixture_time,
         )?;
-        snapshot.join_current(fixture.installed(), fixture_time)?;
+        snapshot
+            .join_current(fixture.installed(), fixture_time)
+            .map_err(JoinFault::into_error)?;
 
         // SIR1 is durable before any RCU1 is sent, so reopening fails closed.
         let committed = fixture.commit_live_update()?;
@@ -1121,8 +1216,54 @@ pub mod tests {
             request_fixture()?,
             fixture_time,
         )?;
-        let admission = admission.join_current(current(), fixture_time)?;
+        let admission = admission
+            .join_current(current(), fixture_time)
+            .map_err(JoinFault::into_error)?;
         assert!(admission.recheck_with(Ok(successor)).is_err());
+        Ok(())
+    }
+
+    // T3 (ADR-122 Amendment 1): a current SIC1 whose `installation-digest`
+    // alone differs from the retained one, its authority digests unchanged,
+    // is refused at the factory's join and at every later recheck.
+    #[test]
+    fn a_changed_installation_digest_alone_is_refused_at_every_join() -> TestResult {
+        let admitted = Arc::new(
+            admitted_state()?
+                .authenticate_bootstrap()?
+                .admit_provider()?,
+        );
+        let changed = || current().map(|state| state.with_installation_digest([2; 32]));
+        let retained = admitted.bootstrap().installed().manifest();
+        let substituted = changed()?;
+        assert_eq!(
+            substituted.manifest().authority_digests(),
+            retained.authority_digests()
+        );
+        assert_ne!(substituted.manifest().digest(), retained.digest());
+        // The substituted installation is itself admissible.
+        substituted.authenticate_bootstrap()?.admit_provider()?;
+        let request = request_fixture()?;
+        // The factory's join.
+        ProviderImageSnapshot::join_authority(&admitted, &request, current())?;
+        assert_eq!(
+            ProviderImageSnapshot::join_authority(&admitted, &request, changed()),
+            Err(InstallationError::ArtifactInvalid)
+        );
+        // The `send_grant` and `verify_input` joins.
+        let snapshot = ProviderImageSnapshot::from_admitted(admitted, request, fixture_time)?;
+        assert_eq!(
+            snapshot.join_current(changed(), fixture_time).map(drop),
+            Err(JoinFault::Authority(InstallationError::ArtifactInvalid))
+        );
+        // The release recheck.
+        let admission = snapshot
+            .join_current(current(), fixture_time)
+            .map_err(JoinFault::into_error)?;
+        assert_eq!(
+            admission.recheck_with(changed()),
+            Err(InstallationError::ArtifactInvalid)
+        );
         Ok(())
     }
 
@@ -1133,11 +1274,11 @@ pub mod tests {
             request_fixture()?,
             fixture_time,
         )?;
-        let admission = snapshot.join_current(current(), fixture_time)?;
+        let admission = snapshot
+            .join_current(current(), fixture_time)
+            .map_err(JoinFault::into_error)?;
         assert_eq!(admission.recheck_with(current())?, admission.authority());
-        assert!(admission
-            .recheck_with(Err(SelectorBoundaryError::Io))
-            .is_err());
+        assert!(admission.recheck_with(Err(InstallationError::Io)).is_err());
         Ok(())
     }
 

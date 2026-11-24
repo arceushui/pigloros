@@ -33,10 +33,10 @@ use crate::selector::recovery::{
     ProviderTerminationAuthority, RecoveryError,
 };
 use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
-use crate::selector::SelectorBoundaryError;
+use crate::selector::{InstallationError, SelectorBoundaryError};
 
 /// Reopens the installation for a new recovery operation.
-type InstallationOpener = Box<dyn Fn() -> Result<FixedInstallation, SelectorBoundaryError> + Send>;
+type InstallationOpener = Box<dyn Fn() -> Result<FixedInstallation, InstallationError> + Send>;
 
 /// Where each closed failure kind is reported: standard error in production.
 type DiagnosticSink = Mutex<Box<dyn std::io::Write + Send>>;
@@ -188,7 +188,11 @@ impl PendingRecovery {
         &self,
     ) -> Result<CompletedRecovery, SelectorBoundaryError> {
         require_absent_evaluator_endpoint(&self.evaluator)
-            .and_then(|()| (self.reopen)().map_err(RecoveryError::from))
+            .and_then(|()| {
+                (self.reopen)()
+                    .map_err(SelectorBoundaryError::from)
+                    .map_err(RecoveryError::from)
+            })
             .and_then(|installation| match installation {
                 FixedInstallation::RecoveryPending(installed) => {
                     PendingRecoveryTarget::load(&installed)
@@ -305,7 +309,7 @@ mod tests {
     fn opener(root: PathBuf) -> InstallationOpener {
         Box::new(move || {
             File::open(&root)
-                .map_err(|_| SelectorBoundaryError::Io)
+                .map_err(|_| InstallationError::Io)
                 .and_then(|root| InstalledSelectorState::open_fixed_at_for_test(&root))
         })
     }

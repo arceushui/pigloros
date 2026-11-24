@@ -53,7 +53,7 @@ use self::{
 use crate::{
     ActivatedRootDirectory, ActivationImage, AdmittedAttempt, AdmittedEntry, CheckedRoot,
     ImageActivationError, ImageActivator, MountfsdImageActivator, PreparedAttemptDirectory,
-    QuarantinedRootMount, StagingError,
+    QuarantinedRootMount, RecheckError,
 };
 
 /// The kernel operations of one attachment.
@@ -220,7 +220,7 @@ fn recheck<K: AttachmentKernel>(
     root: &VerifiedRootMount,
     directory: &PreparedAttemptDirectory,
     activated: Option<&Expected>,
-    mut authority: impl FnMut() -> Result<(), StagingError>,
+    mut authority: impl FnMut() -> Result<(), RecheckError>,
 ) -> Result<ActivatedRootDirectory, ImageActivationError> {
     binds(&root.expected, activated)
         .then_some(())

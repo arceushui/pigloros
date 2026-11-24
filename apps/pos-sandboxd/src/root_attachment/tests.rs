@@ -1497,9 +1497,9 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
                 &tree.prepared,
                 Some(&activated),
                 || Err(if below_floor {
-                    StagingError::BelowControlFloor
+                    RecheckError::Ledger(crate::RecheckLedgerError::BelowControlFloor)
                 } else {
-                    StagingError::AuthorityChanged
+                    RecheckError::AuthorityChanged
                 })
             ),
             Err(ImageActivationError::EvidenceMismatch)
