@@ -686,12 +686,21 @@ impl fmt::Debug for KeyRegistryStateV1 {
 
 impl PartialEq for KeyRegistryStateV1 {
     fn eq(&self, other: &Self) -> bool {
-        self.records == other.records
-            && self.active == other.active
-            && self.tombstones == other.tombstones
-            && self.highest_epoch == other.highest_epoch
-            && self.pending_destructions == other.pending_destructions
-            && self.version == other.version
+        (
+            &self.records,
+            &self.active,
+            &self.tombstones,
+            &self.highest_epoch,
+            &self.pending_destructions,
+            &self.version,
+        ) == (
+            &other.records,
+            &other.active,
+            &other.tombstones,
+            &other.highest_epoch,
+            &other.pending_destructions,
+            &other.version,
+        )
     }
 }
 
@@ -1627,6 +1636,27 @@ mod tests {
         assert_eq!(indexed, decoded);
         let debug = format!("{indexed:?}");
         assert_eq!(debug, format!("{decoded:?}"));
+        Ok(())
+    }
+
+    #[test]
+    fn debug_output_reflects_registered_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let mut registered = KeyRegistryStateV1::new();
+        registered.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+
+        assert_ne!(
+            format!("{:?}", KeyRegistryStateV1::new()),
+            format!("{registered:?}")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn equality_distinguishes_registered_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let mut registered = KeyRegistryStateV1::new();
+        registered.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+
+        assert_ne!(KeyRegistryStateV1::new(), registered);
         Ok(())
     }
 
