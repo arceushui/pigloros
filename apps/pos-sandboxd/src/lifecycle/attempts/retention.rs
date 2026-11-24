@@ -147,6 +147,50 @@ impl<I> AttemptLifecycle<I> {
         }
     }
 
+    /// The response the attempt of `agr1_digest` settles on, waiting while
+    /// it is granted, runs or its response is still signed, as an exact
+    /// repeat of its request does; the caller bounds the wait. `Ok(None)`
+    /// for an attempt this runtime never knew.
+    ///
+    /// # Errors
+    /// [`AttemptLifecycleError::UnknownAttempt`] once the attempt was
+    /// reconciled, [`AttemptLifecycleError::GrantMismatch`] for another
+    /// AGR1, also of a claim, which has none, and
+    /// [`AttemptLifecycleError::ResponseUnavailable`] when no response will
+    /// be signed.
+    pub async fn settled_response(
+        &self,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<Option<Arc<RetainedResponse>>, AttemptLifecycleError> {
+        match self.granted_request(attempt_id, agr1_digest)? {
+            Some(request_digest) => self.join(attempt_id, request_digest).await,
+            None => Ok(None),
+        }
+    }
+
+    /// The SPX1 digest of the attempt admitted under `agr1_digest`; `None`
+    /// for an attempt never known.
+    fn granted_request(
+        &self,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, AttemptLifecycleError> {
+        match lock(&self.attempts).get(&attempt_id) {
+            None => Ok(None),
+            Some(Slot::Reconciled { .. }) => Err(AttemptLifecycleError::UnknownAttempt),
+            Some(slot) if slot.agr1_digest() != Some(agr1_digest) => {
+                Err(AttemptLifecycleError::GrantMismatch)
+            }
+            Some(
+                Slot::Claimed { request, .. }
+                | Slot::Granted { request, .. }
+                | Slot::Running { request, .. }
+                | Slot::Ended { request, .. },
+            ) => Ok(Some(*request)),
+        }
+    }
+
     /// What a repeat of `attempt_id` finds now, under the attempts lock.
     fn joined(
         &self,
@@ -224,20 +268,65 @@ impl<I> AttemptLifecycle<I> {
         }
     }
 
-    /// Re-issue the retained Completed response of the attempt after its
-    /// output transfer timed out (R9 §4.7), and retain the successor in its
-    /// place. `transfer` must carry the retained output and start after the
-    /// cleanup finished; it is `None` when a time of the output transfer
+    /// Whether the attempt of `agr1_digest` was granted and still awaits its
+    /// input: a cancellation of it is recorded for its ending, which has no
+    /// response yet.
+    pub fn awaits_input(&self, attempt_id: [u8; 16], agr1_digest: [u8; 32]) -> bool {
+        let attempts = lock(&self.attempts);
+        let awaiting = matches!(
+            attempts.get(&attempt_id),
+            Some(Slot::Granted { grant, .. }) if *grant == agr1_digest
+        );
+        drop(attempts);
+        awaiting
+    }
+
+    /// Record that `response`, the stored response of `attempt_id`, is now
+    /// delivered whole, as one connection is about to write its SPY1 or an
+    /// SCY1 binds its digest; no re-issue replaces it from then on. `false`
+    /// when it is no longer the stored response: it was re-issued
+    /// meanwhile, and must not be delivered.
+    pub fn claim_delivery(&self, attempt_id: [u8; 16], response: &Arc<RetainedResponse>) -> bool {
+        let attempts = lock(&self.attempts);
+        let stored = matches!(
+            attempts.get(&attempt_id),
+            Some(Slot::Ended {
+                response: Retained::Signed(current),
+                ..
+            }) if Arc::ptr_eq(current, response)
+        );
+        if stored {
+            response.mark_delivered();
+        }
+        drop(attempts);
+        stored
+    }
+
+    /// Re-issue `expected`, the retained Completed response of the attempt
+    /// whose output transfer timed out on this connection (R9 §4.7), and
+    /// retain the successor in its place. `transfer` must carry the
+    /// connection's own transfer of that response's output, starting after
+    /// the cleanup finished; it is `None` when a time of the output transfer
     /// could not be read.
     ///
-    /// A successor that cannot be signed, or whose `output-transfer` time
-    /// could not be read (R9 Amendment 1 change F), is a provider fault (R9
-    /// §5): the stored response is replaced by a fault and stays
-    /// unavailable. Of two concurrent re-issues, the first to store wins,
-    /// and the other returns the winner's successor.
+    /// The successor is built from `expected`, never from a response
+    /// stored since, and stored only while, under the attempts lock,
+    /// `expected` is still the retained response and not delivered (base
+    /// §4). Otherwise it is discarded, whatever its signing or clock fault:
+    /// a response re-issued meanwhile is returned instead, the first
+    /// re-issue to store having won. A successor of a still-retained,
+    /// undelivered response that cannot be signed, or whose
+    /// `output-transfer` time could not be read (R9 Amendment 1 change F),
+    /// is a provider fault (R9 §5): the stored response is replaced by a
+    /// fault and stays unavailable.
     ///
     /// # Errors
-    /// Those of [`AttemptLifecycle::terminal_response`];
+    /// [`AttemptLifecycleError::UnknownAttempt`] and
+    /// [`AttemptLifecycleError::GrantMismatch`] for an attempt that does not
+    /// retain a response of `expected`'s AGR1;
+    /// [`AttemptLifecycleError::ResponseUnavailable`] once its response
+    /// faulted; [`AttemptLifecycleError::ResponseDelivered`] once `expected`
+    /// was delivered whole, which keeps it;
     /// [`AttemptLifecycleError::Response`] with
     /// [`ResponseFault::Evidence`] for a response that cannot be re-issued
     /// with `transfer`, which keeps the retained response, unless the fault
@@ -247,21 +336,15 @@ impl<I> AttemptLifecycle<I> {
     pub fn reissue_response<R: RuntimeAttestationSigner>(
         &self,
         attempt_id: [u8; 16],
-        agr1_digest: [u8; 32],
+        expected: &Arc<RetainedResponse>,
         transfer: Option<TransferRecord>,
         signer: &R,
         admitted: AdmittedRuntimeKey<'_>,
     ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
-        let stored = self.terminal_response(attempt_id, agr1_digest)?;
-        split_refusal(stored.successor(transfer, signer, admitted))
+        let attempt = (attempt_id, expected.agr1_digest());
+        split_refusal(expected.successor(transfer, signer, admitted))
             .map_err(AttemptLifecycleError::from)
-            .and_then(|successor| {
-                self.store(
-                    (attempt_id, agr1_digest),
-                    Some(&stored),
-                    successor.map(Arc::new),
-                )
-            })
+            .and_then(|successor| self.store(attempt, Some(expected), successor.map(Arc::new)))
     }
 
     /// Retain `signed` for the ended attempt of `grant` whose response is
@@ -333,7 +416,10 @@ fn superseded(
 ) -> Option<Result<Arc<RetainedResponse>, AttemptLifecycleError>> {
     match (response, expected) {
         (Retained::Pending, None) => None,
-        (Retained::Signed(current), Some(expected)) if Arc::ptr_eq(current, expected) => None,
+        // A delivered response is kept: the selector may hold its SPY1.
+        (Retained::Signed(current), Some(expected)) if Arc::ptr_eq(current, expected) => current
+            .delivered()
+            .then_some(Err(AttemptLifecycleError::ResponseDelivered)),
         (Retained::Signed(current), _) => Some(Ok(Arc::clone(current))),
         (Retained::Faulted | Retained::Pending, _) => {
             Some(Err(AttemptLifecycleError::ResponseUnavailable))

@@ -450,3 +450,28 @@ pub(crate) fn attempt_admission(grant_digest: [u8; 32]) -> crate::AttemptAdmissi
         }),
     )
 }
+
+/// A Completed test attempt that ended and whose response is not retained
+/// yet, for the serving tests.
+pub struct PendingCompleted {
+    /// The ended attempt.
+    pub ended: crate::EndedAttempt<String>,
+    /// The attempt.
+    pub attempt_id: [u8; 16],
+    /// The AGR1 the attempt was admitted under.
+    pub agr1_digest: [u8; 32],
+}
+
+impl PendingCompleted {
+    /// Sign and retain its response in `lifecycle` under the attempt
+    /// records' test key.
+    ///
+    /// # Errors
+    /// The lifecycle's refusal.
+    pub fn retain(
+        self,
+        lifecycle: &crate::AttemptLifecycle,
+    ) -> Result<Arc<crate::RetainedResponse>, Box<dyn Error + Send + Sync>> {
+        lifecycle.retain_pending_for_test(self)
+    }
+}

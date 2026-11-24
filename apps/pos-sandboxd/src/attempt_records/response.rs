@@ -53,9 +53,25 @@ pub struct RetainedResponse {
     chain: Vec<SandboxAuditRecord>,
     encoded: Encoded,
     output: Option<RetainedOutput>,
+    // Set, under the lifecycle's attempts lock, once a connection writes
+    // its SPY1 or an SCY1 binds it: no re-issue may then replace it.
+    delivered: std::sync::atomic::AtomicBool,
 }
 
 impl RetainedResponse {
+    /// Record that this response is delivered whole: a connection writes
+    /// its SPY1, or an SCY1 binds its digest. The lifecycle calls this
+    /// under its attempts lock, while this is the stored response.
+    pub(crate) fn mark_delivered(&self) {
+        self.delivered
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether this response was delivered whole, so a re-issue must keep it.
+    pub(crate) fn delivered(&self) -> bool {
+        self.delivered.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The self-digest of the AGR1 the response answers.
     #[must_use]
     pub const fn agr1_digest(&self) -> [u8; 32] {
@@ -84,6 +100,30 @@ impl RetainedResponse {
             .chain(std::iter::once(receipt.as_slice()))
             .chain(output.iter().map(Vec::as_slice))
             .chain(std::iter::once(result.as_slice()))
+    }
+
+    /// The AGR1 the response answers, with its admitted ELM1 limits.
+    #[must_use]
+    pub const fn grant(&self) -> &IssuedGrant {
+        &self.grant
+    }
+
+    /// The output SBC1 records of a Completed response, from index zero,
+    /// and the payload bytes they carry: TME1 `output-capture.accepted-bytes`,
+    /// which an output transfer must deliver (R9 §4.7). Empty, with zero
+    /// bytes, for any other response.
+    #[must_use]
+    pub fn output(&self) -> (&[Vec<u8>], u64) {
+        (
+            self.output
+                .as_ref()
+                .map_or(&[][..], RetainedOutput::records),
+            self.records
+                .termination
+                .fields()
+                .output_capture
+                .map_or(0, |capture| capture.accepted_bytes),
+        )
     }
 
     /// The exact AGR1, SAU1 chain, SPR1, SPY1 and `ReleaseV1` bytes.
@@ -576,6 +616,7 @@ fn assemble<R: RuntimeAttestationSigner>(
             chain,
             encoded,
             output,
+            delivered: std::sync::atomic::AtomicBool::new(false),
         })
         .map_err(Into::into)
 }

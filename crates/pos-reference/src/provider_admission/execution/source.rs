@@ -355,6 +355,70 @@ pub enum SourceRefusal {
     /// connection goes to the bounded refusal pool at its current position
     /// (R11 Amendment 1 §7.5, item P7).
     Uncharged(UnchargedSource),
+    /// The first record is no EVR1: the connection carries another
+    /// operation, which serving answers itself.
+    NotExecute(OtherRequest),
+}
+
+/// A connection whose first complete record is no EVR1, with that record,
+/// now uncharged, and the unchanged initial control deadline.
+#[derive(Debug)]
+pub struct OtherRequest {
+    stream: UnixStream,
+    first: Vec<u8>,
+    until: Instant,
+}
+
+impl OtherRequest {
+    /// The stream, the first record's bytes and the initial deadline.
+    #[must_use]
+    pub fn into_parts(self) -> (UnixStream, Vec<u8>, Instant) {
+        (self.stream, self.first, self.until)
+    }
+}
+
+/// A first frame that starts no execute source.
+enum NotEvaluation {
+    /// The frame failed step 1.
+    Fault(FrameFault),
+    /// A complete record of another operation.
+    Other(Vec<u8>),
+}
+
+impl NotEvaluation {
+    /// The refusal of `stream`, whose initial control deadline is `until`.
+    fn refusal(self, stream: UnixStream, until: Instant) -> SourceRefusal {
+        match self {
+            Self::Fault(fault) => fault.refusal(stream, until, None),
+            Self::Other(first) => SourceRefusal::NotExecute(OtherRequest {
+                stream,
+                first,
+                until,
+            }),
+        }
+    }
+}
+
+/// The first frame read as an EVR1 source frame, or what it is instead.
+fn evaluation_frame(
+    read: Result<RetainedControl, FrameFault>,
+) -> Result<RetainedControl, NotEvaluation> {
+    read.map_err(NotEvaluation::Fault).and_then(|frame| {
+        if names_evaluation(&frame.bytes) {
+            Ok(frame)
+        } else {
+            Err(NotEvaluation::Other(frame.bytes))
+        }
+    })
+}
+
+/// Whether `bytes` is a CBOR array whose first item is the text `EVR1`.
+fn names_evaluation(bytes: &[u8]) -> bool {
+    ciborium::from_reader::<ciborium::Value, _>(bytes)
+        .ok()
+        .and_then(|value| value.into_array().ok())
+        .and_then(|fields| fields.into_iter().next())
+        .is_some_and(|magic| magic.as_text() == Some("EVR1"))
 }
 
 /// A connection whose source the ledger refused to charge.
@@ -377,6 +441,20 @@ impl UnchargedSource {
     #[must_use]
     pub const fn closed(&self) -> bool {
         self.closed
+    }
+
+    /// The connection's unchanged initial control deadline: a hand-off that
+    /// waits for a refusal reader waits at most until then.
+    #[must_use]
+    pub const fn deadline(&self) -> Instant {
+        self.until
+    }
+
+    /// Give up the rest unread: the stream, for an answer that needs no
+    /// identity.
+    #[must_use]
+    pub fn into_stream(self) -> UnixStream {
+        self.stream
     }
 
     /// Read the rest of the source uncharged: the stream, and EVR1 then
@@ -500,9 +578,9 @@ impl ExecuteSource {
             },
             ledger,
         );
-        let evaluation = match evaluation {
+        let evaluation = match evaluation_frame(evaluation) {
             Ok(evaluation) => evaluation,
-            Err(fault) => return Err(fault.refusal(stream, until, None)),
+            Err(first) => return Err(first.refusal(stream, until)),
         };
         let request = source_frame(
             &mut TimedStream {
@@ -543,6 +621,14 @@ impl ExecuteSource {
     #[must_use]
     pub fn request(&self) -> &[u8] {
         &self.request.bytes
+    }
+
+    /// The absolute initial control deadline the read started, which also
+    /// bounds a repeat's wait on the attempt it joins (R11 Amendment 1 §7.5,
+    /// item P1).
+    #[must_use]
+    pub const fn deadline(&self) -> Instant {
+        self.deadlines.initial
     }
 
     /// Give up the source: its slot and charges are released, and the
@@ -1374,12 +1460,12 @@ mod tests {
     fn read_frames(
         ledger: &StagingLedger,
         caps: (u64, u64),
-        frames: &[&str],
+        frames: &[&[u8]],
         trailing: &[u8],
     ) -> TestResult<(Result<ExecuteSource, SourceRefusal>, UnixStream)> {
         let (provider, mut selector) = UnixStream::pair()?;
         for frame in frames {
-            write_frame(&mut selector, frame.as_bytes())?;
+            write_frame(&mut selector, frame)?;
         }
         selector.write_all(trailing)?;
         Ok((
@@ -1392,10 +1478,14 @@ mod tests {
         matches!(result, Err(SourceRefusal::Malformed(_)))
     }
 
-    fn source_frames(evaluation: &str, request: &str) -> SourceFrames {
+    /// The smallest record the reader takes for EVR1: a CBOR array whose
+    /// first item is the text `EVR1` (six bytes).
+    const EVR: &[u8] = &[0x81, 0x64, b'E', b'V', b'R', b'1'];
+
+    fn source_frames(evaluation: &[u8], request: &[u8]) -> SourceFrames {
         SourceFrames {
-            evaluation: evaluation.as_bytes().to_vec(),
-            request: request.as_bytes().to_vec(),
+            evaluation: evaluation.to_vec(),
+            request: request.to_vec(),
         }
     }
 
@@ -1695,17 +1785,14 @@ mod tests {
 
     #[test]
     fn the_single_read_holds_both_frames_their_charges_and_a_control_slot() -> TestResult {
-        let ledger = StagingLedger::new(StagingLimits { aggregate_bytes: 5 });
-        let (read, mut selector) = read_frames(&ledger, (1, 5_000), &["evr", "sp"], b"")?;
+        let ledger = StagingLedger::new(StagingLimits { aggregate_bytes: 8 });
+        let (read, mut selector) = read_frames(&ledger, (1, 5_000), &[EVR, b"sp"], b"")?;
         let source = ok(read)?;
-        assert_eq!(
-            (source.evaluation(), source.request()),
-            (&b"evr"[..], &b"sp"[..])
-        );
+        assert_eq!((source.evaluation(), source.request()), (EVR, &b"sp"[..]));
         assert_eq!(
             ledger.usage(),
             StagingUsage {
-                reserved_bytes: 5,
+                reserved_bytes: 8,
                 pending_controls: 1,
                 ..StagingUsage::default()
             }
@@ -1727,7 +1814,7 @@ mod tests {
         let ledger = StagingLedger::new(LARGE);
         // A zero BHC1 ID 16 (ADR-122 Amendment 1 T5 iv).
         assert!(malformed(
-            &read_frames(&ledger, (1, 0), &["e", "s"], b"")?.0
+            &read_frames(&ledger, (1, 0), &[EVR, b"s"], b"")?.0
         ));
         // A zero length, an EVR1 or SPX1 frame that never completes, and a
         // premature byte at the SPX1 frame boundary.
@@ -1750,12 +1837,12 @@ mod tests {
             super::super::monotonic_ns,
         );
         assert!(malformed(&read));
-        let (read, _selector) = read_frames(&ledger, (1, 20), &["evr"], b"\0\0")?;
+        let (read, _selector) = read_frames(&ledger, (1, 20), &[EVR], b"\0\0")?;
         assert!(malformed(&read));
         // A stalled peer: the initial deadline expires during SPX1.
-        let (read, _selector) = read_frames(&ledger, (1, 20), &["evr"], b"")?;
+        let (read, _selector) = read_frames(&ledger, (1, 20), &[EVR], b"")?;
         assert!(malformed(&read));
-        let (read, _selector) = read_frames(&ledger, (1, 5_000), &["evr", "spx"], b"x")?;
+        let (read, _selector) = read_frames(&ledger, (1, 5_000), &[EVR, b"spx"], b"x")?;
         assert!(malformed(&read));
         // A frame above 16 MiB.
         let (provider, mut selector) = UnixStream::pair()?;
@@ -1775,26 +1862,38 @@ mod tests {
     fn a_refused_charge_hands_the_connection_off_at_its_current_position() -> TestResult {
         // No control slot: nothing was read.
         let ledger = StagingLedger::new(LARGE);
-        let (read, _selector) = read_frames(&ledger, (0, 5_000), &["evr", "spx"], b"")?;
+        let (read, mut selector) = read_frames(&ledger, (0, 5_000), &[EVR, b"spx"], b"")?;
         let handed = uncharged(read)?;
         assert!(!handed.closed());
+        assert!(handed.deadline() > Instant::now());
+        // Given up unread, the stream still holds the whole source.
+        let mut stream = handed.into_stream();
+        stream.write_all(b"z")?;
+        let mut byte = [0];
+        selector.read_exact(&mut byte)?;
+        assert_eq!(byte, *b"z");
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix)?;
+        assert_eq!(u32::from_be_bytes(prefix) as usize, EVR.len());
+        let (read, _selector) = read_frames(&ledger, (0, 5_000), &[EVR, b"spx"], b"")?;
+        let handed = uncharged(read)?;
         assert_eq!(ledger.usage(), StagingUsage::default());
         let (_, frames) = handed.read_rest();
-        assert_eq!(frames, Some(source_frames("evr", "spx")));
+        assert_eq!(frames, Some(source_frames(EVR, b"spx")));
         // EVR1's declared length is refused: its prefix was read.
-        let small = StagingLedger::new(StagingLimits { aggregate_bytes: 2 });
-        let (read, _selector) = read_frames(&small, (1, 5_000), &["evr", "sp"], b"")?;
+        let small = StagingLedger::new(StagingLimits { aggregate_bytes: 5 });
+        let (read, _selector) = read_frames(&small, (1, 5_000), &[EVR, b"sp"], b"")?;
         let handed = uncharged(read)?;
         assert_eq!(small.usage(), StagingUsage::default());
-        assert_eq!(handed.read_rest().1, Some(source_frames("evr", "sp")));
+        assert_eq!(handed.read_rest().1, Some(source_frames(EVR, b"sp")));
         // SPX1's declared length is refused: EVR1 is carried, uncharged.
-        let small = StagingLedger::new(StagingLimits { aggregate_bytes: 3 });
-        let (read, _selector) = read_frames(&small, (1, 5_000), &["evr", "spx1"], b"")?;
+        let small = StagingLedger::new(StagingLimits { aggregate_bytes: 6 });
+        let (read, _selector) = read_frames(&small, (1, 5_000), &[EVR, b"spx1"], b"")?;
         let handed = uncharged(read)?;
         assert_eq!(small.usage(), StagingUsage::default());
-        assert_eq!(handed.read_rest().1, Some(source_frames("evr", "spx1")));
+        assert_eq!(handed.read_rest().1, Some(source_frames(EVR, b"spx1")));
         // A rest that fails step 1 yields no frames, but the stream.
-        let (read, _selector) = read_frames(&small, (1, 50), &["evr"], b"\0\0\0\x09")?;
+        let (read, _selector) = read_frames(&small, (1, 50), &[EVR], b"\0\0\0\x09")?;
         let (mut stream, frames) = uncharged(read)?.read_rest();
         assert_eq!(frames, None);
         stream.write_all(b"z")?;
@@ -1803,8 +1902,33 @@ mod tests {
         // A closed ledger is told apart from a full one.
         let closed = StagingLedger::new(LARGE);
         closed.close_for_reconciliation();
-        let (read, _selector) = read_frames(&closed, (1, 5_000), &["e", "s"], b"")?;
+        let (read, _selector) = read_frames(&closed, (1, 5_000), &[EVR, b"s"], b"")?;
         assert!(uncharged(read)?.closed());
+        Ok(())
+    }
+
+    #[test]
+    fn a_first_record_that_is_no_evr1_is_returned_uncharged() -> TestResult {
+        let ledger = StagingLedger::new(LARGE);
+        // Another operation's record, and bytes that are no CBOR at all.
+        for first in [&[0x81, 0x64, b'S', b'D', b'Q', b'1'][..], b"\xff"] {
+            let (read, mut selector) = read_frames(&ledger, (1, 5_000), &[first], b"")?;
+            let Err(SourceRefusal::NotExecute(other)) = read else {
+                return Err(format!("{read:?}").into());
+            };
+            let (mut stream, bytes, until) = other.into_parts();
+            assert_eq!(bytes, first);
+            assert!(until > Instant::now());
+            assert_eq!(ledger.usage(), StagingUsage::default());
+            stream.write_all(b"z")?;
+            let mut byte = [0];
+            selector.read_exact(&mut byte)?;
+            assert_eq!(byte, *b"z");
+        }
+        // The reader keeps the deadline it started.
+        let (read, _selector) = read_frames(&ledger, (1, 5_000), &[EVR, b"s"], b"")?;
+        let source = ok(read)?;
+        assert_eq!(source.deadline(), source.deadlines.initial);
         Ok(())
     }
 
@@ -1817,7 +1941,7 @@ mod tests {
     fn an_unreadable_source_clock_is_carried_to_admission() -> TestResult {
         let ledger = StagingLedger::new(LARGE);
         let (provider, mut selector) = UnixStream::pair()?;
-        write_frame(&mut selector, b"e")?;
+        write_frame(&mut selector, EVR)?;
         write_frame(&mut selector, b"s")?;
         let source = ok(ExecuteSource::read_with(
             peer(provider)?,
