@@ -2,7 +2,7 @@
 //! globally sorted unique input list. Grouping is representation only; every
 //! leaf remains a required, scope-validated and charged edge.
 
-use super::input_reference::CommunityTypedInputRefsV1;
+use super::input_reference::{CommunityTypedInputRefV1, CommunityTypedInputRefsV1};
 use super::native_node::{CommunityContentReferenceV1, MAX_COMMUNITY_DIRECT_INPUTS_V1};
 use super::{
     canonical_end, digest, encode_coordinates, read_coordinates, record_cursor, record_prefix,
@@ -88,4 +88,24 @@ impl<'a> CommunityInputGroupV1<'a> {
                 .and_then(|input| canonical_end(&cursor).and_then(|()| Self::new(input)))
         })
     }
+}
+
+/// A pass CIB1's quoted length for one chunk of leaves (revision 10,
+/// R10.3(3)): the consumer content at its fixed width.
+pub(super) fn quoted_group_len(
+    timeline: TimelineId,
+    generation: [u8; 16],
+    leaves: &[CommunityTypedInputRefV1<'_>],
+) -> usize {
+    CommunityInputGroupV1(CommunityInputGroupInputV1 {
+        timeline,
+        generation,
+        consumer_content: CommunityContentReferenceV1 {
+            record_magic: [0; 4],
+            logical_digest: Hash::zero(),
+        },
+        leaves: CommunityTypedInputRefsV1::from_references(leaves),
+    })
+    .to_canonical_cbor()
+    .len()
 }
