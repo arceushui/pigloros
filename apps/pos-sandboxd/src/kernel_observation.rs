@@ -17,12 +17,13 @@ use std::fs::File;
 use std::io::Read;
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::time::Instant;
 
 use pos_reference::sandbox_provider_protocol::{
     BlockIdentity, CgroupIdentity, DeviceNumber as EvidenceDevice, FdIdentity,
     KernelObservationEvidence, KernelObservationEvidenceFields, KernelObservationStatus,
-    NamespaceIdentity, ObservedKernelState, RootMount, SandboxProviderProtocolError,
-    WorkMountFacts,
+    LocalNetworkReadback, NamespaceIdentity, ObservedKernelState, RootMount,
+    SandboxProviderProtocolError, WorkMountFacts,
 };
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{
@@ -34,7 +35,10 @@ use rustix::process::pidfd_open;
 use rustix::process::Pid;
 use rustix::process::PidfdFlags;
 
-use crate::{EffectiveLimitError, ObservedReadback, ObservedReadbackUnavailable, WorkCapacity};
+use crate::{
+    EffectiveLimitError, NetworkReadback, ObservedReadback, ObservedReadbackUnavailable,
+    ReadbackError, WorkCapacity,
+};
 
 /// The six namespace types KOE1 records, in its order.
 const NAMESPACES: [&str; 6] = ["mnt", "pid", "ipc", "uts", "user", "net"];
@@ -118,7 +122,7 @@ pub struct KernelIdentity {
 }
 
 impl KernelIdentity {
-    fn of(device: u64, inode: u64) -> Result<Self, KernelObservationError> {
+    pub(crate) fn of(device: u64, inode: u64) -> Result<Self, KernelObservationError> {
         DeviceNumber::of(device).map(|device| Self { device, inode })
     }
 
@@ -370,7 +374,7 @@ impl WorkUsage {
 ///
 /// Two observations of the same unrestarted process are equal; the release
 /// recheck relies on that equality.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KernelObservation {
     invocation_id: [u8; 16],
     main_pid: u32,
@@ -382,6 +386,7 @@ pub struct KernelObservation {
     provider_namespaces: NamespaceSet,
     observed_fdl1_digest: [u8; 32],
     work: Option<WorkMount>,
+    network: Option<LocalNetworkReadback>,
 }
 
 impl KernelObservation {
@@ -445,6 +450,12 @@ impl KernelObservation {
         self.work
     }
 
+    /// The Local network readback, for a Local attempt (ADR-069 R14).
+    #[must_use]
+    pub const fn network(&self) -> Option<&LocalNetworkReadback> {
+        self.network.as_ref()
+    }
+
     /// A synthetic observation of the unit with `invocation_id`.
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -481,6 +492,7 @@ impl KernelObservation {
             ),
             observed_fdl1_digest: [0x88; 32],
             work: None,
+            network: None,
         }
     }
 
@@ -531,9 +543,9 @@ pub struct ObservedUnit {
 impl ObservedUnit {
     /// An observation that holds no `/work` handle.
     #[cfg(test)]
-    pub(crate) const fn new(observation: &KernelObservation) -> Self {
+    pub(crate) fn new(observation: &KernelObservation) -> Self {
         Self {
-            observation: *observation,
+            observation: observation.clone(),
             work: None,
         }
     }
@@ -541,9 +553,9 @@ impl ObservedUnit {
     /// An observation that holds `work` as its `/work` handle.
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(crate) const fn with_work_for_test(observation: &KernelObservation, work: File) -> Self {
+    pub(crate) fn with_work_for_test(observation: &KernelObservation, work: File) -> Self {
         Self {
-            observation: *observation,
+            observation: observation.clone(),
             work: Some(work),
         }
     }
@@ -591,13 +603,27 @@ impl<'a> CgroupView<'a> {
 }
 
 /// What the provider already holds for one observation of the unit.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct ObservationContext<'a> {
     cgroup: CgroupView<'a>,
     root: RootIdentity,
     adapter: FdIdentity,
     observed_fdl1_digest: [u8; 32],
     work: bool,
+    network: Option<(&'a (dyn NetworkReadback + Sync), Instant)>,
+}
+
+impl std::fmt::Debug for ObservationContext<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ObservationContext")
+            .field("cgroup", &self.cgroup)
+            .field("root", &self.root)
+            .field("adapter", &self.adapter)
+            .field("work", &self.work)
+            .field("network", &self.network.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> ObservationContext<'a> {
@@ -617,13 +643,36 @@ impl<'a> ObservationContext<'a> {
             adapter,
             observed_fdl1_digest,
             work,
+            network: None,
         }
+    }
+
+    /// Whether the observation also reads a Local network back.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) const fn reads_network(&self) -> bool {
+        self.network.is_some()
+    }
+
+    /// The context of a Local attempt: the unit's observation also reads
+    /// `network` back, bounded by the release `deadline` (ADR-069 R14 §3.2).
+    #[must_use]
+    pub const fn with_network(
+        mut self,
+        network: &'a (dyn NetworkReadback + Sync),
+        deadline: Instant,
+    ) -> Self {
+        self.network = Some((network, deadline));
+        self
     }
 }
 
 /// Why no kernel observation could be made (KOE1 status 2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum KernelObservationError {
+    /// The Local network could not be read back (ADR-069 R14 §3.2).
+    #[error("the Local network could not be read back")]
+    Network(#[source] ReadbackError),
     /// The manager's `MainPID` or `InvocationID` could not be read.
     #[error("the unit identity could not be read")]
     Identity,
@@ -986,6 +1035,11 @@ fn observe_unit_in(
         .ok_or(KernelObservationError::SharedNamespace)?;
     let (device, inode) = context.cgroup.identity;
     let cgroup = KernelIdentity::of(device, inode)?;
+    let network = context
+        .network
+        .map(|(network, deadline)| network.readback(deadline))
+        .transpose()
+        .map_err(KernelObservationError::Network)?;
     let (work, handle) = facts
         .work
         .map_or((None, None), |(mount, file)| (Some(mount), Some(file)));
@@ -1001,6 +1055,7 @@ fn observe_unit_in(
             provider_namespaces,
             observed_fdl1_digest: context.observed_fdl1_digest,
             work,
+            network,
         },
         work: handle,
     })
@@ -1040,7 +1095,7 @@ impl DeviceNumber {
 }
 
 impl KernelIdentity {
-    const fn namespace(self) -> NamespaceIdentity {
+    pub(crate) const fn namespace(self) -> NamespaceIdentity {
         NamespaceIdentity {
             major: self.device.major,
             minor: self.device.minor,
@@ -1085,9 +1140,7 @@ impl KernelObservation {
                 mount_id: work.mount_id,
                 capacity_bytes: work.capacity_bytes,
             }),
-            // No mode is served with a Local network readback yet: Local is
-            // refused before AGR1 (ADR-069 R14 §7, slice 1488-b0).
-            network_readback: None,
+            network_readback: self.network.clone(),
         }
     }
 }

@@ -433,3 +433,11 @@ async fn a_failed_proxy_task_is_reported() -> TestResult {
 fn the_fail_closed_setup_error_is_a_creation_failure() {
     assert_eq!(FailClosedSetup.setup_class(), SetupClass::Creation);
 }
+
+#[test]
+fn the_fail_closed_connector_reads_back_as_other_state() {
+    assert_eq!(
+        RefusingConnector.readback(std::time::Instant::now()),
+        Err(crate::ReadbackError::Changed)
+    );
+}

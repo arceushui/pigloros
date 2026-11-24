@@ -29,8 +29,8 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use pos_reference::sandbox_provider_protocol::{
-    serve_proxy, AdmissionGrant, LocalNetworkAdmission, LocalNetworkSession, LocalProxyBinding,
-    NetworkCaptureStore, NetworkEndpointConnector,
+    serve_proxy, AdmissionGrant, LocalNetworkAdmission, LocalNetworkReadback, LocalNetworkSession,
+    LocalProxyBinding, NetworkCaptureStore, NetworkEndpointConnector,
 };
 use zbus::OwnedFd;
 
@@ -116,6 +116,37 @@ impl SetupError for FailClosedSetup {
     }
 }
 
+/// Why a Local network readback gave no record (ADR-069 R14 §3.2).
+///
+/// At the first observation either class is KOE1 status 2; at the release
+/// recheck a transport failure is barrier failure 6 and a change is 7.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReadbackError {
+    /// The kernel could not be asked, or did not answer in time: a socket
+    /// failure, a receive timeout, a failed `setns`, three torn reads or the
+    /// release deadline.
+    #[error("the Local network could not be read back")]
+    Transport,
+    /// The kernel answered, and the state is not the attempt's: a missing or
+    /// re-pinned namespace, an undecodable object, a mismatch.
+    #[error("the Local network reads back as other state")]
+    Changed,
+}
+
+/// The readback of one attempt's established Local network, which the KOE1
+/// `network-readback` field records (ADR-069 R14 §3.1 and §3.2).
+pub trait NetworkReadback {
+    /// Read the namespace, veth pair, addresses, routes and firewall of the
+    /// attempt back and canonicalize them, exactly as the verifier of the
+    /// record expects them. A read bounded by `deadline`, the attempt's
+    /// release deadline, fails as [`ReadbackError::Transport`] once it has
+    /// passed.
+    ///
+    /// # Errors
+    /// Fails as the [`ReadbackError`] class of whatever went wrong.
+    fn readback(&self, deadline: Instant) -> Result<LocalNetworkReadback, ReadbackError>;
+}
+
 /// The Local network port: it establishes one attempt's namespace.
 ///
 /// An implementation creates the namespace, veth pair and default-drop
@@ -131,8 +162,9 @@ impl SetupError for FailClosedSetup {
 /// therefore make its `Drop` (or its connector's) tear the namespace down, and
 /// must not rely on the caller to do it.
 pub trait LocalNetworkPort {
-    /// The connector that operates inside the established namespace.
-    type Connector: NetworkEndpointConnector + Send + 'static;
+    /// The connector that operates inside the established namespace, and
+    /// reads it back for the attempt's KOE1.
+    type Connector: NetworkEndpointConnector + NetworkReadback + Send + Sync + 'static;
     /// Why a namespace could not be established or read back.
     type Error: SetupError + Send + Sync + 'static;
 
@@ -172,6 +204,15 @@ impl LocalNetworkPort for FailClosedLocalNetwork {
 /// A connector that fails every connection.
 #[derive(Clone, Copy, Debug)]
 pub struct RefusingConnector;
+
+impl NetworkReadback for RefusingConnector {
+    /// It has no namespace to read back, so a Local attempt over it reads
+    /// back as other state: its KOE1 has status 2 and it is never released
+    /// (ADR-069 R14 §7).
+    fn readback(&self, _deadline: Instant) -> Result<LocalNetworkReadback, ReadbackError> {
+        Err(ReadbackError::Changed)
+    }
+}
 
 impl NetworkEndpointConnector for RefusingConnector {
     fn connect(&mut self, _endpoint: SocketAddr, _timeout: Duration) -> io::Result<TcpStream> {

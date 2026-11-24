@@ -68,9 +68,9 @@ use crate::adapter_stdio::{open_channels, AdapterChannels};
 use crate::{
     ActiveAttempt, AdapterIo, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
-    LocalNetworkPort, LocalProxyBindError, OutputReservationRefused, RequestedConfiguration,
-    RequestedConfigurationProperty, ServeError, ServedProxy, SetupClass, SetupError,
-    StdioChannelError, SystemdTransientUnitReadback, TransientServiceUnitName,
+    LocalNetworkPort, LocalProxyBindError, NetworkReadback, OutputReservationRefused,
+    RequestedConfiguration, RequestedConfigurationProperty, ServeError, ServedProxy, SetupClass,
+    SetupError, StdioChannelError, SystemdTransientUnitReadback, TransientServiceUnitName,
     TransientUnitLaunchInputs, TransientUnitRequest, UnitStdio,
 };
 
@@ -215,7 +215,9 @@ pub trait LaunchBarrier {
 
     /// Await `ReadyV1`, recheck every binding, and send exactly one
     /// `ReleaseV1`, all before the attempt's deadline. `cgroup` is the
-    /// attempt's bound cgroup, which the kernel observation reads.
+    /// attempt's bound cgroup, which the kernel observation reads. `network`
+    /// is a Local attempt's established network, whose readback the KOE1
+    /// records (ADR-069 R14 §3.2).
     ///
     /// # Errors
     /// Fails, releasing nothing, if the launcher is not ready in time, any
@@ -224,6 +226,7 @@ pub trait LaunchBarrier {
         &mut self,
         attempt: &ActiveAttempt,
         cgroup: CgroupView<'_>,
+        network: Option<&(dyn NetworkReadback + Sync)>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Take what the release established: the accepted `ReadyV1`, the frozen
@@ -870,6 +873,7 @@ where
         CgroupView::new(cgroup.directory(), cgroup.identity()),
         timed,
         (anchored.release, cancel.clone()),
+        readback_of(&bound),
     )
     .await;
     let bounds = anchored.bounds;
@@ -937,11 +941,12 @@ async fn release_timed<B: LaunchBarrier>(
     cgroup: CgroupView<'_>,
     timed: bool,
     (deadline, cancel): (Instant, CancelSignal),
+    network: Option<&(dyn NetworkReadback + Sync)>,
 ) -> Option<ExecuteError> {
     if !timed {
         return Some(ExecuteError::UnreadableClock);
     }
-    let release = barrier.release(active, cgroup);
+    let release = barrier.release(active, cgroup, network);
     let released = until(deadline, unless(cancel, release)).await;
     released.map_or(Some(ExecuteError::ReleaseTimeout), refusal)
 }
@@ -1346,6 +1351,16 @@ fn resolve_replay(
         .map(|request| store.replay(request.attempt_id, &request.plan, request.transcript_digest))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ExecuteError::ReplayUnavailable)
+}
+
+/// The established network a Local attempt's KOE1 reads back.
+fn readback_of<C: NetworkReadback + Sync>(
+    bound: &Bound<C>,
+) -> Option<&(dyn NetworkReadback + Sync)> {
+    match bound {
+        Bound::Local(_, connector) => Some(connector),
+        Bound::None | Bound::Replay(_) => None,
+    }
 }
 
 fn bind_planned<C>(planned: Planned<C>) -> Bound<C> {

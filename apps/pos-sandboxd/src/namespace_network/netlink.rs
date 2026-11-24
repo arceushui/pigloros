@@ -80,6 +80,9 @@ pub enum NetlinkError {
     /// Provider-owned network state remained after it was removed.
     #[error("provider network state remained after its removal")]
     Residual,
+    /// Every bracketed read of the nftables ruleset was torn by a change.
+    #[error("every bracketed read of the nftables ruleset was torn by a change")]
+    Torn,
 }
 
 /// One netlink socket: whole datagrams out, whole datagrams in.

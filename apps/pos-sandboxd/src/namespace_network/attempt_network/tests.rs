@@ -16,6 +16,7 @@ use rustix::io::Errno;
 
 use super::*;
 use crate::namespace_network::netlink::{NetlinkSession, NetlinkTransport};
+use crate::namespace_network::EgressSlice;
 use crate::namespace_network::{
     FirewallTableFamily, IpPrefix, LinkKind, LinkName, NamespaceName, ObservedAddress,
     ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
@@ -39,6 +40,8 @@ struct FakeEgress {
     refuse_admission: bool,
     refuse_install: bool,
     refuse_removal: bool,
+    /// How the slice readback fails, if it does.
+    readback_failure: Option<fn() -> HostEgressError>,
 }
 
 impl FakeEgress {
@@ -70,6 +73,28 @@ impl EgressControl for FakeEgress {
             self.refuse_removal,
         )
     }
+
+    fn readback_slice(
+        &self,
+        attempt: &AttemptEgress,
+        _deadline: std::time::Instant,
+    ) -> Result<EgressSlice, HostEgressError> {
+        self.readback_failure.map_or_else(
+            || {
+                let ipv4: Vec<SocketAddr> = attempt
+                    .endpoints
+                    .iter()
+                    .copied()
+                    .filter(SocketAddr::is_ipv4)
+                    .collect();
+                Ok(EgressSlice {
+                    allowed: ipv4.clone(),
+                    masqueraded: ipv4,
+                })
+            },
+            |failure| Err(failure()),
+        )
+    }
 }
 
 /// A kernel that installs exactly what it is asked to, pinning each
@@ -83,6 +108,13 @@ struct FakeControl {
     refuse_removal: bool,
     gate: Option<RemovalGate>,
     current: Mutex<Option<ExpectedNamespace>>,
+    /// Changes what a readback reports, if it does, once `armed`.
+    tamper: Option<fn(&mut ObservedNamespace)>,
+    /// Makes a readback fail, if it does, once `armed`.
+    observe_failure: Option<fn() -> NetlinkError>,
+    /// Whether `tamper` and `observe_failure` apply: set once the network
+    /// is established, so the establishment's own readback is untouched.
+    armed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Holds a removal until another task lets it proceed.
@@ -145,6 +177,7 @@ fn observed_for(expected: &ExpectedNamespace) -> ObservedNamespace {
         host_addresses: on(3, &expected.host_addresses),
         namespace_netnsid: 1,
         host_netnsid: 0,
+        firewall_generation: 7,
     }
 }
 
@@ -169,11 +202,21 @@ impl NamespaceControl for FakeControl {
         _name: &NamespaceName,
         _host_link: &LinkName,
     ) -> Result<ObservedNamespace, NetlinkError> {
+        let armed = self.armed.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(failure) = self.observe_failure.filter(|_| armed) {
+            return Err(failure());
+        }
         self.current
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(observed_for)
+            .map(|mut observed| {
+                if let Some(tamper) = self.tamper.filter(|_| armed) {
+                    tamper(&mut observed);
+                }
+                observed
+            })
             .ok_or(NetlinkError::Unexpected)
     }
 
@@ -207,6 +250,16 @@ fn range(ipv4_length: u8, ipv6_length: u8) -> TestResult<NetworkRange> {
     )?)
 }
 
+/// The namespace plan of attempt `[seed; 16]` in slot 0 reaching `ENDPOINT`.
+fn expected_for(seed: u8) -> TestResult<ExpectedNamespace> {
+    Ok(ExpectedNamespace::for_attempt(
+        [seed; 16],
+        &range(24, 120)?,
+        0,
+        &[ENDPOINT],
+    )?)
+}
+
 const ENDPOINT: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443);
 
@@ -230,6 +283,7 @@ fn network_with(
         refuse_admission: egress.refuse_admission,
         refuse_install: egress.refuse_install,
         refuse_removal: egress.refuse_removal,
+        readback_failure: egress.readback_failure,
     };
     Ok((
         NamespacedLocalNetwork::new(
@@ -835,7 +889,9 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
     });
     let mut connector = NamespaceConnector {
         namespace: std::fs::File::open("/proc/self/ns/net").map(OwnedFd::from)?,
-        _teardown: Teardown {
+        expected: expected_for(1)?,
+        namespaces: NetworkNamespaces::pinned_under("/nonexistent"),
+        teardown: Teardown {
             control: Arc::clone(&control),
             egress: Arc::new(FakeEgress::default()),
             attempt: AttemptEgress {
@@ -1439,3 +1495,5 @@ fn every_attempt_network_error_has_its_setup_class() {
         assert_eq!(error.setup_class(), SetupClass::Contradiction, "{error}");
     }
 }
+
+mod readback;

@@ -180,6 +180,16 @@ pub fn capability(address: SocketAddr) -> NetworkCapability {
 /// Connects to the planned endpoint, like a real connector would.
 pub struct LoopbackConnector;
 
+impl crate::NetworkReadback for LoopbackConnector {
+    fn readback(
+        &self,
+        _deadline: std::time::Instant,
+    ) -> Result<pos_reference::sandbox_provider_protocol::LocalNetworkReadback, crate::ReadbackError>
+    {
+        Err(crate::ReadbackError::Transport)
+    }
+}
+
 impl NetworkEndpointConnector for LoopbackConnector {
     fn connect(&mut self, endpoint: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         TcpStream::connect_timeout(&endpoint, timeout)

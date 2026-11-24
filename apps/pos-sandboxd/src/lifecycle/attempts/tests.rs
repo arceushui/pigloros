@@ -2173,6 +2173,7 @@ mod cases {
                 &mut self,
                 _attempt: &ActiveAttempt,
                 _cgroup: crate::CgroupView<'_>,
+                _network: Option<&(dyn crate::NetworkReadback + Sync)>,
             ) -> impl Future<Output = Result<(), Refused>> + Send {
                 std::future::ready(Ok(()))
             }

@@ -258,12 +258,17 @@ impl SetupError for AttemptNetworkError {
 /// scoped, so it is joined before `connect` returns; the sockets it created
 /// belong to the caller, which drops them before the connector; and the
 /// fields drop in declaration order, so `namespace` is closed before
-/// `_teardown` removes the egress and the namespace.
+/// `teardown` removes the egress and the namespace.
 #[derive(Debug)]
 pub struct NamespaceConnector<C: NamespaceControl, E: EgressControl = HostEgress> {
     // Declared first: closed before the teardown below runs.
     namespace: OwnedFd,
-    _teardown: Teardown<C, E>,
+    /// What the attempt's readback is verified against (R14 §3.2 step 8).
+    expected: ExpectedNamespace,
+    /// Where the namespace is pinned, which names it again (R14 §3.2
+    /// step 6).
+    namespaces: NetworkNamespaces,
+    teardown: Teardown<C, E>,
 }
 
 impl<C: NamespaceControl, E: EgressControl> NetworkEndpointConnector for NamespaceConnector<C, E> {
@@ -348,8 +353,8 @@ where
             control: Arc::clone(&self.control),
             egress: Arc::clone(&self.egress),
             attempt: AttemptEgress {
-                namespace: expected.name,
-                host_link: expected.host_link,
+                namespace: expected.name.clone(),
+                host_link: expected.host_link.clone(),
                 endpoints: endpoints.to_vec(),
             },
             slot,
@@ -363,13 +368,16 @@ where
             .and_then(|namespace| namespace.ok_or(NetlinkError::Io(rustix::io::Errno::NOENT)))
             .map(|namespace| NamespaceConnector {
                 namespace,
-                _teardown: teardown,
+                expected,
+                namespaces: self.namespaces.clone(),
+                teardown,
             })
             .map_err(AttemptNetworkError::Open)
     }
 }
 
 mod probe;
+mod readback;
 
 pub(super) use probe::PROBE_HOST_LINK;
 pub use probe::{EgressProbe, EgressProbeError, InvalidEgressProbe, LocalEgressProbe};

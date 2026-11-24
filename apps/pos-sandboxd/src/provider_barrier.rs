@@ -64,9 +64,9 @@ use pos_reference::sandbox_provider_protocol::{BarrierFailure, KernelObservation
 use crate::{
     observation_evidence, release_after_ready, ActiveAttempt, AdmittedAttempt, AdmittedRuntimeKey,
     CancelSignal, CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError,
-    KernelObservationError, LaunchBarrier, LauncherInvocation, ObservationContext, ObservedUnit,
-    ReleaseBarrierError, ReleaseBinding, ReleaseOutcome, ReleaseRecheck, RuntimeAttestationSigner,
-    TransientServiceUnitName,
+    KernelObservationError, LaunchBarrier, LauncherInvocation, NetworkReadback, ObservationContext,
+    ObservedUnit, ReadbackError, ReleaseBarrierError, ReleaseBinding, ReleaseOutcome,
+    ReleaseRecheck, RuntimeAttestationSigner, TransientServiceUnitName,
 };
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -245,6 +245,11 @@ fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefus
     match unavailable.0 {
         KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),
         KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
+        // A Local network that reads back as other state is a change (R14
+        // §3.2): barrier failure 7. A transport failure is 6.
+        KernelObservationError::Network(ReadbackError::Changed) => {
+            RecheckRefusal::ObservationChanged
+        }
         _ => RecheckRefusal::RecheckObservation(unavailable),
     }
 }
@@ -290,6 +295,9 @@ struct Observing<'a> {
     adapter: FdIdentity,
     observed_fdl1_digest: [u8; 32],
     work: bool,
+    /// The Local network the observation reads back, if the attempt is
+    /// Local.
+    network: Option<&'a (dyn NetworkReadback + Sync)>,
 }
 
 impl<R, O, I> Bounded<'_, R, O, I>
@@ -424,6 +432,9 @@ where
             self.observing.observed_fdl1_digest,
             self.observing.work,
         );
+        let context = self.observing.network.map_or(context, |network| {
+            context.with_network(network, self.deadline)
+        });
         self.check.observed.observe(&unit, &context)
     }
 }
@@ -884,6 +895,7 @@ where
         &mut self,
         attempt: &ActiveAttempt,
         cgroup: CgroupView<'_>,
+        network: Option<&(dyn NetworkReadback + Sync)>,
     ) -> Result<(), BarrierError> {
         require_multi_thread()?;
         self.require_attempt(attempt.admitted())?;
@@ -930,6 +942,7 @@ where
                     .admitted
                     .service_limits()
                     .is_ok_and(|limits| limits.work_bytes() != 0),
+                network,
             },
             ready: Cell::new(None),
             requested_configuration_evidence: attempt.requested_configuration_evidence(),
@@ -1020,8 +1033,9 @@ where
         &mut self,
         attempt: &ActiveAttempt,
         cgroup: CgroupView<'_>,
+        network: Option<&(dyn NetworkReadback + Sync)>,
     ) -> Result<(), BarrierError> {
-        let released = self.release_inner(attempt, cgroup).await;
+        let released = self.release_inner(attempt, cgroup, network).await;
         // TME1 `barrier-failure` (ADR-069 R9 §4.6.1), kept typed for the
         // terminal records (Redmine #443 journal 22723).
         self.failure = released

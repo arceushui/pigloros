@@ -13,11 +13,12 @@
 //! endpoint is reached only when it is an address of the host itself, which
 //! needs no forwarding. No other table is ever read for policy or changed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use netlink_packet_core::{
     DefaultNla, Emitable, NlasIterator, NLM_F_APPEND, NLM_F_CREATE, NLM_F_EXCL,
@@ -516,20 +517,31 @@ fn same_rules(expected: &[HostRule], observed: &[(u64, Vec<CanonicalExpression>)
     expected == observed
 }
 
-/// Whether `table` is exactly the host table of `attempts`.
-fn is_exact(table: &ReadTable, attempts: &BTreeMap<String, AttemptEgress>) -> bool {
-    let forward_base = Some((
+/// The hook, priority, policy and type the `forward` base chain must have.
+fn forward_base() -> (u32, u32, u32, String) {
+    (
         u32::from(InetHookNumber::Forward),
         FILTER_PRIORITY,
         NF_ACCEPT,
         "filter".to_owned(),
-    ));
-    let postrouting_base = Some((
+    )
+}
+
+/// The hook, priority, policy and type the `postrouting` base chain must
+/// have.
+fn postrouting_base() -> (u32, u32, u32, String) {
+    (
         u32::from(InetHookNumber::PostRouting),
         SRCNAT_PRIORITY,
         NF_ACCEPT,
         "nat".to_owned(),
-    ));
+    )
+}
+
+/// Whether `table` is exactly the host table of `attempts`.
+fn is_exact(table: &ReadTable, attempts: &BTreeMap<String, AttemptEgress>) -> bool {
+    let forward_base = Some(forward_base());
+    let postrouting_base = Some(postrouting_base());
     let mut dispatches = Vec::new();
     let mut masquerades = Vec::new();
     let attempt_chains = attempts.iter().all(|(chain, attempt)| {
@@ -562,6 +574,58 @@ fn is_exact(table: &ReadTable, attempts: &BTreeMap<String, AttemptEgress>) -> bo
         && attempt_chains
         && forward
         && postrouting
+}
+
+/// The rules of `rules` that match packets entering by `link`: those whose
+/// first two expressions load the input interface name and compare it with
+/// `link`'s name.
+fn rules_for_link(
+    rules: &[(u64, Vec<CanonicalExpression>)],
+    link: &LinkName,
+) -> Vec<Vec<CanonicalExpression>> {
+    let matched = canonical(&input_link_is(&padded(link))).unwrap_or_default();
+    rules
+        .iter()
+        .filter(|(_, rule)| rule.starts_with(&matched))
+        .map(|(_, rule)| rule.clone())
+        .collect()
+}
+
+/// Whether `table` holds, for `attempt`, exactly what [`install_attempt`]
+/// installs (ADR-069 R14 §3.2 step 5): one forward rule that dispatches its
+/// host link to its chain, before the final drop; that chain, regular, with
+/// exactly its accepts in order; in `postrouting`, exactly one masquerade per
+/// IPv4 endpoint on its host link and no other; and the table flags and base
+/// chains. Other attempts' entries are not examined.
+fn slice_exact(table: &ReadTable, attempt: &AttemptEgress) -> bool {
+    let (dispatch, allowed, masquerades) = attempt_rules(attempt);
+    let attempt_chain = table
+        .chains
+        .get(attempt.namespace.as_str())
+        .is_some_and(|read| {
+            read.base.is_none()
+                && read.rules.len() == allowed.len()
+                && read
+                    .rules
+                    .iter()
+                    .zip(&allowed)
+                    .all(|((_, observed), rule)| *observed == canonical_rule(rule))
+        });
+    let forward = table.chains.get(FORWARD).is_some_and(|read| {
+        read.base == Some(forward_base())
+            && read.rules.split_last().is_some_and(|(last, dispatched)| {
+                last.1 == canonical_rule(&HostRule::DropUnmatched)
+                    && rules_for_link(dispatched, &attempt.host_link) == [canonical_rule(&dispatch)]
+            })
+    });
+    let postrouting = table.chains.get(POSTROUTING).is_some_and(|read| {
+        let mut wanted: Vec<_> = masquerades.iter().map(canonical_rule).collect();
+        let mut found = rules_for_link(&read.rules, &attempt.host_link);
+        wanted.sort_unstable();
+        found.sort_unstable();
+        read.base == Some(postrouting_base()) && found == wanted
+    });
+    table.flags == 0 && attempt_chain && forward && postrouting
 }
 
 /// The dumps of every table, chain and rule.
@@ -916,6 +980,19 @@ pub(super) fn restore_forwarding<T: NetlinkTransport>(
     Ok(())
 }
 
+/// One attempt's slice of the host table, as a settled read proved it.
+///
+/// It is the KOE1 `egress-allowed` and `egress-masqueraded` of ADR-069 R14
+/// §3.1: the IPv4 endpoints in canonical order that the attempt's chain
+/// accepts and its `postrouting` masquerades.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EgressSlice {
+    /// The endpoints the attempt's chain accepts.
+    pub allowed: Vec<SocketAddr>,
+    /// The endpoints the attempt's masquerades match.
+    pub masqueraded: Vec<SocketAddr>,
+}
+
 /// The host side of attempt networks: it admits endpoints, gives an
 /// installed attempt egress and takes it away again.
 pub trait EgressControl {
@@ -939,6 +1016,20 @@ pub trait EgressControl {
     /// # Errors
     /// Fails on a refused change or a differing read-back.
     fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError>;
+
+    /// Read `attempt`'s slice of the host table (ADR-069 R14 §3.2 step 5),
+    /// bracketed by `NFT_MSG_GETGEN` and under the change lock, so this
+    /// provider changes no attempt's egress during the read. The lock is held
+    /// for this read only; the read gives up once `deadline` has passed.
+    ///
+    /// # Errors
+    /// Fails if the read is torn three times, `deadline` passed, a netlink
+    /// exchange failed, or the settled table differs from `attempt`'s slice.
+    fn readback_slice(
+        &self,
+        attempt: &AttemptEgress,
+        deadline: Instant,
+    ) -> Result<EgressSlice, HostEgressError>;
 }
 
 /// What the provider installed: each attempt's egress, and the egress
@@ -1000,6 +1091,38 @@ impl HostEgress {
             host_link.index,
             attempt,
         )
+    }
+
+    /// Read `attempt`'s slice through netfilter sessions from `open`, holding
+    /// the change lock for the whole bracketed read.
+    fn readback_through<T: NetlinkTransport>(
+        &self,
+        open: impl Fn(SessionProtocol) -> Result<NetlinkSession<T>, NetlinkError>,
+        attempt: &AttemptEgress,
+        deadline: Instant,
+    ) -> Result<EgressSlice, HostEgressError> {
+        // Other attempts' installs and removals wait here; a poisoned lock
+        // holds state no change left half done, as for every change.
+        let _serialised = self
+            .installed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (_, dumps) = super::firewall::settled(|| open(NETFILTER), Some(deadline))?;
+        read_table(dumps.tables, dumps.chains, dumps.rules)?
+            .filter(|table| slice_exact(table, attempt))
+            .ok_or(HostEgressError::Readback)?;
+        let endpoints: Vec<SocketAddr> = attempt
+            .endpoints
+            .iter()
+            .copied()
+            .filter(SocketAddr::is_ipv4)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(EgressSlice {
+            allowed: endpoints.clone(),
+            masqueraded: endpoints,
+        })
     }
 
     /// Take `attempt`'s egress away through route and netfilter sessions
@@ -1134,6 +1257,14 @@ impl EgressControl for HostEgress {
     fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
         self.remove_through(NetlinkSession::open, attempt)
     }
+
+    fn readback_slice(
+        &self,
+        attempt: &AttemptEgress,
+        deadline: Instant,
+    ) -> Result<EgressSlice, HostEgressError> {
+        self.readback_through(NetlinkSession::open, attempt, deadline)
+    }
 }
 
 /// Delete the whole host table, if it exists, and read its absence back.
@@ -1153,6 +1284,9 @@ pub(super) fn remove_table<N: NetlinkTransport>(
         .and_then(|table| table.map_or(Ok(()), |_| Err(NetlinkError::Residual)))
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod readback_tests;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
