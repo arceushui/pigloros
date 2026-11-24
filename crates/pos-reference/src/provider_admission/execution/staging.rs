@@ -130,10 +130,8 @@ impl StagingDirectory {
         name: [u8; 16],
         prepared: PreparedProviderExecution<C>,
     ) -> Result<StagedInput<C>, Box<ExecuteRefusal>> {
-        match self.create_file(name, prepared.staging_charge()) {
-            Ok(staged) => Ok(StagedInput { staged, prepared }),
-            Err(error) => Err(Box::new(prepared.refuse(RefusalCause::Staging(error)))),
-        }
+        let created = self.create_file(name, prepared.staging_charge());
+        StagedInput::staged(created, prepared)
     }
 
     fn create_file(
@@ -215,6 +213,18 @@ pub struct StagedInput<C = ()> {
 }
 
 impl<C> StagedInput<C> {
+    /// The staged input of `prepared` once its file was `created`; or, if
+    /// creating it failed, `prepared` refused with that error before AGR1.
+    fn staged(
+        created: Result<StagedFile, StagingError>,
+        prepared: PreparedProviderExecution<C>,
+    ) -> Result<Self, Box<ExecuteRefusal>> {
+        match created {
+            Ok(staged) => Ok(Self { staged, prepared }),
+            Err(error) => Err(Box::new(prepared.refuse(RefusalCause::Staging(error)))),
+        }
+    }
+
     /// Sign and write AGR1 on the exchange's own connection, converting its
     /// claim with `convert` as the last check before the write.
     ///
