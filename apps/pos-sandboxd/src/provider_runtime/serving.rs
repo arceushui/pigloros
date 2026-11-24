@@ -77,7 +77,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxReconcileRequest,
 };
 use pos_reference::sandbox_provider_protocol::{
-    SandboxRevocationSnapshot, SandboxTrustRole, SandboxTrustSnapshot,
+    SandboxLimit, SandboxRevocationSnapshot, SandboxTrustRole, SandboxTrustSnapshot,
 };
 use pos_reference::selector::installation::authority::{
     AdmittedSelectorProvider, AuthorityResolution,
@@ -569,10 +569,9 @@ impl<'a> Responder<'a> {
         admission: Admission,
         (permit, place): (Option<ReaderPermit<'_>>, Option<Place<'_>>),
     ) {
-        let limits = self.admitted.provider().broker_hard_caps();
         let mut reading = Deadlined::new(
             stream,
-            Duration::from_millis(limits[CONTROL_DEADLINE_LIMIT_ID].value),
+            control_interval(self.admitted.provider().broker_hard_caps()),
         );
         let until = reading.until;
         let Some(permit) = permit.or_else(|| self.refusals.wait(until)) else {
@@ -644,19 +643,19 @@ impl<'a> Responder<'a> {
     ) -> Option<Vec<u8>> {
         let signing = (&**self.signer, self.key());
         let answered = match control {
-            Control::Cancel(request) => port.cancel(request, (until, self.interval()), signing),
+            Control::Cancel(request) => port.cancel(
+                request,
+                (
+                    until,
+                    control_interval(self.admitted.provider().broker_hard_caps()),
+                ),
+                signing,
+            ),
             Control::Reconcile(request) => port.reconcile(request, until, signing),
         };
         answered.map_or_else(
             |code| code.and_then(|code| self.authenticated(identity, code)),
             Some,
-        )
-    }
-
-    /// One initial control interval, BHC1 limit 16.
-    fn interval(&self) -> Duration {
-        Duration::from_millis(
-            self.admitted.provider().broker_hard_caps()[CONTROL_DEADLINE_LIMIT_ID].value,
         )
     }
 
@@ -948,6 +947,13 @@ impl<'a> Responder<'a> {
         .and_then(|error| error.to_canonical_cbor().map_err(RuntimeSignerError::from))
         .ok()
     }
+}
+
+/// One initial control interval: BHC1 limit 16 of `caps`, in milliseconds.
+/// It bounds every request read, and a cancellation's wait for the signed
+/// response after its attempt ended (R15 §3.6 item 2(a)).
+fn control_interval(caps: &[SandboxLimit]) -> Duration {
+    Duration::from_millis(caps[CONTROL_DEADLINE_LIMIT_ID].value)
 }
 
 /// How a cancel or reconcile that passed step 6 is answered (R15 §3.3,

@@ -543,6 +543,31 @@ mod tests {
                 .is_ok()
         }
 
+        /// How many waits are subscribed to the granted slot's `changed` or
+        /// the ended slot's `settled` of `attempt_id`.
+        pub(crate) fn waiters_for_test(&self, attempt_id: [u8; 16]) -> usize {
+            match lock(&self.attempts).get(&attempt_id) {
+                Some(Slot::Granted { changed, .. }) => changed.receiver_count(),
+                Some(Slot::Ended { settled, .. }) => settled.receiver_count(),
+                _ => 0,
+            }
+        }
+
+        /// End the granted attempt `attempt_id` under `grant` by a failed
+        /// input, its response pending.
+        pub(crate) fn end_granted_for_test(
+            &self,
+            attempt_id: [u8; 16],
+            grant: [u8; 32],
+        ) -> Result<(), AttemptLifecycleError> {
+            self.record_failed::<crate::SystemdVerifiedStart, _>(
+                &pos_reference::provider_admission::execution::FailedInput::fixture(
+                    attempt_id, grant,
+                ),
+            )
+            .map(drop)
+        }
+
         /// The SCQ1 and SRQ1 entries `attempt_id` holds in the ledger.
         pub(crate) fn control_entries(&self, attempt_id: [u8; 16]) -> u8 {
             lock(&self.attempts)
