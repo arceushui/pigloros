@@ -1876,6 +1876,20 @@ mod tests {
     }
 
     #[test]
+    fn registration_rejects_cross_role_material_reuse_after_snapshot_reload(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+        let mut reloaded = state_from_value(&state_value(&registry)?)?;
+
+        assert_eq!(
+            KeyRegistryPortV1::register_key(&mut reloaded, signing_registration(ATTRIBUTION, 1)),
+            Err(KeyRegistryErrorV1::MaterialReuse)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn destruction_is_irreversible_idempotent_and_keeps_public_key(
     ) -> Result<(), KeyRegistryErrorV1> {
         let mut registry = KeyRegistryStateV1::new();
