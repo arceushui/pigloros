@@ -36,6 +36,9 @@ use pos_core::{
 use ulid::Ulid;
 use zeroize::Zeroizing;
 
+use super::super::erasure_budget::{
+    CommunityErasureBudgetPortV1, CommunityErasureBudgetV1, CommunityPendingErasureV1,
+};
 use super::super::{
     prepare_community_observation_v1, CommunityObservationConsumerV1, CommunityObservationEventV1,
     CommunityObservationInstallationV1, CommunityObservationMaterializationInputV1,
@@ -94,6 +97,9 @@ struct Port {
     reused: CommunityPassGraphTermsV1,
     scopes: BTreeMap<[u8; 32], Vec<CommunityScopeMemberV1>>,
     scope_reads: Cell<u32>,
+    budget: CommunityErasureBudgetV1,
+    budget_unavailable: bool,
+    pending: BTreeMap<EntityId, CommunityPendingErasureV1>,
 }
 
 /// The selected CGR1 counts the fake serves by default.
@@ -123,6 +129,17 @@ impl CommunityQuarantineIndexV1 for Port {
     fn quarantine_reasons(&self, key: Hash) -> Option<Vec<CommunityQuarantineReasonV1>> {
         self.reads.set(self.reads.get() + 1);
         self.quarantine.get(key.as_bytes()).cloned()
+    }
+}
+
+impl CommunityErasureBudgetPortV1 for Port {
+    fn erasure_budget(&self, timeline: TimelineId) -> Result<CommunityErasureBudgetV1, Error> {
+        assert_eq!(timeline, self::timeline());
+        if self.budget_unavailable {
+            Err(Error::EvidenceUnavailable)
+        } else {
+            Ok(self.budget.clone())
+        }
     }
 }
 
@@ -179,6 +196,10 @@ impl CommunityPassReadPortV1 for Port {
             .get(reference.digest().as_bytes())
             .cloned()
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    fn pending_erasure_demand(&self, actor: EntityId) -> CommunityPendingErasureV1 {
+        self.pending.get(&actor).cloned().unwrap_or_default()
     }
 }
 
@@ -706,7 +727,10 @@ fn the_quote_names_the_due_rows_limits_and_guarded_counts() -> TestResult {
     let refs = refs();
     let steps = steps(&payload, &refs, false);
     let reused = CommunityPassObservationUseV1::Reused(REUSED);
-    let quote = due.quote(&port, &steps, reused)?;
+    let quoted = due.quote(&port, &steps, reused)?;
+    let quote = quoted.quote();
+    // No actor bounds T's budget in the fake.
+    assert_eq!(quoted.trace_rows(), u64::MAX);
     let members: Vec<_> = [(1, hash(2)), (2, hash(3))]
         .into_iter()
         .zip(&steps)
@@ -735,12 +759,14 @@ fn the_quote_names_the_due_rows_limits_and_guarded_counts() -> TestResult {
             live_keys: 11,
             observation_graph: port.reused,
             observation_keys: 0,
+            observation_rows: 0,
         }),
         expected.demand(CommunityPassDomainV1 {
             selected_graph: SELECTED,
             live_keys: 11,
             observation_graph: port.reused,
             observation_keys: 0,
+            observation_rows: 0,
         })
     );
     // One scope read for the ref both members share.
@@ -771,7 +797,8 @@ fn every_5g_demand_refuses_state_with_14_and_recording_with_19() -> TestResult {
     let reused = CommunityPassObservationUseV1::Reused(REUSED);
     let mut port = scoped_port();
     let due = plan_due(&port, installation(&profile), fixture.view())?;
-    let base = due.quote(&port, &steps, reused)?;
+    let quoted = due.quote(&port, &steps, reused)?;
+    let base = quoted.quote();
     let [nodes, ..] = pos_core::community_lifecycle::COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1;
     let spare = nodes - base.total_terms().nodes;
     let run = |port: &Port| due.quote(port, &steps, reused).err();
@@ -785,6 +812,7 @@ fn every_5g_demand_refuses_state_with_14_and_recording_with_19() -> TestResult {
         live_keys: 0,
         observation_graph: CommunityPassGraphTermsV1::default(),
         observation_keys: 0,
+        observation_rows: 0,
     })?;
     let [state_keys, _] = demand.keys();
     port.live_keys = COMMUNITY_MAXIMUM_STORE_KEYS_V1 - state_keys;
@@ -893,7 +921,8 @@ fn a_minted_observation_shares_its_rows_terms_and_keys() -> TestResult {
     let none: [CommunityTypedInputRefV1<'_>; 0] = [];
     let steps = steps(&payload, &none, true);
     let minted = CommunityPassObservationUseV1::Minted(&sources);
-    let quote = due.quote(&port, &steps, minted)?;
+    let quoted = due.quote(&port, &steps, minted)?;
+    let quote = quoted.quote();
     let sizes = CommunityProtectionSizesV1::new(timeline(), G)?;
     let share = sources.quote_terms(&sizes, |_| false)?;
     let members: Vec<_> = [(1, hash(2)), (2, hash(3))]
@@ -923,6 +952,7 @@ fn a_minted_observation_shares_its_rows_terms_and_keys() -> TestResult {
         live_keys: 0,
         observation_graph: share.graph,
         observation_keys: share.keys,
+        observation_rows: share.erasure_rows,
     })?;
     port.live_keys = COMMUNITY_MAXIMUM_STORE_KEYS_V1 - demand.keys()[0];
     assert_eq!(
@@ -1084,3 +1114,5 @@ fn the_memory_domain_serves_step_4e_from_its_quarantine_index() -> TestResult {
     assert_eq!(run(&world), Err(Error::Quarantined));
     Ok(())
 }
+
+mod erasure;

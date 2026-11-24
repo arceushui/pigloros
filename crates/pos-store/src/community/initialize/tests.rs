@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 use crate::memory::MemoryStore;
 use crate::MemoryTrustedClockAuthorityV1;
 
+use super::super::erasure_budget::CommunityErasureContextV1;
 use super::{
     CommittedInitializationV1, CommunityInitializationContextV1, CommunityInitializationReceiptV1,
     CommunityInitializeCallV1, PreparedV1, SealedMetadataV1, StagedInitializationV1,
@@ -191,6 +192,17 @@ fn the_commit_publishes_and_retains_the_whole_initialization() -> TestResult {
     let domain = &case.domain.world.domain;
     assert_eq!(domain.inventory_generation, 1);
     assert_eq!(domain.native_producer_ordinal, 1);
+    // ADR-129 revision 13, R13.1(5): the context holds F_q = 8n for its
+    // two members.
+    let context = domain.erasure_contexts.get(&target()).copied();
+    assert_eq!(
+        context.map(|context| (context.members, context.active_pairs)),
+        Some((2, 0))
+    );
+    assert_eq!(context.map(CommunityErasureContextV1::reserve), Some(16));
+    // R13.1(2): the batch's ten community rows, two targets each, are
+    // counted in the publishing commit.
+    assert_eq!(domain.store.erasure_counts_for_test(target()), (10, 20));
 
     let owner = community_catalogue_owner_v1(target(), GENERATION)?;
     let published = domain

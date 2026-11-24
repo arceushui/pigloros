@@ -12,10 +12,11 @@
 //! - step 5d and 5e ([`CommunityPassDueV1::admit`]): the retained-outcome
 //!   and control-operation caps (14, R10.4(4)) and the recording horizon
 //!   (19, R10.4(3));
-//! - step 5g ([`CommunityPassDueV1::quote`]), in the R11.5(1) order: the
-//!   R10.3 CBQ1 quote, the live key count (R11.1(6)), the ARD1 graph demand
-//!   (R11.3), the pass CSB1/CPV1 bounds (R11.4(1)–(3)) and the CAU1 object
-//!   bound (R11.4(4)), each State demand first (14) and then with the
+//! - step 5g ([`CommunityPassDueV1::quote`]), in the R11.5(1) order as
+//!   revision 13 restates it (R13.4(1)): the R10.3 CBQ1 quote, the live key
+//!   count (R11.1(6)), the ARD1 graph demand (R11.3), the erasure-target
+//!   budget (R13.1(3)), the pass CSB1/CPV1 bounds (R11.4(1)–(3)) and the CAU1
+//!   object bound (R11.4(4)), each State demand first (14) and then with the
 //!   recording (19).
 //!
 //! Steps 5a–5c (the step-5 decisions, the trust gate and the observation
@@ -33,16 +34,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use pos_core::community_lifecycle::{
     community_member_due_v1, CommunityDurableProfileV1, CommunityGraphCountsV1,
     CommunityHostProgressV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
-    CommunityPassDomainV1, CommunityPassGraphTermsV1, CommunityPassObservationV1,
-    CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1, CommunityPassQuoteV1,
-    CommunityPreparedInvocationInputV1, CommunityProtectionSizesV1, CommunityQuarantineKeyV1,
-    CommunityQuarantineReasonV1, CommunityScopeMemberV1, CommunitySharedCountsV1,
-    CommunityTypedInputRefV1, COMMUNITY_CONTROL_OPERATIONS_V1,
-    COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
+    CommunityPassDemandV1, CommunityPassDomainV1, CommunityPassGraphTermsV1,
+    CommunityPassObservationV1, CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1,
+    CommunityPassQuoteV1, CommunityPreparedInvocationInputV1, CommunityProtectionSizesV1,
+    CommunityQuarantineKeyV1, CommunityQuarantineReasonV1, CommunityScopeMemberV1,
+    CommunitySharedCountsV1, CommunityTypedInputRefV1, COMMUNITY_CONTROL_OPERATIONS_V1,
+    COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_ROW_LIMIT_V1,
+    COMMUNITY_ERASURE_TARGET_LINE_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
     MAX_COMMUNITY_COVERAGE_ROWS_V1, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
 };
-use pos_core::{Hash, TimelineId};
+use pos_core::{EntityId, Hash, TimelineId};
 
+use super::erasure_budget::{
+    CommunityErasureActorV1, CommunityErasureBudgetPortV1, CommunityErasureBudgetV1,
+    CommunityPendingErasureV1,
+};
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::observation::{CommunityObservationQuoteV1, CommunityObservationSourcesV1};
@@ -77,8 +83,9 @@ impl CommunityQuarantineIndexV1 for MemoryCommunityDomainV1 {
 /// selected CGR1 counts and closure index (R11.3) and the scope rows of the
 /// step inputs (R11.4(3)). They are domain-private and have no wire form;
 /// the Memory domain adds their storage and implements this port in A4c.
-/// The trait is re-exported nowhere.
-pub trait CommunityPassReadPortV1 {
+/// Its supertrait is the erasure-budget read (R13.1(2)), which the Memory
+/// domain already serves. The trait is re-exported nowhere.
+pub trait CommunityPassReadPortV1: CommunityErasureBudgetPortV1 {
     /// T's cumulative recorded-set counters (R10.3(6)).
     fn recorded_set_counters(&self, timeline: TimelineId) -> CommunitySharedCountsV1;
 
@@ -122,6 +129,11 @@ pub trait CommunityPassReadPortV1 {
         timeline: TimelineId,
         reference: CommunityTypedInputRefV1<'_>,
     ) -> Result<Vec<CommunityScopeMemberV1>, Error>;
+
+    /// The worst-case demand of `actor`'s unresolved reservations, every T
+    /// of its scope (R13.1(4)), from the A4c pending-reservation ledger. The
+    /// planner adds it to the committed budget.
+    fn pending_erasure_demand(&self, actor: EntityId) -> CommunityPendingErasureV1;
 }
 
 /// Installed composition inputs of the planner. None comes from a caller.
@@ -392,10 +404,11 @@ impl CommunityPassDueV1<'_> {
         }
     }
 
-    /// Step 5g in the R11.5(1) order: the R10.3 CBQ1 quote, the live key
-    /// count, the ARD1 graph demand, the pass CSB1/CPV1 bounds and the CAU1
-    /// object bound. Each is checked for State demand first and then with
-    /// the recording (R10.4(2)).
+    /// Step 5g in the R11.5(1) order with the R13.4(1) budget: the R10.3
+    /// CBQ1 quote, the live key count, the ARD1 graph demand, the erasure
+    /// budget, the pass CSB1/CPV1 bounds and the CAU1 object bound. Each is
+    /// checked for State demand first and then with the recording
+    /// (R10.4(2)).
     ///
     /// `steps` has one entry per due member, in due order.
     ///
@@ -403,15 +416,15 @@ impl CommunityPassDueV1<'_> {
     /// Returns `InvalidBinding` when `steps` does not cover the due set or a
     /// member's scope differs from the pass scope (R11.1(2)); the quote
     /// errors of [`CommunityPassQuoteV1::new`], the stage-2 errors of a
-    /// minted observation and the port's scope-read errors; then
-    /// `CapacityExhausted` when a State demand does not fit and
+    /// minted observation and the port's scope-read and budget-read errors;
+    /// then `CapacityExhausted` when a State demand does not fit and
     /// `RecordingUnavailable` when only a full demand does not.
     pub fn quote<P: CommunityPassReadPortV1>(
         &self,
         port: &P,
         steps: &[CommunityPassStepInputsV1<'_>],
         observation: CommunityPassObservationUseV1<'_>,
-    ) -> Result<CommunityPassQuoteV1, Error> {
+    ) -> Result<CommunityPassQuotedV1, Error> {
         if steps.len() != self.due.len() {
             return Err(Error::InvalidBinding);
         }
@@ -423,24 +436,23 @@ impl CommunityPassDueV1<'_> {
                     .and_then(|quote| {
                         quote
                             .require_fit()
-                            .and_then(|()| {
-                                quote.demand(CommunityPassDomainV1 {
-                                    selected_graph: port.selected_graph(timeline),
-                                    live_keys: port.live_keys(),
-                                    observation_graph: share.graph,
-                                    observation_keys: share.keys,
-                                })
-                            })
+                            .and_then(|()| quote.demand(share.domain(port, timeline)))
                             .and_then(|demand| {
                                 demand
                                     .require_keys()
                                     .and_then(|()| demand.require_graph())
-                                    .and_then(|()| {
+                                    .and_then(|()| erasure_budget(port, timeline, &demand))
+                                    .and_then(|trace_rows| {
                                         scope_bounds(port, timeline, steps, &share.scope)
+                                            .and_then(|()| demand.require_objects())
+                                            .map(|()| (demand, trace_rows))
                                     })
-                                    .and_then(|()| demand.require_objects())
                             })
-                            .map(|()| quote)
+                            .map(|(demand, trace_rows)| CommunityPassQuotedV1 {
+                                quote,
+                                demand,
+                                trace_rows,
+                            })
                     })
             })
     }
@@ -478,6 +490,121 @@ impl CommunityPassDueV1<'_> {
     }
 }
 
+/// A pass that fits step 5g: its CBQ1 quote, the demands it was checked
+/// with and the trace headroom.
+pub struct CommunityPassQuotedV1 {
+    quote: CommunityPassQuoteV1,
+    demand: CommunityPassDemandV1,
+    trace_rows: u64,
+}
+
+impl CommunityPassQuotedV1 {
+    /// The pass CBQ1 quote.
+    #[must_use]
+    pub const fn quote(&self) -> &CommunityPassQuoteV1 {
+        &self.quote
+    }
+
+    /// The key, graph, object and erasure demands over the guarded domain
+    /// counts; the Reserve writer records the erasure rows and `F_p` as the
+    /// pass's pending entry (R13.1(4)).
+    #[must_use]
+    pub const fn demand(&self) -> &CommunityPassDemandV1 {
+        &self.demand
+    }
+
+    /// The trace rows (CAT1, GCA1 and Annotation CPN1s) the erasure budget
+    /// still admits after the State, recording and `F_p` demand, in every
+    /// actor's scope; the rest are omitted with reason 3 `AnnotationBudget`
+    /// (R13.1(3)). `u64::MAX` when T has no actor to bound it.
+    #[must_use]
+    pub const fn trace_rows(&self) -> u64 {
+        self.trace_rows
+    }
+}
+
+/// R13.1(3) at step 5g: for every actor of T's scope, the committed
+/// `targets(A)`, the pending reservations, `F_q(A)`, `F_p` and the pass's
+/// State rows at two targets each stay within the community line, and every
+/// `rows(U)` with its pending rows, T's also with the new rows and the
+/// `F_p` rows, within 4,096: else 14. Then the same with the recording
+/// rows: else 19. The result is the trace rows still admitted.
+fn erasure_budget<P: CommunityPassReadPortV1>(
+    port: &P,
+    timeline: TimelineId,
+    demand: &CommunityPassDemandV1,
+) -> Result<u64, Error> {
+    port.erasure_budget(timeline).and_then(|budget| {
+        let [state, total] = demand.erasure_rows();
+        let rooms: Vec<[Option<u64>; 2]> = budget
+            .actors
+            .iter()
+            .map(|actor| {
+                let pending = port.pending_erasure_demand(actor.actor);
+                let room = |rows| {
+                    trace_room(
+                        &budget,
+                        actor,
+                        &pending,
+                        timeline,
+                        rows,
+                        demand.failure_reserve(),
+                    )
+                };
+                [room(state), room(total)]
+            })
+            .collect();
+        if rooms.iter().any(|[state, _]| state.is_none()) {
+            Err(Error::CapacityExhausted)
+        } else {
+            rooms
+                .iter()
+                .try_fold(u64::MAX, |least, [_, total]| {
+                    total.map(|room| least.min(room))
+                })
+                .ok_or(Error::RecordingUnavailable)
+        }
+    })
+}
+
+/// The trace rows one actor's budget still admits after binding `rows`
+/// to `timeline` and holding the `reserve` targets of `F_p`, or `None` when
+/// they do not fit.
+fn trace_room(
+    budget: &CommunityErasureBudgetV1,
+    actor: &CommunityErasureActorV1,
+    pending: &CommunityPendingErasureV1,
+    timeline: TimelineId,
+    rows: u64,
+    reserve: u64,
+) -> Option<u64> {
+    let used = actor.targets + pending.targets + actor.quarantine_reserve + reserve + 2 * rows;
+    COMMUNITY_ERASURE_TARGET_LINE_V1
+        .checked_sub(used)
+        .and_then(|targets| {
+            budget
+                .rows
+                .iter()
+                .try_fold(targets / 2, |room, (affected, committed)| {
+                    let added = if *affected == timeline {
+                        rows + reserve / 2
+                    } else {
+                        0
+                    };
+                    let pending = pending.rows.get(affected).copied().unwrap_or(0);
+                    COMMUNITY_ERASURE_ROW_LIMIT_V1
+                        .checked_sub(committed + pending + added)
+                        .map(|free| {
+                            if *affected == timeline {
+                                room.min(free)
+                            } else {
+                                room
+                            }
+                        })
+                })
+        })
+}
+
 /// The pass's observation: one this call mints, or a committed one it
 /// reuses (R10.7 step 5c).
 #[derive(Clone, Copy)]
@@ -506,6 +633,7 @@ fn share<P: CommunityPassReadPortV1>(
             observation: None,
             graph: port.observation_graph(timeline, reference),
             keys: 0,
+            rows: 0,
             scope: Vec::new(),
         }),
     }
@@ -515,6 +643,9 @@ struct Share {
     observation: Option<CommunityPassObservationV1>,
     graph: CommunityPassGraphTermsV1,
     keys: u64,
+    /// The ARD1 rows a minted materialization binds at Reserve; a reused
+    /// one's are bound already, even after an Abort (R13.1(4)).
+    rows: u64,
     scope: Vec<CommunityScopeMemberV1>,
 }
 
@@ -524,7 +655,23 @@ impl Share {
             observation: Some(quote.observation),
             graph: quote.graph,
             keys: quote.keys,
+            rows: quote.erasure_rows,
             scope: quote.scope,
+        }
+    }
+
+    /// The domain counts the demands start from, with this share.
+    fn domain<P: CommunityPassReadPortV1>(
+        &self,
+        port: &P,
+        timeline: TimelineId,
+    ) -> CommunityPassDomainV1 {
+        CommunityPassDomainV1 {
+            selected_graph: port.selected_graph(timeline),
+            live_keys: port.live_keys(),
+            observation_graph: self.graph,
+            observation_keys: self.keys,
+            observation_rows: self.rows,
         }
     }
 }

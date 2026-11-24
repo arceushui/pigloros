@@ -29,8 +29,8 @@ use pos_core::community_lifecycle::{
     CommunitySourceClosureV1, CommunityStateContentV1, CommunityStateProducerV1,
     CommunityStateRevisionInputV1, CommunityStateRevisionV1, CommunityTypedInputRefV1 as TypedRef,
     CommunityTypedInputRefsV1, MeteringV1, TimelinePositionV1,
-    COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1, COMMUNITY_MAXIMUM_STORE_KEYS_V1,
-    COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1, COMMUNITY_ERASURE_TARGET_LINE_V1,
+    COMMUNITY_MAXIMUM_STORE_KEYS_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::{
     ArtifactChildEdgeV1, ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
@@ -908,6 +908,7 @@ const fn domain(selected: CommunityGraphCountsV1, live_keys: u64) -> CommunityPa
         live_keys,
         observation_graph: OBSERVATION_GRAPH,
         observation_keys: 2,
+        observation_rows: 3,
     }
 }
 
@@ -1000,7 +1001,16 @@ fn the_demand_adds_the_rebuilt_records_to_the_selected_closure() -> TestResult {
         assert_eq!(recording.registrations, 1 + 2 * 2);
         assert_eq!(recording.edges, 4 * 2);
         assert_eq!(demand.graph()[1], with(state, recording, 7));
-        assert_eq!(demand.keys(), [5 + 3 + 2, 5 + 3 + 2 + 1]);
+        // R13.2(3) and I141: the pass provisions four State keys, the H_g
+        // and H_r cohorts among them, and the recording one more.
+        assert_eq!(demand.keys(), [5 + 4 + 2, 5 + 4 + 2 + 1]);
+        // R13.1(3): the State rows are the objects and the materialization's
+        // 3 rows; the recording adds 2n + 1; F_p is 2(n + 1).
+        assert_eq!(
+            demand.erasure_rows(),
+            [objects + 3, objects + 3 + 2 * 2 + 1]
+        );
+        assert_eq!(demand.failure_reserve(), 2 * (2 + 1));
         assert_eq!(demand.objects(), [objects, objects + 2 * 2 + 1]);
         demand.require_keys()?;
         demand.require_graph()?;
@@ -1134,5 +1144,151 @@ fn minted_observation_terms_count_against_the_per_record_edge_limit() -> TestRes
         quote(spare + 2)?.require_fit().err(),
         Some(Error::CapacityExhausted)
     );
+    Ok(())
+}
+
+/// One R13.3 capacity column: `contexts` lockstep contexts on one affected
+/// scope, `fixed` targets held before the first pass (store, payloads,
+/// initialization rows and every `F_q`), `reserves` of the contexts' `F_p`
+/// pending at the last check of a round, and the materialization rows and
+/// closure additions of each 0-based pass.
+struct Column {
+    contexts: u64,
+    fixed: u64,
+    reserves: u64,
+    observation: fn(u64) -> (u64, CommunityPassGraphTermsV1),
+}
+
+/// A materialization's closure additions: `registrations` records and
+/// `edges` edges, at a nominal size.
+const fn additions(registrations: u64, edges: u64) -> CommunityPassGraphTermsV1 {
+    CommunityPassGraphTermsV1 {
+        registrations,
+        edges,
+        keys: 1,
+        registration_bytes: 100 * registrations,
+        artifact_bytes: 200 * registrations,
+    }
+}
+
+/// No new Event: the first pass mints the empty cut (COV1, Observation
+/// CPN1 and CPE1), later passes reuse it.
+fn no_new_event(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    if pass == 0 {
+        (3, additions(2, 1))
+    } else {
+        (0, CommunityPassGraphTermsV1::default())
+    }
+}
+
+/// One new Event a pass: each pass mints an observation of every Event so
+/// far, with one new CES1 and an Observation CPN1 naming all of them.
+const fn one_new_event(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    (4, additions(3, 2 + pass))
+}
+
+/// The first pass of a Fork column with a one-Event prefix.
+fn prefix_of_one(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    if pass == 0 {
+        (4, additions(3, 2))
+    } else {
+        (0, CommunityPassGraphTermsV1::default())
+    }
+}
+
+/// The first pass of a Fork column with a 500-Event prefix: 500 CES1s in
+/// two CIB1 groups of 256 and 244.
+fn prefix_of_500(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    if pass == 0 {
+        (500 + 3 + 2 * 2, additions(500 + 2 + 2 * 2, 3 + 257 + 245))
+    } else {
+        (0, CommunityPassGraphTermsV1::default())
+    }
+}
+
+/// The passes each context commits before the first 14, from the real
+/// demand of an `n`-member pass: the R11.3 graph demand over the closure the
+/// earlier passes selected, then the R13.1 budget.
+fn passes_before_14(members: u64, column: &Column) -> Fallible<u64> {
+    let fixture = Fixture::new(usize::try_from(members)?)?;
+    let bindings = fixture.bindings()?;
+    // e = 2: the prior StateRevision and the observation (I142).
+    let inputs = artifact_refs(2);
+    let rows: Vec<_> = bindings
+        .iter()
+        .map(|member| quote_member(member, &fixture.payload, &inputs, false))
+        .collect();
+    let quote = CommunityPassQuoteV1::new(quote_input(&rows, None))?;
+    let mut selected = CommunityGraphCountsV1 {
+        registrations: 5 * members,
+        edges: 6 * members,
+        ..SELECTED
+    };
+    let mut targets = column.fixed;
+    let mut passes = 0;
+    loop {
+        let (rows, graph) = (column.observation)(passes);
+        let demand = quote.demand(CommunityPassDomainV1 {
+            selected_graph: selected,
+            live_keys: 0,
+            observation_graph: graph,
+            observation_keys: 0,
+            observation_rows: rows,
+        })?;
+        let [_, total] = demand.erasure_rows();
+        let committed = column.contexts * 2 * total;
+        if demand.require_graph().is_err()
+            || targets + committed + column.reserves * demand.failure_reserve()
+                > COMMUNITY_ERASURE_TARGET_LINE_V1
+        {
+            return Ok(passes);
+        }
+        selected = demand.graph()[0];
+        targets += committed;
+        passes += 1;
+    }
+}
+
+#[test]
+fn the_capacity_table_follows_from_the_pass_demand() -> TestResult {
+    // Revision 13, R13.3 and I142 (the demand part; the planner part runs
+    // over the Memory counters in pos-store). n = 9 exceeds the roster
+    // maximum, so only the demand can show its row. At n = 1 with one new
+    // Event a pass the closure's edges bind first.
+    for (members, expected) in [
+        (1_u64, [164, 116, 81, 39]),
+        (3, [64, 57, 32, 15]),
+        (9, [22, 21, 10, 4]),
+    ] {
+        let one = 2 + 10 * members + 8 * members;
+        let fork = 3 + 10 * members + 2 * 8 * members;
+        let column = |contexts, fixed, observation| Column {
+            contexts,
+            fixed,
+            reserves: contexts,
+            observation,
+        };
+        let columns = [
+            column(1, one, no_new_event),
+            column(1, one, one_new_event),
+            column(2, fork, prefix_of_one),
+            column(2, fork, prefix_of_500),
+        ];
+        let observed = columns
+            .iter()
+            .map(|column| passes_before_14(members, column))
+            .collect::<Fallible<Vec<_>>>()?;
+        assert_eq!(observed, expected, "n = {members}");
+    }
+    // With one pending F_p at a time only n = 9, E = 500 changes, to 5.
+    for (members, expected) in [(9, 5), (3, 15)] {
+        let single = Column {
+            contexts: 2,
+            fixed: 3 + 10 * members + 2 * 8 * members,
+            reserves: 1,
+            observation: prefix_of_500,
+        };
+        assert_eq!(passes_before_14(members, &single)?, expected);
+    }
     Ok(())
 }

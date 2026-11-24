@@ -1,12 +1,12 @@
 //! The R10.4(5) installation check of a CDP1 through its public seam
-//! (ADR-129 revision 10, R10.4(5); revision 11, R11.5(3) and R11.6; I101,
-//! I118 and I122).
+//! (ADR-129 revision 10, R10.4(5); revision 11, R11.5(3); revision 13,
+//! R13.3; I101, I118, I141, I143 and I145).
 
 use pos_core::community_lifecycle::{
     check_community_pass_installation_v1, ArtifactRefV1, CommunityDurableBackendV1,
     CommunityDurableProfileInputV1, CommunityDurableProfileV1, CommunityGraphCountsV1,
-    CommunityLifecycleErrorV1 as Error, CommunityPassTermsV1, CommunityProfileMemberV1,
-    CommunityProfileRetentionV1,
+    CommunityLifecycleErrorV1 as Error, CommunityPassLifetimeV1, CommunityPassTermsV1,
+    CommunityProfileMemberV1, CommunityProfileRetentionV1, COMMUNITY_ERASURE_TARGET_LINE_V1,
 };
 use pos_core::{Hash, ImplementationKeyV1};
 
@@ -68,7 +68,7 @@ fn profile<'a>(
 fn the_minimum_required_pass_of_every_admissible_roster_fits() -> TestResult {
     let key = ImplementationKeyV1::new("plugin-a".into(), "host-v1".into(), hash(11))?;
     let mut observed = Vec::new();
-    for members in [1_u64, 9] {
+    for members in [1_u64, 3] {
         let entries: Vec<String> = (0..members).map(|index| format!("entry-{index}")).collect();
         let rows = roster(&key, &entries)?;
         let profile = profile(&rows)?;
@@ -95,11 +95,19 @@ fn the_minimum_required_pass_of_every_admissible_roster_fits() -> TestResult {
         assert_eq!(replay.registrations, graph.registrations + 1 + 2 * members);
         assert_eq!(replay.edges, graph.edges + 4 * members);
         assert_eq!((replay.keys, replay.maximum_depth), (6, 7));
-        assert_eq!(installed.demand.keys(), [7, 8]);
+        // The 2 initialization keys, the 2 observation keys and the pass's
+        // 4 (R13.2(3), I141), then the recording key.
+        assert_eq!(installed.demand.keys(), [8, 9]);
         assert_eq!(
             installed.demand.objects(),
             [7 * members + 2, 9 * members + 3]
         );
+        // The objects and the empty cut's COV1, Observation CPN1 and CPE1.
+        assert_eq!(
+            installed.demand.erasure_rows(),
+            [7 * members + 5, 9 * members + 6]
+        );
+        assert_eq!(installed.demand.failure_reserve(), 2 * (members + 1));
         observed.push((state.bytes, total.bytes, graph, replay));
     }
     // The byte columns, pinned: every term is a fixed widest width or S_m.
@@ -129,13 +137,48 @@ fn the_minimum_required_pass_of_every_admissible_roster_fits() -> TestResult {
 
 /// `(CBQ1 State bytes, CBQ1 total bytes, CGR1 registration bytes, CGR1
 /// artifact bytes, Replay registration bytes, Replay artifact bytes)` for one
-/// and nine members at 1 MiB.
+/// and three members at 1 MiB.
 const PINNED: [(u64, u64, u64, u64, u64, u64); 2] = [
     (2_113_254, 2_114_133, 4568, 3_163_758, 5557, 3_167_554),
-    (
-        18_906_438, 18_913_781, 36_784, 28_455_934, 43_805, 28_482_515,
-    ),
+    (6_311_550, 6_314_045, 12_622, 9_486_802, 15_119, 9_496_295),
 ];
+
+#[test]
+fn the_installation_sums_equal_the_r13_3_floor_for_every_roster() -> TestResult {
+    // R13.3 and I145: the target, registration and edge sums of the
+    // minimum pass repeated 64 times equal an independent rebuild, for every
+    // admissible roster and at any State limit; at the roster maximum the
+    // targets are 3,910 of the 3,968 under the community line.
+    let key = ImplementationKeyV1::new("plugin-a".into(), "host-v1".into(), hash(11))?;
+    for members in 1_u64..=3 {
+        let entries: Vec<String> = (0..members).map(|index| format!("entry-{index}")).collect();
+        let rows = roster(&key, &entries)?;
+        let profile = profile(&rows)?;
+        for limit in [0, MIB] {
+            let limits = vec![limit; entries.len()];
+            let installed = check_community_pass_installation_v1(&profile, &limits)?;
+            let rebuilt = CommunityPassLifetimeV1 {
+                // Store and payload, 5n initialization rows, F_q, the empty
+                // cut, 64 passes of 9n + 3 rows and F_p, two targets a row.
+                targets: 2
+                    + 2 * 5 * members
+                    + 8 * members
+                    + 2 * 3
+                    + 64 * 2 * (9 * members + 3)
+                    + 2 * (members + 1),
+                registrations: 5 * members + 2 + 64 * 7 * members,
+                edges: 6 * members + 1 + 64 * 11 * members,
+            };
+            assert_eq!(installed.lifetime, rebuilt);
+            assert_eq!(installed.lifetime.targets, 394 + 1172 * members);
+        }
+    }
+    const {
+        assert!(394 + 1172 * 3 <= COMMUNITY_ERASURE_TARGET_LINE_V1);
+        assert!(394 + 1172 * 4 > COMMUNITY_ERASURE_TARGET_LINE_V1);
+    }
+    Ok(())
+}
 
 #[test]
 fn state_limits_must_cover_the_roster_within_one_mib() -> TestResult {

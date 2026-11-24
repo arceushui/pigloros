@@ -138,7 +138,7 @@ fn expected(
             2048,
         ])?,
         policy(&[
-            9,
+            3,
             256,
             8192,
             4096,
@@ -214,7 +214,9 @@ fn complete_profile_encodes_every_selected_policy_and_original_retention_value()
 #[test]
 fn roster_policy_is_complete_strictly_entry_sorted_and_bounded_before_encoding() -> TestResult {
     let key = key()?;
-    let entries: Vec<_> = (0..10).map(|number| format!("entry-{number:02}")).collect();
+    // ADR-129 revision 13, R13.3 and I143: three members install, a fourth
+    // is refused.
+    let entries: Vec<_> = (0..4).map(|number| format!("entry-{number:02}")).collect();
     let all = roster(&key, &entries)?;
     assert_eq!(
         Profile::new(input(&[], Backend::RetainedMemory)).err(),
@@ -224,10 +226,10 @@ fn roster_policy_is_complete_strictly_entry_sorted_and_bounded_before_encoding()
         Profile::new(input(&all, Backend::RetainedMemory)).err(),
         Some(Error::BoundsExceeded)
     );
-    let profile = Profile::new(input(&all[..9], Backend::RetainedMemory))?;
+    let profile = Profile::new(input(&all[..3], Backend::RetainedMemory))?;
     assert_eq!(
         &*profile.to_canonical_cbor(),
-        &encode(&expected(0, &key, &entries[..9], RETENTION)?)?
+        &encode(&expected(0, &key, &entries[..3], RETENTION)?)?
     );
     let reversed = [all[1], all[0]];
     let duplicate = [all[0], all[0]];
@@ -607,29 +609,32 @@ fn pass_planning_limits_are_the_selected_policy_literals() {
         [1_000_000, 4_000_000, 4_000_000]
     );
     assert_eq!(COMMUNITY_RETAINED_PASS_OUTCOMES_V1, 256);
-    assert_eq!(COMMUNITY_MAXIMUM_ROSTER_V1, 9);
+    assert_eq!(COMMUNITY_MAXIMUM_ROSTER_V1, 3);
     assert_eq!(COMMUNITY_CONTROL_OPERATIONS_V1, 8192);
     assert_eq!(COMMUNITY_DECISION_DEADLINE_MICROS_V1, 27_000_000);
 }
 
 #[test]
-fn the_former_roster_maximum_is_refused_by_exact_reconstruction() -> TestResult {
-    // Revision 11, R11.6(d′) and I122: `limits_bytes[0]` is 9, so a CDP1
-    // carrying the former value 64 gives 3.
+fn the_former_roster_maxima_are_refused_by_exact_reconstruction() -> TestResult {
+    // Revision 13, R13.3 and I143: `limits_bytes[0]` is 3, so a CDP1
+    // carrying the former value 9 or 64 gives 3.
     let key = key()?;
     let entries = vec!["entry".into()];
     let members = roster(&key, &entries)?;
     let input = input(&members, Backend::RetainedMemory);
-    let mut former = expected(0, &key, &entries, RETENTION)?;
-    let limits = &mut fields(&mut former)?[9];
-    let mut values: Vec<u64> =
-        ciborium::de::from_reader::<Vec<u64>, _>(limits.as_bytes().ok_or("limits")?.as_slice())?;
-    assert_eq!(values[0], 9);
-    values[0] = 64;
-    *limits = policy(&values)?;
-    assert_eq!(
-        Profile::validate_canonical_cbor(&encode(&former)?, input).err(),
-        Some(Error::InvalidBinding)
-    );
+    for maximum in [9, 64] {
+        let mut former = expected(0, &key, &entries, RETENTION)?;
+        let limits = &mut fields(&mut former)?[9];
+        let mut values: Vec<u64> = ciborium::de::from_reader::<Vec<u64>, _>(
+            limits.as_bytes().ok_or("limits")?.as_slice(),
+        )?;
+        assert_eq!(values[0], 3);
+        values[0] = maximum;
+        *limits = policy(&values)?;
+        assert_eq!(
+            Profile::validate_canonical_cbor(&encode(&former)?, input).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
     Ok(())
 }

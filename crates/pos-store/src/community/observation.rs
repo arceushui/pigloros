@@ -182,6 +182,9 @@ pub struct CommunityObservationQuoteV1 {
     pub graph: CommunityPassGraphTermsV1,
     /// The store keys it provisions (R11.1(4)).
     pub keys: u64,
+    /// The ARD1 rows it binds to T: its closure records and the CPE1, which
+    /// is outside the closure (ADR-129 revision 13, R13.1(3)).
+    pub erasure_rows: u64,
     /// Its Observation CPN1's scope rows (R11.4(2)).
     pub scope: Vec<CommunityScopeMemberV1>,
 }
@@ -728,10 +731,12 @@ impl CommunityObservationSourcesV1 {
                 .iter()
                 .filter(|source| !retained(source.digest))
                 .collect();
+            let graph = self.closure_terms(sizes, &records, &fresh);
             CommunityObservationQuoteV1 {
                 observation: self.observation_row(&records),
-                graph: self.closure_terms(sizes, &records, &fresh),
+                graph,
                 keys: self.cohort_keys(&fresh),
+                erasure_rows: graph.registrations + 1,
                 scope: self.scope_rows(),
             }
         })

@@ -37,16 +37,37 @@ pub const COMMUNITY_SHARED_RECORD_LIMITS_V1: [u64; 3] = [LIMITS[4], LIMITS[5], L
 /// domain's live key count (ADR-129 §2; revision 11, R11.1(6)).
 pub const COMMUNITY_MAXIMUM_STORE_KEYS_V1: u64 = OWNER[2];
 
-/// The CDP1 `limits_bytes` roster maximum (ADR-129 revision 11, R11.6(d′)):
+/// The CDP1 `limits_bytes` roster maximum (ADR-129 revision 13, R13.3):
 /// a CDP1 with more roster rows is refused at installation.
-pub const COMMUNITY_MAXIMUM_ROSTER_V1: usize = 9;
+pub const COMMUNITY_MAXIMUM_ROSTER_V1: usize = 3;
 
-// R11.6 minimum-lifetime floor: the minimum required pass, repeated 64
+/// `R_other`, the erasure targets left to writers that do not check the
+/// budget (ADR-129 revision 13, R13.1(6)).
+pub const COMMUNITY_ERASURE_RESERVE_V1: u64 = 128;
+
+/// The community line `4,096 - R_other`: no community operation takes an
+/// actor's `targets(A)` above it (R13.1(3)).
+pub const COMMUNITY_ERASURE_TARGET_LINE_V1: u64 =
+    crate::ERASURE_MAX_TARGETS as u64 - COMMUNITY_ERASURE_RESERVE_V1;
+
+/// The ADR-136 view-list bound: a Timeline's `rows(U)` of any class stay at
+/// most 4,096 (R13.1(1), (3)).
+pub const COMMUNITY_ERASURE_ROW_LIMIT_V1: u64 = crate::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY as u64;
+
+/// `F_q` per roster member: four quarantine reasons, one CFO1 row each, at
+/// two targets per row (R13.1(5)).
+pub const COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1: u64 = 8;
+
+// R13.3 minimum-lifetime floor: the minimum required pass, repeated 64
 // times from the initialization base with every member due and no new
-// Event, fits the 4,096-registration and 8,192-edge closure bounds at the
-// roster maximum (5n + 2 + 7n x 64 and 6n + 1 + 11n x 64).
+// Event, fits at the roster maximum the 4,096-registration and 8,192-edge
+// closure bounds (5n + 2 + 7n x 64 and 6n + 1 + 11n x 64) and the erasure
+// budget with its reserves: 2 + 10n + 6 + 8n + 64 x (18n + 6) + 2(n + 1),
+// that is 394 + 1,172n, at most 4,096 - 128. The sums depend on n alone, so
+// no installable CDP1 can fail them.
 const _: () = assert!(5 * LIMITS[0] + 2 + 7 * LIMITS[0] * 64 <= GRAPH[1]);
 const _: () = assert!(6 * LIMITS[0] + 1 + 11 * LIMITS[0] * 64 <= GRAPH[2]);
+const _: () = assert!(394 + 1172 * LIMITS[0] <= COMMUNITY_ERASURE_TARGET_LINE_V1);
 // R11.1(5): no V1 key reaches the per-key encryption maximum. The pass
 // ExecutionState cohort holds at most n x (7 + 2 x 16) + 2 records plus the
 // Measurement CPN1s, and a CES1 cohort at most 4,096 records, two credits

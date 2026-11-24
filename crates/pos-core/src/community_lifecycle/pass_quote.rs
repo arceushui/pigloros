@@ -287,21 +287,27 @@ pub struct CommunityPassDomainV1 {
     /// key, one CES1 cohort per owning Timeline with a new CES1 and its
     /// union cohort when distinct (R11.1(4)); zero when reused.
     pub observation_keys: u64,
+    /// The ARD1 rows a minted materialization binds to T: its new CES1s,
+    /// COV1, Observation and `InputIndex` CPN1s, CIB1s and CPE1 (ADR-129
+    /// revision 13, R13.1(3)); zero when reused, whose rows are bound.
+    pub observation_rows: u64,
 }
 
-/// A pass's key, ARD1 graph and object demands, State first and then with
-/// the recording (R11.5(1)).
+/// A pass's key, ARD1 graph, object and erasure demands, State first and
+/// then with the recording (R11.5(1), R13.1(3)).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommunityPassDemandV1 {
     keys: [u64; 2],
     graph: [CommunityGraphCountsV1; 2],
     objects: [u64; 2],
+    erasure_rows: [u64; 2],
+    failure_reserve: u64,
 }
 
-/// The pass's own store keys: the metadata key, the `ExecutionState` `H_r`
-/// cohort and the Measurement cohort, counted apart from `H_r` before
-/// Reserve (R11.1(3), (6)).
-const PASS_STATE_KEYS: u64 = 3;
+/// The pass's own store keys: the metadata key, the `ExecutionState` `H_g`
+/// cohort, the CED1/CEB1 `H_r` cohort (ADR-129 revision 13, R13.2(3)) and
+/// the Measurement cohort, counted apart before Reserve (R11.1(3), (6)).
+const PASS_STATE_KEYS: u64 = 4;
 
 /// The pass's per-pass objects outside its members: CED1 and CEB1.
 const PASS_STATE_OBJECTS: u64 = 2;
@@ -344,10 +350,13 @@ impl CommunityPassDemandV1 {
             .map(MemberRecords::objects)
             .sum::<u64>()
             .saturating_add(PASS_STATE_OBJECTS);
+        let state_rows = state_objects.saturating_add(domain.observation_rows);
         Self {
             keys: [state_keys, state_keys.saturating_add(1)],
             graph: [state, recording],
             objects: [state_objects, state_objects + 2 * count + 1],
+            erasure_rows: [state_rows, state_rows + 2 * count + 1],
+            failure_reserve: 2 * (count + 1),
         }
     }
 
@@ -368,6 +377,22 @@ impl CommunityPassDemandV1 {
     #[must_use]
     pub const fn objects(&self) -> [u64; 2] {
         self.objects
+    }
+
+    /// The ARD1 rows the pass binds to T, State then with the recording
+    /// (R13.1(3)): the R11.2 per-member records, a minted materialization's
+    /// rows, CED1 and CEB1; then the `2n + 1` CIV1, Measurement and CRR1
+    /// rows. Each costs two erasure targets.
+    #[must_use]
+    pub const fn erasure_rows(&self) -> [u64; 2] {
+        self.erasure_rows
+    }
+
+    /// `F_p = 2(n_due + 1)`: the targets of one CFI1 per due member and one
+    /// CFO1 that a failed pass may register (R13.1(5)).
+    #[must_use]
+    pub const fn failure_reserve(&self) -> u64 {
+        self.failure_reserve
     }
 
     /// R11.1(6): the live key count plus the State keys, then plus the

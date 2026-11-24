@@ -1,5 +1,5 @@
 //! The installation checks' error propagation over synthetic domains that a
-//! real minimum pass, with at most 9 members, cannot reach (R11.5(3)): each
+//! real minimum pass, with at most 3 members, cannot reach (R11.5(3)): each
 //! check's 14 and 19 must reach the caller, in the R11.5(1) order.
 
 use super::{check_minimum, CommunityPassDomainV1};
@@ -42,6 +42,7 @@ const fn domain(selected: CommunityGraphCountsV1, live_keys: u64) -> CommunityPa
             artifact_bytes: 0,
         },
         observation_keys: 0,
+        observation_rows: 0,
     }
 }
 

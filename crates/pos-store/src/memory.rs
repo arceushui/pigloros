@@ -126,6 +126,8 @@ use crate::{
 mod community_artifacts;
 mod composition_fallback_registry;
 mod counterfactual_store;
+#[cfg(target_os = "linux")]
+mod erasure_budget;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
@@ -361,6 +363,10 @@ pub struct MemoryStore {
     /// Append-only `(source Timeline, registration address)` bindings
     /// (ADR-136 §2.6), written with the registration batch that names them.
     artifact_registration_timelines: BTreeSet<(TimelineId, Hash)>,
+    /// The community erasure-budget counters of those bindings (ADR-129
+    /// revision 13, R13.1(2)), updated with every binding.
+    #[cfg(target_os = "linux")]
+    erasure_counters: erasure_budget::ErasureCountersV1,
     /// Current local manifest-owner generation and complete owned Timeline set.
     manifest_owner_admission_states: BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
     /// Immutable historical MCA1/MSB1/MSR1 rows and exact scoped native copies.
@@ -863,6 +869,8 @@ impl MemoryStore {
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
             artifact_registration_timelines: BTreeSet::new(),
+            #[cfg(target_os = "linux")]
+            erasure_counters: erasure_budget::ErasureCountersV1::default(),
             manifest_owner_admission_states: BTreeMap::new(),
             manifest_owner_admission_snapshots: BTreeMap::new(),
             manifest_owner_admission_operations: BTreeMap::new(),
@@ -12457,14 +12465,15 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
             batch.root_registration_address(),
         )?;
 
-        let bindings: Vec<_> = batch
+        let bindings: BTreeSet<_> = batch
             .source_timeline()
             .into_iter()
             .flat_map(|timeline| rows.iter().map(move |(address, _, _)| (timeline, *address)))
+            .filter(|binding| !self.artifact_registration_timelines.contains(binding))
             .collect();
-        let has_new_bindings = bindings
-            .iter()
-            .any(|binding| !self.artifact_registration_timelines.contains(binding));
+        let has_new_bindings = !bindings.is_empty();
+        #[cfg(target_os = "linux")]
+        self.count_erasure_bindings(&bindings, rows.iter().map(|(_, _, row)| row));
         self.artifact_registration_timelines.extend(bindings);
         for (address_key, identity_key, row) in rows {
             self.artifact_registrations

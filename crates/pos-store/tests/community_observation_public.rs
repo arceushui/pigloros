@@ -884,7 +884,7 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
     // bytes, derived from the decoded stage-2 records minted at the widest
     // producer ordinal, not from the row formula. Revision 11, R11.1(4),
     // R11.2(4), R11.3(3) and R11.4(2): its closure records, cohort keys and
-    // scope rows.
+    // scope rows. Revision 13, R13.1(3): its ARD1 rows.
     let installed = Installed::new(vec![RULE])?;
     for events in [0, 1, 300] {
         let history = history(events, EVENT_TYPE, None)?;
@@ -951,6 +951,12 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
             expected.keys = 1;
             assert_eq!(quote.graph, expected);
             assert_eq!(quote.keys, 2);
+            // Revision 13, R13.1(3) and R13.3: the ARD1 rows are the new
+            // CES1s, the COV1, the Observation CPN1, each CIB1 and its
+            // InputIndex CPN1, and the CPE1: E + 3 + 2g when minted fresh.
+            let fresh = if retain { 0 } else { events as u64 };
+            let groups = records.input_groups.len() as u64;
+            assert_eq!(quote.erasure_rows, fresh + 3 + 2 * groups);
             let scope: Vec<_> = quote.scope.iter().map(|row| row.source_timeline).collect();
             if events == 0 {
                 assert!(scope.is_empty());

@@ -201,7 +201,9 @@ pub use owner_binding::{
     CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
 };
 pub use pass_graph::{CommunityPassGraphTermsV1, CommunityProtectionSizesV1};
-pub use pass_install::{check_community_pass_installation_v1, CommunityPassInstallationV1};
+pub use pass_install::{
+    check_community_pass_installation_v1, CommunityPassInstallationV1, CommunityPassLifetimeV1,
+};
 pub use pass_quote::{
     CommunityPassDemandV1, CommunityPassDomainV1, CommunityPassObservationV1,
     CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1, CommunityPassQuoteV1,
@@ -215,9 +217,11 @@ pub use profile::{
     community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
     COMMUNITY_CONTROL_OPERATIONS_V1, COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1,
-    COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_FOLD_BUDGET_MICROS_V1,
-    COMMUNITY_INITIALIZER_SET_SCHEMA_V1, COMMUNITY_MAXIMUM_ROSTER_V1,
-    COMMUNITY_MAXIMUM_STORE_KEYS_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
+    COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_RESERVE_V1,
+    COMMUNITY_ERASURE_ROW_LIMIT_V1, COMMUNITY_ERASURE_TARGET_LINE_V1,
+    COMMUNITY_FOLD_BUDGET_MICROS_V1, COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+    COMMUNITY_MAXIMUM_ROSTER_V1, COMMUNITY_MAXIMUM_STORE_KEYS_V1,
+    COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
     COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 pub use progress::CommunityHostProgressV1;

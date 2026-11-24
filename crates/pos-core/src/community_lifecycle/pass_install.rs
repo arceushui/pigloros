@@ -10,8 +10,11 @@
 //! 22661: `5n` registrations, `6n` edges and the 2 initialization keys.
 //!
 //! The pass CSB1/CPV1 bounds hold by construction for that pass (`n + 1`
-//! distinct refs and an empty scope), and the R11.6 minimum-lifetime floor and
-//! the R11.1(5) encryption bound are static assertions of the profile.
+//! distinct refs and an empty scope). The R13.3 minimum-lifetime floor is a
+//! static assertion of the profile at the roster maximum: its target,
+//! registration and edge sums depend on `n` alone, and the check returns them
+//! (ADR-129 revision 13, R13.3, I145). The R11.1(5) encryption bound is a
+//! static assertion too.
 
 use super::native_node::{quoted_node_len, widest_node_reference};
 use super::pass_graph::{CommunityPassGraphTermsV1, CommunityProtectionSizesV1};
@@ -26,8 +29,9 @@ use super::{
     CommunityPassTermsV1, CommunityPreparedInvocationInputV1, CommunityReducerBindingV1,
     CommunitySharedCountsV1, CommunityStateProducerV1, CommunityStateRevisionInputV1,
     CommunityStateRevisionV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1, Result,
-    TimelinePositionV1, COMMUNITY_MAXIMUM_ROSTER_V1, MAX_COMMUNITY_COVERAGE_ROWS_V1,
-    MAX_COMMUNITY_RECORDED_CONSUMERS_V1, MAX_COMMUNITY_STATE_BYTES_V1, WIDEST_HORIZON_MICROS,
+    TimelinePositionV1, COMMUNITY_MAXIMUM_ROSTER_V1, COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1,
+    MAX_COMMUNITY_COVERAGE_ROWS_V1, MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
+    MAX_COMMUNITY_STATE_BYTES_V1, WIDEST_HORIZON_MICROS,
 };
 use crate::{Hash, TimelineId};
 
@@ -50,13 +54,40 @@ const INITIALIZATION_KEYS: u64 = 2;
 /// union cohort (R11.1(4)).
 const OBSERVATION_KEYS: u64 = 2;
 
+/// The empty-cut materialization's ARD1 rows: COV1, Observation CPN1 and
+/// CPE1 (R13.3).
+const OBSERVATION_ROWS: u64 = 3;
+
+/// `P_min`, the passes the floor repeats (R13.3).
+const MINIMUM_PASSES: u64 = 64;
+
+/// The erasure targets fixed for one affected Timeline: the store target and
+/// its `timeline-payload` (R13.1(1)).
+const FIXED_TARGETS: u64 = 2;
+
 /// The minimum required pass of an installed CDP1 (R10.4(5)).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommunityPassInstallationV1 {
     /// Its CBQ1 State demand, then with the recording.
     pub quote: [CommunityPassTermsV1; 2],
-    /// Its key, graph and object demands over the initialization base.
+    /// Its key, graph, object and erasure demands over the initialization
+    /// base.
     pub demand: CommunityPassDemandV1,
+    /// The R13.3 floor sums of the pass repeated 64 times.
+    pub lifetime: CommunityPassLifetimeV1,
+}
+
+/// The R13.3 minimum-lifetime sums on one affected Timeline: the
+/// initialization base, the first pass's empty-cut observation and 64
+/// minimum passes, with every reserve held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommunityPassLifetimeV1 {
+    /// Erasure targets: `2 + 10n + 8n + 6 + 64 (18n + 6) + 2(n + 1)`.
+    pub targets: u64,
+    /// CGR1 registrations: `5n + 2 + 64 x 7n`.
+    pub registrations: u64,
+    /// CGR1 edges: `6n + 1 + 64 x 11n`.
+    pub edges: u64,
 }
 
 /// Check that `profile`'s minimum required pass fits (R10.4(5), R11.5(3)).
@@ -145,6 +176,7 @@ fn minimum_pass(
                                 live_keys: INITIALIZATION_KEYS,
                                 observation_graph: graph,
                                 observation_keys: OBSERVATION_KEYS,
+                                observation_rows: OBSERVATION_ROWS,
                             },
                         )
                     },
@@ -171,8 +203,41 @@ fn check_minimum(
                 .map(|()| CommunityPassInstallationV1 {
                     quote: [quote.state_terms(), quote.total_terms()],
                     demand,
+                    lifetime: lifetime(
+                        quote.quote().as_input().due_members.len() as u64,
+                        &demand,
+                        domain,
+                    ),
                 })
         })
+}
+
+/// The R13.3 sums of the `members`-member `demand` over `domain`, repeated
+/// [`MINIMUM_PASSES`] times. The first pass mints the observation; the later
+/// ones reuse it.
+fn lifetime(
+    members: u64,
+    demand: &CommunityPassDemandV1,
+    domain: CommunityPassDomainV1,
+) -> CommunityPassLifetimeV1 {
+    let [state, _] = demand.graph();
+    let base = domain.selected_graph;
+    let observation = domain.observation_graph;
+    let [_, rows] = demand.erasure_rows();
+    let repeated = |total: u64, fixed: u64| total + (MINIMUM_PASSES - 1) * (total - fixed);
+    CommunityPassLifetimeV1 {
+        targets: FIXED_TARGETS
+            + 2 * base.registrations
+            + COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * members
+            + 2 * domain.observation_rows
+            + MINIMUM_PASSES * 2 * (rows - domain.observation_rows)
+            + demand.failure_reserve(),
+        registrations: repeated(
+            state.registrations,
+            base.registrations + observation.registrations,
+        ),
+        edges: repeated(state.edges, base.edges + observation.edges),
+    }
 }
 
 /// A CIN1 with an empty observation, `prior` as its prior State and every

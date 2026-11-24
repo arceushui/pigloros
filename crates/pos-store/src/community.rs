@@ -9,6 +9,7 @@
 //! records, State or the backing store.
 
 mod attestation;
+mod erasure_budget;
 mod extractor;
 #[cfg(target_os = "linux")]
 mod initialize;
@@ -64,7 +65,7 @@ pub use observation::{
 pub use pass_planner::{
     plan_community_pass_v1, CommunityPassDueV1, CommunityPassInstallationV1,
     CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
-    CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
+    CommunityPassQuotedV1, CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
 };
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
