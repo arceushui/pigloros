@@ -80,9 +80,9 @@ impl UpdateFixture {
     /// Reopen the installation through the provider's recovery-aware path.
     pub(crate) fn installed(
         &self,
-    ) -> Result<InstalledSelectorState, crate::selector::SelectorBoundaryError> {
+    ) -> Result<InstalledSelectorState, crate::selector::InstallationError> {
         File::open(self.directory.path())
-            .map_err(|_| crate::selector::SelectorBoundaryError::Io)
+            .map_err(|_| crate::selector::InstallationError::Io)
             .and_then(|root| InstalledSelectorState::open_at_for_test(&root))
     }
 

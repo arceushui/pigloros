@@ -1180,13 +1180,13 @@ pub(crate) fn execute_request_for_case(
     input: PayloadDescriptor,
     ordinal: u16,
     nonce: [u8; 16],
-) -> Result<SandboxExecuteRequest, crate::selector::SelectorBoundaryError> {
+) -> Result<SandboxExecuteRequest, crate::selector::InstallationError> {
     use crate::sandbox_provider_protocol::{ExecuteAuthority, RequestAuthority};
-    let invalid = |_| crate::selector::SelectorBoundaryError::ArtifactInvalid;
+    let invalid = |_| crate::selector::InstallationError::ArtifactInvalid;
     let requirement = evaluation
         .sandbox_requirement
         .as_ref()
-        .ok_or(crate::selector::SelectorBoundaryError::ArtifactInvalid)?;
+        .ok_or(crate::selector::InstallationError::ArtifactInvalid)?;
     let bootstrap = admitted.bootstrap();
     let provider = admitted.provider();
     let authority = ExecuteAuthority {

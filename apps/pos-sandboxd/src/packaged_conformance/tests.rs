@@ -243,7 +243,7 @@ fn every_error_names_its_stage() {
         ),
         (
             ConformanceError::Admission(
-                pos_reference::selector::SelectorBoundaryError::ArtifactInvalid,
+                pos_reference::selector::InstallationError::ArtifactInvalid,
             ),
             "provider image admission failed: ",
         ),

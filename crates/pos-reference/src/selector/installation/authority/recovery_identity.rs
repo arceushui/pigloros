@@ -143,19 +143,22 @@ impl PreviousProviderBinding {
         main_start_time_ticks: u64,
     ) -> Result<Self, SelectorBoundaryError> {
         let provider = admitted.provider().manifest();
-        admitted.runtime_attestation_key().map(|runtime_key| Self {
-            provider_id: provider.provider_id.clone(),
-            provider_manifest_digest: provider.manifest_digest,
-            provider_binary_digest: provider.binary_digest,
-            public_contract_digest: provider.public_contract_digest,
-            runtime_key_id: runtime_key.key_id.clone(),
-            runtime_public_key: runtime_key.public_key,
-            runtime_key_epoch: runtime_key.epoch,
-            runtime_instance_id,
-            lifecycle_scope_id,
-            main_pid,
-            main_start_time_ticks,
-        })
+        admitted
+            .runtime_attestation_key()
+            .map_err(SelectorBoundaryError::from)
+            .map(|runtime_key| Self {
+                provider_id: provider.provider_id.clone(),
+                provider_manifest_digest: provider.manifest_digest,
+                provider_binary_digest: provider.binary_digest,
+                public_contract_digest: provider.public_contract_digest,
+                runtime_key_id: runtime_key.key_id.clone(),
+                runtime_public_key: runtime_key.public_key,
+                runtime_key_epoch: runtime_key.epoch,
+                runtime_instance_id,
+                lifecycle_scope_id,
+                main_pid,
+                main_start_time_ticks,
+            })
     }
 
     fn value(&self) -> Value {

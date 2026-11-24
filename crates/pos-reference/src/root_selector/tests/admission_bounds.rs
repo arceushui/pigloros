@@ -10,7 +10,7 @@ use crate::selector::installation::fixture::{
 };
 use crate::selector::installation::tests::refresh_table_crc;
 use crate::selector::installation::{InstalledSelectorState, SANDBOX_ARTIFACT_ROOT};
-use crate::selector::SelectorBoundaryError;
+use crate::selector::InstallationError;
 
 const SECTOR: usize = 512;
 
@@ -124,7 +124,7 @@ fn snapshot_open_enforces_gpt_bounds_on_both_architectures() -> TestResult {
             let expected = if accepted {
                 Ok(())
             } else {
-                Err(SelectorBoundaryError::ArtifactInvalid)
+                Err(InstallationError::ArtifactInvalid)
             };
             // Bound to a local only for the edition-2024 drop-order lint.
             let outcome = snapshot_open(architecture, &original, &partitions, edit);
@@ -149,7 +149,7 @@ fn snapshot_open(
     original: &[u8],
     partitions: &[PartitionDescriptor; 3],
     edit: ImageEdit,
-) -> TestResult<Result<(), SelectorBoundaryError>> {
+) -> TestResult<Result<(), InstallationError>> {
     let mut image = original.to_vec();
     edit(
         &mut image,
@@ -201,7 +201,7 @@ fn assert_public_admission(
 /// moved into `inspect`, so it drops before the installed state and paths.
 fn open_installed<T>(
     state: InstalledSelectorState,
-    inspect: impl FnOnce(Result<ProviderImageSnapshot, SelectorBoundaryError>) -> TestResult<T>,
+    inspect: impl FnOnce(Result<ProviderImageSnapshot, InstallationError>) -> TestResult<T>,
 ) -> TestResult<T> {
     let _paths = FixedCompositionFixture::create()?;
     let installed = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
