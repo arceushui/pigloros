@@ -479,78 +479,79 @@ impl<I> AttemptLifecycle<I> {
 }
 
 #[cfg(test)]
-impl<I> AttemptLifecycle<I> {
-    /// How many reconciliation-evidence tuples this lifecycle built.
-    pub(crate) fn evidence_built(&self) -> usize {
-        self.evidence_built
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Retain a signed test response for the ended attempt `attempt_id`,
-    /// whose response is pending, and wake its waiters: what a signed
-    /// terminal response does for the fake attempts of these tests.
-    pub(crate) fn sign_for_test(
-        &self,
-        attempt_id: [u8; 16],
-    ) -> crate::test_fixtures::TestResult<Arc<RetainedResponse>> {
-        let signed = RetainedResponse::signed_for_test()
-            .map_err(|error| -> Box<dyn std::error::Error> { error })?;
-        let mut attempts = lock(&self.attempts);
-        match attempts.slots.get_mut(&attempt_id) {
-            Some(Slot::Ended {
-                response: response @ Retained::Pending,
-                settled,
-                ..
-            }) => {
-                *response = Retained::Signed(Arc::clone(&signed));
-                settled.send_replace(true);
-                Ok(signed)
-            }
-            _ => Err("the attempt has no pending response".into()),
-        }
-    }
-
-    /// Record a provider fault for the ended attempt `attempt_id`, whose
-    /// response is pending, and wake its waiters.
-    pub(crate) fn fault_for_test(&self, attempt_id: [u8; 16]) {
-        let mut attempts = lock(&self.attempts);
-        if let Some(Slot::Ended {
-            response, settled, ..
-        }) = attempts.slots.get_mut(&attempt_id)
-        {
-            *response = Retained::Faulted;
-            settled.send_replace(true);
-        }
-    }
-
-    /// Signal the cancellation `request` under the attempts lock without
-    /// waiting, as [`Self::cancel`] does first: whether it was accepted.
-    pub(crate) fn signal_for_test(&self, request: &SandboxCancelRequest) -> bool {
-        lock(&self.attempts)
-            .control(
-                request.attempt_id,
-                request.agr1_digest,
-                (request.request.request_id, request.request_digest),
-                true,
-            )
-            .and_then(signal)
-            .is_ok()
-    }
-
-    /// The SCQ1 and SRQ1 entries `attempt_id` holds in the ledger.
-    pub(crate) fn control_entries(&self, attempt_id: [u8; 16]) -> u8 {
-        lock(&self.attempts)
-            .controls
-            .get(&attempt_id)
-            .copied()
-            .unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    // The lifecycle tests' seams, kept here so coverage scores them as
+    // test code.
+    impl<I> AttemptLifecycle<I> {
+        /// How many reconciliation-evidence tuples this lifecycle built.
+        pub(crate) fn evidence_built(&self) -> usize {
+            self.evidence_built
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// Retain a signed test response for the ended attempt `attempt_id`,
+        /// whose response is pending, and wake its waiters: what a signed
+        /// terminal response does for the fake attempts of these tests.
+        pub(crate) fn sign_for_test(
+            &self,
+            attempt_id: [u8; 16],
+        ) -> crate::test_fixtures::TestResult<Arc<RetainedResponse>> {
+            let signed = RetainedResponse::signed_for_test()
+                .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+            let mut attempts = lock(&self.attempts);
+            match attempts.slots.get_mut(&attempt_id) {
+                Some(Slot::Ended {
+                    response: response @ Retained::Pending,
+                    settled,
+                    ..
+                }) => {
+                    *response = Retained::Signed(Arc::clone(&signed));
+                    settled.send_replace(true);
+                    Ok(signed)
+                }
+                _ => Err("the attempt has no pending response".into()),
+            }
+        }
+
+        /// Record a provider fault for the ended attempt `attempt_id`, whose
+        /// response is pending, and wake its waiters.
+        pub(crate) fn fault_for_test(&self, attempt_id: [u8; 16]) {
+            let mut attempts = lock(&self.attempts);
+            if let Some(Slot::Ended {
+                response, settled, ..
+            }) = attempts.slots.get_mut(&attempt_id)
+            {
+                *response = Retained::Faulted;
+                settled.send_replace(true);
+            }
+        }
+
+        /// Signal the cancellation `request` under the attempts lock without
+        /// waiting, as [`Self::cancel`] does first: whether it was accepted.
+        pub(crate) fn signal_for_test(&self, request: &SandboxCancelRequest) -> bool {
+            lock(&self.attempts)
+                .control(
+                    request.attempt_id,
+                    request.agr1_digest,
+                    (request.request.request_id, request.request_digest),
+                    true,
+                )
+                .and_then(signal)
+                .is_ok()
+        }
+
+        /// The SCQ1 and SRQ1 entries `attempt_id` holds in the ledger.
+        pub(crate) fn control_entries(&self, attempt_id: [u8; 16]) -> u8 {
+            lock(&self.attempts)
+                .controls
+                .get(&attempt_id)
+                .copied()
+                .unwrap_or_default()
+        }
+    }
 
     /// A tuple the encoder refuses is a fault, never evidence.
     #[test]

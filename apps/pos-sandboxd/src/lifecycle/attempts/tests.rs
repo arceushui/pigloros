@@ -3228,6 +3228,39 @@ mod cases {
             Ok(())
         }
 
+        /// A binding that finds the cancelled attempt admitted but not yet
+        /// running waits on its run's end, holding no lock, then one
+        /// interval from that end for the signed response, though its own
+        /// bound already passed (R15 §3.6 item 2(a)).
+        #[tokio::test(start_paused = true)]
+        async fn a_binding_follows_an_admitted_run_to_its_end() -> TestResult {
+            let runtime = Runtime::new()?;
+            let fixture = manager(1).await?;
+            let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+            let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
+            let cancel = cancel_with(1, 0x61);
+            assert_eq!(
+                runtime.lifecycle.cancel(&cancel).await?,
+                SandboxCancellationResult::CancelledAndCleaned
+            );
+            // Polled first, the binding finds the slot still running.
+            let bound =
+                runtime
+                    .lifecycle
+                    .bind_cancel(&cancel, Instant::now(), Duration::from_secs(5));
+            let run = async {
+                let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let signed = runtime.lifecycle.sign_for_test([1; 16])?;
+                TestResult::Ok((ended, signed))
+            };
+            let (bound, ran) = tokio::join!(bound, run);
+            let (ended, signed) = ran?;
+            assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
+            assert!(Arc::ptr_eq(&bound?, &signed));
+            Ok(())
+        }
+
         /// A slot other than a running one gives a run nothing to start.
         #[test]
         fn only_a_running_slot_starts() {
