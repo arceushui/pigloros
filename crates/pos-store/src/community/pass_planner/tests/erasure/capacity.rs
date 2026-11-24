@@ -32,35 +32,80 @@ struct World {
     pending: BTreeMap<EntityId, CommunityPendingErasureV1>,
 }
 
-impl World {
-    /// T initialized with `members` members: its `5n` rows bound and its
-    /// context's `F_q` held; with `fork`, a Fork child holding its own
-    /// context and no rows (`fork_current` mints no ARD1 row).
-    fn new(members: usize, fork: bool) -> Fallible<Self> {
-        let mut store = MemoryStore::new();
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-        store.create_timeline_with_meta(pos_core::TimelineMeta {
-            id: timeline(),
-            ..pos_core::TimelineMeta::root_owned("capacity", ACTOR)
+/// A Memory domain over a store holding T, owned by [`ACTOR`].
+fn capacity_domain() -> Fallible<MemoryCommunityDomainV1> {
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    store.create_timeline_with_meta(pos_core::TimelineMeta {
+        id: timeline(),
+        ..pos_core::TimelineMeta::root_owned("capacity", ACTOR)
+    })?;
+    Ok(MemoryCommunityDomainV1::new(
+        store,
+        [0x5a; 16],
+        MemoryTrustedClockAuthorityV1::new(),
+    )?)
+}
+
+/// T's initialization: its `5n` rows bound and its context's `F_q` held.
+fn initialized(domain: &mut MemoryCommunityDomainV1, members: u64) -> TestResult {
+    domain
+        .store
+        .bind_erasure_rows_for_test(timeline(), community_rows(1_000_000, 5 * members)?);
+    domain.count_erasure_context(timeline(), members);
+    Ok(())
+}
+
+/// T's Fork child, holding its own context and no rows (`fork_current`
+/// mints no ARD1 row).
+fn fork_child(domain: &mut MemoryCommunityDomainV1, members: u64) -> TestResult {
+    domain
+        .store
+        .create_timeline_with_meta(pos_core::TimelineMeta {
+            id: child(),
+            owner: Some(ACTOR),
+            fork_point: Some((timeline(), Seq::ZERO)),
+            ..pos_core::TimelineMeta::root("capacity-fork")
         })?;
-        let mut domain =
-            MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
+    domain.count_erasure_context(child(), members);
+    Ok(())
+}
+
+/// `members` roster views, none of which has stepped, so all are due.
+fn never_stepped(members: usize) -> Fallible<Vec<CommunityPassMemberViewV1>> {
+    Ok((1..=members)
+        .map(|byte| u8::try_from(byte).map(|byte| member(byte, None)))
+        .collect::<Result<_, std::num::TryFromIntError>>()?)
+}
+
+/// The planner fixture for `members` due members on `timeline`.
+fn fixture_on(timeline: TimelineId, members: usize) -> Fallible<Fixture> {
+    let mut fixture = Fixture::new()?;
+    fixture.progress = CommunityHostProgressV1::new(timeline, G, None, None)?;
+    fixture.members = never_stepped(members)?;
+    Ok(fixture)
+}
+
+/// Step 4 over the domain's quarantine index, which must find a due set.
+fn due_on<'a>(
+    world: &World,
+    installation: CommunityPassInstallationV1<'a>,
+    view: CommunityPassViewV1<'a>,
+) -> Fallible<CommunityPassDueV1<'a>> {
+    match plan_community_pass_v1(&world.domain, installation, view, request(5, 1000))? {
+        CommunityPassPlanV1::Due(due) => Ok(due),
+        CommunityPassPlanV1::NoPass => Err("due expected".into()),
+    }
+}
+
+impl World {
+    /// T initialized with `members` members and, with `fork`, its Fork
+    /// child.
+    fn new(members: usize, fork: bool) -> Fallible<Self> {
+        let mut domain = capacity_domain()?;
         let n = members as u64;
-        domain
-            .store
-            .bind_erasure_rows_for_test(timeline(), community_rows(1_000_000, 5 * n)?);
-        domain.count_erasure_context(timeline(), n);
-        if fork {
-            domain
-                .store
-                .create_timeline_with_meta(pos_core::TimelineMeta {
-                    id: child(),
-                    owner: Some(ACTOR),
-                    fork_point: Some((timeline(), Seq::ZERO)),
-                    ..pos_core::TimelineMeta::root("capacity-fork")
-                })?;
-            domain.count_erasure_context(child(), n);
-        }
+        initialized(&mut domain, n)?;
+        fork.then(|| fork_child(&mut domain, n)).transpose()?;
         Ok(Self {
             domain,
             members,
@@ -80,26 +125,26 @@ impl World {
         minted: Option<&CommunityObservationSourcesV1>,
     ) -> Fallible<Result<CommunityPassQuotedV1, Error>> {
         let key = key()?;
-        let mut fixture = Fixture::new()?;
-        fixture.progress = CommunityHostProgressV1::new(timeline, G, None, None)?;
-        fixture.members = (1..=self.members)
-            .map(|byte| u8::try_from(byte).map(|byte| member(byte, None)))
-            .collect::<Result<_, std::num::TryFromIntError>>()?;
         let roster = Fixture::roster(&key)?;
-        let profile = fixture.profile(&roster[..self.members])?;
+        fixture_on(timeline, self.members).and_then(|fixture| {
+            fixture
+                .profile(&roster[..self.members])
+                .and_then(|profile| self.quote_with(&profile, &fixture, minted))
+        })
+    }
+
+    /// Step 5g of the pass `fixture` views under `profile`.
+    fn quote_with(
+        &self,
+        profile: &CommunityDurableProfileV1<'_>,
+        fixture: &Fixture,
+        minted: Option<&CommunityObservationSourcesV1>,
+    ) -> Fallible<Result<CommunityPassQuotedV1, Error>> {
         let installation = CommunityPassInstallationV1 {
-            profile: &profile,
+            profile,
             state_limit_bytes: &STATE_LIMITS[..self.members],
         };
-        let due = match plan_community_pass_v1(
-            &self.domain,
-            installation,
-            fixture.view(),
-            request(5, 1000),
-        )? {
-            CommunityPassPlanV1::Due(due) => due,
-            CommunityPassPlanV1::NoPass => return Err("due expected".into()),
-        };
+        let due = due_on(self, installation, fixture.view())?;
         let prior = [CommunityTypedInputRefV1::Native(
             CommunityNativeNodeReferenceV1 {
                 node_digest: hash(91),
@@ -107,11 +152,12 @@ impl World {
             },
         )];
         let reused = [prior[0], CommunityTypedInputRefV1::Native(REUSED)];
+        let inputs: &[CommunityTypedInputRefV1<'_>] = minted.map_or(&reused, |_| &prior);
         let payload = [7; 16];
         let steps: Vec<_> = (0..self.members)
             .map(|_| CommunityPassStepInputsV1 {
                 prepared_invocation: invocation(hash(2), &payload),
-                step_inputs: if minted.is_some() { &prior } else { &reused },
+                step_inputs: inputs,
                 consumes_minted_observation: minted.is_some(),
             })
             .collect();
@@ -148,37 +194,63 @@ impl World {
         *pending.rows.entry(timeline).or_default() += rows + demand.failure_reserve() / 2;
     }
 
+    /// Plan and commit one pass on T, or the refusal that stops it.
+    fn step(&mut self, first: Option<&CommunityObservationSourcesV1>) -> Fallible<Option<Error>> {
+        match self.plan(timeline(), first)? {
+            Ok(quoted) => self.commit(timeline(), quoted.demand()).map(|()| None),
+            Err(error) => Ok(Some(error)),
+        }
+    }
+
     /// Passes on T alone until the budget refuses one, and that refusal;
     /// the first pass mints `minted`.
     fn passes(&mut self, minted: &CommunityObservationSourcesV1) -> Fallible<(u64, Error)> {
         let mut passes = 0;
         loop {
-            let first = (passes == 0).then_some(minted);
-            match self.plan(timeline(), first)? {
-                Ok(quoted) => self.commit(timeline(), quoted.demand())?,
-                Err(error) => return Ok((passes, error)),
+            if let Some(error) = self.step((passes == 0).then_some(minted))? {
+                return Ok((passes, error));
             }
             passes += 1;
         }
     }
 
+    /// Reserve T's pass and then its Fork child's, the parent's held as
+    /// pending; `None` once the budget refuses either.
+    fn reserve_pair(
+        &mut self,
+        first: Option<&CommunityObservationSourcesV1>,
+    ) -> Fallible<Option<(CommunityPassQuotedV1, CommunityPassQuotedV1)>> {
+        self.plan(timeline(), first)?
+            .ok()
+            .map_or(Ok(None), |parent| {
+                self.hold(timeline(), parent.demand());
+                self.plan(child(), first)
+                    .map(|forked| forked.ok().map(|forked| (parent, forked)))
+            })
+    }
+
+    /// One lockstep round: both passes reserved before either commits.
+    fn round(&mut self, first: Option<&CommunityObservationSourcesV1>) -> Fallible<bool> {
+        match self.reserve_pair(first)? {
+            None => Ok(false),
+            Some((parent, forked)) => {
+                self.pending.clear();
+                self.commit(timeline(), parent.demand())
+                    .and_then(|()| self.commit(child(), forked.demand()))
+                    .map(|()| true)
+            }
+        }
+    }
+
     /// Lockstep rounds of T and its Fork child until the budget refuses a
-    /// pass, both passes of a round reserved before either commits; each
-    /// first pass mints the prefix (the child re-mints every CES1, R9 I81).
+    /// pass; each first pass mints the prefix (the child re-mints every
+    /// CES1, R9 I81).
     fn rounds(&mut self, minted: &CommunityObservationSourcesV1) -> Fallible<u64> {
         let mut rounds = 0;
         loop {
-            let first = (rounds == 0).then_some(minted);
-            let Ok(parent) = self.plan(timeline(), first)? else {
+            if !self.round((rounds == 0).then_some(minted))? {
                 return Ok(rounds);
-            };
-            self.hold(timeline(), parent.demand());
-            let Ok(forked) = self.plan(child(), first)? else {
-                return Ok(rounds);
-            };
-            self.pending.clear();
-            self.commit(timeline(), parent.demand())?;
-            self.commit(child(), forked.demand())?;
+            }
             rounds += 1;
         }
     }

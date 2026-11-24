@@ -27,14 +27,17 @@ fn other_timeline() -> TimelineId {
 /// reuses its observation.
 fn run(port: &Port) -> Fallible<Result<CommunityPassQuotedV1, Error>> {
     let key = key()?;
-    let fixture = Fixture::new()?;
     let roster = Fixture::roster(&key)?;
-    let profile = fixture.profile(&roster)?;
-    let due = plan_due(port, installation(&profile), fixture.view())?;
-    let payload = [7; 16];
-    let refs = refs();
-    let steps = steps(&payload, &refs, false);
-    Ok(due.quote(port, &steps, CommunityPassObservationUseV1::Reused(REUSED)))
+    Fixture::new().and_then(|fixture| {
+        fixture.profile(&roster).and_then(|profile| {
+            plan_due(port, installation(&profile), fixture.view()).map(|due| {
+                let payload = [7; 16];
+                let refs = refs();
+                let steps = steps(&payload, &refs, false);
+                due.quote(port, &steps, CommunityPassObservationUseV1::Reused(REUSED))
+            })
+        })
+    })
 }
 
 /// A port whose budget holds `actors` and `rows`.

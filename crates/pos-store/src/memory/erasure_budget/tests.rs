@@ -53,77 +53,150 @@ fn timeline(
     Ok(())
 }
 
-fn subject_key(actor: EntityId, epoch: u64) -> Fallible<KeyIdentityV1> {
-    let owner =
-        pos_crypto::subject_key::subject_owner_id(actor).map_err(|error| format!("{error:?}"))?;
-    Ok(KeyIdentityV1::from_parts(
-        OwnerIdV1::new(owner).map_err(|error| format!("{error:?}"))?,
-        KeyRoleV1::SubjectDataEncryption,
-        epoch,
-    ))
-}
+/// The Timelines of the module doc: identity, owner and Fork parent.
+const TIMELINES: [(TimelineId, Option<EntityId>, Option<TimelineId>); 5] = [
+    (R, Some(A), None),
+    (C1, Some(A), Some(R)),
+    (C2, Some(B), Some(C1)),
+    (S, Some(B), None),
+    (U, None, None),
+];
 
-/// The store of the module doc, with every kind of row the closure counts
-/// or skips and two rows bound to two Timelines each.
-fn store() -> Fallible<MemoryStore> {
-    let mut store = MemoryStore::new();
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    timeline(&mut store, R, Some(A), None)?;
-    timeline(&mut store, C1, Some(A), Some(R))?;
-    timeline(&mut store, C2, Some(B), Some(C1))?;
-    timeline(&mut store, S, Some(B), None)?;
-    timeline(&mut store, U, None, None)?;
-    let mut registry = KeyRegistryStateV1::new();
-    for (material, identity) in (0x81..).zip([
-        subject_key(A, 1)?,
-        subject_key(A, 2)?,
-        subject_key(B, 1)?,
-        // A role-7 key under A's subject owner is no role-0 subject key.
-        KeyIdentityV1::from_parts(
-            subject_key(A, 1)?.owner_id,
-            KeyRoleV1::CommunityArtifactEncryption,
-            3,
-        ),
-    ]) {
-        registry
-            .register_key(KeyRegistrationV1::new(
-                identity,
-                Hash::from_bytes([material; 32]),
-                None,
-            ))
-            .map_err(|error| format!("{error:?}"))?;
-    }
-    store.key_registry = Some(registry);
-    let mut on_r = community_rows(1, 3)?;
-    on_r.push(erasure_row(
+/// The registry's keys: subject, role and epoch. A role-7 key under A's
+/// subject owner is no role-0 subject key.
+const KEYS: [(EntityId, KeyRoleV1, u64); 4] = [
+    (A, KeyRoleV1::SubjectDataEncryption, 1),
+    (A, KeyRoleV1::SubjectDataEncryption, 2),
+    (B, KeyRoleV1::SubjectDataEncryption, 1),
+    (A, KeyRoleV1::CommunityArtifactEncryption, 3),
+];
+
+/// The community rows' catalogue owner.
+const COMMUNITY: &str = "community-artifact:budget";
+
+/// Every binding: Timeline, row owner, data class, role-7 keys and seed.
+/// R holds three community rows, a consented row, a keyless private row
+/// and another owner's two-key row; seed 1 is also on C1, seed 20 on C1
+/// and C2, seed 30 on C2 and S.
+const BINDINGS: [(TimelineId, &str, ArtifactDataClassV1, u64, u64); 14] = [
+    (R, COMMUNITY, ArtifactDataClassV1::PrivateSubjectData, 1, 1),
+    (R, COMMUNITY, ArtifactDataClassV1::PrivateSubjectData, 1, 2),
+    (R, COMMUNITY, ArtifactDataClassV1::PrivateSubjectData, 1, 3),
+    (
+        R,
         "budget-owner",
         ArtifactDataClassV1::ConsentedSharedData,
         0,
         10,
-    )?);
-    on_r.push(erasure_row(
+    ),
+    (
+        R,
         "budget-owner",
         ArtifactDataClassV1::PrivateSubjectData,
         0,
         11,
-    )?);
-    on_r.push(erasure_row(
+    ),
+    (
+        R,
         "other-owner",
         ArtifactDataClassV1::PrivateSubjectData,
         2,
         12,
-    )?);
-    store.bind_erasure_rows_for_test(R, on_r);
-    let mut on_c1 = community_rows(20, 2)?;
-    on_c1.extend(community_rows(1, 1)?);
-    store.bind_erasure_rows_for_test(C1, on_c1);
-    let mut on_c2 = community_rows(30, 1)?;
-    on_c2.extend(community_rows(20, 1)?);
-    store.bind_erasure_rows_for_test(C2, on_c2);
-    let mut on_s = community_rows(40, 1)?;
-    on_s.extend(community_rows(30, 1)?);
-    store.bind_erasure_rows_for_test(S, on_s);
-    store.bind_erasure_rows_for_test(U, community_rows(50, 1)?);
+    ),
+    (
+        C1,
+        COMMUNITY,
+        ArtifactDataClassV1::PrivateSubjectData,
+        1,
+        20,
+    ),
+    (
+        C1,
+        COMMUNITY,
+        ArtifactDataClassV1::PrivateSubjectData,
+        1,
+        21,
+    ),
+    (C1, COMMUNITY, ArtifactDataClassV1::PrivateSubjectData, 1, 1),
+    (
+        C2,
+        COMMUNITY,
+        ArtifactDataClassV1::PrivateSubjectData,
+        1,
+        30,
+    ),
+    (
+        C2,
+        COMMUNITY,
+        ArtifactDataClassV1::PrivateSubjectData,
+        1,
+        20,
+    ),
+    (S, COMMUNITY, ArtifactDataClassV1::PrivateSubjectData, 1, 40),
+    (S, COMMUNITY, ArtifactDataClassV1::PrivateSubjectData, 1, 30),
+    (U, COMMUNITY, ArtifactDataClassV1::PrivateSubjectData, 1, 50),
+];
+
+/// `actor`'s ADR-091 subject-owner key of `role` at `epoch`.
+fn identity(actor: EntityId, role: KeyRoleV1, epoch: u64) -> Fallible<KeyIdentityV1> {
+    let owner =
+        pos_crypto::subject_key::subject_owner_id(actor).map_err(|error| format!("{error:?}"))?;
+    let owner = OwnerIdV1::new(owner).map_err(|error| format!("{error:?}"))?;
+    Ok(KeyIdentityV1::from_parts(owner, role, epoch))
+}
+
+/// Register `identity` with a material of `material` bytes.
+fn register(
+    registry: &mut KeyRegistryStateV1,
+    identity: KeyIdentityV1,
+    material: u8,
+) -> TestResult {
+    registry
+        .register_key(KeyRegistrationV1::new(
+            identity,
+            Hash::from_bytes([material; 32]),
+            None,
+        ))
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(())
+}
+
+/// The registry of [`KEYS`], each with its own material.
+fn registry() -> Fallible<KeyRegistryStateV1> {
+    let mut registry = KeyRegistryStateV1::new();
+    for (material, (actor, role, epoch)) in (0x81..).zip(KEYS) {
+        register(&mut registry, identity(actor, role, epoch)?, material)?;
+    }
+    Ok(registry)
+}
+
+/// Bind one row of [`BINDINGS`].
+fn bind(
+    store: &mut MemoryStore,
+    &(timeline, owner, class, keys, seed): &(
+        TimelineId,
+        &'static str,
+        ArtifactDataClassV1,
+        u64,
+        u64,
+    ),
+) -> TestResult {
+    store.bind_erasure_rows_for_test(timeline, vec![erasure_row(owner, class, keys, seed)?]);
+    Ok(())
+}
+
+/// The store of the module doc, with every kind of row the closure counts
+/// or skips and rows bound to two Timelines each.
+fn store() -> Fallible<MemoryStore> {
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    TIMELINES
+        .iter()
+        .try_for_each(|&(id, owner, parent)| timeline(&mut store, id, owner, parent))?;
+    store.key_registry = Some(registry()?);
+    BINDINGS
+        .iter()
+        .try_for_each(|binding| bind(&mut store, binding))?;
     Ok(store)
 }
 

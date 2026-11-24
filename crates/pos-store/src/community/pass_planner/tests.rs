@@ -973,22 +973,21 @@ fn a_minted_observation_shares_its_rows_terms_and_keys() -> TestResult {
     Ok(())
 }
 
-/// The stage-1 sources of a root Timeline with `events` Events, prepared
-/// over a real Memory domain.
-fn minted_sources(events: usize) -> Fallible<CommunityObservationSourcesV1> {
-    static SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
-    let rules = [CommunitySourceSchemaRuleV1 {
-        event_type: "world.action",
-        schema_version: 1,
-        extractor_rule: "pos.community.native-event",
-        extractor_rule_version: 1,
-    }];
-    let catalogue = CommunitySourceCatalogueV1::new(&rules)?;
-    let key = key()?;
-    let roster = Fixture::roster(&key)?;
-    let mut fixture = Fixture::new()?;
-    fixture.generation_not_after = 5000;
-    let profile = fixture.profile_with_catalogue(&roster, catalogue.digest())?;
+/// The minted fixture's one source rule.
+const RULES: [CommunitySourceSchemaRuleV1<'static>; 1] = [CommunitySourceSchemaRuleV1 {
+    event_type: "world.action",
+    schema_version: 1,
+    extractor_rule: "pos.community.native-event",
+    extractor_rule_version: 1,
+}];
+
+/// The minted fixture's source catalogue over [`RULES`].
+fn source_catalogue() -> Fallible<CommunitySourceCatalogueV1<'static>> {
+    Ok(CommunitySourceCatalogueV1::new(&RULES)?)
+}
+
+/// A root Timeline with `events` Events on a fresh Memory store.
+fn history_store(events: usize) -> Fallible<(MemoryStore, TimelineId)> {
     let mut store = MemoryStore::new();
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let root = store.create_timeline("root")?.id();
@@ -1002,28 +1001,60 @@ fn minted_sources(events: usize) -> Fallible<CommunityObservationSourcesV1> {
         })
         .collect();
     store.append(root, &drafts)?;
-    let stored = store.read(
-        root,
-        SeqRange {
-            from: Seq::from_u64(1),
-            to: Some(store.logical_head(root)?),
-        },
-    )?;
-    let domain =
-        MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
-    Ok(prepare_community_observation_v1(
-        &domain,
-        CommunityObservationInstallationV1 {
-            profile: &profile,
-            source_catalogue: catalogue,
-            observation_schema_id: ENCODER,
-        },
-        CommunityObservationPassV1 {
-            generation: G,
-            reservation_operation_id: [0x30; 16],
-        },
-        &CommunityObservationMaterializationV1::new(&SEAL, observation_input(root, &stored)),
-    )?)
+    Ok((store, root))
+}
+
+/// The history's domain, its root and the root's whole stored prefix.
+fn history(events: usize) -> Fallible<(MemoryCommunityDomainV1, TimelineId, Vec<Event>)> {
+    let (store, root) = history_store(events)?;
+    let range = SeqRange {
+        from: Seq::from_u64(1),
+        to: Some(store.logical_head(root)?),
+    };
+    let stored = store.read(root, range)?;
+    MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())
+        .map(|domain| (domain, root, stored))
+        .map_err(Into::into)
+}
+
+/// Run `then` over the minted fixture's profile, whose generation horizon
+/// is 5,000 and whose catalogue is `catalogue`.
+fn with_minted_profile<T>(
+    catalogue: Hash,
+    then: impl FnOnce(&CommunityDurableProfileV1<'_>) -> Fallible<T>,
+) -> Fallible<T> {
+    let key = key()?;
+    let roster = Fixture::roster(&key)?;
+    Fixture::new()
+        .and_then(|mut fixture| {
+            fixture.generation_not_after = 5000;
+            fixture.profile_with_catalogue(&roster, catalogue)
+        })
+        .and_then(|profile| then(&profile))
+}
+
+/// The stage-1 sources of a root Timeline with `events` Events, prepared
+/// over a real Memory domain.
+fn minted_sources(events: usize) -> Fallible<CommunityObservationSourcesV1> {
+    static SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
+    let catalogue = source_catalogue()?;
+    let (domain, root, stored) = history(events)?;
+    with_minted_profile(catalogue.digest(), |profile| {
+        prepare_community_observation_v1(
+            &domain,
+            CommunityObservationInstallationV1 {
+                profile,
+                source_catalogue: catalogue,
+                observation_schema_id: ENCODER,
+            },
+            CommunityObservationPassV1 {
+                generation: G,
+                reservation_operation_id: [0x30; 16],
+            },
+            &CommunityObservationMaterializationV1::new(&SEAL, observation_input(root, &stored)),
+        )
+        .map_err(Into::into)
+    })
 }
 
 /// The observation installed encoder's schema ID in the minted fixture.
