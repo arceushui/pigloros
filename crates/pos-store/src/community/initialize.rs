@@ -617,6 +617,13 @@ impl MemoryCommunityDomainV1 {
         scope: &CommunityMetadataScopeV1<'_>,
     ) -> Result<MintedV1, Error> {
         let operation = inputs.operation;
+        let roster = operation
+            .context
+            .installation
+            .profile
+            .as_input()
+            .roster
+            .len() as u64;
         operation
             .planner
             .bindings(operation.generation)
@@ -629,6 +636,10 @@ impl MemoryCommunityDomainV1 {
                         let addresses: Vec<Hash> =
                             sealed.iter().map(|record| record.address).collect();
                         self.history_counts(operation.timeline())
+                            .and_then(|history| {
+                                self.check_initialize_budget(operation.timeline(), roster)
+                                    .map(|()| history)
+                            })
                             .and_then(|history| {
                                 operation
                                     .planner
@@ -680,16 +691,34 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// T's own recorded-set counts, the history seed of its counters
-    /// (R10.3(6)). The store counts the Timeline's own set only, not a Fork
-    /// child's inherited prefix.
+    /// T's recorded-set counts, the history seed of its counters (R10.3(6)).
+    ///
+    /// The store counts a Timeline's own set only, not a Fork child's
+    /// inherited prefix, which the seed of a Fork child must include. Until
+    /// the Fork slice reads that prefix, a Fork child is refused rather than
+    /// undercounted.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` when the store cannot read the counts.
+    /// Returns `InvalidBinding` for a Fork child, and `EvidenceUnavailable`
+    /// when the store cannot read the Timeline or its counts.
     fn history_counts(&self, timeline: TimelineId) -> Result<CommunitySharedCountsV1, Error> {
         self.store
-            .factual_set_counts(timeline)
-            .or(Err(Error::EvidenceUnavailable))
+            .get_timeline(timeline)
+            .ok()
+            .flatten()
+            .ok_or(Error::EvidenceUnavailable)
+            .and_then(|found| {
+                if found.meta.fork_point.is_some() {
+                    Err(Error::InvalidBinding)
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| {
+                self.store
+                    .factual_set_counts(timeline)
+                    .or(Err(Error::EvidenceUnavailable))
+            })
             .map(|counts| CommunitySharedCountsV1 {
                 nodes: counts.nodes as u64,
                 edges: counts.edges as u64,
@@ -806,7 +835,7 @@ impl MemoryCommunityDomainV1 {
                     .roster
                     .len() as u64;
                 StagedInitializationV1 {
-                    pass_state: CommunityPassStateV1::initialized(history, members, &graph),
+                    pass_state: CommunityPassStateV1::initialized(history, &graph),
                     key: (operation.timeline(), operation.call.form.operation_id),
                     committed: CommittedInitializationV1 {
                         profile_digest: operation.context.installation.profile.digest(),
@@ -918,6 +947,11 @@ impl MemoryCommunityDomainV1 {
             || current != Some(staged.read_selection)
         {
             return Err(Error::EvidenceUnavailable);
+        }
+        // A Timeline initializes once (a second code-0 initialize gives
+        // `StaleGeneration` before staging); never reset its pass state.
+        if self.pass_states.contains_key(&staged.key.0) {
+            return Err(Error::Conflict);
         }
         self.store.commit_community_artifact_batch(&staged.batch)?;
         let [metadata_key, cohort_key] = staged.keys;

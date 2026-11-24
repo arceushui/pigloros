@@ -73,24 +73,28 @@ impl CommunityPassStateV1 {
     /// seed, the actual counts of its history, plus the initialization's
     /// own additions (R10.3(6)), and the graph is the initial CGR1's.
     ///
-    /// The initialization adds one `InitialState` and one `StateRevision`
-    /// CPN1 per member, each with one direct input, and its records'
-    /// plaintext bytes. The store reports no byte count for the history,
-    /// so the byte counter starts at the initialization's own bytes.
+    /// The initialization adds one node per CPN1 of its graph (an
+    /// `InitialState` and a `StateRevision` per member), each with one
+    /// direct input, so as many edges, and its records' plaintext bytes.
+    /// The store reports no byte count for the history, so the byte
+    /// counter starts at the initialization's own bytes.
     pub(super) fn initialized(
         history: CommunitySharedCountsV1,
-        members: u64,
         graph: &CommunityInitializationGraphV1,
     ) -> Self {
-        let bytes = graph
-            .records()
+        let records = graph.records();
+        let nodes = records
+            .iter()
+            .filter(|record| record.record_magic() == CPN1)
+            .count() as u64;
+        let bytes = records
             .iter()
             .map(CommunityAssembledRecordV1::plaintext_length)
             .fold(0_u64, u64::saturating_add);
         Self {
             counters: CommunitySharedCountsV1 {
-                nodes: history.nodes.saturating_add(2 * members),
-                edges: history.edges.saturating_add(2 * members),
+                nodes: history.nodes.saturating_add(nodes),
+                edges: history.edges.saturating_add(nodes),
                 declared_inputs: history.declared_inputs,
                 encoded_record_bytes: history.encoded_record_bytes.saturating_add(bytes),
             },
@@ -102,6 +106,9 @@ impl CommunityPassStateV1 {
         }
     }
 }
+
+/// The magic of a native node record.
+const CPN1: [u8; 4] = *b"CPN1";
 
 /// One unresolved reservation's worst-case demand (R13.1(4)): the pass
 /// rows and `F_p` it still holds, in targets and in rows bound to its

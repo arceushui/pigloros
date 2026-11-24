@@ -249,7 +249,7 @@ fn the_pending_demand_follows_each_actors_scope() -> TestResult {
 
 /// ADR-129 revision 14, RN.3 and O10: the budget carries each Timeline's
 /// unspent `SetReason` rows, half its unspent `F_q` targets: `4n` per
-/// context, less two rows per `(member, reason)` pair spent.
+/// context, less one row per `(member, reason)` pair spent.
 #[test]
 fn the_budget_holds_the_unspent_quarantine_rows_per_timeline() -> TestResult {
     let mut domain = domain()?;

@@ -452,7 +452,9 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     ///
     /// `prior` is the domain's seed of T's cumulative recorded-set counters,
     /// the actual counts of T's existing history (R10.3(6)); the CBQ1
-    /// `prior_shared_counts` equal it.
+    /// `prior_shared_counts` equal it. The domain's initialize passes the
+    /// value it seeds into T's counters at commit: nothing else enforces
+    /// that the two agree, so a caller outside the domain must do the same.
     ///
     /// # Errors
     /// Returns `InvalidBinding` for an admission of another request, an

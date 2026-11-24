@@ -117,11 +117,11 @@ impl CommunityBudgetQuoteV1 {
     /// `due_members` has one row per roster member (owner decisions on
     /// #560, notes 22722 G3 and 22729). The quote carries the caller's prior
     /// counts, the domain's seed of the cumulative recorded-set counters
-    /// (ADR-129 revision 10, R10.3(6)), `2n` nodes and edges (one `InitialState` and one `StateRevision` CPN1
-    /// per member, each with one direct input), and the caller's
-    /// `maximum_required_bytes`: the planner sums each member's CNT1 State
-    /// limit, CIS1 and CSR1 maxima and actual CPN1 sizes (owner decision on
-    /// #560, 2026-11-19).
+    /// (ADR-129 revision 10, R10.3(6)), `2n` nodes and edges (one
+    /// `InitialState` and one `StateRevision` CPN1 per member, each with one
+    /// direct input), and the caller's `maximum_required_bytes`: the planner
+    /// sums each member's CNT1 State limit, CIS1 and CSR1 maxima and actual
+    /// CPN1 sizes (owner decision on #560, 2026-11-19).
     ///
     /// # Errors
     /// As [`Self::new`].

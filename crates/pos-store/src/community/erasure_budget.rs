@@ -14,11 +14,16 @@ use std::collections::BTreeMap;
 
 use pos_core::community_lifecycle::CommunityLifecycleErrorV1 as Error;
 #[cfg(target_os = "linux")]
-use pos_core::community_lifecycle::COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1;
+use pos_core::community_lifecycle::{
+    COMMUNITY_ERASURE_ROW_LIMIT_V1, COMMUNITY_ERASURE_TARGET_LINE_V1,
+    COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1,
+};
 use pos_core::{EntityId, TimelineId};
 
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
+#[cfg(target_os = "linux")]
+use super::pass_planner::CommunityPassReadPortV1;
 
 /// The store domain's committed erasure budget, read under the guard
 /// (ADR-129 revision 13, R13.1(2)).
@@ -137,5 +142,55 @@ impl MemoryCommunityDomainV1 {
     pub(super) fn count_quarantine_pairs(&mut self, timeline: TimelineId, before: u64, after: u64) {
         let context = self.erasure_contexts.entry(timeline).or_default();
         context.active_pairs = (context.active_pairs + after).saturating_sub(before);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MemoryCommunityDomainV1 {
+    /// R13.1(3) for `initialize`: for every actor of `timeline`'s scope,
+    /// `targets(A)` with the pending reservations, the context's `5n` rows at
+    /// two targets each and its `F_q` of `8n` targets stay within the
+    /// community line, and every `rows(U)` with its pending rows and
+    /// `F_q^rows(U)`, `timeline`'s also with the `5n` rows and its own
+    /// `4n` `F_q` rows, stays within 4,096 (ADR-129 revisions 13 and 14,
+    /// RN.3).
+    ///
+    /// # Errors
+    /// Returns `CapacityExhausted` when either line does not fit, and the
+    /// budget read's error.
+    pub(super) fn check_initialize_budget(
+        &self,
+        timeline: TimelineId,
+        members: u64,
+    ) -> Result<(), Error> {
+        let rows = 5 * members;
+        let reserve = COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * members;
+        self.erasure_budget(timeline).and_then(|budget| {
+            let targets_fit = budget.actors.iter().all(|actor| {
+                let pending = self.pending_erasure_demand(actor.actor);
+                actor.targets + pending.targets + actor.quarantine_reserve + reserve + 2 * rows
+                    <= COMMUNITY_ERASURE_TARGET_LINE_V1
+            });
+            let rows_fit = budget.rows.iter().all(|(affected, committed)| {
+                let added = if *affected == timeline {
+                    rows + reserve / 2
+                } else {
+                    0
+                };
+                let pending: u64 = self
+                    .pending_reservations
+                    .iter()
+                    .filter(|((pending, _), _)| pending == affected)
+                    .map(|(_, entry)| entry.rows)
+                    .sum();
+                let held = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
+                committed + pending + held + added <= COMMUNITY_ERASURE_ROW_LIMIT_V1
+            });
+            if targets_fit && rows_fit {
+                Ok(())
+            } else {
+                Err(Error::CapacityExhausted)
+            }
+        })
     }
 }

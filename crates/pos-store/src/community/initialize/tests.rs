@@ -3,23 +3,32 @@
 //! records and COA1s, the burned producer ordinal, the compare-and-swap of
 //! the inventory generation and CSI1, and the retry's evidence checks.
 
-use pos_core::community_lifecycle::CommunityBudgetQuoteV1;
 use pos_core::community_lifecycle::{
     community_catalogue_owner_v1, community_initializer_set_ref_v1, ArtifactRefV1,
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityArtifactOperationV1,
     CommunityArtifactPurposeV1, CommunityDurableProfileV1, CommunityInitializationSourceV1,
     CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1, CommunitySelectionV1,
 };
+use pos_core::community_lifecycle::{
+    CommunityBudgetQuoteV1, CommunitySharedCountsV1, COMMUNITY_ERASURE_TARGET_LINE_V1,
+};
 use pos_core::store::EventStore;
 use pos_core::RecordedSetCountsV1;
-use pos_core::{AuthorityTrustRootSealV1, Hash};
+use pos_core::{
+    ArtifactDataClassV1, AuthorityTrustRootSealV1, EntityId, Hash, Seq, TimelineId, TimelineMeta,
+};
+use std::collections::{BTreeMap, BTreeSet};
+
 use zeroize::Zeroizing;
 
+use crate::erasure_budget_rows::{community_rows, erasure_row};
 use crate::memory::MemoryStore;
 use crate::MemoryTrustedClockAuthorityV1;
 
+use super::super::erasure_budget::CommunityErasureBudgetPortV1;
 use super::super::erasure_budget::CommunityErasureContextV1;
 use super::super::pass_planner::CommunityPassReadPortV1;
+use super::super::pass_state::{CommunityPassStateV1, CommunityPendingReservationV1};
 use super::{
     CommittedInitializationV1, CommunityInitializationContextV1, CommunityInitializationReceiptV1,
     CommunityInitializeCallV1, PreparedV1, SealedMetadataV1, StagedInitializationV1,
@@ -330,6 +339,10 @@ fn the_history_seeds_the_quote_and_the_pass_state() -> TestResult {
         (counters.nodes, counters.edges, counters.declared_inputs),
         (11, 9, 3)
     );
+    // The graph's own additions agree with the CBQ1's `2n` maxima.
+    let maxima = quote.as_input();
+    assert_eq!(counters.nodes - prior.nodes, maxima.maximum_required_nodes);
+    assert_eq!(counters.edges - prior.edges, maxima.maximum_required_edges);
     assert!(counters.encoded_record_bytes > 0);
     assert_eq!(state.graph.registrations, 10);
     assert_eq!(domain.live_keys(), 3);
@@ -569,5 +582,195 @@ fn only_the_installed_authority_and_domain_check_the_writer_bound() -> TestResul
         };
         assert_eq!(refused.err(), Some(Error::EvidenceUnavailable));
     }
+    Ok(())
+}
+
+/// The owner of the planned Timeline in the budget cases.
+fn owner() -> EntityId {
+    EntityId::from_ulid(ulid::Ulid::from_bytes([0x77; 16]))
+}
+
+impl Case {
+    /// A case whose planned Timeline has an owner, so the erasure budget
+    /// has an actor to bound it.
+    fn owned(roster: &Roster) -> Fallible<Self> {
+        let mut case = Self {
+            domain: Bootstrapped::new(&SEAL, roster, true, false)?,
+            state: roster.state.clone(),
+        };
+        case.domain
+            .world
+            .domain
+            .store
+            .create_timeline_with_meta(TimelineMeta {
+                id: target(),
+                owner: Some(owner()),
+                ..TimelineMeta::root("owned")
+            })?;
+        Ok(case)
+    }
+}
+
+/// ADR-129 revision 13, R13.1(3) and revision 14, RN.3, for `initialize`:
+/// the context adds `5n` rows and `F_q`'s `4n` rows to T's `rows(T)`. The
+/// two members of the fixture add 18: T at 4,096 - 18 consented rows
+/// initializes, one more row refuses with 14 and nothing is staged.
+#[test]
+fn initialize_checks_the_rows_bound_with_its_quarantine_rows() -> TestResult {
+    for (rows, allowed) in [(4096 - 18, true), (4096 - 17, false)] {
+        let roster = Roster::release_one()?;
+        let mut case = Case::owned(&roster)?;
+        let consented = (0..rows)
+            .map(|seed| erasure_row("budget", ArtifactDataClassV1::ConsentedSharedData, 0, seed))
+            .collect::<Fallible<Vec<_>>>()?;
+        case.domain
+            .world
+            .domain
+            .store
+            .bind_erasure_rows_for_test(target(), consented);
+        let rows = roster.rows()?;
+        let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
+        let result = case.prepare(&profile, OPERATION)?;
+        assert_eq!(result.is_ok(), allowed);
+        if !allowed {
+            assert_eq!(result.err(), Some(Error::CapacityExhausted));
+        }
+    }
+    Ok(())
+}
+
+/// R13.1(3): the targets line holds the actor's targets, its pending
+/// reservations, the existing contexts' `F_q`, the `5n` rows at two targets
+/// each and the new context's `8n` targets: 20 + 16 more for two members.
+#[test]
+fn initialize_checks_the_targets_line_with_its_quarantine_targets() -> TestResult {
+    let line = COMMUNITY_ERASURE_TARGET_LINE_V1;
+    for (pending, allowed) in [(0, true), (1, false)] {
+        let roster = Roster::release_one()?;
+        let mut case = Case::owned(&roster)?;
+        let domain = &mut case.domain.world.domain;
+        let base = domain.erasure_budget(target())?.actors[0].targets;
+        // Community rows cost two targets each.
+        let filled = (line - 36 - base) / 2;
+        domain
+            .store
+            .bind_erasure_rows_for_test(target(), community_rows(1_000, filled)?);
+        let slack = line - 36 - base - 2 * filled;
+        // A pending reservation holds the rest, and one target more.
+        domain.pending_reservations.insert(
+            (target(), [9; 16]),
+            CommunityPendingReservationV1 {
+                targets: slack + pending,
+                rows: 0,
+            },
+        );
+        let rows = roster.rows()?;
+        let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
+        let result = case.prepare(&profile, OPERATION)?;
+        assert_eq!(result.is_ok(), allowed);
+        if !allowed {
+            assert_eq!(result.err(), Some(Error::CapacityExhausted));
+        }
+    }
+    Ok(())
+}
+
+/// R13.1(3): every `rows(U)` of the scope counts, not only T's: a Fork
+/// child holding 4,096 rows, with its context's `F_q` rows or a pending
+/// reservation, refuses the parent's initialize.
+#[test]
+fn initialize_checks_every_affected_timeline() -> TestResult {
+    let child = TimelineId::from_ulid(ulid::Ulid::from_bytes([0x78; 16]));
+    for (held, pending, allowed) in [(0, 0, true), (1, 0, false), (0, 1, false)] {
+        let roster = Roster::release_one()?;
+        let mut case = Case::owned(&roster)?;
+        let domain = &mut case.domain.world.domain;
+        domain.store.create_timeline_with_meta(TimelineMeta {
+            id: child,
+            owner: Some(owner()),
+            fork_point: Some((target(), Seq::ZERO)),
+            ..TimelineMeta::root("child")
+        })?;
+        // One member's context on the child holds four rows.
+        domain.count_erasure_context(child, 1);
+        let free = 4096 - 4 + held;
+        let rows = (0..free)
+            .map(|seed| erasure_row("budget", ArtifactDataClassV1::ConsentedSharedData, 0, seed))
+            .collect::<Fallible<Vec<_>>>()?;
+        domain.store.bind_erasure_rows_for_test(child, rows);
+        if pending > 0 {
+            domain.pending_reservations.insert(
+                (child, [9; 16]),
+                CommunityPendingReservationV1 {
+                    targets: 0,
+                    rows: 1,
+                },
+            );
+        }
+        let rows = roster.rows()?;
+        let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
+        let result = case.prepare(&profile, OPERATION)?;
+        assert_eq!(result.is_ok(), allowed);
+    }
+    Ok(())
+}
+
+/// R10.3(6): the store counts a Fork child's own set only, so the history
+/// seed of a Fork child would undercount its inherited prefix. A Fork child
+/// is refused until the Fork slice reads that prefix; a root Timeline and a
+/// missing one keep their results.
+#[test]
+fn a_fork_child_has_no_history_seed_yet() -> TestResult {
+    let roster = Roster::release_one()?;
+    let mut case = Case::owned(&roster)?;
+    let child = TimelineId::from_ulid(ulid::Ulid::from_bytes([0x78; 16]));
+    let domain = &mut case.domain.world.domain;
+    domain.store.create_timeline_with_meta(TimelineMeta {
+        id: child,
+        owner: Some(owner()),
+        fork_point: Some((target(), Seq::ZERO)),
+        ..TimelineMeta::root("child")
+    })?;
+    assert_eq!(
+        domain.history_counts(child).err(),
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(
+        domain
+            .history_counts(TimelineId::from_ulid(ulid::Ulid::from_bytes([0x79; 16])))
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert!(domain.history_counts(target()).is_ok());
+    Ok(())
+}
+
+/// A Timeline initializes once: a pass state already retained for it is
+/// never overwritten, and the refused commit publishes nothing.
+#[test]
+fn a_second_pass_state_never_replaces_the_first() -> TestResult {
+    let roster = Roster::release_one()?;
+    let mut case = Case::new(&roster, true)?;
+    let rows = roster.rows()?;
+    let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
+    let staged = staged(case.prepare(&profile, OPERATION)?)?;
+    let domain = &mut case.domain.world.domain;
+    domain.pass_states.insert(
+        target(),
+        CommunityPassStateV1 {
+            counters: CommunitySharedCountsV1::default(),
+            graph: staged.pass_state.graph,
+            closure: BTreeSet::new(),
+            observations: BTreeMap::new(),
+            scope_rows: BTreeMap::new(),
+            generations: BTreeMap::new(),
+        },
+    );
+    assert_eq!(domain.commit(*staged).err(), Some(Error::Conflict));
+    assert!(domain.initializations.is_empty());
+    assert!(domain
+        .store
+        .artifact_registrations_for_timeline(target(), 64)?
+        .is_empty());
     Ok(())
 }

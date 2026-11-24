@@ -540,8 +540,8 @@ fn each_record_materializes_with_its_decided_producer() -> TestResult {
 }
 
 /// ADR-129 revision 10, R10.3(6) and revision 11, R11.3(1): the seeded
-/// counters are the history's plus the initialization's own additions (two
-/// CPN1 nodes and edges per member, its records' plaintext bytes), and the
+/// counters are the history's plus the initialization's own additions (its
+/// four CPN1 nodes, two per member, and as many edges, its records' plaintext bytes), and the
 /// selected graph is the CGR1's `graph_counts`.
 #[test]
 fn the_initial_pass_state_adds_the_initialization_to_the_history() -> TestResult {
@@ -553,7 +553,7 @@ fn the_initial_pass_state_adds_the_initialization_to_the_history() -> TestResult
         declared_inputs: 30,
         encoded_record_bytes: 40,
     };
-    let state = CommunityPassStateV1::initialized(history, 3, &graph);
+    let state = CommunityPassStateV1::initialized(history, &graph);
     let bytes: u64 = assembled
         .plaintexts
         .iter()
@@ -562,8 +562,8 @@ fn the_initial_pass_state_adds_the_initialization_to_the_history() -> TestResult
     assert!(
         state.counters
             == CommunitySharedCountsV1 {
-                nodes: 16,
-                edges: 26,
+                nodes: 14,
+                edges: 24,
                 declared_inputs: 30,
                 encoded_record_bytes: 40 + bytes,
             }
