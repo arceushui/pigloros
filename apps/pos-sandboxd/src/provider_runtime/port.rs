@@ -184,13 +184,10 @@ impl ExecutePort {
     ) -> Result<Vec<u8>, Option<SandboxProviderErrorCode>> {
         let (result, response) = self
             .runtime
-            .block_on(async {
-                let result = self.lifecycle.cancel(request).await?;
+            .block_on(
                 self.lifecycle
-                    .bind_cancel(request, until.into(), interval)
-                    .await
-                    .map(|response| (result, response))
-            })
+                    .cancel_and_bind(request, until.into(), interval),
+            )
             .map_err(|error| Some(control_code(&error)))?;
         SandboxCancelResponse::self_digested(SandboxCancelResponseFields {
             request_id: request.request.request_id,

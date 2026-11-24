@@ -1205,6 +1205,24 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
 }
 
 #[test]
+fn a_control_request_is_routed_revoked_first_then_by_state_then_by_pool() {
+    use super::{control_route, ControlRoute};
+    use SandboxProviderErrorCode as Code;
+    for (opened, taken) in [(None, false), (Some(()), false), (Some(()), true)] {
+        assert_eq!(control_route(true, opened, taken), ControlRoute::Silent);
+    }
+    assert_eq!(
+        control_route::<()>(false, None, true),
+        ControlRoute::Refused(Code::SandboxUnavailable)
+    );
+    assert_eq!(
+        control_route(false, Some(()), false),
+        ControlRoute::Refused(Code::AdmissionBusy)
+    );
+    assert_eq!(control_route(false, Some(7), true), ControlRoute::Answer(7));
+}
+
+#[test]
 fn the_execute_listener_is_polled_while_either_pool_has_room() {
     // A free answered slot alone, room for an uncharged reader alone, and
     // neither.

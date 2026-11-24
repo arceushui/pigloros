@@ -2882,9 +2882,11 @@ mod cases {
                 runtime.lifecycle.reconcile(&reconcile_with(1, 0x65)),
                 Err(AttemptLifecycleError::ControlRequestsExhausted)
             ));
+            // A cancel of the reconciled attempt is unknown before the cap
+            // (R11 Amendment 1 invariant 31); a reconcile meets the cap.
             assert!(matches!(
                 runtime.lifecycle.cancel(&cancel_with(1, 0x66)).await,
-                Err(AttemptLifecycleError::ControlRequestsExhausted)
+                Err(AttemptLifecycleError::UnknownAttempt)
             ));
             assert_eq!(runtime.lifecycle.control_entries([1; 16]), 4);
             runtime.lifecycle.reconcile(&reconcile_with(1, 0x64))?;
@@ -3070,6 +3072,10 @@ mod cases {
                 pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::UnavailableAfterAdmission
             );
             assert_eq!(result.result_digest(), response.terminal_digests().0);
+            // The retained SPY1 bytes are its canonical encoding, the last
+            // frame of the stored response.
+            assert_eq!(result.to_canonical_cbor()?, response.response().result);
+            assert_eq!(response.frames().last(), Some(response.response().result));
             let mut request = reconcile_with(0x5a, 0x61);
             request.agr1_digest = digest;
             assert!(runtime.lifecycle.reconcile(&request).is_ok());
@@ -3095,6 +3101,76 @@ mod cases {
                 Err(AttemptLifecycleError::ResponseUnavailable)
             ));
             assert!(!faulted.admits()?);
+            // With a cancellation recorded first, the dropped owner's
+            // response is Cancelled, with nothing committed.
+            let cancelled = Runtime::new()?;
+            let mut input = FakeInput::new(0x5a);
+            let signed = AttemptAdmission::signed_for_test().map_err(|error| error.to_string())?;
+            input.signed = Some((signed.admission, digest));
+            cancelled.lifecycle.granted_for_test(attempt, digest)?;
+            let owned = cancelled.lifecycle.admit_input(
+                input,
+                (&signed.signer, AdmittedRuntimeKey::new("runtime", &public)),
+            )?;
+            let mut cancel = cancel_with(0x5a, 0x61);
+            cancel.agr1_digest = digest;
+            assert!(cancelled.lifecycle.signal_for_test(&cancel));
+            drop(owned);
+            let response = cancelled.lifecycle.terminal_response(attempt, digest)?;
+            let fields = response.records().termination().fields();
+            assert_eq!(fields.cancel_source, Some(CancelSource::CancelRequest));
+            assert_eq!(
+                fields.cleanup.result,
+                pos_reference::sandbox_provider_protocol::CleanupResult::NothingCommitted
+            );
+            let result =
+                pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+                    response.response().result,
+                )?;
+            assert_eq!(
+                result.outcome,
+                pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome::Cancelled
+            );
+            assert_eq!(result.to_canonical_cbor()?, response.response().result);
+            Ok(())
+        }
+
+        /// Invariant 10, `Running { started: true }`: a cancellation that
+        /// waited for the run to end gets one interval from that end for the
+        /// signed response, not the bound counted from its request (R15
+        /// §3.6 item 2(a)), and binds SCY1 `1`.
+        #[tokio::test(start_paused = true)]
+        async fn a_cancelled_started_run_binds_within_an_interval_from_its_end() -> TestResult {
+            let runtime = Runtime::new()?;
+            let fixture =
+                TeardownFixture::new(1, TeardownStop::Empty, TeardownReset::Unload).await?;
+            let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
+                .behaving(Behaviour::RunsUntilCancelled);
+            let owned = runtime.lifecycle.admit_granted(FakeInput::new(1))?;
+            let request = cancel_with(1, 0x61);
+            let until = Instant::now() + Duration::from_millis(1);
+            let cancel = async {
+                steps.executing().await;
+                runtime
+                    .lifecycle
+                    .cancel_and_bind(&request, until, Duration::from_secs(5))
+                    .await
+            };
+            let run = async {
+                let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+                // Signed well past the request's own bound.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(Instant::now() > until);
+                let signed = runtime.lifecycle.sign_for_test([1; 16])?;
+                TestResult::Ok((ended, signed))
+            };
+            let (bound, ran) = tokio::join!(cancel, run);
+            let (ended, signed) = ran?;
+            cleaned(&ended)?;
+            let (result, response) = bound?;
+            assert_eq!(result, SandboxCancellationResult::CancelledAndCleaned);
+            assert!(Arc::ptr_eq(&response, &signed));
+            assert!(signed.delivered());
             Ok(())
         }
 

@@ -600,10 +600,12 @@ impl<'a> Responder<'a> {
     }
 
     /// Hand an authenticated cancel or reconcile, read in full, to the
-    /// control pool (R15 N13): its execute worker `place`, if any, is freed
-    /// first, and a full control pool gets `12`. After step 6 `Revoked`
-    /// writes zero bytes, a runtime that is not `Open` gets `11`, and an
-    /// `Open` one answers from its lifecycle.
+    /// control pool (R15 N13), by [`control_route`]. An answer holds its
+    /// control place until it is written, and frees the execute worker
+    /// `place` first. A refusal (`11` for a runtime that is not `Open`, `12`
+    /// for a full control pool) is written holding the execute place, or
+    /// else an uncharged reader's place (item P7); with neither free the
+    /// connection closes with zero bytes. `Revoked` writes zero bytes.
     fn answer_control(
         &self,
         stream: &UnixStream,
@@ -611,19 +613,23 @@ impl<'a> Responder<'a> {
         until: Instant,
         place: Option<Place<'_>>,
     ) {
-        drop(place);
-        if self.revocation.observer().revoked() {
-            return;
-        }
-        let held = self.control.take();
-        let response = match (self.opened(), &held) {
-            (None, _) => self.authenticated(identity, SandboxProviderErrorCode::SandboxUnavailable),
-            (Some(_), None) => {
-                self.authenticated(identity, SandboxProviderErrorCode::AdmissionBusy)
+        let opened = self.opened();
+        let held = opened.and_then(|_| self.control.take());
+        match control_route(self.revocation.observer().revoked(), opened, held.is_some()) {
+            ControlRoute::Silent => {}
+            ControlRoute::Answer(port) => {
+                drop(place);
+                Self::conclude(stream, self.control_answer(port, identity, &control, until));
             }
-            (Some(port), Some(_)) => self.control_answer(port, identity, &control, until),
-        };
-        Self::conclude(stream, response);
+            ControlRoute::Refused(code) => {
+                let reader = place.is_none().then(|| self.refusals.wait(until)).flatten();
+                if place.is_some() || reader.is_some() {
+                    Self::conclude(stream, self.authenticated(identity, code));
+                } else {
+                    stream.shutdown(std::net::Shutdown::Both).ok();
+                }
+            }
+        }
         drop(held);
     }
 
@@ -941,6 +947,30 @@ impl<'a> Responder<'a> {
         })
         .and_then(|error| error.to_canonical_cbor().map_err(RuntimeSignerError::from))
         .ok()
+    }
+}
+
+/// How a cancel or reconcile that passed step 6 is answered (R15 §3.3,
+/// N13).
+#[derive(Debug, Eq, PartialEq)]
+enum ControlRoute<P> {
+    /// `Revoked`: zero bytes.
+    Silent,
+    /// The SPE1 of a runtime that is not `Open` (`11`) or of a full
+    /// control pool (`12`).
+    Refused(SandboxProviderErrorCode),
+    /// Answered from this `Open` runtime's lifecycle, on a control place.
+    Answer(P),
+}
+
+/// The route of a control request: `revoked` first, then whether the
+/// runtime is `opened`, then whether a control place was `taken`.
+fn control_route<P>(revoked: bool, opened: Option<P>, taken: bool) -> ControlRoute<P> {
+    match opened {
+        _ if revoked => ControlRoute::Silent,
+        None => ControlRoute::Refused(SandboxProviderErrorCode::SandboxUnavailable),
+        Some(_) if !taken => ControlRoute::Refused(SandboxProviderErrorCode::AdmissionBusy),
+        Some(port) => ControlRoute::Answer(port),
     }
 }
 

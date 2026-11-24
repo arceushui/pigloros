@@ -52,12 +52,15 @@ impl<I> Table<I> {
     /// The slot that the control request `identity` of `attempt_id` under
     /// `grant` names, after the request ledger: other bytes under a recorded
     /// ID conflict, an unknown, claimed or other grant's attempt is unknown,
-    /// and a new ID beyond the attempt's four entries is refused.
+    /// a `cancel` of a reconciled attempt is unknown (R11 Amendment 1
+    /// invariant 31, before the cap: it can never succeed), and a new ID
+    /// beyond the attempt's four entries is refused.
     fn control(
         &mut self,
         attempt_id: [u8; 16],
         grant: [u8; 32],
         (request_id, digest): ControlIdentity,
+        cancel: bool,
     ) -> Result<&mut Slot<I>, AttemptLifecycleError> {
         let recorded = match self.requests.get(&request_id) {
             Some(recorded) if *recorded != digest => {
@@ -76,6 +79,7 @@ impl<I> Table<I> {
             Some(slot) if slot.agr1_digest() != Some(grant) => {
                 Err(AttemptLifecycleError::GrantMismatch)
             }
+            Some(Slot::Reconciled { .. }) if cancel => Err(AttemptLifecycleError::UnknownAttempt),
             Some(_) if full => Err(AttemptLifecycleError::ControlRequestsExhausted),
             Some(slot) => Ok(slot),
         }
@@ -103,17 +107,14 @@ enum Signalled {
 
 /// What a cancellation of `slot` finds, under the attempts lock: a started
 /// run is signalled and fenced, and an attempt awaiting its input or whose
-/// run has not started records it for its ending.
+/// run has not started records it for its ending. The ledger check already
+/// refused a claim and a reconciled attempt, so any other slot has ended.
 fn signal<I>(slot: &mut Slot<I>) -> Result<Signalled, AttemptLifecycleError> {
     match slot {
-        Slot::Claimed { .. } | Slot::Reconciled { .. } => {
-            Err(AttemptLifecycleError::UnknownAttempt)
-        }
         Slot::Ended {
             cleaned: Cleaned::Unproved,
             ..
         } => Err(AttemptLifecycleError::CleanupFailed),
-        Slot::Ended { .. } => Ok(Signalled::Terminal),
         Slot::Granted { cancel, .. } => {
             // Nothing is committed before its input is admitted; its
             // recorded ending carries the first cancellation.
@@ -135,6 +136,7 @@ fn signal<I>(slot: &mut Slot<I>) -> Result<Signalled, AttemptLifecycleError> {
                 Signalled::Recorded
             })
         }
+        _ => Ok(Signalled::Terminal),
     }
 }
 
@@ -203,6 +205,39 @@ impl<I> AttemptLifecycle<I> {
         &self,
         request: &SandboxCancelRequest,
     ) -> Result<SandboxCancellationResult, AttemptLifecycleError> {
+        self.cancelled(request).await.map(|(result, _)| result)
+    }
+
+    /// [`Self::cancel`], then [`Self::bind_cancel`]: the SCY1 result and the
+    /// response it binds (R15 §3.6 item 2(a)). When the cancellation waited
+    /// for a started run to end, the wait for its response is one
+    /// `interval` from that end, not from `until`.
+    ///
+    /// # Errors
+    /// Those of [`Self::cancel`] and [`Self::bind_cancel`].
+    pub async fn cancel_and_bind(
+        &self,
+        request: &SandboxCancelRequest,
+        until: Instant,
+        interval: Duration,
+    ) -> Result<(SandboxCancellationResult, Arc<RetainedResponse>), AttemptLifecycleError> {
+        let (result, waited) = self.cancelled(request).await?;
+        let until = if waited {
+            Instant::now() + interval
+        } else {
+            until
+        };
+        self.bind_cancel(request, until, interval)
+            .await
+            .map(|response| (result, response))
+    }
+
+    /// The cancellation of `request`, and whether it waited for a started
+    /// run to end.
+    async fn cancelled(
+        &self,
+        request: &SandboxCancelRequest,
+    ) -> Result<(SandboxCancellationResult, bool), AttemptLifecycleError> {
         let signalled = {
             let mut attempts = lock(&self.attempts);
             attempts
@@ -210,18 +245,21 @@ impl<I> AttemptLifecycle<I> {
                     request.attempt_id,
                     request.agr1_digest,
                     (request.request.request_id, request.request_digest),
+                    true,
                 )
                 .and_then(signal)
         };
         let mut ended = match signalled? {
-            Signalled::Terminal => return Ok(SandboxCancellationResult::AlreadyTerminal),
-            Signalled::Recorded => return Ok(SandboxCancellationResult::CancelledAndCleaned),
+            Signalled::Terminal => return Ok((SandboxCancellationResult::AlreadyTerminal, false)),
+            Signalled::Recorded => {
+                return Ok((SandboxCancellationResult::CancelledAndCleaned, false))
+            }
             Signalled::Running(ended) => ended,
         };
         // A dropped run ends the wait too; the slot then says what is known.
         ended.wait_for(|ended| *ended).await.ok();
         if self.ended_clean(request.attempt_id) {
-            Ok(SandboxCancellationResult::CancelledAndCleaned)
+            Ok((SandboxCancellationResult::CancelledAndCleaned, true))
         } else {
             Err(AttemptLifecycleError::CleanupFailed)
         }
@@ -306,29 +344,24 @@ impl<I> AttemptLifecycle<I> {
     ) -> Result<Arc<RetainedResponse>, AttemptLifecycleError> {
         let identity = (request.request.request_id, request.request_digest);
         let mut attempts = lock(&self.attempts);
-        let response = match attempts.control(request.attempt_id, request.agr1_digest, identity)? {
-            Slot::Ended {
-                cleaned: Cleaned::Unproved,
-                ..
-            } => Err(AttemptLifecycleError::CleanupFailed),
-            Slot::Ended {
-                response: Retained::Signed(response),
-                ..
-            } => Ok(Arc::clone(response)),
-            Slot::Ended {
-                response: Retained::Faulted,
-                ..
-            } => Err(AttemptLifecycleError::ResponseUnavailable),
-            Slot::Ended {
-                response: Retained::Pending,
-                ..
-            }
-            | Slot::Granted { .. }
-            | Slot::Running { .. } => Err(AttemptLifecycleError::ResponsePending),
-            Slot::Claimed { .. } | Slot::Reconciled { .. } => {
-                Err(AttemptLifecycleError::UnknownAttempt)
-            }
-        }?;
+        let response =
+            match attempts.control(request.attempt_id, request.agr1_digest, identity, true)? {
+                Slot::Ended {
+                    cleaned: Cleaned::Unproved,
+                    ..
+                } => Err(AttemptLifecycleError::CleanupFailed),
+                Slot::Ended {
+                    response: Retained::Signed(response),
+                    ..
+                } => Ok(Arc::clone(response)),
+                Slot::Ended {
+                    response: Retained::Faulted,
+                    ..
+                } => Err(AttemptLifecycleError::ResponseUnavailable),
+                // A pending response: the ledger check refused a claim and a
+                // reconciled attempt, and the wait outlasted any active slot.
+                _ => Err(AttemptLifecycleError::ResponsePending),
+            }?;
         response.mark_delivered();
         attempts.record_control(request.attempt_id, identity);
         drop(attempts);
@@ -396,7 +429,7 @@ impl<I> AttemptLifecycle<I> {
         let grant = request.agr1_digest;
         let identity = (request.request.request_id, request.request_digest);
         let mut attempts = lock(&self.attempts);
-        let evidence = match attempts.control(attempt_id, grant, identity) {
+        let evidence = match attempts.control(attempt_id, grant, identity, false) {
             Err(refusal) => Err(refusal),
             Ok(Slot::Reconciled { evidence, .. }) => Ok((*evidence, false)),
             Ok(Slot::Claimed { .. } | Slot::Granted { .. } | Slot::Running { .. }) => {
@@ -498,6 +531,7 @@ impl<I> AttemptLifecycle<I> {
                 request.attempt_id,
                 request.agr1_digest,
                 (request.request.request_id, request.request_digest),
+                true,
             )
             .and_then(signal)
             .is_ok()
@@ -510,5 +544,23 @@ impl<I> AttemptLifecycle<I> {
             .get(&attempt_id)
             .copied()
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// A tuple the encoder refuses is a fault, never evidence.
+    #[test]
+    fn evidence_of_a_zero_identity_is_refused() -> crate::test_fixtures::TestResult {
+        let response = RetainedResponse::signed_for_test().map_err(|error| error.to_string())?;
+        assert!(matches!(
+            evidence_of([0; 16], [1; 32], &response),
+            Err(AttemptLifecycleError::ResponseUnavailable)
+        ));
+        assert!(evidence_of([1; 16], [1; 32], &response).is_ok());
+        Ok(())
     }
 }
