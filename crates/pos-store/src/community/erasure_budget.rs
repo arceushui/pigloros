@@ -19,6 +19,8 @@ use pos_core::{EntityId, TimelineId};
 
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
+#[cfg(target_os = "linux")]
+use super::pass_planner::{trace_room, CommunityPassReadPortV1};
 
 /// The store domain's committed erasure budget, read under the guard
 /// (ADR-129 revision 13, R13.1(2)).
@@ -52,6 +54,10 @@ pub struct CommunityErasureBudgetV1 {
     pub actors: Vec<CommunityErasureActorV1>,
     /// `rows(U)` of every U in those affected scopes, of any class.
     pub rows: BTreeMap<TimelineId, u64>,
+    /// `F_q^rows(U)` for every U of `rows`: the unspent `SetReason` rows of
+    /// every initialized context on U, which the rows bound holds back
+    /// (ADR-129 revision 14, RN.3). A U with no context has none.
+    pub quarantine_rows: BTreeMap<TimelineId, u64>,
 }
 
 /// An actor's unresolved reservations (R13.1(4)): their worst-case targets
@@ -80,6 +86,12 @@ impl CommunityErasureContextV1 {
         (COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * self.members)
             .saturating_sub(2 * self.active_pairs)
     }
+
+    /// `F_q^rows`: one row for every two unspent targets (ADR-129 revision
+    /// 14, RN.3).
+    pub(super) const fn reserve_rows(self) -> u64 {
+        self.reserve() / 2
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -88,6 +100,14 @@ impl CommunityErasureBudgetPortV1 for MemoryCommunityDomainV1 {
         self.store
             .community_erasure_scope(timeline)
             .map(|(actors, rows)| CommunityErasureBudgetV1 {
+                quarantine_rows: rows
+                    .keys()
+                    .filter_map(|affected| {
+                        self.erasure_contexts
+                            .get(affected)
+                            .map(|context| (*affected, context.reserve_rows()))
+                    })
+                    .collect(),
                 actors: actors
                     .iter()
                     .map(|(actor, targets, affected)| CommunityErasureActorV1 {
@@ -119,5 +139,41 @@ impl MemoryCommunityDomainV1 {
     pub(super) fn count_quarantine_pairs(&mut self, timeline: TimelineId, before: u64, after: u64) {
         let context = self.erasure_contexts.entry(timeline).or_default();
         context.active_pairs = (context.active_pairs + after).saturating_sub(before);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MemoryCommunityDomainV1 {
+    /// R13.1(3) for `initialize`: for every actor of `timeline`'s scope,
+    /// `targets(A)` with the pending reservations, the context's `5n` rows at
+    /// two targets each and its `F_q` of `8n` targets stay within the
+    /// community line, and every `rows(U)` with its pending rows and
+    /// `F_q^rows(U)`, `timeline`'s also with the `5n` rows and its own
+    /// `4n` `F_q` rows, stays within 4,096 (ADR-129 revisions 13 and 14,
+    /// RN.3).
+    ///
+    /// # Errors
+    /// Returns `CapacityExhausted` when either line does not fit, and the
+    /// budget read's error.
+    pub(super) fn check_initialize_budget(
+        &self,
+        timeline: TimelineId,
+        members: u64,
+    ) -> Result<(), Error> {
+        let rows = 5 * members;
+        let reserve = COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * members;
+        self.erasure_budget(timeline).and_then(|budget| {
+            // The context's `5n` rows and `F_q` fit exactly like a pass's
+            // rows and `F_p` (R13.1(3)): one implementation of the bound.
+            let fits = budget.actors.iter().all(|actor| {
+                let pending = self.pending_erasure_demand(actor.actor);
+                trace_room(&budget, actor, &pending, timeline, rows, reserve).is_some()
+            });
+            if fits {
+                Ok(())
+            } else {
+                Err(Error::CapacityExhausted)
+            }
+        })
     }
 }

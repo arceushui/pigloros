@@ -1028,7 +1028,7 @@ impl MemoryStore {
     /// Make the Timeline's own recorded set hold `counts`, as if earlier Ticks
     /// had filled it.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(in crate::memory) fn fill_factual_set_for_test(
+    pub(crate) fn fill_factual_set_for_test(
         &mut self,
         timeline: TimelineId,
         counts: RecordedSetCountsV1,

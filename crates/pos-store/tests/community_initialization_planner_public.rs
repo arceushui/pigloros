@@ -26,8 +26,9 @@ use pos_core::community_lifecycle::{
     CommunityNativeNodeV1, CommunityOriginalProvenanceV1, CommunityOwnerBindingInputV1,
     CommunityOwnerBindingV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
     CommunityScopeBindingV1, CommunitySelectionInputV1, CommunitySelectionV1,
-    CommunityStateContentV1, CommunityTimelineFloorV1, CommunityTimelineFloorsV1,
-    CommunityTypedInputRefV1, CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    CommunitySharedCountsV1, CommunityStateContentV1, CommunityTimelineFloorV1,
+    CommunityTimelineFloorsV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1,
+    COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
@@ -698,6 +699,19 @@ fn bindings_derive_cob1_and_each_cmb1_from_the_roster() -> TestResult {
     Ok(())
 }
 
+/// A seed of the cumulative recorded-set counters (R10.3(6)).
+const HISTORY_SEED: CommunitySharedCountsV1 = CommunitySharedCountsV1 {
+    nodes: 3,
+    edges: 4,
+    declared_inputs: 5,
+    encoded_record_bytes: 6,
+};
+
+/// A Timeline with no recorded history.
+fn no_history() -> CommunitySharedCountsV1 {
+    CommunitySharedCountsV1::default()
+}
+
 /// G3, G4 and A5.3(0): the CGI1 takes the decision's refs and the CDP1
 /// horizon; CSB1 has one empty-scope row per CMB1 ref; CBQ1 is the
 /// initialization quote; CPV1 names the same refs.
@@ -710,7 +724,7 @@ fn records_mint_cgi1_csb1_cbq1_and_cpv1() -> TestResult {
         CommunityInitializationPlannerV1::new(&SEAL, installation(&profile), form(&profile))?;
     let mut world = World::new()?;
     let admission = world.admit(planner.request())?;
-    let records = planner.records(GENERATION, &admission, &ADDRESSES)?;
+    let records = planner.records(GENERATION, &admission, &ADDRESSES, HISTORY_SEED)?;
     let digests: Vec<Hash> = planner
         .bindings(GENERATION)?
         .member_binding_digests()
@@ -779,6 +793,7 @@ fn records_mint_cgi1_csb1_cbq1_and_cpv1() -> TestResult {
         target(),
         GENERATION,
         profile.digest(),
+        HISTORY_SEED,
         due,
         quote_bytes(&STATE_LIMITS, &digests)?,
     )?;
@@ -833,7 +848,9 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
     ] {
         let admission = world.admit(request)?;
         assert_eq!(
-            planner.records(GENERATION, &admission, &ADDRESSES).err(),
+            planner
+                .records(GENERATION, &admission, &ADDRESSES, no_history())
+                .err(),
             Some(Error::InvalidBinding)
         );
     }
@@ -844,12 +861,16 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
         &[ADDRESSES[0], ADDRESSES[0]][..],
     ] {
         assert_eq!(
-            planner.records(GENERATION, &admission, addresses).err(),
+            planner
+                .records(GENERATION, &admission, addresses, no_history())
+                .err(),
             Some(Error::InvalidBinding)
         );
     }
     assert_eq!(
-        planner.records([0; 16], &admission, &ADDRESSES).err(),
+        planner
+            .records([0; 16], &admission, &ADDRESSES, no_history())
+            .err(),
         Some(Error::InvalidBinding)
     );
     // A repeated address that is not adjacent, on a three-member roster.
@@ -881,12 +902,22 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
     let [first, second] = ADDRESSES;
     assert_eq!(
         planner
-            .records(GENERATION, &admission, &[first, second, first])
+            .records(
+                GENERATION,
+                &admission,
+                &[first, second, first],
+                no_history()
+            )
             .err(),
         Some(Error::InvalidBinding)
     );
     assert!(planner
-        .records(GENERATION, &admission, &[first, second, hash(0x73)])
+        .records(
+            GENERATION,
+            &admission,
+            &[first, second, hash(0x73)],
+            no_history()
+        )
         .is_ok());
     Ok(())
 }
@@ -922,7 +953,7 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
             form(&profile),
         )?;
         let admission = world.admit(planner.request())?;
-        let result = planner.records(GENERATION, &admission, &ADDRESSES);
+        let result = planner.records(GENERATION, &admission, &ADDRESSES, no_history());
         if fits {
             let quote = CommunityBudgetQuoteV1::from_canonical_cbor(result?.budget_quote())?;
             assert_eq!(
@@ -944,7 +975,9 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
     )?;
     let admission = world.admit(planner.request())?;
     assert_eq!(
-        planner.records(GENERATION, &admission, &ADDRESSES).err(),
+        planner
+            .records(GENERATION, &admission, &ADDRESSES, no_history())
+            .err(),
         Some(Error::BoundsExceeded)
     );
     // One State limit per roster row.
@@ -1023,7 +1056,7 @@ fn a_three_member_quote_has_the_hand_computed_bytes() -> TestResult {
     let mut world = World::new()?;
     let admission = world.admit(planner.request())?;
     let addresses: Vec<Hash> = (0..3_u8).map(|index| hash(0x80 + index)).collect();
-    let records = planner.records(GENERATION, &admission, &addresses)?;
+    let records = planner.records(GENERATION, &admission, &addresses, no_history())?;
     let quote = CommunityBudgetQuoteV1::from_canonical_cbor(records.budget_quote())?;
     assert_eq!(quote.as_input().maximum_required_bytes, 9_693);
     assert_eq!(9_693, 3 * (1_000 + 1_024 + 512 + 695));

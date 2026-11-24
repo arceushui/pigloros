@@ -20,6 +20,8 @@ mod metadata_authority;
 mod native_graph;
 mod observation;
 mod pass_planner;
+#[cfg(target_os = "linux")]
+mod pass_state;
 mod planner;
 mod private_hash;
 mod protection;
