@@ -367,6 +367,17 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual((case / "routes4").read_text(), "ip -4 route show table all\n")
         self.assertEqual((case / "routes6").read_text(), "ip -6 route show table all\n")
 
+    def test_the_sysctl_is_restored_to_its_boot_value_and_the_main_body_calls_it(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("2\n")
+        (self.base / "network").mkdir()
+        (self.base / "network/boot-sysctl").write_text("0\n")
+        self.shell.out(f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nrestore_fb_tunnels', COLLECTOR)
+        self.assertEqual(sysctl.read_text(), "0\n")
+        # The main body restores right after the last case and before `complete`.
+        body = COLLECTOR.read_text().split("for value in 0 1 2; do", 1)[1]
+        self.assertRegex(body, r"done\nrestore_fb_tunnels\n\nprintf 'complete")
+
     def test_a_failed_ip_command_fails_the_case_even_when_the_last_one_succeeds(self):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")
