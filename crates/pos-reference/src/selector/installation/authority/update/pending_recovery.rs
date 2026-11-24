@@ -93,6 +93,7 @@ impl PendingRecoveryRecords {
             .bootstrap()
             .installed()
             .artifact(InstallationObjectKind::PROVIDER_EXECUTABLE, digest)
+            .map_err(SelectorBoundaryError::from)
             .and_then(|artifact| {
                 bounded_digest(PositionalReader::new(artifact.file()), self.binary.length())
             })
@@ -131,6 +132,7 @@ impl PendingRecoveryRecords {
     ) -> Result<AuthenticatedRevocationAcknowledgement, SelectorBoundaryError> {
         self.previous
             .runtime_attestation_key()
+            .map_err(SelectorBoundaryError::from)
             .and_then(|key| {
                 VerifyingKey::from_bytes(&key.public_key)
                     .map(|verifying| (key.key_id.as_str(), verifying))
@@ -180,7 +182,11 @@ impl PendingRecoveryRecords {
             &self.recovery_file,
             &self.recovery_bytes,
         )
-        .and_then(InstalledSelectorState::authenticate_bootstrap)
+        .and_then(|state| {
+            state
+                .authenticate_bootstrap()
+                .map_err(SelectorBoundaryError::from)
+        })
     }
 }
 
@@ -280,6 +286,7 @@ impl VerifiedPendingRecovery {
                 .and_then(|pending_update| {
                     admitted_provider_binary(&rebuilt.previous)
                         .map(|binary| (pending_update, binary))
+                        .map_err(SelectorBoundaryError::from)
                 })
                 .map(|(pending_update, binary)| Self {
                     sir1_digest: context.sir1_digest,
@@ -328,6 +335,7 @@ impl RebuiltRecovery {
                 InstalledSelectorState::open_recorded_at(root, recorded.previous.clone(), owner)
             })
             .and_then(InstalledSelectorState::authenticate_bootstrap)
+            .map_err(SelectorBoundaryError::from)
             .and_then(|previous| {
                 previous
                     .authenticate_successor(&recorded.next, &recorded.rcu1)
@@ -335,16 +343,19 @@ impl RebuiltRecovery {
             })
             .and_then(|(previous, revocation_update)| {
                 let previous_installation_digest = previous.installed().manifest().digest();
-                previous.admit_provider().and_then(|admitted| {
-                    PendingRecoveryBinding::rebind(&admitted, recorded.runtime).map(|binding| {
-                        Self {
-                            previous_installation_digest,
-                            revocation_update,
-                            binding,
-                            previous: admitted,
-                        }
+                previous
+                    .admit_provider()
+                    .map_err(SelectorBoundaryError::from)
+                    .and_then(|admitted| {
+                        PendingRecoveryBinding::rebind(&admitted, recorded.runtime).map(|binding| {
+                            Self {
+                                previous_installation_digest,
+                                revocation_update,
+                                binding,
+                                previous: admitted,
+                            }
+                        })
                     })
-                })
             })
     }
 }

@@ -259,9 +259,11 @@ impl AuthenticatedSelectorBootstrap {
             .and_then(|(next_manifest, next_policy, next_revocation)| {
                 next_revocation
                     .read_control(MANIFEST_LIMIT)
+                    .map_err(SelectorBoundaryError::from)
                     .and_then(|next_revocation_bytes| {
                         next_policy
                             .read_control(MANIFEST_LIMIT)
+                            .map_err(SelectorBoundaryError::from)
                             .and_then(|next_policy_bytes| {
                                 self.authenticate_update_records(
                                     &next_manifest,
@@ -295,6 +297,7 @@ impl AuthenticatedSelectorBootstrap {
                         InstallationObjectKind::ADMINISTRATOR_POLICY,
                         self.policy.policy_digest(),
                     )
+                    .map_err(SelectorBoundaryError::from)
                     .and_then(|current_policy| {
                         SandboxAdministratorPolicy::validate_revocation_successor(
                             &current_policy,
@@ -359,7 +362,10 @@ impl AuthenticatedSelectorBootstrap {
                     .root
                     .try_clone()
                     .map_err(map_io_to_boundary_failure)
-                    .and_then(|root| open_directory_chain(root, Path::new(kind.directory()), owner))
+                    .and_then(|root| {
+                        open_directory_chain(root, Path::new(kind.directory()), owner)
+                            .map_err(SelectorBoundaryError::from)
+                    })
                     .map(|directory| (object, owner, directory))
             })
             .and_then(|(object, owner, directory)| {
@@ -370,16 +376,19 @@ impl AuthenticatedSelectorBootstrap {
                     object.byte_length(),
                     owner,
                 )
+                .map_err(SelectorBoundaryError::from)
                 .map(|file| (object, file))
             })
             .and_then(|(object, file)| {
-                digest_complete_file(&file, object.byte_length()).and_then(|digest| {
-                    if digest == object.content_digest() {
-                        Ok(HeldInstallationArtifact { file, object })
-                    } else {
-                        Err(SelectorBoundaryError::ArtifactInvalid)
-                    }
-                })
+                digest_complete_file(&file, object.byte_length())
+                    .map_err(SelectorBoundaryError::from)
+                    .and_then(|digest| {
+                        if digest == object.content_digest() {
+                            Ok(HeldInstallationArtifact { file, object })
+                        } else {
+                            Err(SelectorBoundaryError::ArtifactInvalid)
+                        }
+                    })
             })
     }
 }

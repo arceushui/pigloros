@@ -67,7 +67,11 @@ pub(super) fn start_provider_runtime(
         .and_then(|deadline| terminate_stale_runtimes(port, deadline))
         .and_then(|()| remove_stale_endpoints(admitted))
         .and_then(|()| ProviderRuntimeSlot::allocate(admitted))
-        .and_then(|slot| admitted_provider_binary(admitted).map(|binary| (slot, binary)))
+        .and_then(|slot| {
+            admitted_provider_binary(admitted)
+                .map_err(SelectorBoundaryError::from)
+                .map(|binary| (slot, binary))
+        })
         .and_then(|(slot, binary)| {
             start_and_admit(port, admitted, slot, &binary, executable_digest)
         })
@@ -187,7 +191,10 @@ fn remove_stale_endpoint(
         .and_then(|(relative, parent_relative, leaf)| {
             File::open(ancestry_root)
                 .map_err(io_error)
-                .and_then(|root| open_directory_chain(root, parent_relative, owner))
+                .and_then(|root| {
+                    open_directory_chain(root, parent_relative, owner)
+                        .map_err(SelectorBoundaryError::from)
+                })
                 .and_then(|parent| {
                     stale_socket(&parent, &leaf, owner).and_then(|stale| {
                         stale.map_or(Ok(()), |identity| {
