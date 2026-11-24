@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use pos_reference::evaluator_domain::ExecutionMode;
 use pos_reference::sandbox_provider_protocol::{
@@ -87,10 +87,6 @@ pub(super) struct CancelAnswer {
     agr1_digest: [u8; 32],
     scy1: Vec<u8>,
 }
-
-/// How often a cancellation looks again for the response its attempt is
-/// still signing.
-const SETTLE_POLL: Duration = Duration::from_millis(10);
 
 /// The SPE1 code of a cancellation the lifecycle refused: an attempt this
 /// runtime does not hold under the named AGR1 is unknown (`15`), one whose
@@ -275,26 +271,25 @@ impl ExecutePort {
     }
 
     /// The stored response of the attempt of `agr1_digest`, waiting until
-    /// `until` while the attempt is still active or its response pending.
+    /// `until` while the attempt is still active or its response pending:
+    /// the lifecycle wakes the wait when it settles.
     fn settled(
         &self,
         attempt_id: [u8; 16],
         agr1_digest: [u8; 32],
         until: Instant,
     ) -> Option<Arc<RetainedResponse>> {
-        self.runtime.block_on(async {
-            loop {
-                let current = self.lifecycle.terminal_response(attempt_id, agr1_digest);
-                match current {
-                    Ok(response) => return Some(response),
-                    Err(
-                        AttemptLifecycleError::AttemptActive
-                        | AttemptLifecycleError::ResponsePending,
-                    ) if Instant::now() < until => tokio::time::sleep(SETTLE_POLL).await,
-                    Err(_) => return None,
-                }
-            }
-        })
+        self.runtime
+            .block_on(async {
+                tokio::time::timeout_at(
+                    until.into(),
+                    self.lifecycle.settled_response(attempt_id, agr1_digest),
+                )
+                .await
+            })
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
     }
 
     /// Run the owned attempt admitted in `mode` to its end and retain its

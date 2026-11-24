@@ -396,9 +396,9 @@ impl Responder<'_> {
         // attempt this exchange no longer holds under its AGR1 (unknown or
         // mismatched), a provider bug that stores nothing. No response
         // exists to write: nothing is emitted (R9 §5).
-        if let Ok(response) = response {
-            self.deliver(port, &stream, identity, &response, true);
-        }
+        response
+            .inspect(|response| self.deliver(port, &stream, identity, response, true))
+            .ok();
     }
 
     /// Write the stored full response (ADR-069 §4), less the AGR1 this

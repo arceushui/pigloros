@@ -225,13 +225,17 @@ mod served {
     use pos_reference::provider_admission::test_support::StagedInstallation;
     use pos_reference::sandbox_provider_protocol::{
         AdmissionGrant, RequestAuthority, SandboxCancelRequest, SandboxCancelResponse,
-        SandboxCancellationResult, SandboxExecuteRequest, SandboxProviderError,
-        SandboxProviderErrorCode as Code, SandboxProviderResult, SandboxReconcileRequest,
+        SandboxCancellationResult, SandboxDescribeResponse, SandboxExecuteRequest,
+        SandboxProviderError, SandboxProviderErrorCode as Code, SandboxProviderResult,
+        SandboxReconcileRequest,
     };
 
     use super::super::{transfer_output, Transfer};
     use super::TestResult;
     use crate::provider_runtime::port::ExecutePort;
+    use crate::provider_runtime::serving::tests::{
+        describe, request, request_authority, Authority,
+    };
     use crate::provider_runtime::serving::{
         Admission, RequestIdentity, Responder, EXECUTE, FENCED, REVOKED,
     };
@@ -240,6 +244,7 @@ mod served {
     };
     use crate::provider_runtime::AdmissionState;
     use crate::{KeyFileRuntimeSigner, StagingLimits};
+    use ciborium::value::Value;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -333,6 +338,12 @@ mod served {
             refused(&answered(&responder, Admission::Answered, false)?)?,
             (Code::AdmissionBusy, id)
         );
+        // A handed-off source read to its end fails its own step first.
+        let stale = staged.changed_request(|request| request.request.policy_epoch += 1)?;
+        let handed = served(&[staged.evaluation(), &stale], false, |stream| {
+            responder.answer(stream, Admission::Answered, None);
+        })?;
+        assert_eq!(refused(&handed)?.0, Code::AuthorityMismatch);
         port(&open)?.ledger.close_for_reconciliation();
         assert_eq!(
             refused(&answered(&responder, Admission::Answered, false)?)?,
@@ -638,6 +649,166 @@ mod served {
         Ok(())
     }
 
+    /// Another operation on the execute socket is answered by its own
+    /// rules once its request ends: an SCQ1 by the port, `15` for an
+    /// attempt it does not hold and SCY1 `0` for a terminal one, an SDQ1 by
+    /// its SDY1, and a request of another authority by its step 6 refusal.
+    #[test]
+    fn the_port_answers_every_other_operation_on_the_execute_socket() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::the_port_answers_every_other_operation_on_the_execute_socket",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 4);
+        let port = port(&open)?;
+        let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+        let authority = Authority {
+            apt1: execute.request.apt1_digest,
+            epoch: execute.request.policy_epoch,
+        };
+        let ask = |record: &[u8]| -> TestResult<Vec<Vec<u8>>> {
+            let (server, mut peer) = UnixStream::pair()?;
+            peer.set_read_timeout(Some(TIMEOUT))?;
+            peer.write_all(&framed(&[record])?)?;
+            peer.shutdown(std::net::Shutdown::Write)?;
+            responder.answer(server, Admission::Answered, None);
+            read_frames(&mut peer)
+        };
+        let cancel_record = |attempt: [u8; 16], agr1: [u8; 32], authority| {
+            request(
+                "SCQ1",
+                1,
+                vec![
+                    request_authority([8; 16], authority),
+                    Value::Bytes(attempt.to_vec()),
+                    Value::Bytes(agr1.to_vec()),
+                ],
+                false,
+            )
+        };
+        assert_eq!(
+            refused(&ask(&cancel_record([9; 16], [10; 32], authority)?)?)?.0,
+            Code::UnknownAttempt
+        );
+        let stored = port
+            .lifecycle
+            .completed_for_test()
+            .map_err(|error| error.to_string())?;
+        let attempt = identity_of(&stored)?.attempt_id.ok_or("no attempt")?;
+        let answered = ask(&cancel_record(attempt, stored.agr1_digest(), authority)?)?;
+        let [scy1] = &answered[..] else {
+            return Err("one SCY1".into());
+        };
+        let scy1 = SandboxCancelResponse::from_canonical_cbor(scy1)?;
+        scy1.verify_signature(responder.key().key())?;
+        assert_eq!(scy1.result, SandboxCancellationResult::AlreadyTerminal);
+        let described = ask(&describe([4; 16], authority)?)?;
+        let [description] = &described[..] else {
+            return Err("one SDY1".into());
+        };
+        SandboxDescribeResponse::from_canonical_cbor(description)?;
+        let other = Authority {
+            apt1: [0x55; 32],
+            ..authority
+        };
+        assert_eq!(
+            refused(&ask(&cancel_record([9; 16], [10; 32], other)?)?)?.0,
+            Code::AuthorityMismatch
+        );
+        drop(staged);
+        Ok(())
+    }
+
+    /// Refusals of a charged source after its read: another authority at
+    /// step 6, a staging file that cannot be created (`11`), an AGR1 write
+    /// that failed (nothing more, and no attempt remains), and a request ID
+    /// another attempt claimed with other bytes (`16`).
+    #[test]
+    fn a_charged_source_is_refused_at_the_step_that_fails() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::a_charged_source_is_refused_at_the_step_that_fails",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let (tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 4);
+        let port = port(&open)?;
+        let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+        let id = Some(execute.request.request_id);
+        let answered = |source: &[&[u8]], granted| {
+            served(source, granted, |stream| {
+                responder.answer(stream, Admission::Answered, None);
+            })
+        };
+        let stale = staged.changed_request(|request| request.request.policy_epoch += 1)?;
+        assert_eq!(
+            refused(&answered(&[staged.evaluation(), &stale], false)?)?,
+            (Code::AuthorityMismatch, id)
+        );
+        // Step S: an entry already at the staging name is never adopted.
+        let name = execute
+            .attempt_id
+            .iter()
+            .fold(String::new(), |mut name, byte| {
+                use std::fmt::Write as _;
+                write!(name, "{byte:02x}").ok();
+                name
+            });
+        let planted = tree.staging().join(name);
+        std::fs::write(&planted, b"")?;
+        let source = [staged.evaluation(), staged.request()];
+        assert_eq!(
+            refused(&answered(&source, false)?)?,
+            (Code::SandboxUnavailable, id)
+        );
+        std::fs::remove_file(&planted)?;
+        // Step W: the AGR1 write fails, and nothing follows it.
+        let (server, peer) = UnixStream::pair()?;
+        (&peer).write_all(&framed(&source)?)?;
+        peer.shutdown(std::net::Shutdown::Read)?;
+        responder.answer(server, Admission::Answered, None);
+        assert!(matches!(
+            port.runtime.block_on(
+                port.lifecycle
+                    .join(execute.attempt_id, execute.request_digest)
+            ),
+            Ok(None)
+        ));
+        drop(peer);
+        // Step A: another exchange claimed this request ID with other
+        // bytes, under another attempt: the claim refuses it.
+        port.lifecycle
+            .failed_granted(
+                &pos_reference::provider_admission::execution::FailedInput::fixture(
+                    execute.request.request_id,
+                    [0x42; 32],
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            refused(&answered(&source, false)?)?,
+            (Code::RequestIdentityConflict, id)
+        );
+        drop(staged);
+        Ok(())
+    }
+
     /// The frames of a whole response read from `peer` to its EOF.
     fn read_frames(peer: &mut UnixStream) -> TestResult<Vec<Vec<u8>>> {
         let mut bytes = Vec::new();
@@ -858,7 +1029,7 @@ mod served {
                     (signer, key),
                 )
             });
-            std::thread::sleep(Duration::from_millis(100));
+            // Retained before or during the wait, the cancellation binds it.
             pending
                 .retain(&port.lifecycle)
                 .map_err(|error| error.to_string())?;

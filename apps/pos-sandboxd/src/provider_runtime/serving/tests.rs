@@ -51,9 +51,9 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The retained authority a request names.
 #[derive(Clone, Copy)]
-struct Authority {
-    apt1: [u8; 32],
-    epoch: u64,
+pub(super) struct Authority {
+    pub(super) apt1: [u8; 32],
+    pub(super) epoch: u64,
 }
 
 /// Stage SIC1 with an execution source, SPI1, its key and `/run/pigloros`.
@@ -102,7 +102,12 @@ fn unframe(response: &[u8]) -> TestResult<&[u8]> {
 
 /// A self-digested request record: `[[magic, version, fields..], digest]`,
 /// whose digest is flipped when `corrupt`.
-fn request(magic: &str, version: u64, fields: Vec<Value>, corrupt: bool) -> TestResult<Vec<u8>> {
+pub(super) fn request(
+    magic: &str,
+    version: u64,
+    fields: Vec<Value>,
+    corrupt: bool,
+) -> TestResult<Vec<u8>> {
     let mut prefix = vec![
         Value::Text(magic.to_owned()),
         Value::Integer(version.into()),
@@ -118,7 +123,7 @@ fn request(magic: &str, version: u64, fields: Vec<Value>, corrupt: bool) -> Test
     encode(&Value::Array(vec![unsigned, Value::Bytes(digest.to_vec())]))
 }
 
-fn request_authority(request_id: [u8; 16], authority: Authority) -> Value {
+pub(super) fn request_authority(request_id: [u8; 16], authority: Authority) -> Value {
     Value::Array(vec![
         Value::Bytes(request_id.to_vec()),
         Value::Bytes(authority.apt1.to_vec()),
@@ -127,7 +132,7 @@ fn request_authority(request_id: [u8; 16], authority: Authority) -> Value {
     ])
 }
 
-fn describe(request_id: [u8; 16], authority: Authority) -> TestResult<Vec<u8>> {
+pub(super) fn describe(request_id: [u8; 16], authority: Authority) -> TestResult<Vec<u8>> {
     request(
         "SDQ1",
         1,

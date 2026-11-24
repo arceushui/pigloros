@@ -32,6 +32,15 @@ use crate::{
     RetainedResponse, RuntimeAttestationSigner,
 };
 
+/// What a wait for an attempt's response names it by.
+#[derive(Clone, Copy)]
+enum Named {
+    /// An exact repeated execute's SPX1 digest.
+    Request([u8; 32]),
+    /// A cancellation's AGR1 digest.
+    Grant([u8; 32]),
+}
+
 /// What a repeated execute found.
 enum Joined {
     /// The response to replay; `None` for an attempt this runtime never
@@ -137,8 +146,36 @@ impl<I> AttemptLifecycle<I> {
         attempt_id: [u8; 16],
         request_digest: [u8; 32],
     ) -> Result<Option<Arc<RetainedResponse>>, AttemptLifecycleError> {
+        self.settled_as(attempt_id, Named::Request(request_digest))
+            .await
+    }
+
+    /// The response the attempt of `agr1_digest` settles on, waiting while
+    /// it is granted, runs or its response is still signed; the caller
+    /// bounds the wait. `Ok(None)` for an attempt this runtime never knew.
+    ///
+    /// # Errors
+    /// [`AttemptLifecycleError::UnknownAttempt`] once the attempt was
+    /// reconciled, [`AttemptLifecycleError::GrantMismatch`] for another
+    /// AGR1, also of a claim, which has none, and
+    /// [`AttemptLifecycleError::ResponseUnavailable`] when no response will
+    /// be signed.
+    pub async fn settled_response(
+        &self,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<Option<Arc<RetainedResponse>>, AttemptLifecycleError> {
+        self.settled_as(attempt_id, Named::Grant(agr1_digest)).await
+    }
+
+    /// Wait until the attempt `named` names is settled.
+    async fn settled_as(
+        &self,
+        attempt_id: [u8; 16],
+        named: Named,
+    ) -> Result<Option<Arc<RetainedResponse>>, AttemptLifecycleError> {
         loop {
-            let mut settled = match self.joined(attempt_id, request_digest)? {
+            let mut settled = match self.joined(attempt_id, named)? {
                 Joined::Ready(response) => return Ok(response),
                 Joined::Waiting(settled) => settled,
             };
@@ -147,12 +184,9 @@ impl<I> AttemptLifecycle<I> {
         }
     }
 
-    /// What a repeat of `attempt_id` finds now, under the attempts lock.
-    fn joined(
-        &self,
-        attempt_id: [u8; 16],
-        request_digest: [u8; 32],
-    ) -> Result<Joined, AttemptLifecycleError> {
+    /// What a wait for the attempt `named` names finds now, under the
+    /// attempts lock.
+    fn joined(&self, attempt_id: [u8; 16], named: Named) -> Result<Joined, AttemptLifecycleError> {
         match lock(&self.attempts).get(&attempt_id) {
             None => Ok(Joined::Ready(None)),
             Some(Slot::Reconciled { .. }) => Err(AttemptLifecycleError::UnknownAttempt),
@@ -161,7 +195,12 @@ impl<I> AttemptLifecycle<I> {
                 | Slot::Granted { request, .. }
                 | Slot::Running { request, .. }
                 | Slot::Ended { request, .. },
-            ) if *request != request_digest => Err(AttemptLifecycleError::RequestConflict),
+            ) if matches!(named, Named::Request(digest) if *request != digest) => {
+                Err(AttemptLifecycleError::RequestConflict)
+            }
+            Some(slot) if matches!(named, Named::Grant(digest) if slot.agr1_digest() != Some(digest)) => {
+                Err(AttemptLifecycleError::GrantMismatch)
+            }
             // A claim converts or is released, and a granted attempt is
             // admitted or ends: either replaces the slot, which wakes this.
             Some(Slot::Claimed { changed, .. } | Slot::Granted { changed, .. }) => {

@@ -976,3 +976,41 @@ fn a_delivered_response_is_never_reissued() -> TestResult {
     assert!(lifecycle.claim_delivery(ATTEMPT, &successor));
     Ok(())
 }
+
+/// A cancellation waits for the response its attempt settles on, by the
+/// attempt's AGR1: none for an attempt never known, a refusal for another
+/// AGR1, and while the response is pending the wait lasts until it is
+/// retained, which wakes it.
+#[tokio::test]
+async fn a_cancellation_waits_for_the_response_its_attempt_settles_on() -> TestResult {
+    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    assert!(lifecycle
+        .settled_response(ATTEMPT, [1; 32])
+        .await?
+        .is_none());
+    let pending = super::super::completed_pending(&lifecycle)?;
+    let digest = pending.agr1_digest;
+    assert!(matches!(
+        lifecycle.settled_response(ATTEMPT, [1; 32]).await,
+        Err(AttemptLifecycleError::GrantMismatch)
+    ));
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        lifecycle.settled_response(ATTEMPT, digest)
+    )
+    .await
+    .is_err());
+    let (waited, retained) = tokio::join!(lifecycle.settled_response(ATTEMPT, digest), async {
+        tokio::task::yield_now().await;
+        super::super::retain_pending(pending, &lifecycle)
+    });
+    let retained = retained?;
+    assert!(waited?.is_some_and(|waited| Arc::ptr_eq(&waited, &retained)));
+    // A reconciled attempt is unknown.
+    lifecycle.reconcile(&reconcile(digest))?;
+    assert!(matches!(
+        lifecycle.settled_response(ATTEMPT, digest).await,
+        Err(AttemptLifecycleError::UnknownAttempt)
+    ));
+    Ok(())
+}
