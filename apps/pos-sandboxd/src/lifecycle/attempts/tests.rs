@@ -3270,6 +3270,8 @@ mod cases {
                 changed: tokio::sync::watch::channel(false).0,
             };
             assert!(ended.start().is_none());
+            // A claim has no AGR1 yet.
+            assert_eq!(ended.agr1_digest(), None);
         }
     }
 }

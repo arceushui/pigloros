@@ -1667,11 +1667,9 @@ impl<I, R: RuntimeAttestationSigner + Sync> OwnedAttempt<'_, I, R> {
         // The cleanup returned, proved or not (R9 §4.6.6).
         let cleanup_finished_at = finished_at();
         let (progress, cleanup) = ended;
-        let cleaned = if cleanup.is_ok() {
-            Cleaned::Proved
-        } else {
-            Cleaned::Unproved
-        };
+        let cleaned = cleanup
+            .as_ref()
+            .map_or(Cleaned::Unproved, |_| Cleaned::Proved);
         if matches!(cleaned, Cleaned::Unproved) {
             run.claim.lifecycle.quarantine();
         }

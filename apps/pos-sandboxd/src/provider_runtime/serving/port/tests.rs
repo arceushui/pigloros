@@ -1207,16 +1207,23 @@ mod served {
     /// The one record a connection answers to `record`, sent whole and
     /// half-closed, answered by `serve`.
     fn asked(record: &[u8], serve: impl FnOnce(UnixStream) + Send) -> TestResult<Vec<Vec<u8>>> {
-        let (server, mut peer) = UnixStream::pair()?;
-        peer.set_read_timeout(Some(TIMEOUT))?;
-        peer.write_all(&framed(&[record])?)?;
-        peer.shutdown(std::net::Shutdown::Write)?;
+        let (server, mut peer) = sent(&framed(&[record])?)?;
         std::thread::scope(|scope| {
             let serving = scope.spawn(move || serve(server));
             let frames = read_frames(&mut peer);
             serving.join().map_err(|_| "serving panicked")?;
             frames
         })
+    }
+
+    /// A connected pair whose peer sent the `framed` request whole and
+    /// half-closed: the server end, then the peer.
+    fn sent(framed: &[u8]) -> TestResult<(UnixStream, UnixStream)> {
+        let (server, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(TIMEOUT))?;
+        peer.write_all(framed)?;
+        peer.shutdown(std::net::Shutdown::Write)?;
+        Ok((server, peer))
     }
 
     /// An SRY1 signing fault and a revocation after step 6, for
