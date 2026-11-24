@@ -381,7 +381,10 @@ The host must set `net.core.fb_tunnels_only_for_init_net` to at least 1
 accepts only the loopback and the attempt's veth end, and every unit's
 `PrivateNetwork=true` namespace, in every execution mode, must hold only `lo`
 and no route off `lo`. `deploy/sysctl.d/60-piglor-sandbox.conf` is the drop-in
-that sets it. The runtime reads the sysctl at startup, before it connects the
+that sets it; installing it is deployment's job, and nothing in this repository
+installs it yet. The #444 QEMU guest does not set the key either: the #444
+work wires the drop-in into the guest (`guest.nix`, a boot-sysctl expectation
+of 1, the pinned hashes) when this lands. The runtime reads the sysctl at startup, before it connects the
 bus, and exits without binding its sockets (admission closed) when the value
 is below 1 or cannot be read. After `ReadyV1`, the first kernel observation
 enters the unit's retained `ns/net` descriptor and reads its links and main

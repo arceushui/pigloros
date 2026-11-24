@@ -982,7 +982,9 @@ fn member(cgroup: BorrowedFd<'_>, main_pid: u32) -> Result<(), KernelObservation
 /// Derive the kernel observation of the unit by the R9 §4.4 procedure.
 ///
 /// `network` checks that the unit's network namespace holds only `lo` (R14
-/// N12), on the descriptor read with the namespace identities. `unit` reads the manager's `MainPID` and `InvocationID`; it is called
+/// N12), on the descriptor read with the namespace identities.
+///
+/// `unit` reads the manager's `MainPID` and `InvocationID`; it is called
 /// before the process is anchored and again after. Every per-process fact is
 /// read through the anchored procfs directory while the pidfd shows the
 /// process alive, so none can describe a later process with a reused PID.

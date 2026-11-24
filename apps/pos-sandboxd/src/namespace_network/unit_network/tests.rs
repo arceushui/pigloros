@@ -268,16 +268,32 @@ fn a_descriptor_that_is_no_namespace_is_a_transport_failure() -> TestResult {
 }
 
 #[test]
-fn the_calling_threads_namespace_is_read_through_a_new_route_session() {
-    // The host namespace of a test holds an `lo` whatever else it holds; a
-    // host whose routes the provider cannot represent fails the read.
-    match read_unit_view() {
-        Ok((links, _)) => assert!(links.iter().any(|link| link.name == "lo")),
-        Err(error) => assert!(
-            matches!(error, NetlinkError::Io(_) | NetlinkError::Unrepresentable),
-            "{error:?}"
-        ),
-    }
+fn a_route_session_opens_and_the_view_is_read_through_it() -> TestResult {
+    assert!(open_route().is_ok());
+    let opened = std::cell::Cell::new(0);
+    let sessions = || {
+        opened.set(opened.get() + 1);
+        let transport = Scripted(RefCell::new(VecDeque::from([
+            dump(1, vec![loopback()]),
+            dump(2, Vec::new()),
+        ])));
+        Ok(NetlinkSession::new(transport))
+    };
+    let (links, routes) = read_through(sessions)?;
+    assert_eq!(links, [observed_link(1, "lo", LinkKind::Loopback)]);
+    assert!(routes.is_empty());
+    assert_eq!(opened.get(), 1);
+    // A session that cannot open ends the read at once.
+    let failing = || -> Result<NetlinkSession<Scripted>, NetlinkError> {
+        opened.set(opened.get() + 1);
+        Err(NetlinkError::Io(Errno::MFILE))
+    };
+    assert!(matches!(
+        read_through(failing),
+        Err(NetlinkError::Io(Errno::MFILE))
+    ));
+    assert_eq!(opened.get(), 2);
+    Ok(())
 }
 
 #[test]

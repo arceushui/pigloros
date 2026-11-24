@@ -16,6 +16,12 @@
 //! every new namespace down devices such as `sit0` and `tunl0`. The startup
 //! probe [`fb_tunnels_isolated`] closes admission unless the sysctl is at
 //! least 1.
+//!
+//! The check has no deadline of its own. A stalled netlink exchange waits at
+//! most `RECEIVE_TIMEOUT` (10 s) per receive and then fails as
+//! [`UnitNetworkError::Transport`]. At the release recheck the barrier's
+//! remaining time turns that into an expiry; at the first observation
+//! ADR-069 R14 N13 accepts the stall as a quarantine.
 
 use std::fs;
 use std::os::fd::BorrowedFd;
@@ -24,7 +30,8 @@ use std::path::Path;
 use rustix::io::Errno;
 
 use super::netlink::{
-    consistent, in_namespace, links, NetlinkError, NetlinkSession, NetlinkTransport, ROUTE,
+    consistent, in_namespace, links, NetlinkError, NetlinkSession, NetlinkSocket, NetlinkTransport,
+    ROUTE,
 };
 use super::{route, LinkKind, ObservedLink, ObservedRoute};
 
@@ -76,7 +83,19 @@ type UnitView = (Vec<ObservedLink>, Vec<ObservedRoute>);
 
 /// Read the calling thread's namespace, again while a dump is torn.
 fn read_unit_view() -> Result<UnitView, NetlinkError> {
-    consistent(|| NetlinkSession::open(ROUTE).and_then(|session| unit_view(&session)))
+    read_through(open_route)
+}
+
+/// A new route session in the calling thread's namespace.
+fn open_route() -> Result<NetlinkSession<NetlinkSocket>, NetlinkError> {
+    NetlinkSession::open(ROUTE)
+}
+
+/// The unit view of the sessions `open` yields, one per attempt at a dump.
+fn read_through<T: NetlinkTransport>(
+    mut open: impl FnMut() -> Result<NetlinkSession<T>, NetlinkError>,
+) -> Result<UnitView, NetlinkError> {
+    consistent(|| open().and_then(|session| unit_view(&session)))
 }
 
 /// The links, then the main-table routes of both families, of the session's

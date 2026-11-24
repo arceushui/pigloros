@@ -506,6 +506,20 @@ fn unrepresentable_links_and_foreign_replies_fail() {
 }
 
 #[test]
+fn a_thread_that_cannot_be_spawned_is_an_io_failure() {
+    let os = std::io::Error::from_raw_os_error(Errno::NOMEM.raw_os_error());
+    assert!(matches!(
+        NetlinkError::from(os),
+        NetlinkError::Io(errno) if errno == Errno::NOMEM
+    ));
+    let other = std::io::Error::other("no thread");
+    assert!(matches!(
+        NetlinkError::from(other),
+        NetlinkError::Io(errno) if errno == Errno::AGAIN
+    ));
+}
+
+#[test]
 fn a_descriptor_that_is_no_namespace_is_not_entered() -> TestResult {
     let null = File::open("/dev/null")?;
     assert!(matches!(

@@ -173,7 +173,9 @@ fn netlink_network(
 /// probe that `network` builds for the SPI1 attempt range and egress probe.
 /// `isolated` is the fallback-tunnel sysctl probe (ADR-069 R14 N12): the
 /// unit network check is sound only when it holds, so a host where it does
-/// not is refused first, before anything is opened. The bus is connected, then the recovery owner opened, then the staging
+/// not is refused first, before anything is opened.
+///
+/// The bus is connected, then the recovery owner opened, then the staging
 /// directory and the capture store opened or created; any failure refuses
 /// the whole step.
 pub(super) fn prepare_with<N, P, E>(
