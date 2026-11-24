@@ -422,3 +422,28 @@ fn envelope_refuses_missing_tags_bad_nonces_and_oversized_nested_records() -> Te
         },
     )
 }
+
+#[test]
+fn the_nonce_free_length_is_the_encoded_length_at_every_head_width() -> TestResult {
+    // The COE1 size the pass planner quotes is the real encoding's, at the
+    // 16-byte minimum, at each ciphertext length-head boundary and at the
+    // cap; the lengths the constructor refuses are refused.
+    nonce_properties::check(any::<[u8; 12]>(), |nonce| {
+        let header = Header::new(execution_input()?)?;
+        for length in [16, 23, 24, 255, 256, 65_535, 65_536, MAX_PLAINTEXT + 16] {
+            let ciphertext = vec![0x42; length];
+            let envelope = Envelope::new(Header::new(execution_input()?)?, nonce, &ciphertext)?;
+            assert_eq!(
+                Envelope::encoded_len(&header, length)?,
+                envelope.to_canonical_cbor().len() as u64
+            );
+        }
+        for length in [15, MAX_PLAINTEXT + 17] {
+            assert_eq!(
+                Envelope::encoded_len(&header, length).err(),
+                Some(Error::BoundsExceeded)
+            );
+        }
+        Ok(())
+    })
+}

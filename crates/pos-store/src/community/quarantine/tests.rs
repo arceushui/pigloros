@@ -212,6 +212,14 @@ fn an_active_reason_persists_only_its_outcome() -> TestResult {
     let mut case = QuarantineCase::new(&SEAL, Revocation::Artifact)?;
     let first = set_reason(&mut case, claim(Basis::Artifact))??;
     let keys = domain(&case).keys.len();
+    // R13.1(5): the applied pair spends its two targets of F_q.
+    let pairs = |case: &QuarantineCase| {
+        domain(case)
+            .erasure_contexts
+            .get(&target())
+            .map(|context| context.active_pairs)
+    };
+    assert_eq!(pairs(&case), Some(1));
     let again = [0x41; 16];
     let receipt = set_reason(
         &mut case,
@@ -222,6 +230,8 @@ fn an_active_reason_persists_only_its_outcome() -> TestResult {
         },
     )??;
     assert!(receipt.disposition() == Disposition::AlreadyQuarantined);
+    // An active reason spends nothing (journal 23094).
+    assert_eq!(pairs(&case), Some(1));
     let after = domain(&case);
     assert_eq!(after.keys.len(), keys + 1);
     let ledger = after
@@ -281,6 +291,14 @@ fn a_new_reason_appends_the_set_union() -> TestResult {
         .ok_or("no index entry")?;
     assert_eq!(ledger.ordinal, 2);
     assert_eq!(ledger.head, receipt.selected_ledger_digest());
+    // R13.1(5): the appended pair spends two more targets of F_q.
+    assert_eq!(
+        domain(&case)
+            .erasure_contexts
+            .get(&target())
+            .map(|context| context.active_pairs),
+        Some(2)
+    );
     assert_eq!(ledger.evidence_not_after_micros, HORIZON - 1);
     let codes: Vec<u8> = ledger.reasons.iter().map(|row| row.reason.code()).collect();
     assert_eq!(codes, [2, 3]);

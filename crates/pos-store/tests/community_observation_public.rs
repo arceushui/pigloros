@@ -18,9 +18,10 @@ use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityEventSourceV1, CommunityInputIndexV1,
     CommunityLifecycleErrorV1 as Error, CommunityNativeNodeKindV1, CommunityNativeNodeV1,
-    CommunityObservationSourceV1, CommunityObservationValueV1, CommunityProfileMemberV1,
-    CommunityProfileRetentionV1, CommunityReducerBindingV1, CommunitySourceCatalogueV1,
-    CommunitySourceSchemaRuleV1, CommunityTypedInputRefV1,
+    CommunityObservationSourceV1, CommunityObservationValueV1, CommunityPassGraphTermsV1,
+    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityProtectionSizesV1,
+    CommunityReducerBindingV1, CommunitySourceCatalogueV1, CommunitySourceSchemaRuleV1,
+    CommunityTypedInputRefV1,
 };
 use pos_core::store::{EventStore, SeqRange};
 use pos_core::{
@@ -881,7 +882,9 @@ fn an_empty_fork_child_names_its_fork_chain_root_genesis() -> TestResult {
 fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> TestResult {
     // Revision 10, R10.3(3) and (5): the Observation row's nodes, edges and
     // bytes, derived from the decoded stage-2 records minted at the widest
-    // producer ordinal, not from the row formula.
+    // producer ordinal, not from the row formula. Revision 11, R11.1(4),
+    // R11.2(4), R11.3(3) and R11.4(2): its closure records, cohort keys and
+    // scope rows. Revision 13, R13.1(3): its ARD1 rows.
     let installed = Installed::new(vec![RULE])?;
     for events in [0, 1, 300] {
         let history = history(events, EVENT_TYPE, None)?;
@@ -894,19 +897,21 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
         widest.producer_ordinal = u64::MAX;
         let records = sources.finish(widest)?;
         let observation = CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?;
+        assert_eq!(observation.as_input().producer_ordinal, u64::MAX);
+        // Each node's input count, from its decoded input index.
+        let inputs = |node: &CommunityNativeNodeV1<'_>| match node.as_input().input_index {
+            CommunityInputIndexV1::Direct(inputs) => inputs.len() as u64,
+            CommunityInputIndexV1::Grouped { groups, .. } => groups.len() as u64,
+            CommunityInputIndexV1::Empty => 0,
+        };
         let mut nodes = 1;
-        let mut edges = 0;
-        match observation.as_input().input_index {
-            CommunityInputIndexV1::Direct(inputs) => edges += inputs.len(),
-            CommunityInputIndexV1::Grouped { groups, .. } => edges += groups.len(),
-            CommunityInputIndexV1::Empty => {}
-        }
+        let mut edges = inputs(&observation);
+        let mut leaves = Vec::new();
         for (_group, node) in &records.input_groups {
             let node = CommunityNativeNodeV1::from_canonical_cbor(node)?;
             nodes += 1;
-            if let CommunityInputIndexV1::Direct(inputs) = node.as_input().input_index {
-                edges += inputs.len();
-            }
+            edges += inputs(&node);
+            leaves.push(inputs(&node));
         }
         let bytes = sources.event_sources().map(<[u8]>::len).sum::<usize>()
             + sources.observation_value().len()
@@ -917,17 +922,48 @@ fn quote_terms_measure_the_minted_records_at_the_widest_producer_ordinal() -> Te
                 .map(|(group, node)| group.len() + node.len())
                 .sum::<usize>()
             + records.observation_node.len();
-        let terms = sources.quote_terms()?;
-        assert_eq!(terms.terms.nodes, nodes);
-        assert_eq!(terms.terms.edges, edges as u64);
-        assert_eq!(terms.terms.bytes, bytes as u64);
-        assert_eq!(terms.node_ordinal, observation.as_input().node_ordinal);
-        assert_eq!(
-            CommunityNativeNodeV1::from_canonical_cbor(&records.observation_node)?
-                .as_input()
-                .producer_ordinal,
-            u64::MAX
-        );
+        let sizes = CommunityProtectionSizesV1::new(history.root, GENERATION)?;
+        for retain in [false, true] {
+            let quote = sources.quote_terms(&sizes, |_| retain)?;
+            let terms = quote.observation;
+            assert_eq!(terms.terms.nodes, nodes);
+            assert_eq!(terms.terms.edges, edges);
+            assert_eq!(terms.terms.bytes, bytes as u64);
+            assert_eq!(terms.node_ordinal, observation.as_input().node_ordinal);
+            // Closure records: new CES1s and the COV1 with no children, the
+            // Observation CPN1 → COV1 and its inputs (a genesis ref has no
+            // registration), and each group pair → its CIB1 and leaves.
+            let mut expected = CommunityPassGraphTermsV1::default();
+            if !retain {
+                for source in sources.event_sources() {
+                    expected = expected.plus(sizes.record(source.len() as u64, 0));
+                }
+            }
+            expected = expected.plus(sizes.record(sources.observation_value().len() as u64, 0));
+            let registered = if events == 0 { 0 } else { inputs(&observation) };
+            expected =
+                expected.plus(sizes.record(records.observation_node.len() as u64, 1 + registered));
+            for ((group, node), leaves) in records.input_groups.iter().zip(&leaves) {
+                expected = expected
+                    .plus(sizes.record(group.len() as u64, 0))
+                    .plus(sizes.record(node.len() as u64, 1 + leaves));
+            }
+            expected.keys = 1;
+            assert_eq!(quote.graph, expected);
+            assert_eq!(quote.keys, 2);
+            // Revision 13, R13.1(3) and R13.3: the ARD1 rows are the new
+            // CES1s, the COV1, the Observation CPN1, each CIB1 and its
+            // InputIndex CPN1, and the CPE1: E + 3 + 2g when minted fresh.
+            let fresh = if retain { 0 } else { events as u64 };
+            let groups = records.input_groups.len() as u64;
+            assert_eq!(quote.erasure_rows, fresh + 3 + 2 * groups);
+            let scope: Vec<_> = quote.scope.iter().map(|row| row.source_timeline).collect();
+            if events == 0 {
+                assert!(scope.is_empty());
+            } else {
+                assert_eq!(scope, [history.root]);
+            }
+        }
     }
     Ok(())
 }

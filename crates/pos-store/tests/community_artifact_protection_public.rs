@@ -480,3 +480,64 @@ fn protection_refuses_cohorts_it_cannot_serve() -> TestResult {
     }
     Ok(())
 }
+
+/// ADR-129 revision 11, R11.3(2) and I109: the quoted COW1 and ARD1 sizes
+/// equal the sizes the real protector writes for a pass, a materialization
+/// and an initialization parent alike. Every protected record's COH1 names
+/// its own `ProtectArtifacts` control suboperation (§3), whatever its parent,
+/// so a template headed by the parent's CPK1 would fail this test.
+#[test]
+fn quoted_protection_sizes_equal_real_protected_records_for_every_parent() -> TestResult {
+    use pos_core::community_lifecycle::{CommunityPassKeyV1, CommunityProtectionSizesV1};
+    let sizes = CommunityProtectionSizesV1::new(timeline(), GENERATION)?;
+    let parents = [
+        Operation::Pass(CommunityPassKeyV1::new(timeline(), GENERATION, u64::MAX)?),
+        Operation::Control([0x4d; 16]),
+        Operation::Initialization([3; 16]),
+    ];
+    // 2,048 strictly ordered children, the ARD1 and CAR1 maximum.
+    let children: Vec<ArtifactChildEdgeV1> = (0..2048_u16)
+        .map(|index| {
+            let mut digest = [0x20; 32];
+            digest[..2].copy_from_slice(&index.to_be_bytes());
+            ArtifactChildEdgeV1 {
+                artifact_class: Class::TimelineReplay,
+                artifact_digest: Hash::from_bytes(digest),
+                registration_address: Hash::from_bytes(digest),
+                required: true,
+            }
+        })
+        .collect();
+    for parent in parents {
+        for (purpose, kind) in [
+            (Purpose::ExecutionState, Kind::StateContent),
+            (Purpose::ExecutionState, Kind::ExecutionProvenance),
+            (Purpose::ReplayEvidence, Kind::ReplayReceiptOrRoot),
+            (Purpose::PresentationTrace, Kind::TraceAnnotation),
+        ] {
+            let mut cohort = cohort(purpose, kind)?;
+            cohort.parent_operation = parent;
+            cohort.evidence_not_after_micros = u64::MAX / 2;
+            let mut protector = CommunityArtifactProtectorV1::provision(&SEAL, cohort)?;
+            // The R11.8 I109 ranges, where a CBOR length head widens.
+            for plaintext in [0_usize, 1, 1 << 20, 3 << 20] {
+                for count in [0, 1, 2048] {
+                    let record = protector.protect(
+                        kind,
+                        &vec![7; plaintext],
+                        evidence(&children[..count]),
+                    )?;
+                    assert_eq!(
+                        sizes.object_len(plaintext as u64, count as u64),
+                        record.object().len() as u64
+                    );
+                    assert_eq!(
+                        sizes.registration_len(count as u64),
+                        record.registration().canonical_cbor().len() as u64
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}

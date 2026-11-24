@@ -300,11 +300,11 @@ fn graph_counts_have_profile_one_maxima_and_shared_counts_are_exact_u64() -> Tes
         let mut input = input(&NODE, false, ROOT_FORMS[0])?;
         input.graph_counts = graph_counts(values);
         let encoded = Bundle::new(input)?.to_canonical_cbor();
-        assert!(
+        assert_eq!(
             Bundle::from_canonical_cbor(&encoded)?
                 .as_input()
-                .graph_counts
-                == graph_counts(values)
+                .graph_counts,
+            graph_counts(values)
         );
         values[index] += 1;
         input.graph_counts = graph_counts(values);
