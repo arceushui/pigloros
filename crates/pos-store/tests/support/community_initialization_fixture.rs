@@ -19,12 +19,16 @@ use pos_core::community_lifecycle::{
     CommunityActorRowV1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
     CommunityArtifactPurposeV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
     CommunityDurableBackendV1, CommunityDurableProfileInputV1, CommunityDurableProfileV1,
-    CommunityInitializationRequestV1, CommunityInitializationSourceV1, CommunityKeyIntentInputV1,
-    CommunityKeyIntentV1, CommunityMemberBindingV1, CommunityMemberSlotsV1,
-    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityRecordKindsV1,
-    CommunityStateContentV1,
+    CommunityGenerationAdmissionV1, CommunityInitializationRequestV1,
+    CommunityInitializationSourceV1, CommunityKeyIntentInputV1, CommunityKeyIntentV1,
+    CommunityMemberBindingV1, CommunityMemberSlotsV1, CommunityProfileMemberV1,
+    CommunityProfileRetentionV1, CommunityRecordKindsV1, CommunityStateContentV1,
 };
-use pos_core::community_lifecycle::{CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1};
+use pos_core::community_lifecycle::{
+    CommunityLifecycleErrorV1 as LifecycleError, CommunityMetadataPolicyInputV1,
+    CommunityMetadataPolicyV1, CommunityPluginHostErrorV1, CommunityQuarantineReasonV1,
+    RevocationBasisV1,
+};
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
     ForkAuthenticationPolicyV1,
@@ -44,22 +48,29 @@ use pos_core::{
 use pos_core::{TimelineMeta, TimelineMode, WallTime};
 use pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1;
 use pos_store::community::{
-    metadata_resource, CommunityAdministrativeRequestV1, CommunityArtifactProtectorV1,
-    CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1, CommunityBootstrapRequestV1,
-    CommunityDomainBindingV1, CommunityDomainOpenedV1, CommunityInitializationGraphInputV1,
+    metadata_resource, CommunityAdministrativeOperationV1, CommunityAdministrativeRequestV1,
+    CommunityArtifactProtectorV1, CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1,
+    CommunityBootstrapRequestV1, CommunityDomainBindingV1, CommunityDomainOpenedV1,
+    CommunityInitializationContextV1, CommunityInitializationGraphInputV1,
     CommunityInitializationGraphV1, CommunityInitializationInstallationV1,
     CommunityInitializationMemberV1, CommunityInitializationPlannerV1,
-    CommunityInitializationRecordsV1, CommunityInitializeFormV1, CommunityInitializerOwnerV1,
-    CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
-    CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1, CommunityProtectionCohortV1,
-    MemoryCommunityDomainV1,
+    CommunityInitializationReceiptV1, CommunityInitializationRecordsV1, CommunityInitializeCallV1,
+    CommunityInitializeFormV1, CommunityInitializerOwnerV1, CommunityLifecycleAuthorityInputV1,
+    CommunityLifecycleAuthorityV1, CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
+    CommunityPreExecutionFailureInputV1, CommunityPreExecutionFailureV1,
+    CommunityPreExecutionTrustV1, CommunityProtectionCohortV1, CommunityQuarantineContextV1,
+    CommunitySetReasonCallV1, MemoryCommunityDomainV1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::MemoryTrustedClockAuthorityV1;
 use ulid::Ulid;
 use zeroize::Zeroizing;
 
-use crate::plugin_trust_registry_fixtures::{release_one, Harness, ManifestSpec};
+use crate::plugin_trust_registry_fixtures::{
+    release_one, spec, tps_after, Env, Harness, ManifestSpec, Material, Spec, TpsSpec,
+};
+use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 
 /// A fallible fixture step.
 pub type Fallible<T> = Result<T, Box<dyn StdError>>;
@@ -276,6 +287,7 @@ impl Roster {
                     SCHEMA,
                     hash(6),
                     self.initializer(),
+                    10,
                 )?)
             })
             .collect()
@@ -315,6 +327,7 @@ pub fn profile_until<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: HORIZON,
                 metadata_not_after_micros: HORIZON,
+                recording_not_after_micros: HORIZON,
             },
         },
     )?)
@@ -629,6 +642,103 @@ pub fn trusted_store(admit: bool) -> Fallible<(MemoryStore, Harness)> {
     Ok((store, harness))
 }
 
+/// How the scope's adopted trust policy revokes the admitted `release_one`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Revocation {
+    /// No revocation: the release is still trusted.
+    None,
+    /// PRV1 revokes the release digest.
+    Artifact,
+    /// PRV1 revokes the publisher key epoch 1.
+    PublisherKey,
+    /// The operator-signed TPS1 alone denies the release digest.
+    OperatorDenial,
+}
+
+/// A harness store whose `scope` has `release_one` admitted and revoked.
+///
+/// For a revocation, an adopted policy revokes it at UTC 51, Tick 6. The
+/// policy material the trust gate evaluates is returned with it (the
+/// genesis material for [`Revocation::None`]). Keep the harness alive while
+/// the store is used.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
+pub fn revoked_store(revocation: Revocation) -> Fallible<(MemoryStore, Harness, Material)> {
+    let (mut harness, material) = revoked_harness(revocation)?;
+    let store = std::mem::replace(&mut harness.store, MemoryStore::new());
+    Ok((store, harness, material))
+}
+
+/// A second scope `other` in `harness`'s store whose adopted policy
+/// revokes `release_one` by artifact, with its environment and material.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
+pub fn foreign_scope(harness: &mut Harness) -> Fallible<(Env, Material)> {
+    let installed = std::mem::replace(&mut harness.env, Env::new("other")?);
+    PluginTrustPolicyRegistryV1::provision(
+        &mut harness.store,
+        &harness.env.anchor,
+        &harness.env.genesis_tps1,
+    )?;
+    let genesis = harness.env.genesis()?;
+    harness.admit(&genesis, &release_one(), 2)??;
+    let material = harness.env.material(
+        &Spec {
+            epochs: 2,
+            revoked_artifacts: vec![release_one().release_digest()?],
+            ..Spec::default().at(51, 6)
+        },
+        &tps_after(&genesis),
+    )?;
+    harness.advance(&material)??;
+    let foreign = std::mem::replace(&mut harness.env, installed);
+    Ok((foreign, material))
+}
+
+fn revoked_harness(revocation: Revocation) -> Fallible<(Harness, Material)> {
+    let mut harness = Harness::new()?;
+    let genesis = harness.env.genesis()?;
+    harness.admit(&genesis, &release_one(), 1)??;
+    let release = release_one().release_digest()?;
+    let adopted = match revocation {
+        Revocation::None => None,
+        Revocation::Artifact => Some((
+            Spec {
+                epochs: 2,
+                revoked_artifacts: vec![release],
+                ..Spec::default().at(51, 6)
+            },
+            tps_after(&genesis),
+        )),
+        Revocation::PublisherKey => Some((
+            Spec {
+                epochs: 2,
+                revoked_publisher_epochs: vec![1],
+                ..Spec::default().at(51, 6)
+            },
+            tps_after(&genesis),
+        )),
+        Revocation::OperatorDenial => Some((
+            spec(1, 2).at(51, 6),
+            TpsSpec {
+                extra_artifacts: vec![release],
+                ..tps_after(&genesis)
+            },
+        )),
+    };
+    let material = match adopted {
+        None => genesis,
+        Some((chain, tps)) => {
+            let material = harness.env.material(&chain, &tps)?;
+            harness.advance(&material)??;
+            material
+        }
+    };
+    Ok((harness, material))
+}
+
 /// The protected initial graph of `records` for `generation`, minted as
 /// the 2c-3 commit will: one `ExecutionState` cohort whose scope cover is
 /// the CSB1.
@@ -913,7 +1023,49 @@ impl Bootstrapped {
         timeline: bool,
         metadata_horizon: u64,
     ) -> Fallible<Self> {
-        let (mut store, harness) = trusted_store(admit)?;
+        let (store, harness) = trusted_store(admit)?;
+        Self::over(seal, roster, store, harness, timeline, metadata_horizon)
+    }
+
+    /// [`Bootstrapped::new`] over a store whose `release_one` is admitted
+    /// and then revoked by `revocation`, with the trust-gate material.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or bootstrap error.
+    pub fn revoked(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+        revocation: Revocation,
+    ) -> Fallible<(Self, Material)> {
+        let (store, harness, material) = revoked_store(revocation)?;
+        Self::over(seal, roster, store, harness, true, HORIZON).map(|domain| (domain, material))
+    }
+
+    /// [`Bootstrapped::revoked`] by artifact, whose store also holds the
+    /// [`foreign_scope`] `other`, returned with its environment and
+    /// material.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or bootstrap error.
+    pub fn revoked_with_foreign(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+    ) -> Fallible<(Self, Material, Env, Material)> {
+        let (mut harness, material) = revoked_harness(Revocation::Artifact)?;
+        let (env, foreign) = foreign_scope(&mut harness)?;
+        let store = std::mem::replace(&mut harness.store, MemoryStore::new());
+        Self::over(seal, roster, store, harness, true, HORIZON)
+            .map(|domain| (domain, material, env, foreign))
+    }
+
+    fn over(
+        seal: &'static AuthorityTrustRootSealV1,
+        roster: &Roster,
+        mut store: MemoryStore,
+        harness: Harness,
+        timeline: bool,
+        metadata_horizon: u64,
+    ) -> Fallible<Self> {
         if timeline {
             store.create_timeline_with_meta(TimelineMeta {
                 id: target(),
@@ -1023,4 +1175,263 @@ pub fn metadata_authority(
         },
         ScriptedTrustedWallSourceV1::from_micros(vec![NOW; samples]),
     ))
+}
+
+/// The default installation of `profile` on this fixture's incarnation.
+#[must_use]
+pub const fn installation<'a>(
+    profile: &'a CommunityDurableProfileV1<'a>,
+) -> CommunityInitializationInstallationV1<'a> {
+    CommunityInitializationInstallationV1 {
+        store_incarnation: INCARNATION,
+        profile,
+        native_profile_digest: NATIVE_PROFILE,
+        installed_owner_catalogue_digest: hash(0x62),
+        installation_id: [0x63; 16],
+        state_limit_bytes: &STATE_LIMITS,
+    }
+}
+
+/// Initialize [`target`]'s first generation under `profile` with every
+/// grant (code 0, [`OPERATION`]).
+///
+/// # Errors
+/// Returns the fixture construction error; the call result is the value.
+pub fn initialize_target(
+    seal: &'static AuthorityTrustRootSealV1,
+    domain: &mut Bootstrapped,
+    roster: &Roster,
+    profile: &CommunityDurableProfileV1<'_>,
+) -> Fallible<Result<CommunityInitializationReceiptV1, LifecycleError>> {
+    let form = CommunityInitializeFormV1 {
+        timeline: target(),
+        operation_id: OPERATION,
+        initial_source: CommunityInitializationSourceV1::Initializer(
+            community_initializer_set_ref_v1(profile),
+        ),
+    };
+    let request = CommunityAdministrativeRequestV1::derive(
+        &CommunityAdministrativeOperationV1::Initialize {
+            timeline: form.timeline,
+            operation_id: form.operation_id,
+            initial_source: form.initial_source,
+            expected_prior_generation: None,
+            expected_prior_head_digest: None,
+        },
+    )?;
+    let credential = domain.world.credential(request)?;
+    let owner = CommunityInitializerOwnerV1::new(
+        seal,
+        profile,
+        vec![Zeroizing::new(roster.state.clone()); 2],
+    )?;
+    let policy = CommunityMetadataPolicyV1::new(*domain.policy.as_input())?;
+    let context = CommunityInitializationContextV1 {
+        installation: installation(profile),
+        binding: CommunityDomainBindingV1 {
+            metadata_policy: &policy,
+            installed_catalogue_digest: INSTALLED_CATALOGUE,
+            native_profile_digest: NATIVE_PROFILE,
+        },
+        initializer: &owner,
+    };
+    let world = &mut domain.world;
+    Ok(world.domain.initialize(
+        seal,
+        context,
+        &mut world.authority,
+        &mut domain.metadata,
+        CommunityInitializeCallV1 {
+            credential: &credential,
+            form,
+            administrative_leaf: DATA_LEAF,
+            initializer_leaves: &[DATA_LEAF],
+            member_leaves: &[DATA_LEAF, DATA_LEAF],
+        },
+    ))
+}
+
+/// The selected head an initialization committed: its CGA1's initial CSH1.
+///
+/// # Errors
+/// Returns the CGA1 codec refusal.
+pub fn initial_head(receipt: &CommunityInitializationReceiptV1) -> Fallible<Hash> {
+    Ok(
+        CommunityGenerationAdmissionV1::from_canonical_cbor(receipt.generation_admission())?
+            .as_input()
+            .initial_selected_head_digest,
+    )
+}
+
+/// The control identity of a first `SetReason`.
+pub const CONTROL: [u8; 16] = [0x40; 16];
+
+/// One initialized domain whose registry revokes the member release, with
+/// the trust-gate material and [`target`]'s committed head.
+pub struct QuarantineCase {
+    /// The domain and its authorities.
+    pub domain: Bootstrapped,
+    /// The generation's roster.
+    pub roster: Roster,
+    /// The trust-gate material the store re-evaluates.
+    pub material: Material,
+    /// [`target`]'s committed selected head.
+    pub head: Hash,
+}
+
+impl QuarantineCase {
+    /// Initialize [`target`] on a domain revoked by `revocation`, under the
+    /// default profile.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or initialization error.
+    pub fn new(seal: &'static AuthorityTrustRootSealV1, revocation: Revocation) -> Fallible<Self> {
+        let roster = Roster::release_one()?;
+        let (mut domain, material) = Bootstrapped::revoked(seal, &roster, revocation)?;
+        let rows = roster.rows()?;
+        let profile = profile_until(&rows, HORIZON, hash(1), domain.world.catalogue)?;
+        let receipt = initialize_target(seal, &mut domain, &roster, &profile)??;
+        let head = initial_head(&receipt)?;
+        Ok(Self {
+            domain,
+            roster,
+            material,
+            head,
+        })
+    }
+}
+
+/// What one `SetReason` names and claims; each field may be varied.
+#[derive(Clone, Copy)]
+pub struct Claim<'a> {
+    /// The failure's Timeline.
+    pub timeline: TimelineId,
+    /// The failure's stable entry.
+    pub entry: &'a str,
+    /// The failure's host error.
+    pub host: CommunityPluginHostErrorV1,
+    /// The bound reason.
+    pub reason: CommunityQuarantineReasonV1,
+    /// The control identity.
+    pub control: [u8; 16],
+    /// The expected ledger.
+    pub ledger: Option<Hash>,
+    /// The expected generation.
+    pub generation: [u8; 16],
+    /// The expected head; `None` uses the committed head.
+    pub head: Option<Hash>,
+    /// The claimed TPS1 digest; `None` uses the material's.
+    pub tps1: Option<Hash>,
+    /// The failure's IMK1; `None` uses the roster's.
+    pub implementation: Option<&'a ImplementationKeyV1>,
+    /// The trust gate's anchor and material; `None` uses the case's.
+    pub trust: Option<(&'a PluginTrustPolicyAnchorV1, &'a Material)>,
+}
+
+/// The first-use claim of a release revoked with `basis` on [`target`]'s
+/// first entry.
+#[must_use]
+pub const fn claim(basis: RevocationBasisV1) -> Claim<'static> {
+    Claim {
+        timeline: target(),
+        entry: ENTRIES[0],
+        host: CommunityPluginHostErrorV1::ArtifactRevoked { basis },
+        reason: CommunityQuarantineReasonV1::Revoked,
+        control: CONTROL,
+        ledger: None,
+        generation: GENERATION,
+        head: None,
+        tps1: None,
+        implementation: None,
+        trust: None,
+    }
+}
+
+/// Run one `SetReason` of `claim` on `case` through `run`.
+///
+/// The failure is sealed with `seal` and names the release `manifest`; the
+/// context installs the CDP1 `profile`. `run` gets the domain's world and
+/// metadata authority.
+///
+/// # Errors
+/// Returns the fixture construction error.
+pub fn with_set_reason<T>(
+    seal: &'static AuthorityTrustRootSealV1,
+    case: &mut QuarantineCase,
+    profile: &CommunityDurableProfileV1<'_>,
+    manifest: &ManifestSpec,
+    claim: Claim<'_>,
+    run: impl FnOnce(
+        &mut World,
+        &mut CommunityMetadataAuthorityV1,
+        CommunityQuarantineContextV1<'_>,
+        CommunitySetReasonCallV1<'_>,
+    ) -> T,
+) -> Fallible<T> {
+    let projection = manifest.projection()?;
+    let policy = CommunityMetadataPolicyV1::new(*case.domain.policy.as_input())?;
+    let retained = Hash::from_bytes(case.material.tps1_digest());
+    let (anchor, material) = claim
+        .trust
+        .unwrap_or((&case.domain.harness.env.anchor, &case.material));
+    let failure = CommunityPreExecutionFailureV1::new(
+        seal,
+        CommunityPreExecutionFailureInputV1 {
+            timeline: claim.timeline,
+            stable_entry: claim.entry,
+            implementation: claim.implementation.unwrap_or(&case.roster.implementation),
+            host_failure: claim.host,
+            trust_policy_snapshot_digest: claim.tps1.unwrap_or(retained),
+            trust: CommunityPreExecutionTrustV1 {
+                anchor,
+                tps1_bytes: &material.tps1,
+                evidence: &material.evidence,
+                projection: &projection,
+                trusted_utc: material.trusted()?,
+                tick: material.tick,
+            },
+        },
+    );
+    Ok(run(
+        &mut case.domain.world,
+        &mut case.domain.metadata,
+        CommunityQuarantineContextV1 {
+            profile,
+            binding: CommunityDomainBindingV1 {
+                metadata_policy: &policy,
+                installed_catalogue_digest: INSTALLED_CATALOGUE,
+                native_profile_digest: NATIVE_PROFILE,
+            },
+        },
+        CommunitySetReasonCallV1 {
+            failure: &failure,
+            control_operation_id: claim.control,
+            reason: claim.reason,
+            expected_ledger_digest: claim.ledger,
+            expected_generation: claim.generation,
+            expected_state_head_digest: claim.head.unwrap_or(case.head),
+        },
+    ))
+}
+
+/// The CDP1 `rows` under `quarantine` as its quarantine horizon.
+///
+/// # Errors
+/// Returns the CDP1 refusal.
+pub fn profile_with_quarantine<'a>(
+    rows: &'a [CommunityProfileMemberV1<'a>],
+    catalogue: Hash,
+    quarantine: u64,
+) -> Fallible<CommunityDurableProfileV1<'a>> {
+    Ok(CommunityDurableProfileV1::new(
+        CommunityDurableProfileInputV1 {
+            retention: CommunityProfileRetentionV1 {
+                quarantine_not_after_micros: quarantine,
+                ..profile_until(rows, HORIZON, hash(1), catalogue)?
+                    .as_input()
+                    .retention
+            },
+            ..*profile_until(rows, HORIZON, hash(1), catalogue)?.as_input()
+        },
+    )?)
 }

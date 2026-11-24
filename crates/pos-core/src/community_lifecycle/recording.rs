@@ -1,7 +1,7 @@
 //! Complete CRR1 Replay root, checked against the exact due roster and CIV1s.
 
 use super::{
-    canonical_end, read_hash, read_head, read_pass_key, record_cursor, record_prefix,
+    canonical_end, head_len, read_hash, read_head, read_pass_key, record_cursor, record_prefix,
     validate_horizon, CommunityInvocationEvidenceV1, CommunityLifecycleErrorV1 as Error,
     CommunityPassKeyV1, Result, MAX_COMMUNITY_MEMBERS_V1,
 };
@@ -61,6 +61,24 @@ impl CommunityAnnotationOmissionsV1 {
     fn codes(self) -> impl Iterator<Item = u8> {
         (0..=4_u8).filter(move |code| self.0 & (1 << code) != 0)
     }
+}
+
+/// A pass CRR1's quoted length for `members` due members (revision 10,
+/// R10.3(3)): the pass key with its widest ordinal, every digest at its
+/// fixed width, and each coverage row's two annotation counts, all five
+/// omission reasons and the horizon at their widest encodings.
+pub(super) fn quoted_recording_len(pass_key: CommunityPassKeyV1, members: usize) -> usize {
+    let key = pass_key.to_canonical_cbor().len();
+    let count = members as u64;
+    // A coverage row: array head, CMB1, two widest counts, and an array of
+    // the five one-byte reason codes.
+    let coverage = 1 + 34 + 9 + 9 + 6;
+    7 + head_len(key as u64)
+        + key
+        + 2 * (head_len(count) + 34 * members)
+        + head_len(count)
+        + coverage * members
+        + 9
 }
 
 /// One due member's independently selected CMB1/CNT1 identity pair.

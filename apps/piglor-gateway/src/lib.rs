@@ -18,6 +18,7 @@ mod e2e_determinism;
 // Public so its crate-only items satisfy `unreachable_pub` and
 // `clippy::redundant_pub_crate`, as `host_timelines` below.
 pub mod erasure;
+pub mod erasure_admissions;
 pub mod executor;
 // Public so its crate-only items satisfy both `unreachable_pub` and
 // `clippy::redundant_pub_crate`: in a private module `pub(crate)` trips the
@@ -4094,7 +4095,7 @@ fn build_proposed_action(
     capability: &str,
 ) -> Result<ProposedAction, ActionRejected> {
     validate_world_action_route(event_type, capability).and_then(|()| {
-        serde_json::from_value::<GatewayWorldActionPayload>(payload.clone())
+        GatewayWorldActionPayload::deserialize(payload)
             .map_err(|_| {
                 ActionRejected::DomainValidationFailed("invalid world.action.v1 payload".to_owned())
             })
@@ -4121,7 +4122,7 @@ struct GatewayWorldActionPayload {
     actor_entity_id: EntityId,
     body_entity_id: EntityId,
     action_kind: String,
-    params: [serde_json::Value; 2],
+    params: [serde_json::Number; 2],
     action_scope: u8,
     catalogue_version: u32,
     tick: u64,
@@ -4163,11 +4164,10 @@ impl GatewayWorldActionPayload {
 }
 
 fn encode_gateway_actuator_params(
-    params: &[serde_json::Value; 2],
+    params: &[serde_json::Number; 2],
 ) -> Result<Vec<u8>, ActionRejected> {
-    let component = |value: &serde_json::Value| {
-        value
-            .as_number()
+    let component = |value: &serde_json::Number| {
+        Some(value)
             .filter(|number| number.is_f64())
             .and_then(serde_json::Number::as_f64)
             .ok_or_else(|| {

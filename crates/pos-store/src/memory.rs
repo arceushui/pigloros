@@ -126,6 +126,8 @@ use crate::{
 mod community_artifacts;
 mod composition_fallback_registry;
 mod counterfactual_store;
+#[cfg(target_os = "linux")]
+mod erasure_budget;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
@@ -348,6 +350,10 @@ pub struct MemoryStore {
     erasure_retained_objects: BTreeMap<ErasureReferenceV1, String>,
     /// The write-once erasure store identity (ADR-136 §4).
     erasure_store_identity: Option<Hash>,
+    /// The redaction generation: how many ELCG1 cache generations the store
+    /// committed (ADR-136 follow-up F2, #1407). Like every other erasure
+    /// record of a `MemoryStore`, it lives as long as the instance.
+    redaction_generation: u64,
     /// Exact immutable artifact bytes and ARD1 rows visible in each local owner catalog.
     artifact_registrations: BTreeMap<Hash, ArtifactRegistrationCatalogRowV1>,
     /// Unique immutable identity index for `(owner, class, artifact digest)`.
@@ -357,6 +363,10 @@ pub struct MemoryStore {
     /// Append-only `(source Timeline, registration address)` bindings
     /// (ADR-136 §2.6), written with the registration batch that names them.
     artifact_registration_timelines: BTreeSet<(TimelineId, Hash)>,
+    /// The community erasure-budget counters of those bindings (ADR-129
+    /// revision 13, R13.1(2)), updated with every binding.
+    #[cfg(target_os = "linux")]
+    erasure_counters: erasure_budget::ErasureCountersV1,
     /// Current local manifest-owner generation and complete owned Timeline set.
     manifest_owner_admission_states: BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
     /// Immutable historical MCA1/MSB1/MSR1 rows and exact scoped native copies.
@@ -405,6 +415,8 @@ pub struct MemoryStore {
     mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1,
     /// Gateway-managed Preference and `OptionSpec` revisions (#304).
     gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1,
+    /// The operator's Local erasure admissions record (#1408).
+    erasure_admissions: pos_core::ErasureAdmissionsStateV1,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -852,10 +864,13 @@ impl MemoryStore {
             erasure_evidence: BTreeMap::new(),
             erasure_retained_objects: BTreeMap::new(),
             erasure_store_identity: None,
+            redaction_generation: 0,
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
             artifact_registration_timelines: BTreeSet::new(),
+            #[cfg(target_os = "linux")]
+            erasure_counters: erasure_budget::ErasureCountersV1::default(),
             manifest_owner_admission_states: BTreeMap::new(),
             manifest_owner_admission_snapshots: BTreeMap::new(),
             manifest_owner_admission_operations: BTreeMap::new(),
@@ -880,6 +895,7 @@ impl MemoryStore {
             erasure_fork_recovery_proofs: BTreeMap::new(),
             mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1::default(),
             gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1::default(),
+            erasure_admissions: pos_core::ErasureAdmissionsStateV1::Open,
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -888,6 +904,13 @@ impl MemoryStore {
     #[must_use]
     pub fn with_hasher(hasher: Box<dyn Hasher>) -> Self {
         Self::with_default_components(hasher)
+    }
+
+    /// The store's pinned Hasher, the one its Event chains are built with.
+    /// The community observation owner re-derives chain hashes with it
+    /// (ADR-129 revision 9, R9.3 and R9.6).
+    pub(crate) fn event_hasher(&self) -> &dyn Hasher {
+        self.hasher.as_ref()
     }
 
     /// Construct a store with a deterministic or host-provided admission clock.
@@ -3379,8 +3402,15 @@ impl MemoryStore {
         if head.as_u64() != cut {
             return Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary);
         }
-        let meta = TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name);
-        let child = Timeline::new(meta);
+        // ADR-136 §1: the admitted child inherits the parent's owner.
+        let owner = self
+            .timelines
+            .get(&parent_id)
+            .and_then(|state| state.timeline.meta.owner);
+        let child = Timeline::new(TimelineMeta {
+            owner,
+            ..TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name)
+        });
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent_id, Seq::from_u64(cut))
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)?;
@@ -3957,6 +3987,10 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         prepared: pos_core::PreparedLocalOwnerEffectV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         self.local_erasure_commit_owner_effect(&prepared)
+    }
+
+    fn redaction_generation(&self) -> Result<u64, ErasureErrorV1> {
+        Ok(self.redaction_generation)
     }
 
     fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
@@ -5624,6 +5658,21 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
 impl pos_core::LocalReplicaResidualPortV1 for MemoryStore {
     fn purge_local_replica_residue(&mut self) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ReplicaNegativeAcknowledgement)
+    }
+}
+
+/// The admissions record of a `MemoryStore` lives as long as its instance
+/// (#1408).
+impl pos_core::ErasureAdmissionsPortV1 for MemoryStore {
+    fn erasure_admissions(&self) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+        Ok(self.erasure_admissions)
+    }
+
+    fn set_erasure_admissions(
+        &mut self,
+        state: pos_core::ErasureAdmissionsStateV1,
+    ) -> Result<pos_core::ErasureAdmissionsStateV1, CoreError> {
+        Ok(std::mem::replace(&mut self.erasure_admissions, state))
     }
 }
 
@@ -12416,14 +12465,15 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
             batch.root_registration_address(),
         )?;
 
-        let bindings: Vec<_> = batch
+        let bindings: BTreeSet<_> = batch
             .source_timeline()
             .into_iter()
             .flat_map(|timeline| rows.iter().map(move |(address, _, _)| (timeline, *address)))
+            .filter(|binding| !self.artifact_registration_timelines.contains(binding))
             .collect();
-        let has_new_bindings = bindings
-            .iter()
-            .any(|binding| !self.artifact_registration_timelines.contains(binding));
+        let has_new_bindings = !bindings.is_empty();
+        #[cfg(target_os = "linux")]
+        self.count_erasure_bindings(&bindings, rows.iter().map(|(_, _, row)| row));
         self.artifact_registration_timelines.extend(bindings);
         for (address_key, identity_key, row) in rows {
             self.artifact_registrations

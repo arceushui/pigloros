@@ -23,7 +23,8 @@
 //!
 //! The `provider-runtime` mode, `serve_provider_runtime`, runs these
 //! steps and step 7 (`reconcile`: the system bus, the exclusive attempt
-//! recovery and the staging directory) before any socket exists. The
+//! recovery, the staging directory and the network capture store) before any
+//! socket exists. The
 //! selector started this runtime as its runtime unit (#1399, R11 §5.0), so
 //! the mode then binds both SIC1 endpoints, execute then control
 //! (`endpoint`, R11 §6), sends `READY=1` (`notify`) and serves both in state
@@ -62,7 +63,7 @@ use pos_reference::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
 use pos_reference::selector::installation::{InstallationObjectKind, InstalledSelectorState};
-use pos_reference::selector::SelectorBoundaryError;
+use pos_reference::selector::InstallationError;
 
 use crate::{
     AttemptLifecycle, KeyFileRuntimeSigner, ProviderInstallation, ProviderInstallationError,
@@ -87,7 +88,7 @@ const MAX_SLOTS: u64 = 256;
 pub enum ProviderStartupError {
     /// Step 2: SIC1 is missing, invalid, pending recovery or not admitted.
     #[error(transparent)]
-    Installation(#[from] SelectorBoundaryError),
+    Installation(#[from] InstallationError),
     /// Step 3: `/proc/self/exe` is not the held SIC1 provider executable.
     #[error("the running executable is not the admitted provider binary")]
     SelfBinding,
@@ -115,9 +116,12 @@ pub(crate) enum ProviderRuntimeError {
     /// A listener could not be bound or polled.
     #[error("a provider endpoint is unavailable")]
     EndpointUnavailable,
-    /// R11 §5.1 step 7: the system bus, the exclusive attempt recovery or
-    /// the staging directory is unavailable, before any socket existed.
-    #[error("the system bus, the attempt registry or the staging directory is unavailable")]
+    /// R11 §5.1 step 7: the system bus, the exclusive attempt recovery, the
+    /// staging directory or the network capture store is unavailable, before
+    /// any socket existed.
+    #[error(
+        "the system bus, the attempt registry, the staging directory or the capture store is unavailable"
+    )]
     HostUnavailable,
 }
 

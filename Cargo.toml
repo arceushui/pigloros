@@ -117,7 +117,7 @@ rusqlite = { version = "0.43", features = ["bundled", "hooks", "functions"] }
 # pin with default features off. `runtime` is the feature that lets the
 # Component Model instantiate and call a Component; `scripts/
 # check_wasmtime_feature_pin.py` fails if any further feature is resolved.
-wasmtime = { version = "=49.0.6", default-features = false, features = [
+wasmtime = { version = "=50.0.3", default-features = false, features = [
   "component-model",
   "cranelift",
   "runtime",
@@ -129,8 +129,8 @@ tempfile = "3"
 # Component text fixtures for the community Plugin host tests; the same
 # wasm-tools release (wasmparser 0.258) that builds the guest fixtures.
 wat = "=1.263.0"
-wit-parser = { version = "=0.258.3", default-features = false }
-jsonschema = { version = "=0.59.0", default-features = false }
+wit-parser = { version = "=0.263.0", default-features = false }
+jsonschema = { version = "=0.61.2", default-features = false }
 
 # Data files
 toml = "1.1"

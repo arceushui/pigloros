@@ -8,9 +8,12 @@
 //! channel. After the unit started and was verified it:
 //!
 //! 1. reads the unit's current `MainPID` and `InvocationID` fresh from the
-//!    manager ([`UnitIdentitySource`]) and observes `/proc/<MainPID>/exe`
-//!    itself, so the launcher's claims are compared with the provider's own
-//!    observations, not with the launcher's word;
+//!    manager ([`UnitIdentitySource`]), observes `/proc/<MainPID>/exe`
+//!    itself, and observes the adapter at its admitted path beneath the
+//!    pidfd-anchored `/proc/<MainPID>/root` (owner decision 2026-11-21), so
+//!    the launcher's claims are compared with the provider's own
+//!    observations in the unit's mount namespace, not with the launcher's
+//!    word;
 //! 2. bounds the `ReadyV1` receive and the `ReleaseV1` send with socket
 //!    timeouts set to the time left before the attempt deadline, so a silent
 //!    launcher cannot hold the provider; and
@@ -442,13 +445,6 @@ where
     }
 }
 
-/// Evidence the composition root already holds about the launch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BarrierEvidence {
-    /// The adapter's mount ID and inode, observed beneath the verified root.
-    pub adapter_identity: FdIdentity,
-}
-
 /// Why the barrier could not be built or could not release.
 #[derive(Debug, thiserror::Error)]
 pub enum BarrierError {
@@ -473,6 +469,9 @@ pub enum BarrierError {
     /// `/proc/<MainPID>/exe` could not be observed.
     #[error("the launcher executable could not be observed")]
     LauncherIdentity,
+    /// The adapter could not be observed beneath `/proc/<MainPID>/root`.
+    #[error("the adapter could not be observed beneath the unit root")]
+    AdapterIdentity(#[source] KernelObservationError),
     /// The attempt deadline passed before any `ReadyV1` was received.
     #[error("the attempt deadline passed before the release")]
     Expired,
@@ -501,7 +500,8 @@ impl BarrierError {
     /// as code 9 and content faults, among them "recheck expiry", as 10).
     ///
     /// Before any `ReadyV1` was received, the barrier could not read the
-    /// unit, hold its launcher, arm the receive or meet the deadline: no
+    /// unit, hold its launcher, observe its adapter, arm the receive or meet
+    /// the deadline: no
     /// `ReadyV1` became available, which is `0 ReadyUnavailable` (R9 §11
     /// O15). After `ReleaseV1` was sent the attempt has progress 2, where
     /// R9 §4.6.3 requires a null `barrier-failure`. `None` is also recorded
@@ -513,9 +513,13 @@ impl BarrierError {
     #[must_use]
     pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
         match self {
-            Self::Identity(_) | Self::LauncherIdentity | Self::Timeout(_) | Self::Expired => {
-                Some(BarrierFailure::ReadyUnavailable)
-            }
+            // Owner decision 2026-11-15 (#443 journal 22319): before
+            // ReadyV1, identity failures, the adapter's among them, map to 0.
+            Self::Identity(_)
+            | Self::LauncherIdentity
+            | Self::AdapterIdentity(_)
+            | Self::Timeout(_)
+            | Self::Expired => Some(BarrierFailure::ReadyUnavailable),
             Self::Release(release) => release_failure(release),
             Self::Refused(refusal) => refusal.barrier_failure(),
             Self::AttemptMismatch
@@ -569,7 +573,6 @@ pub struct ProviderReleaseBarrier<S, I, R, O> {
     provider_end: std::os::fd::OwnedFd,
     unit_end: Option<OwnedFd>,
     parameters: LaunchParameters,
-    evidence: BarrierEvidence,
     adapter_digest: [u8; 32],
     signer: S,
     identity: I,
@@ -592,7 +595,6 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
     pub fn new(
         attempt: &AdmittedAttempt,
         nonce: [u8; 32],
-        evidence: BarrierEvidence,
         signer: S,
         identity: I,
         check: AuthorityCheck<R, O>,
@@ -623,7 +625,6 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
                     provider_end,
                     unit_end: Some(OwnedFd::from(unit_end)),
                     parameters,
-                    evidence,
                     adapter_digest: attempt.executable_digest(),
                     signer,
                     identity,
@@ -705,11 +706,9 @@ struct HeldLauncher {
     facts: crate::LauncherFacts,
 }
 
-/// Identify the very descriptor opened from the running process.
+/// Identify the very descriptor `file` opened from the running process.
 /// Holding it through the handshake prevents a path/stat/hash substitution.
-fn hold_launcher(pid: u32, facts: &crate::LauncherFacts) -> Result<HeldLauncher, BarrierError> {
-    let file =
-        File::open(format!("/proc/{pid}/exe")).map_err(|_| BarrierError::LauncherIdentity)?;
+fn hold_launcher(file: File, facts: &crate::LauncherFacts) -> Result<HeldLauncher, BarrierError> {
     verify_launcher_identity(&file, facts).and_then(|()| {
         statx(
             &file,
@@ -729,6 +728,27 @@ fn hold_launcher(pid: u32, facts: &crate::LauncherFacts) -> Result<HeldLauncher,
         })
         .ok_or(BarrierError::LauncherIdentity)
     })
+}
+
+/// Anchor `main_pid` once, hold its launcher through that anchor, then
+/// observe its adapter through the same anchor as the launcher inside the
+/// unit sees it: through the unit's own root, so in the unit's mount
+/// namespace.
+fn hold_launcher_and_adapter(
+    main_pid: u32,
+    admitted: &AdmittedAttempt,
+) -> Result<(HeldLauncher, FdIdentity), BarrierError> {
+    crate::MainProcess::open(main_pid)
+        .and_then(|process| process.executable().map(|file| (process, file)))
+        .map_err(|_| BarrierError::LauncherIdentity)
+        .and_then(|(process, file)| {
+            hold_launcher(file, admitted.launcher()).and_then(|held| {
+                process
+                    .adapter(admitted.executable_path())
+                    .map(|adapter| (held, adapter))
+                    .map_err(BarrierError::AdapterIdentity)
+            })
+        })
 }
 
 fn verify_launcher(file: &File, facts: &crate::LauncherFacts) -> Result<(), BarrierError> {
@@ -879,10 +899,10 @@ where
             self.identity.invocation_id(attempt.unit_name()),
         )
         .await?;
-        let held_launcher =
-            tokio::task::block_in_place(|| hold_launcher(main_pid, self.admitted.launcher()))?;
+        let (held_launcher, adapter) =
+            tokio::task::block_in_place(|| hold_launcher_and_adapter(main_pid, &self.admitted))?;
         let launcher = held_launcher.identity;
-        let expected = self.expected(invocation, launcher);
+        let expected = self.expected(invocation, launcher, adapter);
         let (_, deadline_monotonic_ns) = release_window(attempt.deadline())?;
         // Nothing above consumes `ReadyV1`, so dropping the future before this
         // point leaves the barrier unused; from here the release is one-shot.
@@ -903,7 +923,7 @@ where
             refusal: RefCell::new(None),
             observing: Observing {
                 cgroup,
-                adapter: self.evidence.adapter_identity,
+                adapter,
                 observed_fdl1_digest: self.parameters.expected_fdl1_digest,
                 work: self
                     .admitted
@@ -939,7 +959,12 @@ where
         released_by(attempt.deadline())
     }
 
-    const fn expected(&self, invocation: [u8; 16], launcher: FdIdentity) -> ExpectedLauncherReady {
+    const fn expected(
+        &self,
+        invocation: [u8; 16],
+        launcher: FdIdentity,
+        adapter: FdIdentity,
+    ) -> ExpectedLauncherReady {
         ExpectedLauncherReady {
             attempt_id: self.parameters.attempt_id,
             nonce: self.parameters.nonce,
@@ -948,7 +973,7 @@ where
             launcher_identity: launcher,
             sim1_digest: self.parameters.sim1_digest,
             adapter_digest: self.adapter_digest,
-            adapter_identity: self.evidence.adapter_identity,
+            adapter_identity: adapter,
             launch_parameter_digest: self.parameters.digest,
             expected_fdl1_digest: self.parameters.expected_fdl1_digest,
         }

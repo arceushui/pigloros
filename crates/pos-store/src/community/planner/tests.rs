@@ -86,6 +86,10 @@ impl CommunityStoreDomainV1 for Fake<'_> {
         Err(Error::EvidenceUnavailable)
     }
 
+    fn event_history(&self) -> (&dyn pos_core::store::EventStore, &dyn pos_core::Hasher) {
+        self.inner.event_history()
+    }
+
     fn inventory_generation(&self) -> u64 {
         self.inventory_generation
     }
@@ -238,6 +242,7 @@ fn trust_rows_follow_plugin_order_with_the_scope_floors() -> TestResult {
                 crate::community_initialization_fixture::SCHEMA,
                 Hash::from_bytes([6; 32]),
                 roster.initializer(),
+                10,
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
@@ -428,5 +433,29 @@ fn authority_and_decision_rows_are_ordered_and_current() -> TestResult {
             Some(Error::EvidenceUnavailable)
         );
     }
+    Ok(())
+}
+
+/// The fake answers Event history from its inner domain, so a planner
+/// fixture never substitutes the store the observation preparer re-checks.
+#[test]
+fn the_fake_reads_event_history_from_its_inner_domain() -> TestResult {
+    let domain = MemoryCommunityDomainV1::new(
+        crate::memory::MemoryStore::new(),
+        [1; 16],
+        MemoryTrustedClockAuthorityV1::new(),
+    )?;
+    let fake = Fake::new(&domain);
+    let (events, hasher) = fake.event_history();
+    let (inner_events, inner_hasher) = domain.event_history();
+    assert_eq!(hasher.genesis_hash(), inner_hasher.genesis_hash());
+    assert_eq!(
+        events
+            .logical_head(TimelineId::from_ulid(Ulid::from_bytes([9; 16])))
+            .is_err(),
+        inner_events
+            .logical_head(TimelineId::from_ulid(Ulid::from_bytes([9; 16])))
+            .is_err()
+    );
     Ok(())
 }

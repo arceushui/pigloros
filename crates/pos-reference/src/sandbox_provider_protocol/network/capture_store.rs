@@ -4,18 +4,24 @@
 //! `responses/<hex response artifact digest>` holds the exact response bytes,
 //! and `transcripts/<hex transcript digest>` holds the canonical NXT1 record.
 //! NRP1 version 1 retains every accepted artifact indefinitely, so this store
-//! has no deletion, expiry or replacement operation.
+//! has no deletion, expiry or replacement operation. Only the unpublished
+//! temporaries a crash left are removed, by the restart sweep
+//! ([`NetworkCaptureStore::sweep_unpublished`]).
 
+use std::ffi::CStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{
-    mkdirat, openat2, renameat_with, unlinkat, AtFlags, Mode, OFlags, RenameFlags, ResolveFlags,
+    fchmod, mkdirat, openat2, renameat_with, statat, unlinkat, AtFlags, FileType, Mode, OFlags,
+    RenameFlags, ResolveFlags,
 };
 use rustix::io::Errno;
 use rustix::process::geteuid;
 use rustix::rand::{getrandom, GetRandomFlags};
+
+use crate::held_directory::entry_names;
 
 use super::{
     content_digest, NetworkExchangePlan, NetworkExchangeReply, NetworkExchangeTranscript,
@@ -125,6 +131,27 @@ impl NetworkCaptureStore {
             })
     }
 
+    /// Remove the unpublished temporaries a crash left in either retention
+    /// directory, keep every published record, and refuse anything else
+    /// (ADR-069 R11 Amendment 1 §5.4).
+    ///
+    /// A temporary is a regular file named `.partial-<64 lowercase hex>-<32
+    /// lowercase hex>`: it was never evidence, and no Captured reply was
+    /// released for it. A published record is a regular file that `owner`
+    /// owns (UID 0 for the provider runtime), of mode `0400` and link count
+    /// 1, named by its 64 lowercase hexadecimal digest; its bytes are not
+    /// read, since Replay verifies them on every lookup. Entries are visited
+    /// through the held directory descriptors.
+    ///
+    /// # Errors
+    /// [`NetworkCaptureStoreError::UnsafeStore`] for any other entry, which is
+    /// kept, and [`NetworkCaptureStoreError::Io`] when a directory cannot be
+    /// listed or an entry inspected or removed. Entries are handled in
+    /// directory order until then.
+    pub fn sweep_unpublished(&self, owner: u32) -> Result<(), NetworkCaptureStoreError> {
+        sweep(&self.responses, owner).and_then(|()| sweep(&self.transcripts, owner))
+    }
+
     /// Resolve one retained exchange for offline Replay, without network I/O.
     ///
     /// The authorized report supplies the attempt, its exact NXP1 occurrence and
@@ -211,10 +238,61 @@ fn checked_directory(directory: &File, private: bool) -> Result<(), NetworkCaptu
         })
 }
 
+fn sweep(directory: &File, owner: u32) -> Result<(), NetworkCaptureStoreError> {
+    entry_names(directory)
+        .map_err(NetworkCaptureStoreError::Io)
+        .and_then(|names| {
+            names
+                .iter()
+                .try_for_each(|name| sweep_entry(directory, name, owner))
+        })
+}
+
+/// Unlink `name` if it is an unpublished temporary, keep it if it is a
+/// published record of `owner`, and refuse it otherwise.
+fn sweep_entry(directory: &File, name: &CStr, owner: u32) -> Result<(), NetworkCaptureStoreError> {
+    statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(io::Error::from)
+        .map_err(NetworkCaptureStoreError::Io)
+        .and_then(|entry| {
+            let regular = FileType::from_raw_mode(entry.st_mode) == FileType::RegularFile;
+            let name_bytes = name.to_bytes();
+            if regular && temporary_name(name_bytes) {
+                unlinkat(directory, name, AtFlags::empty())
+                    .map_err(io::Error::from)
+                    .map_err(NetworkCaptureStoreError::Io)
+            } else if regular
+                && lower_hex(name_bytes, 64)
+                && entry.st_uid == owner
+                && entry.st_mode & 0o7777 == 0o400
+                && entry.st_nlink == 1
+            {
+                Ok(())
+            } else {
+                Err(NetworkCaptureStoreError::UnsafeStore)
+            }
+        })
+}
+
+/// Whether `name` is `.partial-<64 lowercase hex>-<32 lowercase hex>`.
+fn temporary_name(name: &[u8]) -> bool {
+    name.strip_prefix(b".partial-")
+        .filter(|rest| rest.len() == 64 + 1 + 32 && rest[64] == b'-')
+        .is_some_and(|rest| lower_hex(&rest[..64], 64) && lower_hex(&rest[65..], 32))
+}
+
+/// Whether `name` is exactly `length` lowercase hexadecimal digits.
+fn lower_hex(name: &[u8], length: usize) -> bool {
+    name.len() == length
+        && name
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn retention_directory(root: &File, name: &str) -> Result<File, NetworkCaptureStoreError> {
     // An existing entry is accepted only after the checks below; any other
     // creation failure surfaces when the directory cannot be opened.
-    mkdirat(root, name, Mode::RWXU).ok();
+    let created = mkdirat(root, name, Mode::RWXU).is_ok();
     openat2(
         root,
         name,
@@ -222,6 +300,15 @@ fn retention_directory(root: &File, name: &str) -> Result<File, NetworkCaptureSt
         Mode::empty(),
         RESOLVE,
     )
+    .and_then(|directory| {
+        // The umask may strip bits from a new directory; restore exactly 0700
+        // (ADR-069 R11 Amendment 1 §5.4). An existing one is only checked.
+        if created {
+            fchmod(&directory, Mode::RWXU).map(|()| directory)
+        } else {
+            Ok(directory)
+        }
+    })
     .map(File::from)
     .map_err(io::Error::from)
     .map_err(NetworkCaptureStoreError::Io)

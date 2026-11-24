@@ -20,9 +20,13 @@ use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
+use super::erasure_budget::CommunityErasureContextV1;
+#[cfg(target_os = "linux")]
 use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::private_hash::scope_set_digest;
+#[cfg(target_os = "linux")]
+use super::quarantine::{CommittedQuarantineControlV1, QuarantineLedgerV1};
 use super::sealer::SealedMetadataV1;
 use super::store_domain::CommunityStoreDomainV1;
 use super::vault::{fresh_identity, VaultKeyV1};
@@ -162,6 +166,20 @@ pub struct MemoryCommunityDomainV1 {
     /// (A5.3(5), R6.3(4)).
     #[cfg(target_os = "linux")]
     pub(super) initializations: BTreeMap<(TimelineId, [u8; 16]), CommittedInitializationV1>,
+    /// The domain-private quarantine index: each CQK1 digest's current CQR1
+    /// ledger head (ADR-129 revision 8 R8.6(2)).
+    #[cfg(target_os = "linux")]
+    pub(super) quarantine_index: BTreeMap<Hash, QuarantineLedgerV1>,
+    /// Every committed `SetReason` by `(T, control_operation_id)`, its retry
+    /// key (A5.3(5)).
+    #[cfg(target_os = "linux")]
+    pub(super) quarantine_controls: BTreeMap<(TimelineId, [u8; 16]), CommittedQuarantineControlV1>,
+    /// Each initialized Timeline's quarantine reserve inputs (ADR-129
+    /// revision 13, R13.1(5)): its contexts' roster members and its active
+    /// `(member, reason)` pairs, a T-keyed view of the quarantine index
+    /// updated in the same transactions.
+    #[cfg(target_os = "linux")]
+    pub(super) erasure_contexts: BTreeMap<TimelineId, CommunityErasureContextV1>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -202,6 +220,12 @@ impl MemoryCommunityDomainV1 {
                 selection: None,
                 #[cfg(target_os = "linux")]
                 initializations: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                quarantine_index: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                quarantine_controls: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                erasure_contexts: BTreeMap::new(),
             })
         }
     }

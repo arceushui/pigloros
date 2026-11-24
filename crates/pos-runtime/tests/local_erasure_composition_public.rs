@@ -3200,6 +3200,185 @@ fn a_host_timeline_stays_outside_the_frozen_scope_but_its_owned_fork_does_not() 
     Ok(())
 }
 
+fn cbor(value: &ciborium::value::Value) -> TestResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// The FAC1 the Fork admission service sends for its own principal: a POC1
+/// binding it to an owner name when `parent` is `None`, else an FCC1 Fork
+/// of `parent` at cut zero.
+fn service_command(
+    host: &mut ErasureExecutionHostV1,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    operation: u8,
+    parent: Option<TimelineId>,
+) -> TestResult<pos_core::ForkAdmissionHostCommandV1> {
+    use ciborium::value::Value;
+    let (signer, adapter, policy) = service_keys()?;
+    let evidence = adapter.sign_authenticated_principal(
+        pos_core::fork_authentication::AuthenticatedPrincipalRecordV1 {
+            principal: pos_core::PrincipalRefV1::try_new([4; 16], "service.local")?,
+            adapter_id: "service-adapter".to_owned(),
+            assurance: 1,
+            issued_at: 0,
+            expires_at: u64::MAX,
+            registry_binding: Hash::from_bytes([3; 32]),
+            operation_nonce: [5; 32],
+        },
+    )?;
+    let verified = pos_crypto::fork_authentication::verify_authenticated_principal_evidence_v1(
+        &policy, evidence,
+    )?;
+    let principal = pos_core::fork_authentication::principal_digest_v1(
+        &verified.evidence().record().principal,
+    )?;
+    let store_id = host
+        .fork_admission_bootstrap()
+        .fork_admission_host_record()?
+        .store_id();
+    let mut fields = vec![
+        Value::Text(if parent.is_some() { "FCC1" } else { "POC1" }.to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(store_id.as_bytes().to_vec()),
+        Value::Bytes(session.identity().as_bytes().to_vec()),
+        Value::Bytes(vec![operation; 32]),
+        Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+        Value::Bytes(principal.as_bytes().to_vec()),
+    ];
+    fields.extend(parent.map_or_else(
+        || vec![Value::Text("service".to_owned())],
+        |parent| {
+            vec![
+                Value::Bytes(parent.inner().to_bytes().to_vec()),
+                Value::Integer(0.into()),
+                Value::Integer(0.into()),
+                Value::Bytes(vec![8; 32]),
+                Value::Bytes(vec![9; 32]),
+                Value::Integer(1.into()),
+                Value::Text("service-fork".to_owned()),
+            ]
+        },
+    ));
+    let inner = cbor(&Value::Array(fields))?;
+    let signature = signer.sign_command(&inner, &verified)?;
+    Ok(pos_core::ForkAdmissionHostCommandV1::from_canonical_cbor(
+        &cbor(&Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(inner),
+            Value::Bytes(verified.evidence().to_canonical_cbor()?),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ]))?,
+    )?)
+}
+
+/// The Fork admission service's host key, its authentication adapter and
+/// the policy that trusts that adapter.
+fn service_keys() -> TestResult<(
+    pos_crypto::fork_authentication::ForkHostSigningKeyV1,
+    pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1,
+    pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+)> {
+    let signer = pos_crypto::fork_authentication::ForkHostSigningKeyV1::from_seed([0x71; 32])?;
+    let adapter =
+        pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1::from_seed(
+            [0x72; 32],
+        )?;
+    let policy = pos_core::fork_authentication::ForkAuthenticationPolicyV1::new(vec![
+        pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1 {
+            adapter_id: "service-adapter".to_owned(),
+            verifying_key: adapter.public_key(),
+            minimum_assurance: 1,
+            registry_bindings: vec![Hash::from_bytes([3; 32])],
+        },
+    ])?;
+    Ok((signer, adapter, policy))
+}
+
+/// Provision the Fork admission service on `host`, bind its own principal
+/// and admit its Fork of `parent` (an FCC1): the child's id.
+fn service_admitted_fork(
+    host: &mut ErasureExecutionHostV1,
+    parent: TimelineId,
+) -> TestResult<TimelineId> {
+    let (signer, _, policy) = service_keys()?;
+    let key = pos_core::PublicKey::from_bytes(signer.public_key());
+    let bootstrap = host.fork_admission_bootstrap();
+    let initialize = bootstrap.begin_fork_admission_initialize(key, policy.digest()?)?;
+    bootstrap.finalize_fork_admission_initialize(
+        &initialize,
+        &signer.sign_initialize(&initialize.to_canonical_cbor()?)?,
+    )?;
+    let open = bootstrap.begin_fork_admission_open(key, policy.digest()?)?;
+    let session = bootstrap
+        .finalize_fork_admission_open(&open, &signer.sign_open(&open.to_canonical_cbor()?)?)?;
+    let bind = service_command(host, &session, 1, None)?;
+    host.execute_fork_admission_command(&session, &policy, &bind)?;
+    let fork = service_command(host, &session, 2, Some(parent))?;
+    match host.execute_fork_admission_command(&session, &policy, &fork)? {
+        pos_core::ForkAdmissionOperationResultV1::Fork(receipt) => Ok(receipt.child_id),
+        other @ pos_core::ForkAdmissionOperationResultV1::PrincipalOwner(_) => {
+            Err(format!("expected an admitted Fork, got {other:?}").into())
+        }
+    }
+}
+
+/// ADR-136 §1 and §3 (#1477): a Fork the Fork admission service admits for
+/// its own principal inherits its parent's owner, so it freezes by owner.
+///
+/// The parent is a listed host Timeline, which the freeze leaves out, so no
+/// `fork_point` lineage reaches the child: only its owner, the actor, does.
+#[test]
+fn a_service_admitted_fork_of_a_host_timeline_freezes_by_its_inherited_owner() -> TestResult {
+    let owned = OwnedStore::new()?;
+    let host_timeline = owned
+        .store
+        .sqlite()?
+        .create_timeline_with_meta(TimelineMeta::root_owned("host", actor()))?
+        .id();
+    let mut hosting = bundle();
+    hosting.host_timelines.push(host_timeline);
+    hosting.host_timelines.sort_unstable();
+    let case = Case::signed(&hosting, &bundle_root(), &[])?;
+    let (child, digest) = {
+        let mut host = owned.store.host(&case, 4_096)?;
+        let child = service_admitted_fork(&mut host, host_timeline)?;
+        assert_eq!(
+            host.read_sender()?
+                .timeline(child)?
+                .ok_or("no admitted child")?
+                .meta
+                .owner,
+            Some(actor())
+        );
+        let digest = prepared(
+            &owned.store,
+            &mut host,
+            1,
+            ErasureScopeV1::PrivateSubjectData,
+        )?;
+        (child, digest)
+    };
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::FreezeAuthorization,
+        digest,
+        &erasure_signer(),
+        1,
+    )?;
+    owned.store.retain(std::slice::from_ref(&signed))?;
+    let mut host = owned.store.host(&case, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .freeze_access(request_of(1)?, &freeze(signature_address(&signed)?))?
+            .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert_frozen(&mut host, &[owned.owned, child], host_timeline)?;
+    Ok(())
+}
+
 #[test]
 fn identified_forks_extend_a_frozen_scope_across_restart_and_rotation() -> TestResult {
     let owned = OwnedStore::new()?;
@@ -7043,9 +7222,9 @@ fn driver_memory_host(case: &Case) -> TestResult<ErasureExecutionHostV1> {
 }
 
 /// A store a fixture seeds before its host opens over it.
-trait SeedStore: EventStore + ErasureInventoryPersistencePortV1 {}
+trait SeedStore: EventStore + ErasureInventoryPersistencePortV1 + ErasureAdmissionsPortV1 {}
 
-impl<T: EventStore + ErasureInventoryPersistencePortV1> SeedStore for T {}
+impl<T: EventStore + ErasureInventoryPersistencePortV1 + ErasureAdmissionsPortV1> SeedStore for T {}
 
 /// The store adapter a test runs over.
 #[derive(Clone, Copy, Debug)]
@@ -9261,6 +9440,52 @@ fn the_projection_follows_a_driven_request() -> TestResult {
     Ok(())
 }
 
+/// #1407 (ADR-136 follow-up F2): the store's redaction generation is 0
+/// until the first ELCG1 commits, never decreases while a request is
+/// driven, and rises again with the next request's ELCG1; every projection
+/// reads the same store-wide value. Each ELCG1 still carries its own
+/// request's attempt position, 2 for attempt 0 (Q8).
+#[test]
+fn the_redaction_generation_rises_across_requests() -> TestResult {
+    let store = driver_store()?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    submitted(&mut host, 1, ErasureScopeV1::PrivateSubjectData)?;
+    let redaction = |host: &mut ErasureExecutionHostV1, key: u8| -> TestResult<u64> {
+        Ok(projection(host, actor(), key)?
+            .ok_or("no projection")?
+            .redaction_generation)
+    };
+    let mut previous = redaction(&mut host, 1)?;
+    assert_eq!(previous, 0);
+    loop {
+        let step = driver().step(&mut host, request_of(1)?)?;
+        if step == LocalErasureStepV1::Idle {
+            break;
+        }
+        let current = redaction(&mut host, 1)?;
+        assert!(current >= previous, "{step:?}");
+        previous = current;
+    }
+    assert_eq!(previous, 1);
+    submitted(&mut host, 2, ErasureScopeV1::ConsentedSharedData)?;
+    assert_eq!(redaction(&mut host, 2)?, 1);
+    finalized(driver().drive(&mut host, request_of(2)?)?)?;
+    assert_eq!(redaction(&mut host, 1)?, 2);
+    assert_eq!(redaction(&mut host, 2)?, 2);
+    let mut records = store
+        .sqlite()?
+        .retained_erasure_objects("ELCG1", 16)?
+        .iter()
+        .map(|bytes| LocalErasureCacheGenerationV1::from_canonical_cbor(bytes))
+        .map(|record| record.map(|record| (record.request, record.generation)))
+        .collect::<Result<Vec<_>, _>>()?;
+    records.sort_unstable();
+    let mut expected = vec![(request_of(1)?, 2), (request_of(2)?, 2)];
+    expected.sort_unstable();
+    assert_eq!(records, expected);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ADR-136 acceptance test 10 (owner decision D12 of 2026-11-18 on #1413):
 // a subject-scoped export through core `export_timeline`, then erasure,
@@ -9372,3 +9597,160 @@ fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult 
 
 #[path = "local_erasure_composition/acceptance.rs"]
 mod acceptance;
+
+// ---------------------------------------------------------------------------
+// ADR-129 revision 13 (#560 A4b-2, R13-1): the Memory community
+// erasure-budget counters against the authority's closure.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+#[path = "local_erasure_composition/community_budget.rs"]
+mod community_budget;
+
+// ---------------------------------------------------------------------------
+// ADR-136 follow-up F3 (#1408): the operator's admissions record closes
+// fresh Local submissions only. An exact replay, the driver and its startup
+// sweep never read it, so every admitted request still freezes and
+// completes.
+// ---------------------------------------------------------------------------
+
+use pos_core::{ErasureAdmissionsPortV1, ErasureAdmissionsStateV1};
+
+impl LocalStore {
+    /// Write the operator's admissions record while no host is open, as the
+    /// offline `piglor-gateway erasure-admissions` writer does.
+    fn set_admissions(&self, state: ErasureAdmissionsStateV1) -> TestResult {
+        self.sqlite()?.set_erasure_admissions(state)?;
+        Ok(())
+    }
+
+    /// Submit request 1 for private subject data on a host composed of
+    /// `case`, and return its admission.
+    fn admitted(&self, case: &Case) -> TestResult<pos_runtime::LocalErasureAdmittedV1> {
+        let mut host = self.host(case, 4_096)?;
+        let admitted = host
+            .command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        Ok(admitted)
+    }
+}
+
+/// #1408: while the record is closed, a fresh submission is refused
+/// `OperatorClosed` on both adapters. The Memory store is closed before its
+/// host owns it.
+#[test]
+fn a_closed_record_refuses_a_fresh_submission() -> TestResult {
+    for adapter in ADAPTERS {
+        let (mut fixture, previous) =
+            Fixture::local(adapter, &GrantShape::standard(), 4_096, |store| {
+                Ok(store.set_erasure_admissions(ErasureAdmissionsStateV1::Closed)?)
+            })?;
+        assert_eq!(previous, ErasureAdmissionsStateV1::Open, "{adapter:?}");
+        assert_eq!(
+            fixture
+                .host
+                .command_sender()?
+                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::OperatorClosed),
+            "{adapter:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #1408 on `SQLite`, closed and reopened behind the host: the exact replay
+/// of an admitted request still answers its state and the same key with
+/// another body its conflict; a fresh request is refused before the
+/// subject checks and retains nothing; reopening admits it to the subject
+/// checks again.
+#[test]
+fn a_closed_record_answers_the_exact_replay_and_retains_nothing() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let state = store.admitted(&local_case()?)?;
+    store.set_admissions(ErasureAdmissionsStateV1::Closed)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    {
+        let mut sender = host.command_sender()?;
+        assert_eq!(
+            sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+            Ok(state)
+        );
+        assert_eq!(
+            sender.submit_local_erasure(&submission(1, ErasureScopeV1::ConsentedSharedData)?),
+            Err(LocalErasureSubmitErrorV1::Host(
+                ErasureHostErrorV1::Conflict
+            ))
+        );
+    }
+    // Request 1 still holds the subject, yet the closed record answers
+    // first, so the refusal is not `Concurrent`.
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::OperatorClosed,
+    )?;
+    drop(host);
+    store.set_admissions(ErasureAdmissionsStateV1::Open)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Concurrent)
+    );
+    Ok(())
+}
+
+/// #1408 on `SQLite`: a request admitted before the record closed survives
+/// the startup sweep, freezes and completes on a host restarted while it is
+/// closed, which still refuses a fresh request of the released subject.
+#[test]
+fn an_admitted_request_freezes_and_completes_while_admissions_are_closed() -> TestResult {
+    let store = driver_store()?;
+    {
+        let mut host = store.host(&driver_case()?, 4_096)?;
+        submitted(&mut host, 1, ErasureScopeV1::ConsentedSharedData)?;
+    }
+    store.set_admissions(ErasureAdmissionsStateV1::Closed)?;
+    let mut host = store.host(&driver_case()?, 4_096)?;
+    assert!(matches!(
+        LocalErasureDriverV1::sweep(&mut host),
+        LocalErasureSweepV1::Swept(_)
+    ));
+    let steps = driven_steps(&mut host, |_| false)?;
+    assert_eq!(steps[0], LocalErasureStepV1::Authorized);
+    assert_eq!(steps[1], LocalErasureStepV1::Frozen);
+    let receipt = finalized(steps.last().cloned().ok_or("no step")?)?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::OperatorClosed)
+    );
+    Ok(())
+}
+
+/// #1408 on `SQLite`: a record the host cannot read (a row the `CHECK`
+/// refuses, written with the checks off) fails closed for a fresh request
+/// as `AdapterFailure`, retaining nothing, while the exact replay is still
+/// answered.
+#[test]
+fn an_unreadable_record_fails_closed_for_a_fresh_submission_only() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let state = store.admitted(&local_case()?)?;
+    rusqlite::Connection::open(&store.path)?.execute_batch(
+        "PRAGMA ignore_check_constraints = ON;
+         INSERT INTO erasure_admissions (singleton, closed) VALUES (1, 'unreadable');",
+    )?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Ok(state)
+    );
+    refused_before_the_subject_checks(
+        &store,
+        &mut host,
+        LocalErasureSubmitErrorV1::Host(ErasureHostErrorV1::AdapterFailure),
+    )
+}

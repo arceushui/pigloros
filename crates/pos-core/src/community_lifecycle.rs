@@ -5,14 +5,18 @@
 //! source, selected generation, current head and actual protected use. These
 //! codecs cannot issue a guest permit or restore a live state cell.
 
+mod annotation_manifest;
 mod authority_catalogue;
 mod authority_evidence;
 mod budget_quote;
 mod classification;
 mod copy_inventory;
 mod current_view;
+mod dependency_bundle;
 mod envelope;
 mod error;
+mod event_drafts;
+mod event_source;
 mod failure;
 mod generation_admission;
 mod graph_root;
@@ -30,8 +34,12 @@ mod member_progress;
 mod metadata_envelope;
 mod metadata_scope;
 mod native_node;
+mod observation;
 mod original_provenance;
 mod owner_binding;
+mod pass_graph;
+mod pass_install;
+mod pass_quote;
 mod prepared;
 mod profile;
 mod progress;
@@ -50,6 +58,12 @@ mod state;
 mod step;
 mod terminal;
 
+pub use annotation_manifest::{
+    CommunityAnnotationItemV1, CommunityAnnotationManifestInputV1, CommunityAnnotationManifestV1,
+    MAX_COMMUNITY_ANNOTATION_CLAIM_BYTES_V1, MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1,
+    MAX_COMMUNITY_ANNOTATION_INPUT_REFS_V1, MAX_COMMUNITY_ANNOTATION_ITEMS_V1,
+    MAX_COMMUNITY_ANNOTATION_MANIFEST_BYTES_V1,
+};
 pub use authority_catalogue::{
     community_authentication_nonce_v1, community_capability_attestation_digest_v1,
     CommunityActorRowV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
@@ -80,13 +94,34 @@ pub use current_view::{
     MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1, MAX_COMMUNITY_VIEW_KEY_ROWS_V1,
     MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1, MAX_COMMUNITY_VIEW_TRUST_ROWS_V1,
 };
+pub use dependency_bundle::{
+    CommunityDependencyBundleInputV1, CommunityDependencyBundleV1, CommunityEvidenceRootsV1,
+    CommunityFactualBindingV1, MAX_COMMUNITY_DEPENDENCY_BUNDLE_BYTES_V1,
+    MAX_COMMUNITY_REQUIRED_NODES_V1,
+};
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityEncryptedEnvelopeV1,
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
 };
 pub use error::CommunityLifecycleErrorV1;
+pub use event_drafts::{
+    community_event_draft_vector_bytes_v1, CommunityEventDraftFragmentInputV1,
+    CommunityEventDraftFragmentReferenceV1, CommunityEventDraftFragmentV1,
+    CommunityEventDraftManifestInputV1, CommunityEventDraftManifestV1,
+    MAX_COMMUNITY_EVENT_DRAFTS_V1, MAX_COMMUNITY_EVENT_DRAFT_FRAGMENTS_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_BYTES_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_FRAGMENT_RECORD_BYTES_V1,
+    MAX_COMMUNITY_EVENT_DRAFT_MANIFEST_BYTES_V1, MAX_COMMUNITY_EVENT_DRAFT_VECTOR_BYTES_V1,
+};
+pub use event_source::{
+    CommunityEventSourceInputV1, CommunityEventSourceV1, CommunitySourceCatalogueV1,
+    CommunitySourceSchemaRuleV1, COMMUNITY_NATIVE_EVENT_EXTRACTOR_RULE_V1,
+    MAX_COMMUNITY_EVENT_SOURCE_BYTES_V1, MAX_COMMUNITY_EVENT_SOURCE_KEYS_V1,
+    MAX_COMMUNITY_SOURCE_CATALOGUE_ROWS_V1, MAX_COMMUNITY_SOURCE_RULE_TEXT_BYTES_V1,
+};
 pub use failure::{
+    community_decision_provenance_digest_v1, CommunityDecisionProvenanceInputV1,
     CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
     CommunityPassFailureV1,
 };
@@ -134,9 +169,9 @@ pub use materialization::{
 };
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use member_progress::{
-    CommunityCarriedEventV1, CommunityCarriedEventsIterV1, CommunityCarriedEventsV1,
-    CommunityFactualNodeReferenceV1, CommunityMemberProgressInputV1, CommunityMemberProgressV1,
-    CommunityProgressReferenceV1, MAX_COMMUNITY_CARRIED_EVENTS_V1,
+    community_member_due_v1, CommunityCarriedEventV1, CommunityCarriedEventsIterV1,
+    CommunityCarriedEventsV1, CommunityFactualNodeReferenceV1, CommunityMemberProgressInputV1,
+    CommunityMemberProgressV1, CommunityProgressReferenceV1, MAX_COMMUNITY_CARRIED_EVENTS_V1,
 };
 pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchemaV1};
 pub use metadata_scope::{
@@ -148,11 +183,31 @@ pub use native_node::{
     CommunityNativeNodeKindV1, CommunityNativeNodeV1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
     MAX_COMMUNITY_EXPANDED_INPUTS_V1,
 };
+pub use observation::{
+    community_event_source_authority_digest_v1, community_observation_materialization_id_v1,
+    community_recorded_consumer_digest_v1, community_recorded_consumer_set_digest_v1,
+    community_reducer_configuration_digest_v1, CommunityEventSourceRefV1,
+    CommunityObservationEventRowV1, CommunityObservationSourceInputV1,
+    CommunityObservationSourceV1, CommunityObservationValueInputV1, CommunityObservationValueV1,
+    CommunityReducerBindingV1, MAX_COMMUNITY_OBSERVATION_BYTES_V1,
+    MAX_COMMUNITY_OBSERVATION_EVENTS_V1, MAX_COMMUNITY_OBSERVATION_SOURCE_BYTES_V1,
+    MAX_COMMUNITY_OBSERVATION_VALUE_BYTES_V1, MAX_COMMUNITY_RECORDED_CONSUMERS_V1,
+    MAX_STAGED_CALLBACK_BOUND_V1,
+};
 pub use original_provenance::{CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1};
 pub use owner_binding::{
     community_catalogue_owner_reference_v1, community_catalogue_owner_v1,
     CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
     CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
+};
+pub use pass_graph::{CommunityPassGraphTermsV1, CommunityProtectionSizesV1};
+pub use pass_install::{
+    check_community_pass_installation_v1, CommunityPassInstallationV1, CommunityPassLifetimeV1,
+};
+pub use pass_quote::{
+    CommunityPassDemandV1, CommunityPassDomainV1, CommunityPassObservationV1,
+    CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1, CommunityPassQuoteV1,
+    CommunityPassTermsV1,
 };
 pub use prepared::{
     CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
@@ -161,15 +216,22 @@ pub use prepared::{
 pub use profile::{
     community_initializer_set_ref_v1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
-    COMMUNITY_INITIALIZER_SET_SCHEMA_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    COMMUNITY_CONTROL_OPERATIONS_V1, COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1,
+    COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_RESERVE_V1,
+    COMMUNITY_ERASURE_ROW_LIMIT_V1, COMMUNITY_ERASURE_TARGET_LINE_V1,
+    COMMUNITY_FOLD_BUDGET_MICROS_V1, COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+    COMMUNITY_MAXIMUM_ROSTER_V1, COMMUNITY_MAXIMUM_STORE_KEYS_V1,
+    COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
+    COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
 };
 pub use quarantine::{
-    CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
-    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
+    community_quarantine_delta_digest_v1, community_quarantine_reason_v1,
+    CommunityQuarantineDeltaRowV1, CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1,
+    CommunityQuarantineReasonV1, CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
     CommunityQuarantineRevisionV1,
 };
 pub use quarantine_control::{
@@ -310,6 +372,20 @@ fn validate_coordinates(timeline: TimelineId, generation: [u8; 16]) -> Result<()
         Err(CommunityLifecycleErrorV1::InvalidBinding)
     } else {
         Ok(())
+    }
+}
+
+/// The largest admissible horizon, `i64::MAX`: the widest encoding of an
+/// evidence horizon unknown at quote time (revision 10, R10.3(3)).
+const WIDEST_HORIZON_MICROS: u64 = u64::MAX / 2;
+
+/// A CPK1 whose unallocated ordinal is counted at its widest form, 9 bytes
+/// (revision 10, R10.3(3)). It is a quote placeholder, never a pass key.
+const fn widest_pass_key(timeline: TimelineId, generation: [u8; 16]) -> CommunityPassKeyV1 {
+    CommunityPassKeyV1 {
+        timeline,
+        generation,
+        ordinal: u64::MAX,
     }
 }
 

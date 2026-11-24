@@ -30,7 +30,7 @@ const GRAPH_MAXIMA: [u64; 6] = [4096, 8192, 4096, 4096, 67_108_864, 268_435_456]
 
 /// `[registrations, edges, keys, maximum_depth, registration_bytes,
 /// artifact_bytes]`, exact checked sums re-derived by the native owner.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommunityGraphCountsV1 {
     /// Distinct registrations.
     pub registrations: u64,
@@ -47,7 +47,7 @@ pub struct CommunityGraphCountsV1 {
 }
 
 impl CommunityGraphCountsV1 {
-    const fn values(self) -> [u64; 6] {
+    pub(super) const fn values(self) -> [u64; 6] {
         [
             self.registrations,
             self.edges,
@@ -63,6 +63,19 @@ impl CommunityGraphCountsV1 {
     /// root set needs at least one registration per root and a depth from 1
     /// up to the number of registrations.
     fn validate(self, roots: usize) -> Result<()> {
+        let related = if self.registrations < roots as u64
+            || self.maximum_depth == 0
+            || self.maximum_depth > self.registrations
+        {
+            Err(Error::InvalidBinding)
+        } else {
+            Ok(())
+        };
+        self.within_maxima().and(related)
+    }
+
+    /// Every count is within its profile-1 `graph_policy_bytes` maximum.
+    pub(super) fn within_maxima(self) -> Result<()> {
         if self
             .values()
             .iter()
@@ -70,17 +83,12 @@ impl CommunityGraphCountsV1 {
             .any(|(value, maximum)| *value > maximum)
         {
             Err(Error::BoundsExceeded)
-        } else if self.registrations < roots as u64
-            || self.maximum_depth == 0
-            || self.maximum_depth > self.registrations
-        {
-            Err(Error::InvalidBinding)
         } else {
             Ok(())
         }
     }
 
-    fn read(cursor: &mut CborCursor<'_>) -> Result<Self> {
+    pub(super) fn read(cursor: &mut CborCursor<'_>) -> Result<Self> {
         let mut values = [0; 6];
         cursor
             .fixed(&[0x86])

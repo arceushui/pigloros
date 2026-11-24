@@ -496,6 +496,44 @@ impl CommunityLifecycleAuthorityV1 {
         domain.check_writer_bound(call.reservation, self.mono.as_mut(), call.decision_bound)
     }
 
+    /// Commit the one trusted-clock reservation of a `SetReason` command.
+    ///
+    /// It reserves on `domain`'s own clock with this authority's wall and
+    /// guard monotonic sources (ADR-129 revision 9 R9.9(6), as I39). No FAE1
+    /// is involved: `SetReason`'s authority is the installed failure
+    /// producer.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for a domain other than the installed
+    /// one and for every reservation failure.
+    #[cfg(target_os = "linux")]
+    pub(super) fn reserve_control<D: CommunityStoreDomainV1>(
+        &mut self,
+        domain: &mut D,
+    ) -> Result<TrustedClockReservationV1, Error> {
+        if domain.store_incarnation() != self.store_incarnation {
+            return Err(Error::EvidenceUnavailable);
+        }
+        domain.reserve_clock(self.wall.as_mut(), self.mono.as_mut())
+    }
+
+    /// The `SetReason` writer's bound check on `domain`'s clock, for the
+    /// reservation [`Self::reserve_control`] committed (R9.9(6)).
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` when the guard cannot open, the
+    /// monotonic source rolls back, or the writer's time is at or after
+    /// `bound`.
+    #[cfg(target_os = "linux")]
+    pub(super) fn check_control_bound<D: CommunityStoreDomainV1>(
+        &mut self,
+        reservation: TrustedClockReservationV1,
+        bound: WallTime,
+        domain: &mut D,
+    ) -> Result<(), Error> {
+        domain.check_writer_bound(reservation, self.mono.as_mut(), bound)
+    }
+
     /// Evaluate the call's administrative request (A5.1) against the chain
     /// `leaf_grant_id` names, loaded now from the domain's own store.
     ///

@@ -9,6 +9,7 @@
 //! records, State or the backing store.
 
 mod attestation;
+mod erasure_budget;
 mod extractor;
 #[cfg(target_os = "linux")]
 mod initialize;
@@ -17,16 +18,21 @@ mod lifecycle_authority;
 mod memory_domain;
 mod metadata_authority;
 mod native_graph;
+mod observation;
+mod pass_planner;
 mod planner;
 mod private_hash;
 mod protection;
+#[cfg(target_os = "linux")]
+mod quarantine;
 mod sealer;
 mod store_domain;
 mod vault;
 
 pub use extractor::{
-    prepare_community_artifact_batch_v1, CommunityArtifactBatchInputV1, CommunityArtifactBatchV1,
-    CommunityArtifactRecordInputV1,
+    prepare_community_artifact_batch_v1, CommunityArtifactBatchFormV1,
+    CommunityArtifactBatchInputV1, CommunityArtifactBatchV1, CommunityArtifactRecordInputV1,
+    CommunityControlBatchInputV1,
 };
 #[cfg(target_os = "linux")]
 pub use initialize::{
@@ -49,6 +55,18 @@ pub use native_graph::{
     CommunityAssembledRecordV1, CommunityInitializationGraphInputV1,
     CommunityInitializationGraphV1, CommunityInitializationMemberV1,
 };
+pub use observation::{
+    prepare_community_observation_v1, CommunityObservationBindingsV1,
+    CommunityObservationConsumerV1, CommunityObservationEventV1,
+    CommunityObservationInstallationV1, CommunityObservationMaterializationInputV1,
+    CommunityObservationMaterializationV1, CommunityObservationPassV1, CommunityObservationQuoteV1,
+    CommunityObservationRecordsV1, CommunityObservationSourcesV1,
+};
+pub use pass_planner::{
+    plan_community_pass_v1, CommunityPassDueV1, CommunityPassInstallationV1,
+    CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
+    CommunityPassQuotedV1, CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
+};
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
     CommunityInitializationEvidenceInputV1, CommunityInitializationInstallationV1,
@@ -58,4 +76,10 @@ pub use planner::{
 pub use protection::{
     CommunityArtifactProtectorV1, CommunityProtectedRecordV1, CommunityProtectionCohortV1,
     CommunityRecordEvidenceV1,
+};
+#[cfg(target_os = "linux")]
+pub use quarantine::{
+    CommunityPreExecutionFailureInputV1, CommunityPreExecutionFailureV1,
+    CommunityPreExecutionTrustV1, CommunityQuarantineContextV1, CommunityQuarantineReceiptV1,
+    CommunitySetReasonCallV1,
 };

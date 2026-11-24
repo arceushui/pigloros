@@ -2,6 +2,8 @@
 
 mod bundle;
 mod codes;
+mod negative_integers;
+mod network_readback;
 mod observed;
 mod oracle;
 mod requested;

@@ -329,7 +329,7 @@ pub(crate) struct ParsedRoomRequestV1 {
 /// the body's canonical JSON (keys sorted), so an exact retry with other
 /// whitespace or member order is still exact.
 pub(crate) fn parse_create(body: &Value) -> Result<ParsedRoomRequestV1, RoomFailureV1> {
-    serde_json::from_value::<CreateScenarioRoomRequestV1>(body.clone())
+    CreateScenarioRoomRequestV1::deserialize(body)
         .ok()
         .and_then(|request| request.descriptor.into_input())
         .map(|input| ParsedRoomRequestV1 {
@@ -345,7 +345,7 @@ pub(crate) fn parse_derive(
     room_id: EntityId,
     body: &Value,
 ) -> Result<ParsedRoomRequestV1, RoomFailureV1> {
-    serde_json::from_value::<DeriveScenarioRoomRequestV1>(body.clone())
+    DeriveScenarioRoomRequestV1::deserialize(body)
         .ok()
         .and_then(|request| {
             let parent_revision = request.parent_revision;

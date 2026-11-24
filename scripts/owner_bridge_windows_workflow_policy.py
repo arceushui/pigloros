@@ -60,10 +60,10 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                               'with': {'toolchain': '1.97.1',
                                                        'components': 'clippy,llvm-tools-preview'}},
                                              {'name': 'Install coverage producer',
-                                              'uses': 'taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29',
+                                              'uses': 'taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519',
                                               'with': {'tool': 'cargo-llvm-cov'}},
                                              {'name': 'Install coverage gate',
-                                              'uses': 'taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29',
+                                              'uses': 'taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519',
                                               'with': {'tool': 'covgate@0.2.0'}},
                                              {'name': 'Enforce the Windows unsafe inventory',
                                               'run': 'python '
@@ -212,7 +212,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                              {'name': 'Retain native LCOV and checkout receipt',
                                               'if': '${{ !cancelled() && steps.native-lcov.outcome '
                                                     "== 'success' }}",
-                                              'uses': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+                                              'uses': 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
                                               'with': {'name': 'owner-windows-lcov-${{ github.sha '
                                                                '}}',
                                                        'path': '${{ runner.temp '
@@ -223,7 +223,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                              {'name': 'Retain the measured shim report',
                                               'if': '${{ !cancelled() && steps.coverage.outcome == '
                                                     "'success' }}",
-                                              'uses': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+                                              'uses': 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
                                               'with': {'name': 'owner-windows-coverage-${{ '
                                                                'github.sha }}',
                                                        'path': '${{ runner.temp '
@@ -300,7 +300,7 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
          '}\n'},
  {'name': 'Retain failed native coverage diagnostics',
   'if': "${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}",
-  'uses': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+  'uses': 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
   'with': {'name': 'owner-windows-failed-diagnostic-${{ github.sha }}',
            'path': '${{ runner.temp }}/owner-windows-failed-diagnostic/',
            'if-no-files-found': 'error'}}])
@@ -350,7 +350,7 @@ EXPECTED_NATIVE["jobs"]["readiness-soak"] = {
     ],
 }
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '1f4f410e25d8d19488cac406659b730993e60b05fd01117a5eb182a403955c71',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'd85a2eb971d62f1e2563d7483fc619a0f71a5d1543c80215e61786b83aadfe85',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 

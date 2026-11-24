@@ -32,7 +32,7 @@ use std::{
 use pos_reference::provider_admission::{test_support::StagedInstallation, ProviderImageSnapshot};
 use pos_sandboxd::{
     ActivationImage, ControlFloor, ImageActivationError, ImageActivator, MountfsdImageActivator,
-    StagingError, StagingLedger, StagingLimits,
+    RecheckError, RecheckLedgerError, StagingLedger, StagingLimits,
 };
 use rustix::{
     fs::fstat,
@@ -257,12 +257,12 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     });
     assert!(matches!(
         entry.recheck(),
-        Err(StagingError::BelowControlFloor)
+        Err(RecheckError::Ledger(RecheckLedgerError::BelowControlFloor))
     ));
     fs::write("/var/lib/pigloros/sandbox/installation-update.cbor", [1_u8])?;
     assert!(matches!(
         entry.recheck(),
-        Err(StagingError::AuthorityChanged)
+        Err(RecheckError::AuthorityChanged)
     ));
     Ok(())
 }
