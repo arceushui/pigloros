@@ -16,8 +16,9 @@
 //!
 //! The trust state store lives at the fixed path
 //! [`DEPLOYMENT_TRUST_STATE_PATH`]; it is provisioned explicitly, never by
-//! the Gateway. [`load_deployment_trust_v1`] opens it read-only against the
-//! anchor and returns its current TPS1 through
+//! the Gateway. [`load_deployment_trust_v1`] opens it against the anchor
+//! (the registry opens its connection read-write) and returns its current
+//! TPS1 through
 //! `DeploymentTrustPolicyRegistryV1::current_trust_policy`, so every
 //! consumer sees a TPS1 the operator key signed and the genesis chain
 //! reaches. The Gateway's `provision-local-erasure` and serve composition
