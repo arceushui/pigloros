@@ -561,12 +561,6 @@ impl NetworkSetupFailure {
             source: Box::new(error),
         }
     }
-
-    /// The class the port gave the failure.
-    #[must_use]
-    pub const fn class(&self) -> SetupClass {
-        self.class
-    }
 }
 
 /// What is known of the unit when an execution failed.

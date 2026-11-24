@@ -104,15 +104,14 @@ pub trait SetupError: Error {
     fn setup_class(&self) -> SetupClass;
 }
 
-/// The error type of [`FailClosedLocalNetwork`], which never fails: it
-/// exists so the port's error names a class.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("the fail-closed Local network cannot fail")]
-pub struct FailClosedSetup;
-
-impl SetupError for FailClosedSetup {
+impl SetupError for std::convert::Infallible {
     fn setup_class(&self) -> SetupClass {
-        SetupClass::Creation
+        // No value of this type exists, so the dereference is never run.
+        #[expect(
+            clippy::uninhabited_references,
+            reason = "an empty match on `Infallible`"
+        )]
+        match *self {}
     }
 }
 
@@ -190,13 +189,13 @@ pub struct FailClosedLocalNetwork;
 
 impl LocalNetworkPort for FailClosedLocalNetwork {
     type Connector = RefusingConnector;
-    type Error = FailClosedSetup;
+    type Error = std::convert::Infallible;
 
     fn establish(
         &self,
         attempt_id: [u8; 16],
         _endpoints: &[SocketAddr],
-    ) -> Result<EstablishedNetwork<RefusingConnector>, FailClosedSetup> {
+    ) -> Result<EstablishedNetwork<RefusingConnector>, std::convert::Infallible> {
         Ok(EstablishedNetwork::new(attempt_id, RefusingConnector))
     }
 }

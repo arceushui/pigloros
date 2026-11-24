@@ -734,10 +734,6 @@ fn network_and_replay_setup_refusals_have_their_launch_failure() {
             Some(LaunchFailure::ReplayUnavailable),
         ),
     ];
-    assert_eq!(
-        NetworkSetupFailure::new(Classified(SetupClass::Creation)).class(),
-        SetupClass::Creation
-    );
     for (error, expected) in cases {
         assert_eq!(error.launch_failure(), expected, "{error}");
     }
