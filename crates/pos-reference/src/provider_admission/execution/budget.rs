@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-use super::{OutputReservationRefused, ProviderExecutionPolicy, StagingError};
+use super::{OutputReservationRefused, ProviderExecutionPolicy, RecheckLedgerError, StagingError};
 use crate::provider_admission::AdmittedAuthority;
 
 /// Provider-owned configuration; per-attempt limits never come from configuration.
@@ -248,14 +248,14 @@ fn remove_ceiling(ceilings: &mut BTreeMap<u64, u64>, ceiling: u64) {
     ceilings.retain(|_, count| *count != 0);
 }
 
-pub(super) const fn check_floor(
+const fn check_floor(
     floor: ControlFloor,
     authority: AdmittedAuthority,
-) -> Result<(), StagingError> {
+) -> Result<(), RecheckLedgerError> {
     if authority.revocation_epoch < floor.revocation_epoch
         || authority.policy_epoch < floor.policy_epoch
     {
-        Err(StagingError::BelowControlFloor)
+        Err(RecheckLedgerError::BelowControlFloor)
     } else {
         Ok(())
     }
@@ -278,9 +278,15 @@ pub(super) struct AttemptSlot {
 }
 
 impl AttemptSlot {
-    pub(super) fn recheck(&self, authority: AdmittedAuthority) -> Result<(), StagingError> {
+    pub(super) fn recheck(&self, authority: AdmittedAuthority) -> Result<(), RecheckLedgerError> {
         let state = self.shared.state();
-        check_floor(state.usage.floor, authority).and_then(|()| state.ensure_open())
+        check_floor(state.usage.floor, authority).and_then(|()| {
+            if state.is_open() {
+                Ok(())
+            } else {
+                Err(RecheckLedgerError::CleanupFailed)
+            }
+        })
     }
 
     pub(super) fn output(
@@ -631,11 +637,23 @@ mod tests {
         });
         assert!(matches!(
             slot.recheck(authority(5, 9)),
-            Err(StagingError::BelowControlFloor)
+            Err(RecheckLedgerError::BelowControlFloor)
         ));
         drop((slot, input));
         assert_eq!(ledger.usage().attempts, 0);
         Ok(())
+    }
+
+    #[test]
+    fn a_recheck_refusal_is_the_staging_refusal_of_the_same_name() {
+        assert!(matches!(
+            StagingError::from(RecheckLedgerError::BelowControlFloor),
+            StagingError::BelowControlFloor
+        ));
+        assert!(matches!(
+            StagingError::from(RecheckLedgerError::CleanupFailed),
+            StagingError::CleanupFailed
+        ));
     }
 
     // R11 Amendment 1 §7.5 row R: an input above its ceiling (2), then the
@@ -671,7 +689,7 @@ mod tests {
         ));
         assert!(matches!(
             slot.recheck(authority(1, 1)),
-            Err(StagingError::BelowControlFloor)
+            Err(RecheckLedgerError::BelowControlFloor)
         ));
         assert!(matches!(
             ledger.prepare_with(authority(2, 1), policy(1, 1, 1)),
@@ -700,7 +718,7 @@ mod tests {
         ));
         assert!(matches!(
             slot.recheck(authority(1, 1)),
-            Err(StagingError::CleanupFailed)
+            Err(RecheckLedgerError::CleanupFailed)
         ));
         assert!(matches!(input.recheck(), Err(StagingError::CleanupFailed)));
         // Dropping every reservation or raising the floor does not reopen it,
@@ -740,7 +758,7 @@ mod tests {
         ));
         assert!(matches!(
             slot.recheck(authority(1, 1)),
-            Err(StagingError::CleanupFailed)
+            Err(RecheckLedgerError::CleanupFailed)
         ));
         assert!(matches!(
             slot.output_with_limit(1),

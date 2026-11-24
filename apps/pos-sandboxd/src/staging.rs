@@ -2,6 +2,6 @@
 
 pub use pos_reference::provider_admission::execution::{
     AdmittedEntry, ControlFloor, FailedInput, IssuedGrant, OutputReservationRefused, RecheckError,
-    StagedInput, StagingCharge, StagingDirectory, StagingError, StagingLedger, StagingLimits,
-    StagingUsage, VerifiedStagedInput,
+    RecheckLedgerError, StagedInput, StagingCharge, StagingDirectory, StagingError, StagingLedger,
+    StagingLimits, StagingUsage, VerifiedStagedInput,
 };
