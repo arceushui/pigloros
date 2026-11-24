@@ -373,6 +373,53 @@ mod tests {
         Ok(())
     }
 
+    /// Base §4 and the R11 repeat rule: only an exact repeat of the
+    /// attempt's last SCQ1 gets its SCY1 bytes again; an SCQ1 with another
+    /// request ID and digest is a new request, answered with its own SCY1.
+    #[test]
+    fn only_an_exact_repeat_of_the_last_scq1_replays_its_scy1(
+    ) -> crate::provider_runtime::tests::TestResult {
+        use pos_reference::sandbox_provider_protocol::{
+            AdmissionGrant, RequestAuthority, SandboxCancellationResult,
+        };
+        let (_tree, port) = crate::provider_runtime::tests::test_port(crate::StagingLimits {
+            aggregate_bytes: 1024 * 1024,
+        })?;
+        let stored = port
+            .lifecycle
+            .completed_for_test()
+            .map_err(|error| error.to_string())?;
+        let grant = AdmissionGrant::from_canonical_cbor(stored.frames().next().ok_or("no AGR1")?)?;
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let public = signing.verifying_key();
+        let signer = KeyFileRuntimeSigner::from_signing_key(signing, "runtime".to_owned());
+        let key = AdmittedRuntimeKey::new("runtime", &public);
+        let request = |id: u8| SandboxCancelRequest {
+            request: RequestAuthority {
+                request_id: [id; 16],
+                apt1_digest: [1; 32],
+                policy_epoch: 1,
+                nonce: [id; 16],
+            },
+            attempt_id: grant.attempt_id,
+            agr1_digest: grant.grant_digest(),
+            request_digest: [id; 32],
+        };
+        let until = || Instant::now() + std::time::Duration::from_secs(5);
+        let cancel = |id| {
+            port.cancel(&request(id), until(), (&signer, key))
+                .map_err(|code| format!("{code:?}"))
+        };
+        let first = cancel(3)?;
+        assert_eq!(cancel(3)?, first);
+        let next = cancel(4)?;
+        assert_ne!(next, first);
+        let answered = SandboxCancelResponse::from_canonical_cbor(&next)?;
+        assert_eq!(answered.request_id, [4; 16]);
+        assert_eq!(answered.result, SandboxCancellationResult::AlreadyTerminal);
+        Ok(())
+    }
+
     #[test]
     fn cancel_refusals_name_their_codes() {
         for (error, code) in [
