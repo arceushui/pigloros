@@ -151,6 +151,11 @@ fn state_limits_must_cover_the_roster_within_one_mib() -> TestResult {
         check_community_pass_installation_v1(&profile, &[MIB, MIB + 1]).err(),
         Some(Error::BoundsExceeded)
     );
+    // Exactly 1 MiB is admitted; one byte more is refused.
+    assert_eq!(
+        check_community_pass_installation_v1(&profile, &[MIB + 1, 0]).err(),
+        Some(Error::BoundsExceeded)
+    );
     let installed = check_community_pass_installation_v1(&profile, &[0, MIB])?;
     let [state, _] = installed.quote;
     assert!(state.bytes > MIB);

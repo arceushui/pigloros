@@ -61,6 +61,12 @@ pub struct CommunityPassInstallationV1 {
 
 /// Check that `profile`'s minimum required pass fits (R10.4(5), R11.5(3)).
 ///
+/// This check does **not** enforce the R10.4(3) installation rule that
+/// `recording_not_after_micros` is at most the recording owner's admitted
+/// `ReplayRecording` policy horizon: no input here carries that owner
+/// horizon. A4c's installation wiring must supply the owner horizon and
+/// enforce that rule alongside this check.
+///
 /// `state_limit_bytes` is each roster row's CNT1 State limit, in roster
 /// order, as for the planners.
 ///

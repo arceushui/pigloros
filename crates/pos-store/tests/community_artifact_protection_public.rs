@@ -495,19 +495,33 @@ fn quoted_protection_sizes_equal_real_protected_records_for_every_parent() -> Te
         Operation::Control([0x4d; 16]),
         Operation::Initialization([3; 16]),
     ];
-    let children = [child(1, 11), child(2, 12), child(3, 13)];
+    // 2,048 strictly ordered children, the ARD1 and CAR1 maximum.
+    let children: Vec<ArtifactChildEdgeV1> = (0..2048_u16)
+        .map(|index| {
+            let mut digest = [0x20; 32];
+            digest[..2].copy_from_slice(&index.to_be_bytes());
+            ArtifactChildEdgeV1 {
+                artifact_class: Class::TimelineReplay,
+                artifact_digest: Hash::from_bytes(digest),
+                registration_address: Hash::from_bytes(digest),
+                required: true,
+            }
+        })
+        .collect();
     for parent in parents {
         for (purpose, kind) in [
             (Purpose::ExecutionState, Kind::StateContent),
             (Purpose::ExecutionState, Kind::ExecutionProvenance),
             (Purpose::ReplayEvidence, Kind::ReplayReceiptOrRoot),
+            (Purpose::PresentationTrace, Kind::TraceAnnotation),
         ] {
             let mut cohort = cohort(purpose, kind)?;
             cohort.parent_operation = parent;
             cohort.evidence_not_after_micros = u64::MAX / 2;
             let mut protector = CommunityArtifactProtectorV1::provision(&SEAL, cohort)?;
-            for plaintext in [0_usize, 1, 23, 24, 1000] {
-                for count in [0, 1, 3] {
+            // The R11.8 I109 ranges, where a CBOR length head widens.
+            for plaintext in [0_usize, 1, 1 << 20, 3 << 20] {
+                for count in [0, 1, 2048] {
                     let record = protector.protect(
                         kind,
                         &vec![7; plaintext],
