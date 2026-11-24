@@ -696,6 +696,53 @@ fn reservation_and_channel_refusals_keep_their_launch_failure() {
     }
 }
 
+/// ADR-069 R14 §3.4: a creation, transport or resource failure of the Local
+/// network, its FD 3 channel or a Replay exchange has a launch failure; a
+/// contradiction of the provider's own state falls back to O6.
+#[test]
+fn network_and_replay_setup_refusals_have_their_launch_failure() {
+    use crate::execute::NetworkSetupFailure;
+    use crate::{LocalProxyBindError, SetupClass};
+    use pos_reference::sandbox_provider_protocol::{LaunchFailure, NetworkCaptureStoreError};
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("classified")]
+    struct Classified(SetupClass);
+    impl crate::SetupError for Classified {
+        fn setup_class(&self) -> SetupClass {
+            self.0
+        }
+    }
+    let network = |class| ExecuteError::Network(NetworkSetupFailure::new(Classified(class)));
+    let setup = Some(LaunchFailure::NetworkSetupFailed);
+    let cases = [
+        (network(SetupClass::Creation), setup),
+        (network(SetupClass::Contradiction), None),
+        (
+            ExecuteError::HostService(std::io::Error::other("pair")),
+            setup,
+        ),
+        (ExecuteError::Bind(LocalProxyBindError::Namespace), setup),
+        (ExecuteError::Bind(LocalProxyBindError::Channel), setup),
+        (ExecuteError::Bind(LocalProxyBindError::Attempt), None),
+        (ExecuteError::Bind(LocalProxyBindError::Request), None),
+        (ExecuteError::Bind(LocalProxyBindError::Authority), None),
+        (ExecuteError::Bind(LocalProxyBindError::LaunchPolicy), None),
+        (ExecuteError::Bind(LocalProxyBindError::Capability), None),
+        (
+            ExecuteError::ReplayUnavailable(NetworkCaptureStoreError::ReplayUnavailable),
+            Some(LaunchFailure::ReplayUnavailable),
+        ),
+    ];
+    assert_eq!(
+        NetworkSetupFailure::new(Classified(SetupClass::Creation)).class(),
+        SetupClass::Creation
+    );
+    for (error, expected) in cases {
+        assert_eq!(error.launch_failure(), expected, "{error}");
+    }
+}
+
 #[tokio::test]
 async fn an_adapter_that_closes_stdin_leaves_the_feed_incomplete() -> TestResult {
     let script = StdioScript {

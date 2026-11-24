@@ -983,18 +983,18 @@ fn grant_matches_execute_request(
         && grant.expected_launch_policy_digest == spx.authority.lps1_digest
 }
 
-/// The receipt binds at most one NXT1 digest per planned exchange (ADR-069
-/// R16 N13): none without plans, as every V1 execute of #1488-a.
+/// The receipt binds at most one NXT1 digest per planned exchange, and none
+/// unless the adapter was released (ADR-069 R16 N13 and its residual Local
+/// check): no exchange can happen before `release1-digest` is bound.
 ///
-/// The check is mode-independent, so it is stricter for `AirGapped` and `Fork`
-/// than R16 requires. The R16 residual clause ("NXT1 empty unless
-/// `release1-digest` is non-null") is added by 1488-b or 1492 once non-empty
-/// plans exist.
+/// The check is mode-independent. With no plans, which every V1 execute has,
+/// the first clause already requires an empty list.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
 ) -> bool {
     receipt.network_transcript_digests.len() <= spx.network_plans.len()
+        && (receipt.release1_digest.is_some() || receipt.network_transcript_digests.is_empty())
 }
 
 fn receipt_matches_grant(
@@ -3234,6 +3234,7 @@ mod tests {
             .map_err(|_| AdapterError::ProtocolFailure)?;
         let mut receipt = evidence.receipt;
         assert!(transcripts_fit_plans(&receipt, &spx));
+        receipt.release1_digest = Some([8; 32]);
         receipt.network_transcript_digests = vec![[1; 32]];
         assert!(!transcripts_fit_plans(&receipt, &spx));
         spx.network_plans = vec![NetworkExchangePlan {
@@ -3248,6 +3249,11 @@ mod tests {
             plan_digest: [6; 32],
         }];
         assert!(transcripts_fit_plans(&receipt, &spx));
+        receipt.release1_digest = None;
+        assert!(
+            !transcripts_fit_plans(&receipt, &spx),
+            "no exchange happens before the release"
+        );
         receipt.network_transcript_digests.clear();
         assert!(transcripts_fit_plans(&receipt, &spx));
         receipt.network_transcript_digests = vec![[1; 32], [7; 32]];

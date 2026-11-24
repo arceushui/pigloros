@@ -69,9 +69,9 @@ use crate::{
     ActiveAttempt, AdapterIo, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
     LocalNetworkPort, LocalProxyBindError, OutputReservationRefused, RequestedConfiguration,
-    RequestedConfigurationProperty, ServeError, ServedProxy, StdioChannelError,
-    SystemdTransientUnitReadback, TransientServiceUnitName, TransientUnitLaunchInputs,
-    TransientUnitRequest, UnitStdio,
+    RequestedConfigurationProperty, ServeError, ServedProxy, SetupClass, SetupError,
+    StdioChannelError, SystemdTransientUnitReadback, TransientServiceUnitName,
+    TransientUnitLaunchInputs, TransientUnitRequest, UnitStdio,
 };
 
 /// The least time a terminating host call is given, however short the
@@ -424,8 +424,8 @@ pub enum ExecuteError {
     #[error("a replayed exchange is unavailable")]
     ReplayUnavailable(#[source] NetworkCaptureStoreError),
     /// The Local network could not be established.
-    #[error("the Local network could not be established")]
-    Network(#[source] Box<dyn Error + Send + Sync>),
+    #[error(transparent)]
+    Network(NetworkSetupFailure),
     /// A systemd operation did not finish within its bound.
     #[error("a systemd operation did not finish within its bound")]
     HostTimeout,
@@ -497,6 +497,24 @@ impl ExecuteError {
             Self::Recheck(_) | Self::RootIdentity => Some(LaunchFailure::PreStartRecheckFailed),
             Self::OutputReservation(refused) => Some(LaunchFailure::from(*refused)),
             Self::StdioChannel(_) => Some(LaunchFailure::StdioChannelFailed),
+            _ => self.setup_refusal(),
+        }
+    }
+
+    /// The launch failure of a network or Replay setup refused after AGR1
+    /// and before the unit start (6 or 7, ADR-069 R14 §3.4): creation,
+    /// transport and resource refusals only. Contradictions of the
+    /// provider's own state have none, and fall back to O6.
+    const fn setup_refusal(&self) -> Option<LaunchFailure> {
+        match self {
+            Self::HostService(_)
+            | Self::Bind(LocalProxyBindError::Namespace | LocalProxyBindError::Channel) => {
+                Some(LaunchFailure::NetworkSetupFailed)
+            }
+            Self::Network(failure) if matches!(failure.class, SetupClass::Creation) => {
+                Some(LaunchFailure::NetworkSetupFailed)
+            }
+            Self::ReplayUnavailable(_) => Some(LaunchFailure::ReplayUnavailable),
             _ => None,
         }
     }
@@ -520,6 +538,31 @@ impl ExecuteError {
             Self::Start(start) => Some(start),
             _ => None,
         }
+    }
+}
+
+/// A Local network that could not be set up, with the class its port gave
+/// the failure (ADR-069 R14 §3.4).
+#[derive(Debug, thiserror::Error)]
+#[error("the Local network could not be established")]
+pub struct NetworkSetupFailure {
+    class: SetupClass,
+    #[source]
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl NetworkSetupFailure {
+    fn new<E: SetupError + Send + Sync + 'static>(error: E) -> Self {
+        Self {
+            class: error.setup_class(),
+            source: Box::new(error),
+        }
+    }
+
+    /// The class the port gave the failure.
+    #[must_use]
+    pub const fn class(&self) -> SetupClass {
+        self.class
     }
 }
 
@@ -1219,7 +1262,7 @@ where
                 .map_err(ExecuteError::HostService)?;
             let established = network
                 .establish(attempt.attempt_id(), &admitted_endpoints(&admission))
-                .map_err(|error| ExecuteError::Network(Box::new(error)))?;
+                .map_err(|error| ExecuteError::Network(NetworkSetupFailure::new(error)))?;
             // A bad admission, namespace or channel never reaches the start.
             let checked = attempt.check_local(*admission, established, channel)?;
             (

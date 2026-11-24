@@ -86,6 +86,36 @@ impl<C> EstablishedNetwork<C> {
     }
 }
 
+/// What kind of failure ended a Local network setup (ADR-069 R14 §3.4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SetupClass {
+    /// A creation, transport or resource refusal that left no owned state:
+    /// TME1 `launch-failure` 6, with no quarantine.
+    Creation,
+    /// The provider contradicted its own state or lifecycle: the O6 fallback,
+    /// code 2 with quarantine (R14 N9, N11 and N15).
+    Contradiction,
+}
+
+/// A setup error that names its own [`SetupClass`], so nothing downcasts a
+/// boxed error to find it.
+pub trait SetupError: Error {
+    /// The class of this failure.
+    fn setup_class(&self) -> SetupClass;
+}
+
+/// The error type of [`FailClosedLocalNetwork`], which never fails: it
+/// exists so the port's error names a class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("the fail-closed Local network cannot fail")]
+pub struct FailClosedSetup;
+
+impl SetupError for FailClosedSetup {
+    fn setup_class(&self) -> SetupClass {
+        SetupClass::Creation
+    }
+}
+
 /// The Local network port: it establishes one attempt's namespace.
 ///
 /// An implementation creates the namespace, veth pair and default-drop
@@ -104,7 +134,7 @@ pub trait LocalNetworkPort {
     /// The connector that operates inside the established namespace.
     type Connector: NetworkEndpointConnector + Send + 'static;
     /// Why a namespace could not be established or read back.
-    type Error: Error + Send + Sync + 'static;
+    type Error: SetupError + Send + Sync + 'static;
 
     /// Establish and read back the namespace of `attempt_id`, which reaches
     /// exactly `endpoints`, the attempt's admitted LPS1 endpoints.
@@ -128,13 +158,13 @@ pub struct FailClosedLocalNetwork;
 
 impl LocalNetworkPort for FailClosedLocalNetwork {
     type Connector = RefusingConnector;
-    type Error = std::convert::Infallible;
+    type Error = FailClosedSetup;
 
     fn establish(
         &self,
         attempt_id: [u8; 16],
         _endpoints: &[SocketAddr],
-    ) -> Result<EstablishedNetwork<RefusingConnector>, std::convert::Infallible> {
+    ) -> Result<EstablishedNetwork<RefusingConnector>, FailClosedSetup> {
         Ok(EstablishedNetwork::new(attempt_id, RefusingConnector))
     }
 }
