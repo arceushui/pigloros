@@ -980,8 +980,9 @@ fn a_delivered_response_is_never_reissued() -> TestResult {
 /// A cancellation waits for the response its attempt settles on, by the
 /// attempt's AGR1: none for an attempt never known, a refusal for another
 /// AGR1, and while the response is pending the wait lasts until it is
-/// retained, which wakes it.
-#[tokio::test]
+/// retained, which wakes it. On paused time: a wait that should not
+/// happen advances the clock to its bound and fails at once.
+#[tokio::test(start_paused = true)]
 async fn a_cancellation_waits_for_the_response_its_attempt_settles_on() -> TestResult {
     let (_directory, lifecycle, _ledger) = lifecycle()?;
     assert!(lifecycle
@@ -990,10 +991,17 @@ async fn a_cancellation_waits_for_the_response_its_attempt_settles_on() -> TestR
         .is_none());
     let pending = super::super::completed_pending(&lifecycle)?;
     let digest = pending.agr1_digest;
+    // Refused at once, before any wait on the pending response.
+    let before = tokio::time::Instant::now();
     assert!(matches!(
-        lifecycle.settled_response(ATTEMPT, [1; 32]).await,
-        Err(AttemptLifecycleError::GrantMismatch)
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            lifecycle.settled_response(ATTEMPT, [1; 32])
+        )
+        .await,
+        Ok(Err(AttemptLifecycleError::GrantMismatch))
     ));
+    assert_eq!(tokio::time::Instant::now(), before);
     assert!(tokio::time::timeout(
         std::time::Duration::from_millis(20),
         lifecycle.settled_response(ATTEMPT, digest)
