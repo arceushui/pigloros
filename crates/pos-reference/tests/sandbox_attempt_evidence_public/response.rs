@@ -408,6 +408,11 @@ fn unstarted(plan: &Plan<'_>) -> TestResult<Built> {
 }
 
 const COMPLETED: Plan<'static> = Plan::new(&[11, 12], 0);
+
+/// The SAU1 chain of the completed response.
+pub(super) fn completed_audit() -> TestResult<Vec<Vec<u8>>> {
+    completed(&COMPLETED).map(|built| built.audit)
+}
 /// TME1 progress 0 selects code 2 (missing evidence): one SAU1 event 2.
 const UNSTARTED: Plan<'static> = Plan::new(&[2], 4);
 

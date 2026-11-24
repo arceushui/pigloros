@@ -30,7 +30,7 @@ use std::time::Duration;
 use pos_reference::provider_admission::test_support::{StagedImage, StagedInstallation};
 use pos_reference::provider_admission::{HeldImageAdmission, ProviderImageSnapshot};
 use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
-use pos_reference::selector::SelectorBoundaryError;
+use pos_reference::selector::InstallationError;
 
 use crate::{
     activate_admitted_root, ImageActivationError, PlannedAttemptIntent, PreparedAttemptDirectory,
@@ -66,7 +66,7 @@ pub enum ConformanceError {
     Stage(String),
     /// Production image admission refused the staged installation.
     #[error("provider image admission failed: {0}")]
-    Admission(#[from] SelectorBoundaryError),
+    Admission(#[from] InstallationError),
     /// The fixed attempt registry refused the planned attempt.
     #[error("the attempt registry failed: {0}")]
     Registry(#[from] SystemdAttemptRegistryError),

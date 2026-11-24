@@ -26,7 +26,7 @@ use crate::sandbox_provider_protocol::{
     SandboxTrustSnapshot,
 };
 use crate::sandbox_provider_protocol::{RecoveryCancellationContext, RevocationUpdateRequest};
-use crate::selector::SelectorBoundaryError;
+use crate::selector::{InstallationError, SelectorBoundaryError};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InstallationUpdateCommitError {
@@ -157,23 +157,23 @@ impl InstalledSelectorState {
     /// cannot pass [`AuthenticatedSelectorBootstrap::admit_provider`].
     pub fn authenticate_bootstrap(
         self,
-    ) -> Result<AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
+    ) -> Result<AuthenticatedSelectorBootstrap, InstallationError> {
         let (root_key_id, root_bytes) = self.manifest.offline_root();
         let [trust_digest, revocation_digest, policy_digest] = self.manifest.authority_digests();
         VerifyingKey::from_bytes(&root_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .map_err(|_| InstallationError::ArtifactInvalid)
             .and_then(|root_key| {
                 self.control_record(InstallationObjectKind(0), trust_digest)
                     .and_then(|trust_record| {
                         SandboxTrustSnapshot::authenticate(&trust_record, root_key_id, &root_key)
-                            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                            .map_err(|_| InstallationError::ArtifactInvalid)
                     })
             })
             .and_then(|trust| {
                 self.control_record(InstallationObjectKind(1), revocation_digest)
                     .and_then(|revocation_record| {
                         SandboxRevocationSnapshot::authenticate(&revocation_record, &trust)
-                            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                            .map_err(|_| InstallationError::ArtifactInvalid)
                             .map(|revocation| (trust, revocation))
                     })
             })
@@ -185,7 +185,7 @@ impl InstalledSelectorState {
                             &trust,
                             &revocation,
                         )
-                        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                        .map_err(|_| InstallationError::ArtifactInvalid)
                         .map(|policy| (trust, revocation, policy))
                     })
             })
@@ -210,7 +210,7 @@ impl InstalledSelectorState {
         &self,
         kind: InstallationObjectKind,
         identity: [u8; 32],
-    ) -> Result<Vec<u8>, SelectorBoundaryError> {
+    ) -> Result<Vec<u8>, InstallationError> {
         self.artifact(kind, identity)
             .and_then(|artifact| artifact.read_control(MANIFEST_LIMIT))
     }
@@ -222,14 +222,14 @@ fn authenticate_selected_artifacts(
     revocation: &SandboxRevocationSnapshot,
     policy: &SandboxAdministratorPolicy,
     expected_digests: [[u8; 32]; 3],
-) -> Result<(), SelectorBoundaryError> {
+) -> Result<(), InstallationError> {
     if [
         trust.snapshot_digest(),
         revocation.snapshot_digest(),
         policy.policy_digest(),
     ] != expected_digests
     {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+        return Err(InstallationError::ArtifactInvalid);
     }
     let selection = policy.selection();
     [
@@ -251,14 +251,14 @@ impl AuthenticatedSelectorBootstrap {
     /// Returns an error when the selected provider, conformance report, host
     /// profile, capability evidence, or immutable artifact bindings fail
     /// admission. This does not expose an evaluator socket.
-    pub fn admit_provider(self) -> Result<AdmittedSelectorProvider, SelectorBoundaryError> {
+    pub fn admit_provider(self) -> Result<AdmittedSelectorProvider, InstallationError> {
         let selection = self.policy.selection().clone();
         let conformance_report = self
             .installed
             .control_record(InstallationObjectKind(4), selection.conformance_report)?;
         let host_profile_digest =
             ProviderConformanceReport::from_canonical_cbor(&conformance_report)
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?
+                .map_err(|_| InstallationError::ArtifactInvalid)?
                 .tested_hcp1_digest;
         let provider_manifest = self
             .installed
@@ -291,7 +291,7 @@ impl AuthenticatedSelectorBootstrap {
                 required_features: self.installed.manifest.required_features(),
             },
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .map_err(|_| InstallationError::ArtifactInvalid)
         .map(|provider| AdmittedSelectorProvider {
             bootstrap: self,
             provider,
@@ -328,13 +328,13 @@ impl AuthenticatedSelectorBootstrap {
     /// from the TPS1's own trust roots, EVR1, CFB1, or APT1.
     ///
     /// # Errors
-    /// Returns [`SelectorBoundaryError::ArtifactInvalid`] unless TRS1 holds
+    /// Returns [`InstallationError::ArtifactInvalid`] unless TRS1 holds
     /// exactly one deployment-operator record that RVS1 does not revoke and
     /// whose bytes are an Ed25519 verifying key.
-    pub fn trust_policy_operator_key(&self) -> Result<VerifyingKey, SelectorBoundaryError> {
+    pub fn trust_policy_operator_key(&self) -> Result<VerifyingKey, InstallationError> {
         self.revocation
             .deployment_operator_key(&self.trust)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .map_err(|_| InstallationError::ArtifactInvalid)
     }
 }
 
@@ -355,9 +355,7 @@ impl AdmittedSelectorProvider {
         self.bootstrap.installed.manifest().provider_sockets()
     }
 
-    pub(crate) fn runtime_attestation_key(
-        &self,
-    ) -> Result<&SandboxTrustKey, SelectorBoundaryError> {
+    pub(crate) fn runtime_attestation_key(&self) -> Result<&SandboxTrustKey, InstallationError> {
         let key_id = &self.provider.manifest().runtime_attestation_key_id;
         self.bootstrap
             .trust
@@ -366,7 +364,7 @@ impl AdmittedSelectorProvider {
             .find(|key| {
                 key.key_id == *key_id && key.role == SandboxTrustRole::ProviderRuntimeAttestation
             })
-            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+            .ok_or(InstallationError::ArtifactInvalid)
     }
 }
 

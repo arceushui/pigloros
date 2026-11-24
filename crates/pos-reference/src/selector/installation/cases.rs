@@ -7,7 +7,7 @@ use super::{
 use crate::evaluator::{case_attempt, selector_bounded_hard_caps};
 use crate::evaluator_protocol::EvaluationRequest;
 use crate::profile::Profile;
-use crate::selector::SelectorBoundaryError;
+use crate::selector::InstallationError;
 use crate::signed_bundle::{
     preflight_signed_bundle_reader, verify_signed_bundle_reader, TrustPolicyOperatorAnchor,
 };
@@ -15,8 +15,8 @@ use crate::signed_bundle::{
 const CFB1_OBJECT: InstallationObjectKind = InstallationObjectKind(14);
 const TPS1_OBJECT: InstallationObjectKind = InstallationObjectKind(15);
 
-fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
-    SelectorBoundaryError::ArtifactInvalid
+fn artifact_invalid<T>(_: T) -> InstallationError {
+    InstallationError::ArtifactInvalid
 }
 
 impl AuthenticatedSelectorBootstrap {
@@ -36,7 +36,7 @@ impl AuthenticatedSelectorBootstrap {
         &self,
         request: &EvaluationRequest,
         ordinal: u16,
-    ) -> Result<ResolvedInstalledCase, SelectorBoundaryError> {
+    ) -> Result<ResolvedInstalledCase, InstallationError> {
         self.trust_policy_operator_key()
             .map(TrustPolicyOperatorAnchor::from_trusted_registry)
             .and_then(|operator| {
@@ -79,7 +79,7 @@ impl AuthenticatedSelectorBootstrap {
                             && fixture.release_admission_authorized()
                     })
                     .cloned()
-                    .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                    .ok_or(InstallationError::ArtifactInvalid)
                     .map(|fixture| (verified, hard_caps, profile, fixture))
             })
             .and_then(|(verified, hard_caps, profile, fixture)| {
@@ -102,7 +102,7 @@ impl AuthenticatedSelectorBootstrap {
     fn retained_case_descriptors(
         &self,
         request: &EvaluationRequest,
-    ) -> Result<(PositionalReader<'_>, Vec<u8>), SelectorBoundaryError> {
+    ) -> Result<(PositionalReader<'_>, Vec<u8>), InstallationError> {
         let installed = self.installed();
         installed
             .artifact(CFB1_OBJECT, request.fixture_bundle_digest)
@@ -127,6 +127,6 @@ mod tests {
 
     #[test]
     fn error_mappers_preserve_the_closed_failure_class() {
-        assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
+        assert_eq!(artifact_invalid(()), InstallationError::ArtifactInvalid);
     }
 }
