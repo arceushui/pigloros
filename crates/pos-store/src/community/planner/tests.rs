@@ -242,6 +242,7 @@ fn trust_rows_follow_plugin_order_with_the_scope_floors() -> TestResult {
                 crate::community_initialization_fixture::SCHEMA,
                 Hash::from_bytes([6; 32]),
                 roster.initializer(),
+                10,
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;

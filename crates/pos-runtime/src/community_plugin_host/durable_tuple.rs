@@ -119,15 +119,19 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
     ///
     /// This row excludes the later CMB1/COB1 identities. The installed owner
     /// still verifies the actual State schema and admitted initializer source.
+    /// `cadence_interval_ns` is the member's identity-bound cadence interval
+    /// (ADR-129 revision 10, R10.1).
     ///
     /// # Errors
-    /// Rejects a foreign implementation, invalid entry or zero required identity.
+    /// Rejects a foreign implementation, invalid entry, zero required identity
+    /// or zero cadence interval.
     pub fn profile_member<'binding>(
         &self,
         stable_entry: &'binding str,
         implementation: &'binding ImplementationKeyV1,
         state_schema_digest: Hash,
         initializer: ArtifactRefV1,
+        cadence_interval_ns: u64,
     ) -> Result<CommunityProfileMemberV1<'binding>> {
         self.require_implementation(implementation).and_then(|()| {
             CommunityProfileMemberV1::new(
@@ -137,6 +141,7 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
                 state_schema_digest,
                 self.digest(),
                 initializer,
+                cadence_interval_ns,
             )
         })
     }

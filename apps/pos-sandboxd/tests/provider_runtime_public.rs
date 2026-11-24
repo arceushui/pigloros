@@ -18,7 +18,7 @@ use std::process::{Command, Output};
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT;
-use pos_reference::selector::SelectorBoundaryError;
+use pos_reference::selector::InstallationError;
 use pos_sandboxd::{start_runtime_authority, ProviderStartupError};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -69,7 +69,7 @@ fn startup_refuses_a_missing_or_pending_installation_and_a_foreign_executable() 
     assert_eq!(
         start_runtime_authority().err(),
         Some(ProviderStartupError::Installation(
-            SelectorBoundaryError::ArtifactInvalid
+            InstallationError::ArtifactInvalid
         ))
     );
     drop(staged);

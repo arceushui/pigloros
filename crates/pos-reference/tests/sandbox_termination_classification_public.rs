@@ -1,6 +1,6 @@
 //! The ADR-069 R9 §4.6.5 totality obligation for the public terminal
 //! classifier, with the R10 §4.8 rows for the stdin feed and launch failures
-//! 3 to 5.
+//! 3 to 5, and the R14 §3.4 rows for launch failures 6 and 7.
 //!
 //! An independent oracle restates R9's candidate table and R10's added rows, the D5 contradiction
 //! order and the literal `Completed` conditions with the closed numeric codes,
@@ -83,7 +83,7 @@ const PROGRESS: [AttemptProgressCode; 3] = [
     AttemptProgressCode::StartedNotReleased,
     AttemptProgressCode::Released,
 ];
-const LAUNCH: [Option<LaunchFailure>; 7] = [
+const LAUNCH: [Option<LaunchFailure>; 9] = [
     None,
     Some(LaunchFailure::RootNotActivated),
     Some(LaunchFailure::PreStartRecheckFailed),
@@ -91,6 +91,8 @@ const LAUNCH: [Option<LaunchFailure>; 7] = [
     Some(LaunchFailure::OutputReservationRefused),
     Some(LaunchFailure::StdioChannelFailed),
     Some(LaunchFailure::AdmissionClosed),
+    Some(LaunchFailure::NetworkSetupFailed),
+    Some(LaunchFailure::ReplayUnavailable),
 ];
 const START: [Option<StartJobResult>; 7] = [
     None,
@@ -449,7 +451,7 @@ fn oracle_code_ten(facts: &TerminationFacts) -> bool {
         &[1, 2, 3, 4, 5, 10],
     ) || in_set(
         code_of(facts.launch_failure, |failure| failure as u8),
-        &[0, 1, 3],
+        &[0, 1, 3, 7],
     ) || in_set(code_of(facts.start_job, |job| job as u8), &[1, 2, 3, 4, 5])
         || [2, 3].contains(&(facts.requested as u8))
         || (result.is_some_and(|result| ![0, 3, 7, 9].contains(&result)) && exec == Some(0))
@@ -485,7 +487,10 @@ fn oracle_candidates(facts: &TerminationFacts, contradiction: Option<u8>) -> [bo
             code_of(facts.barrier_failure, |failure| failure as u8),
             &[0, 6, 8, 9, 12],
         ) || in_set(network, &[0, 3, 4])
-            || code_of(facts.launch_failure, |failure| failure as u8) == Some(4),
+            || in_set(
+                code_of(facts.launch_failure, |failure| failure as u8),
+                &[4, 6],
+            ),
         oracle_code_ten(facts),
     ]
 }
@@ -684,13 +689,13 @@ fn with_observation(
 // ---------------------------------------------------------------------------
 // Exhaustive tests.
 
-#[test]
-fn every_lifecycle_code_and_status_is_placed_exactly_once() {
-    let (points, fallbacks) = exhaust(
+/// The lifecycle dimensions with `launch` as the launch failures.
+fn lifecycle(launch: &[Option<LaunchFailure>]) -> (usize, usize) {
+    exhaust(
         &completed(),
         &[
             dimension(&PROGRESS, |facts, value| facts.progress = value),
-            dimension(&LAUNCH, |facts, value| facts.launch_failure = value),
+            dimension(launch, |facts, value| facts.launch_failure = value),
             dimension(&START, |facts, value| facts.start_job = value),
             dimension(&BARRIERS, |facts, value| facts.barrier_failure = value),
             dimension(&CANCEL, |facts, value| facts.cancel_source = value),
@@ -698,9 +703,19 @@ fn every_lifecycle_code_and_status_is_placed_exactly_once() {
             dimension(&REQUESTED, |facts, value| facts.requested = value),
             dimension(&OBSERVATIONS, |facts, value| facts.observed = value),
         ],
-    );
-    assert_eq!(points, 3 * 7 * 7 * 14 * 3 * 3 * 4 * 3);
+    )
+}
+
+#[test]
+fn every_lifecycle_code_and_status_is_placed_exactly_once() {
+    let (points, fallbacks) = lifecycle(&LAUNCH);
+    assert_eq!(points, 3 * 9 * 7 * 14 * 3 * 3 * 4 * 3);
     assert!(fallbacks > 0);
+    // R14 §5 invariant 8: launch failures 6 and 7 are candidates at every
+    // point, so they add no fallback point.
+    let (r10_points, r10_fallbacks) = lifecycle(&LAUNCH[..7]);
+    assert_eq!(r10_points, 3 * 7 * 7 * 14 * 3 * 3 * 4 * 3);
+    assert_eq!(fallbacks, r10_fallbacks);
 }
 
 #[test]
@@ -1794,6 +1809,9 @@ fn r10_feed_capture_and_pre_start_rows_select_their_codes() {
         ),
         (launch(LaunchFailure::StdioChannelFailed), vec![9], false),
         (launch(LaunchFailure::AdmissionClosed), vec![2], true),
+        // R14 §4.6: TME1-G and TME1-H.
+        (launch(LaunchFailure::NetworkSetupFailed), vec![9], false),
+        (launch(LaunchFailure::ReplayUnavailable), vec![10], false),
     ] {
         check(&facts);
         assert_eq!(candidate_codes(&facts), candidates, "{facts:?}");

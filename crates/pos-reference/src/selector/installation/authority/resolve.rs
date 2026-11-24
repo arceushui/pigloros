@@ -31,7 +31,7 @@ use super::super::{
 use crate::sandbox_provider_protocol::{
     RevocationUpdateRequest, SandboxRevocationSnapshot, SandboxTrustSnapshot,
 };
-use crate::selector::SelectorBoundaryError;
+use crate::selector::InstallationError;
 
 /// Which installed RVS1 may verify an RCU1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,13 +89,13 @@ impl InstalledAuthorityObjects {
     pub fn resolve(
         rcu1: &[u8],
         resolution: AuthorityResolution,
-    ) -> Result<Self, SelectorBoundaryError> {
+    ) -> Result<Self, InstallationError> {
         File::open("/")
-            .map_err(|_| SelectorBoundaryError::Io)
+            .map_err(|_| InstallationError::Io)
             .and_then(|filesystem_root| {
                 Path::new(SANDBOX_ARTIFACT_ROOT)
                     .strip_prefix("/")
-                    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                    .map_err(|_| InstallationError::ArtifactInvalid)
                     .and_then(|relative| open_directory_chain(filesystem_root, relative, 0))
             })
             .and_then(|root| Self::resolve_at(&root, 0, rcu1, resolution))
@@ -106,17 +106,17 @@ impl InstalledAuthorityObjects {
         owner: u32,
         rcu1: &[u8],
         resolution: AuthorityResolution,
-    ) -> Result<Self, SelectorBoundaryError> {
+    ) -> Result<Self, InstallationError> {
         validate_directory(root, owner)
             .and_then(|()| open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT, owner))
             .and_then(|file| read_complete_file(&file, MANIFEST_LIMIT))
             .and_then(|bytes| {
                 InstallationManifest::from_canonical_cbor(&bytes)
-                    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                    .map_err(|_| InstallationError::ArtifactInvalid)
             })
             .and_then(|manifest| {
                 RevocationUpdateRequest::claimed_revocation_digests(rcu1)
-                    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                    .map_err(|_| InstallationError::ArtifactInvalid)
                     .and_then(|[previous, next]| {
                         let [trust, current, _] = manifest.authority_digests();
                         let allowed = match resolution {
@@ -129,7 +129,7 @@ impl InstalledAuthorityObjects {
                         };
                         allowed
                             .then_some((trust, previous))
-                            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                            .ok_or(InstallationError::ArtifactInvalid)
                     })
                     .and_then(|(trust, previous)| {
                         Self::authenticate(root, owner, &manifest, trust, previous)
@@ -145,15 +145,15 @@ impl InstalledAuthorityObjects {
         manifest: &InstallationManifest,
         trust: [u8; 32],
         previous: [u8; 32],
-    ) -> Result<Self, SelectorBoundaryError> {
+    ) -> Result<Self, InstallationError> {
         let (root_key_id, root_key) = manifest.offline_root();
         VerifyingKey::from_bytes(&root_key)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .map_err(|_| InstallationError::ArtifactInvalid)
             .and_then(|root_key| {
                 installed_record(root, owner, manifest, InstallationObjectKind(0), trust).and_then(
                     |bytes| {
                         SandboxTrustSnapshot::authenticate(&bytes, root_key_id, &root_key)
-                            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                            .map_err(|_| InstallationError::ArtifactInvalid)
                     },
                 )
             })
@@ -167,7 +167,7 @@ impl InstalledAuthorityObjects {
                 )
                 .and_then(|bytes| {
                     SandboxRevocationSnapshot::authenticate(&bytes, &trust)
-                        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                        .map_err(|_| InstallationError::ArtifactInvalid)
                 })
                 .map(|previous_revocation| Self {
                     trust,
@@ -197,13 +197,13 @@ fn installed_record(
     manifest: &InstallationManifest,
     kind: InstallationObjectKind,
     identity: [u8; 32],
-) -> Result<Vec<u8>, SelectorBoundaryError> {
+) -> Result<Vec<u8>, InstallationError> {
     manifest
         .object(kind, identity)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .map_err(|_| InstallationError::ArtifactInvalid)
         .and_then(|object| {
             root.try_clone()
-                .map_err(|_| SelectorBoundaryError::Io)
+                .map_err(|_| InstallationError::Io)
                 .and_then(|root| open_directory_chain(root, Path::new(kind.directory()), owner))
                 .and_then(|directory| {
                     open_immutable_file(
@@ -221,7 +221,7 @@ fn installed_record(
                                 file,
                                 object: object.clone(),
                             })
-                            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                            .ok_or(InstallationError::ArtifactInvalid)
                     })
                 })
         })

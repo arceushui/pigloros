@@ -63,6 +63,11 @@ impl MemoryStore {
                 if taken {
                     return Err(Error::Conflict);
                 }
+                let bindings = rows
+                    .iter()
+                    .map(|row| (timeline, row.registration_address()))
+                    .collect();
+                self.count_erasure_bindings(&bindings, rows.iter());
                 for row in rows {
                     let address = row.registration_address();
                     self.artifact_registration_identities.insert(
