@@ -700,6 +700,9 @@ mod served {
             complete(stream, records, expected)
         };
         std::thread::scope(|scope| -> TestResult {
+            // Owned by the scope: an early return or panic drops it, so B
+            // wakes and the scope's join cannot hang.
+            let resume = resume;
             let writing = scope.spawn(|| {
                 responder.deliver_within(port, &server, (identity, &second), false, held);
             });
