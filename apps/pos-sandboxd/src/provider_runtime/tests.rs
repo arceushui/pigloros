@@ -314,8 +314,15 @@ impl SubscribingManager {
 /// manager's end of the bus.
 pub(super) struct PortFixture {
     /// The runtime tree: `registry`, `attempts`, `staging` and `captures`.
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     _manager: zbus::Connection,
+}
+
+impl PortFixture {
+    /// The port's staging directory.
+    pub(super) fn staging(&self) -> PathBuf {
+        self.directory.path().join("staging")
+    }
 }
 
 /// A private directory `name` beneath `parent`, mode `0700`.
@@ -378,7 +385,7 @@ pub(super) fn test_port(limits: StagingLimits) -> TestResult<(PortFixture, Execu
     };
     Ok((
         PortFixture {
-            _directory: directory,
+            directory,
             _manager: manager,
         },
         port,
