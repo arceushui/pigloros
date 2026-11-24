@@ -648,69 +648,64 @@ impl<'de> Deserialize<'de> for KeyRegistryFormatVersionV1 {
     }
 }
 
-/// Reference state machine for adapters and public-interface tests.
-/// Serialized snapshots require an explicit V1 marker; earlier shapes are
-/// rejected at decode without migration or an upcaster.
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct KeyRegistryStateV1 {
+macro_rules! define_key_registry_state {
+    ($($field:ident: $field_type:ty),+ $(,)?) => {
+        /// Reference state machine for adapters and public-interface tests.
+        /// Serialized snapshots require an explicit V1 marker; earlier shapes are
+        /// rejected at decode without migration or an upcaster.
+        #[derive(Clone, Default, Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct KeyRegistryStateV1 {
+            $($field: $field_type,)+
+            /// Lazily derived from live records and tombstones after validation; never
+            /// part of the V1 snapshot. `None` means the snapshot still needs validation.
+            #[serde(skip)]
+            reserved_material: Option<HashSet<Hash>>,
+        }
+
+        #[derive(PartialEq)]
+        struct KeyRegistryStateSemanticView<'a> {
+            $($field: &'a $field_type,)+
+        }
+
+        impl KeyRegistryStateV1 {
+            const fn semantic_view(&self) -> KeyRegistryStateSemanticView<'_> {
+                KeyRegistryStateSemanticView {
+                    $($field: &self.$field,)+
+                }
+            }
+        }
+
+        impl fmt::Debug for KeyRegistryStateV1 {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let semantic = self.semantic_view();
+                formatter
+                    .debug_struct("KeyRegistryStateV1")
+                    $(.field(stringify!($field), semantic.$field))+
+                    .finish()
+            }
+        }
+
+        impl PartialEq for KeyRegistryStateV1 {
+            fn eq(&self, other: &Self) -> bool {
+                self.semantic_view() == other.semantic_view()
+            }
+        }
+
+        impl Eq for KeyRegistryStateV1 {}
+    };
+}
+
+define_key_registry_state! {
     records: BTreeMap<KeyIdentityV1, KeyRecordV1>,
     active: BTreeMap<(OwnerIdV1, KeyRoleV1), KeyIdentityV1>,
     tombstones: BTreeMap<KeyIdentityV1, KeyTombstoneV1>,
     highest_epoch: BTreeMap<(OwnerIdV1, KeyRoleV1), u64>,
     pending_destructions: BTreeMap<KeyIdentityV1, KeyDestructionRequestV1>,
     version: KeyRegistryFormatVersionV1,
-    /// Lazily derived from live records and tombstones after validation; never
-    /// part of the V1 snapshot. `None` means the snapshot still needs validation.
-    #[serde(skip)]
-    reserved_material: Option<HashSet<Hash>>,
 }
-
-#[derive(PartialEq)]
-struct KeyRegistryStateSemanticView<'a> {
-    records: &'a BTreeMap<KeyIdentityV1, KeyRecordV1>,
-    active: &'a BTreeMap<(OwnerIdV1, KeyRoleV1), KeyIdentityV1>,
-    tombstones: &'a BTreeMap<KeyIdentityV1, KeyTombstoneV1>,
-    highest_epoch: &'a BTreeMap<(OwnerIdV1, KeyRoleV1), u64>,
-    pending_destructions: &'a BTreeMap<KeyIdentityV1, KeyDestructionRequestV1>,
-    version: &'a KeyRegistryFormatVersionV1,
-}
-
-impl fmt::Debug for KeyRegistryStateV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let semantic = self.semantic_view();
-        formatter
-            .debug_struct("KeyRegistryStateV1")
-            .field("records", semantic.records)
-            .field("active", semantic.active)
-            .field("tombstones", semantic.tombstones)
-            .field("highest_epoch", semantic.highest_epoch)
-            .field("pending_destructions", semantic.pending_destructions)
-            .field("version", semantic.version)
-            .finish()
-    }
-}
-
-impl PartialEq for KeyRegistryStateV1 {
-    fn eq(&self, other: &Self) -> bool {
-        self.semantic_view() == other.semantic_view()
-    }
-}
-
-impl Eq for KeyRegistryStateV1 {}
 
 impl KeyRegistryStateV1 {
-    const fn semantic_view(&self) -> KeyRegistryStateSemanticView<'_> {
-        KeyRegistryStateSemanticView {
-            records: &self.records,
-            active: &self.active,
-            tombstones: &self.tombstones,
-            highest_epoch: &self.highest_epoch,
-            pending_destructions: &self.pending_destructions,
-            version: &self.version,
-        }
-    }
-
     /// Decode the existing durable V1 CBOR snapshot with native work guards.
     ///
     /// The guard receives only checkpoints and exact logical materialization
