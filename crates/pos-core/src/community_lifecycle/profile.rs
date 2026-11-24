@@ -142,19 +142,14 @@ impl<'a> CommunityProfileMemberV1<'a> {
         initializer: ArtifactRefV1,
         cadence_interval_ns: u64,
     ) -> Result<Self> {
-        if cadence_interval_ns == 0
-            || !crate::manifest_plugin_roster::valid_slot(stable_entry)
-            || [
-                implementation.release_digest(),
-                pmf1_digest,
-                state_schema_digest,
-                negotiated_tuple_digest,
-                Hash::from_bytes(initializer.digest),
-            ]
-            .contains(&Hash::zero())
-        {
-            Err(Error::InvalidBinding)
-        } else {
+        let identities = [
+            implementation.release_digest(),
+            pmf1_digest,
+            state_schema_digest,
+            negotiated_tuple_digest,
+            Hash::from_bytes(initializer.digest),
+        ];
+        if valid_row(stable_entry, &identities, cadence_interval_ns) {
             Ok(Self {
                 stable_entry,
                 implementation,
@@ -164,6 +159,8 @@ impl<'a> CommunityProfileMemberV1<'a> {
                 initializer,
                 cadence_interval_ns,
             })
+        } else {
+            Err(Error::InvalidBinding)
         }
     }
 
@@ -201,6 +198,14 @@ impl<'a> CommunityProfileMemberV1<'a> {
     pub const fn cadence_interval_ns(&self) -> u64 {
         self.cadence_interval_ns
     }
+}
+
+/// A roster row's local invariants: an ADR-088 stable entry, nonzero
+/// identities and a cadence interval of at least 1 (revision 10, R10.1).
+fn valid_row(stable_entry: &str, identities: &[Hash], cadence_interval_ns: u64) -> bool {
+    cadence_interval_ns != 0
+        && crate::manifest_plugin_roster::valid_slot(stable_entry)
+        && !identities.contains(&Hash::zero())
 }
 
 /// Exact finite original policy dates, never a sliding lease extension.
