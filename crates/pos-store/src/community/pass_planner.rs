@@ -526,8 +526,8 @@ impl CommunityPassQuotedV1 {
 /// R13.1(3) at step 5g: for every actor of T's scope, the committed
 /// `targets(A)`, the pending reservations, `F_q(A)`, `F_p` and the pass's
 /// State rows at two targets each stay within the community line, and every
-/// `rows(U)` with its pending rows, T's also with the new rows and the
-/// `F_p` rows, within 4,096: else 14. Then the same with the recording
+/// `rows(U)` with its pending rows and its `F_q^rows(U)`, T's also with the
+/// new rows and the `F_p` rows, within 4,096: else 14. Then the same with the recording
 /// rows: else 19. The result is the trace rows still admitted.
 fn erasure_budget<P: CommunityPassReadPortV1>(
     port: &P,
@@ -592,8 +592,9 @@ fn trace_room(
                         0
                     };
                     let pending = pending.rows.get(affected).copied().unwrap_or(0);
+                    let held = budget.quarantine_rows.get(affected).copied().unwrap_or(0);
                     COMMUNITY_ERASURE_ROW_LIMIT_V1
-                        .checked_sub(committed + pending + added)
+                        .checked_sub(committed + pending + added + held)
                         .map(|free| {
                             if *affected == timeline {
                                 room.min(free)

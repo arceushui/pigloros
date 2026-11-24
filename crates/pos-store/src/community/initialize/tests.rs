@@ -3,6 +3,7 @@
 //! records and COA1s, the burned producer ordinal, the compare-and-swap of
 //! the inventory generation and CSI1, and the retry's evidence checks.
 
+use pos_core::community_lifecycle::CommunityBudgetQuoteV1;
 use pos_core::community_lifecycle::{
     community_catalogue_owner_v1, community_initializer_set_ref_v1, ArtifactRefV1,
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityArtifactOperationV1,
@@ -10,6 +11,7 @@ use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1, CommunitySelectionV1,
 };
 use pos_core::store::EventStore;
+use pos_core::RecordedSetCountsV1;
 use pos_core::{AuthorityTrustRootSealV1, Hash};
 use zeroize::Zeroizing;
 
@@ -17,6 +19,7 @@ use crate::memory::MemoryStore;
 use crate::MemoryTrustedClockAuthorityV1;
 
 use super::super::erasure_budget::CommunityErasureContextV1;
+use super::super::pass_planner::CommunityPassReadPortV1;
 use super::{
     CommittedInitializationV1, CommunityInitializationContextV1, CommunityInitializationReceiptV1,
     CommunityInitializeCallV1, PreparedV1, SealedMetadataV1, StagedInitializationV1,
@@ -280,6 +283,56 @@ fn the_commit_publishes_and_retains_the_whole_initialization() -> TestResult {
         cohort.authority_request_digest
     );
     assert_eq!(domain.store.logical_head(target())?, pos_core::Seq::ZERO);
+    Ok(())
+}
+
+/// ADR-129 revision 10, R10.3(6) and I90, with the byte counter limited to
+/// what the store reports (revision 14 erratum candidate: the store counts
+/// no history bytes): the CBQ1 `prior_shared_counts` and the seeded
+/// counters carry T's recorded-set nodes, edges and declared inputs, and the
+/// initialization adds its own two CPN1 nodes and edges per member. The
+/// selected graph is the CGR1's, and the key reads count the three retained
+/// keys. Only the three seedable counters are asserted exactly.
+#[test]
+fn the_history_seeds_the_quote_and_the_pass_state() -> TestResult {
+    let roster = Roster::release_one()?;
+    let mut case = Case::new(&roster, true)?;
+    case.domain.world.domain.store.fill_factual_set_for_test(
+        target(),
+        RecordedSetCountsV1 {
+            nodes: 7,
+            edges: 5,
+            inputs: 3,
+        },
+    );
+    let rows = roster.rows()?;
+    let profile = profile_until(&rows, HORIZON, hash(1), case.domain.world.catalogue)?;
+    case.initialize(&profile, OPERATION)??;
+    let domain = &case.domain.world.domain;
+    let committed = domain
+        .initializations
+        .get(&(target(), OPERATION))
+        .ok_or("the initialization must be retained")?;
+    let key = domain
+        .keys
+        .get(&committed.metadata_key)
+        .ok_or("the metadata key")?;
+    // After the two CMB1s, COB1, CGI1 and CSB1 comes the CBQ1.
+    let quote = CommunityBudgetQuoteV1::from_canonical_cbor(&key.open(&committed.records[5])?)?;
+    let prior = quote.as_input().prior_shared_counts;
+    assert_eq!((prior.nodes, prior.edges, prior.declared_inputs), (7, 5, 3));
+    let state = domain
+        .pass_states
+        .get(&target())
+        .ok_or("the pass state must be retained")?;
+    let counters = state.counters;
+    assert_eq!(
+        (counters.nodes, counters.edges, counters.declared_inputs),
+        (11, 9, 3)
+    );
+    assert!(counters.encoded_record_bytes > 0);
+    assert_eq!(state.graph.registrations, 10);
+    assert_eq!(domain.live_keys(), 3);
     Ok(())
 }
 

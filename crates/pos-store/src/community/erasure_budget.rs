@@ -52,6 +52,10 @@ pub struct CommunityErasureBudgetV1 {
     pub actors: Vec<CommunityErasureActorV1>,
     /// `rows(U)` of every U in those affected scopes, of any class.
     pub rows: BTreeMap<TimelineId, u64>,
+    /// `F_q^rows(U)` for every U of `rows`: the unspent `SetReason` rows of
+    /// every initialized context on U, which the rows bound holds back
+    /// (ADR-129 revision 14, RN.3). A U with no context has none.
+    pub quarantine_rows: BTreeMap<TimelineId, u64>,
 }
 
 /// An actor's unresolved reservations (R13.1(4)): their worst-case targets
@@ -80,6 +84,12 @@ impl CommunityErasureContextV1 {
         (COMMUNITY_QUARANTINE_RESERVE_PER_MEMBER_V1 * self.members)
             .saturating_sub(2 * self.active_pairs)
     }
+
+    /// `F_q^rows`: one row for every two unspent targets (ADR-129 revision
+    /// 14, RN.3).
+    pub(super) const fn reserve_rows(self) -> u64 {
+        self.reserve() / 2
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -88,6 +98,14 @@ impl CommunityErasureBudgetPortV1 for MemoryCommunityDomainV1 {
         self.store
             .community_erasure_scope(timeline)
             .map(|(actors, rows)| CommunityErasureBudgetV1 {
+                quarantine_rows: rows
+                    .keys()
+                    .filter_map(|affected| {
+                        self.erasure_contexts
+                            .get(affected)
+                            .map(|context| (*affected, context.reserve_rows()))
+                    })
+                    .collect(),
                 actors: actors
                     .iter()
                     .map(|(actor, targets, affected)| CommunityErasureActorV1 {

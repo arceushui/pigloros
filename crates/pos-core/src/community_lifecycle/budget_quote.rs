@@ -115,8 +115,9 @@ impl CommunityBudgetQuoteV1 {
     /// The code-0 initialization quote for `due_members`.
     ///
     /// `due_members` has one row per roster member (owner decisions on
-    /// #560, notes 22722 G3 and 22729). The quote has zero prior counts,
-    /// `2n` nodes and edges (one `InitialState` and one `StateRevision` CPN1
+    /// #560, notes 22722 G3 and 22729). The quote carries the caller's prior
+    /// counts, the domain's seed of the cumulative recorded-set counters
+    /// (ADR-129 revision 10, R10.3(6)), `2n` nodes and edges (one `InitialState` and one `StateRevision` CPN1
     /// per member, each with one direct input), and the caller's
     /// `maximum_required_bytes`: the planner sums each member's CNT1 State
     /// limit, CIS1 and CSR1 maxima and actual CPN1 sizes (owner decision on
@@ -128,6 +129,7 @@ impl CommunityBudgetQuoteV1 {
         timeline: TimelineId,
         generation: [u8; 16],
         profile_digest: Hash,
+        prior_shared_counts: CommunitySharedCountsV1,
         due_members: Vec<CommunityDueMemberBudgetV1>,
         maximum_required_bytes: u64,
     ) -> Result<Self> {
@@ -136,7 +138,7 @@ impl CommunityBudgetQuoteV1 {
             timeline,
             generation,
             profile_digest,
-            prior_shared_counts: CommunitySharedCountsV1::default(),
+            prior_shared_counts,
             due_members,
             maximum_required_nodes: 2 * members,
             maximum_required_edges: 2 * members,

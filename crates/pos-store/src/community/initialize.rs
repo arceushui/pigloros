@@ -40,13 +40,13 @@ use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMemberBindingV1, CommunityMemberSlotsV1,
     CommunityMetadataAnchorV1, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
     CommunityMetadataScopeV1, CommunityRecordKindsV1, CommunityScopeMembersV1,
-    CommunitySelectionInputV1, CommunitySelectionV1, CommunityTimelineFloorV1,
-    CommunityTimelineFloorsV1,
+    CommunitySelectionInputV1, CommunitySelectionV1, CommunitySharedCountsV1,
+    CommunityTimelineFloorV1, CommunityTimelineFloorsV1,
 };
 use pos_core::store::EventStore;
 use pos_core::{
-    ArtifactRegistrationPersistencePortV1, AuthorityGranteeV1, AuthorityTrustRootSealV1, Hash,
-    TimelineId,
+    ArtifactRegistrationPersistencePortV1, AuthorityGranteeV1, AuthorityTrustRootSealV1,
+    FactualPrefixReadPortV1, Hash, TimelineId,
 };
 use zeroize::Zeroizing;
 
@@ -65,6 +65,7 @@ use super::native_graph::{
     CommunityInitializationGraphInputV1, CommunityInitializationGraphV1,
     CommunityInitializationMemberV1,
 };
+use super::pass_state::CommunityPassStateV1;
 use super::planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
     CommunityInitializationEvidenceInputV1, CommunityInitializationInstallationV1,
@@ -191,6 +192,8 @@ pub(super) struct StagedInitializationV1 {
     /// The roster members, whose quarantine reserve the context holds
     /// (ADR-129 revision 13, R13.1(5)).
     members: u64,
+    /// T's pass state: the seeded counters and the initial graph.
+    pass_state: CommunityPassStateV1,
 }
 
 /// The read-only inputs of the staging steps.
@@ -211,6 +214,9 @@ struct MintedV1 {
     protector: CommunityArtifactProtectorV1,
     graph: CommunityInitializationGraphV1,
     batch: CommunityArtifactBatchV1,
+    /// The actual recorded-set counts of T's history, which seed the
+    /// counters (R10.3(6)).
+    history: CommunitySharedCountsV1,
 }
 
 /// The CAU1 of one initialization with its COA1s and CMI1s.
@@ -622,14 +628,19 @@ impl MemoryCommunityDomainV1 {
                     .and_then(|sealed| {
                         let addresses: Vec<Hash> =
                             sealed.iter().map(|record| record.address).collect();
-                        operation
-                            .planner
-                            .records(
-                                operation.generation,
-                                &inputs.decisions.administrative,
-                                &addresses,
-                            )
-                            .and_then(|records| {
+                        self.history_counts(operation.timeline())
+                            .and_then(|history| {
+                                operation
+                                    .planner
+                                    .records(
+                                        operation.generation,
+                                        &inputs.decisions.administrative,
+                                        &addresses,
+                                        history,
+                                    )
+                                    .map(|records| (records, history))
+                            })
+                            .and_then(|(records, history)| {
                                 cohort(operation, records.scope_binding_digest(), inputs.decisions)
                                     .and_then(|cohort| {
                                         CommunityArtifactProtectorV1::provision(
@@ -659,12 +670,31 @@ impl MemoryCommunityDomainV1 {
                                                     protector,
                                                     graph,
                                                     batch,
+                                                    history,
                                                 })
                                             },
                                         )
                                     })
                             })
                     })
+            })
+    }
+
+    /// T's own recorded-set counts, the history seed of its counters
+    /// (R10.3(6)). The store counts the Timeline's own set only, not a Fork
+    /// child's inherited prefix.
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` when the store cannot read the counts.
+    fn history_counts(&self, timeline: TimelineId) -> Result<CommunitySharedCountsV1, Error> {
+        self.store
+            .factual_set_counts(timeline)
+            .or(Err(Error::EvidenceUnavailable))
+            .map(|counts| CommunitySharedCountsV1 {
+                nodes: counts.nodes as u64,
+                edges: counts.edges as u64,
+                declared_inputs: counts.inputs as u64,
+                encoded_record_bytes: 0,
             })
     }
 
@@ -731,6 +761,7 @@ impl MemoryCommunityDomainV1 {
             protector,
             graph,
             batch,
+            history,
         } = minted;
         let (mut cohort_key, cohort_copy) = protector.into_parts();
         key_copy(operation, &key)
@@ -767,7 +798,15 @@ impl MemoryCommunityDomainV1 {
             .map(|(selection, receipt)| {
                 key.close();
                 cohort_key.close();
+                let members = operation
+                    .context
+                    .installation
+                    .profile
+                    .as_input()
+                    .roster
+                    .len() as u64;
                 StagedInitializationV1 {
+                    pass_state: CommunityPassStateV1::initialized(history, members, &graph),
                     key: (operation.timeline(), operation.call.form.operation_id),
                     committed: CommittedInitializationV1 {
                         profile_digest: operation.context.installation.profile.digest(),
@@ -783,13 +822,7 @@ impl MemoryCommunityDomainV1 {
                     selection,
                     receipt,
                     read_selection: operation.selection_address,
-                    members: operation
-                        .context
-                        .installation
-                        .profile
-                        .as_input()
-                        .roster
-                        .len() as u64,
+                    members,
                 }
             })
     }
@@ -897,6 +930,7 @@ impl MemoryCommunityDomainV1 {
         self.selection = Some((metadata_id, staged.selection));
         self.inventory_generation += 1;
         self.count_erasure_context(staged.key.0, staged.members);
+        self.pass_states.insert(staged.key.0, staged.pass_state);
         self.initializations.insert(staged.key, staged.committed);
         Ok(staged.receipt)
     }

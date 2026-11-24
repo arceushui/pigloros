@@ -145,24 +145,25 @@ fn cbq1_round_trips_the_exact_ten_fields() -> TestResult {
     })
 }
 
-/// G3 and note 22729: zero prior counts, `2n` nodes and edges, and the
-/// planner's byte maximum.
+/// G3, note 22729 and R10.3(6): the seeded prior counts, `2n` nodes and
+/// edges, and the planner's byte maximum.
 #[test]
 fn initialization_quote_has_the_owner_decided_maxima() -> TestResult {
     let rows = vec![due(10, 11), due(12, 13), due(14, 11)];
-    let quote = Quote::initialization(timeline(4), GENERATION, hash(9), rows.clone(), 77)?;
+    let seed = Counts {
+        nodes: 5,
+        edges: 6,
+        declared_inputs: 7,
+        encoded_record_bytes: 8,
+    };
+    let quote = Quote::initialization(timeline(4), GENERATION, hash(9), seed, rows.clone(), 77)?;
     assert!(
         *quote.as_input()
             == QuoteInput {
                 timeline: timeline(4),
                 generation: GENERATION,
                 profile_digest: hash(9),
-                prior_shared_counts: Counts {
-                    nodes: 0,
-                    edges: 0,
-                    declared_inputs: 0,
-                    encoded_record_bytes: 0,
-                },
+                prior_shared_counts: seed,
                 due_members: rows,
                 maximum_required_nodes: 6,
                 maximum_required_edges: 6,
@@ -170,7 +171,15 @@ fn initialization_quote_has_the_owner_decided_maxima() -> TestResult {
             }
     );
     assert_eq!(
-        Quote::initialization(timeline(4), GENERATION, hash(9), vec![], 0).err(),
+        Quote::initialization(
+            timeline(4),
+            GENERATION,
+            hash(9),
+            Counts::default(),
+            vec![],
+            0
+        )
+        .err(),
         Some(Error::BoundsExceeded)
     );
     Ok(())
