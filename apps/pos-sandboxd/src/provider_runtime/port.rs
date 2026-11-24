@@ -8,9 +8,10 @@
 //! system bus transport with the multi-thread runtime that drives it. Both
 //! outlive reconciliation: every admitted attempt runs on them.
 //!
-//! Until #1488 the port serves the `AirGapped` and `Fork` modes only; a
-//! `Local` or `Replay` case is refused with SPE1 `8 ProviderCapabilityMissing` (journal
-//! 23069). Each admitted attempt's launcher barrier is the production
+//! The port serves the `AirGapped`, `Fork` and `Replay` modes; a `Local` case
+//! is refused with SPE1 `8 ProviderCapabilityMissing` (R11 Amendment 1 §7.5
+//! row 9) until #1488 serves it. Replay is evidence-only with empty plans
+//! (#1488 journal 23125, G3): no FD 3 and no bytes reach the adapter. Each admitted attempt's launcher barrier is the production
 //! [`ProviderReleaseBarrier`] over the runtime key, the manager's unit
 //! identity and the kernel readback, with the attempt's own cancellation in
 //! its `AuthorityCheck`.
@@ -59,18 +60,28 @@ pub(super) struct ExecutePort {
     pub(super) runtime: Runtime,
 }
 
-/// Whether the port serves a case of `mode`: `AirGapped` and `Fork` until
-/// #1488 adds the `Local` and `Replay` mode plans.
+/// Whether the port serves a case of `mode`: every mode but `Local`, which
+/// stays refused (SPE1 `8`) until #1488 serves it.
 pub(super) const fn serves(mode: ExecutionMode) -> bool {
-    matches!(mode, ExecutionMode::AirGapped | ExecutionMode::Fork)
+    matches!(
+        mode,
+        ExecutionMode::AirGapped | ExecutionMode::Fork | ExecutionMode::Replay
+    )
 }
 
 /// The network plan of an admitted `mode` the port serves: `Fork`'s own,
-/// and `AirGapped`'s for every other, whose execution then refuses the
-/// mismatch.
+/// `Replay`'s with no exchanges, and `AirGapped`'s for every other, whose
+/// execution then refuses the mismatch.
+///
+/// A Replay case has no exchange to resolve: the plans it reconstructs are
+/// empty, because a non-empty SPX1 plan list fails the reconstruction
+/// equality (R11 Amendment 1 §7.5 row 7).
 const fn mode_plan(mode: SandboxExecutionMode) -> ModePlan {
     match mode {
         SandboxExecutionMode::Fork => ModePlan::Fork,
+        SandboxExecutionMode::Replay => ModePlan::Replay {
+            exchanges: Vec::new(),
+        },
         _ => ModePlan::AirGapped,
     }
 }
@@ -280,20 +291,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_port_serves_air_gapped_and_fork_only() {
+    fn the_port_serves_every_mode_but_local() {
         assert!(serves(ExecutionMode::AirGapped));
         assert!(serves(ExecutionMode::Fork));
+        assert!(serves(ExecutionMode::Replay));
         assert!(!serves(ExecutionMode::Local));
-        assert!(!serves(ExecutionMode::Replay));
         assert!(matches!(
             mode_plan(SandboxExecutionMode::Fork),
             ModePlan::Fork
         ));
-        for mode in [
-            SandboxExecutionMode::AirGapped,
-            SandboxExecutionMode::Local,
-            SandboxExecutionMode::Replay,
-        ] {
+        assert!(matches!(
+            mode_plan(SandboxExecutionMode::Replay),
+            ModePlan::Replay { exchanges } if exchanges.is_empty()
+        ));
+        for mode in [SandboxExecutionMode::AirGapped, SandboxExecutionMode::Local] {
             assert!(matches!(mode_plan(mode), ModePlan::AirGapped));
         }
     }

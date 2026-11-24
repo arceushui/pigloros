@@ -921,6 +921,7 @@ fn validate_evidence(
     if !result_matches_evidence(result, grant, receipt)
         || !grant_matches_execute_request(grant, &spx, &expected_grant_authority)
         || !receipt_matches_grant(receipt, grant, &expected_receipt_authority)
+        || !transcripts_fit_plans(receipt, &spx)
     {
         return Err(AdapterError::ProtocolFailure);
     }
@@ -980,6 +981,15 @@ fn grant_matches_execute_request(
                 .map(|plan| plan.plan_digest)
                 .collect::<Vec<_>>()
         && grant.expected_launch_policy_digest == spx.authority.lps1_digest
+}
+
+/// The receipt binds at most one NXT1 digest per planned exchange (ADR-069
+/// R16 N13): none without plans, as every V1 execute of #1488-a.
+const fn transcripts_fit_plans(
+    receipt: &SandboxProviderReceipt,
+    spx: &SandboxExecuteRequest,
+) -> bool {
+    receipt.network_transcript_digests.len() <= spx.network_plans.len()
 }
 
 fn receipt_matches_grant(
@@ -1233,7 +1243,8 @@ mod tests {
     use crate::evaluator_protocol::{ImplementationIdentity, OutputCapability, SubjectAdapterKind};
     use crate::profile::DeterministicBudget;
     use crate::sandbox_provider_protocol::{
-        SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
+        NetworkExchangePlan, SandboxLocalErrorCode, SandboxLocalErrorPhase,
+        SandboxProviderOperation,
     };
 
     use super::*;
@@ -3210,6 +3221,36 @@ mod tests {
     }
 
     #[test]
+    fn a_receipt_binds_at_most_one_transcript_per_plan() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, _, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let evidence = admitted_evidence(&control)?;
+        let mut spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&evidence.fields[5])?)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut receipt = evidence.receipt;
+        assert!(transcripts_fit_plans(&receipt, &spx));
+        receipt.network_transcript_digests = vec![[1; 32]];
+        assert!(!transcripts_fit_plans(&receipt, &spx));
+        spx.network_plans = vec![NetworkExchangePlan {
+            exchange_id: [2; 16],
+            occurrence: 0,
+            capability_id: "network".to_owned(),
+            request_length: 1,
+            request_digest: [3; 32],
+            response_maximum: 1,
+            expected_response_digest: [4; 32],
+            retention_policy_digest: [5; 32],
+            plan_digest: [6; 32],
+        }];
+        assert!(transcripts_fit_plans(&receipt, &spx));
+        receipt.network_transcript_digests.clear();
+        assert!(transcripts_fit_plans(&receipt, &spx));
+        receipt.network_transcript_digests = vec![[1; 32], [7; 32]];
+        assert!(!transcripts_fit_plans(&receipt, &spx));
+        Ok(())
+    }
+
+    #[test]
     fn evidence_relationships_reject_each_cross_record_mismatch() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         let (control, _, _) = admitted_reply(&encoded, [14; 32], 0)?;
@@ -3253,7 +3294,7 @@ mod tests {
             );
         }
 
-        for field in 0..7 {
+        for field in 0..8 {
             let mut receipt = evidence.receipt.clone();
             match field {
                 0 => receipt.attempt_id = [99; 16],
@@ -3263,6 +3304,7 @@ mod tests {
                 4 => receipt.trust_epoch = 99,
                 5 => receipt.hcp1_digest = [99; 32],
                 6 => receipt.elm1_digest = [99; 32],
+                7 => receipt.network_transcript_digests = vec![[99; 32]],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(
