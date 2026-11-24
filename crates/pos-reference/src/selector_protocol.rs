@@ -985,6 +985,11 @@ fn grant_matches_execute_request(
 
 /// The receipt binds at most one NXT1 digest per planned exchange (ADR-069
 /// R16 N13): none without plans, as every V1 execute of #1488-a.
+///
+/// The check is mode-independent, so it is stricter for `AirGapped` and `Fork`
+/// than R16 requires. The R16 residual clause ("NXT1 empty unless
+/// `release1-digest` is non-null") is added by 1488-b or 1492 once non-empty
+/// plans exist.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
@@ -3294,7 +3299,7 @@ mod tests {
             );
         }
 
-        for field in 0..8 {
+        for field in 0..7 {
             let mut receipt = evidence.receipt.clone();
             match field {
                 0 => receipt.attempt_id = [99; 16],
@@ -3304,7 +3309,6 @@ mod tests {
                 4 => receipt.trust_epoch = 99,
                 5 => receipt.hcp1_digest = [99; 32],
                 6 => receipt.elm1_digest = [99; 32],
-                7 => receipt.network_transcript_digests = vec![[99; 32]],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(
@@ -3317,6 +3321,19 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+
+        // A transcript with no plan to bind it.
+        let mut receipt = evidence.receipt.clone();
+        receipt.network_transcript_digests = vec![[99; 32]];
+        assert_eq!(
+            validate_evidence(
+                &evidence.fields,
+                &evidence.result,
+                &evidence.grant,
+                &receipt,
+            ),
+            Err(AdapterError::ProtocolFailure)
+        );
 
         for field in 0..4 {
             let mut result = evidence.result.clone();
