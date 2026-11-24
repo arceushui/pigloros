@@ -20,6 +20,7 @@ use pos_core::community_lifecycle::{
     CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1, CommunityCurrentViewV1,
     CommunityDurableProfileV1, CommunityInitializationSourceV1 as Source, CommunityKeyStateV1,
     CommunityLifecycleErrorV1 as Error, CommunityMaterializationV1, CommunityPassFrontierV1,
+    CommunitySharedCountsV1,
 };
 use pos_core::trusted_clock::{TrustedClockOverrunLatchRowV1, TrustedClockStorePortV1};
 use pos_core::{AuthorityTrustRootSealV1, Hash, KeyRoleV1};
@@ -262,7 +263,12 @@ fn with_operation(check: impl FnOnce(Operation<'_>) -> TestResult) -> TestResult
         MemoryTrustedClockAuthorityV1::new(),
     )?;
     let (call, admission) = world.call_and_admit(planner.request(), LEAVES[0])?;
-    let records = planner.records(GENERATION, &admission, &ADDRESSES)?;
+    let records = planner.records(
+        GENERATION,
+        &admission,
+        &ADDRESSES,
+        CommunitySharedCountsV1::default(),
+    )?;
     let view = planner.current_view(
         &world.domain,
         &world.authority,
@@ -396,7 +402,12 @@ fn the_authority_evidence_refuses_inputs_that_do_not_belong_together() -> TestRe
             Request::derive(&Operation::initialize(profile, [0x11; 16]))?,
             LEAVES[0],
         )?;
-        let other_records = planner.records(OTHER_GENERATION, admission, &ADDRESSES)?;
+        let other_records = planner.records(
+            OTHER_GENERATION,
+            admission,
+            &ADDRESSES,
+            CommunitySharedCountsV1::default(),
+        )?;
         let other_graph = graph(
             &SEAL,
             planner,

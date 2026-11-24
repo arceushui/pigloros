@@ -60,6 +60,7 @@ impl Cursor<'_> {
             highest_epoch: highest_epoch.ok_or(Error::InvalidSnapshot)?,
             pending_destructions: pending_destructions.ok_or(Error::InvalidSnapshot)?,
             version: version.ok_or(Error::InvalidSnapshot)?,
+            reserved_material: None,
         })
     }
 

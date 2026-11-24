@@ -671,3 +671,30 @@ pub use response::{ResponseFault, RetainedResponse};
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+#[cfg(test)]
+impl crate::AttemptLifecycle {
+    /// Retain `pending`'s response, signed by the attempt records' test key.
+    pub(crate) fn retain_pending_for_test(
+        &self,
+        pending: crate::test_fixtures::PendingCompleted,
+    ) -> Result<std::sync::Arc<RetainedResponse>, Box<dyn std::error::Error + Send + Sync>> {
+        tests::retain_pending(pending, self)
+    }
+
+    /// A Completed test attempt that ended here, its response pending.
+    pub(crate) fn completed_pending_for_test(
+        &self,
+    ) -> Result<crate::test_fixtures::PendingCompleted, Box<dyn std::error::Error + Send + Sync>>
+    {
+        tests::completed_pending(self)
+    }
+
+    /// A Completed response with output, signed by the test runtime key and
+    /// retained for the test attempt, for the serving tests.
+    pub(crate) fn completed_for_test(
+        &self,
+    ) -> Result<std::sync::Arc<RetainedResponse>, Box<dyn std::error::Error + Send + Sync>> {
+        tests::completed_retained(self)
+    }
+}

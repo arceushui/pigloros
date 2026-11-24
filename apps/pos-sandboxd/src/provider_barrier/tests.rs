@@ -2,7 +2,7 @@ use std::{
     io::IoSlice,
     mem::MaybeUninit,
     os::fd::OwnedFd as StdOwnedFd,
-    sync::atomic::AtomicUsize,
+    sync::atomic::{AtomicUsize, Ordering},
     thread::{self, JoinHandle},
 };
 
@@ -314,7 +314,11 @@ fn barrier_with(
     } else {
         Observing::Stable
     };
-    let cancelled = Arc::new(AtomicBool::new(matches!(refusal, Refusal::Cancelled)));
+    let cancel = crate::AttemptCancel::new();
+    if matches!(refusal, Refusal::Cancelled) {
+        cancel.cancel(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest);
+    }
+    let cancelled = cancel.signal();
     let check = AuthorityCheck::new(
         root_check(refusal, attempt),
         TestObserved::new(observing)?,
@@ -485,13 +489,14 @@ impl crate::BarrierFactory for Production {
         self,
         attempt: &AdmittedAttempt,
         root: crate::RootRecheck<'r>,
+        cancel: crate::CancelSignal,
     ) -> Result<Self::Barrier<'r>, BarrierError> {
         ProviderReleaseBarrier::new(
             attempt,
             self.nonce,
             test_signer(),
             TestIdentity::new(own_pid()),
-            AuthorityCheck::new(root, self.observed, Arc::new(AtomicBool::new(false))),
+            AuthorityCheck::new(root, self.observed, cancel),
         )
     }
 }
@@ -511,7 +516,12 @@ async fn a_factory_builds_the_production_barrier_over_the_lent_root_recheck() ->
         nonce: fresh_nonce()?,
         observed: TestObserved::new(Observing::Stable)?,
     };
-    let mut barrier = crate::BarrierFactory::barrier(factory, &attempt, &root)?;
+    let mut barrier = crate::BarrierFactory::barrier(
+        factory,
+        &attempt,
+        &root,
+        crate::AttemptCancel::new().signal(),
+    )?;
     let unit_end = StdOwnedFd::from(barrier.prepare(&attempt)?.1);
     let ready = ready_for(&barrier)?.to_canonical_cbor()?;
     let launcher = thread::spawn(move || {
@@ -1536,7 +1546,7 @@ mod kernel_observation {
         let check = AuthorityCheck::new(
             root_check(Refusal::None, &attempt),
             readback,
-            Arc::new(AtomicBool::new(false)),
+            crate::AttemptCancel::new().signal(),
         );
         let mut barrier = ProviderReleaseBarrier::new(
             &attempt,

@@ -6,7 +6,10 @@
 //! material from the live authorization record and leaves an immutable
 //! tombstone so that the identity cannot be restored or reused.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -645,12 +648,55 @@ impl<'de> Deserialize<'de> for KeyRegistryFormatVersionV1 {
     }
 }
 
-/// Reference state machine for adapters and public-interface tests.
-/// Serialized snapshots require an explicit V1 marker; earlier shapes are
-/// rejected at decode without migration or an upcaster.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct KeyRegistryStateV1 {
+macro_rules! define_key_registry_state {
+    ($($field:ident: $field_type:ty),+ $(,)?) => {
+        /// Reference state machine for adapters and public-interface tests.
+        /// Serialized snapshots require an explicit V1 marker; earlier shapes are
+        /// rejected at decode without migration or an upcaster.
+        #[derive(Clone, Default, Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct KeyRegistryStateV1 {
+            $($field: $field_type,)+
+            /// Lazily derived from live records and tombstones after validation; never
+            /// part of the V1 snapshot. `None` means the snapshot still needs validation.
+            #[serde(skip)]
+            reserved_material: Option<HashSet<Hash>>,
+        }
+
+        #[derive(PartialEq)]
+        struct KeyRegistryStateSemanticView<'a> {
+            $($field: &'a $field_type,)+
+        }
+
+        impl KeyRegistryStateV1 {
+            const fn semantic_view(&self) -> KeyRegistryStateSemanticView<'_> {
+                KeyRegistryStateSemanticView {
+                    $($field: &self.$field,)+
+                }
+            }
+        }
+
+        impl fmt::Debug for KeyRegistryStateV1 {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let semantic = self.semantic_view();
+                formatter
+                    .debug_struct("KeyRegistryStateV1")
+                    $(.field(stringify!($field), semantic.$field))+
+                    .finish()
+            }
+        }
+
+        impl PartialEq for KeyRegistryStateV1 {
+            fn eq(&self, other: &Self) -> bool {
+                self.semantic_view() == other.semantic_view()
+            }
+        }
+
+        impl Eq for KeyRegistryStateV1 {}
+    };
+}
+
+define_key_registry_state! {
     records: BTreeMap<KeyIdentityV1, KeyRecordV1>,
     active: BTreeMap<(OwnerIdV1, KeyRoleV1), KeyIdentityV1>,
     tombstones: BTreeMap<KeyIdentityV1, KeyTombstoneV1>,
@@ -687,6 +733,7 @@ impl KeyRegistryStateV1 {
             highest_epoch: BTreeMap::new(),
             pending_destructions: BTreeMap::new(),
             version: KeyRegistryFormatVersionV1,
+            reserved_material: None,
         }
     }
 
@@ -719,6 +766,40 @@ impl KeyRegistryStateV1 {
             .map_err(|_| KeyRegistryErrorV1::InvalidState)
     }
 
+    fn ensure_registration_index(&mut self) -> Result<(), KeyRegistryErrorV1> {
+        if self.reserved_material.is_some() {
+            return Ok(());
+        }
+        self.validate()?;
+        self.reserved_material = Some(self.reserved_material_digests().copied().collect());
+        Ok(())
+    }
+
+    fn record_material_entries(
+        &self,
+    ) -> impl Iterator<Item = (&KeyIdentityV1, &KeyRecordV1, Option<&Hash>)> + '_ {
+        self.records
+            .iter()
+            .map(|(identity, record)| (identity, record, record.private_material_digest.as_ref()))
+    }
+
+    fn tombstone_material_entries(
+        &self,
+    ) -> impl Iterator<Item = (&KeyIdentityV1, &KeyTombstoneV1, &Hash)> + '_ {
+        self.tombstones.iter().map(|(identity, tombstone)| {
+            (identity, tombstone, &tombstone.destroyed_material_digest)
+        })
+    }
+
+    fn reserved_material_digests(&self) -> impl Iterator<Item = &Hash> + '_ {
+        self.record_material_entries()
+            .filter_map(|(_, _, digest)| digest)
+            .chain(
+                self.tombstone_material_entries()
+                    .map(|(_, _, digest)| digest),
+            )
+    }
+
     fn validate_with_read_context(
         &self,
         context: &mut ReadContext<'_>,
@@ -744,7 +825,7 @@ impl KeyRegistryStateV1 {
         context: &mut ReadContext<'_>,
         reserved_material: &mut HashSet<Hash>,
     ) -> Result<(), KeyRegistryReadErrorV1> {
-        for (identity, record) in &self.records {
+        for (identity, record, material_digest) in self.record_material_entries() {
             context.step(|context| {
                 if record.identity != *identity {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
@@ -761,12 +842,10 @@ impl KeyRegistryStateV1 {
                 if !self.highest_epoch.contains_key(&scope) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-                if let Some(digest) = record.private_material_digest.as_ref() {
+                if let Some(digest) = material_digest {
                     reserve_material(reserved_material, digest, context)?;
                 }
-                if record.private_material_digest.is_none()
-                    && !self.tombstones.contains_key(identity)
-                {
+                if material_digest.is_none() && !self.tombstones.contains_key(identity) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
                 Ok(())
@@ -856,7 +935,7 @@ impl KeyRegistryStateV1 {
         context: &mut ReadContext<'_>,
         reserved_material: &mut HashSet<Hash>,
     ) -> Result<(), KeyRegistryReadErrorV1> {
-        for (identity, tombstone) in &self.tombstones {
+        for (identity, tombstone, digest) in self.tombstone_material_entries() {
             context.step(|context| {
                 let Some(record) = self.records.get(identity) else {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
@@ -867,11 +946,7 @@ impl KeyRegistryStateV1 {
                 if record.private_material_digest.is_some() {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-                reserve_material(
-                    reserved_material,
-                    &tombstone.destroyed_material_digest,
-                    context,
-                )
+                reserve_material(reserved_material, digest, context)
             })?;
         }
         Ok(())
@@ -968,7 +1043,7 @@ impl KeyRegistryStateV1 {
         &mut self,
         registration: KeyRegistrationV1,
     ) -> Result<KeyRegistrationOutcomeV1, KeyRegistryErrorV1> {
-        self.validate()?;
+        self.ensure_registration_index()?;
         validate_registration(&registration)?;
         let identity = registration.identity;
         if self.tombstones.contains_key(&identity) {
@@ -994,7 +1069,11 @@ impl KeyRegistryStateV1 {
             }
             return Err(KeyRegistryErrorV1::IdentityConflict);
         }
-        if self.material_is_reserved(registration.private_material_digest) {
+        if self
+            .reserved_material
+            .as_ref()
+            .is_some_and(|reserved| reserved.contains(&registration.private_material_digest))
+        {
             return Err(KeyRegistryErrorV1::MaterialReuse);
         }
         self.records.insert(
@@ -1009,6 +1088,9 @@ impl KeyRegistryStateV1 {
             .insert((identity.owner_id, identity.role), identity);
         self.highest_epoch
             .insert((identity.owner_id, identity.role), identity.epoch);
+        self.reserved_material
+            .get_or_insert_with(HashSet::new)
+            .insert(registration.private_material_digest);
         Ok(KeyRegistrationOutcomeV1::Registered)
     }
 
@@ -1302,16 +1384,6 @@ impl KeyRegistryStateV1 {
         Ok(KeyDestructionOutcomeV1::Destroyed(tombstone))
     }
 
-    fn material_is_reserved(&self, digest: Hash) -> bool {
-        self.records
-            .values()
-            .any(|record| record.private_material_digest == Some(digest))
-            || self
-                .tombstones
-                .values()
-                .any(|tombstone| tombstone.destroyed_material_digest == digest)
-    }
-
     fn validate_pending_destructions(
         &self,
         context: &mut ReadContext<'_>,
@@ -1562,6 +1634,40 @@ mod tests {
         )
     }
 
+    #[test]
+    fn debug_output_is_stable_across_registry_roundtrip() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut indexed = KeyRegistryStateV1::new();
+        indexed.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+        let decoded = state_from_value(&state_value(&indexed)?)?;
+
+        assert_eq!(indexed, decoded);
+        let debug = format!("{indexed:?}");
+        assert_eq!(debug, format!("{decoded:?}"));
+        Ok(())
+    }
+
+    #[test]
+    fn debug_output_reflects_registered_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let mut registered = KeyRegistryStateV1::new();
+        registered.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+
+        assert_ne!(
+            format!("{:?}", KeyRegistryStateV1::new()),
+            format!("{registered:?}")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn equality_distinguishes_registered_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let mut registered = KeyRegistryStateV1::new();
+        registered.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+
+        assert_ne!(KeyRegistryStateV1::new(), registered);
+        Ok(())
+    }
+
     fn assert_signing_error(
         registry: &mut KeyRegistryStateV1,
         identity: KeyIdentityV1,
@@ -1764,6 +1870,38 @@ mod tests {
         registry.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
         assert_eq!(
             registry.register_key(signing_registration(ATTRIBUTION, 1)),
+            Err(KeyRegistryErrorV1::MaterialReuse)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registration_rejects_live_material_reuse_after_durable_snapshot_reload(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+        let mut reloaded = state_from_durable_cbor(&registry)?;
+
+        assert_eq!(
+            KeyRegistryPortV1::register_key(&mut reloaded, signing_registration(ATTRIBUTION, 1)),
+            Err(KeyRegistryErrorV1::MaterialReuse)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registration_rejects_destroyed_material_reuse_after_durable_snapshot_reload(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(2), None))?;
+        destroy(
+            &mut registry,
+            KeyDestructionRequestV1::new(DATA, digest(2), digest(3)),
+        )?;
+        let mut reloaded = state_from_durable_cbor(&registry)?;
+
+        assert_eq!(
+            KeyRegistryPortV1::register_key(&mut reloaded, signing_registration(ATTRIBUTION, 2)),
             Err(KeyRegistryErrorV1::MaterialReuse)
         );
         Ok(())
@@ -2178,6 +2316,28 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::into_writer(value, &mut bytes)?;
         Ok(ciborium::from_reader(bytes.as_slice())?)
+    }
+
+    struct AllowAllReadGuard;
+
+    impl KeyRegistryReadGuardV1 for AllowAllReadGuard {
+        fn observe(
+            &mut self,
+            _: KeyRegistryReadWorkV1,
+        ) -> std::result::Result<(), KeyRegistryReadRefusedV1> {
+            Ok(())
+        }
+    }
+
+    fn state_from_durable_cbor(
+        state: &KeyRegistryStateV1,
+    ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(state, &mut bytes)?;
+        Ok(KeyRegistryStateV1::from_durable_cbor_with_read_guard(
+            &bytes,
+            &mut AllowAllReadGuard,
+        )?)
     }
 
     fn edit_state<F>(
