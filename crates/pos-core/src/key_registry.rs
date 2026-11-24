@@ -6,7 +6,10 @@
 //! material from the live authorization record and leaves an immutable
 //! tombstone so that the identity cannot be restored or reused.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -648,7 +651,7 @@ impl<'de> Deserialize<'de> for KeyRegistryFormatVersionV1 {
 /// Reference state machine for adapters and public-interface tests.
 /// Serialized snapshots require an explicit V1 marker; earlier shapes are
 /// rejected at decode without migration or an upcaster.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyRegistryStateV1 {
     records: BTreeMap<KeyIdentityV1, KeyRecordV1>,
@@ -657,7 +660,40 @@ pub struct KeyRegistryStateV1 {
     highest_epoch: BTreeMap<(OwnerIdV1, KeyRoleV1), u64>,
     pending_destructions: BTreeMap<KeyIdentityV1, KeyDestructionRequestV1>,
     version: KeyRegistryFormatVersionV1,
+    /// Derived from live records and tombstones; never part of the V1 snapshot.
+    #[serde(skip)]
+    reserved_material: HashSet<Hash>,
+    /// Deserialized states rebuild the index only after validating their snapshot.
+    #[serde(skip)]
+    registration_index_valid: bool,
 }
+
+impl fmt::Debug for KeyRegistryStateV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KeyRegistryStateV1")
+            .field("records", &self.records)
+            .field("active", &self.active)
+            .field("tombstones", &self.tombstones)
+            .field("highest_epoch", &self.highest_epoch)
+            .field("pending_destructions", &self.pending_destructions)
+            .field("version", &self.version)
+            .finish()
+    }
+}
+
+impl PartialEq for KeyRegistryStateV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.records == other.records
+            && self.active == other.active
+            && self.tombstones == other.tombstones
+            && self.highest_epoch == other.highest_epoch
+            && self.pending_destructions == other.pending_destructions
+            && self.version == other.version
+    }
+}
+
+impl Eq for KeyRegistryStateV1 {}
 
 impl KeyRegistryStateV1 {
     /// Decode the existing durable V1 CBOR snapshot with native work guards.
@@ -687,6 +723,8 @@ impl KeyRegistryStateV1 {
             highest_epoch: BTreeMap::new(),
             pending_destructions: BTreeMap::new(),
             version: KeyRegistryFormatVersionV1,
+            reserved_material: HashSet::new(),
+            registration_index_valid: true,
         }
     }
 
@@ -717,6 +755,25 @@ impl KeyRegistryStateV1 {
     pub fn validate(&self) -> Result<(), KeyRegistryErrorV1> {
         self.validate_with_read_context(&mut ReadContext::new(&mut OrdinaryReadGuard))
             .map_err(|_| KeyRegistryErrorV1::InvalidState)
+    }
+
+    fn ensure_registration_index(&mut self) -> Result<(), KeyRegistryErrorV1> {
+        if self.registration_index_valid {
+            return Ok(());
+        }
+        self.validate()?;
+        self.reserved_material = self
+            .records
+            .values()
+            .filter_map(|record| record.private_material_digest)
+            .chain(
+                self.tombstones
+                    .values()
+                    .map(|tombstone| tombstone.destroyed_material_digest),
+            )
+            .collect();
+        self.registration_index_valid = true;
+        Ok(())
     }
 
     fn validate_with_read_context(
@@ -968,7 +1025,7 @@ impl KeyRegistryStateV1 {
         &mut self,
         registration: KeyRegistrationV1,
     ) -> Result<KeyRegistrationOutcomeV1, KeyRegistryErrorV1> {
-        self.validate()?;
+        self.ensure_registration_index()?;
         validate_registration(&registration)?;
         let identity = registration.identity;
         if self.tombstones.contains_key(&identity) {
@@ -994,7 +1051,10 @@ impl KeyRegistryStateV1 {
             }
             return Err(KeyRegistryErrorV1::IdentityConflict);
         }
-        if self.material_is_reserved(registration.private_material_digest) {
+        if self
+            .reserved_material
+            .contains(&registration.private_material_digest)
+        {
             return Err(KeyRegistryErrorV1::MaterialReuse);
         }
         self.records.insert(
@@ -1009,6 +1069,8 @@ impl KeyRegistryStateV1 {
             .insert((identity.owner_id, identity.role), identity);
         self.highest_epoch
             .insert((identity.owner_id, identity.role), identity.epoch);
+        self.reserved_material
+            .insert(registration.private_material_digest);
         Ok(KeyRegistrationOutcomeV1::Registered)
     }
 
@@ -1300,16 +1362,6 @@ impl KeyRegistryStateV1 {
         self.pending_destructions.remove(&request.identity);
         self.tombstones.insert(request.identity, tombstone);
         Ok(KeyDestructionOutcomeV1::Destroyed(tombstone))
-    }
-
-    fn material_is_reserved(&self, digest: Hash) -> bool {
-        self.records
-            .values()
-            .any(|record| record.private_material_digest == Some(digest))
-            || self
-                .tombstones
-                .values()
-                .any(|tombstone| tombstone.destroyed_material_digest == digest)
     }
 
     fn validate_pending_destructions(
