@@ -41,10 +41,6 @@ use std::{
     io::{self, Read},
     os::unix::fs::MetadataExt,
     path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
     time::{Duration, Instant},
 };
 
@@ -67,9 +63,9 @@ use pos_reference::sandbox_provider_protocol::{BarrierFailure, KernelObservation
 
 use crate::{
     observation_evidence, release_after_ready, ActiveAttempt, AdmittedAttempt, AdmittedRuntimeKey,
-    CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError, KernelObservationError,
-    LaunchBarrier, LauncherInvocation, ObservationContext, ObservedUnit, ReleaseBarrierError,
-    ReleaseBinding, ReleaseOutcome, ReleaseRecheck, RuntimeAttestationSigner,
+    CancelSignal, CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError,
+    KernelObservationError, LaunchBarrier, LauncherInvocation, ObservationContext, ObservedUnit,
+    ReleaseBarrierError, ReleaseBinding, ReleaseOutcome, ReleaseRecheck, RuntimeAttestationSigner,
     TransientServiceUnitName,
 };
 
@@ -168,7 +164,7 @@ pub enum RecheckRefusal {
 pub struct AuthorityCheck<R, O> {
     root: R,
     observed: O,
-    cancelled: Arc<AtomicBool>,
+    cancelled: CancelSignal,
 }
 
 impl<R, O> AuthorityCheck<R, O>
@@ -177,11 +173,12 @@ where
     O: ObservedReadback,
 {
     /// Bind the root recheck to the independently admitted policy,
-    /// the observed readback source and the cancellation flag the attempt
-    /// lifecycle sets. The authority heads bound into the release are the
-    /// admitted attempt's, taken by the barrier.
+    /// the observed readback source and the attempt's own cancellation
+    /// signal, which the lifecycle's cancel and fence set. The authority
+    /// heads bound into the release are the admitted attempt's, taken by the
+    /// barrier.
     #[must_use]
-    pub const fn new(root: R, observed: O, cancelled: Arc<AtomicBool>) -> Self {
+    pub const fn new(root: R, observed: O, cancelled: CancelSignal) -> Self {
         Self {
             root,
             observed,
@@ -192,7 +189,7 @@ where
     /// Why a release was refused: cancellation, once requested, outranks
     /// every other refusal (R9: a cancelled attempt reports `Cancelled`).
     fn cancelled_or(&self, refusal: RecheckRefusal) -> RecheckRefusal {
-        if self.cancelled.load(Ordering::SeqCst) {
+        if self.cancelled.is_requested() {
             RecheckRefusal::Cancelled
         } else {
             refusal
@@ -211,7 +208,7 @@ where
         if !checked.matches_attempt(admitted) {
             return Err(RecheckRefusal::Root(ImageActivationError::EvidenceMismatch));
         }
-        if self.cancelled.load(Ordering::SeqCst) {
+        if self.cancelled.is_requested() {
             return Err(RecheckRefusal::Cancelled);
         }
         let observed_readback_digest = observed(&checked)?;
@@ -457,6 +454,9 @@ pub enum BarrierError {
     /// The release channel could not be created.
     #[error("the release channel could not be created")]
     Channel(#[source] io::Error),
+    /// The single-use LPV1 nonce could not be drawn.
+    #[error("the launch nonce could not be drawn")]
+    Nonce(#[source] io::Error),
     /// The unit's end of the release channel was already handed over.
     #[error("the unit end of the release channel was already taken")]
     UnitEndTaken,
@@ -525,6 +525,7 @@ impl BarrierError {
             Self::AttemptMismatch
             | Self::Parameters(_)
             | Self::Channel(_)
+            | Self::Nonce(_)
             | Self::UnitEndTaken
             | Self::RuntimeFlavor
             | Self::AlreadyAttempted

@@ -162,6 +162,7 @@ fn refusal(
     let source = match ExecuteSource::read(peer, ledger, installation) {
         Ok(source) => source,
         Err(SourceRefusal::Malformed(_)) => return Ok(Some("malformed".to_owned())),
+        Err(SourceRefusal::NotExecute(_)) => return Ok(Some("not execute".to_owned())),
         Err(SourceRefusal::Uncharged(handed)) => {
             return Ok(Some(format!("uncharged, closed: {}", handed.closed())))
         }
