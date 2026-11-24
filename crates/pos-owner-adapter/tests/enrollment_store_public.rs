@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
 /// `N` bytes derived one-way from `label`, so no literal key material is used.
+///
+/// Byte `i` comes from `SHA-256(label || block)` with `block = i / 32`. The block counter
+/// saturates, which no caller reaches because every caller asks for at most 32 bytes.
 fn derived<const N: usize>(label: &str) -> [u8; N] {
     std::array::from_fn(|index| {
         let mut hasher = Sha256::new();
