@@ -1202,16 +1202,42 @@ def address_set(evidence: Evidence, name: str) -> set[tuple[str, str, str]]:
     return addresses
 
 
-def route_field(fields: list[str], key: str) -> str | None:
-    return fields[fields.index(key) + 1] if key in fields[:-1] else None
+# The fields `ip route` prints after a loopback route's destination, with the
+# values each may take; `linkdown` stands alone. Anything else (`via`, `gateway`,
+# `nhid`, `encap`, `nexthop`, a global scope ...) is not the loopback's own.
+ROUTE_FIELDS = {"dev": {"lo"}, "table": {"local", "main"}, "proto": {"kernel"}, "scope": {"host", "link"},
+                "src": {"127.0.0.1", "::1"}, "metric": None, "pref": {"medium"}}
+ROUTE_FLAGS = {"linkdown"}
+
+
+def route_fields(fields: list[str]) -> dict[str, str] | None:
+    """The `key value` pairs of a route's tail, or None if any field is foreign or repeated."""
+    pairs, index = {}, 0
+    while index < len(fields):
+        key = fields[index]
+        if key in ROUTE_FLAGS:
+            index += 1
+            continue
+        if key not in ROUTE_FIELDS or key in pairs or index + 1 >= len(fields):
+            return None
+        value = fields[index + 1]
+        allowed = ROUTE_FIELDS[key]
+        if (allowed is None and not value.isdigit()) or (allowed is not None and value not in allowed):
+            return None
+        pairs[key] = value
+        index += 2
+    return pairs
 
 
 def require_loopback_routes(evidence: Evidence, name: str, family: dict) -> list[str]:
-    """Every route is one of the loopback's own, none has a gateway, and the host route is there.
+    """Every route is one of the loopback's own, and the host route is there.
 
-    A route is `[KIND] DESTINATION dev lo [table TABLE] ...`. IPv6 may put the
-    `::1` route in the main table (no `table` field), as some kernels do; every
-    other route, and every IPv4 one, is in the local table.
+    A route is `[KIND] DESTINATION` and then only the fields of ROUTE_FIELDS,
+    each at most once, with `dev lo`. A kinded route (`local`, `broadcast`,
+    `multicast`) is in the local table. IPv6 may also hold the `::1` host route
+    without a kind in the main table, which some kernels print with no `table`
+    field; the same route unkinded in the local table is refused, because the
+    kernel always names a local-table route's kind.
     """
     routes = evidence.text(name).splitlines()
     seen = set()
@@ -1221,11 +1247,14 @@ def require_loopback_routes(evidence: Evidence, name: str, family: dict) -> list
             raise EvidenceError(f"{name} holds a blank line")
         kind = fields[0] if fields[0] in ROUTE_KINDS else None
         destination = fields[1 if kind else 0] if len(fields) > 1 else ""
-        table = route_field(fields, "table")
+        pairs = route_fields(fields[(2 if kind else 1):])
         allowed = family["kinds"].get(kind, set()) if kind else family["unicast"]
-        if "via" in fields or "nexthop" in fields or route_field(fields, "dev") != "lo" \
-                or destination not in allowed \
-                or table not in (("local", None) if destination in family["main"] and not kind else ("local",)):
+        if kind:
+            table_ok = pairs is not None and pairs.get("table") == "local"
+        else:
+            table_ok = pairs is not None and pairs.get("table") in (None, "main")
+        if pairs is None or pairs.get("dev") != "lo" or destination not in allowed or not table_ok \
+                or (not kind and destination not in family["main"]):
             raise EvidenceError(f"{name} holds a route other than the loopback's own: {line!r}")
         seen.add(destination)
     if not seen & family["required"]:

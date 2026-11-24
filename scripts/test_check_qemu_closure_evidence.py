@@ -1318,7 +1318,10 @@ class EvidenceTests(unittest.TestCase):
 
     def test_private_network_main_table_loopback_route_is_accepted_deliberately(self):
         main_table = "::1 dev lo proto kernel metric 256 pref medium\n"
-        for routes in (main_table, ROUTES6 + main_table, ROUTES6.replace("::1 ", "::1/128 ")):
+        # The kernel names a local-table route's kind, so the main table is the
+        # only place an unkinded ::1 route is accepted (explicit or implied).
+        for routes in (main_table, ROUTES6 + main_table, ROUTES6.replace("::1 ", "::1/128 "),
+                       "::1 dev lo table main proto kernel metric 256 pref medium\n"):
             with self.subTest(routes=routes):
                 verdict = self.verdict(change=lambda f, r=routes: f.update({"guest/network/fb-1/routes6": r}))
                 self.assertEqual(verdict["private_network"]["fb-1"]["links"], ["lo"])
@@ -1382,7 +1385,21 @@ class EvidenceTests(unittest.TestCase):
              "other than the loopback's own"),
             (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "default via fe80::1 dev lo\n"}),
              "other than the loopback's own"),
-            (lambda f: f.update({f"{base}/fb-2/routes6": "::1 dev lo table main\n"}),
+            # An unkinded ::1 route in the local table is refused: the kernel
+            # always prints `local` for that table, so it is not what it printed.
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "::1 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "local ::1 dev lo table main\n"}),
+             "other than the loopback's own"),
+            # Fields beyond the first dev and table: a second device or table,
+            # a gateway, a nexthop id, encapsulation, a global scope or source.
+            *[(lambda f, tail=tail: f.update(
+                {f"{base}/fb-1/routes6": ROUTES6 + "local ::1 dev lo table local " + tail + "\n"}),
+               "other than the loopback's own")
+              for tail in ("dev eth0", "table main", "gateway fe80::1", "nhid 5", "encap ip id 1",
+                           "src 2001:db8::1", "scope global", "proto bgp", "metric x", "linkdown extra", "dev")],
+            (lambda f: f.update(
+                {f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 dev lo table local src 10.0.0.1\n"}),
              "other than the loopback's own"),
             (lambda f: f.update({f"{base}/fb-2/routes6": "multicast ff00::/8 dev lo table local\n"}),
              "lacks the loopback host route"),

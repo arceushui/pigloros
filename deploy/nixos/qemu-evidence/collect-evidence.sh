@@ -229,6 +229,12 @@ network_case() { # NAME VALUE
   printf '%s\n' "${status}" >"${dir}/status"
 }
 
+# Put the sysctl back to the value recorded at boot in network/boot-sysctl,
+# so later cases run as the package ships.
+restore_fb_tunnels() {
+  cat network/boot-sysctl >"${FB_TUNNELS_SYSCTL}"
+}
+
 # scripts/test_qemu_closure_evidence_producer.py sources the functions above.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
   return 0
@@ -361,7 +367,6 @@ cat /proc/modules >network/modules
 for value in 0 1 2; do
   network_case "fb-${value}" "${value}"
 done
-# The booted value again, so later cases run as the package ships.
-cat network/boot-sysctl >"${FB_TUNNELS_SYSCTL}"
+restore_fb_tunnels
 
 printf 'complete\n' >status
