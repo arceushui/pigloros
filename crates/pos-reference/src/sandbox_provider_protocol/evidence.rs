@@ -1,5 +1,7 @@
 //! The ADR-069 R9 V1 attempt evidence records and their verifier, as R10
-//! extends them with the provider stdio channels and the stdin feed.
+//! extends them with the provider stdio channels and the stdin feed, and R14
+//! with the Local network readback and the network and replay setup
+//! failures.
 //!
 //! Three closed, unsigned, self-digested records carry the evidence that the
 //! runtime-signed SPR1, SAU1 and RLS1 bind by digest (R9 §4):
@@ -30,6 +32,7 @@ mod observed;
 mod requested;
 mod terminated;
 
+use std::net::SocketAddr;
 use std::ops::RangeInclusive;
 
 use ciborium::value::Value;
@@ -50,7 +53,9 @@ use super::{
 
 pub use observed::{
     BlockIdentity, DeviceNumber, KernelObservationEvidence, KernelObservationEvidenceFields,
-    KernelObservationStatus, NamespaceIdentity, ObservedKernelState, RootMount,
+    KernelObservationStatus, LocalNetworkReadback, NamespaceIdentity, ObservedKernelState,
+    ReadbackFirewallBase, ReadbackFirewallChain, ReadbackFirewallHook, ReadbackFirewallPolicy,
+    ReadbackFirewallRule, ReadbackPrefix, ReadbackRoute, ReadbackVethEnd, RootMount,
 };
 pub use requested::{
     DbusProperty, DbusValue, RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields,
@@ -106,7 +111,7 @@ closed_codes! {
     AttemptProgressCode: [NotStarted, StartedNotReleased, Released];
     LaunchFailure: [
         RootNotActivated, PreStartRecheckFailed, UnitRefFailed, OutputReservationRefused,
-        StdioChannelFailed, AdmissionClosed,
+        StdioChannelFailed, AdmissionClosed, NetworkSetupFailed, ReplayUnavailable,
     ];
     StartJobResult: [Done, Canceled, Timeout, Failed, Dependency, Skipped];
     Contradiction: [IdentityChanged, TimeReversed, CounterDecreased];
@@ -137,6 +142,8 @@ closed_codes! {
         FileOrOutputLimit, ProcessCrash, IpcFailure, ProtocolFailure,
     ];
     CgroupEmptyBasis: [Events, Deleted];
+    ReadbackFirewallHook: [Input, Forward, Output];
+    ReadbackFirewallPolicy: [Accept, Drop];
 }
 
 /// One closed code field.
@@ -257,6 +264,11 @@ pub struct AttemptEvidenceContext<'a> {
     pub ready: Option<&'a LauncherReady>,
     /// The provider's own namespaces, retained once for the runtime.
     pub provider_namespaces: &'a [NamespaceIdentity; 6],
+    /// The endpoints of the LPS1 `network-capability` records that the
+    /// AGR1-bound NXP1 plans name, in any order (R14 §3.5 rule 4). The
+    /// verifier maps IPv4-mapped addresses and drops duplicates. Empty
+    /// for a mode other than Local, and in V1.
+    pub planned_endpoints: &'a [SocketAddr],
 }
 
 /// The ELM1 a verifier holds: its limits and the other fields its
@@ -517,7 +529,8 @@ impl AttemptEvidence {
     }
 
     /// Rule 4: KOE1 binds exactly the accepted `ReadyV1`, and an observation
-    /// agrees with it, with the runtime's namespaces and with ELM1 limit 9.
+    /// agrees with it, with the runtime's namespaces, with ELM1 limit 9 and,
+    /// by R14 rules 2 and 4, with the mode and the planned endpoints.
     fn observation_bound(&self, context: &AttemptEvidenceContext<'_>, work_limit: u64) -> bool {
         match (&self.observed.fields().status, context.ready) {
             (KernelObservationStatus::NotReached, None) => true,
@@ -533,28 +546,36 @@ impl AttemptEvidence {
             ) => {
                 *ready1_digest == ready.digest
                     && observation.matches_ready(ready, context.provider_namespaces)
-                    && work_capacity_matches(
-                        observation.work,
-                        work_limit,
-                        work_block_bytes(context.architecture),
-                    )
+                    && observation_planned(observation, work_limit, context)
             }
             _ => false,
         }
     }
 
     /// Rule 2's nullability that follows the mode and ELM1 limit 9
-    /// (R9 §4.6.3): `local-network` and `work-after`.
+    /// (R9 §4.6.3): `local-network` and `work-after`; and R14 rule 2's
+    /// modes of `launch-failure` 6 (Local) and 7 (Replay).
     fn termination_shaped(&self, mode: SandboxExecutionMode, work_limit: u64) -> bool {
         let termination = self.termination.fields();
         let released = termination.progress == AttemptProgressCode::Released;
         let local = mode == SandboxExecutionMode::Local;
         let network = termination.local_network.is_some();
-        self.work_after_shaped(work_limit)
+        self.setup_shaped(mode, work_limit)
             && if released {
                 local == network
             } else {
                 local || !network
+            }
+    }
+
+    /// `work-after` follows ELM1 limit 9 and KOE1, and `launch-failure` 6
+    /// is Local's and 7 is Replay's (R14 rule 2).
+    fn setup_shaped(&self, mode: SandboxExecutionMode, work_limit: u64) -> bool {
+        self.work_after_shaped(work_limit)
+            && match self.termination.fields().launch_failure {
+                Some(LaunchFailure::NetworkSetupFailed) => mode == SandboxExecutionMode::Local,
+                Some(LaunchFailure::ReplayUnavailable) => mode == SandboxExecutionMode::Replay,
+                _ => true,
             }
     }
 
@@ -716,6 +737,32 @@ impl Limits {
             incomplete_inputs: limit(INCOMPLETE_INPUTS_LIMIT)?,
         })
     }
+}
+
+/// A status-0 observation's `/work` capacity follows ELM1 limit 9 and the
+/// architecture, and its network readback the mode and plans.
+fn observation_planned(
+    observation: &ObservedKernelState,
+    work_limit: u64,
+    context: &AttemptEvidenceContext<'_>,
+) -> bool {
+    work_capacity_matches(
+        observation.work,
+        work_limit,
+        work_block_bytes(context.architecture),
+    ) && network_readback_planned(observation.network_readback.as_ref(), context)
+}
+
+/// R14 rules 2 and 4: a status-0 KOE1 has a network readback exactly in
+/// Local mode, and a readback follows the planned endpoints.
+fn network_readback_planned(
+    readback: Option<&LocalNetworkReadback>,
+    context: &AttemptEvidenceContext<'_>,
+) -> bool {
+    let local = context.mode == SandboxExecutionMode::Local;
+    readback.map_or(!local, |readback| {
+        local && readback.planned(context.planned_endpoints)
+    })
 }
 
 /// KOE1 `work` is null exactly when ELM1 limit 9 is zero, and otherwise its

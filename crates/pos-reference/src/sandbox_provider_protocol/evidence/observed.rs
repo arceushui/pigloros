@@ -1,7 +1,10 @@
-//! KOE1, the kernel-observation evidence of ADR-069 R9 §4.4.
+//! KOE1, the kernel-observation evidence of ADR-069 R9 §4.4, with the
+//! R14 §3.1 `network-readback`.
 //!
 //! Its self-digest is `observed_state_digest`: SPR1 ordinal 20, the last
 //! authority digest of SAU1 events 11 to 13, and RLS1 ordinal 12.
+
+mod network_readback;
 
 use ciborium::value::Value;
 
@@ -11,13 +14,19 @@ use super::{
 use crate::sandbox_provider_protocol::codec::{
     array, bytes_value, id16, text_value, uint, uint_value,
 };
+pub use network_readback::{
+    LocalNetworkReadback, ReadbackFirewallBase, ReadbackFirewallChain, ReadbackFirewallHook,
+    ReadbackFirewallPolicy, ReadbackFirewallRule, ReadbackPrefix, ReadbackRoute, ReadbackVethEnd,
+};
+
 use crate::sandbox_provider_protocol::{
     CgroupIdentity, FdIdentity, KernelObservationFacts, LauncherReady,
     SandboxProviderProtocolError, WorkMountFacts,
 };
 
 const MAGIC: &str = "KOE1";
-const MAX_RECORD_BYTES: usize = 4096;
+/// R14 N3: the readback of up to 256 planned exchanges fits.
+const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// The kernel's device-number bounds: 12 major and 20 minor bits.
 const MAX_MAJOR: u32 = 4095;
 const MAX_MINOR: u32 = 1_048_575;
@@ -185,6 +194,9 @@ pub struct ObservedKernelState {
     /// The `/work` mount and capacity, without its free space; null exactly
     /// when ELM1 limit 9 is zero.
     pub work: Option<WorkMountFacts>,
+    /// The Local network readback (R14 §3.1); present exactly when the
+    /// AGR1 mode is Local.
+    pub network_readback: Option<LocalNetworkReadback>,
 }
 
 impl ObservedKernelState {
@@ -202,11 +214,12 @@ impl ObservedKernelState {
             namespaces_value(&self.provider_namespaces),
             digest_value(&self.observed_fdl1_digest),
             optional_value(self.work, work_mount_value),
+            optional_value(self.network_readback.as_ref(), LocalNetworkReadback::value),
         ])
     }
 
     fn decode(value: &Value) -> Result<Self> {
-        let fields = array::<12>(value)?;
+        let fields = array::<13>(value)?;
         let state = Self {
             invocation_id: id16(&fields[0])?,
             main_pid: u32_in(&fields[1], 1..=MAX_PID)?,
@@ -220,9 +233,23 @@ impl ObservedKernelState {
             provider_namespaces: namespaces(&fields[9])?,
             observed_fdl1_digest: digest(&fields[10])?,
             work: optional(&fields[11], work_mount)?,
+            network_readback: None,
         };
         consistent(state.root_mount.device == state.root_mapper.device && state.isolated())
-            .map(|()| state)
+            .and_then(|()| state.with_network_readback(&fields[12]))
+    }
+
+    /// The state with its decoded `network-readback`, whose attempt
+    /// namespace is neither the unit's nor the provider's network namespace
+    /// (R14 rule 4).
+    fn with_network_readback(self, value: &Value) -> Result<Self> {
+        optional(value, |readback| {
+            LocalNetworkReadback::decode(readback, self.namespaces[5], self.provider_namespaces[5])
+        })
+        .map(|network_readback| Self {
+            network_readback,
+            ..self
+        })
     }
 
     /// No unit namespace is the provider's namespace of the same type.
