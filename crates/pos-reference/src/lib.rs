@@ -37,6 +37,8 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_domain;
 pub mod evaluator_protocol;
+#[cfg(target_os = "linux")]
+pub mod held_directory;
 pub mod metric_profile;
 pub mod profile;
 #[cfg(unix)]
