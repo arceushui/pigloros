@@ -377,6 +377,41 @@ impl OtherRequest {
     }
 }
 
+/// A first frame that starts no execute source.
+enum NotEvaluation {
+    /// The frame failed step 1.
+    Fault(FrameFault),
+    /// A complete record of another operation.
+    Other(Vec<u8>),
+}
+
+impl NotEvaluation {
+    /// The refusal of `stream`, whose initial control deadline is `until`.
+    fn refusal(self, stream: UnixStream, until: Instant) -> SourceRefusal {
+        match self {
+            Self::Fault(fault) => fault.refusal(stream, until, None),
+            Self::Other(first) => SourceRefusal::NotExecute(OtherRequest {
+                stream,
+                first,
+                until,
+            }),
+        }
+    }
+}
+
+/// The first frame read as an EVR1 source frame, or what it is instead.
+fn evaluation_frame(
+    read: Result<RetainedControl, FrameFault>,
+) -> Result<RetainedControl, NotEvaluation> {
+    read.map_err(NotEvaluation::Fault).and_then(|frame| {
+        if names_evaluation(&frame.bytes) {
+            Ok(frame)
+        } else {
+            Err(NotEvaluation::Other(frame.bytes))
+        }
+    })
+}
+
 /// Whether `bytes` is a CBOR array whose first item is the text `EVR1`.
 fn names_evaluation(bytes: &[u8]) -> bool {
     ciborium::from_reader::<ciborium::Value, _>(bytes)
@@ -543,16 +578,9 @@ impl ExecuteSource {
             },
             ledger,
         );
-        let evaluation = match evaluation {
-            Ok(evaluation) if names_evaluation(&evaluation.bytes) => evaluation,
-            Ok(other) => {
-                return Err(SourceRefusal::NotExecute(OtherRequest {
-                    stream,
-                    first: other.bytes,
-                    until,
-                }))
-            }
-            Err(fault) => return Err(fault.refusal(stream, until, None)),
+        let evaluation = match evaluation_frame(evaluation) {
+            Ok(evaluation) => evaluation,
+            Err(first) => return Err(first.refusal(stream, until)),
         };
         let request = source_frame(
             &mut TimedStream {
