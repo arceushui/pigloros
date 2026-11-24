@@ -963,7 +963,7 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
     Ok(())
 }
 
-/// L3: the CBQ1 byte maximum of a 13-member roster, written out by hand
+/// L3: the CBQ1 byte maximum of a 3-member roster, written out by hand
 /// from the CPN1 field list. Each member adds its 1,000-byte State limit,
 /// CIS1 1,024, CSR1 512 and its two one-input CPN1s at the widest producer
 /// ordinal: 695 bytes for slots 0..=11, and 698 from slot 12 on.
@@ -990,14 +990,12 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
 /// 1, node ref array(4) 1, incarnation 17, producer `u64::MAX` 9, node
 /// ordinal 2s 1, digest 34), then 102 + 3. 381 + 314 = 695.
 ///
-/// From slot 12, node ordinals 24 and 25 no longer fit a one-byte CBOR
-/// head and take two bytes (`0x18 n`): each CPN1's own node ordinal grows
-/// by one, and so does the `StateRevision` node's native input ordinal 24,
-/// so 695 + 3 = 698. The locator's slot 12 still fits one byte.
+/// The roster maximum is 3 (ADR-129 revision 13, R13.3), so every node
+/// ordinal (at most 5) fits a one-byte CBOR head.
 #[test]
-fn a_thirteen_member_quote_has_the_hand_computed_bytes() -> TestResult {
+fn a_three_member_quote_has_the_hand_computed_bytes() -> TestResult {
     let fixture = Fixture::new()?;
-    let entries: Vec<String> = (0..13).map(|index| format!("Entry-{index:02}")).collect();
+    let entries: Vec<String> = (0..3).map(|index| format!("Entry-{index:02}")).collect();
     let rows = entries
         .iter()
         .map(|entry| {
@@ -1012,22 +1010,22 @@ fn a_thirteen_member_quote_has_the_hand_computed_bytes() -> TestResult {
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
-    let thirteen = crate::profile(&rows)?;
-    let limits = [1_000; 13];
+    let three = crate::profile(&rows)?;
+    let limits = [1_000; 3];
     let planner = CommunityInitializationPlannerV1::new(
         &SEAL,
         CommunityInitializationInstallationV1 {
             state_limit_bytes: &limits,
-            ..installation(&thirteen)
+            ..installation(&three)
         },
-        form(&thirteen),
+        form(&three),
     )?;
     let mut world = World::new()?;
     let admission = world.admit(planner.request())?;
-    let addresses: Vec<Hash> = (0..13_u8).map(|index| hash(0x80 + index)).collect();
+    let addresses: Vec<Hash> = (0..3_u8).map(|index| hash(0x80 + index)).collect();
     let records = planner.records(GENERATION, &admission, &addresses)?;
     let quote = CommunityBudgetQuoteV1::from_canonical_cbor(records.budget_quote())?;
-    assert_eq!(quote.as_input().maximum_required_bytes, 42_006);
-    assert_eq!(42_006, 13 * (1_000 + 1_024 + 512) + 12 * 695 + 698);
+    assert_eq!(quote.as_input().maximum_required_bytes, 9_693);
+    assert_eq!(9_693, 3 * (1_000 + 1_024 + 512 + 695));
     Ok(())
 }

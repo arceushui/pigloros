@@ -30,7 +30,7 @@ const GRAPH_MAXIMA: [u64; 6] = [4096, 8192, 4096, 4096, 67_108_864, 268_435_456]
 
 /// `[registrations, edges, keys, maximum_depth, registration_bytes,
 /// artifact_bytes]`, exact checked sums re-derived by the native owner.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommunityGraphCountsV1 {
     /// Distinct registrations.
     pub registrations: u64,
