@@ -437,7 +437,24 @@ fn complete_receipt_input(
 const COORDINATOR: ErasureReferenceV1 = reference(200);
 
 fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    request(ErasureScopeV1::PrivateSubjectData, vec![reference(20)])
+    coordinator_request_for(reference(1))
+}
+
+fn coordinator_request_for(
+    request_reference: ErasureReferenceV1,
+) -> Result<ErasureRequestV1, ErasureErrorV1> {
+    ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: request_reference,
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
+        request_position: 10,
+        horizon_position: 20,
+        provenance: reference(6),
+    })
 }
 
 fn sequence_reference(seed: usize) -> ErasureReferenceV1 {
@@ -1536,6 +1553,29 @@ fn coordinator_retries_delivery_after_durable_dispatch_commit() -> Result<(), Er
             .ok_or(ErasureErrorV1::ProvenanceMissing)?
     );
     assert_eq!(adapter.dispatch_call_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn coordinator_keeps_cached_requests_independent_after_an_update() -> Result<(), ErasureErrorV1> {
+    let first = coordinator_request_for(reference(201))?;
+    let second = coordinator_request_for(reference(202))?;
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(coordinator_port(Vec::new(), None), COORDINATOR);
+
+    coordinator.submit(first.clone(), first.provenance())?;
+    let second_submitted = coordinator.submit(second.clone(), second.provenance())?;
+    let first_authorized = coordinator.authorize(first.reference(), reference(203))?;
+
+    assert_eq!(
+        coordinator.existing(first.reference()),
+        Some(&first_authorized)
+    );
+    assert_eq!(
+        coordinator.existing(second.reference()),
+        Some(&second_submitted)
+    );
+    assert_eq!(coordinator.existing(reference(204)), None);
     Ok(())
 }
 

@@ -102,20 +102,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         Self {
             port,
             coordinator,
-            records: Vec::new(),
+            records: BTreeMap::new(),
         }
     }
 
     fn cache(&mut self, recovered: RecoveredErasureV1) {
-        if let Some(slot) = self
-            .records
-            .iter_mut()
-            .find(|value| value.request.reference() == recovered.request.reference())
-        {
-            *slot = recovered;
-        } else {
-            self.records.push(recovered);
-        }
+        self.records
+            .insert(recovered.request.reference(), recovered);
     }
 
     fn retain_recovery_error(
@@ -172,11 +165,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<RecoveredErasureV1, ErasureErrorV1> {
-        if let Some(record) = self
-            .records
-            .iter()
-            .find(|record| record.request.reference() == request)
-        {
+        if let Some(record) = self.records.get(&request) {
             return Ok(record.clone());
         }
         self.recover(request)?
@@ -258,9 +247,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .map(|_| next_digest)
                     .inspect_err(|error| {
                         if *error == ErasureErrorV1::PolicyConflict {
-                            self.records.retain(|record| {
-                                record.request.reference() != next.request.reference()
-                            });
+                            self.records.remove(&next.request.reference());
                         }
                     })
             })
@@ -275,10 +262,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Query a warm recovered state without consulting an adapter.
     #[must_use]
     pub fn existing(&self, request: ErasureReferenceV1) -> Option<&ErasureStateV1> {
-        self.records
-            .iter()
-            .find(|record| record.request.reference() == request)
-            .map(RecoveredErasureV1::state)
+        self.records.get(&request).map(RecoveredErasureV1::state)
     }
 
     /// Recover one request from durable storage and expose its verified scope
