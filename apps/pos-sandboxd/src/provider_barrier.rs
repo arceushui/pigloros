@@ -66,7 +66,7 @@ use crate::{
     CancelSignal, CgroupView, CheckedRoot, ExpectedLauncherReady, ImageActivationError,
     KernelObservationError, LaunchBarrier, LauncherInvocation, ObservationContext, ObservedUnit,
     ReleaseBarrierError, ReleaseBinding, ReleaseOutcome, ReleaseRecheck, RuntimeAttestationSigner,
-    TransientServiceUnitName,
+    TransientServiceUnitName, UnitNetworkError,
 };
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -245,6 +245,10 @@ fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefus
     match unavailable.0 {
         KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),
         KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
+        // The unit's network namespace now holds more than `lo` (R14 N12).
+        KernelObservationError::UnitNetwork(UnitNetworkError::Changed) => {
+            RecheckRefusal::ObservationChanged
+        }
         _ => RecheckRefusal::RecheckObservation(unavailable),
     }
 }

@@ -312,6 +312,46 @@ pub mod attempt_directory {
     ));
 }
 
+/// The unit network check a test stands in with: it answers `verdict` and
+/// records the identity of every namespace descriptor it was handed.
+#[derive(Debug)]
+pub(crate) struct FakeUnitNetwork {
+    verdict: Result<(), crate::UnitNetworkError>,
+    seen: std::sync::Mutex<Vec<(u64, u64)>>,
+}
+
+impl FakeUnitNetwork {
+    /// A check that answers `verdict`.
+    pub(crate) const fn answering(verdict: Result<(), crate::UnitNetworkError>) -> Self {
+        Self {
+            verdict,
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A check that finds the namespace holds only `lo`.
+    pub(crate) const fn isolated() -> Self {
+        Self::answering(Ok(()))
+    }
+
+    /// The `st_dev` and `st_ino` of each descriptor checked, in order.
+    pub(crate) fn seen(&self) -> Vec<(u64, u64)> {
+        self.seen
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl crate::UnitNetworkCheck for FakeUnitNetwork {
+    fn check(&self, namespace: std::os::fd::BorrowedFd<'_>) -> Result<(), crate::UnitNetworkError> {
+        if let (Ok(status), Ok(mut seen)) = (rustix::fs::fstat(namespace), self.seen.lock()) {
+            seen.push((status.st_dev, status.st_ino));
+        }
+        self.verdict
+    }
+}
+
 /// A directory standing in for a bound cgroup whose `cgroup.procs` lists
 /// `main_pid`, and that directory held open.
 pub(crate) fn cgroup_listing(main_pid: u32) -> TestResult<(tempfile::TempDir, File)> {

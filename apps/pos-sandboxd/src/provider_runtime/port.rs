@@ -34,9 +34,9 @@ use crate::{
     fresh_nonce, sign_verified, AdmittedAttempt, AdmittedRuntimeKey, AttemptLaunch,
     AttemptLifecycle, AttemptLifecycleError, AuthorityCheck, BarrierError, BarrierFactory,
     CancelSignal, CleanupBudget, FailClosedLocalNetwork, KernelObservedReadback,
-    KeyFileRuntimeSigner, ModePlan, OwnedAttempt, ProviderNamespaces, ProviderReleaseBarrier,
-    RetainedResponse, RootRecheck, RuntimeAttestationSigner, StagingDirectory, StagingLedger,
-    SystemdAttemptSteps, SystemdTransientUnitTransport,
+    KeyFileRuntimeSigner, ModePlan, NetlinkUnitNetwork, OwnedAttempt, ProviderNamespaces,
+    ProviderReleaseBarrier, RetainedResponse, RootRecheck, RuntimeAttestationSigner,
+    StagingDirectory, StagingLedger, SystemdAttemptSteps, SystemdTransientUnitTransport,
 };
 
 /// What an `Open` runtime's execute port holds for the life of the process.
@@ -120,7 +120,7 @@ impl BarrierFactory for RuntimeBarriers {
         Arc<KeyFileRuntimeSigner>,
         SystemdTransientUnitTransport,
         RootRecheck<'r>,
-        KernelObservedReadback,
+        KernelObservedReadback<NetlinkUnitNetwork>,
     >;
     type Error = BarrierError;
 
@@ -138,7 +138,11 @@ impl BarrierFactory for RuntimeBarriers {
                     nonce,
                     self.signer,
                     self.transport,
-                    AuthorityCheck::new(root, KernelObservedReadback::new(self.namespaces), cancel),
+                    AuthorityCheck::new(
+                        root,
+                        KernelObservedReadback::new(self.namespaces, NetlinkUnitNetwork),
+                        cancel,
+                    ),
                 )
             })
     }

@@ -22,7 +22,8 @@ use zbus::OwnedObjectPath;
 
 use super::{
     capture_store_over, ledger, open_capture_store, open_staging, prepare_host, prepare_with,
-    retained_floor, sweep_captures, sweep_staging, Reconcile, ReconcileError, ROOT,
+    retained_floor, sweep_captures, sweep_staging, HostReconciliation, Reconcile, ReconcileError,
+    ROOT,
 };
 use crate::provider_runtime::tests::{
     bind_as_provider, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
@@ -458,7 +459,7 @@ fn step_7_refuses(
     calls: &Arc<[AtomicUsize; 2]>,
 ) -> TestResult {
     matches!(
-        prepare_with(authority, fake_bus(servers, calls), clean_network),
+        prepare_with(authority, || true, fake_bus(servers, calls), clean_network),
         Err(ProviderRuntimeError::HostUnavailable)
     )
     .then_some(())
@@ -498,13 +499,51 @@ fn serves_nothing_over_an_unsafe_store(
     assert_eq!(
         serve_with(
             move || Ok(authority),
-            |authority| prepare_with(authority, fake_bus(servers, calls), clean_network),
+            |authority| prepare_with(authority, || true, fake_bus(servers, calls), clean_network),
             Some(OsStr::new(NOTIFY)),
         ),
         ProviderRuntimeError::HostUnavailable
     );
     assert!(endpoints.iter().all(|endpoint| !endpoint.exists()));
     assert!(manager.recv(&mut [0; 16]).is_err(), "READY=1 was sent");
+    Ok(())
+}
+
+/// Step 7 over a host whose sysctl probe passes and whose network is clean.
+fn prepare_clean(
+    authority: &RuntimeAuthority,
+    servers: &Mutex<Vec<zbus::Connection>>,
+    calls: &Arc<[AtomicUsize; 2]>,
+) -> Result<HostReconciliation<Network, Egress>, ProviderRuntimeError> {
+    prepare_with(authority, || true, fake_bus(servers, calls), clean_network)
+}
+
+/// ADR-069 R14 N12: a host whose fallback-tunnel sysctl probe fails is
+/// refused before the bus is connected or any port is built.
+fn refuses_a_host_without_the_sysctl(
+    authority: &RuntimeAuthority,
+    servers: &Mutex<Vec<zbus::Connection>>,
+    calls: &Arc<[AtomicUsize; 2]>,
+) -> TestResult {
+    let built = Cell::new(false);
+    assert!(matches!(
+        prepare_with(
+            authority,
+            || false,
+            fake_bus(servers, calls),
+            |range, probe| {
+                built.set(true);
+                clean_network(range, probe)
+            }
+        ),
+        Err(ProviderRuntimeError::HostUnavailable)
+    ));
+    assert!(!built.get());
+    assert!(servers.lock().map_err(|_| "poisoned")?.is_empty());
+    assert_eq!(
+        calls.each_ref().map(|count| count.load(Ordering::SeqCst)),
+        [0, 0]
+    );
     Ok(())
 }
 
@@ -520,25 +559,23 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     let authority = bind_as_provider()??;
     let (admitted, installation, _) = &authority;
     let captures = Path::new(SANDBOX_ARTIFACT_ROOT).join("captures");
-    // Step 7 on this host: the container has no system bus, and a failed
-    // earlier step creates no capture store.
-    assert!(matches!(
-        prepare_host(&authority),
-        Err(ProviderRuntimeError::HostUnavailable)
-    ));
+    // Step 7 here has no system bus, and creates no capture store.
+    let host = prepare_host(&authority);
+    assert!(matches!(host, Err(ProviderRuntimeError::HostUnavailable)));
     assert!(!captures.exists(), "the capture store was created");
     creates_a_private_store_under_a_strict_umask(admitted.bootstrap().installed(), &captures)?;
     provider_state()?;
     let staging = Path::new("/run/pigloros/sandbox/staging");
     let servers = Mutex::new(Vec::new());
     let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
-    // A failed orphan sweep keeps admission closed; the staging directory
-    // step 7 created is not swept.
+    refuses_a_host_without_the_sysctl(&authority, &servers, &calls)?;
+    // A failed orphan sweep keeps admission closed; staging is not swept.
     let built = Cell::new(None);
-    let host = prepare_with(&authority, fake_bus(&servers, &calls), |range, probe| {
+    let failing = |range, probe| {
         built.set(Some((range, probe)));
         (Network { fails: true }, Egress)
-    })?;
+    };
+    let host = prepare_with(&authority, || true, fake_bus(&servers, &calls), failing)?;
     // The ports are built for the SPI1 attempt range and egress probe.
     assert_eq!(
         built.get(),
@@ -587,7 +624,7 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     assert!(staging.join(STAGED).is_file());
     // An entry that is no staged input fails reconciliation closed.
     fs::create_dir(staging.join("directory"))?;
-    let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
+    let host = prepare_clean(&authority, &servers, &calls)?;
     assert!(matches!(host.reconcile(), Err(ReconcileError::Staging)));
     fs::remove_dir(staging.join("directory"))?;
     refuses_an_unsafe_store(&authority, &captures, &servers, &calls)?;
@@ -599,14 +636,14 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     fs::set_permissions(&record, fs::Permissions::from_mode(0o400))?;
     fs::write(captures.join("responses").join(temporary()), b"partial")?;
     fs::write(captures.join("notes"), b"")?;
-    let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
+    let host = prepare_clean(&authority, &servers, &calls)?;
     assert!(matches!(host.reconcile(), Err(ReconcileError::Captures)));
     assert!(captures.join("notes").is_file());
     fs::remove_file(captures.join("notes"))?;
     // A clean host: the staging directory is emptied, the capture temporary
     // removed, the published record kept byte for byte, and the lifecycle
     // holds the registry for the life of the process.
-    let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
+    let host = prepare_clean(&authority, &servers, &calls)?;
     let lifecycle = host.reconcile()?;
     // Each step 7 subscribed, and each reconciliation listed the units.
     assert_eq!(
