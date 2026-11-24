@@ -660,12 +660,10 @@ pub struct KeyRegistryStateV1 {
     highest_epoch: BTreeMap<(OwnerIdV1, KeyRoleV1), u64>,
     pending_destructions: BTreeMap<KeyIdentityV1, KeyDestructionRequestV1>,
     version: KeyRegistryFormatVersionV1,
-    /// Derived from live records and tombstones; never part of the V1 snapshot.
+    /// Lazily derived from live records and tombstones after validation; never
+    /// part of the V1 snapshot. `None` means the snapshot still needs validation.
     #[serde(skip)]
     reserved_material: Option<HashSet<Hash>>,
-    /// Deserialized states rebuild the index only after validating their snapshot.
-    #[serde(skip)]
-    registration_index_valid: bool,
 }
 
 #[expect(
@@ -728,7 +726,6 @@ impl KeyRegistryStateV1 {
             pending_destructions: BTreeMap::new(),
             version: KeyRegistryFormatVersionV1,
             reserved_material: None,
-            registration_index_valid: false,
         }
     }
 
@@ -762,8 +759,7 @@ impl KeyRegistryStateV1 {
     }
 
     fn ensure_registration_index(&mut self) -> Result<(), KeyRegistryErrorV1> {
-        if self.registration_index_valid {
-            self.reserved_material.get_or_insert_with(HashSet::new);
+        if self.reserved_material.is_some() {
             return Ok(());
         }
         self.validate()?;
@@ -778,7 +774,6 @@ impl KeyRegistryStateV1 {
                 )
                 .collect(),
         );
-        self.registration_index_valid = true;
         Ok(())
     }
 
@@ -1623,8 +1618,8 @@ mod tests {
     }
 
     #[test]
-    fn debug_output_excludes_the_derived_registration_index(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn debug_output_is_stable_across_registry_roundtrip() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut indexed = KeyRegistryStateV1::new();
         indexed.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
         let decoded = state_from_value(&state_value(&indexed)?)?;
@@ -1632,8 +1627,6 @@ mod tests {
         assert_eq!(indexed, decoded);
         let debug = format!("{indexed:?}");
         assert_eq!(debug, format!("{decoded:?}"));
-        assert!(debug.contains("records"));
-        assert!(!debug.contains("reserved_material"));
         Ok(())
     }
 

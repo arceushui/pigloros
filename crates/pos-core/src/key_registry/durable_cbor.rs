@@ -61,7 +61,6 @@ impl Cursor<'_> {
             pending_destructions: pending_destructions.ok_or(Error::InvalidSnapshot)?,
             version: version.ok_or(Error::InvalidSnapshot)?,
             reserved_material: None,
-            registration_index_valid: false,
         })
     }
 
