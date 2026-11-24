@@ -74,6 +74,15 @@ pub mod plugin_trust_registry_fixtures;
 #[path = "../tests/support/community_initialization_fixture.rs"]
 pub mod community_initialization_fixture;
 
+// Test-only. The catalogue rows of the community erasure-budget tests
+// (ADR-129 revision 13) serve the Memory counter tests and the pass
+// planner's capacity tests; the items are `pub` for the same reason as the
+// fixtures above.
+#[cfg(all(test, target_os = "linux"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/erasure_budget_rows.rs"]
+pub mod erasure_budget_rows;
+
 pub mod community;
 pub mod composition_fallback_registry;
 

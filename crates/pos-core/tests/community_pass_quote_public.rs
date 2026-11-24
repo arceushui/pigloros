@@ -8,27 +8,35 @@
 
 use pos_core::community_lifecycle::{
     community_member_due_v1, ArtifactRefV1, CommunityAnnotationOmissionV1 as Omission,
-    CommunityAnnotationOmissionsV1, CommunityContentReferenceV1,
+    CommunityAnnotationOmissionsV1, CommunityArtifactChildrenV1, CommunityArtifactHeaderInputV1,
+    CommunityArtifactHeaderV1, CommunityArtifactKindV1 as ArtifactKind,
+    CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityClassificationProofInputV1,
+    CommunityClassificationProofV1, CommunityContentReferenceV1, CommunityEncryptedEnvelopeV1,
     CommunityEventDraftFragmentInputV1, CommunityEventDraftFragmentReferenceV1,
     CommunityEventDraftFragmentV1, CommunityEventDraftManifestInputV1,
-    CommunityEventDraftManifestV1, CommunityInputGroupInputV1, CommunityInputGroupV1,
-    CommunityInputIndexV1, CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1,
-    CommunityInvocationStepV1, CommunityLifecycleErrorV1 as Error,
+    CommunityEventDraftManifestV1, CommunityGraphCountsV1, CommunityInputGroupInputV1,
+    CommunityInputGroupV1, CommunityInputIndexV1, CommunityInvocationEvidenceInputV1,
+    CommunityInvocationEvidenceV1, CommunityInvocationStepV1, CommunityLifecycleErrorV1 as Error,
     CommunityMaterializationReferenceV1, CommunityMemberBindingInputV1, CommunityMemberBindingV1,
     CommunityNativeNodeInputV1, CommunityNativeNodeKindV1 as Kind, CommunityNativeNodeReferenceV1,
     CommunityNativeNodeReferencesV1, CommunityNativeNodeV1, CommunityOutputUsageV1,
-    CommunityPassKeyV1, CommunityPassObservationV1, CommunityPassQuoteInputV1,
-    CommunityPassQuoteMemberV1, CommunityPassQuoteV1, CommunityPassTermsV1,
-    CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
+    CommunityPassDomainV1, CommunityPassGraphTermsV1, CommunityPassKeyV1,
+    CommunityPassObservationV1, CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1,
+    CommunityPassQuoteV1, CommunityPassTermsV1, CommunityPreparedInvocationInputV1,
+    CommunityPreparedInvocationV1, CommunityProtectedObjectV1, CommunityProtectionSizesV1,
     CommunityReplayMemberBindingV1, CommunityReplayMemberV1, CommunityReplayRecordingInputV1,
     CommunityReplayRecordingV1, CommunitySharedCountsV1, CommunitySourceClosureInputV1,
-    CommunitySourceClosureV1, CommunityStateProducerV1, CommunityStateRevisionInputV1,
-    CommunityStateRevisionV1, CommunityTypedInputRefV1 as TypedRef, CommunityTypedInputRefsV1,
-    MeteringV1, TimelinePositionV1, COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1,
-    COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    CommunitySourceClosureV1, CommunityStateContentV1, CommunityStateProducerV1,
+    CommunityStateRevisionInputV1, CommunityStateRevisionV1, CommunityTypedInputRefV1 as TypedRef,
+    CommunityTypedInputRefsV1, MeteringV1, TimelinePositionV1,
+    COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1, COMMUNITY_ERASURE_TARGET_LINE_V1,
+    COMMUNITY_MAXIMUM_STORE_KEYS_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::{
-    ErasureArtifactClassV1, Hash, ImplementationKeyV1, RecordedDependencyClassV1, TimelineId,
+    ArtifactChildEdgeV1, ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactRegistrationFieldsV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1,
+    ErasureArtifactClassV1, Hash, ImplementationKeyV1, KeyRoleV1, RecordedDependencyClassV1,
+    TimelineId,
 };
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -182,6 +190,59 @@ fn rebuilt_state(
     payload: &[u8],
     inputs: &[TypedRef<'_>],
 ) -> Fallible<CommunityPassTermsV1> {
+    rebuilt_member(member, payload, inputs).map(|(terms, _)| terms)
+}
+
+/// The number of a ref list's mode-0 and mode-2 refs, each an ARD1 edge.
+fn registered(inputs: &[TypedRef<'_>]) -> u64 {
+    inputs
+        .iter()
+        .filter(|input| matches!(input, TypedRef::Native(_) | TypedRef::Artifact { .. }))
+        .count() as u64
+}
+
+/// The rebuilt CIB1 groups and `InputIndex` CPN1s of a step with more than
+/// 256 inputs, appended to `records`; their native references.
+fn rebuilt_groups(
+    inputs: &[TypedRef<'_>],
+    records: &mut Vec<(u64, u64)>,
+) -> Fallible<Vec<CommunityNativeNodeReferenceV1>> {
+    let mut groups = Vec::new();
+    if inputs.len() <= 256 {
+        return Ok(groups);
+    }
+    for (chunk, ordinal) in inputs.chunks(256).zip(u32::MAX - 40..) {
+        let leaves = CommunityTypedInputRefsV1::from_references(chunk);
+        let group = CommunityInputGroupV1::new(CommunityInputGroupInputV1 {
+            timeline: T,
+            generation: G,
+            consumer_content: CommunityContentReferenceV1 {
+                record_magic: *b"CPI1",
+                logical_digest: hash(37),
+            },
+            leaves,
+        })?;
+        records.push((group.to_canonical_cbor().len() as u64, 0));
+        let index = node(
+            ordinal,
+            Kind::InputIndex,
+            *b"CIB1",
+            RecordedDependencyClassV1::EndogenousRecomputed,
+            CommunityInputIndexV1::Direct(leaves),
+        )?;
+        records.push((index as u64, 1 + registered(chunk)));
+        groups.push(native(u64::MAX, ordinal));
+    }
+    Ok(groups)
+}
+
+/// The member's rebuilt R10.3(5) rows and its R11.2(1) closure records as
+/// `(plaintext bytes, ARD1 children)`.
+fn rebuilt_member(
+    member: &CommunityMemberBindingV1<'_>,
+    payload: &[u8],
+    inputs: &[TypedRef<'_>],
+) -> Fallible<(CommunityPassTermsV1, Vec<(u64, u64)>)> {
     let key = pass_key()?;
     let prepared = CommunityPreparedInvocationV1::new(invocation(member.digest(), payload))?;
     let step = CommunityInvocationStepV1::new(key, member, &prepared, hash(35), HORIZON)?;
@@ -192,52 +253,35 @@ fn rebuilt_state(
         source_scope_union_digest: hash(36),
     })?;
     let endogenous = RecordedDependencyClassV1::EndogenousRecomputed;
-    let mut bytes = step.to_canonical_cbor().len()
-        + prepared.to_canonical_cbor().len()
-        + closure.to_canonical_cbor().len();
-    let mut groups = Vec::new();
-    for (chunk, ordinal) in inputs.chunks(256).zip(u32::MAX - 40..) {
-        if inputs.len() <= 256 {
-            break;
-        }
-        let leaves = CommunityTypedInputRefsV1::from_references(chunk);
-        bytes += CommunityInputGroupV1::new(CommunityInputGroupInputV1 {
-            timeline: T,
-            generation: G,
-            consumer_content: CommunityContentReferenceV1 {
-                record_magic: *b"CPI1",
-                logical_digest: hash(37),
+    let length = |bytes: usize| bytes as u64;
+    let mut records = vec![
+        (length(closure.to_canonical_cbor().len()), 0),
+        (length(prepared.to_canonical_cbor().len()), 1),
+        (length(step.to_canonical_cbor().len()), 1),
+    ];
+    let groups = rebuilt_groups(inputs, &mut records)?;
+    let (index, children) = match inputs.len() {
+        0 => (CommunityInputIndexV1::Empty, 0),
+        1..=256 => (
+            CommunityInputIndexV1::Direct(CommunityTypedInputRefsV1::from_references(inputs)),
+            registered(inputs),
+        ),
+        total => (
+            CommunityInputIndexV1::Grouped {
+                groups: CommunityNativeNodeReferencesV1::from_references(&groups),
+                total_leaf_count: total as u64,
             },
-            leaves,
-        })?
-        .to_canonical_cbor()
-        .len();
-        bytes += node(
-            ordinal,
-            Kind::InputIndex,
-            *b"CIB1",
-            endogenous,
-            CommunityInputIndexV1::Direct(leaves),
-        )?;
-        groups.push(native(u64::MAX, ordinal));
-    }
-    let index = match inputs.len() {
-        0 => CommunityInputIndexV1::Empty,
-        1..=256 => {
-            CommunityInputIndexV1::Direct(CommunityTypedInputRefsV1::from_references(inputs))
-        }
-        total => CommunityInputIndexV1::Grouped {
-            groups: CommunityNativeNodeReferencesV1::from_references(&groups),
-            total_leaf_count: total as u64,
-        },
+            groups.len() as u64,
+        ),
     };
-    bytes += node(
+    let step_node = node(
         u32::MAX - 1,
         Kind::InvocationStep,
         *b"CPI1",
         endogenous,
         index,
     )?;
+    records.push((length(step_node), 1 + children));
     let revision = CommunityStateRevisionV1::new(CommunityStateRevisionInputV1 {
         producer_origin: CommunityStateProducerV1::Pass(key),
         member_binding_digest: member.digest(),
@@ -248,20 +292,33 @@ fn rebuilt_state(
         evidence_not_after_micros: HORIZON,
     })?;
     let single = [TypedRef::Native(native(u64::MAX, u32::MAX - 1))];
-    bytes += revision.to_canonical_cbor().len()
-        + usize::try_from(STATE_LIMIT)?
-        + node(
-            u32::MAX,
-            Kind::StateRevision,
-            *b"CSR1",
-            endogenous,
-            CommunityInputIndexV1::Direct(CommunityTypedInputRefsV1::from_references(&single)),
-        )?;
-    Ok(CommunityPassTermsV1 {
-        nodes: 2 + groups.len() as u64,
-        edges: (inputs.len() + groups.len() + 1) as u64,
-        bytes: bytes as u64,
-    })
+    let revision_node = node(
+        u32::MAX,
+        Kind::StateRevision,
+        *b"CSR1",
+        endogenous,
+        CommunityInputIndexV1::Direct(CommunityTypedInputRefsV1::from_references(&single)),
+    )?;
+    let state = vec![0; usize::try_from(STATE_LIMIT)?];
+    let content = CommunityStateContentV1::new(SCHEMA, &state)?;
+    records.push((length(content.to_canonical_cbor().len()), 0));
+    records.push((length(revision.to_canonical_cbor().len()), 3));
+    records.push((length(revision_node), 3));
+    let bytes = records[..records.len() - 3]
+        .iter()
+        .map(|(bytes, _)| bytes)
+        .sum::<u64>()
+        + length(revision.to_canonical_cbor().len())
+        + STATE_LIMIT
+        + length(revision_node);
+    Ok((
+        CommunityPassTermsV1 {
+            nodes: 2 + groups.len() as u64,
+            edges: (inputs.len() + groups.len() + 1) as u64,
+            bytes,
+        },
+        records,
+    ))
 }
 
 fn rebuilt_evidence(member: Hash) -> Fallible<CommunityInvocationEvidenceV1> {
@@ -724,6 +781,365 @@ fn minted_observation_terms_count_against_the_per_record_node_limit() -> TestRes
     Ok(())
 }
 
+fn header(kind: ArtifactKind) -> Fallible<CommunityArtifactHeaderV1> {
+    Ok(CommunityArtifactHeaderV1::new(
+        CommunityArtifactHeaderInputV1 {
+            timeline: T,
+            generation: G,
+            purpose: CommunityArtifactPurposeV1::ExecutionState,
+            operation: CommunityArtifactOperationV1::Control([1; 16]),
+            record_kind: kind,
+            scope_cover_digest: hash(60),
+            evidence_not_after_micros: HORIZON,
+        },
+    )?)
+}
+
+fn children(count: usize) -> Vec<ArtifactChildEdgeV1> {
+    (0..count)
+        .map(|index| ArtifactChildEdgeV1 {
+            artifact_class: ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest: indexed(index),
+            registration_address: indexed(index),
+            required: true,
+        })
+        .collect()
+}
+
+/// A fresh random COE1 nonce: the sizes never depend on its bytes.
+fn random_nonce() -> Fallible<[u8; 12]> {
+    let mut nonce = getrandom::u64()?.to_le_bytes().to_vec();
+    nonce.extend(getrandom::u32()?.to_le_bytes());
+    Ok(nonce.try_into().map_err(|_| "a 12-byte nonce")?)
+}
+
+/// The actual protected COW1 and ARD1 sizes of a `plaintext`-byte record
+/// with `count` children, through the real envelope, CAR1, COW1 and ARD1
+/// constructors.
+fn protected_sizes(plaintext: usize, count: usize) -> Fallible<(u64, u64)> {
+    let edges = children(count);
+    let ciphertext = vec![0; plaintext + 16];
+    let content = CommunityEncryptedEnvelopeV1::new(
+        header(ArtifactKind::StateContent)?,
+        random_nonce()?,
+        &ciphertext,
+    )?
+    .to_canonical_cbor();
+    let parsed = CommunityEncryptedEnvelopeV1::from_canonical_cbor(&content)?;
+    let proof = CommunityClassificationProofV1::new(CommunityClassificationProofInputV1 {
+        header: parsed.header(),
+        owner_binding_digest: hash(61),
+        plaintext_commitment: hash(62),
+        envelope_address: parsed.address(),
+        children: CommunityArtifactChildrenV1::from_children(&edges),
+        host_provenance_digest: hash(63),
+    })?
+    .to_canonical_cbor();
+    let sealed = vec![0; proof.len() + 16];
+    let proof = CommunityEncryptedEnvelopeV1::new(
+        header(ArtifactKind::ClassificationProof)?,
+        random_nonce()?,
+        &sealed,
+    )?
+    .to_canonical_cbor();
+    let object = CommunityProtectedObjectV1::new(&content, &proof)?.to_canonical_cbor();
+    let registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+        artifact_class: ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: hash(64),
+        owner_reference: hash(65),
+        data_class: ArtifactDataClassV1::PrivateSubjectData,
+        optionality: ArtifactOptionalityV1::Required,
+        transition_rule: ArtifactTransitionRuleV1::Remove,
+        required_key_roles: vec![KeyRoleV1::CommunityArtifactEncryption],
+        key_dependencies: vec![ArtifactKeyDependencyV1 {
+            identity: parsed.header().key_identity(),
+            material_digest: hash(66),
+            private_material_required: true,
+        }],
+        child_artifacts: edges,
+    })?;
+    Ok((
+        object.len() as u64,
+        registration.canonical_cbor().len() as u64,
+    ))
+}
+
+#[test]
+fn protection_sizes_equal_the_actual_protected_records() -> TestResult {
+    // Revision 11, R11.3(2) and I109.
+    let sizes = CommunityProtectionSizesV1::new(T, G)?;
+    for plaintext in [0, 1, 23, 24, 1 << 20, 3 << 20] {
+        for count in [0, 1, 23, 24, 2048] {
+            let (object, registration) = protected_sizes(plaintext, count)?;
+            assert_eq!(sizes.object_len(plaintext as u64, count as u64), object);
+            assert_eq!(sizes.registration_len(count as u64), registration);
+            assert_eq!(
+                sizes.record(plaintext as u64, count as u64),
+                CommunityPassGraphTermsV1 {
+                    registrations: 1,
+                    edges: count as u64,
+                    keys: 0,
+                    registration_bytes: registration,
+                    artifact_bytes: object,
+                }
+            );
+        }
+    }
+    assert_eq!(
+        CommunityProtectionSizesV1::new(T, [0; 16]).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+const SELECTED: CommunityGraphCountsV1 = CommunityGraphCountsV1 {
+    registrations: 10,
+    edges: 12,
+    keys: 2,
+    maximum_depth: 3,
+    registration_bytes: 1000,
+    artifact_bytes: 2000,
+};
+
+const OBSERVATION_GRAPH: CommunityPassGraphTermsV1 = CommunityPassGraphTermsV1 {
+    registrations: 2,
+    edges: 1,
+    keys: 1,
+    registration_bytes: 100,
+    artifact_bytes: 200,
+};
+
+const fn domain(selected: CommunityGraphCountsV1, live_keys: u64) -> CommunityPassDomainV1 {
+    CommunityPassDomainV1 {
+        selected_graph: selected,
+        live_keys,
+        observation_graph: OBSERVATION_GRAPH,
+        observation_keys: 2,
+        observation_rows: 3,
+    }
+}
+
+fn graph_of(
+    sizes: &CommunityProtectionSizesV1,
+    records: &[(u64, u64)],
+) -> CommunityPassGraphTermsV1 {
+    records.iter().fold(
+        CommunityPassGraphTermsV1::default(),
+        |total, (bytes, children)| total.plus(sizes.record(*bytes, *children)),
+    )
+}
+
+const fn with(
+    counts: CommunityGraphCountsV1,
+    terms: CommunityPassGraphTermsV1,
+    depth: u64,
+) -> CommunityGraphCountsV1 {
+    CommunityGraphCountsV1 {
+        registrations: counts.registrations + terms.registrations,
+        edges: counts.edges + terms.edges,
+        keys: counts.keys + terms.keys,
+        maximum_depth: depth,
+        registration_bytes: counts.registration_bytes + terms.registration_bytes,
+        artifact_bytes: counts.artifact_bytes + terms.artifact_bytes,
+    }
+}
+
+#[test]
+fn the_demand_adds_the_rebuilt_records_to_the_selected_closure() -> TestResult {
+    // Revision 11, R11.1(6), R11.3(1)-(5) and R11.4(4); I110 and I113.
+    let sizes = CommunityProtectionSizesV1::new(T, G)?;
+    for committed in [2, 300] {
+        let fixture = Fixture::new(2)?;
+        let bindings = fixture.bindings()?;
+        let refs = artifact_refs(committed);
+        let mut complete = vec![TypedRef::Native(native(u64::MAX, 0))];
+        complete.extend(refs.iter().copied());
+        let members: Vec<_> = bindings
+            .iter()
+            .map(|member| quote_member(member, &fixture.payload, &refs, true))
+            .collect();
+        let quote = CommunityPassQuoteV1::new(quote_input(&members, Some(OBSERVATION)))?;
+        let demand = quote.demand(domain(SELECTED, 5))?;
+        let mut additions = OBSERVATION_GRAPH.plus(CommunityPassGraphTermsV1 {
+            keys: 1,
+            ..CommunityPassGraphTermsV1::default()
+        });
+        let mut objects = 2;
+        let groups: u64 = if committed > 255 { 2 } else { 0 };
+        for member in &bindings {
+            let (_, records) = rebuilt_member(member, &fixture.payload, &complete)?;
+            assert_eq!(records.len() as u64, 7 + 2 * groups);
+            additions = additions.plus(graph_of(&sizes, &records));
+            objects += 7 + 2 * groups;
+        }
+        let e = registered(&complete);
+        assert_eq!(additions.registrations, 2 + 2 * (7 + 2 * groups));
+        assert_eq!(additions.edges, 1 + 2 * (e + 2 * groups + 9));
+        let state = with(SELECTED, additions, 6);
+        assert_eq!(demand.graph()[0], state);
+        let digests: Vec<_> = bindings
+            .iter()
+            .map(CommunityMemberBindingV1::digest)
+            .collect();
+        let civ1 = rebuilt_evidence(digests[0])?.to_canonical_cbor().len() as u64;
+        let single = [TypedRef::Native(native(u64::MAX, u32::MAX - 1))];
+        let measurement = node(
+            u32::MAX,
+            Kind::Measurement,
+            *b"CIV1",
+            RecordedDependencyClassV1::PresentationOnly,
+            CommunityInputIndexV1::Direct(CommunityTypedInputRefsV1::from_references(&single)),
+        )? as u64;
+        let crr1 = rebuilt_recording(&digests)?.bytes - 2 * (civ1 + measurement);
+        let recording = graph_of(
+            &sizes,
+            &[
+                (civ1, 0),
+                (civ1, 0),
+                (measurement, 2),
+                (measurement, 2),
+                (crr1, 4),
+            ],
+        )
+        .plus(CommunityPassGraphTermsV1 {
+            keys: 2,
+            ..CommunityPassGraphTermsV1::default()
+        });
+        assert_eq!(recording.registrations, 1 + 2 * 2);
+        assert_eq!(recording.edges, 4 * 2);
+        assert_eq!(demand.graph()[1], with(state, recording, 7));
+        // R13.2(3) and I141: the pass provisions four State keys, the H_g
+        // and H_r cohorts among them, and the recording one more.
+        assert_eq!(demand.keys(), [5 + 4 + 2, 5 + 4 + 2 + 1]);
+        // R13.1(3): the State rows are the objects and the materialization's
+        // 3 rows; the recording adds 2n + 1; F_p is 2(n + 1).
+        assert_eq!(
+            demand.erasure_rows(),
+            [objects + 3, objects + 3 + 2 * 2 + 1]
+        );
+        assert_eq!(demand.failure_reserve(), 2 * (2 + 1));
+        assert_eq!(demand.objects(), [objects, objects + 2 * 2 + 1]);
+        demand.require_keys()?;
+        demand.require_graph()?;
+        demand.require_objects()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn the_state_depth_bound_is_three_above_the_selected_depth_or_three() -> TestResult {
+    // R11.3(4): max(D, 3 + max(D, 3)); the Replay closure adds one.
+    let fixture = Fixture::new(1)?;
+    let bindings = fixture.bindings()?;
+    let members = [quote_member(&bindings[0], &fixture.payload, &[], false)];
+    let quote = CommunityPassQuoteV1::new(quote_input(&members, None))?;
+    for (selected, expected) in [
+        (0, 6),
+        (2, 6),
+        (3, 6),
+        (4, 7),
+        (10, 13),
+        (u64::MAX - 10, u64::MAX - 7),
+    ] {
+        let demand = quote.demand(domain(
+            CommunityGraphCountsV1 {
+                maximum_depth: selected,
+                ..SELECTED
+            },
+            0,
+        ))?;
+        assert_eq!(demand.graph()[0].maximum_depth, expected);
+        assert_eq!(demand.graph()[1].maximum_depth, expected + 1);
+    }
+    // Both bounds saturate at the widest depth.
+    let widest = quote.demand(domain(
+        CommunityGraphCountsV1 {
+            maximum_depth: u64::MAX,
+            ..SELECTED
+        },
+        0,
+    ))?;
+    assert_eq!(
+        widest.graph().map(|graph| graph.maximum_depth),
+        [u64::MAX; 2]
+    );
+    Ok(())
+}
+
+#[test]
+fn key_graph_and_object_demand_split_state_from_recording() -> TestResult {
+    // R11.5(1), I107, I112 and I116: State over a limit gives 14; State
+    // within with the recording over gives 19.
+    let fixture = Fixture::new(1)?;
+    let bindings = fixture.bindings()?;
+    let members = [quote_member(&bindings[0], &fixture.payload, &[], false)];
+    let quote = CommunityPassQuoteV1::new(quote_input(&members, None))?;
+    let base = quote.demand(domain(SELECTED, 0))?;
+    let [state_keys, _] = base.keys();
+    let spare = COMMUNITY_MAXIMUM_STORE_KEYS_V1 - state_keys;
+    let keys = |live| -> Fallible<Option<Error>> {
+        Ok(quote.demand(domain(SELECTED, live))?.require_keys().err())
+    };
+    assert_eq!(keys(spare - 1)?, None);
+    assert_eq!(keys(spare)?, Some(Error::RecordingUnavailable));
+    assert_eq!(keys(spare + 1)?, Some(Error::CapacityExhausted));
+    let [state, recording] = base.graph();
+    let added = recording.registrations - state.registrations;
+    let graph = |registrations: u64, depth: u64| -> Fallible<Option<Error>> {
+        Ok(quote
+            .demand(domain(
+                CommunityGraphCountsV1 {
+                    registrations,
+                    maximum_depth: depth,
+                    ..SELECTED
+                },
+                0,
+            ))?
+            .require_graph()
+            .err())
+    };
+    let free = 4096 - (state.registrations - SELECTED.registrations);
+    assert_eq!(graph(free - added, 3)?, None);
+    assert_eq!(
+        graph(free - added + 1, 3)?,
+        Some(Error::RecordingUnavailable)
+    );
+    assert_eq!(graph(free, 3)?, Some(Error::RecordingUnavailable));
+    assert_eq!(graph(free + 1, 3)?, Some(Error::CapacityExhausted));
+    // Depth: 3 + D for the State, one more for the Replay closure.
+    assert_eq!(graph(10, 4092)?, None);
+    assert_eq!(graph(10, 4093)?, Some(Error::RecordingUnavailable));
+    assert_eq!(graph(10, 4094)?, Some(Error::CapacityExhausted));
+    Ok(())
+}
+
+#[test]
+fn the_object_bound_counts_every_pass_cow1() -> TestResult {
+    // R11.4(4) and I116: 9n + 2 sum(g) + 3 objects against 2,048 bindings.
+    let fixture = Fixture::new(64)?;
+    let bindings = fixture.bindings()?;
+    let grouped = artifact_refs(4096);
+    let objects = |groups_of: usize| -> Fallible<Option<Error>> {
+        let members: Vec<_> = bindings
+            .iter()
+            .enumerate()
+            .map(|(index, member)| {
+                let refs: &[TypedRef<'_>] = if index < groups_of { &grouped } else { &[] };
+                quote_member(member, &fixture.payload, refs, false)
+            })
+            .collect();
+        let quote = CommunityPassQuoteV1::new(quote_input(&members, None))?;
+        Ok(quote.demand(domain(SELECTED, 0))?.require_objects().err())
+    };
+    // 64 x 7 + 2 x 16 x 45 + 2 = 1,890 and 2,019 with the recording.
+    assert_eq!(objects(45)?, None);
+    // 64 x 7 + 2 x 16 x 48 + 2 = 1,986, and 2,115 with the recording.
+    assert_eq!(objects(48)?, Some(Error::RecordingUnavailable));
+    // 64 x 7 + 2 x 16 x 50 + 2 = 2,050.
+    assert_eq!(objects(50)?, Some(Error::CapacityExhausted));
+    Ok(())
+}
+
 #[test]
 fn minted_observation_terms_count_against_the_per_record_edge_limit() -> TestResult {
     // R10.4(1): the per-record edge limit is exactly 262,144. State edges at
@@ -754,5 +1170,151 @@ fn minted_observation_terms_count_against_the_per_record_edge_limit() -> TestRes
         quote(spare + 2)?.require_fit().err(),
         Some(Error::CapacityExhausted)
     );
+    Ok(())
+}
+
+/// One R13.3 capacity column: `contexts` lockstep contexts on one affected
+/// scope, `fixed` targets held before the first pass (store, payloads,
+/// initialization rows and every `F_q`), `reserves` of the contexts' `F_p`
+/// pending at the last check of a round, and the materialization rows and
+/// closure additions of each 0-based pass.
+struct Column {
+    contexts: u64,
+    fixed: u64,
+    reserves: u64,
+    observation: fn(u64) -> (u64, CommunityPassGraphTermsV1),
+}
+
+/// A materialization's closure additions: `registrations` records and
+/// `edges` edges, at a nominal size.
+const fn additions(registrations: u64, edges: u64) -> CommunityPassGraphTermsV1 {
+    CommunityPassGraphTermsV1 {
+        registrations,
+        edges,
+        keys: 1,
+        registration_bytes: 100 * registrations,
+        artifact_bytes: 200 * registrations,
+    }
+}
+
+/// No new Event: the first pass mints the empty cut (COV1, Observation
+/// CPN1 and CPE1), later passes reuse it.
+fn no_new_event(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    if pass == 0 {
+        (3, additions(2, 1))
+    } else {
+        (0, CommunityPassGraphTermsV1::default())
+    }
+}
+
+/// One new Event a pass: each pass mints an observation of every Event so
+/// far, with one new CES1 and an Observation CPN1 naming all of them.
+const fn one_new_event(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    (4, additions(3, 2 + pass))
+}
+
+/// The first pass of a Fork column with a one-Event prefix.
+fn prefix_of_one(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    if pass == 0 {
+        (4, additions(3, 2))
+    } else {
+        (0, CommunityPassGraphTermsV1::default())
+    }
+}
+
+/// The first pass of a Fork column with a 500-Event prefix: 500 CES1s in
+/// two CIB1 groups of 256 and 244.
+fn prefix_of_500(pass: u64) -> (u64, CommunityPassGraphTermsV1) {
+    if pass == 0 {
+        (500 + 3 + 2 * 2, additions(500 + 2 + 2 * 2, 3 + 257 + 245))
+    } else {
+        (0, CommunityPassGraphTermsV1::default())
+    }
+}
+
+/// The passes each context commits before the first 14, from the real
+/// demand of an `n`-member pass: the R11.3 graph demand over the closure the
+/// earlier passes selected, then the R13.1 budget.
+fn passes_before_14(members: u64, column: &Column) -> Fallible<u64> {
+    let fixture = Fixture::new(usize::try_from(members)?)?;
+    let bindings = fixture.bindings()?;
+    // e = 2: the prior StateRevision and the observation (I142).
+    let inputs = artifact_refs(2);
+    let rows: Vec<_> = bindings
+        .iter()
+        .map(|member| quote_member(member, &fixture.payload, &inputs, false))
+        .collect();
+    let quote = CommunityPassQuoteV1::new(quote_input(&rows, None))?;
+    let mut selected = CommunityGraphCountsV1 {
+        registrations: 5 * members,
+        edges: 6 * members,
+        ..SELECTED
+    };
+    let mut targets = column.fixed;
+    let mut passes = 0;
+    loop {
+        let (rows, graph) = (column.observation)(passes);
+        let demand = quote.demand(CommunityPassDomainV1 {
+            selected_graph: selected,
+            live_keys: 0,
+            observation_graph: graph,
+            observation_keys: 0,
+            observation_rows: rows,
+        })?;
+        let [_, total] = demand.erasure_rows();
+        let committed = column.contexts * 2 * total;
+        if demand.require_graph().is_err()
+            || targets + committed + column.reserves * demand.failure_reserve()
+                > COMMUNITY_ERASURE_TARGET_LINE_V1
+        {
+            return Ok(passes);
+        }
+        selected = demand.graph()[0];
+        targets += committed;
+        passes += 1;
+    }
+}
+
+#[test]
+fn the_capacity_table_follows_from_the_pass_demand() -> TestResult {
+    // Revision 13, R13.3 and I142 (the demand part; the planner part runs
+    // over the Memory counters in pos-store). n = 9 exceeds the roster
+    // maximum, so only the demand can show its row. At n = 1 with one new
+    // Event a pass the closure's edges bind first.
+    for (members, expected) in [
+        (1_u64, [164, 116, 81, 39]),
+        (3, [64, 57, 32, 15]),
+        (9, [22, 21, 10, 4]),
+    ] {
+        let one = 2 + 10 * members + 8 * members;
+        let fork = 3 + 10 * members + 2 * 8 * members;
+        let column = |contexts, fixed, observation| Column {
+            contexts,
+            fixed,
+            reserves: contexts,
+            observation,
+        };
+        let columns = [
+            column(1, one, no_new_event),
+            column(1, one, one_new_event),
+            column(2, fork, prefix_of_one),
+            column(2, fork, prefix_of_500),
+        ];
+        let observed = columns
+            .iter()
+            .map(|column| passes_before_14(members, column))
+            .collect::<Fallible<Vec<_>>>()?;
+        assert_eq!(observed, expected, "n = {members}");
+    }
+    // With one pending F_p at a time only n = 9, E = 500 changes, to 5.
+    for (members, expected) in [(9, 5), (3, 15)] {
+        let single = Column {
+            contexts: 2,
+            fixed: 3 + 10 * members + 2 * 8 * members,
+            reserves: 1,
+            observation: prefix_of_500,
+        };
+        assert_eq!(passes_before_14(members, &single)?, expected);
+    }
     Ok(())
 }

@@ -1,28 +1,58 @@
 //! The pass planner through its public entry points, over a fake read port
-//! that serves the domain-private quarantine index, recorded-set counters
-//! and retained-outcome and control-operation counts (A4c adds the Memory
-//! domain's storage). Each case names its ADR-129 revision 10 obligation.
+//! that serves the domain-private quarantine index, recorded-set counters,
+//! retained-outcome and control-operation counts, live keys, selected CGR1
+//! counts, closure index and scope rows (A4c adds the Memory domain's
+//! storage). Each case names its ADR-129 revision 10 or 11 obligation.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
     CommunityDurableProfileV1, CommunityHostProgressV1, CommunityLifecycleErrorV1 as Error,
-    CommunityPassObservationV1, CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1,
-    CommunityPassQuoteV1, CommunityPassTermsV1, CommunityPreparedInvocationInputV1,
-    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityQuarantineKeyV1,
-    CommunityQuarantineReasonV1, CommunitySharedCountsV1, CommunityTypedInputRefV1,
-    TimelinePositionV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1, CommunityPassQuoteV1,
+    CommunityPreparedInvocationInputV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
+    CommunityQuarantineKeyV1, CommunityQuarantineReasonV1, CommunitySharedCountsV1,
+    CommunityTypedInputRefV1, TimelinePositionV1,
+};
+use pos_core::community_lifecycle::{
+    CommunityGraphCountsV1, CommunityLocatorProducerV1, CommunityMetadataLocatorV1,
+    CommunityMetadataSchemaV1, CommunityNativeNodeReferenceV1, CommunityPassDomainV1,
+    CommunityPassGraphTermsV1, CommunityProtectionSizesV1, CommunityScopeMemberV1,
+    COMMUNITY_MAXIMUM_STORE_KEYS_V1,
 };
 use pos_core::{ErasureArtifactClassV1, Hash, ImplementationKeyV1, TimelineId};
+use std::sync::Arc;
+use std::time::Duration;
+
+use pos_core::community_lifecycle::{
+    CommunityReducerBindingV1, CommunitySourceCatalogueV1, CommunitySourceSchemaRuleV1,
+};
+use pos_core::store::{EventStore, SeqRange};
+use pos_core::{
+    AuthorityTrustRootSealV1, CanonicalBytes, EntityId, ErasureContainmentGateV1, Event,
+    EventDraft, Kind, Seq,
+};
 use ulid::Ulid;
+use zeroize::Zeroizing;
+
+use super::super::erasure_budget::{
+    CommunityErasureBudgetPortV1, CommunityErasureBudgetV1, CommunityPendingErasureV1,
+};
+use super::super::{
+    prepare_community_observation_v1, CommunityObservationConsumerV1, CommunityObservationEventV1,
+    CommunityObservationInstallationV1, CommunityObservationMaterializationInputV1,
+    CommunityObservationMaterializationV1, CommunityObservationPassV1,
+    CommunityObservationSourcesV1, MemoryCommunityDomainV1,
+};
+use crate::memory::MemoryStore;
+use crate::MemoryTrustedClockAuthorityV1;
 
 use super::{
     plan_community_pass_v1, CommunityPassDueV1, CommunityPassInstallationV1,
-    CommunityPassMemberViewV1, CommunityPassPlanV1, CommunityPassReadPortV1,
-    CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
-    CommunityQuarantineIndexV1,
+    CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
+    CommunityPassReadPortV1, CommunityPassRequestV1, CommunityPassStepInputsV1,
+    CommunityPassViewV1, CommunityQuarantineIndexV1,
 };
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -61,7 +91,26 @@ struct Port {
     outcomes: u64,
     operations: u64,
     reads: Cell<u32>,
+    live_keys: u64,
+    selected: Option<CommunityGraphCountsV1>,
+    retained: BTreeSet<[u8; 32]>,
+    reused: CommunityPassGraphTermsV1,
+    scopes: BTreeMap<[u8; 32], Vec<CommunityScopeMemberV1>>,
+    scope_reads: Cell<u32>,
+    budget: CommunityErasureBudgetV1,
+    budget_unavailable: bool,
+    pending: BTreeMap<EntityId, CommunityPendingErasureV1>,
 }
+
+/// The selected CGR1 counts the fake serves by default.
+const SELECTED: CommunityGraphCountsV1 = CommunityGraphCountsV1 {
+    registrations: 15,
+    edges: 18,
+    keys: 2,
+    maximum_depth: 3,
+    registration_bytes: 1000,
+    artifact_bytes: 2000,
+};
 
 impl Port {
     fn quarantine(
@@ -83,6 +132,17 @@ impl CommunityQuarantineIndexV1 for Port {
     }
 }
 
+impl CommunityErasureBudgetPortV1 for Port {
+    fn erasure_budget(&self, timeline: TimelineId) -> Result<CommunityErasureBudgetV1, Error> {
+        assert_eq!(timeline, self::timeline());
+        if self.budget_unavailable {
+            Err(Error::EvidenceUnavailable)
+        } else {
+            Ok(self.budget.clone())
+        }
+    }
+}
+
 impl CommunityPassReadPortV1 for Port {
     fn recorded_set_counters(&self, timeline: TimelineId) -> CommunitySharedCountsV1 {
         assert_eq!(timeline, self::timeline());
@@ -97,6 +157,49 @@ impl CommunityPassReadPortV1 for Port {
     fn control_operations(&self, timeline: TimelineId, generation: [u8; 16]) -> u64 {
         assert_eq!((timeline, generation), (self::timeline(), G));
         self.operations
+    }
+
+    fn live_keys(&self) -> u64 {
+        self.live_keys
+    }
+
+    fn selected_graph(&self, timeline: TimelineId) -> CommunityGraphCountsV1 {
+        assert_eq!(timeline, self::timeline());
+        self.selected.unwrap_or(SELECTED)
+    }
+
+    fn event_source_in_closure(&self, timeline: TimelineId, event_source: Hash) -> bool {
+        assert_eq!(timeline, self::timeline());
+        self.retained.contains(event_source.as_bytes())
+    }
+
+    fn observation_graph(
+        &self,
+        timeline: TimelineId,
+        observation: CommunityNativeNodeReferenceV1,
+    ) -> CommunityPassGraphTermsV1 {
+        assert_eq!(
+            (timeline, observation.node_digest),
+            (self::timeline(), hash(90))
+        );
+        self.reused
+    }
+
+    fn scope_rows(
+        &self,
+        timeline: TimelineId,
+        reference: CommunityTypedInputRefV1<'_>,
+    ) -> Result<Vec<CommunityScopeMemberV1>, Error> {
+        assert_eq!(timeline, self::timeline());
+        self.scope_reads.set(self.scope_reads.get() + 1);
+        self.scopes
+            .get(reference.digest().as_bytes())
+            .cloned()
+            .ok_or(Error::EvidenceUnavailable)
+    }
+
+    fn pending_erasure_demand(&self, actor: EntityId) -> CommunityPendingErasureV1 {
+        self.pending.get(&actor).cloned().unwrap_or_default()
     }
 }
 
@@ -145,12 +248,20 @@ impl Fixture {
         &self,
         roster: &'a [CommunityProfileMemberV1<'a>],
     ) -> Fallible<CommunityDurableProfileV1<'a>> {
+        self.profile_with_catalogue(roster, hash(10))
+    }
+
+    fn profile_with_catalogue<'a>(
+        &self,
+        roster: &'a [CommunityProfileMemberV1<'a>],
+        catalogue: Hash,
+    ) -> Fallible<CommunityDurableProfileV1<'a>> {
         Ok(CommunityDurableProfileV1::new(
             CommunityDurableProfileInputV1 {
                 backend: CommunityDurableBackendV1::RetainedMemory,
                 execution_profile_digest: hash(9),
                 roster,
-                source_catalogue_digest: hash(10),
+                source_catalogue_digest: catalogue,
                 authority_catalogue_digest: hash(11),
                 retention: CommunityProfileRetentionV1 {
                     generation_not_after_micros: self.generation_not_after,
@@ -517,54 +628,303 @@ fn invocation(member: Hash, payload: &[u8]) -> CommunityPreparedInvocationInputV
     }
 }
 
-fn refs() -> Vec<CommunityTypedInputRefV1<'static>> {
-    vec![CommunityTypedInputRefV1::Artifact {
+fn artifact(byte: u8) -> CommunityTypedInputRefV1<'static> {
+    CommunityTypedInputRefV1::Artifact {
         owner_reference: hash(20),
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: hash(21),
+        artifact_digest: hash(byte),
         registration_address: hash(22),
         source_scope_binding_digest: hash(23),
-    }]
+    }
 }
 
-const OBSERVATION: CommunityPassObservationV1 = CommunityPassObservationV1 {
-    terms: CommunityPassTermsV1 {
-        nodes: 1,
-        edges: 1,
-        bytes: 500,
-    },
+fn refs() -> Vec<CommunityTypedInputRefV1<'static>> {
+    vec![artifact(21)]
+}
+
+fn metadata(slot: u16) -> CommunityTypedInputRefV1<'static> {
+    CommunityTypedInputRefV1::Metadata {
+        schema: CommunityMetadataSchemaV1::Cmb1,
+        locator: CommunityMetadataLocatorV1 {
+            timeline: timeline(),
+            generation: G,
+            producer: CommunityLocatorProducerV1::Control([5; 16]),
+            record_role: 1,
+            slot,
+        },
+        envelope_address: hash(24),
+        private_record_digest: hash(25),
+    }
+}
+
+fn row(byte: u8) -> CommunityScopeMemberV1 {
+    CommunityScopeMemberV1 {
+        scope_reference: hash(byte),
+        source_timeline: timeline(),
+        owner_reference: hash(26),
+        retention_lease_reference: hash(27),
+        not_after_micros: 9,
+    }
+}
+
+const REUSED: CommunityNativeNodeReferenceV1 = CommunityNativeNodeReferenceV1 {
+    store_incarnation: [7; 16],
+    producer_ordinal: 4,
     node_ordinal: 0,
+    node_digest: hash(90),
 };
 
+/// A port whose one artifact ref has one scope row.
+fn scoped_port() -> Port {
+    let mut port = Port::default();
+    port.scopes
+        .insert(*artifact(21).digest().as_bytes(), vec![row(30)]);
+    port
+}
+
+fn steps<'a>(
+    payload: &'a [u8],
+    refs: &'a [CommunityTypedInputRefV1<'a>],
+    minted: bool,
+) -> Vec<CommunityPassStepInputsV1<'a>> {
+    [hash(2), hash(3)]
+        .into_iter()
+        .map(|member| CommunityPassStepInputsV1 {
+            prepared_invocation: invocation(member, payload),
+            step_inputs: refs,
+            consumes_minted_observation: minted,
+        })
+        .collect()
+}
+
 #[test]
-fn the_quote_names_the_due_rows_limits_and_guarded_counters() -> TestResult {
+fn the_quote_names_the_due_rows_limits_and_guarded_counts() -> TestResult {
     let key = key()?;
-    // R10.3 and I89: the planner fills each due row's CMB1, CNT1 and S_m from
-    // the view and installation, and the prior counts from the port.
+    // R10.3, I89 and R11.3(1)-(3): the planner fills each due row's CMB1,
+    // CNT1 and S_m from the view and installation, the prior counts, the
+    // selected graph, the live keys and the reused observation's closure
+    // additions from the port.
     let fixture = Fixture::new()?;
     let roster = Fixture::roster(&key)?;
     let profile = fixture.profile(&roster)?;
-    let port = Port {
-        counters: CommunitySharedCountsV1 {
-            nodes: 1,
-            edges: 2,
-            declared_inputs: 3,
-            encoded_record_bytes: 4,
-        },
-        ..Port::default()
+    let mut port = scoped_port();
+    port.counters = CommunitySharedCountsV1 {
+        nodes: 1,
+        edges: 2,
+        declared_inputs: 3,
+        encoded_record_bytes: 4,
+    };
+    port.live_keys = 11;
+    port.reused = CommunityPassGraphTermsV1 {
+        registrations: 3,
+        edges: 4,
+        keys: 1,
+        registration_bytes: 5,
+        artifact_bytes: 6,
     };
     let due = plan_due(&port, installation(&profile), fixture.view())?;
     let payload = [7; 16];
     let refs = refs();
-    let steps: Vec<_> = [hash(2), hash(3)]
+    let steps = steps(&payload, &refs, false);
+    let reused = CommunityPassObservationUseV1::Reused(REUSED);
+    let quoted = due.quote(&port, &steps, reused)?;
+    let quote = quoted.quote();
+    // No actor bounds T's budget in the fake.
+    assert_eq!(quoted.trace_rows(), u64::MAX);
+    let members: Vec<_> = [(1, hash(2)), (2, hash(3))]
         .into_iter()
-        .map(|member| CommunityPassStepInputsV1 {
-            prepared_invocation: invocation(member, &payload),
-            step_inputs: &refs,
-            consumes_minted_observation: true,
+        .zip(&steps)
+        .map(|((slot, member), step)| CommunityPassQuoteMemberV1 {
+            member_binding_digest: member,
+            negotiated_tuple_digest: hash(7),
+            state_limit_bytes: STATE_LIMITS[slot],
+            prepared_invocation: step.prepared_invocation,
+            step_inputs: step.step_inputs,
+            consumes_minted_observation: false,
         })
         .collect();
-    let quote = due.quote(&port, &steps, Some(OBSERVATION))?;
+    let expected = CommunityPassQuoteV1::new(CommunityPassQuoteInputV1 {
+        timeline: timeline(),
+        generation: G,
+        profile_digest: profile.digest(),
+        prior_shared_counts: port.counters,
+        members: &members,
+        minted_observation: None,
+    })?;
+    assert!(quote.quote() == expected.quote());
+    assert_eq!(quote.state_terms(), expected.state_terms());
+    assert_eq!(
+        quote.demand(CommunityPassDomainV1 {
+            selected_graph: SELECTED,
+            live_keys: 11,
+            observation_graph: port.reused,
+            observation_keys: 0,
+            observation_rows: 0,
+        }),
+        expected.demand(CommunityPassDomainV1 {
+            selected_graph: SELECTED,
+            live_keys: 11,
+            observation_graph: port.reused,
+            observation_keys: 0,
+            observation_rows: 0,
+        })
+    );
+    // One scope read for the ref both members share.
+    assert_eq!(port.scope_reads.get(), 1);
+    assert_eq!(
+        due.quote(&port, &steps[..1], reused).err(),
+        Some(Error::InvalidBinding)
+    );
+    let minted_without_mint = self::steps(&payload, &refs, true);
+    assert_eq!(
+        due.quote(&port, &minted_without_mint, reused).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+#[test]
+fn every_5g_demand_refuses_state_with_14_and_recording_with_19() -> TestResult {
+    let key = key()?;
+    // R10.4(2), R11.5(1), I91, I107 and I112, in the R11.5(1) order: the
+    // CBQ1, the live keys and the ARD1 graph.
+    let fixture = Fixture::new()?;
+    let roster = Fixture::roster(&key)?;
+    let profile = fixture.profile(&roster)?;
+    let payload = [7; 16];
+    let refs = refs();
+    let steps = steps(&payload, &refs, false);
+    let reused = CommunityPassObservationUseV1::Reused(REUSED);
+    let mut port = scoped_port();
+    let due = plan_due(&port, installation(&profile), fixture.view())?;
+    let quoted = due.quote(&port, &steps, reused)?;
+    let base = quoted.quote();
+    let [nodes, ..] = pos_core::community_lifecycle::COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1;
+    let spare = nodes - base.total_terms().nodes;
+    let run = |port: &Port| due.quote(port, &steps, reused).err();
+    port.counters.nodes = spare + 1;
+    assert_eq!(run(&port), Some(Error::RecordingUnavailable));
+    port.counters.nodes = spare + 3;
+    assert_eq!(run(&port), Some(Error::CapacityExhausted));
+    port.counters.nodes = 0;
+    let demand = base.demand(CommunityPassDomainV1 {
+        selected_graph: SELECTED,
+        live_keys: 0,
+        observation_graph: CommunityPassGraphTermsV1::default(),
+        observation_keys: 0,
+        observation_rows: 0,
+    })?;
+    let [state_keys, _] = demand.keys();
+    port.live_keys = COMMUNITY_MAXIMUM_STORE_KEYS_V1 - state_keys;
+    assert_eq!(run(&port), Some(Error::RecordingUnavailable));
+    port.live_keys += 1;
+    assert_eq!(run(&port), Some(Error::CapacityExhausted));
+    port.live_keys = 0;
+    let [state, recording] = demand.graph();
+    let free = 4096 - (state.registrations - SELECTED.registrations);
+    port.selected = Some(CommunityGraphCountsV1 {
+        registrations: free - (recording.registrations - state.registrations) + 1,
+        ..SELECTED
+    });
+    assert_eq!(run(&port), Some(Error::RecordingUnavailable));
+    port.selected = Some(CommunityGraphCountsV1 {
+        registrations: free + 1,
+        ..SELECTED
+    });
+    assert_eq!(run(&port), Some(Error::CapacityExhausted));
+    port.selected = None;
+    let mut invalid = steps.clone();
+    invalid[0].prepared_invocation.member_binding_digest = Hash::zero();
+    assert_eq!(
+        due.quote(&port, &invalid, reused).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_pass_scope_records_bound_refs_rows_and_member_scopes() -> TestResult {
+    let key = key()?;
+    // R11.4(1)-(3), R11.1(2), I106 and I115.
+    let fixture = Fixture::new()?;
+    let roster = Fixture::roster(&key)?;
+    let profile = fixture.profile(&roster)?;
+    let payload = [7; 16];
+    let reused = CommunityPassObservationUseV1::Reused(REUSED);
+    let port = scoped_port();
+    let due = plan_due(&port, installation(&profile), fixture.view())?;
+    // 4,097 distinct mode-3 refs across the two members: 14.
+    let first: Vec<_> = (0..4096).map(metadata).collect();
+    let second: Vec<_> = (1..4097).map(metadata).collect();
+    let mut wide = steps(&payload, &first, false);
+    wide[1].step_inputs = &second;
+    assert_eq!(
+        due.quote(&port, &wide, reused).err(),
+        Some(Error::CapacityExhausted)
+    );
+    wide[1].step_inputs = &first;
+    due.quote(&port, &wide, reused)?;
+    // Members whose scopes differ: 3.
+    let mut split = scoped_port();
+    split
+        .scopes
+        .insert(*artifact(40).digest().as_bytes(), vec![row(31)]);
+    let one = [artifact(21)];
+    let other = [artifact(40)];
+    let mut differing = steps(&payload, &one, false);
+    differing[1].step_inputs = &other;
+    assert_eq!(
+        due.quote(&split, &differing, reused).err(),
+        Some(Error::InvalidBinding)
+    );
+    // A scope read the domain cannot serve: 12.
+    let unknown = [artifact(41)];
+    assert_eq!(
+        due.quote(&split, &steps(&payload, &unknown, false), reused)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // 2,048 rows fit; 2,049 give 14.
+    for (rows, expected) in [(2048_u16, None), (2049, Some(Error::CapacityExhausted))] {
+        let mut broad = Port::default();
+        broad.scopes.insert(
+            *artifact(21).digest().as_bytes(),
+            (0..rows)
+                .map(|index| CommunityScopeMemberV1 {
+                    not_after_micros: u64::from(index),
+                    ..row(30)
+                })
+                .collect(),
+        );
+        let refs = refs();
+        assert_eq!(
+            due.quote(&broad, &steps(&payload, &refs, false), reused)
+                .err(),
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_minted_observation_shares_its_rows_terms_and_keys() -> TestResult {
+    let key = key()?;
+    // R11.1(4), R11.3(3) and R11.4(2): a minted observation adds its CBQ1
+    // row, its closure records and keys and its scope rows.
+    let fixture = Fixture::new()?;
+    let roster = Fixture::roster(&key)?;
+    let profile = fixture.profile(&roster)?;
+    let sources = minted_sources(2)?;
+    let mut port = Port::default();
+    let due = plan_due(&port, installation(&profile), fixture.view())?;
+    let payload = [7; 16];
+    let none: [CommunityTypedInputRefV1<'_>; 0] = [];
+    let steps = steps(&payload, &none, true);
+    let minted = CommunityPassObservationUseV1::Minted(&sources);
+    let quoted = due.quote(&port, &steps, minted)?;
+    let quote = quoted.quote();
+    let sizes = CommunityProtectionSizesV1::new(timeline(), G)?;
+    let share = sources.quote_terms(&sizes, |_| false)?;
     let members: Vec<_> = [(1, hash(2)), (2, hash(3))]
         .into_iter()
         .zip(&steps)
@@ -583,68 +943,210 @@ fn the_quote_names_the_due_rows_limits_and_guarded_counters() -> TestResult {
         profile_digest: profile.digest(),
         prior_shared_counts: port.counters,
         members: &members,
-        minted_observation: Some(OBSERVATION),
+        minted_observation: Some(share.observation),
     })?;
     assert!(quote.quote() == expected.quote());
-    assert_eq!(quote.state_terms(), expected.state_terms());
+    // The minted observation's keys push the live count over the limit.
+    let demand = expected.demand(CommunityPassDomainV1 {
+        selected_graph: SELECTED,
+        live_keys: 0,
+        observation_graph: share.graph,
+        observation_keys: share.keys,
+        observation_rows: share.erasure_rows,
+    })?;
+    port.live_keys = COMMUNITY_MAXIMUM_STORE_KEYS_V1 - demand.keys()[0];
     assert_eq!(
-        due.quote(&port, &steps[..1], None).err(),
-        Some(Error::InvalidBinding)
+        due.quote(&port, &steps, minted).err(),
+        Some(Error::RecordingUnavailable)
     );
+    port.live_keys = 0;
+    // The minted ref counts once among the 4,096 distinct refs.
+    let many: Vec<_> = (0..4096).map(metadata).collect();
+    let crowded = self::steps(&payload, &many, true);
+    assert_eq!(
+        due.quote(&port, &crowded, minted).err(),
+        Some(Error::CapacityExhausted)
+    );
+    // A retained CES1 is not a new registration.
+    let retained = sources.quote_terms(&sizes, |_| true)?.graph.registrations;
+    assert!(retained < share.graph.registrations);
     Ok(())
 }
 
+/// Three steps over `refs`, the `minting` ones consuming the minted
+/// observation with only `refs[0]` of their own.
+fn three_steps<'a>(
+    payload: &'a [u8],
+    refs: &'a [CommunityTypedInputRefV1<'a>],
+    minting: [bool; 3],
+) -> Vec<CommunityPassStepInputsV1<'a>> {
+    [hash(2), hash(3), hash(4)]
+        .into_iter()
+        .zip(minting)
+        .map(|(member, minted)| CommunityPassStepInputsV1 {
+            prepared_invocation: invocation(member, payload),
+            step_inputs: if minted { &refs[..1] } else { refs },
+            consumes_minted_observation: minted,
+        })
+        .collect()
+}
+
 #[test]
-fn the_quote_refuses_state_demand_with_14_and_recording_demand_with_19() -> TestResult {
+fn a_later_step_consuming_the_mint_adds_its_ref_to_the_4096() -> TestResult {
+    // R11.4(1): 4,096 distinct refs fit when no step consumes the minted
+    // observation; the minted Observation ref is one more when any step,
+    // here the second of three, consumes it, which gives 14.
     let key = key()?;
-    // R10.4(2) and I91.
     let fixture = Fixture::new()?;
     let roster = Fixture::roster(&key)?;
     let profile = fixture.profile(&roster)?;
+    let port = Port::default();
+    let CommunityPassPlanV1::Due(due) = plan_community_pass_v1(
+        &port,
+        installation(&profile),
+        fixture.view(),
+        request(5, 1010),
+    )?
+    else {
+        return Err("due expected".into());
+    };
+    assert_eq!(due.due_members(), [0, 1, 2]);
+    let sources = minted_sources(0)?;
+    let minted = CommunityPassObservationUseV1::Minted(&sources);
     let payload = [7; 16];
-    let refs = refs();
-    let steps: Vec<_> = [hash(2), hash(3)]
-        .into_iter()
-        .map(|member| CommunityPassStepInputsV1 {
-            prepared_invocation: invocation(member, &payload),
-            step_inputs: &refs,
-            consumes_minted_observation: false,
+    let refs: Vec<_> = (0..4096).map(metadata).collect();
+    let run = |minting| {
+        due.quote(&port, &three_steps(&payload, &refs, minting), minted)
+            .err()
+    };
+    assert_eq!(run([false; 3]), None);
+    assert_eq!(run([false, true, false]), Some(Error::CapacityExhausted));
+    Ok(())
+}
+
+/// The minted fixture's one source rule.
+const RULES: [CommunitySourceSchemaRuleV1<'static>; 1] = [CommunitySourceSchemaRuleV1 {
+    event_type: "world.action",
+    schema_version: 1,
+    extractor_rule: "pos.community.native-event",
+    extractor_rule_version: 1,
+}];
+
+/// The minted fixture's source catalogue over [`RULES`].
+fn source_catalogue() -> Fallible<CommunitySourceCatalogueV1<'static>> {
+    Ok(CommunitySourceCatalogueV1::new(&RULES)?)
+}
+
+/// A root Timeline with `events` Events on a fresh Memory store.
+fn history_store(events: usize) -> Fallible<(MemoryStore, TimelineId)> {
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let root = store.create_timeline("root")?.id();
+    let drafts: Vec<EventDraft> = (0..events)
+        .map(|index| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("world.action"),
+                CanonicalBytes::from_vec(vec![u8::try_from(index).unwrap_or(0)]),
+            )
         })
         .collect();
-    let mut port = Port::default();
-    let due = plan_due(&port, installation(&profile), fixture.view())?;
-    let base = due.quote(&port, &steps, None)?;
-    let [nodes, ..] = pos_core::community_lifecycle::COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1;
-    let spare = nodes - base.total_terms().nodes;
-    port.counters.nodes = spare + 1;
-    assert_eq!(
-        due.quote(&port, &steps, None).err(),
-        Some(Error::RecordingUnavailable)
-    );
-    port.counters.nodes = spare + 3;
-    assert_eq!(
-        due.quote(&port, &steps, None).err(),
-        Some(Error::CapacityExhausted)
-    );
-    let huge = CommunityPassObservationV1 {
-        terms: CommunityPassTermsV1 {
-            bytes: COMMUNITY_SHARED_RECORD_LIMITS_V1[2],
-            ..OBSERVATION.terms
-        },
-        ..OBSERVATION
+    store.append(root, &drafts)?;
+    Ok((store, root))
+}
+
+/// The history's domain, its root and the root's whole stored prefix.
+fn history(events: usize) -> Fallible<(MemoryCommunityDomainV1, TimelineId, Vec<Event>)> {
+    let (store, root) = history_store(events)?;
+    let range = SeqRange {
+        from: Seq::from_u64(1),
+        to: Some(store.logical_head(root)?),
     };
-    port.counters.nodes = 0;
-    assert_eq!(
-        due.quote(&port, &steps, Some(huge)).err(),
-        Some(Error::CapacityExhausted)
-    );
-    let mut invalid = steps.clone();
-    invalid[0].prepared_invocation.member_binding_digest = Hash::zero();
-    assert_eq!(
-        due.quote(&port, &invalid, None).err(),
-        Some(Error::InvalidBinding)
-    );
-    Ok(())
+    let stored = store.read(root, range)?;
+    MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())
+        .map(|domain| (domain, root, stored))
+        .map_err(Into::into)
+}
+
+/// Run `then` over the minted fixture's profile, whose generation horizon
+/// is 5,000 and whose catalogue is `catalogue`.
+fn with_minted_profile<T>(
+    catalogue: Hash,
+    then: impl FnOnce(&CommunityDurableProfileV1<'_>) -> Fallible<T>,
+) -> Fallible<T> {
+    let key = key()?;
+    let roster = Fixture::roster(&key)?;
+    Fixture::new()
+        .and_then(|mut fixture| {
+            fixture.generation_not_after = 5000;
+            fixture.profile_with_catalogue(&roster, catalogue)
+        })
+        .and_then(|profile| then(&profile))
+}
+
+/// The stage-1 sources of a root Timeline with `events` Events, prepared
+/// over a real Memory domain.
+fn minted_sources(events: usize) -> Fallible<CommunityObservationSourcesV1> {
+    static SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
+    let catalogue = source_catalogue()?;
+    let (domain, root, stored) = history(events)?;
+    with_minted_profile(catalogue.digest(), |profile| {
+        prepare_community_observation_v1(
+            &domain,
+            CommunityObservationInstallationV1 {
+                profile,
+                source_catalogue: catalogue,
+                observation_schema_id: ENCODER,
+            },
+            CommunityObservationPassV1 {
+                generation: G,
+                reservation_operation_id: [0x30; 16],
+            },
+            &CommunityObservationMaterializationV1::new(&SEAL, observation_input(root, &stored)),
+        )
+        .map_err(Into::into)
+    })
+}
+
+/// The observation installed encoder's schema ID in the minted fixture.
+const ENCODER: u32 = 0x4f42_0001;
+
+/// The publisher's honest input for `root`'s full prefix `stored`.
+fn observation_input(
+    root: TimelineId,
+    stored: &[Event],
+) -> CommunityObservationMaterializationInputV1 {
+    CommunityObservationMaterializationInputV1 {
+        timeline: root,
+        through_seq: stored.len() as u64,
+        events: stored
+            .iter()
+            .map(|event| CommunityObservationEventV1 {
+                owning_timeline: root,
+                logical_seq: event.seq.as_u64(),
+                event_id: event.id.inner().to_bytes(),
+                payload_hash: event.payload_hash,
+            })
+            .collect(),
+        consumers: vec![CommunityObservationConsumerV1 {
+            binding: CommunityReducerBindingV1 {
+                consumer_identity_digest: hash(0x50),
+                schema_digest: hash(0x61),
+                reducer_digest: hash(0x62),
+                configuration_digest: hash(0x63),
+                admission_evidence_digest: hash(0x64),
+                minimization_policy_digest: hash(0x65),
+            },
+            callback_bound: Duration::from_millis(1),
+        }],
+        timeline_scopes: vec![(root, hash(0x70))],
+        observation_artifact_ref: ArtifactRefV1 {
+            schema_id: ENCODER,
+            byte_length: 11,
+            digest: [0x77; 32],
+        },
+        observation_bytes: Zeroizing::new(b"observation".to_vec()),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -654,7 +1156,6 @@ fn the_memory_domain_serves_step_4e_from_its_quarantine_index() -> TestResult {
     // CQK1 gives 9; no row gives none.
     use super::super::quarantine::QuarantineLedgerV1;
     use crate::community_initialization_fixture::{trusted_store, World, TRUST_SCOPE};
-    use crate::MemoryTrustedClockAuthorityV1;
     use pos_core::community_lifecycle::CommunityQuarantineReasonEvidenceV1;
     use pos_core::AuthorityTrustRootSealV1;
 
@@ -695,3 +1196,5 @@ fn the_memory_domain_serves_step_4e_from_its_quarantine_index() -> TestResult {
     assert_eq!(run(&world), Err(Error::Quarantined));
     Ok(())
 }
+
+mod erasure;
