@@ -414,8 +414,9 @@ mod tests {
         let first = cancel(3)?;
         assert_eq!(cancel(3)?, first);
         // The repeat is answered from the stored SCY1, never signed again: a
-        // signer that cannot sign under the admitted key still replays it,
-        // and execute admission stays open.
+        // signer whose key ID is not the admitted one, which `sign_verified`
+        // refuses before signing, still replays it, and execute admission
+        // stays open.
         let foreign = KeyFileRuntimeSigner::from_signing_key(
             ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
             "foreign".to_owned(),
