@@ -28,8 +28,9 @@ use crate::MemoryTrustedClockAuthorityV1;
 
 use super::super::erasure_budget::CommunityErasureBudgetPortV1;
 use super::super::erasure_budget::CommunityErasureContextV1;
+use super::super::erasure_budget::CommunityPendingReservationV1;
 use super::super::pass_planner::CommunityPassReadPortV1;
-use super::super::pass_state::{CommunityPassStateV1, CommunityPendingReservationV1};
+use super::super::pass_state::CommunityPassStateV1;
 use super::{
     CommittedInitializationV1, CommunityInitializationContextV1, CommunityInitializationReceiptV1,
     CommunityInitializeCallV1, PreparedV1, SealedMetadataV1, StagedInitializationV1,
