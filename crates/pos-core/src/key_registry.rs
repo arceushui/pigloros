@@ -662,7 +662,7 @@ pub struct KeyRegistryStateV1 {
     version: KeyRegistryFormatVersionV1,
     /// Derived from live records and tombstones; never part of the V1 snapshot.
     #[serde(skip)]
-    reserved_material: HashSet<Hash>,
+    reserved_material: Option<HashSet<Hash>>,
     /// Deserialized states rebuild the index only after validating their snapshot.
     #[serde(skip)]
     registration_index_valid: bool,
@@ -723,7 +723,7 @@ impl KeyRegistryStateV1 {
             highest_epoch: BTreeMap::new(),
             pending_destructions: BTreeMap::new(),
             version: KeyRegistryFormatVersionV1,
-            reserved_material: HashSet::new(),
+            reserved_material: None,
             registration_index_valid: true,
         }
     }
@@ -759,19 +759,21 @@ impl KeyRegistryStateV1 {
 
     fn ensure_registration_index(&mut self) -> Result<(), KeyRegistryErrorV1> {
         if self.registration_index_valid {
+            self.reserved_material.get_or_insert_with(HashSet::new);
             return Ok(());
         }
         self.validate()?;
-        self.reserved_material = self
-            .records
-            .values()
-            .filter_map(|record| record.private_material_digest)
-            .chain(
-                self.tombstones
-                    .values()
-                    .map(|tombstone| tombstone.destroyed_material_digest),
-            )
-            .collect();
+        self.reserved_material = Some(
+            self.records
+                .values()
+                .filter_map(|record| record.private_material_digest)
+                .chain(
+                    self.tombstones
+                        .values()
+                        .map(|tombstone| tombstone.destroyed_material_digest),
+                )
+                .collect(),
+        );
         self.registration_index_valid = true;
         Ok(())
     }
@@ -1053,7 +1055,8 @@ impl KeyRegistryStateV1 {
         }
         if self
             .reserved_material
-            .contains(&registration.private_material_digest)
+            .as_ref()
+            .is_some_and(|reserved| reserved.contains(&registration.private_material_digest))
         {
             return Err(KeyRegistryErrorV1::MaterialReuse);
         }
@@ -1070,6 +1073,7 @@ impl KeyRegistryStateV1 {
         self.highest_epoch
             .insert((identity.owner_id, identity.role), identity.epoch);
         self.reserved_material
+            .get_or_insert_with(HashSet::new)
             .insert(registration.private_material_digest);
         Ok(KeyRegistrationOutcomeV1::Registered)
     }
