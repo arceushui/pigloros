@@ -1,0 +1,172 @@
+//! Selector-side SCQ1 and SRQ1 requests and the authentication of their
+//! signed SCY1 and SRY1 answers (ADR-069 R15 §3.5, N8).
+
+use super::{AdmittedSandboxProvider, SandboxAdmissionError};
+use crate::sandbox_provider_protocol::{
+    ReconciliationEvidence, ReconciliationEvidenceFields, RequestAuthority, SandboxCancelRequest,
+    SandboxCancelResponse, SandboxProviderProtocolError, SandboxReconcileRequest,
+    SandboxReconcileResponse,
+};
+
+/// How far the selector could check the evidence digest of a reconcile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconcileEvidenceCheck {
+    /// The selector recomputed the tuple from its accepted terminal response
+    /// and the digests are byte-equal (R15 §3.5 rule 2).
+    Recomputed,
+    /// The selector holds no accepted terminal response, so only the
+    /// signature and identities were checked (R15 §3.5 rule 3).
+    Unverified,
+}
+
+/// One SRY1 that passed every selector check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedReconciliation {
+    /// The signed response.
+    pub response: SandboxReconcileResponse,
+    /// How the evidence digest was checked.
+    pub evidence: ReconcileEvidenceCheck,
+}
+
+const fn contradiction() -> SandboxAdmissionError {
+    SandboxAdmissionError::Protocol(SandboxProviderProtocolError::InconsistentFields)
+}
+
+impl AdmittedSandboxProvider {
+    const fn request_authority(&self, request_id: [u8; 16], nonce: [u8; 16]) -> RequestAuthority {
+        RequestAuthority {
+            request_id,
+            apt1_digest: self.policy.policy_digest(),
+            policy_epoch: self.policy.policy_epoch(),
+            nonce,
+        }
+    }
+
+    /// Build the SCQ1 that cancels `attempt_id`, bound to its AGR1 digest and
+    /// to this provider's active APT1 and epoch.
+    ///
+    /// # Errors
+    /// Rejects a zero request ID, nonce, attempt ID or AGR1 digest.
+    pub fn cancel_request(
+        &self,
+        request_id: [u8; 16],
+        nonce: [u8; 16],
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<(SandboxCancelRequest, Vec<u8>), SandboxProviderProtocolError> {
+        SandboxCancelRequest::canonical(
+            self.request_authority(request_id, nonce),
+            attempt_id,
+            agr1_digest,
+        )
+    }
+
+    /// Build the SRQ1 that reconciles `attempt_id`, bound to its AGR1 digest
+    /// and to this provider's active APT1 and epoch.
+    ///
+    /// # Errors
+    /// Rejects a zero request ID, nonce, attempt ID or AGR1 digest.
+    pub fn reconcile_request(
+        &self,
+        request_id: [u8; 16],
+        nonce: [u8; 16],
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<(SandboxReconcileRequest, Vec<u8>), SandboxProviderProtocolError> {
+        SandboxReconcileRequest::canonical(
+            self.request_authority(request_id, nonce),
+            attempt_id,
+            agr1_digest,
+        )
+    }
+
+    /// Authenticate one SCY1 against the SCQ1 it answers.
+    ///
+    /// The signature is checked under the admitted runtime key before the
+    /// request identities. When the selector accepted the attempt's terminal
+    /// SPY1, `accepted_spy1_digest` must equal the digest the SCY1 binds
+    /// (R15 §3.5).
+    ///
+    /// # Errors
+    /// Rejects a malformed, foreign-keyed, forged, unbound or contradicting
+    /// response.
+    pub fn authenticate_cancel_response(
+        &self,
+        bytes: &[u8],
+        request: &SandboxCancelRequest,
+        accepted_spy1_digest: Option<[u8; 32]>,
+    ) -> Result<SandboxCancelResponse, SandboxAdmissionError> {
+        let response = SandboxCancelResponse::from_canonical_cbor(bytes)?;
+        self.require_runtime_signature(
+            &response.runtime_attestation_key_id,
+            response.verify_signature(&self.runtime_key),
+        )?;
+        response.validate_for_request(request)?;
+        match accepted_spy1_digest {
+            Some(accepted) if accepted != response.terminal_spy1_digest => Err(contradiction()),
+            _ => Ok(response),
+        }
+    }
+
+    /// Authenticate one SRY1 against the SRQ1 it answers (R15 §3.5, N8).
+    ///
+    /// 1. The signature is verified under the admitted runtime key, then the
+    ///    fields, identities and self-digest are validated.
+    /// 2. With `accepted` terminal digests, the selector recomputes
+    ///    `reconciliation-evidence-v1` and requires a byte-equal digest. A
+    ///    mismatch is a signed provider contradiction and is refused.
+    /// 3. Without them, the digest is accepted on rule 1 alone and reported
+    ///    as [`ReconcileEvidenceCheck::Unverified`].
+    ///
+    /// # Errors
+    /// Rejects a malformed, foreign-keyed, forged, unbound or contradicting
+    /// response, and `accepted` digests that do not name the requested attempt.
+    pub fn authenticate_reconcile_response(
+        &self,
+        bytes: &[u8],
+        request: &SandboxReconcileRequest,
+        accepted: Option<&ReconciliationEvidenceFields>,
+    ) -> Result<AuthenticatedReconciliation, SandboxAdmissionError> {
+        let response = SandboxReconcileResponse::from_canonical_cbor(bytes)?;
+        self.require_runtime_signature(
+            &response.runtime_attestation_key_id,
+            response.verify_signature(&self.runtime_key),
+        )?;
+        response.validate_for_request(request)?;
+        accepted
+            .map_or(Ok(ReconcileEvidenceCheck::Unverified), |fields| {
+                recompute_matches(fields, request, &response)
+                    .then_some(ReconcileEvidenceCheck::Recomputed)
+                    .ok_or_else(contradiction)
+            })
+            .map(|evidence| AuthenticatedReconciliation { response, evidence })
+    }
+
+    fn require_runtime_signature(
+        &self,
+        key_id: &str,
+        verified: Result<(), SandboxProviderProtocolError>,
+    ) -> Result<(), SandboxAdmissionError> {
+        if key_id == self.manifest.runtime_attestation_key_id {
+            verified.map_err(Into::into)
+        } else {
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        }
+    }
+}
+
+/// R15 §3.5 rule 2: the tuple names the requested attempt and AGR1, and its
+/// digest equals the signed one.
+fn recompute_matches(
+    fields: &ReconciliationEvidenceFields,
+    request: &SandboxReconcileRequest,
+    response: &SandboxReconcileResponse,
+) -> bool {
+    fields.attempt_id == request.attempt_id
+        && fields.agr1_digest == request.agr1_digest
+        && ReconciliationEvidence::new(fields)
+            .is_ok_and(|evidence| evidence.digest() == response.reconciliation_evidence_digest)
+}
+
+#[cfg(test)]
+mod tests;

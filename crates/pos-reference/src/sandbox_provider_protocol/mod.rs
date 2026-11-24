@@ -81,8 +81,9 @@ pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, Sand
 
 pub use admission::{
     AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
-    AuthenticatedSandboxProviderReceipt, AuthenticatedSandboxProviderResult, HostCapabilityProfile,
-    HostFeatureProof, LocalNetworkAdmission, NetworkProxyLimits, ProviderConformanceReport,
+    AuthenticatedReconciliation, AuthenticatedSandboxProviderReceipt,
+    AuthenticatedSandboxProviderResult, HostCapabilityProfile, HostFeatureProof,
+    LocalNetworkAdmission, NetworkProxyLimits, ProviderConformanceReport, ReconcileEvidenceCheck,
     SandboxAdmissionError, SandboxImageProofError, SandboxProviderAdmissionInputs,
     SelectorGrantCommitment, VerifiedSandboxImageProof,
 };
