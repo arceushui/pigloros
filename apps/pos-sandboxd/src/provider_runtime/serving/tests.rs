@@ -1210,6 +1210,18 @@ fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestR
 }
 
 #[test]
+fn the_control_interval_is_bhc1_limit_16_in_milliseconds() {
+    use pos_reference::sandbox_provider_protocol::SandboxLimit;
+    let caps: Vec<SandboxLimit> = (0..17)
+        .map(|limit_id| SandboxLimit {
+            limit_id,
+            value: u64::from(limit_id) * 100 + 7,
+        })
+        .collect();
+    assert_eq!(super::control_interval(&caps), Duration::from_millis(1607));
+}
+
+#[test]
 fn a_control_request_is_routed_revoked_first_then_by_state_then_by_pool() {
     use super::{control_route, ControlRoute};
     use SandboxProviderErrorCode as Code;

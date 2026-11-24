@@ -1506,4 +1506,70 @@ mod served {
         drop(staged);
         Ok(())
     }
+
+    /// Spin, within [`TIMEOUT`], until `attempt_id` has a subscribed wait.
+    fn await_waiter(port: &ExecutePort, attempt_id: [u8; 16]) -> TestResult {
+        let deadline = Instant::now() + TIMEOUT;
+        while port.lifecycle.waiters_for_test(attempt_id) == 0 {
+            std::thread::yield_now();
+            if Instant::now() > deadline {
+                return Err("no wait subscribed".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// R15 §3.6 item 2(a), through the serving path: an SCQ1 for an attempt
+    /// awaiting its input waits for its end, then one control interval
+    /// (BHC1 limit 16) from that end for the signed response, which is
+    /// signed only once the wait is subscribed to the pending response.
+    #[test]
+    fn a_cancellation_waits_one_control_interval_from_the_attempts_end() -> TestResult {
+        if !in_isolated_root(
+            "provider_runtime::serving::port::tests::served::a_cancellation_waits_one_control_interval_from_the_attempts_end",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
+        let (admitted, _, signer) = bind_as_provider()??;
+        let (admitted, signer) = (Arc::new(admitted), Arc::new(signer));
+        let authority = (
+            admitted.bootstrap().policy().policy_digest(),
+            admitted.bootstrap().policy().policy_epoch(),
+        );
+        let (_tree, port_value) = test_port(StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        })?;
+        let open = OnceLock::from(AdmissionState::Open(Box::new(port_value)));
+        let responder = Responder::new(&admitted, &signer, &open, 1);
+        let port = port(&open)?;
+        let (attempt, grant) = ([0x77; 16], [0x78; 32]);
+        port.lifecycle.granted_for_test(attempt, grant)?;
+        let cancel = control_record("SCQ1", authority, [0x79; 16], (attempt, grant))?;
+        let (answered, retained) = std::thread::scope(|scope| -> TestResult<_> {
+            let serving = scope.spawn(|| {
+                asked(&cancel, |stream| {
+                    responder.answer(stream, Admission::Answered, None);
+                })
+                .map_err(|error| error.to_string())
+            });
+            // The cancellation waits on the granted attempt, then on its
+            // pending response once it ended.
+            await_waiter(port, attempt)?;
+            port.lifecycle.end_granted_for_test(attempt, grant)?;
+            await_waiter(port, attempt)?;
+            let retained = port.lifecycle.sign_for_test(attempt)?;
+            let answered = serving.join().map_err(|_| "serving panicked")??;
+            Ok((answered, retained))
+        })?;
+        let [record] = &answered[..] else {
+            return Err("one SCY1".into());
+        };
+        let scy1 = SandboxCancelResponse::from_canonical_cbor(record)?;
+        assert_eq!(scy1.result, SandboxCancellationResult::CancelledAndCleaned);
+        assert_eq!(scy1.terminal_spy1_digest, retained.terminal_digests().0);
+        drop(staged);
+        Ok(())
+    }
 }
