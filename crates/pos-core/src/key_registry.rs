@@ -1622,6 +1622,21 @@ mod tests {
         )
     }
 
+    #[test]
+    fn debug_output_excludes_the_derived_registration_index(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut indexed = KeyRegistryStateV1::new();
+        indexed.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+        let decoded = state_from_value(&state_value(&indexed)?)?;
+
+        assert_eq!(indexed, decoded);
+        let debug = format!("{indexed:?}");
+        assert_eq!(debug, format!("{decoded:?}"));
+        assert!(debug.contains("records"));
+        assert!(!debug.contains("reserved_material"));
+        Ok(())
+    }
+
     fn assert_signing_error(
         registry: &mut KeyRegistryStateV1,
         identity: KeyIdentityV1,
