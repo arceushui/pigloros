@@ -7,6 +7,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
 use ciborium::value::Value;
+use pos_reference::held_directory::open_or_create_beneath;
 use pos_reference::sandbox_provider_protocol::{
     NetworkCaptureStore, NetworkCaptureStoreError, NetworkExchangeFailure, NetworkExchangePlan,
     NetworkExchangeReply, NetworkExchangeRequest, NetworkRetentionPolicy,
@@ -240,6 +241,58 @@ fn open_rejects_unsafe_roots_and_retention_directories() -> TestResult {
         assert_io(NetworkCaptureStore::open(&File::open(root.path())?))?;
     }
     assert_eq!(entries(elsewhere.path())?, 0);
+    Ok(())
+}
+
+/// Names the parent directory of the re-executed process that alone runs
+/// the umask probe below.
+const UMASK_PROBE: &str = "POS_REFERENCE_CAPTURE_STORE_UMASK_PROBE";
+
+/// Under a umask that strips the owner's bits, the capture store root and
+/// both retention directories are still created with mode exactly `0700`
+/// (ADR-069 R11 Amendment 1 §5.4). The umask is process-wide, so the test
+/// re-executes itself alone in a child process to change it.
+#[test]
+fn the_capture_store_is_created_private_under_a_strict_umask() -> TestResult {
+    if let Some(parent) = std::env::var_os(UMASK_PROBE) {
+        let held = File::open(parent)?;
+        let umask = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+        let opened =
+            open_or_create_beneath(&held, "captures").map(|root| NetworkCaptureStore::open(&root));
+        rustix::process::umask(umask);
+        opened??;
+        return Ok(());
+    }
+    let parent = tempfile::tempdir()?;
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "the_capture_store_is_created_private_under_a_strict_umask",
+            "--nocapture",
+        ])
+        .env(UMASK_PROBE, parent.path())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "the umask probe failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The probe ran exactly this one test.
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    let captures = parent.path().join("captures");
+    for path in [
+        captures.clone(),
+        captures.join("responses"),
+        captures.join("transcripts"),
+    ] {
+        assert_eq!(mode(&path)?, 0o700);
+    }
+    // An existing directory is returned as it is, for its caller to check.
+    fs::set_permissions(&captures, fs::Permissions::from_mode(0o750))?;
+    let held = File::open(parent.path())?;
+    let reopened = open_or_create_beneath(&held, "captures")?;
+    assert_eq!(reopened.metadata()?.permissions().mode() & 0o7777, 0o750);
     Ok(())
 }
 
