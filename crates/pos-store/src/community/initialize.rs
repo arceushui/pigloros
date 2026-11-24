@@ -919,22 +919,15 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// The atomic commit (ADR-129 §3, §4; G5, G7).
-    ///
-    /// The writer compares the inventory generation CAU1 read and the CSI1
-    /// the operation read with the current ones, publishes the ARD1 rows,
-    /// and only then retains the keys, the successor CSI1, the sealed
-    /// records, the COA1s and the retry index, and advances the inventory
-    /// generation once.
+    /// The writer's compares before anything is published.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` when either compared value moved,
-    /// `Conflict` when the Timeline already has pass state, and the ARD1
-    /// publication refusal; each leaves the domain unchanged.
-    pub(super) fn commit(
-        &mut self,
-        staged: StagedInitializationV1,
-    ) -> Result<CommunityInitializationReceiptV1, Error> {
+    /// Returns `EvidenceUnavailable` when the inventory generation CAU1 read
+    /// or the CSI1 the operation read moved, and `Conflict` when the
+    /// Timeline already has pass state: a Timeline initializes once (a
+    /// second code-0 initialize gives `StaleGeneration` before staging), and
+    /// its pass state is never reset.
+    fn check_writer(&self, staged: &StagedInitializationV1) -> Result<(), Error> {
         let current = self
             .selection
             .as_ref()
@@ -949,11 +942,28 @@ impl MemoryCommunityDomainV1 {
         {
             return Err(Error::EvidenceUnavailable);
         }
-        // A Timeline initializes once (a second code-0 initialize gives
-        // `StaleGeneration` before staging); never reset its pass state.
         if self.pass_states.contains_key(&staged.key.0) {
             return Err(Error::Conflict);
         }
+        Ok(())
+    }
+
+    /// The atomic commit (ADR-129 §3, §4; G5, G7).
+    ///
+    /// The writer compares the inventory generation CAU1 read and the CSI1
+    /// the operation read with the current ones, publishes the ARD1 rows,
+    /// and only then retains the keys, the successor CSI1, the sealed
+    /// records, the COA1s and the retry index, and advances the inventory
+    /// generation once.
+    ///
+    /// # Errors
+    /// Returns the [`Self::check_writer`] refusals and the ARD1 publication
+    /// refusal; each leaves the domain unchanged.
+    pub(super) fn commit(
+        &mut self,
+        staged: StagedInitializationV1,
+    ) -> Result<CommunityInitializationReceiptV1, Error> {
+        self.check_writer(&staged)?;
         self.store.commit_community_artifact_batch(&staged.batch)?;
         let [metadata_key, cohort_key] = staged.keys;
         let metadata_id = metadata_key.intent().as_input().protection_operation_id;

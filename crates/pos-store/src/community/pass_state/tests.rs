@@ -43,10 +43,10 @@ const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
-/// A domain over a store holding T (`id(1)`) and its Fork child (`id(2)`)
-/// owned by the second actor, and an unrelated Timeline (`id(3)`) of that
-/// actor. The first actor owns T.
-fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
+/// A store holding T (`id(1)`) and its Fork child (`id(2)`) owned by the
+/// second actor, and an unrelated Timeline (`id(3)`) of that actor. The
+/// first actor owns T.
+fn store() -> Result<MemoryStore, Box<dyn std::error::Error>> {
     let mut store = MemoryStore::new();
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     store.create_timeline_with_meta(TimelineMeta {
@@ -63,8 +63,13 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
         id: id(3),
         ..TimelineMeta::root_owned("other", actor(11))
     })?;
+    Ok(store)
+}
+
+/// A domain over [`store`].
+fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
     Ok(MemoryCommunityDomainV1::new(
-        store,
+        store()?,
         [0x5a; 16],
         MemoryTrustedClockAuthorityV1::new(),
     )?)
