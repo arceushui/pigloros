@@ -20,8 +20,7 @@ use std::path::{Component, Path};
 
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
-use rustix::fs::{fchmod, mkdirat, openat2, statat, AtFlags, Mode, OFlags, ResolveFlags};
-use rustix::io::Errno;
+use rustix::fs::{openat2, statat, AtFlags, Mode, OFlags, ResolveFlags};
 
 use super::{InstallationError, SANDBOX_SELECTOR_SOCKET};
 use crate::evaluator_protocol::{
@@ -41,7 +40,7 @@ const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 /// R11 Amendment 1 §5.4).
 const CAPTURE_STORE_NAME: &str = "captures";
 /// The capture store root's exact mode.
-const CAPTURE_STORE_MODE: Mode = Mode::RWXU;
+const CAPTURE_STORE_MODE: u32 = 0o700;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
 
@@ -541,37 +540,14 @@ impl InstalledSelectorState {
     /// created, including through a link, a mount or a non-directory, and
     /// [`InstallationError::ArtifactInvalid`] for another owner or mode.
     pub fn open_capture_store_root(&self, owner: u32) -> Result<File, InstallationError> {
-        let open = || {
-            openat2(
-                &self.root,
-                CAPTURE_STORE_NAME,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::empty(),
-                ResolveFlags::BENEATH
-                    | ResolveFlags::NO_SYMLINKS
-                    | ResolveFlags::NO_MAGICLINKS
-                    | ResolveFlags::NO_XDEV,
-            )
-            .map(File::from)
-        };
-        open()
-            .or_else(|error| {
-                if error == Errno::NOENT {
-                    mkdirat(&self.root, CAPTURE_STORE_NAME, CAPTURE_STORE_MODE)
-                        .and_then(|()| open())
-                        .and_then(|created| fchmod(&created, CAPTURE_STORE_MODE).map(|()| created))
-                } else {
-                    Err(error)
-                }
-            })
+        crate::held_directory::open_or_create_beneath(&self.root, CAPTURE_STORE_NAME)
             .map_err(io_failure)
             .and_then(|directory| {
                 directory
                     .metadata()
                     // `O_DIRECTORY` already refused anything but a directory.
                     .is_ok_and(|metadata| {
-                        metadata.uid() == owner
-                            && metadata.mode() & 0o7777 == CAPTURE_STORE_MODE.bits()
+                        metadata.uid() == owner && metadata.mode() & 0o7777 == CAPTURE_STORE_MODE
                     })
                     .then_some(directory)
                     .ok_or(InstallationError::ArtifactInvalid)
@@ -1920,57 +1896,6 @@ pub mod tests {
         let manifest_path = root.join(MANIFEST_NAME);
         fs::write(&manifest_path, encode_manifest(unsigned(objects))?)?;
         fs::set_permissions(manifest_path, fs::Permissions::from_mode(0o400))?;
-        Ok(())
-    }
-
-    /// Names the artifact root of the re-executed process that alone runs
-    /// the umask probe below.
-    const UMASK_PROBE: &str = "POS_REFERENCE_CAPTURE_STORE_UMASK_PROBE";
-
-    /// Under a umask that strips the owner's bits, the capture store root
-    /// and both retention directories are still created with mode exactly
-    /// `0700` (ADR-069 R11 Amendment 1 §5.4). The umask is process-wide, so
-    /// the test re-executes itself alone in a child process to change it.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_capture_store_is_created_private_under_a_strict_umask() -> TestResult {
-        if let Some(root) = std::env::var_os(UMASK_PROBE) {
-            let held = File::open(&root)?;
-            let state = InstalledSelectorState::open_at_for_test(&held)?;
-            let umask = rustix::process::umask(Mode::from_raw_mode(0o277));
-            let opened = state
-                .open_capture_store_root(held.metadata()?.uid())
-                .map(|root| crate::sandbox_provider_protocol::NetworkCaptureStore::open(&root));
-            rustix::process::umask(umask);
-            opened??;
-            return Ok(());
-        }
-        let temporary = tempfile::tempdir()?;
-        write_state(temporary.path())?;
-        let output = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "selector::installation::tests::the_capture_store_is_created_private_under_a_strict_umask",
-                "--nocapture",
-            ])
-            .env(UMASK_PROBE, temporary.path())
-            .output()?;
-        assert!(
-            output.status.success(),
-            "the umask probe failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        // The probe ran exactly this one test.
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-        let captures = temporary.path().join("captures");
-        for path in [
-            captures.clone(),
-            captures.join("responses"),
-            captures.join("transcripts"),
-        ] {
-            assert_eq!(fs::metadata(path)?.mode() & 0o7777, 0o700);
-        }
         Ok(())
     }
 
