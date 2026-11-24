@@ -41,6 +41,20 @@ use sha2::{Digest, Sha256};
 use ulid::Ulid;
 use zeroize::Zeroizing;
 
+/// `N` bytes derived one-way from `label`, so no literal key material is used.
+fn derived<const N: usize>(label: &str) -> [u8; N] {
+    let mut out = [0_u8; N];
+    for (counter, chunk) in (0_u8..).zip(out.chunks_mut(32)) {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        hasher.update([counter]);
+        for (dst, src) in chunk.iter_mut().zip(hasher.finalize().iter()) {
+            *dst = *src;
+        }
+    }
+    out
+}
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Bridge = OwnerBridge<FakeHost, FakeRandom, FakeClock>;
 
@@ -311,13 +325,17 @@ fn wrap_fixture(rp_id: &str, salt: u8) -> TestResult<Vec<u8>> {
         epoch: 1,
         rp_id: rp_id.to_owned(),
         credential_id: CREDENTIAL_ID.to_vec(),
-        prf_input: [1; 32],
-        wrap_salt: [salt; 32],
-        subkey_salt: [3; 32],
-        wrap_nonce: [4; 12],
+        prf_input: derived("wrap fixture prf input"),
+        wrap_salt: derived(&format!("wrap fixture wrap salt {salt}")),
+        subkey_salt: derived("wrap fixture subkey salt"),
+        wrap_nonce: derived("wrap fixture wrap nonce"),
     };
-    let root = SubjectRootKeyV1::from_bytes([5; 32]);
-    let wrap = SubjectKeyWrapV1::seal(params, &root, &SubjectPrfOutputV1::from_bytes([6; 32]))?;
+    let root = SubjectRootKeyV1::from_bytes(derived("wrap fixture root"));
+    let wrap = SubjectKeyWrapV1::seal(
+        params,
+        &root,
+        &SubjectPrfOutputV1::from_bytes(derived("wrap fixture prf output")),
+    )?;
     Ok(wrap.to_bytes())
 }
 
@@ -453,7 +471,7 @@ fn a_wrong_prf_fails_the_open_and_leaves_the_binding() -> TestResult {
     let binding = fixture.read(&binding_name(1))?;
     let mut adapter = open(&fixture.lock, &mut fixture.store, 1)?;
     let page = HonestConfig {
-        substitute_get_prf: Some([0x33; 32]),
+        substitute_get_prf: Some(derived("substituted prf output")),
         ..honest()
     };
     assert_eq!(unlock(page, &mut adapter)?.err(), Some(WRAP_REFUSED));
@@ -472,7 +490,7 @@ fn a_later_failed_open_withdraws_the_earlier_success() -> TestResult {
     let binding = fixture.read(&binding_name(1))?;
     let mut adapter = open(&fixture.lock, &mut fixture.store, 1)?;
     open_pending(&mut adapter)?;
-    let wrong = Zeroizing::new([0x33; 32]);
+    let wrong = Zeroizing::new(derived("wrong prf output"));
     assert_eq!(
         adapter.open_pending(PrfOutput::new(&wrong)).err(),
         Some(OwnerError::new(OwnerErrorKind::Wrap))
@@ -493,7 +511,7 @@ fn a_later_failed_open_withdraws_the_earlier_success() -> TestResult {
 fn a_root_whose_fingerprint_is_not_the_registry_identitys_is_refused() -> TestResult {
     let fixture = Fixture::enrolled(honest())?;
     let binding = fixture.read(&binding_name(1))?;
-    let mut adapter = open(&fixture.lock, &mut Fingerprint([0x77; 32]), 1)?;
+    let mut adapter = open(&fixture.lock, &mut Fingerprint(derived("fingerprint")), 1)?;
     assert_eq!(
         unlock(honest(), &mut adapter)?.err(),
         Some(REGISTRY_REFUSED)
@@ -703,7 +721,7 @@ fn the_volatile_store_returns_the_digest_of_the_exact_registration_only() -> Tes
         owner_id: owner(SUBJECT),
         subject_id: entity(SUBJECT),
         epoch: 2,
-        root_material_digest: [0x33; 32],
+        root_material_digest: derived("registration root material digest"),
     };
     store
         .commit_staging_record(&registration.owner_id, 2)
@@ -712,7 +730,7 @@ fn the_volatile_store_returns_the_digest_of_the_exact_registration_only() -> Tes
     let owner_id = owner(SUBJECT);
     assert_eq!(
         store.registered_root_material_digest(&owner_id, entity(SUBJECT), 2),
-        Ok([0x33; 32])
+        Ok(derived("registration root material digest"))
     );
     for (owner_id, subject, epoch) in [
         (owner_id.clone(), SUBJECT, 1),
