@@ -1876,14 +1876,32 @@ mod tests {
     }
 
     #[test]
-    fn registration_rejects_cross_role_material_reuse_after_snapshot_reload(
+    fn registration_rejects_live_material_reuse_after_durable_snapshot_reload(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
-        let mut reloaded = state_from_value(&state_value(&registry)?)?;
+        let mut reloaded = state_from_durable_cbor(&registry)?;
 
         assert_eq!(
             KeyRegistryPortV1::register_key(&mut reloaded, signing_registration(ATTRIBUTION, 1)),
+            Err(KeyRegistryErrorV1::MaterialReuse)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registration_rejects_destroyed_material_reuse_after_durable_snapshot_reload(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(2), None))?;
+        destroy(
+            &mut registry,
+            KeyDestructionRequestV1::new(DATA, digest(2), digest(3)),
+        )?;
+        let mut reloaded = state_from_durable_cbor(&registry)?;
+
+        assert_eq!(
+            KeyRegistryPortV1::register_key(&mut reloaded, signing_registration(ATTRIBUTION, 2)),
             Err(KeyRegistryErrorV1::MaterialReuse)
         );
         Ok(())
@@ -2298,6 +2316,28 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::into_writer(value, &mut bytes)?;
         Ok(ciborium::from_reader(bytes.as_slice())?)
+    }
+
+    struct AllowAllReadGuard;
+
+    impl KeyRegistryReadGuardV1 for AllowAllReadGuard {
+        fn observe(
+            &mut self,
+            _: KeyRegistryReadWorkV1,
+        ) -> std::result::Result<(), KeyRegistryReadRefusedV1> {
+            Ok(())
+        }
+    }
+
+    fn state_from_durable_cbor(
+        state: &KeyRegistryStateV1,
+    ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(state, &mut bytes)?;
+        Ok(KeyRegistryStateV1::from_durable_cbor_with_read_guard(
+            &bytes,
+            &mut AllowAllReadGuard,
+        )?)
     }
 
     fn edit_state<F>(
