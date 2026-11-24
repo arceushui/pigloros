@@ -816,13 +816,18 @@ mod served {
         let mut rest = bytes.as_slice();
         let mut frames = Vec::new();
         while !rest.is_empty() {
-            let (prefix, tail) = rest.split_at_checked(4).ok_or("short frame")?;
-            let length = usize::try_from(u32::from_be_bytes(prefix.try_into()?))?;
-            let (record, tail) = tail.split_at_checked(length).ok_or("short record")?;
+            let (record, tail) = next_frame(rest)?;
             frames.push(record.to_vec());
             rest = tail;
         }
         Ok(frames)
+    }
+
+    /// The first length-prefixed record of `bytes`, and what follows it.
+    fn next_frame(bytes: &[u8]) -> TestResult<(&[u8], &[u8])> {
+        let (prefix, tail) = bytes.split_at_checked(4).ok_or("short frame")?;
+        let length = usize::try_from(u32::from_be_bytes(prefix.try_into()?))?;
+        Ok(tail.split_at_checked(length).ok_or("short record")?)
     }
 
     /// Base §4: while B stands mid-response with the re-issued R2, between
