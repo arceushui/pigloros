@@ -30,7 +30,8 @@ use super::super::pass_record::{CommunityPassStatusV1, CommunityReservedPassV1};
 use super::super::pass_state::{CommunityGenerationCountsV1, CommunityPassStateV1};
 use super::super::quarantine::QuarantineLedgerV1;
 use super::{
-    add_counts, CommunityCommitInputV1, CommunityMintedObservationV1, CommunityReserveInputV1,
+    add_counts, CommunityCommitInputV1, CommunityMintedObservationV1, CommunityObservationCutV1,
+    CommunityReserveInputV1,
 };
 use crate::community::MemoryCommunityDomainV1;
 use crate::memory::MemoryStore;
@@ -143,6 +144,10 @@ fn minted() -> CommunityMintedObservationV1 {
         rows: 6,
         scope_reference: hash(40),
         scope: vec![scope_row()],
+        cut: CommunityObservationCutV1 {
+            through_seq: 0,
+            chain_heads: Vec::new(),
+        },
     }
 }
 
@@ -160,6 +165,7 @@ fn input() -> Result<CommunityReserveInputV1, Error> {
         pass_rows: 24,
         failure_reserve: 4,
         minted: Some(minted()),
+        reused_not_after_micros: None,
         pass: reserved_pass()?,
     })
 }
@@ -191,14 +197,15 @@ fn reserved_pass() -> Result<CommunityReservedPassV1, Error> {
         cbq1_digest: hash(84),
         quote_maxima: [1, 2, 3],
         trace_rows: 6,
-        generation_horizon_micros: 9_000,
-        outcome_horizon_micros: 8_000,
+        generation_horizon_micros: 10_000,
+        outcome_horizon_micros: 9_000,
     })
 }
 
 fn reuse() -> Result<CommunityReserveInputV1, Error> {
     Ok(CommunityReserveInputV1 {
         minted: None,
+        reused_not_after_micros: Some(9_000),
         ..input()?
     })
 }
@@ -877,6 +884,7 @@ fn a_token_staged_twice_applies_once() -> TestResult {
         prior_shared_counts: domain.recorded_set_counters(id(1)),
         selected_head: hash(31),
         minted: None,
+        reused_not_after_micros: Some(9_000),
         ..input()?
     })?;
     let staged = domain.stage_reserve(next)?;
@@ -1250,4 +1258,109 @@ fn the_budget_sums_saturate() {
         ..budget(1)
     };
     assert_eq!(trace_room(&held, &fits, &none, id(1), 1, 0), None);
+}
+
+/// R9.7 step 6: a minting Reserve's Logical Head and chain compare gives 12
+/// with nothing committed, before the generation compare (R10.7 5j).
+#[test]
+fn the_writer_compares_the_logical_head_and_the_chains() -> TestResult {
+    let domain = domain()?;
+    let genesis = domain.store.chain_hash_at(id(1), Seq::ZERO)?;
+    let with_cut = |through_seq: u64, chain_heads: Vec<(TimelineId, u64, Hash)>| {
+        let mut call = input()?;
+        if let Some(minted) = call.minted.as_mut() {
+            minted.cut = CommunityObservationCutV1 {
+                through_seq,
+                chain_heads,
+            };
+        }
+        Ok::<_, Error>(call)
+    };
+    // T's chain at its cut, and an ancestor's at its Fork cut.
+    let holds = with_cut(0, vec![(id(1), 0, genesis)])?;
+    assert!(domain.stage_reserve(holds).is_ok());
+    // A head that moved on: T is at 0 events, the cut observed one.
+    let moved = with_cut(1, vec![(id(1), 0, genesis)])?;
+    assert_eq!(
+        domain.stage_reserve(moved).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // A chain hash that differs, and a Timeline the store does not hold.
+    let forked = with_cut(0, vec![(id(1), 0, hash(99))])?;
+    assert_eq!(
+        domain.stage_reserve(forked).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    let unknown = with_cut(0, vec![(id(9), 0, genesis)])?;
+    assert_eq!(
+        domain.stage_reserve(unknown).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // The 12 comes before a stale generation (5), and the store is
+    // untouched.
+    let mut both = with_cut(1, Vec::new())?;
+    both.generation = [0x21; 16];
+    assert_eq!(
+        domain.stage_reserve(bound(both)?).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(domain.pass_status(id(1), OPERATION), None);
+    // A reusing Reserve has no cut to compare.
+    assert!(domain.stage_reserve(reuse()?).is_ok());
+    Ok(())
+}
+
+/// R9.2, R10.7 5j: a reused observation must outlive the exact reservation
+/// horizon; one microsecond short gives 6, equal passes.
+#[test]
+fn a_reused_observation_must_outlive_the_exact_reservation_horizon() -> TestResult {
+    let domain = domain()?;
+    let reusing = |retained: u64| {
+        let mut call = reuse()?;
+        call.reused_not_after_micros = Some(retained);
+        Ok::<_, Error>(call)
+    };
+    assert!(domain.stage_reserve(reusing(9_000)?).is_ok());
+    assert_eq!(
+        domain.stage_reserve(reusing(8_999)?).err(),
+        Some(Error::StaleFrontier)
+    );
+    Ok(())
+}
+
+/// The record's horizons are `H_r` at most `H_g`, the CPR1 horizon is
+/// `H_r`, and a reused observation is named exactly when none is minted.
+#[test]
+fn the_reserve_binds_its_horizons_and_its_observation_use() -> TestResult {
+    let domain = domain()?;
+    let mut apart = input()?;
+    apart.pass.outcome_horizon_micros = 8_000;
+    assert_eq!(
+        domain.stage_reserve(apart).err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut over = input()?;
+    over.pass.generation_horizon_micros = 8_999;
+    assert_eq!(
+        domain.stage_reserve(over).err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut equal = input()?;
+    equal.pass.generation_horizon_micros = 9_000;
+    assert!(domain.stage_reserve(equal).is_ok());
+    // A minting call that also names a reused observation, and a reusing
+    // call that names none.
+    let mut both = input()?;
+    both.reused_not_after_micros = Some(9_000);
+    assert_eq!(
+        domain.stage_reserve(both).err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut neither = reuse()?;
+    neither.reused_not_after_micros = None;
+    assert_eq!(
+        domain.stage_reserve(neither).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
 }

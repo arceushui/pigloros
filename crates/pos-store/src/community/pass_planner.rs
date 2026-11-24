@@ -37,8 +37,8 @@ use pos_core::community_lifecycle::{
     CommunityPassDemandV1, CommunityPassDomainV1, CommunityPassGraphTermsV1,
     CommunityPassObservationV1, CommunityPassQuoteInputV1, CommunityPassQuoteMemberV1,
     CommunityPassQuoteV1, CommunityPreparedInvocationInputV1, CommunityProtectionSizesV1,
-    CommunityQuarantineKeyV1, CommunityQuarantineReasonV1, CommunityScopeMemberV1,
-    CommunitySharedCountsV1, CommunityTypedInputRefV1, COMMUNITY_CONTROL_OPERATIONS_V1,
+    CommunityQuarantineReasonV1, CommunityScopeMemberV1, CommunitySharedCountsV1,
+    CommunityTypedInputRefV1, COMMUNITY_CONTROL_OPERATIONS_V1,
     COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_ROW_LIMIT_V1,
     COMMUNITY_ERASURE_TARGET_LINE_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
     MAX_COMMUNITY_COVERAGE_ROWS_V1, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
@@ -52,6 +52,7 @@ use super::erasure_budget::{
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::observation::{CommunityObservationQuoteV1, CommunityObservationSourcesV1};
+use super::pass_install::community_roster_quarantine_keys_v1;
 
 /// The domain's quarantine index read (R10.6(2)).
 ///
@@ -294,24 +295,17 @@ fn quarantine<Q: CommunityQuarantineIndexV1>(
     installation: CommunityPassInstallationV1<'_>,
     timeline: TimelineId,
 ) -> Result<(), Error> {
-    installation
-        .profile
-        .as_input()
-        .roster
-        .iter()
-        .try_for_each(|member| {
-            CommunityQuarantineKeyV1::new(timeline, member.stable_entry(), member.implementation())
-                .and_then(|key| {
-                    if index
-                        .quarantine_reasons(key.digest())
-                        .is_some_and(|reasons| !reasons.is_empty())
-                    {
-                        Err(Error::Quarantined)
-                    } else {
-                        Ok(())
-                    }
-                })
-        })
+    community_roster_quarantine_keys_v1(installation.profile, timeline).and_then(|keys| {
+        if keys.iter().any(|key| {
+            index
+                .quarantine_reasons(*key)
+                .is_some_and(|reasons| !reasons.is_empty())
+        }) {
+            Err(Error::Quarantined)
+        } else {
+            Ok(())
+        }
+    })
 }
 
 /// Step 4f: the generation horizon and the selected root's horizon must
