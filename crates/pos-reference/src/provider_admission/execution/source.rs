@@ -2256,6 +2256,38 @@ mod tests {
         Ok(())
     }
 
+    /// Row 7: a non-empty plan list is never adopted from SPX1, so the plans
+    /// every served mode (Replay included, #1488-a) reconstructs stay empty.
+    #[test]
+    fn a_request_carrying_plans_is_refused_at_row_7() -> TestResult {
+        if !isolated("a_request_carrying_plans_is_refused_at_row_7")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let installation = startup()?;
+        let ledger = StagingLedger::new(LARGE);
+        let plan = crate::sandbox_provider_protocol::NetworkExchangePlan::fixture(
+            [9; 16],
+            0,
+            "network",
+            b"request",
+            b"response",
+        )?;
+        let request = staged.changed_request(|request| request.network_plans = vec![plan])?;
+        let (provider, mut selector) = UnixStream::pair()?;
+        write_frame(&mut selector, staged.evaluation())?;
+        write_frame(&mut selector, &request)?;
+        let source = ok(ExecuteSource::read(
+            ok(ExecutePeer::authenticate(provider))?,
+            &ledger,
+            &installation,
+        ))?;
+        let (_, error) = refused(admit(source, &ledger, &installation))?;
+        assert!(matches!(error, StagingError::InvalidSource), "{error:?}");
+        assert_eq!(ledger.usage(), StagingUsage::default());
+        Ok(())
+    }
+
     #[test]
     fn installation_digest_identity_and_clock_refusals_release_everything() -> TestResult {
         if !isolated("installation_digest_identity_and_clock_refusals_release_everything")? {
