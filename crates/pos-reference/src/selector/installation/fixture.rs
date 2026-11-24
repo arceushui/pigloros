@@ -567,6 +567,9 @@ pub(crate) fn admitted_state_with_salt(
     admitted_state_with_arguments(root_image, executable, partitions, signing, salt, &[])
 }
 
+/// The provider binary the fixture installs unless a caller supplies one.
+const FIXTURE_PROVIDER_BINARY: &[u8] = b"exact provider binary";
+
 pub(crate) fn admitted_state_with_arguments(
     root_image: &[u8],
     executable: &[u8],
@@ -574,6 +577,29 @@ pub(crate) fn admitted_state_with_arguments(
     signing: &ImageSigning,
     salt: [u8; 32],
     arguments: &[String],
+) -> TestResult<InstalledSelectorState> {
+    admitted_state_with_provider_binary(
+        root_image,
+        executable,
+        partitions,
+        signing,
+        salt,
+        arguments,
+        FIXTURE_PROVIDER_BINARY,
+    )
+}
+
+/// [`admitted_state_with_arguments`] with `provider_binary` as the bytes of
+/// the installed kind-11 provider executable, whose BLAKE3 digest the SPM1,
+/// PCR1 and APT1 records then bind.
+pub(crate) fn admitted_state_with_provider_binary(
+    root_image: &[u8],
+    executable: &[u8],
+    partitions: &[PartitionDescriptor; 3],
+    signing: &ImageSigning,
+    salt: [u8; 32],
+    arguments: &[String],
+    provider_binary: &[u8],
 ) -> TestResult<InstalledSelectorState> {
     let authority = provider_authority();
     let architecture = signing.architecture;
@@ -585,7 +611,6 @@ pub(crate) fn admitted_state_with_arguments(
         .map(str::to_owned)
         .to_vec();
     let features_digest = feature_digest(&features)?;
-    let provider_binary = b"exact provider binary";
     let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
     let hard_caps = broker_hard_caps()?;
     let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
@@ -641,7 +666,7 @@ pub(crate) fn admitted_state_with_arguments(
         (8, launch_digest, launch.as_slice()),
         (9, image_digest, image.as_slice()),
         (10, hard_caps_digest, hard_caps.as_slice()),
-        (11, provider_binary_digest, provider_binary.as_slice()),
+        (11, provider_binary_digest, provider_binary),
         (12, *blake3::hash(root_image).as_bytes(), root_image),
         (13, *blake3::hash(executable).as_bytes(), executable),
     ];
@@ -787,6 +812,26 @@ pub(crate) fn materialize_state(
     fs::write(&manifest_path, manifest_bytes)?;
     fs::set_permissions(manifest_path, fs::Permissions::from_mode(0o400))?;
     Ok(admitted)
+}
+
+/// Where `materialize_state` wrote the installed provider executable below
+/// `root`.
+pub(crate) fn provider_executable_path(
+    root: &Path,
+    admitted: &AdmittedSelectorProvider,
+) -> TestResult<std::path::PathBuf> {
+    let kind = InstallationObjectKind::PROVIDER_EXECUTABLE;
+    let object = admitted
+        .bootstrap()
+        .installed()
+        .manifest()
+        .objects()
+        .iter()
+        .find(|object| object.kind() == kind)
+        .ok_or("the installation holds no provider executable")?;
+    Ok(root
+        .join(kind.directory())
+        .join(hex_name(object.content_digest())))
 }
 
 fn retain_case_artifact(
