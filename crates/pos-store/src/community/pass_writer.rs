@@ -23,19 +23,20 @@
 //! the budget: an Abort only has to bind no more rows than its pending entry
 //! holds (R13.1(5)).
 //!
-//! The writer refuses only a reservation id that is still pending. It does
-//! not refuse another pending reservation of the same T under a different
-//! id (4c, code 7), nor a replay of an id that already resolved: both rely
-//! on the planner's step 4a and 4c, which the pipeline runs first.
-//!
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
-//! re-validates only what is cheap to check: the pass state and the entry
-//! (Reserve also refuses another pending reservation of the same T, code 7).
-//! It does not re-run the budget, caps, head or counters compares; a token
-//! staged before another operation changed them is for the pipeline to
-//! discard. A Reserve replayed after its resolution finds no entry to
-//! resolve and a Commit or Abort does the same, so they are refused too.
+//! re-validates only what is cheap to check: the pass state and the entry.
+//! A Reserve is refused when its identity is pending (`Conflict`) or when
+//! another reservation of the same T is pending (`PassUnresolved`, code 7,
+//! refused at the apply only, not at stage). A Commit or Abort is refused
+//! when its entry is gone or too small, which also refuses their replay.
+//!
+//! A Reserve replayed after its reservation resolved is not refused here:
+//! it creates an entry, so it applies again. Refusing it, and the same
+//! identity under 4a's original outcome, is the planner's step 4a, which
+//! the pipeline runs first. Neither apply re-runs the budget, caps, head or
+//! counters compares; a token staged before another operation changed them
+//! is for the pipeline to discard.
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
@@ -150,6 +151,9 @@ pub struct CommunityStagedAbortV1 {
 impl MemoryCommunityDomainV1 {
     /// Re-check a Reserve at the writer (R10.7 step 5j) and stage it.
     ///
+    /// Another pending reservation of T (`PassUnresolved`, code 7) is not
+    /// refused here, only at [`Self::apply_reserve`].
+    ///
     /// # Errors
     /// Returns `InvalidBinding` when the minted rows exceed the pass rows or
     /// when the record's CPK1 Timeline or generation, or its predecessor
@@ -259,10 +263,11 @@ impl MemoryCommunityDomainV1 {
         })
     }
 
-    /// Apply a staged Reserve in the guarded step that published its
-    /// records: one more retained outcome, the pending entry and, for a
-    /// minted materialization, its additions to the counters, the closure
-    /// terms and scope rows a reuse reads and one more control operation.
+    /// Apply a staged Reserve in the guarded step that published its records.
+    ///
+    /// It adds one retained outcome and the pending entry and, for a minted
+    /// materialization, its additions to the counters, the closure terms and
+    /// scope rows a reuse reads and one more control operation.
     ///
     /// # Errors
     /// Returns `Conflict` when the reservation identity is pending already,
@@ -329,11 +334,12 @@ impl MemoryCommunityDomainV1 {
         .map(|()| CommunityStagedCommitV1(input))
     }
 
-    /// Apply a staged Commit: the entry is removed, the rows it bound are
-    /// the pipeline's own batch's,
-    /// the counters, selected graph, head and closure advance, the
-    /// materialization's records are in the closure and an Annotation CPN1
-    /// is one more control operation each.
+    /// Apply a staged Commit in the guarded step that published its records.
+    ///
+    /// The entry is removed (the rows it bound are the pipeline's own
+    /// batch's). The counters, selected graph, head and closure advance, the
+    /// materialization's records are in the closure and each Annotation CPN1
+    /// is one more control operation.
     ///
     /// # Errors
     /// Returns the [`Self::stage_commit`] refusals again: the entry must
@@ -388,10 +394,12 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// Apply a staged Abort: the entry is removed, and the rows it
-    /// registered are bound by the pipeline's own batch. The retained outcome, the materialization's counters,
-    /// control operation and closure terms stay, so the next pass reuses
-    /// its records (R13.1(4)).
+    /// Apply a staged Abort in the guarded step that published its records.
+    ///
+    /// The entry is removed (the rows it registered are the pipeline's own
+    /// batch's). The retained outcome, the materialization's counters,
+    /// control operation and closure terms stay, so the next pass reuses its
+    /// records (R13.1(4)).
     ///
     /// # Errors
     /// Returns the [`Self::stage_abort`] refusals again: the entry must
