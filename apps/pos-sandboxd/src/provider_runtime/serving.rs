@@ -579,6 +579,19 @@ impl<'a> Responder<'a> {
         };
         let classified = self.classify(&mut reading);
         drop(permit);
+        self.answer_classified(stream, (classified, admission), until, place);
+    }
+
+    /// Answer a request read uncharged by its classification: a cancel or
+    /// reconcile through the control pool, any other authenticated request
+    /// by its admission, and a refusal by its SPE1.
+    fn answer_classified(
+        &self,
+        stream: &UnixStream,
+        (classified, admission): (Result<Classified, Refusal>, Admission),
+        until: Instant,
+        place: Option<Place<'_>>,
+    ) {
         match (classified, admission) {
             (
                 Ok(Classified {
