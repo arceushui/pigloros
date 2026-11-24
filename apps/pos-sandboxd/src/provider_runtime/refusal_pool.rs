@@ -70,10 +70,9 @@ impl RefusalPool {
                 readers.running += 1;
                 return Some(ReaderPermit(self));
             }
-            let Some(left) = until
-                .checked_duration_since(Instant::now())
-                .filter(|left| !left.is_zero())
-            else {
+            // A zero `left` times out at once; the next look finds `until`
+            // past.
+            let Some(left) = until.checked_duration_since(Instant::now()) else {
                 readers.waiting -= 1;
                 return None;
             };
