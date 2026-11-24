@@ -668,6 +668,10 @@ pub struct KeyRegistryStateV1 {
     registration_index_valid: bool,
 }
 
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "derived registration cache is not semantic registry state"
+)]
 impl fmt::Debug for KeyRegistryStateV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
