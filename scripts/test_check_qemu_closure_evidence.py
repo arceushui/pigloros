@@ -334,28 +334,35 @@ def case_files() -> dict[str, bytes | str]:
 INIT_NETNS = "net:[4026531840]"
 UNIT_NETNS = "net:[4026532200]"
 LINK_LO = "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n"
-LINK_TUNL = "2: tunl0@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT group default qlen 1000\\    link/ipip 0.0.0.0 brd 0.0.0.0\n"
-LINK_SIT = "3: sit0@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT group default qlen 1000\\    link/sit 0.0.0.0 brd 0.0.0.0\n"
+def link(index: int, name: str, kind: str) -> str:
+    return (f"{index}: {name}@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT group default "
+            f"qlen 1000\\    link/{kind} 0.0.0.0 brd 0.0.0.0\n")
+
+
+LINK_TUNL = link(2, "tunl0", "ipip")
+FALLBACKS = LINK_TUNL + link(3, "sit0", "sit") + link(4, "ip6tnl0", "tunnel6") + link(5, "gre0", "gre")
+MODULES = "".join(f"{name} 12288 0 - Live 0x0000000000000000\n" for name in ("ipip", "sit", "ip6_tunnel", "ip_gre"))
 ADDRESSES = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever\n"
              "1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever\n")
 ROUTES4 = ("local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1\n"
            "local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1\n"
            "broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1\n")
-ROUTES6 = "local ::1 dev lo table local proto kernel metric 0 pref medium\n"
+ROUTES6 = ("local ::1 dev lo table local proto kernel metric 0 pref medium\n"
+           "multicast ff00::/8 dev lo table local proto kernel metric 256 pref medium\n")
 
 
 def network_files() -> dict[str, bytes | str]:
     files: dict[str, bytes | str] = {
         "guest/network/boot-sysctl": "0\n",
         "guest/network/init-netns": INIT_NETNS + "\n",
-        "guest/network/init-links": LINK_LO + LINK_TUNL + LINK_SIT,
-        "guest/network/modules": "ipip 12288 0 - Live 0x0000000000000000\n",
+        "guest/network/init-links": LINK_LO + FALLBACKS,
+        "guest/network/modules": MODULES,
     }
     for case, value in checker.NETWORK_CASES.items():
         base = f"guest/network/{case}"
         files.update({
             f"{base}/sysctl": f"{value}\n", f"{base}/status": "0\n", f"{base}/netns": UNIT_NETNS + "\n",
-            f"{base}/links": LINK_LO + (LINK_TUNL if value == "0" else ""),
+            f"{base}/links": LINK_LO + (FALLBACKS if value == "0" else ""),
             f"{base}/addrs": ADDRESSES, f"{base}/routes4": ROUTES4, f"{base}/routes6": ROUTES6,
         })
     return files
@@ -1216,42 +1223,86 @@ class EvidenceTests(unittest.TestCase):
     def test_private_network_unit_holds_only_the_loopback_once_the_sysctl_is_set(self):
         network = self.verdict()["private_network"]
         self.assertEqual(network["boot_sysctl"], 0)
-        self.assertEqual(network["fb-0"]["links"], ["lo", "tunl0"])
+        self.assertEqual(network["fb-0"]["links"], ["lo", "tunl0", "sit0", "ip6tnl0", "gre0"])
         for case in ("fb-1", "fb-2"):
             self.assertEqual(network[case]["links"], ["lo"])
             self.assertEqual(network[case]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
-            self.assertEqual(network[case]["routes6"], [ROUTES6.rstrip("\n")])
+            self.assertEqual(network[case]["routes6"], ROUTES6.splitlines())
+
+    def test_private_network_main_table_loopback_route_is_accepted_deliberately(self):
+        main_table = "::1 dev lo proto kernel metric 256 pref medium\n"
+        for routes in (main_table, ROUTES6 + main_table, ROUTES6.replace("::1 ", "::1/128 ")):
+            with self.subTest(routes=routes):
+                verdict = self.verdict(change=lambda f, r=routes: f.update({"guest/network/fb-1/routes6": r}))
+                self.assertEqual(verdict["private_network"]["fb-1"]["links"], ["lo"])
+
+    def test_private_network_linked_device_names_are_normalised(self):
+        addresses = ADDRESSES.replace("1: lo ", "1: lo@lo ", 1)
+        self.assertEqual(self.verdict(change=lambda f: f.update({"guest/network/fb-1/addrs": addresses}))
+                         ["private_network"]["fb-1"]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
 
     def test_private_network_fabrication_fails_closed(self):
         base = "guest/network"
         changes = [
-            lambda f: f.pop(f"{base}/modules"),
-            lambda f: f.update({f"{base}/extra": ""}),
-            lambda f: f.pop(f"{base}/fb-1/routes6"),
-            lambda f: f.update({f"{base}/boot-sysctl": "x\n"}),
-            # No control: the host has no fallback device, so value 0 proves nothing.
-            lambda f: f.update({f"{base}/init-links": LINK_LO}),
-            lambda f: f.update({f"{base}/fb-0/links": LINK_LO}),
-            lambda f: f.update({f"{base}/fb-0/links": LINK_LO + LINK_TUNL.replace("tunl0", "evil0")}),
-            lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_TUNL}),
-            lambda f: f.update({f"{base}/fb-2/links": LINK_TUNL}),
-            lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_LO}),
-            lambda f: f.update({f"{base}/fb-1/links": "garbage\n"}),
-            lambda f: f.update({f"{base}/fb-1/sysctl": "0\n"}),
-            lambda f: f.update({f"{base}/fb-1/status": "1\n"}),
-            lambda f: f.update({f"{base}/fb-1/netns": INIT_NETNS + "\n"}),
-            lambda f: f.update({f"{base}/fb-1/netns": "net:[x]\n"}),
-            lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES.split("\n")[0] + "\n"}),
-            lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES + "2: eth0    inet 10.0.0.2/24 scope global eth0\n"}),
-            lambda f: f.update({f"{base}/fb-1/addrs": "1: lo\n"}),
-            lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "default via 10.0.0.1 dev eth0\n"}),
-            lambda f: f.update({f"{base}/fb-1/routes4": "10.0.0.0/24 dev lo scope link\n"}),
-            lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev eth0 table local\n"}),
-            lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev\n"}),
+            (lambda f: f.pop(f"{base}/modules"), "does not hold exactly"),
+            (lambda f: f.update({f"{base}/extra": ""}), "does not hold exactly"),
+            (lambda f: f.pop(f"{base}/fb-1/routes6"), "malformed network record"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "x\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "1\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "7\n"}), "does not boot"),
+            # The modules, and the control: value 0 must show the host's fallback devices.
+            (lambda f: f.update({f"{base}/modules": ""}), "tunnel modules are not loaded"),
+            (lambda f: f.update({f"{base}/modules": MODULES.replace("ip_gre", "ip_gre2")}),
+             "tunnel modules are not loaded"),
+            (lambda f: f.update({f"{base}/init-links": LINK_LO}), "no fallback tunnel device"),
+            (lambda f: f.update({f"{base}/init-links": LINK_LO + LINK_TUNL}), "no fallback tunnel device"),
+            (lambda f: f.update({f"{base}/fb-0/links": LINK_LO}), "lacks the host's fallback"),
+            (lambda f: f.update({f"{base}/fb-0/links": LINK_LO + LINK_TUNL}), "lacks the host's fallback"),
+            (lambda f: f.update({f"{base}/fb-0/links": LINK_LO + FALLBACKS + link(6, "evil0", "ipip")}),
+             "lacks the host's fallback"),
+            (lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_TUNL}), "more than lo"),
+            (lambda f: f.update({f"{base}/fb-2/links": LINK_TUNL}), "lacks exactly one lo"),
+            (lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_LO}), "lacks exactly one lo"),
+            (lambda f: f.update({f"{base}/fb-1/links": "garbage\n"}), "malformed"),
+            (lambda f: f.update({f"{base}/fb-1/sysctl": "0\n"}), "did not run with"),
+            (lambda f: f.update({f"{base}/fb-1/status": "1\n"}), "did not complete"),
+            (lambda f: f.update({f"{base}/fb-1/netns": INIT_NETNS + "\n"}), "network namespace of its own"),
+            (lambda f: f.update({f"{base}/fb-1/netns": "net:[x]\n"}), "network namespace of its own"),
+            (lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES.split("\n")[0] + "\n"}), "lacks exactly one lo"),
+            (lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES + "2: eth0    inet 10.0.0.2/24 scope global eth0\n"}),
+             "more than lo"),
+            (lambda f: f.update({f"{base}/fb-1/addrs": "1: lo\n"}), "malformed"),
+            # Routes: empty, off lo, via a gateway, outside the allowlist.
+            (lambda f: f.update({f"{base}/fb-1/routes4": ""}), "lacks the loopback host route"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ""}), "lacks the loopback host route"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": "\n"}), "blank line"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "default via 10.0.0.1 dev eth0\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 via 127.0.0.2 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "local 10.0.0.0/8 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "127.0.0.0/8 dev lo\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "unreachable 127.0.0.1 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": "broadcast 127.255.255.255 dev lo table local\n"}),
+             "lacks the loopback host route"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev eth0 table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev\n"}), "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "fe80::/64 dev lo proto kernel\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "default via fe80::1 dev lo\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": "::1 dev lo table main\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": "multicast ff00::/8 dev lo table local\n"}),
+             "lacks the loopback host route"),
         ]
-        for change in changes:
-            with self.subTest(change=change):
-                self.refuses(change)
+        for change, message in changes:
+            with self.subTest(change=change), self.assertRaisesRegex(checker.EvidenceError, message):
+                self.verdict(change=change)
 
     def test_cli_writes_one_verdict_and_refuses_bad_input(self):
         root = self.evidence()

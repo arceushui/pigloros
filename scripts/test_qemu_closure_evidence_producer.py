@@ -367,6 +367,16 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual((case / "routes4").read_text(), "ip -4 route show table all\n")
         self.assertEqual((case / "routes6").read_text(), "ip -6 route show table all\n")
 
+    def test_a_failed_ip_command_fails_the_case_even_when_the_last_one_succeeds(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        self.shell.stub("systemd-run", 'while [[ $1 == --* ]]; do shift; done\nexec "$@"')
+        # Only the first `ip` command fails; bash -c would otherwise return the last status.
+        self.shell.stub("ip", '[[ $* == "-o link show" ]] && exit 1\nexit 0')
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        self.assertEqual((self.base / "network/fb-1/status").read_text(), "1\n")
+
     def test_network_case_records_a_failed_unit_instead_of_exiting(self):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")

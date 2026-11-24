@@ -168,6 +168,16 @@ NETWORK_CASES = {"fb-0": "0", "fb-1": "1", "fb-2": "2"}
 NETWORK_ENTRIES = {"boot-sysctl", "init-netns", "init-links", "modules", *NETWORK_CASES}
 NETWORK_FILES = {"sysctl", "netns", "links", "addrs", "routes4", "routes6", "status"}
 LOOPBACK_ADDRESSES = {("lo", "inet", "127.0.0.1/8"), ("lo", "inet6", "::1/128")}
+# The modules guest.nix loads, and the fallback device each creates in a new
+# network namespace while the sysctl is 0 (ipip, sit, ip6_tunnel, ip_gre).
+TUNNEL_MODULES = {"ipip", "sit", "ip6_tunnel", "ip_gre"}
+FALLBACK_DEVICES = {"tunl0", "sit0", "ip6tnl0", "gre0"}
+ROUTE_KINDS = {"local", "broadcast", "multicast", "unicast", "unreachable", "blackhole", "prohibit", "throw"}
+ROUTES4_ALLOWED = {"kinds": {"local": {"127.0.0.0/8", "127.0.0.1"},
+                             "broadcast": {"127.0.0.0", "127.255.255.255"}},
+                   "unicast": set(), "main": set(), "required": {"127.0.0.0/8"}}
+ROUTES6_ALLOWED = {"kinds": {"local": {"::1", "::1/128"}, "multicast": {"ff00::/8"}},
+                   "unicast": {"::1", "::1/128"}, "main": {"::1", "::1/128"}, "required": {"::1", "::1/128"}}
 LINK_NAME = re.compile(r"[0-9]+: ([^\s:@]+)(?:@\S+)?: ")
 CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
@@ -1142,7 +1152,8 @@ def address_set(evidence: Evidence, name: str) -> set[tuple[str, str, str]]:
         fields = line.split()
         if len(fields) < 4 or fields[2] not in ("inet", "inet6"):
             raise EvidenceError(f"malformed {name} line: {line!r}")
-        addresses.add((fields[1], fields[2], fields[3]))
+        # `ip` prints a linked device as NAME@PEER.
+        addresses.add((fields[1].split("@")[0], fields[2], fields[3]))
     return addresses
 
 
@@ -1150,13 +1161,30 @@ def route_field(fields: list[str], key: str) -> str | None:
     return fields[fields.index(key) + 1] if key in fields[:-1] else None
 
 
-def require_loopback_routes(evidence: Evidence, name: str) -> list[str]:
-    """Every route is in the local table and leaves by `lo`: none leaves the unit."""
+def require_loopback_routes(evidence: Evidence, name: str, family: dict) -> list[str]:
+    """Every route is one of the loopback's own, none has a gateway, and the host route is there.
+
+    A route is `[KIND] DESTINATION dev lo [table TABLE] ...`. IPv6 may put the
+    `::1` route in the main table (no `table` field), as some kernels do; every
+    other route, and every IPv4 one, is in the local table.
+    """
     routes = evidence.text(name).splitlines()
+    seen = set()
     for line in routes:
         fields = line.split()
-        if route_field(fields, "dev") != "lo" or route_field(fields, "table") != "local":
-            raise EvidenceError(f"{name} holds a route other than the loopback's local ones: {line!r}")
+        if not fields:
+            raise EvidenceError(f"{name} holds a blank line")
+        kind = fields[0] if fields[0] in ROUTE_KINDS else None
+        destination = fields[1 if kind else 0] if len(fields) > 1 else ""
+        table = route_field(fields, "table")
+        allowed = family["kinds"].get(kind, set()) if kind else family["unicast"]
+        if "via" in fields or "nexthop" in fields or route_field(fields, "dev") != "lo" \
+                or destination not in allowed \
+                or table not in (("local", None) if destination in family["main"] and not kind else ("local",)):
+            raise EvidenceError(f"{name} holds a route other than the loopback's own: {line!r}")
+        seen.add(destination)
+    if not seen & family["required"]:
+        raise EvidenceError(f"{name} lacks the loopback host route: {routes}")
     return routes
 
 
@@ -1176,25 +1204,32 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
         raise EvidenceError(f"the {name} unit lacks exactly one lo with 127.0.0.1/8 and ::1/128: "
                             f"{links} {sorted(addresses)}")
     if value == "0":
-        # The control: the fallback devices of the init namespace appear.
-        if not extra or any(link not in init[1] for link in extra):
-            raise EvidenceError(f"with value 0 the unit holds no fallback tunnel device of the host: {links}")
+        # The control: the fallback device of every loaded tunnel module
+        # appears, and each is one the host has too.
+        if not FALLBACK_DEVICES <= set(extra) or any(link not in init[1] for link in extra):
+            raise EvidenceError(f"with value 0 the unit lacks the host's fallback tunnel devices: {links}")
     elif extra or addresses != LOOPBACK_ADDRESSES:
         raise EvidenceError(f"the {name} unit holds more than lo with 127.0.0.1/8 and ::1/128: "
                             f"{links} {sorted(addresses)}")
     return {"links": links, "addresses": sorted(addresses),
-            "routes4": require_loopback_routes(evidence, f"{base}/routes4"),
-            "routes6": require_loopback_routes(evidence, f"{base}/routes6")}
+            "routes4": require_loopback_routes(evidence, f"{base}/routes4", ROUTES4_ALLOWED),
+            "routes6": require_loopback_routes(evidence, f"{base}/routes6", ROUTES6_ALLOWED)}
 
 
 def check_network(evidence: Evidence) -> dict:
     """ADR-069 R14: the unit holds only lo whenever the sysctl is at least 1."""
-    boot = evidence.line("guest/network/boot-sysctl")
+    # The packaged default: the kernel's own 0, which R14 changes through
+    # a host sysctl.d drop-in that #1488-b ships.
+    if evidence.line("guest/network/boot-sysctl") != "0":
+        raise EvidenceError("the packaged guest does not boot with net.core.fb_tunnels_only_for_init_net=0")
+    modules = {line.split()[0] for line in evidence.text("guest/network/modules").splitlines() if line.split()}
+    if not TUNNEL_MODULES <= modules:
+        raise EvidenceError(f"the tunnel modules are not loaded: {sorted(TUNNEL_MODULES - modules)}")
     init_netns = evidence.line("guest/network/init-netns")
     init_links = link_names(evidence, "guest/network/init-links")
-    if not boot.isdigit() or not any(link != "lo" for link in init_links):
+    if not FALLBACK_DEVICES <= set(init_links):
         raise EvidenceError("the init namespace has no fallback tunnel device to compare with")
-    return {"boot_sysctl": int(boot), "init_links": init_links,
+    return {"boot_sysctl": 0, "init_links": init_links, "modules": sorted(TUNNEL_MODULES),
             **{name: check_network_case(evidence, name, value, (init_netns, init_links))
                for name, value in NETWORK_CASES.items()}}
 

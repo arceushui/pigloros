@@ -223,7 +223,7 @@ network_case() { # NAME VALUE
   printf '%s\n' "$2" >"${FB_TUNNELS_SYSCTL}"
   cat "${FB_TUNNELS_SYSCTL}" >"${dir}/sysctl"
   systemd-run --quiet --wait --collect --pipe --property=PrivateNetwork=yes --setenv=PATH \
-    bash -c "$(declare -f network_probe); network_probe \"\$1\"" probe "${PWD}/${dir}" || status=$?
+    bash -c "set -o errexit; $(declare -f network_probe); network_probe \"\$1\"" probe "${PWD}/${dir}" || status=$?
   printf '%s\n' "${status}" >"${dir}/status"
 }
 
@@ -359,5 +359,7 @@ cat /proc/modules >network/modules
 for value in 0 1 2; do
   network_case "fb-${value}" "${value}"
 done
+# The booted value again, so later cases run as the package ships.
+cat network/boot-sysctl >"${FB_TUNNELS_SYSCTL}"
 
 printf 'complete\n' >status
