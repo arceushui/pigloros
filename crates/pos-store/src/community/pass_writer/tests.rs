@@ -21,8 +21,11 @@ use pos_core::{
 use ulid::Ulid;
 
 use super::super::erasure_budget::CommunityErasureBudgetPortV1;
-use super::super::erasure_budget::CommunityPendingReservationV1;
-use super::super::pass_planner::CommunityPassReadPortV1;
+use super::super::erasure_budget::{
+    CommunityErasureActorV1, CommunityErasureBudgetV1, CommunityPendingErasureV1,
+    CommunityPendingReservationV1,
+};
+use super::super::pass_planner::{trace_room, CommunityPassReadPortV1};
 use super::super::pass_record::{CommunityPassStatusV1, CommunityReservedPassV1};
 use super::super::pass_state::{CommunityGenerationCountsV1, CommunityPassStateV1};
 use super::super::quarantine::QuarantineLedgerV1;
@@ -1122,4 +1125,96 @@ fn an_apply_over_a_record_or_a_bare_entry_fails_loudly() -> TestResult {
         Some(Error::InvalidBinding)
     );
     Ok(())
+}
+
+/// R13.1(4) and code 7: at most one reservation of T is pending, so a
+/// second Reserve staged before the first applied is refused at the apply,
+/// whatever its identity sorts to; another Timeline's entry does not count.
+#[test]
+fn a_second_pending_reservation_of_t_refuses_the_apply() -> TestResult {
+    let mut domain = domain()?;
+    let base = input()?;
+    let other = |byte: u8| CommunityReserveInputV1 {
+        reservation_operation_id: [byte; 16],
+        ..base.clone()
+    };
+    // Another Timeline's entry is not T's.
+    domain.pending_reservations.insert(
+        (id(2), [0x40; 16]),
+        CommunityPendingReservationV1::for_pass(0, 0),
+    );
+    let first = domain.stage_reserve(other(0x40))?;
+    let second = domain.stage_reserve(other(0x41))?;
+    domain.apply_reserve(&SEAL, first)?;
+    assert_eq!(
+        domain.apply_reserve(&SEAL, second).err(),
+        Some(Error::PassUnresolved)
+    );
+    // The bounds of the identity range hold: the lowest and highest
+    // identities of T are T's too.
+    for edge in [[0; 16], [u8::MAX; 16]] {
+        let mut domain = self::domain()?;
+        let staged = domain.stage_reserve(other(0x42))?;
+        domain
+            .pending_reservations
+            .insert((id(1), edge), CommunityPendingReservationV1::for_pass(0, 0));
+        assert_eq!(
+            domain.apply_reserve(&SEAL, staged).err(),
+            Some(Error::PassUnresolved)
+        );
+    }
+    Ok(())
+}
+
+/// R13.1(3): the budget sums saturate instead of overflowing, so a count
+/// near `u64::MAX` is a misfit, not a panic.
+#[test]
+fn the_budget_sums_saturate() {
+    let actor = |targets, quarantine_reserve| CommunityErasureActorV1 {
+        actor: actor(10),
+        targets,
+        quarantine_reserve,
+    };
+    let budget = |rows| CommunityErasureBudgetV1 {
+        actors: Vec::new(),
+        rows: BTreeMap::from([(id(1), rows)]),
+        quarantine_rows: BTreeMap::new(),
+    };
+    let pending = |targets, rows| CommunityPendingErasureV1 {
+        targets,
+        rows: BTreeMap::from([(id(1), rows)]),
+    };
+    let none = CommunityPendingErasureV1::default();
+    // Every target term at the top.
+    assert_eq!(
+        trace_room(&budget(0), &actor(u64::MAX, 0), &none, id(1), 0, 0),
+        None
+    );
+    assert_eq!(
+        trace_room(&budget(0), &actor(0, u64::MAX), &none, id(1), 0, 0),
+        None
+    );
+    assert_eq!(
+        trace_room(&budget(0), &actor(1, 1), &pending(u64::MAX, 0), id(1), 0, 0),
+        None
+    );
+    assert_eq!(
+        trace_room(&budget(0), &actor(1, 1), &none, id(1), u64::MAX, 0),
+        None
+    );
+    // Every row term at the top, with the targets fitting.
+    let fits = actor(0, 0);
+    assert_eq!(
+        trace_room(&budget(u64::MAX), &fits, &none, id(1), 1, 0),
+        None
+    );
+    assert_eq!(
+        trace_room(&budget(1), &fits, &pending(0, u64::MAX), id(1), 1, 0),
+        None
+    );
+    let held = CommunityErasureBudgetV1 {
+        quarantine_rows: BTreeMap::from([(id(1), u64::MAX)]),
+        ..budget(1)
+    };
+    assert_eq!(trace_room(&held, &fits, &none, id(1), 1, 0), None);
 }
