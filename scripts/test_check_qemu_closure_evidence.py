@@ -209,6 +209,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
     }
     files["host/kernel-config"] = files["guest/kernel-config"]
     files.update(case_files())
+    files.update(executable_files(architecture))
     files.update(network_files())
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
@@ -241,12 +242,12 @@ REPLY = json.dumps({
                     "partitionNumber": 1, "architecture": "x86-64", "fileSystemType": "erofs",
                     "size": 581632, "offset": 20480, "mountFileDescriptor": 0, "mountPoint": ["/"]}],
     "singleFileSystem": False, "imagePolicy": "root=signed:=absent",
-    "imageSize": 4096, "sectorSize": 512, "imageName": "piglor-evidence-image",
+    "imageSize": 0, "sectorSize": 512, "imageName": "piglor-evidence-image",
 }, indent=4) + "\n"
 
 
 def ddi(root_hash: str = ROOT_HASH, salt: str = SALT, version: int = 1, hash_type: int = 1,
-        salt_size: int = 32) -> bytes:
+        salt_size: int = 32, adapter: bytes | None = None) -> bytes:
     """A minimal three-partition GPT image: data, a verity superblock and the
     root-verity-sig JSON, at 512-byte sectors."""
     image = bytearray(512 * 8)
@@ -267,16 +268,51 @@ def ddi(root_hash: str = ROOT_HASH, salt: str = SALT, version: int = 1, hash_typ
     image[6 * 512:7 * 512] = superblock
     signature = json.dumps({"rootHash": root_hash, "signature": "AA=="}).encode()
     image[7 * 512:7 * 512 + len(signature)] = signature
-    return bytes(image)
+    # The adapter's bytes follow the partitions verbatim: the real image holds
+    # them uncompressed in its EROFS root, which the checker finds by content.
+    return bytes(image) + (X86_ADAPTER if adapter is None else adapter)
 
 
 TAMPERED_OFFSET = 5 * 512 + 10
 
 
-def tampered_ddi() -> bytes:
-    image = bytearray(ddi())
+def tampered_ddi(adapter: bytes | None = None) -> bytes:
+    image = bytearray(ddi(adapter=adapter))
     image[TAMPERED_OFFSET] ^= 0x01
     return bytes(image)
+
+
+def static_elf(machine: int, tag: bytes, *, interpreter: bool = False, size: int = 200_000) -> bytes:
+    """A minimal 64-bit ELF header and two program headers, then tagged filler."""
+    header = bytearray(64)
+    header[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<HH", header, 16, 3, machine)
+    struct.pack_into("<Q", header, 32, 64)
+    struct.pack_into("<HH", header, 54, 56, 2)
+    headers = bytearray(112)
+    struct.pack_into("<I", headers, 0, 1)
+    # PT_INTERP names the loader of a dynamic executable; PT_NOTE does not.
+    struct.pack_into("<I", headers, 56, 3 if interpreter else 4)
+    return bytes(header + headers) + tag.ljust(size, b".")
+
+
+X86_ADAPTER = static_elf(62, b"adapter")
+# The raw reply's imageSize is the positive image's length, adapter included.
+IMAGE_SIZE = len(ddi())
+REPLY = REPLY.replace('"imageSize": 0', f'"imageSize": {IMAGE_SIZE}')
+
+
+def executable_files(architecture: str, adapter: bytes | None = None) -> dict[str, bytes]:
+    """The architecture's adapter and launcher, and the images that carry the adapter."""
+    machine = checker.ELF_MACHINES[architecture]
+    adapter = static_elf(machine, b"adapter") if adapter is None else adapter
+    return {
+        "host/images/adapter": adapter,
+        "host/images/launcher": static_elf(machine, b"launcher"),
+        "host/images/positive.raw": ddi(adapter=adapter),
+        "host/images/wrong-key.raw": ddi(adapter=adapter),
+        "host/images/tampered.raw": tampered_ddi(adapter),
+    }
 
 
 def case_files() -> dict[str, bytes | str]:
@@ -306,7 +342,8 @@ def case_files() -> dict[str, bytes | str]:
     ):
         base = f"guest/cases/{case}"
         files.update({
-            f"{base}/arguments": f"{IMAGES}/{image}.raw\n{IMAGES}/{signer}.der\n{description}\n",
+            f"{base}/arguments": (f"{IMAGES}/{image}.raw\n{IMAGES}/{signer}.der\n{description}\n"
+                                  f"{IMAGES}/adapter\nhonest\n"),
             f"{base}/driver-stderr": "",
             f"{base}/driver-status": "0\n",
             f"{base}/timing": "activation-seconds\t12.50\n",
@@ -1101,11 +1138,61 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(verdict["tampered"]["readback"]["file"][0], "1")
         self.assertEqual(verdict["wrong-key"]["report"][0], ["activation", "refused", "MethodRejected"])
         self.assertEqual((verdict["mountfsd_reply"]["imageSize"], verdict["mountfsd_reply"]["sectorSize"]),
-                         (4096, 512))
+                         (IMAGE_SIZE, 512))
         self.assertEqual(verdict["tampered_offset"], TAMPERED_OFFSET)
         self.assertEqual(verdict["mountfsd_reply"]["cold_mountimage_seconds"], 71.25)
         self.assertEqual(verdict["positive"]["activation_seconds"], 12.5)
         self.assertEqual(verdict["positive"]["held"]["dm_device"], "253:0")
+
+    def test_the_adapter_and_launcher_are_real_static_executables(self):
+        for architecture in ("x86_64", "aarch64"):
+            executables = self.verdict(architecture)["mount_image_cases"]["executables"]
+            adapter = executable_files(architecture)["host/images/adapter"]
+            self.assertEqual(executables["adapter_sha256"], hashlib.sha256(adapter).hexdigest())
+            self.assertEqual(executables["adapter_bytes"], len(adapter))
+
+    def test_a_stand_in_adapter_or_launcher_fails_closed(self):
+        machine = checker.ELF_MACHINES["x86_64"]
+        other = checker.ELF_MACHINES["aarch64"]
+        def with_adapter(adapter):
+            return lambda f: f.update(executable_files("x86_64", adapter))
+        stub = b"adapter"
+        stub_files = {**executable_files("x86_64", stub)}
+        changes = [
+            # The 7-byte stand-in the staged SIM1 used to name, in the file and in the image.
+            with_adapter(stub),
+            lambda f: f.update({"host/images/adapter": stub}),
+            lambda f: f.update({"host/images/launcher": stub}),
+            lambda f: f.update(stub_files),
+            # A script, a truncated ELF and a wrong class or byte order.
+            lambda f: f.update({"host/images/launcher": b"#!/bin/sh\n" + bytes(200_000)}),
+            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:99_999]}),
+            lambda f: f.update({"host/images/launcher": b"\x7fELF\x01" + f["host/images/launcher"][5:]}),
+            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:5] + b"\x02"
+                                + f["host/images/launcher"][6:]}),
+            # Another architecture, and a relocatable object.
+            with_adapter(static_elf(other, b"adapter")),
+            lambda f: f.update({"host/images/launcher": static_elf(other, b"launcher")}),
+            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:16]
+                                + struct.pack("<H", 1) + f["host/images/launcher"][18:]}),
+            # Dynamically linked: no loader exists inside the image's root.
+            with_adapter(static_elf(machine, b"adapter", interpreter=True)),
+            lambda f: f.update({"host/images/launcher": static_elf(machine, b"launcher", interpreter=True)}),
+            # A program header table beyond the file, or too small an entry.
+            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:32]
+                                + struct.pack("<Q", 10**9) + f["host/images/launcher"][40:]}),
+            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:54]
+                                + struct.pack("<H", 8) + f["host/images/launcher"][56:]}),
+            # The image does not carry the adapter exactly once.
+            lambda f: f.update({"host/images/positive.raw": ddi(adapter=b"other")}),
+            lambda f: f.update({"host/images/positive.raw": f["host/images/positive.raw"]
+                                + f["host/images/adapter"]}),
+            lambda f: f.pop("host/images/adapter"),
+            lambda f: f.pop("host/images/launcher"),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
 
     def test_mount_image_case_fabrication_fails_closed(self):
         positive, tampered = "guest/cases/positive", "guest/cases/tampered"
@@ -1205,7 +1292,7 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({f"{reply}/reply": without("imageSize")}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": true')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"erofs"', '"ext4"')}),
-            lambda f: f.update({f"{reply}/reply": REPLY.replace('"imageSize": 4096', '"imageSize": 4097')}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {IMAGE_SIZE + 1}')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": 4096')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed:=absent", "root=verity:=absent")}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed:=absent", "root=signed+erofs:=absent")}),

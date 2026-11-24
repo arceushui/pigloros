@@ -72,6 +72,8 @@ struct Inputs {
     image: Vec<u8>,
     certificate: Vec<u8>,
     binary: std::path::PathBuf,
+    adapter: Vec<u8>,
+    arguments: Vec<String>,
     spi1: Vec<u8>,
 }
 
@@ -90,6 +92,9 @@ impl Inputs {
             image: expanded.stdout,
             certificate: fs::read(vectors.join("signer.der"))?,
             binary,
+            // Staging only digests the adapter into SIM1; it is not run here.
+            adapter: b"staged adapter stand-in".to_vec(),
+            arguments: vec!["honest".to_owned()],
             spi1: hex(SPI1_A),
         })
     }
@@ -105,6 +110,8 @@ impl Inputs {
                 image: &self.image,
                 certificate: &self.certificate,
                 key_description: KEY_DESCRIPTION,
+                executable: &self.adapter,
+                arguments: &self.arguments,
             },
             binary: &self.binary,
             installation: &self.spi1,

@@ -62,29 +62,55 @@ fn never_released((): (), _: &()) -> Release<'_> {
 }
 
 #[test]
-fn arguments_are_exactly_image_certificate_and_utf8_description() -> TestResult {
+fn arguments_are_image_certificate_description_adapter_and_its_arguments() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let image = directory.path().join("image.raw");
-    let certificate = directory.path().join("signer.der");
-    std::fs::write(&image, b"image bytes")?;
-    std::fs::write(&certificate, b"certificate bytes")?;
-    let (image, certificate) = (
-        image.to_str().ok_or("temporary path")?,
-        certificate.to_str().ok_or("temporary path")?,
-    );
+    let files = ["image.raw", "signer.der", "adapter"].map(|name| directory.path().join(name));
+    for (file, bytes) in
+        files
+            .iter()
+            .zip([&b"image bytes"[..], b"certificate bytes", b"adapter bytes"])
+    {
+        std::fs::write(file, bytes)?;
+    }
+    let [image, certificate, adapter] = files
+        .iter()
+        .map(|file| file.to_str().ok_or("temporary path"))
+        .collect::<Result<Vec<_>, _>>()?[..]
+    else {
+        return Err("three paths".into());
+    };
 
-    let case = ConformanceCase::from_arguments(&arguments(&[image, certificate, "CN: 01"]))?;
+    let case =
+        ConformanceCase::from_arguments(&arguments(&[image, certificate, "CN: 01", adapter]))?;
     assert_eq!(case.image, b"image bytes");
     assert_eq!(case.certificate, b"certificate bytes");
     assert_eq!(case.key_description, "CN: 01");
+    assert_eq!(case.adapter, b"adapter bytes");
+    assert!(case.adapter_arguments.is_empty());
+    let case = ConformanceCase::from_arguments(&arguments(&[
+        image,
+        certificate,
+        "CN: 01",
+        adapter,
+        "honest",
+        "7",
+    ]))?;
+    assert_eq!(case.adapter_arguments, ["honest", "7"]);
 
     for wrong in [
         arguments(&[]),
-        arguments(&[image, certificate]),
-        arguments(&[image, certificate, "CN: 01", "extra"]),
+        arguments(&[image, certificate, "CN: 01"]),
         vec![
             image.into(),
             certificate.into(),
+            OsString::from_vec(vec![0xff]),
+            adapter.into(),
+        ],
+        vec![
+            image.into(),
+            certificate.into(),
+            "CN: 01".into(),
+            adapter.into(),
             OsString::from_vec(vec![0xff]),
         ],
     ] {
@@ -95,9 +121,18 @@ fn arguments_are_exactly_image_certificate_and_utf8_description() -> TestResult 
     }
     let missing = directory.path().join("missing");
     let missing = missing.to_str().ok_or("temporary path")?;
-    for unreadable in [[missing, certificate], [image, missing]] {
+    for unreadable in [
+        [missing, certificate, adapter],
+        [image, missing, adapter],
+        [image, certificate, missing],
+    ] {
         assert!(matches!(
-            ConformanceCase::from_arguments(&arguments(&[unreadable[0], unreadable[1], "CN: 01"])),
+            ConformanceCase::from_arguments(&arguments(&[
+                unreadable[0],
+                unreadable[1],
+                "CN: 01",
+                unreadable[2]
+            ])),
             Err(ConformanceError::Io(_))
         ));
     }
@@ -110,6 +145,8 @@ fn an_image_that_is_not_a_ddi_is_refused_before_staging() {
         image: b"not a disk image".to_vec(),
         certificate: Vec::new(),
         key_description: "CN: 01".to_owned(),
+        adapter: b"adapter".to_vec(),
+        adapter_arguments: vec!["honest".to_owned()],
     };
     let refused = case.stage();
     assert!(
@@ -226,7 +263,7 @@ fn removal_and_exit_status_report_each_outcome() {
     assert_eq!(
         String::from_utf8_lossy(&diagnostics),
         "pos-sandboxd-conformance: usage: pos-sandboxd-conformance IMAGE CERTIFICATE_DER \
-         KEY_DESCRIPTION\n"
+         KEY_DESCRIPTION ADAPTER [ADAPTER_ARGUMENT...]\n"
     );
 }
 
@@ -266,7 +303,12 @@ async fn a_run_stops_at_the_first_step_that_fails() -> TestResult {
     std::fs::write(&image, b"not a disk image")?;
     let mut report = Vec::new();
     let staging = run(
-        vec![image.clone().into(), image.into(), "CN: 01".into()],
+        vec![
+            image.clone().into(),
+            image.clone().into(),
+            "CN: 01".into(),
+            image.into(),
+        ],
         io::empty(),
         &mut report,
         describe,

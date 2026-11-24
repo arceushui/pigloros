@@ -141,13 +141,15 @@ provision_runtime() {
 driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   local dir="cases/$1" fifo=/run/piglor-evidence-control control line root pid status=0 start
   mkdir -p "${dir}"
-  printf '%s\n' "$2" "$3" "$4" >"${dir}/arguments"
+  # The image's own /adapter and its signed argument vector, which the driver
+  # binds in the staged SIM1.
+  printf '%s\n' "$2" "$3" "$4" "${images}/adapter" honest >"${dir}/arguments"
   provision_runtime
   devices >"${dir}/devices-before"
   # The control FIFO lives on the guest's tmpfs, not on the 9p evidence share.
   mkfifo -m 0600 "${fifo}"
   start="$(cut -d ' ' -f 1 /proc/uptime)"
-  pos-sandboxd-conformance "$2" "$3" "$4" <"${fifo}" >"${dir}/report" 2>"${dir}/driver-stderr" &
+  pos-sandboxd-conformance "$2" "$3" "$4" "${images}/adapter" honest <"${fifo}" >"${dir}/report" 2>"${dir}/driver-stderr" &
   pid=$!
   exec {control}>"${fifo}"
   for _ in $(seq 600); do

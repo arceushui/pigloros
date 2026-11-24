@@ -98,11 +98,14 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
         .stdout(fs::File::create(image)?)
         .status()?;
     assert!(expanded.success());
+    let adapter = Path::new("/tmp/conformance-adapter");
+    fs::write(adapter, b"adapter")?;
     let arguments = || -> Vec<OsString> {
         vec![
             image.into(),
             vectors.join("signer.der").into(),
             VECTOR_KEY_DESCRIPTION.into(),
+            adapter.into(),
         ]
     };
 
@@ -186,7 +189,7 @@ fn the_binary_fails_a_usage_error_with_a_diagnostic_and_no_report() -> TestResul
     assert_eq!(
         String::from_utf8(output.stderr)?,
         "pos-sandboxd-conformance: usage: pos-sandboxd-conformance IMAGE CERTIFICATE_DER \
-         KEY_DESCRIPTION\n"
+         KEY_DESCRIPTION ADAPTER [ADAPTER_ARGUMENT...]\n"
     );
     Ok(())
 }
