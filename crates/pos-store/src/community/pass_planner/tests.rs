@@ -973,6 +973,57 @@ fn a_minted_observation_shares_its_rows_terms_and_keys() -> TestResult {
     Ok(())
 }
 
+/// Three steps over `refs`, the `minting` ones consuming the minted
+/// observation with only `refs[0]` of their own.
+fn three_steps<'a>(
+    payload: &'a [u8],
+    refs: &'a [CommunityTypedInputRefV1<'a>],
+    minting: [bool; 3],
+) -> Vec<CommunityPassStepInputsV1<'a>> {
+    [hash(2), hash(3), hash(4)]
+        .into_iter()
+        .zip(minting)
+        .map(|(member, minted)| CommunityPassStepInputsV1 {
+            prepared_invocation: invocation(member, payload),
+            step_inputs: if minted { &refs[..1] } else { refs },
+            consumes_minted_observation: minted,
+        })
+        .collect()
+}
+
+#[test]
+fn a_later_step_consuming_the_mint_adds_its_ref_to_the_4096() -> TestResult {
+    // R11.4(1): 4,096 distinct refs fit when no step consumes the minted
+    // observation; the minted Observation ref is one more when any step,
+    // here the second of three, consumes it, which gives 14.
+    let key = key()?;
+    let fixture = Fixture::new()?;
+    let roster = Fixture::roster(&key)?;
+    let profile = fixture.profile(&roster)?;
+    let port = Port::default();
+    let CommunityPassPlanV1::Due(due) = plan_community_pass_v1(
+        &port,
+        installation(&profile),
+        fixture.view(),
+        request(5, 1010),
+    )?
+    else {
+        return Err("due expected".into());
+    };
+    assert_eq!(due.due_members(), [0, 1, 2]);
+    let sources = minted_sources(0)?;
+    let minted = CommunityPassObservationUseV1::Minted(&sources);
+    let payload = [7; 16];
+    let refs: Vec<_> = (0..4096).map(metadata).collect();
+    let run = |minting| {
+        due.quote(&port, &three_steps(&payload, &refs, minting), minted)
+            .err()
+    };
+    assert_eq!(run([false; 3]), None);
+    assert_eq!(run([false, true, false]), Some(Error::CapacityExhausted));
+    Ok(())
+}
+
 /// The minted fixture's one source rule.
 const RULES: [CommunitySourceSchemaRuleV1<'static>; 1] = [CommunitySourceSchemaRuleV1 {
     event_type: "world.action",
