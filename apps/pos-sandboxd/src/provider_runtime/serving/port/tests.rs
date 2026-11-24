@@ -589,23 +589,28 @@ mod served {
             .lifecycle
             .terminal_response(attempt, stored.agr1_digest())
             .is_ok_and(|current| Arc::ptr_eq(&current, &stored)));
+        // B still holds the replaced response: it may write its output, but
+        // never its SPY1.
+        let late = delivered(&responder, fresh, (identity, &stored), false, TIMEOUT)?;
+        assert_eq!(late.len(), frames.len() - 1);
+        assert_eq!(late, frames[..frames.len() - 1]);
         Ok(())
     }
 
-    /// This request cancels an admitted attempt awaiting its input: SCY1
-    /// `1`, once its input ends and its response is signed.
+    /// A cancellation of an admitted attempt that awaits its input is
+    /// recorded for its ending, which has no SPY1 yet: `11`, no fabricated
+    /// SPY1 (until the N6 decision); the exchange still ends in its stored
+    /// response once its input ends.
     fn cancels_an_attempt_awaiting_its_input(
         responder: &Responder<'_>,
         port: &ExecutePort,
         staged: &StagedInstallation,
         (signer, key): (&KeyFileRuntimeSigner, crate::AdmittedRuntimeKey<'_>),
     ) -> TestResult {
-        let soon = || Instant::now() + Duration::from_secs(5);
         let source = [staged.evaluation(), staged.request()];
         let (server, mut peer) = UnixStream::pair()?;
         peer.set_read_timeout(Some(TIMEOUT))?;
         peer.write_all(&framed(&source)?)?;
-        let signing = signer;
         std::thread::scope(|scope| -> TestResult {
             let serving = scope.spawn(|| responder.answer(server, Admission::Answered, None));
             let mut prefix = [0; 4];
@@ -613,25 +618,70 @@ mod served {
             let mut bytes = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
             peer.read_exact(&mut bytes)?;
             let grant = AdmissionGrant::from_canonical_cbor(&bytes)?;
-            let cancelling = scope.spawn(move || {
+            assert_eq!(
                 port.cancel(
                     &cancel_request(grant.attempt_id, grant.grant_digest(), 6),
-                    soon(),
-                    (signing, key),
+                    Instant::now() + TIMEOUT,
+                    (signer, key),
+                ),
+                Err(Some(Code::SandboxUnavailable))
+            );
+            peer.shutdown(std::net::Shutdown::Write)?;
+            let mut rest = Vec::new();
+            peer.read_to_end(&mut rest)?;
+            assert!(!rest.is_empty());
+            serving.join().map_err(|_| "serving panicked")?;
+            Ok(())
+        })
+    }
+
+    /// A cancellation waits for a response still being signed, and gets
+    /// `11` once its deadline passes with none.
+    fn cancel_waits_for_a_pending_response(
+        (signer, key): (&KeyFileRuntimeSigner, crate::AdmittedRuntimeKey<'_>),
+    ) -> TestResult {
+        let limits = StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        };
+        let (_late_tree, late) = test_port(limits)?;
+        let pending = late
+            .lifecycle
+            .completed_pending_for_test()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            late.cancel(
+                &cancel_request(pending.attempt_id, pending.agr1_digest, 8),
+                Instant::now() + Duration::from_millis(50),
+                (signer, key),
+            ),
+            Err(Some(Code::SandboxUnavailable))
+        );
+        let (_tree, port) = test_port(limits)?;
+        let pending = port
+            .lifecycle
+            .completed_pending_for_test()
+            .map_err(|error| error.to_string())?;
+        let (attempt, digest) = (pending.attempt_id, pending.agr1_digest);
+        std::thread::scope(|scope| -> TestResult {
+            let cancelling = scope.spawn(|| {
+                port.cancel(
+                    &cancel_request(attempt, digest, 9),
+                    Instant::now() + TIMEOUT,
+                    (signer, key),
                 )
             });
-            std::thread::sleep(Duration::from_millis(300));
-            peer.shutdown(std::net::Shutdown::Write)?;
+            std::thread::sleep(Duration::from_millis(100));
+            pending
+                .retain(&port.lifecycle)
+                .map_err(|error| error.to_string())?;
             let answered = cancelling
                 .join()
                 .map_err(|_| "cancel panicked")?
                 .map_err(|code| format!("{code:?}"))?;
-            serving.join().map_err(|_| "serving panicked")?;
             let scy1 = SandboxCancelResponse::from_canonical_cbor(&answered)?;
-            assert_eq!(scy1.result, SandboxCancellationResult::CancelledAndCleaned);
+            assert_eq!(scy1.result, SandboxCancellationResult::AlreadyTerminal);
             Ok(())
-        })?;
-        Ok(())
+        })
     }
 
     /// SCY1 (base §4, §10): `0` binds the SPY1 of an attempt already
@@ -710,16 +760,7 @@ mod served {
             ),
             Err(Some(Code::UnknownAttempt))
         );
-        // An attempt that awaits its input past the deadline has no SPY1.
-        port.lifecycle.granted_for_test([0x77; 16], [0x78; 32])?;
-        assert_eq!(
-            port.cancel(
-                &cancel_request([0x77; 16], [0x78; 32], 5),
-                Instant::now() + Duration::from_millis(50),
-                (&*signer, key)
-            ),
-            Err(Some(Code::SandboxUnavailable))
-        );
+        cancel_waits_for_a_pending_response((&signer, key))?;
         cancels_an_attempt_awaiting_its_input(&responder, port, &staged, (&signer, key))?;
         drop(staged);
         Ok(())

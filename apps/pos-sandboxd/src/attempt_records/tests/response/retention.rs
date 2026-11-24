@@ -876,7 +876,7 @@ fn racing_retentions_keep_the_first_stored_response() -> TestResult {
 /// stored response stays; a response replaced meanwhile cannot be claimed.
 #[test]
 fn a_delivered_response_is_never_reissued() -> TestResult {
-    let (_directory, lifecycle, _ledger) = lifecycle()?;
+    let (_directory, lifecycle, ledger) = lifecycle()?;
     let public = signing_key().verifying_key();
     let admitted = AdmittedRuntimeKey::new(KEY_ID, &public);
     let retained = completed_retained(&lifecycle)?;
@@ -898,6 +898,44 @@ fn a_delivered_response_is_never_reissued() -> TestResult {
         &lifecycle.terminal_response(ATTEMPT, digest)?,
         &retained
     ));
+    // A successor that faults is discarded for a delivered response: no
+    // fault replaces it and nothing is quarantined.
+    let foreign = crate::KeyFileRuntimeSigner::from_signing_key(
+        ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+        KEY_ID.to_owned(),
+    );
+    assert!(matches!(
+        lifecycle.reissue_response(
+            ATTEMPT,
+            digest,
+            Some(timed_out_transfer()),
+            &foreign,
+            admitted
+        ),
+        Err(AttemptLifecycleError::ResponseDelivered)
+    ));
+    assert!(Arc::ptr_eq(
+        &lifecycle.terminal_response(ATTEMPT, digest)?,
+        &retained
+    ));
+    assert!(ledger.reserve_storage(0).is_ok());
+    // For an undelivered response the same fault is a provider fault.
+    let (_faulted_directory, faulted, faulted_ledger) = self::lifecycle()?;
+    let undelivered = completed_retained(&faulted)?;
+    assert!(faulted
+        .reissue_response(
+            ATTEMPT,
+            undelivered.agr1_digest(),
+            Some(timed_out_transfer()),
+            &foreign,
+            admitted
+        )
+        .is_err());
+    assert!(matches!(
+        faulted.terminal_response(ATTEMPT, undelivered.agr1_digest()),
+        Err(AttemptLifecycleError::ResponseUnavailable)
+    ));
+    assert!(faulted_ledger.reserve_storage(0).is_err());
     // An undelivered response is re-issued, and the replaced one can no
     // longer be claimed.
     let (_directory, lifecycle, _ledger) = self::lifecycle()?;

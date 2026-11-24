@@ -176,10 +176,10 @@ impl ExecutePort {
     ///
     /// # Errors
     /// `Some` SPE1 code: the lifecycle's refusal (see [`cancel_code`]), or
-    /// `11` when no terminal SPY1 exists to bind by `until`, including an
-    /// attempt withdrawn before its run, which leaves none (the N6 question
-    /// on the SRY1 draft), or when it was re-issued just before it could be
-    /// bound. `None` when the SCY1 cannot be signed under the
+    /// `11` when no terminal SPY1 exists to bind: an attempt that awaited
+    /// its input, or one withdrawn before its run, which leave none yet (the
+    /// N6 question on the SRY1 draft), one that has none by `until`, or one
+    /// re-issued just before it could be bound. `None` when the SCY1 cannot be signed under the
     /// admitted key: nothing is emitted (R9 §5).
     pub(super) fn cancel(
         &self,
@@ -190,10 +190,20 @@ impl ExecutePort {
         if let Some(repeated) = self.repeated_cancel(request) {
             return Ok(repeated);
         }
+        // A cancellation of an attempt still awaiting its input is recorded
+        // for its ending, which has no SPY1 yet: like a withdrawal, it is
+        // refused with 11 until the N6 decision, never bound to a fabricated
+        // SPY1.
+        let awaiting = self
+            .lifecycle
+            .awaits_input(request.attempt_id, request.agr1_digest);
         let result = self
             .runtime
             .block_on(self.lifecycle.cancel(request))
             .map_err(|error| Some(cancel_code(&error)))?;
+        if awaiting {
+            return Err(Some(SandboxProviderErrorCode::SandboxUnavailable));
+        }
         // The SCY1 binds the stored response's SPY1, which it delivers: no
         // re-issue may replace it after this.
         let spy1 = self

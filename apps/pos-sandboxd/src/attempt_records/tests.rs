@@ -215,6 +215,14 @@ fn start() -> String {
 pub(super) fn completed_retained(
     lifecycle: &crate::AttemptLifecycle,
 ) -> TestResult<std::sync::Arc<crate::RetainedResponse>> {
+    completed_pending(lifecycle).and_then(|pending| retain_pending(pending, lifecycle))
+}
+
+/// A Completed attempt of [`ATTEMPT`] that ended in `lifecycle` and whose
+/// response is not retained yet.
+pub(super) fn completed_pending(
+    lifecycle: &crate::AttemptLifecycle,
+) -> TestResult<crate::test_fixtures::PendingCompleted> {
     let grant = signed_grant()?;
     let digest = grant.grant.grant_digest();
     lifecycle.failed_granted(
@@ -229,9 +237,21 @@ pub(super) fn completed_retained(
         ..Released::default()
     }
     .ended()?;
+    Ok(crate::test_fixtures::PendingCompleted {
+        ended,
+        attempt_id: ATTEMPT,
+        agr1_digest: digest,
+    })
+}
+
+/// Retain `pending`'s response in `lifecycle`, signed by the test key.
+pub(super) fn retain_pending(
+    pending: crate::test_fixtures::PendingCompleted,
+    lifecycle: &crate::AttemptLifecycle,
+) -> TestResult<std::sync::Arc<crate::RetainedResponse>> {
     let public = signing_key().verifying_key();
     Ok(lifecycle.retain_response(
-        ended,
+        pending.ended,
         &signer(),
         crate::AdmittedRuntimeKey::new(KEY_ID, &public),
     )?)

@@ -224,6 +224,19 @@ impl<I> AttemptLifecycle<I> {
         }
     }
 
+    /// Whether the attempt of `agr1_digest` was granted and still awaits its
+    /// input: a cancellation of it is recorded for its ending, which has no
+    /// response yet.
+    pub fn awaits_input(&self, attempt_id: [u8; 16], agr1_digest: [u8; 32]) -> bool {
+        let attempts = lock(&self.attempts);
+        let awaiting = matches!(
+            attempts.get(&attempt_id),
+            Some(Slot::Granted { grant, .. }) if *grant == agr1_digest
+        );
+        drop(attempts);
+        awaiting
+    }
+
     /// Record that `response`, the stored response of `attempt_id`, is now
     /// delivered whole, as one connection is about to write its SPY1 or an
     /// SCY1 binds its digest; no re-issue replaces it from then on. `false`
