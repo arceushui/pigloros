@@ -408,10 +408,24 @@ impl Responder<'_> {
     ) {
         let window =
             Duration::from_millis(response.grant().effective_limits()[TRANSFER_WINDOW_ID].value);
-        self.deliver_within(port, stream, (identity, response), granted, window);
+        self.deliver_within(
+            port,
+            stream,
+            (identity, response),
+            granted,
+            |stream, records, expected| {
+                transfer_output(
+                    stream,
+                    records,
+                    (expected, window),
+                    crate::launcher::clock::monotonic_ns,
+                )
+            },
+        );
     }
 
-    /// [`Self::deliver`] with the output transfer bounded by `window`.
+    /// [`Self::deliver`] with the output `transfer` of the records, which
+    /// carry the given payload bytes, to the stream.
     ///
     /// SPY1 is written only once the lifecycle recorded this response as
     /// delivered, which no re-issue may then replace; a response replaced
@@ -422,7 +436,7 @@ impl Responder<'_> {
         stream: &UnixStream,
         (identity, response): (RequestIdentity, &Arc<RetainedResponse>),
         granted: bool,
-        window: Duration,
+        transfer: impl FnOnce(&UnixStream, &[Vec<u8>], u64) -> Transfer,
     ) {
         let attempt_id = identity.attempt_id.unwrap_or_default();
         let frames: Vec<&[u8]> = response.frames().collect();
@@ -434,14 +448,7 @@ impl Responder<'_> {
             .iter()
             .try_for_each(|frame| write_frame(&mut writing, frame))
             .is_ok();
-        let transferred = written.then(|| {
-            transfer_output(
-                stream,
-                outputs,
-                (expected, window),
-                crate::launcher::clock::monotonic_ns,
-            )
-        });
+        let transferred = written.then(|| transfer(stream, outputs, expected));
         match transferred {
             Some(Transfer::Complete) => {
                 if port.lifecycle.claim_delivery(attempt_id, response) {
