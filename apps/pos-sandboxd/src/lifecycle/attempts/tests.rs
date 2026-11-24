@@ -2105,6 +2105,7 @@ mod cases {
                 self,
                 _attempt: &AdmittedAttempt,
                 root: crate::RootRecheck<'r>,
+                _cancel: crate::CancelSignal,
             ) -> Result<OpenBarrier<'r>, Refused> {
                 if self.refused {
                     return Err(Refused);

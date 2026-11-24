@@ -28,8 +28,8 @@ use pos_core::community_lifecycle::{
     CommunityNativeNodeV1, CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1,
     CommunityOwnerBindingInputV1, CommunityOwnerBindingV1, CommunityScopeBindingInputV1,
     CommunityScopeBindingV1, CommunityScopeCoverageRowV1, CommunityScopeCoverageRowsV1,
-    CommunityScopeMembersV1, CommunitySelectionV1, CommunityTypedInputRefV1,
-    CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    CommunityScopeMembersV1, CommunitySelectionV1, CommunitySharedCountsV1,
+    CommunityTypedInputRefV1, CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::community_lifecycle::{
     community_recipient_identity_digest_v1, CommunityArtifactAdmissionV1,
@@ -450,6 +450,12 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     /// Before minting the CGI1, the CBQ1 maxima must fit the CDP1 shared
     /// per-record limits (owner decision on #560, 2026-11-19).
     ///
+    /// `prior` is the domain's seed of T's cumulative recorded-set counters,
+    /// the actual counts of T's existing history (R10.3(6)); the CBQ1
+    /// `prior_shared_counts` equal it. The domain's initialize passes the
+    /// value it seeds into T's counters at commit: nothing else enforces
+    /// that the two agree, so a caller outside the domain must do the same.
+    ///
     /// # Errors
     /// Returns `InvalidBinding` for an admission of another request, an
     /// address count other than the roster's, a zero or repeated address and
@@ -460,6 +466,7 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
         generation: [u8; 16],
         admission: &CommunityAuthorityAdmissionV1,
         envelope_addresses: &[Hash],
+        prior: CommunitySharedCountsV1,
     ) -> Result<CommunityInitializationRecordsV1, Error> {
         let decided = admission.request();
         let expected = self.request;
@@ -491,10 +498,11 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                     )
                 })
                 .collect();
-            self.quote(generation, &digests, &refs).and_then(|quote| {
-                self.request_record(generation, admission, &digests)
-                    .and_then(|request| self.evidence(generation, request, &refs, &quote))
-            })
+            self.quote(generation, prior, &digests, &refs)
+                .and_then(|quote| {
+                    self.request_record(generation, admission, &digests)
+                        .and_then(|request| self.evidence(generation, request, &refs, &quote))
+                })
         })
     }
 
@@ -507,6 +515,7 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
     fn quote(
         &self,
         generation: [u8; 16],
+        prior: CommunitySharedCountsV1,
         digests: &[Hash],
         refs: &[CommunityTypedInputRefV1<'_>],
     ) -> Result<CommunityBudgetQuoteV1, Error> {
@@ -535,6 +544,7 @@ impl<'a> CommunityInitializationPlannerV1<'a> {
                     self.form.timeline,
                     generation,
                     profile.digest(),
+                    prior,
                     due,
                     bytes,
                 )
