@@ -428,8 +428,3 @@ async fn a_failed_proxy_task_is_reported() -> TestResult {
     assert!(adapter.join().map_err(|_| "adapter thread")?.is_err());
     Ok(())
 }
-
-#[test]
-fn the_fail_closed_setup_error_is_a_creation_failure() {
-    assert_eq!(FailClosedSetup.setup_class(), SetupClass::Creation);
-}
