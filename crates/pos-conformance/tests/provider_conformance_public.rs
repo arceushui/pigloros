@@ -17,17 +17,43 @@ fn attempt_id(index: usize) -> Option<[u8; 16]> {
     Some(id)
 }
 
-/// The observation a faithful provider shows for one attempt of a case.
+/// The observation a faithful provider shows for one attempt of a case,
+/// written out here independently of `ProviderConformanceCase::expectation`.
 fn faithful_attempt(case: ProviderConformanceCase, index: usize) -> ObservedAttempt {
-    let public = match case.expectation() {
-        ExpectedPublicOutcome::Terminal { outcome, codes } => ObservedPublic::Terminal {
-            outcome,
-            terminal_code: codes.first().copied(),
-        },
-        ExpectedPublicOutcome::Refused(code) => ObservedPublic::Refused(code),
+    use ProviderConformanceCase as Case;
+    use SandboxTerminalOutcomeV1 as Outcome;
+    let terminal = |outcome, terminal_code| ObservedPublic::Terminal {
+        outcome,
+        terminal_code,
+    };
+    let public = match case {
+        Case::FilesystemEscape
+        | Case::ReadOnlyRootWrite
+        | Case::WorkAreaExhaustion
+        | Case::NetworkEscape
+        | Case::ForeignSignals
+        | Case::OrphanedChild
+        | Case::ConcurrentAttempts => terminal(Outcome::Completed, None),
+        Case::OversizedOutput => terminal(Outcome::UnavailableAfterAdmission, Some(7)),
+        Case::TaskExhaustion => terminal(Outcome::UnavailableAfterAdmission, Some(5)),
+        Case::MemoryExhaustion => terminal(Outcome::UnavailableAfterAdmission, Some(4)),
+        Case::WatchdogExpiry => terminal(Outcome::UnavailableAfterAdmission, Some(6)),
+        Case::AdapterCrash => terminal(Outcome::UnavailableAfterAdmission, Some(8)),
+        Case::MalformedOutput => terminal(Outcome::UnavailableAfterAdmission, Some(10)),
+        Case::BrokerCrashRecovery => terminal(Outcome::UnavailableAfterAdmission, Some(2)),
+        Case::CancelBeforeRelease | Case::CancelWhileRunning | Case::RevokedWhileRunning => {
+            terminal(Outcome::Cancelled, Some(1))
+        }
+        Case::RevokedBeforeAdmission => {
+            ObservedPublic::Refused(SandboxProviderErrorCodeV1::TrustRevoked)
+        }
+        Case::MissingHostFeature => {
+            ObservedPublic::Refused(SandboxProviderErrorCodeV1::SandboxUnavailable)
+        }
     };
     ObservedAttempt {
         attempt_id: attempt_id(index),
+        request_id: Some([9; 16]),
         public,
     }
 }
@@ -49,7 +75,7 @@ struct Reference {
 impl ProviderUnderTest for Reference {
     fn run_case(&mut self, case: ProviderConformanceCase) -> Result<ProviderRun, ProviderRunError> {
         if self.unrunnable == Some(case) {
-            return Err(ProviderRunError);
+            return Err(ProviderRunError("unrunnable".to_owned()));
         }
         match &self.broken {
             Some((broken, run)) if *broken == case => Ok(run.clone()),
@@ -121,6 +147,7 @@ fn the_expected_outcomes_follow_the_adr_069_precedence_table() {
         Case::NetworkEscape,
         Case::ForeignSignals,
         Case::OrphanedChild,
+        Case::WorkAreaExhaustion,
         Case::ConcurrentAttempts,
     ] {
         assert_eq!(
@@ -131,10 +158,6 @@ fn the_expected_outcomes_follow_the_adr_069_precedence_table() {
         );
     }
     let unavailable = Outcome::UnavailableAfterAdmission;
-    assert_eq!(
-        terminal(Case::WorkAreaExhaustion),
-        Some((unavailable, &[7][..]))
-    );
     assert_eq!(
         terminal(Case::OversizedOutput),
         Some((unavailable, &[7][..]))
@@ -173,12 +196,18 @@ fn the_expected_outcomes_follow_the_adr_069_precedence_table() {
         );
     }
     assert_eq!(
-        terminal(Case::MissingHostFeature),
-        Some((Outcome::UnavailableBeforeAdmission, &[][..]))
+        Case::MissingHostFeature.expectation(),
+        ExpectedPublicOutcome::Refused(&[
+            SandboxProviderErrorCodeV1::SandboxUnavailable,
+            SandboxProviderErrorCodeV1::ProviderCapabilityMissing,
+        ])
     );
     assert_eq!(
         Case::RevokedBeforeAdmission.expectation(),
-        ExpectedPublicOutcome::Refused(SandboxProviderErrorCodeV1::TrustRevoked)
+        ExpectedPublicOutcome::Refused(&[
+            SandboxProviderErrorCodeV1::TrustRevoked,
+            SandboxProviderErrorCodeV1::AuthorityMismatch,
+        ])
     );
 }
 
@@ -222,7 +251,7 @@ fn every_accepted_terminal_code_passes_and_no_other_does() {
 }
 
 #[test]
-fn a_wrong_outcome_or_refusal_fails() {
+fn a_wrong_outcome_fails() {
     let every_outcome = [
         SandboxTerminalOutcomeV1::Completed,
         SandboxTerminalOutcomeV1::Cancelled,
@@ -230,14 +259,14 @@ fn a_wrong_outcome_or_refusal_fails() {
         SandboxTerminalOutcomeV1::Rejected,
         SandboxTerminalOutcomeV1::UnavailableAfterAdmission,
     ];
-    let case = ProviderConformanceCase::MissingHostFeature;
+    let case = ProviderConformanceCase::FilesystemEscape;
     for outcome in every_outcome {
         let mut run = faithful_run(case);
         run.attempts[0].public = ObservedPublic::Terminal {
             outcome,
             terminal_code: None,
         };
-        let expected = if outcome == SandboxTerminalOutcomeV1::UnavailableBeforeAdmission {
+        let expected = if outcome == SandboxTerminalOutcomeV1::Completed {
             CaseVerdict::Passed
         } else {
             CaseVerdict::Failed(FailureReason::Outcome)
@@ -251,23 +280,67 @@ fn a_wrong_outcome_or_refusal_fails() {
         evaluate(case, &refused),
         CaseVerdict::Failed(FailureReason::Outcome)
     );
-    let revoked = ProviderConformanceCase::RevokedBeforeAdmission;
-    let mut result = faithful_run(revoked);
-    result.attempts[0].public = ObservedPublic::Terminal {
-        outcome: SandboxTerminalOutcomeV1::Rejected,
-        terminal_code: None,
-    };
-    assert_eq!(
-        evaluate(revoked, &result),
-        CaseVerdict::Failed(FailureReason::Outcome)
-    );
-    let mut other = faithful_run(revoked);
-    other.attempts[0].public =
-        ObservedPublic::Refused(SandboxProviderErrorCodeV1::AuthorityMismatch);
-    assert_eq!(
-        evaluate(revoked, &other),
-        CaseVerdict::Failed(FailureReason::Refusal)
-    );
+    for refusal_case in [
+        ProviderConformanceCase::RevokedBeforeAdmission,
+        ProviderConformanceCase::MissingHostFeature,
+    ] {
+        let mut result = faithful_run(refusal_case);
+        result.attempts[0].public = ObservedPublic::Terminal {
+            outcome: SandboxTerminalOutcomeV1::Rejected,
+            terminal_code: None,
+        };
+        assert_eq!(
+            evaluate(refusal_case, &result),
+            CaseVerdict::Failed(FailureReason::Outcome)
+        );
+    }
+}
+
+const ALL_REFUSAL_CODES: [SandboxProviderErrorCodeV1; 18] = [
+    SandboxProviderErrorCodeV1::InvalidEncoding,
+    SandboxProviderErrorCodeV1::UnsupportedVersion,
+    SandboxProviderErrorCodeV1::FieldOutOfBounds,
+    SandboxProviderErrorCodeV1::NonCanonicalOrder,
+    SandboxProviderErrorCodeV1::DigestMismatch,
+    SandboxProviderErrorCodeV1::SignatureInvalid,
+    SandboxProviderErrorCodeV1::TrustRevoked,
+    SandboxProviderErrorCodeV1::AuthorityMismatch,
+    SandboxProviderErrorCodeV1::ProviderCapabilityMissing,
+    SandboxProviderErrorCodeV1::ImageIdentityMismatch,
+    SandboxProviderErrorCodeV1::SelfTestFailed,
+    SandboxProviderErrorCodeV1::SandboxUnavailable,
+    SandboxProviderErrorCodeV1::AdmissionBusy,
+    SandboxProviderErrorCodeV1::AuditUnavailable,
+    SandboxProviderErrorCodeV1::CleanupFailed,
+    SandboxProviderErrorCodeV1::UnknownAttempt,
+    SandboxProviderErrorCodeV1::RequestIdentityConflict,
+    SandboxProviderErrorCodeV1::PayloadTransferTimeout,
+];
+
+#[test]
+fn the_refusal_sets_accept_exactly_their_codes() {
+    use SandboxProviderErrorCodeV1 as Code;
+    for (case, accepted) in [
+        (
+            ProviderConformanceCase::MissingHostFeature,
+            [Code::SandboxUnavailable, Code::ProviderCapabilityMissing],
+        ),
+        (
+            ProviderConformanceCase::RevokedBeforeAdmission,
+            [Code::TrustRevoked, Code::AuthorityMismatch],
+        ),
+    ] {
+        for code in ALL_REFUSAL_CODES {
+            let mut run = faithful_run(case);
+            run.attempts[0].public = ObservedPublic::Refused(code);
+            let expected = if accepted.contains(&code) {
+                CaseVerdict::Passed
+            } else {
+                CaseVerdict::Failed(FailureReason::Refusal)
+            };
+            assert_eq!(evaluate(case, &run), expected, "{} {code:?}", case.id());
+        }
+    }
 }
 
 #[test]
@@ -326,11 +399,30 @@ fn concurrent_attempts_need_distinct_named_identities() {
             CaseVerdict::Failed(FailureReason::AttemptIdentity)
         );
     }
-    // A single attempt needs no identity comparison.
-    let single_case = ProviderConformanceCase::FilesystemEscape;
-    let mut single = faithful_run(single_case);
-    single.attempts[0].attempt_id = None;
-    assert_eq!(evaluate(single_case, &single), CaseVerdict::Passed);
+    // Every single answer names its own authenticated identity.
+    for (case, attempt) in [
+        (ProviderConformanceCase::FilesystemEscape, true),
+        (ProviderConformanceCase::RevokedBeforeAdmission, false),
+    ] {
+        let mut run = faithful_run(case);
+        if attempt {
+            run.attempts[0].attempt_id = None;
+        } else {
+            run.attempts[0].request_id = None;
+        }
+        assert_eq!(
+            evaluate(case, &run),
+            CaseVerdict::Failed(FailureReason::AttemptIdentity)
+        );
+        // The other identity is not required.
+        let mut other = faithful_run(case);
+        if attempt {
+            other.attempts[0].request_id = None;
+        } else {
+            other.attempts[0].attempt_id = None;
+        }
+        assert_eq!(evaluate(case, &other), CaseVerdict::Passed);
+    }
 }
 
 #[test]
@@ -392,6 +484,7 @@ fn spy1_is_read_through_its_public_fields() {
         vec![11, 12, 13, 6],
     ));
     assert_eq!(observed.attempt_id, Some([3; 16]));
+    assert_eq!(observed.request_id, Some([2; 16]));
     assert_eq!(
         observed.public,
         ObservedPublic::Terminal {
@@ -432,6 +525,7 @@ fn spe1_is_read_through_its_public_fields() {
     };
     let refusal = ObservedAttempt::from_error(&error);
     assert_eq!(refusal.attempt_id, Some([4; 16]));
+    assert_eq!(refusal.request_id, Some([2; 16]));
     assert_eq!(
         refusal.public,
         ObservedPublic::Refused(SandboxProviderErrorCodeV1::TrustRevoked)
@@ -529,5 +623,113 @@ fn reports_round_trip_through_json() -> TestResult {
     assert_eq!(parsed, report);
     let x86 = serde_json::to_string(&report_for(SandboxArchitectureV1::X86_64, None))?;
     assert!(x86.contains(r#""architecture":"x86_64""#));
+    Ok(())
+}
+
+#[test]
+fn failures_are_reported_in_the_documented_order() {
+    let case = ProviderConformanceCase::ConcurrentAttempts;
+    let mut run = faithful_run(case);
+    run.leaked_resources = 3;
+    run.attempts[1].attempt_id = run.attempts[0].attempt_id;
+    assert_eq!(
+        evaluate(case, &run),
+        CaseVerdict::Failed(FailureReason::AttemptIdentity)
+    );
+    run.attempts[2].public = ObservedPublic::Terminal {
+        outcome: SandboxTerminalOutcomeV1::Cancelled,
+        terminal_code: Some(1),
+    };
+    assert_eq!(
+        evaluate(case, &run),
+        CaseVerdict::Failed(FailureReason::Outcome)
+    );
+    run.attempts.pop();
+    assert_eq!(
+        evaluate(case, &run),
+        CaseVerdict::Failed(FailureReason::AttemptCount)
+    );
+    let single = ProviderConformanceCase::TaskExhaustion;
+    let mut wrong = faithful_run(single);
+    wrong.attempts[0].public = ObservedPublic::Terminal {
+        outcome: SandboxTerminalOutcomeV1::UnavailableAfterAdmission,
+        terminal_code: Some(4),
+    };
+    wrong.leaked_resources = 1;
+    assert_eq!(
+        evaluate(single, &wrong),
+        CaseVerdict::Failed(FailureReason::TerminalCode)
+    );
+}
+
+#[test]
+fn every_gate_error_names_what_failed() {
+    let errors = [
+        (
+            GateError::ArchitectureCoverage(ReportArchitecture::X86_64),
+            "expected exactly one report for X86_64",
+        ),
+        (
+            GateError::UnknownCase("odd".to_owned()),
+            "report names an unknown case odd",
+        ),
+        (
+            GateError::CaseCoverage("adapter-crash"),
+            "report does not list case adapter-crash exactly once",
+        ),
+        (
+            GateError::Failed {
+                architecture: ReportArchitecture::X86_64,
+                case: "adapter-crash",
+                reason: FailureReason::NotRun,
+            },
+            "case adapter-crash failed on X86_64: NotRun",
+        ),
+    ];
+    for (error, text) in errors {
+        assert_eq!(error.to_string(), text);
+    }
+    assert_eq!(
+        ProviderRunError("no broker".to_owned()).to_string(),
+        "the provider could not run the case: no broker"
+    );
+}
+
+#[test]
+fn every_verdict_and_architecture_round_trips() -> TestResult {
+    let reasons = [
+        (FailureReason::NotRun, "not_run"),
+        (FailureReason::AttemptCount, "attempt_count"),
+        (FailureReason::Outcome, "outcome"),
+        (FailureReason::TerminalCode, "terminal_code"),
+        (FailureReason::Refusal, "refusal"),
+        (FailureReason::AttemptIdentity, "attempt_identity"),
+        (FailureReason::ResourceLeak, "resource_leak"),
+    ];
+    for (reason, name) in reasons {
+        let text = serde_json::to_string(&reason)?;
+        assert_eq!(text, format!("\"{name}\""));
+        assert_eq!(serde_json::from_str::<FailureReason>(&text)?, reason);
+        let verdict = CaseVerdict::Failed(reason);
+        let text = serde_json::to_string(&verdict)?;
+        assert_eq!(serde_json::from_str::<CaseVerdict>(&text)?, verdict);
+    }
+    let passed = serde_json::to_string(&CaseVerdict::Passed)?;
+    assert_eq!(
+        serde_json::from_str::<CaseVerdict>(&passed)?,
+        CaseVerdict::Passed
+    );
+    for (architecture, name) in [
+        (ReportArchitecture::X86_64, "x86_64"),
+        (ReportArchitecture::Aarch64, "aarch64"),
+    ] {
+        let text = serde_json::to_string(&architecture)?;
+        assert_eq!(text, format!("\"{name}\""));
+        assert_eq!(
+            serde_json::from_str::<ReportArchitecture>(&text)?,
+            architecture
+        );
+    }
+    assert_eq!(ReportArchitecture::REQUIRED.len(), 2);
     Ok(())
 }

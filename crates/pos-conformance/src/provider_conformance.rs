@@ -7,6 +7,13 @@
 //! event codes `1..=10` and [`SandboxProviderErrorCodeV1`]), so the same
 //! suite gates the systemd provider today and any replacement later.
 //!
+//! **The gate is not yet an authority.** [`verify_gate`] judges plain,
+//! unsigned, self-asserted reports: it binds no suite revision or digest, no
+//! provider digest, no host class and no PCR1 signature by the conformance
+//! reviewer key (ADR-069 §0 and §3). It is therefore not wired into any
+//! required check, and must not be until the workflow slice adds those
+//! bindings and verifies them.
+//!
 //! A provider is bound through [`ProviderUnderTest`]; this module holds no
 //! launcher, adapter fixture or host access. The binding for the selected
 //! systemd provider runs in the pinned QEMU guest and hands the observed
@@ -35,6 +42,18 @@ const PROCESS_CRASH: u8 = 8;
 const PROTOCOL_FAILURE: u8 = 10;
 /// The greatest SAU1 terminal event code; codes above it are lifecycle events.
 const LAST_TERMINAL_CODE: u8 = 10;
+/// Revocation before admission: the revoked trust, or the stale epoch the
+/// revocation leaves a request with (ADR-069 §4).
+const REVOKED_REFUSALS: [SandboxProviderErrorCodeV1; 2] = [
+    SandboxProviderErrorCodeV1::TrustRevoked,
+    SandboxProviderErrorCodeV1::AuthorityMismatch,
+];
+/// A missing host feature: the provider is unavailable or lacks the
+/// capability (ADR-069 §0, §1 and §4.1).
+const MISSING_FEATURE_REFUSALS: [SandboxProviderErrorCodeV1; 2] = [
+    SandboxProviderErrorCodeV1::SandboxUnavailable,
+    SandboxProviderErrorCodeV1::ProviderCapabilityMissing,
+];
 /// Every terminal code an `UnavailableAfterAdmission` result may end with.
 const UNAVAILABLE_CODES: [u8; 9] = [2, 3, 4, 5, 6, 7, 8, 9, 10];
 
@@ -45,7 +64,9 @@ pub enum ProviderConformanceCase {
     FilesystemEscape,
     /// The adapter writes to its read-only root.
     ReadOnlyRootWrite,
-    /// The adapter writes past its work-area capacity.
+    /// The adapter writes past its work-area capacity. The overflow is an
+    /// `ENOSPC`, a denied operation: `/work` usage never produces a terminal
+    /// event (ADR-069 R9 §4.6.5, D6), so a contained adapter completes.
     WorkAreaExhaustion,
     /// The adapter opens raw, UDP, Unix and undeclared TCP sockets and DNS.
     NetworkEscape,
@@ -93,7 +114,7 @@ pub enum ExpectedPublicOutcome {
         codes: &'static [u8],
     },
     /// An SPE1 refusal with this code.
-    Refused(SandboxProviderErrorCodeV1),
+    Refused(&'static [SandboxProviderErrorCodeV1]),
 }
 
 const fn contained() -> ExpectedPublicOutcome {
@@ -192,12 +213,11 @@ impl ProviderConformanceCase {
             Self::FilesystemEscape
             | Self::ReadOnlyRootWrite
             | Self::NetworkEscape
+            | Self::WorkAreaExhaustion
             | Self::ForeignSignals
             | Self::OrphanedChild
             | Self::ConcurrentAttempts => contained(),
-            Self::WorkAreaExhaustion | Self::OversizedOutput => {
-                unavailable(&[FILE_OR_OUTPUT_LIMIT])
-            }
+            Self::OversizedOutput => unavailable(&[FILE_OR_OUTPUT_LIMIT]),
             Self::TaskExhaustion => unavailable(&[TASK_LIMIT]),
             Self::MemoryExhaustion => unavailable(&[OOM_KILLED, MEMORY_LIMIT]),
             Self::WatchdogExpiry => unavailable(&[WATCHDOG]),
@@ -210,13 +230,8 @@ impl ProviderConformanceCase {
             // and reports it unavailable; which terminal code the kernel
             // evidence selects after the crash is not fixed.
             Self::BrokerCrashRecovery => unavailable(&UNAVAILABLE_CODES),
-            Self::RevokedBeforeAdmission => {
-                ExpectedPublicOutcome::Refused(SandboxProviderErrorCodeV1::TrustRevoked)
-            }
-            Self::MissingHostFeature => ExpectedPublicOutcome::Terminal {
-                outcome: SandboxTerminalOutcomeV1::UnavailableBeforeAdmission,
-                codes: &[],
-            },
+            Self::RevokedBeforeAdmission => ExpectedPublicOutcome::Refused(&REVOKED_REFUSALS),
+            Self::MissingHostFeature => ExpectedPublicOutcome::Refused(&MISSING_FEATURE_REFUSALS),
         }
     }
 }
@@ -240,6 +255,8 @@ pub enum ObservedPublic {
 pub struct ObservedAttempt {
     /// The attempt identity the provider answered for, when it named one.
     pub attempt_id: Option<[u8; 16]>,
+    /// The authenticated request identity, when the answer named one.
+    pub request_id: Option<[u8; 16]>,
     /// The public outcome.
     pub public: ObservedPublic,
 }
@@ -256,6 +273,7 @@ impl ObservedAttempt {
             .filter(|code| *code <= LAST_TERMINAL_CODE);
         Self {
             attempt_id: Some(result.attempt_id),
+            request_id: Some(result.request_id),
             public: ObservedPublic::Terminal {
                 outcome: result.outcome,
                 terminal_code,
@@ -268,6 +286,7 @@ impl ObservedAttempt {
     pub const fn from_error(error: &SandboxProviderErrorV1) -> Self {
         Self {
             attempt_id: error.attempt_id,
+            request_id: error.request_id,
             public: ObservedPublic::Refused(error.code),
         }
     }
@@ -284,8 +303,9 @@ pub struct ProviderRun {
 }
 
 /// The provider could not run the case at all.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProviderRunError;
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("the provider could not run the case: {0}")]
+pub struct ProviderRunError(pub String);
 
 /// The binding of one provider to the suite.
 pub trait ProviderUnderTest {
@@ -347,8 +367,8 @@ fn attempt_matches(
                 Ok(())
             }
         }
-        (ExpectedPublicOutcome::Refused(code), ObservedPublic::Refused(shown)) => {
-            if code == shown {
+        (ExpectedPublicOutcome::Refused(codes), ObservedPublic::Refused(shown)) => {
+            if codes.contains(&shown) {
                 Ok(())
             } else {
                 Err(FailureReason::Refusal)
@@ -358,22 +378,31 @@ fn attempt_matches(
     }
 }
 
-fn identities_distinct(attempts: &[ObservedAttempt]) -> bool {
-    attempts.iter().enumerate().all(|(index, attempt)| {
-        attempt.attempt_id.is_some_and(|id| {
+/// Every answer names the identity its kind authenticates: an attempt for an
+/// SPY1 result, the request for an SPE1 refusal (ADR-069 §4). Concurrent
+/// attempts also need distinct attempt identities.
+fn identities_named(attempts: &[ObservedAttempt]) -> bool {
+    let named = attempts.iter().all(|attempt| match attempt.public {
+        ObservedPublic::Terminal { .. } => attempt.attempt_id.is_some(),
+        ObservedPublic::Refused(_) => attempt.request_id.is_some(),
+    });
+    named
+        && attempts.iter().enumerate().all(|(index, attempt)| {
             attempts
                 .iter()
                 .skip(index + 1)
-                .all(|other| other.attempt_id != Some(id))
+                .all(|other| other.attempt_id != attempt.attempt_id)
         })
-    })
 }
 
 /// Judge what a provider showed for a case.
+///
+/// Failures are reported in a fixed order: the attempt count, then each
+/// attempt's outcome, terminal code or refusal, then identities, then
+/// leaked resources.
 #[must_use]
 pub fn evaluate(case: ProviderConformanceCase, run: &ProviderRun) -> CaseVerdict {
-    let attempts = case.attempts();
-    let failure = if run.attempts.len() != attempts {
+    let failure = if run.attempts.len() != case.attempts() {
         Some(FailureReason::AttemptCount)
     } else if let Some(reason) = run
         .attempts
@@ -381,7 +410,7 @@ pub fn evaluate(case: ProviderConformanceCase, run: &ProviderRun) -> CaseVerdict
         .find_map(|attempt| attempt_matches(case.expectation(), attempt.public).err())
     {
         Some(reason)
-    } else if attempts > 1 && !identities_distinct(&run.attempts) {
+    } else if !identities_named(&run.attempts) {
         Some(FailureReason::AttemptIdentity)
     } else if run.leaked_resources != 0 {
         Some(FailureReason::ResourceLeak)
