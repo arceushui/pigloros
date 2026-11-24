@@ -209,6 +209,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
     }
     files["host/kernel-config"] = files["guest/kernel-config"]
     files.update(case_files())
+    files.update(network_files())
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
         ("311", WORKER, b"LANG=C.UTF-8\0MOUNTFS_FIXED_WORKER=1\0"),
@@ -327,6 +328,36 @@ def case_files() -> dict[str, bytes | str]:
             })
         else:
             files[f"{base}/report"] = "activation\trefused\tMethodRejected\nrelease\tnone\nremoval\tremoved\n"
+    return files
+
+
+INIT_NETNS = "net:[4026531840]"
+UNIT_NETNS = "net:[4026532200]"
+LINK_LO = "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n"
+LINK_TUNL = "2: tunl0@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT group default qlen 1000\\    link/ipip 0.0.0.0 brd 0.0.0.0\n"
+LINK_SIT = "3: sit0@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT group default qlen 1000\\    link/sit 0.0.0.0 brd 0.0.0.0\n"
+ADDRESSES = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever\n"
+             "1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever\n")
+ROUTES4 = ("local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1\n"
+           "local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1\n"
+           "broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1\n")
+ROUTES6 = "local ::1 dev lo table local proto kernel metric 0 pref medium\n"
+
+
+def network_files() -> dict[str, bytes | str]:
+    files: dict[str, bytes | str] = {
+        "guest/network/boot-sysctl": "0\n",
+        "guest/network/init-netns": INIT_NETNS + "\n",
+        "guest/network/init-links": LINK_LO + LINK_TUNL + LINK_SIT,
+        "guest/network/modules": "ipip 12288 0 - Live 0x0000000000000000\n",
+    }
+    for case, value in checker.NETWORK_CASES.items():
+        base = f"guest/network/{case}"
+        files.update({
+            f"{base}/sysctl": f"{value}\n", f"{base}/status": "0\n", f"{base}/netns": UNIT_NETNS + "\n",
+            f"{base}/links": LINK_LO + (LINK_TUNL if value == "0" else ""),
+            f"{base}/addrs": ADDRESSES, f"{base}/routes4": ROUTES4, f"{base}/routes6": ROUTES6,
+        })
     return files
 
 
@@ -1177,6 +1208,46 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({f"{reply}/devices-after": "dm\tdm-1\tx\tCRYPT-VERITY-x\t253:1\tloop2p1\n"}),
             lambda f: f.update({f"{reply}/devices-after": "loop\tloop5\t/var/lib/other.img\t/var/lib/other.img\t7:80\t\n"}),
             lambda f: f.update({f"{reply}/devices-before": "garbage\n"}),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
+
+    def test_private_network_unit_holds_only_the_loopback_once_the_sysctl_is_set(self):
+        network = self.verdict()["private_network"]
+        self.assertEqual(network["boot_sysctl"], 0)
+        self.assertEqual(network["fb-0"]["links"], ["lo", "tunl0"])
+        for case in ("fb-1", "fb-2"):
+            self.assertEqual(network[case]["links"], ["lo"])
+            self.assertEqual(network[case]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
+            self.assertEqual(network[case]["routes6"], [ROUTES6.rstrip("\n")])
+
+    def test_private_network_fabrication_fails_closed(self):
+        base = "guest/network"
+        changes = [
+            lambda f: f.pop(f"{base}/modules"),
+            lambda f: f.update({f"{base}/extra": ""}),
+            lambda f: f.pop(f"{base}/fb-1/routes6"),
+            lambda f: f.update({f"{base}/boot-sysctl": "x\n"}),
+            # No control: the host has no fallback device, so value 0 proves nothing.
+            lambda f: f.update({f"{base}/init-links": LINK_LO}),
+            lambda f: f.update({f"{base}/fb-0/links": LINK_LO}),
+            lambda f: f.update({f"{base}/fb-0/links": LINK_LO + LINK_TUNL.replace("tunl0", "evil0")}),
+            lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_TUNL}),
+            lambda f: f.update({f"{base}/fb-2/links": LINK_TUNL}),
+            lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_LO}),
+            lambda f: f.update({f"{base}/fb-1/links": "garbage\n"}),
+            lambda f: f.update({f"{base}/fb-1/sysctl": "0\n"}),
+            lambda f: f.update({f"{base}/fb-1/status": "1\n"}),
+            lambda f: f.update({f"{base}/fb-1/netns": INIT_NETNS + "\n"}),
+            lambda f: f.update({f"{base}/fb-1/netns": "net:[x]\n"}),
+            lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES.split("\n")[0] + "\n"}),
+            lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES + "2: eth0    inet 10.0.0.2/24 scope global eth0\n"}),
+            lambda f: f.update({f"{base}/fb-1/addrs": "1: lo\n"}),
+            lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "default via 10.0.0.1 dev eth0\n"}),
+            lambda f: f.update({f"{base}/fb-1/routes4": "10.0.0.0/24 dev lo scope link\n"}),
+            lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev eth0 table local\n"}),
+            lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev\n"}),
         ]
         for change in changes:
             with self.subTest(change=change):

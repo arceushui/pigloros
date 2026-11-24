@@ -152,7 +152,7 @@ GUEST_FILES = {
     "detect-virt-container", "container-markers", "proc-cmdline", "kernel-config",
     "kernel-log", "proc-keys", "builtin-trusted-keys", "verity-d", "mountfsd-units",
     "mountfsd-service-properties", "mountfsd-socket-properties", "manager-environment",
-    "pid1-namespaces", "cases",
+    "pid1-namespaces", "cases", "network",
 }
 DRIVER_CASES = ("positive", "tampered", "wrong-key", "verity-d")
 MOUNTED_CASES = ("positive", "tampered")
@@ -160,6 +160,15 @@ DRIVER_FILES = {"arguments", "report", "driver-stderr", "driver-status", "timing
                 "devices-after", "runtime-after"}
 HELD_FILES = {"devices-held", "mountinfo-held", "dm-table-held", "readback"}
 REPLY_FILES = {"devices-before", "reply", "stderr", "status", "timing", "devices-after"}
+# ADR-069 R14: the network of a PrivateNetwork= unit under each value of
+# net.core.fb_tunnels_only_for_init_net. Value 0 is the control: the fallback
+# tunnel devices the loaded modules create in the init namespace must then
+# appear in the unit's, or the other values prove nothing.
+NETWORK_CASES = {"fb-0": "0", "fb-1": "1", "fb-2": "2"}
+NETWORK_ENTRIES = {"boot-sysctl", "init-netns", "init-links", "modules", *NETWORK_CASES}
+NETWORK_FILES = {"sysctl", "netns", "links", "addrs", "routes4", "routes6", "status"}
+LOOPBACK_ADDRESSES = {("lo", "inet", "127.0.0.1/8"), ("lo", "inet6", "::1/128")}
+LINK_NAME = re.compile(r"[0-9]+: ([^\s:@]+)(?:@\S+)?: ")
 CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
 PLANTED_CERTIFICATE = "/run/verity.d/piglor-untrusted.crt"
@@ -387,6 +396,7 @@ class Evidence:
                 missing, extra = sorted(expected - found), sorted(found - expected)
                 raise EvidenceError(f"{name}/ files differ: missing {missing}, unexpected {extra}")
         self._inventory_cases()
+        self._inventory_network()
         found = {path.name for path in (self.root / "host" / "images").iterdir()}
         if found != HOST_IMAGE_FILES:
             raise EvidenceError(f"host/images/ differs: {sorted(found)}")
@@ -412,6 +422,14 @@ class Evidence:
                 raise EvidenceError(f"malformed case record: {name}: {sorted(found)}")
         if {path.name for path in (cases / "mountfsd-reply").iterdir()} != REPLY_FILES:
             raise EvidenceError("malformed case record: mountfsd-reply")
+
+    def _inventory_network(self) -> None:
+        network = self.root / "guest" / "network"
+        if {path.name for path in network.iterdir()} != NETWORK_ENTRIES:
+            raise EvidenceError("guest/network/ does not hold exactly the ADR-069 R14 records")
+        for name in NETWORK_CASES:
+            if {path.name for path in (network / name).iterdir()} != NETWORK_FILES:
+                raise EvidenceError(f"malformed network record: {name}")
 
     def _verify_manifest(self) -> None:
         """A sealed artifact must match its manifest, file for file."""
@@ -1108,6 +1126,79 @@ def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
 
 
 
+def link_names(evidence: Evidence, name: str) -> list[str]:
+    names = []
+    for line in evidence.text(name).splitlines():
+        match = LINK_NAME.match(line)
+        if not match:
+            raise EvidenceError(f"malformed {name} line: {line!r}")
+        names.append(match.group(1))
+    return names
+
+
+def address_set(evidence: Evidence, name: str) -> set[tuple[str, str, str]]:
+    addresses = set()
+    for line in evidence.text(name).splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[2] not in ("inet", "inet6"):
+            raise EvidenceError(f"malformed {name} line: {line!r}")
+        addresses.add((fields[1], fields[2], fields[3]))
+    return addresses
+
+
+def route_field(fields: list[str], key: str) -> str | None:
+    return fields[fields.index(key) + 1] if key in fields[:-1] else None
+
+
+def require_loopback_routes(evidence: Evidence, name: str) -> list[str]:
+    """Every route is in the local table and leaves by `lo`: none leaves the unit."""
+    routes = evidence.text(name).splitlines()
+    for line in routes:
+        fields = line.split()
+        if route_field(fields, "dev") != "lo" or route_field(fields, "table") != "local":
+            raise EvidenceError(f"{name} holds a route other than the loopback's local ones: {line!r}")
+    return routes
+
+
+def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[str, list[str]]) -> dict:
+    base = f"guest/network/{name}"
+    if evidence.line(f"{base}/sysctl") != value:
+        raise EvidenceError(f"{name} did not run with net.core.fb_tunnels_only_for_init_net={value}")
+    if evidence.line(f"{base}/status") != "0":
+        raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete")
+    netns = evidence.line(f"{base}/netns")
+    if not re.fullmatch(r"net:\[[0-9]+\]", netns) or netns == init[0]:
+        raise EvidenceError(f"the {name} unit did not run in a network namespace of its own")
+    links = link_names(evidence, f"{base}/links")
+    addresses = address_set(evidence, f"{base}/addrs")
+    extra = [link for link in links if link != "lo"]
+    if links.count("lo") != 1 or len(set(links)) != len(links) or not addresses >= LOOPBACK_ADDRESSES:
+        raise EvidenceError(f"the {name} unit lacks exactly one lo with 127.0.0.1/8 and ::1/128: "
+                            f"{links} {sorted(addresses)}")
+    if value == "0":
+        # The control: the fallback devices of the init namespace appear.
+        if not extra or any(link not in init[1] for link in extra):
+            raise EvidenceError(f"with value 0 the unit holds no fallback tunnel device of the host: {links}")
+    elif extra or addresses != LOOPBACK_ADDRESSES:
+        raise EvidenceError(f"the {name} unit holds more than lo with 127.0.0.1/8 and ::1/128: "
+                            f"{links} {sorted(addresses)}")
+    return {"links": links, "addresses": sorted(addresses),
+            "routes4": require_loopback_routes(evidence, f"{base}/routes4"),
+            "routes6": require_loopback_routes(evidence, f"{base}/routes6")}
+
+
+def check_network(evidence: Evidence) -> dict:
+    """ADR-069 R14: the unit holds only lo whenever the sysctl is at least 1."""
+    boot = evidence.line("guest/network/boot-sysctl")
+    init_netns = evidence.line("guest/network/init-netns")
+    init_links = link_names(evidence, "guest/network/init-links")
+    if not boot.isdigit() or not any(link != "lo" for link in init_links):
+        raise EvidenceError("the init namespace has no fallback tunnel device to compare with")
+    return {"boot_sysctl": int(boot), "init_links": init_links,
+            **{name: check_network_case(evidence, name, value, (init_netns, init_links))
+               for name, value in NETWORK_CASES.items()}}
+
+
 def sha256_file(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1173,6 +1264,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "verity_d": check_verity_d(evidence, paths["systemd"]),
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
         "mount_image_cases": check_cases(evidence, paths, (der, description), untrusted),
+        "private_network": check_network(evidence),
     }
 
 

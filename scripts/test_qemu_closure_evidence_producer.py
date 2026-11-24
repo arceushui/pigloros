@@ -347,6 +347,34 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual(lines[0], "file\t1\tsha256sum: -: Input/output error  extra")
         self.assertTrue(lines[1].startswith("block-0\t1\t"), lines)
 
+    def test_network_case_sets_the_sysctl_and_records_the_unit_network(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        # systemd-run stub: drop the options, run the command as the unit would.
+        self.shell.stub("systemd-run", 'while [[ $1 == --* ]]; do shift; done\nexec "$@"')
+        self.shell.stub("ip", 'printf "ip %s\\n" "$*"')
+        out = self.base / "out"
+        out.mkdir()
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{out}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        case = out / "network" / "fb-1"
+        self.assertEqual(sysctl.read_text(), "1\n")
+        self.assertEqual((case / "sysctl").read_text(), "1\n")
+        self.assertEqual((case / "status").read_text(), "0\n")
+        self.assertRegex((case / "netns").read_text(), r"^net:\[[0-9]+\]\n$")
+        self.assertEqual((case / "links").read_text(), "ip -o link show\n")
+        self.assertEqual((case / "addrs").read_text(), "ip -o addr show\n")
+        self.assertEqual((case / "routes4").read_text(), "ip -4 route show table all\n")
+        self.assertEqual((case / "routes6").read_text(), "ip -6 route show table all\n")
+
+    def test_network_case_records_a_failed_unit_instead_of_exiting(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        self.shell.stub("systemd-run", "exit 3")
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-2 2'
+        self.shell.out(script, COLLECTOR)
+        self.assertEqual((self.base / "network/fb-2/status").read_text(), "3\n")
+
     def test_producer_and_checker_hash_the_same_inputs(self):
         import check_qemu_closure_evidence as checker
         listed = self.shell.out('printf "%s\\n" "${provenance_files[@]}"').split()
