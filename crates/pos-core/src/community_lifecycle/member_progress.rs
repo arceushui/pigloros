@@ -182,6 +182,25 @@ impl Iterator for CommunityCarriedEventsIterV1<'_> {
 }
 impl ExactSizeIterator for CommunityCarriedEventsIterV1<'_> {}
 
+/// Whether a roster member is due at request Simulation Time
+/// `simulation_time` (revision 10, R10.1(2)).
+///
+/// The member is due exactly when its committed CMS1 `last_step_sim_time` is
+/// null, or `simulation_time >= last_step_sim_time + cadence_interval_ns`.
+/// The sum is taken over u128, so it cannot overflow. Request Tick takes no
+/// part. With an interval of at least 1, a member that has stepped is never
+/// due again at the same Simulation Time.
+#[must_use]
+pub fn community_member_due_v1(
+    last_step_simulation_time: Option<u64>,
+    cadence_interval_ns: u64,
+    simulation_time: u64,
+) -> bool {
+    last_step_simulation_time.is_none_or(|last| {
+        u128::from(simulation_time) >= u128::from(last) + u128::from(cadence_interval_ns)
+    })
+}
+
 /// Exact complete CMS1 fields; there is no independently mutable availability.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct CommunityMemberProgressInputV1<'a> {

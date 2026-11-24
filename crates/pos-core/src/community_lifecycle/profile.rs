@@ -33,9 +33,25 @@ const GRAPH: [u64; 10] = [
 /// that every operation's CBQ1 quote must fit (ADR-129 §2, §5).
 pub const COMMUNITY_SHARED_RECORD_LIMITS_V1: [u64; 3] = [LIMITS[4], LIMITS[5], LIMITS[6]];
 
+/// The CDP1 `limits_bytes` cumulative recorded-set maxima `[nodes, edges,
+/// declared_inputs]` (ADR-129 §2; revision 10, R10.4(1)).
+pub const COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1: [u64; 3] = [LIMITS[7], LIMITS[8], LIMITS[9]];
+
+/// The CDP1 `limits_bytes` cap on retained detailed pass outcomes per
+/// generation (ADR-129 §2; revision 10, R10.4(4)).
+pub const COMMUNITY_RETAINED_PASS_OUTCOMES_V1: u64 = LIMITS[1];
+
+/// The CDP1 `limits_bytes` cap on retained control/protection operations
+/// per generation (ADR-129 §2; revision 10, R10.4(4)).
+pub const COMMUNITY_CONTROL_OPERATIONS_V1: u64 = LIMITS[2];
+
 /// The CDP1 `limits_bytes` deterministic fold budget, 12 s in microseconds
 /// (ADR-129 revision 9, R9.7(a)): the 16th entry.
 pub const COMMUNITY_FOLD_BUDGET_MICROS_V1: u64 = LIMITS[15];
+
+/// The CDP1 `worker_policy_bytes` decision deadline, 27 s in microseconds,
+/// measured from guard start (ADR-129 §2; revisions 8 and 10).
+pub const COMMUNITY_DECISION_DEADLINE_MICROS_V1: u64 = WORKER[1];
 
 const LIMITS: [u64; 16] = [
     64,
@@ -72,7 +88,9 @@ const _: () = assert!(LIMITS[15] < WORKER[2]);
 const ANNOTATION: [u64; 5] = [1_128_333_313, 1024, 1_048_576, 4096, 86_400_000_000];
 const REPLAY: [u64; 3] = [1, 1, 0];
 const _: () = assert!(1024 + MAX_COMMUNITY_MEMBERS_V1 * 512 < MAX_RECORD);
-const _: () = assert!(1 + 66 + 3 + crate::MAX_IMPLEMENTATION_KEY_BYTES_V1 + 3 * 34 + 49 <= 512);
+// A roster row: array head, stable entry, IMK1 bstr, three digests, the
+// initializer ref and the widest cadence interval (revision 10, R10.1).
+const _: () = assert!(1 + 66 + 3 + crate::MAX_IMPLEMENTATION_KEY_BYTES_V1 + 3 * 34 + 49 + 9 <= 512);
 
 /// Retention backend named by the profile, not a deployment qualification.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -101,14 +119,20 @@ pub struct CommunityProfileMemberV1<'a> {
     state_schema_digest: Hash,
     negotiated_tuple_digest: Hash,
     initializer: ArtifactRefV1,
+    cadence_interval_ns: u64,
 }
 
 impl<'a> CommunityProfileMemberV1<'a> {
-    /// Bind the exact retained implementation and required initializer identity.
+    /// Bind the exact retained implementation, required initializer identity
+    /// and cadence interval.
+    ///
+    /// `cadence_interval_ns` is the member's only cadence interval, in
+    /// Simulation Time nanoseconds (revision 10, R10.1).
     ///
     /// # Errors
-    /// Rejects invalid stable entry or zero release/required digests. Equality
-    /// with actual admitted PMF1/schema/CNT1/initializer remains an owner check.
+    /// Rejects invalid stable entry, zero release/required digests and a zero
+    /// cadence interval. Equality with actual admitted PMF1/schema/CNT1/
+    /// initializer remains an owner check.
     pub fn new(
         stable_entry: &'a str,
         implementation: &'a ImplementationKeyV1,
@@ -116,19 +140,16 @@ impl<'a> CommunityProfileMemberV1<'a> {
         state_schema_digest: Hash,
         negotiated_tuple_digest: Hash,
         initializer: ArtifactRefV1,
+        cadence_interval_ns: u64,
     ) -> Result<Self> {
-        if !crate::manifest_plugin_roster::valid_slot(stable_entry)
-            || [
-                implementation.release_digest(),
-                pmf1_digest,
-                state_schema_digest,
-                negotiated_tuple_digest,
-                Hash::from_bytes(initializer.digest),
-            ]
-            .contains(&Hash::zero())
-        {
-            Err(Error::InvalidBinding)
-        } else {
+        let identities = [
+            implementation.release_digest(),
+            pmf1_digest,
+            state_schema_digest,
+            negotiated_tuple_digest,
+            Hash::from_bytes(initializer.digest),
+        ];
+        if valid_row(stable_entry, &identities, cadence_interval_ns) {
             Ok(Self {
                 stable_entry,
                 implementation,
@@ -136,7 +157,10 @@ impl<'a> CommunityProfileMemberV1<'a> {
                 state_schema_digest,
                 negotiated_tuple_digest,
                 initializer,
+                cadence_interval_ns,
             })
+        } else {
+            Err(Error::InvalidBinding)
         }
     }
 
@@ -167,6 +191,21 @@ impl<'a> CommunityProfileMemberV1<'a> {
     pub const fn initializer(&self) -> ArtifactRefV1 {
         self.initializer
     }
+
+    /// The member's cadence interval in Simulation Time nanoseconds, at
+    /// least 1 (revision 10, R10.1).
+    #[must_use]
+    pub const fn cadence_interval_ns(&self) -> u64 {
+        self.cadence_interval_ns
+    }
+}
+
+/// A roster row's local invariants: an ADR-088 stable entry, nonzero
+/// identities and a cadence interval of at least 1 (revision 10, R10.1).
+fn valid_row(stable_entry: &str, identities: &[Hash], cadence_interval_ns: u64) -> bool {
+    cadence_interval_ns != 0
+        && crate::manifest_plugin_roster::valid_slot(stable_entry)
+        && !identities.contains(&Hash::zero())
 }
 
 /// Exact finite original policy dates, never a sliding lease extension.
@@ -180,6 +219,22 @@ pub struct CommunityProfileRetentionV1 {
     pub quarantine_not_after_micros: u64,
     /// Independently admitted native metadata absolute deadline.
     pub metadata_not_after_micros: u64,
+    /// The installed recording owner's admitted absolute horizon for the
+    /// purpose-2 `ReplayRecording` evidence (revision 10, R10.4(3)).
+    pub recording_not_after_micros: u64,
+}
+
+impl CommunityProfileRetentionV1 {
+    /// The first four `retention_bytes` entries: the `RetentionPolicy`
+    /// lease preimage, which excludes the recording horizon (R10.4(3)).
+    const fn lease_entries(self) -> [u64; 4] {
+        [
+            self.generation_not_after_micros,
+            self.recovery_window_micros,
+            self.quarantine_not_after_micros,
+            self.metadata_not_after_micros,
+        ]
+    }
 }
 
 /// Inputs for the exact ADR-129 initial selected policy, with all values encoded.
@@ -243,6 +298,7 @@ impl<'a> CommunityDurableProfileV1<'a> {
             retention.generation_not_after_micros,
             retention.quarantine_not_after_micros,
             retention.metadata_not_after_micros,
+            retention.recording_not_after_micros,
         ]
         .into_iter()
         .try_for_each(validate_horizon)
@@ -265,13 +321,14 @@ impl<'a> CommunityDurableProfileV1<'a> {
         encode_hash(&mut out, input.execution_profile_digest);
         encode_head(&mut out, 4, input.roster.len() as u64);
         for member in input.roster {
-            out.push(0x86);
+            out.push(0x87);
             encode_bytes(&mut out, member.stable_entry.as_bytes(), 3);
             encode_implementation_key(&mut out, member.implementation);
             for hash in member.digests() {
                 encode_hash(&mut out, hash);
             }
             encode_artifact_ref(&mut out, member.initializer);
+            encode_head(&mut out, 0, member.cadence_interval_ns);
         }
         encode_policy(&mut out, &OWNER);
         encode_hash(&mut out, input.source_catalogue_digest);
@@ -279,13 +336,15 @@ impl<'a> CommunityDurableProfileV1<'a> {
         encode_policy(&mut out, &GRAPH);
         encode_policy(&mut out, &LIMITS);
         let retention = input.retention;
+        let [generation, recovery, quarantine, metadata] = retention.lease_entries();
         encode_policy(
             &mut out,
             &[
-                retention.generation_not_after_micros,
-                retention.recovery_window_micros,
-                retention.quarantine_not_after_micros,
-                retention.metadata_not_after_micros,
+                generation,
+                recovery,
+                quarantine,
+                metadata,
+                retention.recording_not_after_micros,
             ],
         );
         encode_policy(&mut out, &WORKER);
@@ -295,20 +354,15 @@ impl<'a> CommunityDurableProfileV1<'a> {
     }
 
     /// `H("RetentionPolicy", retention_bytes)`: the generation's CDP1
-    /// retention-policy digest over the exact canonical `retention_bytes`
-    /// array. It is the lease reference of a native Event's whole-Timeline
-    /// scope row (owner 2026-11-21 (#560), item (c)).
+    /// retention-policy digest over the canonical array of the first four
+    /// `retention_bytes` entries. It is the lease reference of a native
+    /// Event's whole-Timeline scope row (owner 2026-11-21 (#560), item (c)),
+    /// so it never depends on the recording horizon (revision 10, R10.4(3)).
     #[must_use]
     pub fn retention_policy_digest(&self) -> Hash {
-        let retention = self.0.retention;
         let mut bytes = Vec::with_capacity(37);
         encode_head(&mut bytes, 4, 4);
-        for value in [
-            retention.generation_not_after_micros,
-            retention.recovery_window_micros,
-            retention.quarantine_not_after_micros,
-            retention.metadata_not_after_micros,
-        ] {
+        for value in self.0.retention.lease_entries() {
             encode_head(&mut bytes, 0, value);
         }
         digest(b"PiglorOS.Community.RetentionPolicy.v1\0", &bytes)

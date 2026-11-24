@@ -3,6 +3,7 @@
 use super::{
     digest, record_prefix, validate_horizon, CommunityLifecycleErrorV1 as Error,
     CommunityMemberBindingV1, CommunityPassKeyV1, CommunityPreparedInvocationV1, Result,
+    WIDEST_HORIZON_MICROS,
 };
 use crate::{encode_bytes, encode_hash, encode_head, Hash};
 use zeroize::Zeroizing;
@@ -122,4 +123,22 @@ impl CommunityInvocationStepV1 {
             Err(Error::InvalidBinding)
         }
     }
+}
+
+/// A pass CPI1's quoted length (revision 10, R10.3(3)): every digest at its
+/// fixed width and the unknown horizon at its widest encoding. The pass key
+/// carries the widest ordinal.
+pub(super) fn quoted_step_len(pass_key: CommunityPassKeyV1) -> usize {
+    CommunityInvocationStepV1(CommunityInvocationStepInputV1 {
+        pass_key,
+        member_binding_digest: Hash::zero(),
+        invocation_id: [0; 16],
+        negotiated_tuple_digest: Hash::zero(),
+        prepared_invocation_digest: Hash::zero(),
+        source_closure_root: Hash::zero(),
+        rule_bundle_digest: Hash::zero(),
+        evidence_not_after_micros: WIDEST_HORIZON_MICROS,
+    })
+    .to_canonical_cbor()
+    .len()
 }
