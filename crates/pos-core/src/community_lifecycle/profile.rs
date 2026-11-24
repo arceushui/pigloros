@@ -52,6 +52,9 @@ pub const COMMUNITY_ERASURE_TARGET_LINE_V1: u64 =
 
 /// The ADR-136 view-list bound: a Timeline's `rows(U)` of any class stay at
 /// most 4,096 (R13.1(1), (3)).
+///
+/// It is `ERASURE_MAX_OBLIGATIONS_PER_CATEGORY`, the `VIEW_LIST_MAX` a
+/// Timeline's ARD1 list read in `freeze.rs` refuses above.
 pub const COMMUNITY_ERASURE_ROW_LIMIT_V1: u64 = crate::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY as u64;
 
 /// `F_q` per roster member: four quarantine reasons, one CFO1 row each, at

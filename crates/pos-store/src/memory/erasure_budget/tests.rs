@@ -238,3 +238,28 @@ fn a_nil_owner_has_no_subject_keys() -> TestResult {
     assert_parity(&store, &[nil]);
     Ok(())
 }
+
+#[test]
+fn a_row_bound_to_three_affected_timelines_counts_once() -> TestResult {
+    // I131: the three bindings sum six targets; the shared index takes
+    // 2 x (3 - 1) back, so A pays the row's two targets once. B's scope
+    // holds only C2 of them.
+    let mut store = store()?;
+    let [a, b] = [A, B].map(|actor| store.erasure_targets_for_test(actor));
+    let summed = |store: &MemoryStore| -> u64 {
+        [R, C1, C2]
+            .iter()
+            .map(|timeline| store.erasure_counts_for_test(*timeline).1)
+            .sum()
+    };
+    let before = summed(&store);
+    let row = community_rows(70, 1)?;
+    for timeline in [R, C1, C2] {
+        store.bind_erasure_rows_for_test(timeline, row.clone());
+    }
+    assert_eq!(summed(&store), before + 3 * 2);
+    assert_eq!(store.erasure_targets_for_test(A), a + 2);
+    assert_eq!(store.erasure_targets_for_test(B), b + 2);
+    assert_parity(&store, &[A, B]);
+    Ok(())
+}
