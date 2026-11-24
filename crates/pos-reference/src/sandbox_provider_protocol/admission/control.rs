@@ -8,11 +8,12 @@ use crate::sandbox_provider_protocol::{
     SandboxReconcileResponse,
 };
 
-/// How far the selector could check the evidence digest of a reconcile.
+/// How far the selector could check an answer against the terminal response
+/// it accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReconcileEvidenceCheck {
-    /// The selector recomputed the tuple from its accepted terminal response
-    /// and the digests are byte-equal (R15 §3.5 rule 2).
+pub enum TerminalEvidenceCheck {
+    /// The selector compared the answer with its accepted terminal response
+    /// and they agree (R15 §3.5 rule 2).
     Recomputed,
     /// The selector holds no accepted terminal response, so only the
     /// signature and identities were checked (R15 §3.5 rule 3).
@@ -20,12 +21,49 @@ pub enum ReconcileEvidenceCheck {
 }
 
 /// One SRY1 that passed every selector check.
+///
+/// Only [`AdmittedSandboxProvider::authenticate_reconcile_response`] builds it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedReconciliation {
+    response: SandboxReconcileResponse,
+    check: TerminalEvidenceCheck,
+}
+
+impl AuthenticatedReconciliation {
     /// The signed response.
-    pub response: SandboxReconcileResponse,
+    #[must_use]
+    pub const fn response(&self) -> &SandboxReconcileResponse {
+        &self.response
+    }
+
     /// How the evidence digest was checked.
-    pub evidence: ReconcileEvidenceCheck,
+    #[must_use]
+    pub const fn check(&self) -> TerminalEvidenceCheck {
+        self.check
+    }
+}
+
+/// One SCY1 that passed every selector check.
+///
+/// Only [`AdmittedSandboxProvider::authenticate_cancel_response`] builds it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedCancellation {
+    response: SandboxCancelResponse,
+    check: TerminalEvidenceCheck,
+}
+
+impl AuthenticatedCancellation {
+    /// The signed response.
+    #[must_use]
+    pub const fn response(&self) -> &SandboxCancelResponse {
+        &self.response
+    }
+
+    /// Whether the bound SPY1 digest was compared with the accepted one.
+    #[must_use]
+    pub const fn check(&self) -> TerminalEvidenceCheck {
+        self.check
+    }
 }
 
 const fn contradiction() -> SandboxAdmissionError {
@@ -95,17 +133,18 @@ impl AdmittedSandboxProvider {
         bytes: &[u8],
         request: &SandboxCancelRequest,
         accepted_spy1_digest: Option<[u8; 32]>,
-    ) -> Result<SandboxCancelResponse, SandboxAdmissionError> {
+    ) -> Result<AuthenticatedCancellation, SandboxAdmissionError> {
         let response = SandboxCancelResponse::from_canonical_cbor(bytes)?;
-        self.require_runtime_signature(
-            &response.runtime_attestation_key_id,
-            response.verify_signature(&self.runtime_key),
-        )?;
+        self.require_runtime_key_id(&response.runtime_attestation_key_id)?;
+        response.verify_signature(&self.runtime_key)?;
         response.validate_for_request(request)?;
-        match accepted_spy1_digest {
-            Some(accepted) if accepted != response.terminal_spy1_digest => Err(contradiction()),
-            _ => Ok(response),
-        }
+        accepted_spy1_digest
+            .map_or(Ok(TerminalEvidenceCheck::Unverified), |accepted| {
+                (accepted == response.terminal_spy1_digest)
+                    .then_some(TerminalEvidenceCheck::Recomputed)
+                    .ok_or_else(contradiction)
+            })
+            .map(|check| AuthenticatedCancellation { response, check })
     }
 
     /// Authenticate one SRY1 against the SRQ1 it answers (R15 §3.5, N8).
@@ -116,7 +155,7 @@ impl AdmittedSandboxProvider {
     ///    `reconciliation-evidence-v1` and requires a byte-equal digest. A
     ///    mismatch is a signed provider contradiction and is refused.
     /// 3. Without them, the digest is accepted on rule 1 alone and reported
-    ///    as [`ReconcileEvidenceCheck::Unverified`].
+    ///    as [`TerminalEvidenceCheck::Unverified`].
     ///
     /// # Errors
     /// Rejects a malformed, foreign-keyed, forged, unbound or contradicting
@@ -128,30 +167,22 @@ impl AdmittedSandboxProvider {
         accepted: Option<&ReconciliationEvidenceFields>,
     ) -> Result<AuthenticatedReconciliation, SandboxAdmissionError> {
         let response = SandboxReconcileResponse::from_canonical_cbor(bytes)?;
-        self.require_runtime_signature(
-            &response.runtime_attestation_key_id,
-            response.verify_signature(&self.runtime_key),
-        )?;
+        self.require_runtime_key_id(&response.runtime_attestation_key_id)?;
+        response.verify_signature(&self.runtime_key)?;
         response.validate_for_request(request)?;
         accepted
-            .map_or(Ok(ReconcileEvidenceCheck::Unverified), |fields| {
+            .map_or(Ok(TerminalEvidenceCheck::Unverified), |fields| {
                 recompute_matches(fields, request, &response)
-                    .then_some(ReconcileEvidenceCheck::Recomputed)
+                    .then_some(TerminalEvidenceCheck::Recomputed)
                     .ok_or_else(contradiction)
             })
-            .map(|evidence| AuthenticatedReconciliation { response, evidence })
+            .map(|check| AuthenticatedReconciliation { response, check })
     }
 
-    fn require_runtime_signature(
-        &self,
-        key_id: &str,
-        verified: Result<(), SandboxProviderProtocolError>,
-    ) -> Result<(), SandboxAdmissionError> {
-        if key_id == self.manifest.runtime_attestation_key_id {
-            verified.map_err(Into::into)
-        } else {
-            Err(SandboxAdmissionError::ConformanceMismatch)
-        }
+    fn require_runtime_key_id(&self, key_id: &str) -> Result<(), SandboxAdmissionError> {
+        (key_id == self.manifest.runtime_attestation_key_id)
+            .then_some(())
+            .ok_or(SandboxAdmissionError::ConformanceMismatch)
     }
 }
 

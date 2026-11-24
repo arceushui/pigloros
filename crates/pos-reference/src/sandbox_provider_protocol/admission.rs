@@ -7,7 +7,7 @@ mod image_file;
 mod image_gpt;
 mod image_proof;
 mod network;
-pub use control::{AuthenticatedReconciliation, ReconcileEvidenceCheck};
+pub use control::{AuthenticatedCancellation, AuthenticatedReconciliation, TerminalEvidenceCheck};
 pub use image_proof::SandboxImageProofError;
 pub use network::{LocalNetworkAdmission, NetworkProxyLimits};
 

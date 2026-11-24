@@ -81,11 +81,11 @@ pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, Sand
 
 pub use admission::{
     AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
-    AuthenticatedReconciliation, AuthenticatedSandboxProviderReceipt,
+    AuthenticatedCancellation, AuthenticatedReconciliation, AuthenticatedSandboxProviderReceipt,
     AuthenticatedSandboxProviderResult, HostCapabilityProfile, HostFeatureProof,
-    LocalNetworkAdmission, NetworkProxyLimits, ProviderConformanceReport, ReconcileEvidenceCheck,
-    SandboxAdmissionError, SandboxImageProofError, SandboxProviderAdmissionInputs,
-    SelectorGrantCommitment, VerifiedSandboxImageProof,
+    LocalNetworkAdmission, NetworkProxyLimits, ProviderConformanceReport, SandboxAdmissionError,
+    SandboxImageProofError, SandboxProviderAdmissionInputs, SelectorGrantCommitment,
+    TerminalEvidenceCheck, VerifiedSandboxImageProof,
 };
 pub use audit::{SandboxAuditRecord, SandboxAuditRecordFields};
 pub use authority::{

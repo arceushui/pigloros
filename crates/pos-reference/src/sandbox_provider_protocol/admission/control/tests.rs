@@ -147,9 +147,15 @@ fn cancel_authentication_accepts_only_the_signed_answer_to_the_request() -> Test
     let (request, _) = provider.cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
     let signed = scy1(&fixture, REQUEST_ID, 1, key_id(&fixture))?;
     for accepted_spy1 in [None, Some(SPY1)] {
-        let response = provider.authenticate_cancel_response(&signed, &request, accepted_spy1)?;
-        assert_eq!(response.terminal_spy1_digest, SPY1);
-        assert_eq!(response.request_id, REQUEST_ID);
+        let verified = provider.authenticate_cancel_response(&signed, &request, accepted_spy1)?;
+        assert_eq!(verified.response().terminal_spy1_digest, SPY1);
+        assert_eq!(verified.response().request_id, REQUEST_ID);
+        assert_eq!(
+            verified.check(),
+            accepted_spy1.map_or(TerminalEvidenceCheck::Unverified, |_| {
+                TerminalEvidenceCheck::Recomputed
+            })
+        );
     }
     assert_eq!(
         provider.authenticate_cancel_response(&signed, &request, Some([11; 32])),
@@ -182,9 +188,9 @@ fn reconcile_recomputes_the_tuple_when_the_selector_accepted_the_terminal() -> T
     let signed = sry1(&fixture, REQUEST_ID, recomputed_digest()?, key_id(&fixture))?;
     let verified =
         provider.authenticate_reconcile_response(&signed, &request, Some(&accepted()))?;
-    assert_eq!(verified.evidence, ReconcileEvidenceCheck::Recomputed);
+    assert_eq!(verified.check(), TerminalEvidenceCheck::Recomputed);
     assert_eq!(
-        verified.response.reconciliation_evidence_digest,
+        verified.response().reconciliation_evidence_digest,
         recomputed_digest()?
     );
     Ok(())
@@ -204,8 +210,8 @@ fn reconcile_refuses_a_validly_signed_digest_that_is_not_the_recomputed_one() ->
     );
     // Without an accepted terminal response only rule 1 applies (rule 3).
     let verified = provider.authenticate_reconcile_response(&signed, &request, None)?;
-    assert_eq!(verified.evidence, ReconcileEvidenceCheck::Unverified);
-    assert_eq!(verified.response.reconciliation_evidence_digest, changed);
+    assert_eq!(verified.check(), TerminalEvidenceCheck::Unverified);
+    assert_eq!(verified.response().reconciliation_evidence_digest, changed);
     Ok(())
 }
 
@@ -265,6 +271,26 @@ fn reconcile_checks_the_signature_before_the_request_identities() -> TestResult 
     )?;
     assert_eq!(
         provider.authenticate_reconcile_response(&foreign_key, &request, None),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_foreign_key_id_is_refused_before_the_signature_is_verified() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let provider = &fixture.provider;
+    let foreign = || Value::Text("foreign".to_owned());
+    let (cancel, _) = provider.cancel_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let cancelled = flip_last_byte(scy1(&fixture, REQUEST_ID, 1, foreign())?);
+    assert_eq!(
+        provider.authenticate_cancel_response(&cancelled, &cancel, None),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    let (reconcile, _) = provider.reconcile_request(REQUEST_ID, NONCE, ATTEMPT, AGR1)?;
+    let reconciled = flip_last_byte(sry1(&fixture, REQUEST_ID, recomputed_digest()?, foreign())?);
+    assert_eq!(
+        provider.authenticate_reconcile_response(&reconciled, &reconcile, None),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
     Ok(())
