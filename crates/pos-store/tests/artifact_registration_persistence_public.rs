@@ -1681,10 +1681,10 @@ where
 fn timeline_bindings_have_memory_and_sqlite_parity() -> Result<(), Box<dyn std::error::Error>> {
     let mut memory = MemoryStore::new();
     let mut sqlite = pos_store::sqlite::SqliteStore::open_in_memory()?;
-    assert_eq!(
-        timeline_binding_contract(&mut memory)?,
-        timeline_binding_contract(&mut sqlite)?
-    );
+    let bound = timeline_binding_contract(&mut memory)?;
+    assert_eq!(bound, timeline_binding_contract(&mut sqlite)?);
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    erasure_counters_follow_the_bindings(&memory, &bound);
     failed_registration_writes_no_binding(&mut memory)?;
     failed_registration_writes_no_binding(&mut sqlite)?;
     assert_eq!(
@@ -1692,6 +1692,46 @@ fn timeline_bindings_have_memory_and_sqlite_parity() -> Result<(), Box<dyn std::
         pos_core::store::EventStore::artifact_registrations_for_timeline(&sqlite, timeline(3), 4)?
     );
     Ok(())
+}
+
+/// ADR-129 revision 13, R13.1(2): every new binding the commit writes, and
+/// none an exact retry or a shared row repeats, moves the Memory
+/// erasure-budget counters of its Timeline: one row, and the closure
+/// targets of a private row (its Artifact target and its role-7 keys).
+#[cfg(all(feature = "test-support", target_os = "linux"))]
+fn erasure_counters_follow_the_bindings(
+    memory: &MemoryStore,
+    bound: &[Vec<ArtifactRegistrationCatalogRowV1>],
+) {
+    let targets = |rows: &[ArtifactRegistrationCatalogRowV1]| -> u64 {
+        rows.iter()
+            .map(|row| {
+                let fields = row.registration().fields();
+                if fields.data_class == ArtifactDataClassV1::PrivateSubjectData {
+                    1 + fields
+                        .key_dependencies
+                        .iter()
+                        .filter(|dependency| {
+                            dependency.identity.role
+                                == pos_core::KeyRoleV1::CommunityArtifactEncryption
+                        })
+                        .count() as u64
+                } else {
+                    0
+                }
+            })
+            .sum()
+    };
+    for (timeline, rows) in [timeline(2), timeline(3), timeline(4)]
+        .into_iter()
+        .zip(bound)
+    {
+        assert_eq!(
+            memory.erasure_counts_for_test(timeline),
+            (rows.len() as u64, targets(rows))
+        );
+    }
+    assert!(targets(&bound[0]) > 0);
 }
 
 #[cfg(feature = "sqlite")]

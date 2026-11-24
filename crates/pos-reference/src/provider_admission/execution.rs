@@ -1,15 +1,23 @@
-//! Provider-owned policy admission for one authenticated execute exchange.
+//! Provider-owned policy admission for one authenticated execute exchange
+//! (ADR-122 as amended by ADR-122 Amendment 1).
 //!
-//! The only production constructor reads EVR1 and SPX1 from a root peer and
-//! reconstructs the selected case from the retained SIC1 installation. The
-//! prepared state holds the exact policy and reservations before AGR1. Only
-//! complete SBC1 and EAI1 verification can produce the admitted state.
+//! [`ExecuteSource::read`] reads EVR1 and SPX1 exactly once from a root peer's
+//! execute connection, charged before allocation, and takes ownership of the
+//! stream. The only factory, [`PreparedProviderExecution::admit`], consumes
+//! that source and reconstructs the selected case from the provider admission
+//! retained at runtime startup; only its held-image join opens SIC1. The
+//! prepared state holds the exact policy, the lifecycle claim and the
+//! reservations before AGR1. Its private staging file is created before AGR1
+//! ([`StagingDirectory::create_input`]), then [`StagedInput::send_grant`]
+//! writes AGR1. Only complete SBC1 and EAI1 verification can produce the
+//! admitted state. Every refusal before the AGR1 write returns the stream
+//! ([`ExecuteRefusal`]); none follows once the write began.
 
 mod budget;
 mod source;
 mod staging;
 
-use std::{fs::File, io, os::unix::net::UnixStream, sync::Arc, time::Instant};
+use std::{convert::Infallible, fs::File, io, os::unix::net::UnixStream, sync::Arc, time::Instant};
 
 use crate::{
     evaluator::CaseAttempt,
@@ -17,42 +25,76 @@ use crate::{
         AdmissionLedger, LaunchFailure, PayloadDescriptor, SandboxExecutionMode, SandboxLimit,
         SelectorGrantCommitment, TransferRecord,
     },
-    selector::SelectorBoundaryError,
+    selector::InstallationError,
 };
 
 use super::{AdmittedAuthority, ProviderImageSnapshot};
 
-pub use staging::{AdmittedEntry, StagedInput, StagingDirectory, VerifiedStagedInput};
+pub use source::{
+    ExecutePeer, ExecuteSource, OtherRequest, SourceFrames, SourceRefusal, UnchargedSource,
+};
+pub use staging::{
+    AdmittedEntry, GrantedInput, StagedInput, StagingDirectory, VerifiedStagedInput,
+};
 
 pub use budget::{ControlFloor, StagingCharge, StagingLedger, StagingLimits, StagingUsage};
 
 /// Closed failures of source admission, resource reservation and input staging.
+///
+/// Each failure before AGR1 has one SPE1 code (ADR-069 R11 Amendment 1
+/// §7.5). Variants the composed execute port cannot reach are not
+/// representable: the stream is owned from the single read on, so no
+/// connection can change, and the grant is written by consuming the staged
+/// state, so it can be neither repeated nor missing (ADR-122 Amendment 1
+/// T7):
+///
+/// ```compile_fail
+/// let _ = pos_reference::provider_admission::execution::StagingError::ConnectionChanged;
+/// ```
+///
+/// A changed authority is refused only by the release recheck, after AGR1,
+/// with [`RecheckError::AuthorityChanged`]; it is not a pre-AGR1 refusal
+/// (R11 Amendment 1 §7.5):
+///
+/// ```compile_fail
+/// let _ = pos_reference::provider_admission::execution::StagingError::AuthorityChanged;
+/// ```
+///
+/// Its installation failures are an [`InstallationError`], so the
+/// selector-socket `SelectorUnavailable` cannot reach the port:
+///
+/// ```compile_fail
+/// use pos_reference::{provider_admission::execution::StagingError, selector};
+/// let _ = StagingError::Source(selector::SelectorBoundaryError::SelectorUnavailable);
+/// ```
 #[derive(Debug, thiserror::Error)]
 pub enum StagingError {
-    /// The execute connection is not owned by root.
-    #[error("execute peer is not root")]
-    UnauthenticatedPeer,
     /// The two source records do not identify the independently resolved case.
     #[error("execute source does not match authenticated authority")]
     InvalidSource,
     /// The received bytes do not reproduce the expected complete EAI1 stream.
     #[error("staged input differs from the admitted case")]
     InvalidInput,
-    /// The original control or input-transfer deadline has expired.
-    #[error("provider transfer deadline expired")]
-    Expired,
-    /// A different connection was supplied after source admission.
-    #[error("execute connection changed")]
-    ConnectionChanged,
-    /// This prepared exchange has already attempted to write its grant.
-    #[error("admission grant is single use")]
-    GrantAlreadyIssued,
-    /// Input cannot be admitted before AGR1 was completely written.
-    #[error("admission grant has not been sent")]
-    GrantRequired,
-    /// The supplied signature is not made by the admitted runtime key.
-    #[error("admission signature differs from the admitted runtime key")]
-    InvalidSignature,
+    /// The initial control deadline expired (R11 Amendment 1 item P1).
+    #[error("provider initial control deadline expired")]
+    ControlExpired,
+    /// The ELM1 ID 16 input window expired.
+    #[error("provider input window expired")]
+    InputWindowExpired,
+    /// The runtime signer failed, or its AGR1 failed verify-before-emit.
+    #[error("the runtime signer failed")]
+    SignerFault,
+    /// The signed AGR1 failed the provider's own commitment check.
+    #[error("the signed grant differs from the derived commitment")]
+    GrantCommitmentMismatch,
+    /// The reconstructed execution mode is not one this provider serves:
+    /// SPE1 `8` (R11 Amendment 1 §7.5 row 9). Not in that amendment's §5
+    /// list of `StagingError` changes; an ADR erratum candidate.
+    #[error("the execution mode is not supported")]
+    CapabilityMissing,
+    /// The image or the provider binary failed its identity check.
+    #[error("image or provider binary identity differs")]
+    ImageIdentity,
     /// The independently admitted bootstrap permits no additional source reader.
     #[error("pending control slots are exhausted")]
     ControlSlotsExhausted,
@@ -62,9 +104,6 @@ pub enum StagingError {
     /// The admitted epochs are below the live provider control floor.
     #[error("admission is below the provider control floor")]
     BelowControlFloor,
-    /// A current installation no longer matches the admitted authority.
-    #[error("installed authority differs from the admitted authority")]
-    AuthorityChanged,
     /// The candidate or a live attempt forbids another attempt.
     #[error("staging attempt slots are exhausted")]
     AttemptsExhausted,
@@ -80,18 +119,100 @@ pub enum StagingError {
     /// A staging directory is not private and provider-owned.
     #[error("staging directory is unsafe")]
     UnsafeDirectory,
-    /// A write would exceed its exact reservation.
-    #[error("staged input exceeds its reservation")]
-    ExceedsReservation,
     /// The peer ended the input before its declared complete length.
     #[error("staged input is incomplete")]
     Incomplete,
     /// Fixed-installation admission failed.
     #[error(transparent)]
-    Source(#[from] SelectorBoundaryError),
+    Source(#[from] InstallationError),
     /// A stream or descriptor operation failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// Why the release recheck of an admitted execution refused (ADR-122
+/// Amendment 1 invariant 1(d)).
+#[derive(Debug, thiserror::Error)]
+pub enum RecheckError {
+    /// The current installation no longer matches the admitted authority.
+    #[error("installed authority differs from the admitted authority")]
+    AuthorityChanged,
+    /// The live ledger refused: a raised control floor, or a ledger closed
+    /// after a cleanup failure.
+    #[error(transparent)]
+    Ledger(RecheckLedgerError),
+}
+
+/// The live ledger's refusal of a recheck of an attempt it already
+/// counts: only the floor and the closed ledger apply, so no reservation
+/// refusal can be carried:
+///
+/// ```compile_fail
+/// let _ = pos_reference::provider_admission::execution::RecheckLedgerError::AggregateExceeded;
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RecheckLedgerError {
+    /// The admitted epochs are below the live provider control floor.
+    #[error("admission is below the provider control floor")]
+    BelowControlFloor,
+    /// A failed private-file cleanup permanently closed this live ledger.
+    #[error("staging admission is closed after a cleanup failure")]
+    CleanupFailed,
+}
+
+/// A recheck refusal before AGR1 is the staging refusal of the same name.
+impl From<RecheckLedgerError> for StagingError {
+    fn from(refused: RecheckLedgerError) -> Self {
+        match refused {
+            RecheckLedgerError::BelowControlFloor => Self::BelowControlFloor,
+            RecheckLedgerError::CleanupFailed => Self::CleanupFailed,
+        }
+    }
+}
+
+/// Why an exchange was refused before its AGR1 write began.
+#[derive(Debug)]
+pub enum RefusalCause<E = Infallible> {
+    /// The source, its admission, a resource or the staging file.
+    Staging(StagingError),
+    /// The caller's lifecycle claim or its conversion.
+    Claim(E),
+}
+
+/// An exchange refused before its AGR1 write began (ADR-122 Amendment 1
+/// change C): its execute stream, returned for the SPE1, and why.
+///
+/// Every policy, slot, charge, claim and reservation the exchange held was
+/// released before this was returned (R11 Amendment 1, change A).
+#[derive(Debug)]
+pub struct ExecuteRefusal<E = Infallible> {
+    stream: UnixStream,
+    cause: RefusalCause<E>,
+}
+
+impl<E> ExecuteRefusal<E> {
+    /// The execute stream and why it was refused.
+    ///
+    /// The stream may still carry the shortened read and write timeouts of
+    /// the exchange's own deadlines, possibly already expired. Serving must
+    /// set the SPE1 refusal's own write deadline on it explicitly before
+    /// writing (journal 22582).
+    #[must_use]
+    pub fn into_parts(self) -> (UnixStream, RefusalCause<E>) {
+        (self.stream, self.cause)
+    }
+}
+
+/// Why [`StagedInput::send_grant`] wrote no complete AGR1.
+#[derive(Debug)]
+pub enum GrantFailure<E = Infallible> {
+    /// Refused before the write began: the exchange may still be answered.
+    Refused(Box<ExecuteRefusal<E>>),
+    /// The write began and failed. No byte follows: SPE1 cannot follow AGR1
+    /// (base ADR-069 §4), and the selector never authenticated a grant.
+    /// The stream was dropped with the exchange, and the provider keeps no
+    /// clone of it, so the selector reads EOF after the partial frame.
+    Interrupted(StagingError),
 }
 
 /// Why the attempt's one output reservation of exactly ELM1\[8\] bytes was
@@ -327,17 +448,6 @@ impl FailedInput {
     }
 }
 
-/// Why staged input was not admitted.
-#[derive(Debug, thiserror::Error)]
-pub enum InputRefusal {
-    /// No AGR1 was completely sent: the exchange fails before admission.
-    #[error(transparent)]
-    NotGranted(StagingError),
-    /// AGR1 was sent: the admitted attempt's input failed.
-    #[error("admitted input failed: {}", .0.error)]
-    Failed(Box<FailedInput>),
-}
-
 /// The input-transfer window in `CLOCK_MONOTONIC` nanoseconds: its start
 /// once the complete SPX1 frame was read, and the enforced input deadline,
 /// the ELM1 ID 16 window from that same instant under any stricter
@@ -468,33 +578,50 @@ struct RetainedCase {
     _charge: StagingCharge,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ConnectionIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum GrantState {
-    Prepared,
-    Writing,
-    /// AGR1 was written completely.
-    Granted(IssuedGrant),
-}
-
-/// Derived policy and atomic reservations, before any adapter input is admitted.
+/// What a prepared or granted exchange holds for its input: the retained
+/// source, the counted attempt, the input charge and its deadlines. Field
+/// order keeps the retained source and the attempt before the input charge.
 #[derive(Debug)]
-pub struct PreparedProviderExecution {
+struct Execution {
     source: Arc<ExecutionSource>,
     slot: Arc<budget::AttemptSlot>,
     input: StagingCharge,
     ledger: StagingLedger,
-    connection: ConnectionIdentity,
-    initial_deadline: Instant,
     input_deadline: Instant,
     window: TransferWindow,
     clock: Clock,
-    grant: GrantState,
+    connection: ConnectionIdentity,
+}
+
+/// An execute connection's `fstat` `(st_dev, st_ino)`, recorded by the
+/// source reader before the first source byte (ADR-122 Amendment 1
+/// invariant 2).
+type ConnectionIdentity = (u64, u64);
+
+/// Derived policy, the caller's lifecycle claim and atomic reservations,
+/// before any adapter input is admitted. It owns the execute stream.
+///
+/// [`Self::admit`] over an [`ExecuteSource`] is its only constructor; the
+/// stream-taking `receive` is gone (ADR-122 Amendment 1 T8):
+///
+/// ```compile_fail
+/// use pos_reference::provider_admission::execution::PreparedProviderExecution;
+/// let _ = PreparedProviderExecution::<()>::receive;
+/// ```
+#[derive(Debug)]
+pub struct PreparedProviderExecution<C = ()> {
+    execution: Execution,
+    claim: C,
+    initial_deadline: Instant,
+    stream: UnixStream,
+}
+
+/// An exchange whose AGR1 was completely written, awaiting its input.
+#[derive(Debug)]
+struct GrantedExecution {
+    execution: Execution,
+    grant: IssuedGrant,
+    stream: UnixStream,
 }
 
 /// Exact, descriptor-bound input admitted under one independently derived policy.
@@ -507,22 +634,9 @@ pub struct AdmittedProviderExecution {
     authority: AdmittedAuthority,
     grant: IssuedGrant,
     transfer: Option<TransferRecord>,
+    connection: ConnectionIdentity,
     // The descriptor pins staged storage even after its private name is unlinked.
     // Close owned resources before releasing bytes, then the counted attempt.
     _input: StagingCharge,
     slot: Arc<budget::AttemptSlot>,
-}
-
-impl PreparedProviderExecution {
-    /// Authenticate root, read EVR1 then SPX1, and reserve their derived policy.
-    ///
-    /// No listener is opened. Installation recovery and source/byte/deadline
-    /// checks all precede AGR1; this creates no execution or mount permit.
-    ///
-    /// # Errors
-    /// Refuses non-root peers, invalid source/installation, expired transfers
-    /// and any exhausted independently derived or aggregate resource ceiling.
-    pub fn receive(stream: &mut UnixStream, ledger: &StagingLedger) -> Result<Self, StagingError> {
-        source::receive(stream, ledger, monotonic_ns)
-    }
 }

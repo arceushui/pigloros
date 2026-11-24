@@ -752,6 +752,11 @@ impl MemoryCommunityDomainV1 {
                 .insert(key.intent().as_input().protection_operation_id, key);
         }
         if let Some((key, ledger)) = staged.ledger {
+            let before = self
+                .quarantine_index
+                .get(&key)
+                .map_or(0, |current| current.reasons.len() as u64);
+            self.count_quarantine_pairs(staged.key.0, before, ledger.reasons.len() as u64);
             self.quarantine_index.insert(key, ledger);
         }
         self.inventory_generation += 1;

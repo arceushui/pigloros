@@ -9599,6 +9599,15 @@ fn an_export_after_the_erasure_reports_its_unavailable_artifact() -> TestResult 
 mod acceptance;
 
 // ---------------------------------------------------------------------------
+// ADR-129 revision 13 (#560 A4b-2, R13-1): the Memory community
+// erasure-budget counters against the authority's closure.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+#[path = "local_erasure_composition/community_budget.rs"]
+mod community_budget;
+
+// ---------------------------------------------------------------------------
 // ADR-136 follow-up F3 (#1408): the operator's admissions record closes
 // fresh Local submissions only. An exact replay, the driver and its startup
 // sweep never read it, so every admitted request still freezes and

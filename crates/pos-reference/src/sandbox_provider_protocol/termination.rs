@@ -136,6 +136,15 @@ pub enum LaunchFailure {
     /// 5: the staging ledger was closed after a cleanup failure, so the
     /// output reservation was refused (R10 §4.7, D5).
     AdmissionClosed = 5,
+    /// 6: after AGR1 and before `StartTransientUnit`, a Local attempt's
+    /// network could not be set up because of a creation, transport or
+    /// resource failure that left no owned state (ADR-069 R14 §3.4). Mode
+    /// Local only; an IPC failure (code 9).
+    NetworkSetupFailed = 6,
+    /// 7: after AGR1 and before `StartTransientUnit`, a Replay attempt's
+    /// captured exchange is missing, unreadable or does not match (R14
+    /// §3.4). Mode Replay only; a protocol failure (code 10).
+    ReplayUnavailable = 7,
 }
 
 /// TME1 `start-job-result`: systemd's `JobRemoved` result of the start job.
@@ -836,13 +845,15 @@ impl TerminationFacts {
                 .is_some_and(LocalNetworkTerminationCode::channel_fault)
     }
 
-    /// A channel failed before the release: a stdio channel (R10 §4.1) or
-    /// the launcher barrier.
+    /// A channel failed before the release: a stdio channel (R10 §4.1), the
+    /// Local network setup (R14 §3.4) or the launcher barrier.
     fn launch_channel_failed(&self) -> bool {
-        matches!(self.launch_failure, Some(LaunchFailure::StdioChannelFailed))
-            || self
-                .barrier_failure
-                .is_some_and(BarrierFailure::channel_fault)
+        matches!(
+            self.launch_failure,
+            Some(LaunchFailure::StdioChannelFailed | LaunchFailure::NetworkSetupFailed)
+        ) || self
+            .barrier_failure
+            .is_some_and(BarrierFailure::channel_fault)
     }
 
     fn protocol_failed(&self) -> bool {
@@ -854,6 +865,7 @@ impl TerminationFacts {
                     LaunchFailure::RootNotActivated
                         | LaunchFailure::PreStartRecheckFailed
                         | LaunchFailure::OutputReservationRefused
+                        | LaunchFailure::ReplayUnavailable
                 )
             )
             || self

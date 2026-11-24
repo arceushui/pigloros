@@ -26,8 +26,9 @@ use pos_core::community_lifecycle::{
     CommunityNativeNodeV1, CommunityOriginalProvenanceV1, CommunityOwnerBindingInputV1,
     CommunityOwnerBindingV1, CommunityProfileMemberV1, CommunityProfileRetentionV1,
     CommunityScopeBindingV1, CommunitySelectionInputV1, CommunitySelectionV1,
-    CommunityStateContentV1, CommunityTimelineFloorV1, CommunityTimelineFloorsV1,
-    CommunityTypedInputRefV1, CommunityTypedInputRefsV1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
+    CommunitySharedCountsV1, CommunityStateContentV1, CommunityTimelineFloorV1,
+    CommunityTimelineFloorsV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1,
+    COMMUNITY_SHARED_RECORD_LIMITS_V1,
 };
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
@@ -199,6 +200,7 @@ impl Fixture {
                     SCHEMA,
                     TUPLES[slot],
                     self.initializer(slot),
+                    10,
                 )?)
             })
             .collect()
@@ -220,6 +222,7 @@ fn profile<'a>(
                 recovery_window_micros: 1,
                 quarantine_not_after_micros: HORIZON,
                 metadata_not_after_micros: HORIZON,
+                recording_not_after_micros: HORIZON,
             },
         },
     )?)
@@ -696,6 +699,19 @@ fn bindings_derive_cob1_and_each_cmb1_from_the_roster() -> TestResult {
     Ok(())
 }
 
+/// A seed of the cumulative recorded-set counters (R10.3(6)).
+const HISTORY_SEED: CommunitySharedCountsV1 = CommunitySharedCountsV1 {
+    nodes: 3,
+    edges: 4,
+    declared_inputs: 5,
+    encoded_record_bytes: 6,
+};
+
+/// A Timeline with no recorded history.
+fn no_history() -> CommunitySharedCountsV1 {
+    CommunitySharedCountsV1::default()
+}
+
 /// G3, G4 and A5.3(0): the CGI1 takes the decision's refs and the CDP1
 /// horizon; CSB1 has one empty-scope row per CMB1 ref; CBQ1 is the
 /// initialization quote; CPV1 names the same refs.
@@ -708,7 +724,7 @@ fn records_mint_cgi1_csb1_cbq1_and_cpv1() -> TestResult {
         CommunityInitializationPlannerV1::new(&SEAL, installation(&profile), form(&profile))?;
     let mut world = World::new()?;
     let admission = world.admit(planner.request())?;
-    let records = planner.records(GENERATION, &admission, &ADDRESSES)?;
+    let records = planner.records(GENERATION, &admission, &ADDRESSES, HISTORY_SEED)?;
     let digests: Vec<Hash> = planner
         .bindings(GENERATION)?
         .member_binding_digests()
@@ -777,6 +793,7 @@ fn records_mint_cgi1_csb1_cbq1_and_cpv1() -> TestResult {
         target(),
         GENERATION,
         profile.digest(),
+        HISTORY_SEED,
         due,
         quote_bytes(&STATE_LIMITS, &digests)?,
     )?;
@@ -831,7 +848,9 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
     ] {
         let admission = world.admit(request)?;
         assert_eq!(
-            planner.records(GENERATION, &admission, &ADDRESSES).err(),
+            planner
+                .records(GENERATION, &admission, &ADDRESSES, no_history())
+                .err(),
             Some(Error::InvalidBinding)
         );
     }
@@ -842,12 +861,16 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
         &[ADDRESSES[0], ADDRESSES[0]][..],
     ] {
         assert_eq!(
-            planner.records(GENERATION, &admission, addresses).err(),
+            planner
+                .records(GENERATION, &admission, addresses, no_history())
+                .err(),
             Some(Error::InvalidBinding)
         );
     }
     assert_eq!(
-        planner.records([0; 16], &admission, &ADDRESSES).err(),
+        planner
+            .records([0; 16], &admission, &ADDRESSES, no_history())
+            .err(),
         Some(Error::InvalidBinding)
     );
     // A repeated address that is not adjacent, on a three-member roster.
@@ -862,6 +885,7 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
                 SCHEMA,
                 TUPLES[0],
                 fixture.initializer(state),
+                10,
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
@@ -878,12 +902,22 @@ fn records_refuse_another_decision_and_bad_addresses() -> TestResult {
     let [first, second] = ADDRESSES;
     assert_eq!(
         planner
-            .records(GENERATION, &admission, &[first, second, first])
+            .records(
+                GENERATION,
+                &admission,
+                &[first, second, first],
+                no_history()
+            )
             .err(),
         Some(Error::InvalidBinding)
     );
     assert!(planner
-        .records(GENERATION, &admission, &[first, second, hash(0x73)])
+        .records(
+            GENERATION,
+            &admission,
+            &[first, second, hash(0x73)],
+            no_history()
+        )
         .is_ok());
     Ok(())
 }
@@ -919,7 +953,7 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
             form(&profile),
         )?;
         let admission = world.admit(planner.request())?;
-        let result = planner.records(GENERATION, &admission, &ADDRESSES);
+        let result = planner.records(GENERATION, &admission, &ADDRESSES, no_history());
         if fits {
             let quote = CommunityBudgetQuoteV1::from_canonical_cbor(result?.budget_quote())?;
             assert_eq!(
@@ -941,7 +975,9 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
     )?;
     let admission = world.admit(planner.request())?;
     assert_eq!(
-        planner.records(GENERATION, &admission, &ADDRESSES).err(),
+        planner
+            .records(GENERATION, &admission, &ADDRESSES, no_history())
+            .err(),
         Some(Error::BoundsExceeded)
     );
     // One State limit per roster row.
@@ -960,7 +996,7 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
     Ok(())
 }
 
-/// L3: the CBQ1 byte maximum of a 13-member roster, written out by hand
+/// L3: the CBQ1 byte maximum of a 3-member roster, written out by hand
 /// from the CPN1 field list. Each member adds its 1,000-byte State limit,
 /// CIS1 1,024, CSR1 512 and its two one-input CPN1s at the widest producer
 /// ordinal: 695 bytes for slots 0..=11, and 698 from slot 12 on.
@@ -987,14 +1023,12 @@ fn records_refuse_a_quote_over_the_shared_limits() -> TestResult {
 /// 1, node ref array(4) 1, incarnation 17, producer `u64::MAX` 9, node
 /// ordinal 2s 1, digest 34), then 102 + 3. 381 + 314 = 695.
 ///
-/// From slot 12, node ordinals 24 and 25 no longer fit a one-byte CBOR
-/// head and take two bytes (`0x18 n`): each CPN1's own node ordinal grows
-/// by one, and so does the `StateRevision` node's native input ordinal 24,
-/// so 695 + 3 = 698. The locator's slot 12 still fits one byte.
+/// The roster maximum is 3 (ADR-129 revision 13, R13.3), so every node
+/// ordinal (at most 5) fits a one-byte CBOR head.
 #[test]
-fn a_thirteen_member_quote_has_the_hand_computed_bytes() -> TestResult {
+fn a_three_member_quote_has_the_hand_computed_bytes() -> TestResult {
     let fixture = Fixture::new()?;
-    let entries: Vec<String> = (0..13).map(|index| format!("Entry-{index:02}")).collect();
+    let entries: Vec<String> = (0..3).map(|index| format!("Entry-{index:02}")).collect();
     let rows = entries
         .iter()
         .map(|entry| {
@@ -1005,25 +1039,26 @@ fn a_thirteen_member_quote_has_the_hand_computed_bytes() -> TestResult {
                 SCHEMA,
                 TUPLES[0],
                 fixture.initializer(0),
+                10,
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
-    let thirteen = crate::profile(&rows)?;
-    let limits = [1_000; 13];
+    let three = crate::profile(&rows)?;
+    let limits = [1_000; 3];
     let planner = CommunityInitializationPlannerV1::new(
         &SEAL,
         CommunityInitializationInstallationV1 {
             state_limit_bytes: &limits,
-            ..installation(&thirteen)
+            ..installation(&three)
         },
-        form(&thirteen),
+        form(&three),
     )?;
     let mut world = World::new()?;
     let admission = world.admit(planner.request())?;
-    let addresses: Vec<Hash> = (0..13_u8).map(|index| hash(0x80 + index)).collect();
-    let records = planner.records(GENERATION, &admission, &addresses)?;
+    let addresses: Vec<Hash> = (0..3_u8).map(|index| hash(0x80 + index)).collect();
+    let records = planner.records(GENERATION, &admission, &addresses, no_history())?;
     let quote = CommunityBudgetQuoteV1::from_canonical_cbor(records.budget_quote())?;
-    assert_eq!(quote.as_input().maximum_required_bytes, 42_006);
-    assert_eq!(42_006, 13 * (1_000 + 1_024 + 512) + 12 * 695 + 698);
+    assert_eq!(quote.as_input().maximum_required_bytes, 9_693);
+    assert_eq!(9_693, 3 * (1_000 + 1_024 + 512 + 695));
     Ok(())
 }

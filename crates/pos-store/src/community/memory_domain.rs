@@ -20,8 +20,12 @@ use pos_core::{AuthorizationDecisionV1, Hash, PersistedAuthorityV1, TimelineId};
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
+use super::erasure_budget::CommunityErasureContextV1;
+#[cfg(target_os = "linux")]
 use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
+#[cfg(target_os = "linux")]
+use super::pass_state::{CommunityPassStateV1, CommunityPendingReservationV1};
 use super::private_hash::scope_set_digest;
 #[cfg(target_os = "linux")]
 use super::quarantine::{CommittedQuarantineControlV1, QuarantineLedgerV1};
@@ -172,6 +176,23 @@ pub struct MemoryCommunityDomainV1 {
     /// key (A5.3(5)).
     #[cfg(target_os = "linux")]
     pub(super) quarantine_controls: BTreeMap<(TimelineId, [u8; 16]), CommittedQuarantineControlV1>,
+    /// Each initialized Timeline's quarantine reserve inputs (ADR-129
+    /// revision 13, R13.1(5)): its contexts' roster members and its active
+    /// `(member, reason)` pairs, a T-keyed view of the quarantine index
+    /// updated in the same transactions.
+    #[cfg(target_os = "linux")]
+    pub(super) erasure_contexts: BTreeMap<TimelineId, CommunityErasureContextV1>,
+    /// Each initialized Timeline's pass state: its recorded-set counters,
+    /// selected graph and retained operation counts (ADR-129 revision 10,
+    /// R10.3(6) and R10.4(4)).
+    #[cfg(target_os = "linux")]
+    pub(super) pass_states: BTreeMap<TimelineId, CommunityPassStateV1>,
+    /// The ledger of unresolved reservations by `(T, reservation
+    /// operation ID)`, each holding its worst-case demand (ADR-129 revision
+    /// 13, R13.1(4)).
+    #[cfg(target_os = "linux")]
+    pub(super) pending_reservations:
+        BTreeMap<(TimelineId, [u8; 16]), CommunityPendingReservationV1>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -216,6 +237,12 @@ impl MemoryCommunityDomainV1 {
                 quarantine_index: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 quarantine_controls: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                erasure_contexts: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                pass_states: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                pending_reservations: BTreeMap::new(),
             })
         }
     }

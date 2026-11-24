@@ -18,8 +18,8 @@ use pos_core::community_lifecycle::{
     CommunityMetadataLocatorV1, CommunityMetadataSchemaV1, CommunityNativeNodeKindV1,
     CommunityNativeNodeReferenceV1, CommunityNativeNodeV1, CommunityProducerBindingV1,
     CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityProtectedObjectV1,
-    CommunityRecordKindsV1, CommunityStateContentV1, CommunityStateProducerV1,
-    CommunityStateRevisionV1, CommunityTypedInputRefV1,
+    CommunityRecordKindsV1, CommunitySharedCountsV1, CommunityStateContentV1,
+    CommunityStateProducerV1, CommunityStateRevisionV1, CommunityTypedInputRefV1,
 };
 use pos_core::{
     AuthorityTrustRootSealV1, Hash, ImplementationKeyV1, RecordedDependencyClassV1, Seq, TimelineId,
@@ -28,6 +28,7 @@ use ulid::Ulid;
 use zeroize::Zeroizing;
 
 use super::super::initializer::CommunityInitializerOwnerV1;
+use super::super::pass_state::CommunityPassStateV1;
 use super::super::protection::{CommunityArtifactProtectorV1, CommunityProtectionCohortV1};
 use super::{
     CommunityInitializationGraphInputV1, CommunityInitializationGraphV1,
@@ -98,6 +99,7 @@ fn profile<'a>(
             recovery_window_micros: 1,
             quarantine_not_after_micros: 1_000,
             metadata_not_after_micros: 1_000,
+            recording_not_after_micros: 1_000,
         },
     })
 }
@@ -179,6 +181,7 @@ fn rows<'a>(
                 SCHEMA,
                 hash(6),
                 initializer(&states[slot]),
+                10,
             )
         })
         .collect()
@@ -533,5 +536,40 @@ fn each_record_materializes_with_its_decided_producer() -> TestResult {
         assert_eq!(fields.scope_binding_digest, SCOPE_COVER);
         assert_eq!(fields.evidence_not_after_micros, HORIZON);
     }
+    Ok(())
+}
+
+/// ADR-129 revision 10, R10.3(6) and revision 11, R11.3(1): the seeded
+/// counters are the history's plus the initialization's own additions (its
+/// four CPN1 nodes, two per member, and as many edges, its records' plaintext bytes), and the
+/// selected graph is the CGR1's `graph_counts`.
+#[test]
+fn the_initial_pass_state_adds_the_initialization_to_the_history() -> TestResult {
+    let assembled = assemble(PRODUCER)?;
+    let graph = assembled.graph?;
+    let history = CommunitySharedCountsV1 {
+        nodes: 10,
+        edges: 20,
+        declared_inputs: 30,
+        encoded_record_bytes: 40,
+    };
+    let state = CommunityPassStateV1::initialized(history, &graph);
+    let bytes: u64 = assembled
+        .plaintexts
+        .iter()
+        .map(|plaintext| plaintext.len() as u64)
+        .sum();
+    assert!(
+        state.counters
+            == CommunitySharedCountsV1 {
+                nodes: 14,
+                edges: 24,
+                declared_inputs: 30,
+                encoded_record_bytes: 40 + bytes,
+            }
+    );
+    assert_eq!(state.graph, graph.graph_counts());
+    assert_eq!(state.graph.registrations, 10);
+    assert!(state.closure.is_empty() && state.generations.is_empty());
     Ok(())
 }

@@ -167,6 +167,11 @@ pub enum AttemptLifecycleError {
     /// quarantined and restart reconciliation recovers.
     #[error("the attempt's terminal response is unavailable")]
     ResponseUnavailable,
+    /// The stored response was already delivered whole, so it is kept and
+    /// not re-issued (base ADR-069 §4: every connection receives the same
+    /// stored response).
+    #[error("the attempt's terminal response was already delivered")]
+    ResponseDelivered,
     /// A repeated execute carries other EVR1 or SPX1 bytes than the attempt
     /// was admitted with (ADR-069 §4; SPE1 16 `RequestIdentityConflict`).
     #[error("the repeated execute differs from the attempt's request")]
@@ -548,7 +553,9 @@ pub trait BarrierFactory: Send {
     /// Why the barrier could not be built.
     type Error: Error + Send + Sync + 'static;
 
-    /// Build the barrier for `attempt`, whose root `root` rechecks.
+    /// Build the barrier for `attempt`, whose root `root` rechecks and
+    /// whose cancellation `cancel` reports: a cancellation requested before
+    /// `ReleaseV1` refuses the release.
     ///
     /// # Errors
     /// Fails if the barrier cannot be built; nothing is started then.
@@ -556,6 +563,7 @@ pub trait BarrierFactory: Send {
         self,
         attempt: &AdmittedAttempt,
         root: RootRecheck<'r>,
+        cancel: CancelSignal,
     ) -> Result<Self::Barrier<'r>, Self::Error>;
 }
 
@@ -613,7 +621,7 @@ where
         cancel: CancelSignal,
     ) -> impl Future<Output = Executed<SystemdVerifiedStart, crate::BoundAttemptCgroup>> + Send + 'a
     {
-        let barrier = launch.barrier.barrier(&attempt, recheck);
+        let barrier = launch.barrier.barrier(&attempt, recheck, cancel.clone());
         let job = ExecuteJob {
             attempt,
             mode: launch.mode,

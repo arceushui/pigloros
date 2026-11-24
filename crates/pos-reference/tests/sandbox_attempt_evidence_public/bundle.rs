@@ -1,5 +1,8 @@
 //! `AttemptEvidence`: R9 §6 rules 4 to 7 and 9 across RQE1, KOE1, TME1,
-//! the grant, ELM1, `ReadyV1` and SPR1.
+//! the grant, ELM1, `ReadyV1` and SPR1, with the R14 §3.5 additions to
+//! rules 2 and 4.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use ciborium::value::Value;
 use pos_reference::sandbox_provider_protocol::{
@@ -10,6 +13,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxProviderReceiptFields, TerminalCode, TerminationEvidence,
 };
 
+use super::network_readback::{list_at, vector_d_endpoints, READBACK};
 use super::observed::provider_namespaces;
 use super::oracle::{
     edit, filled, integer, self_digest, set, text, unhex, with, wrapped_digest, TestResult,
@@ -17,7 +21,8 @@ use super::oracle::{
 use super::response::{runtime_key, sign};
 use super::terminated::at_progress;
 use super::vectors::{
-    KOE1_A, KOE1_B, RQE1_A, RQE1_B, TME1_A, TME1_B, TME1_C, TME1_D, TME1_E, TME1_F,
+    KOE1_A, KOE1_B, KOE1_C, KOE1_D, RQE1_A, RQE1_B, TME1_A, TME1_B, TME1_C, TME1_D, TME1_E, TME1_F,
+    TME1_G, TME1_H,
 };
 
 const WORK_LIMIT: u64 = 1_048_576;
@@ -111,6 +116,7 @@ pub(super) struct Fixture {
     provider: [NamespaceIdentity; 6],
     pub(super) grant: ([u8; 16], [u8; 32]),
     elm1: Option<[u8; 32]>,
+    endpoints: Vec<SocketAddr>,
 }
 
 impl Fixture {
@@ -131,6 +137,7 @@ impl Fixture {
             provider: provider_namespaces(),
             grant: ([0x11; 16], [0x22; 32]),
             elm1: None,
+            endpoints: Vec::new(),
         };
         fixture.rebind()?;
         Ok(fixture)
@@ -138,6 +145,16 @@ impl Fixture {
 
     pub(super) fn released(vector: &str) -> TestResult<Self> {
         Self::observed(unhex(vector)?)
+    }
+
+    /// The Local attempt of `fixture`, whose status-0 KOE1 holds the
+    /// readback of `koe1` (R14 KOE1-C or -D) under `endpoints`.
+    fn local(mut self, koe1: &str, endpoints: Vec<SocketAddr>) -> TestResult<Self> {
+        let readback =
+            super::oracle::at(&mut super::oracle::unsigned(&unhex(koe1)?)?, &READBACK)?.clone();
+        self.mode = SandboxExecutionMode::Local;
+        self.endpoints = endpoints;
+        self.koe1(&READBACK, readback)
     }
 
     /// RQE1-B, KOE1-B and a progress-0 TME1: nothing was started.
@@ -223,6 +240,7 @@ impl Fixture {
             architecture: self.architecture,
             ready: self.ready.as_ref(),
             provider_namespaces: &self.provider,
+            planned_endpoints: &self.endpoints,
         };
         // A predecessor is presented only as verified evidence.
         let previous = match previous {
@@ -510,22 +528,23 @@ fn rule_4_work_capacity_is_exactly_the_limit_rounded_up_to_a_block() -> TestResu
 #[test]
 fn rule_2_local_network_and_work_after_follow_mode_and_elm1() -> TestResult {
     let network = Value::Array(vec![Value::Null, Value::Bool(false)]);
-    let mut local = Fixture::released(TME1_A)?;
-    local.mode = SandboxExecutionMode::Local;
-    local.rejects("Local released without a proxy session")?;
-    let mut proxied = Fixture::released(TME1_A)?.tme1(&[19], network.clone())?;
-    proxied.mode = SandboxExecutionMode::Local;
-    proxied.accepts()?;
+    Fixture::released(TME1_A)?
+        .local(KOE1_C, Vec::new())?
+        .rejects("Local released without a proxy session")?;
+    Fixture::released(TME1_A)?
+        .tme1(&[19], network.clone())?
+        .local(KOE1_C, Vec::new())?
+        .accepts()?;
     Fixture::released(TME1_A)?
         .tme1(&[19], network.clone())?
         .rejects("air-gapped with a proxy session")?;
 
-    let mut unbound = Fixture::observed(at_progress(1)?)?;
-    unbound.mode = SandboxExecutionMode::Local;
-    unbound.accepts()?;
-    let mut bound = Fixture::observed(with(&at_progress(1)?, &[19], network.clone())?)?;
-    bound.mode = SandboxExecutionMode::Local;
-    bound.accepts()?;
+    Fixture::observed(at_progress(1)?)?
+        .local(KOE1_C, Vec::new())?
+        .accepts()?;
+    Fixture::observed(with(&at_progress(1)?, &[19], network.clone())?)?
+        .local(KOE1_C, Vec::new())?
+        .accepts()?;
     Fixture::observed(with(&at_progress(1)?, &[19], network)?)?
         .rejects("air-gapped started with a proxy session")?;
 
@@ -868,4 +887,204 @@ fn rule_2_work_after_follows_a_status_0_koe1() -> TestResult {
         .koe1(&[7, 11], Value::Null)?
         .tme1(&[26], integer(2))?
         .rejects("work-after without a /work limit")
+}
+
+/// A released Local attempt whose KOE1 holds the readback of `koe1`.
+fn local_released(koe1: &str, endpoints: Vec<SocketAddr>) -> TestResult<Fixture> {
+    let network = Value::Array(vec![Value::Null, Value::Bool(false)]);
+    Fixture::released(TME1_A)?
+        .tme1(&[19], network)?
+        .local(koe1, endpoints)
+}
+
+/// One `network-readback` field of a fixture's KOE1.
+fn readback_path(path: &[usize]) -> Vec<usize> {
+    READBACK.iter().chain(path).copied().collect()
+}
+
+/// R14 rule 2: a status-0 KOE1 has a `network-readback` exactly in Local
+/// mode, and rule 4 accepts KOE1-C under a Local AGR1 with empty plans.
+#[test]
+fn r14_rule_2_the_network_readback_follows_the_mode() -> TestResult {
+    local_released(KOE1_C, Vec::new())?.accepts()?;
+    for mode in [
+        SandboxExecutionMode::AirGapped,
+        SandboxExecutionMode::Replay,
+        SandboxExecutionMode::Fork,
+    ] {
+        // (e) a readback in KOE1-A, outside Local mode.
+        let mut present = local_released(KOE1_C, Vec::new())?;
+        present.mode = mode;
+        present.rejects(&format!("a readback in {mode:?}"))?;
+        let mut absent = Fixture::released(TME1_A)?;
+        absent.mode = mode;
+        absent.accepts()?;
+    }
+    // (f) null in a Local status-0 KOE1.
+    local_released(KOE1_C, Vec::new())?
+        .koe1(&READBACK, Value::Null)?
+        .rejects("a Local status-0 KOE1 without a readback")?;
+    // A status-1 or status-2 KOE1 has no observation, so no readback.
+    let mut unstarted = Fixture::not_started()?;
+    unstarted.mode = SandboxExecutionMode::Local;
+    unstarted.accepts().map(|_| ())
+}
+
+fn ipv4_endpoint(octets: [u8; 4], port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::from(octets)), port)
+}
+
+/// R14 rule 4: the routes, chains and egress lists follow the planned
+/// endpoints, mapped and distinct, in any order.
+#[test]
+fn r14_rule_4_the_readback_follows_the_planned_endpoints() -> TestResult {
+    let [web, ipv6_endpoint] = vector_d_endpoints();
+    let mapped = SocketAddr::new(
+        IpAddr::V6(Ipv4Addr::new(203, 0, 113, 10).to_ipv6_mapped()),
+        443,
+    );
+    for endpoints in [
+        vec![web, ipv6_endpoint],
+        vec![ipv6_endpoint, web],
+        vec![web, ipv6_endpoint, web],
+        vec![mapped, ipv6_endpoint],
+    ] {
+        local_released(KOE1_D, endpoints)?.accepts()?;
+    }
+    for (koe1, endpoints, case) in [
+        (KOE1_D, Vec::new(), "KOE1-D without plans"),
+        (KOE1_D, vec![web], "KOE1-D without the IPv6 endpoint"),
+        (
+            KOE1_D,
+            vec![ipv6_endpoint],
+            "KOE1-D without the IPv4 endpoint",
+        ),
+        (
+            KOE1_D,
+            vec![ipv4_endpoint([203, 0, 113, 10], 444), ipv6_endpoint],
+            "another port",
+        ),
+        (KOE1_C, vec![web], "KOE1-C with a planned endpoint"),
+    ] {
+        local_released(koe1, endpoints)?.rejects(case)?;
+    }
+    Ok(())
+}
+
+fn bytes(value: &[u8]) -> Value {
+    Value::Bytes(value.to_vec())
+}
+
+/// R14 rule 4: each route, chain and egress condition, one field at a
+/// time, over KOE1-C and KOE1-D.
+#[test]
+fn r14_rule_4_routes_chains_and_egress_are_exact() -> TestResult {
+    let endpoints = || vector_d_endpoints().to_vec();
+    let web = Value::Array(vec![bytes(&[203, 0, 113, 10]), integer(443)]);
+    let reject_d = |path: &[usize], value: Value, case: &str| -> TestResult {
+        local_released(KOE1_D, endpoints())?
+            .koe1(&readback_path(path), value)?
+            .rejects(case)
+    };
+    // Routes: each gateway and each connected route.
+    reject_d(
+        &[8, 1, 1],
+        bytes(&[10, 200, 0, 14]),
+        "an IPv4 host route via N+2",
+    )?;
+    let ipv6_gateway = Ipv6Addr::new(0xfd70, 0x6967, 0x6c6f, 0, 0, 0, 0, 7);
+    reject_d(
+        &[8, 2, 1],
+        bytes(&ipv6_gateway.octets()),
+        "an IPv6 host route via M+1",
+    )?;
+    reject_d(&[8, 0, 0, 1], integer(29), "a /29 connected route")?;
+    reject_d(
+        &[8, 3, 1],
+        bytes(&[0xfd; 16]),
+        "a connected IPv6 route via a gateway",
+    )?;
+    // Chains: hook, priority, policy, regular chain, rules and names.
+    reject_d(&[10, 0, 1, 0], integer(2), "input at the output hook")?;
+    reject_d(&[10, 2, 1, 1], integer(1), "forward at priority 1")?;
+    reject_d(&[10, 1, 1, 2], integer(0), "an accepting output chain")?;
+    reject_d(&[10, 2, 1], Value::Null, "a regular forward chain")?;
+    reject_d(
+        &[10, 0, 2],
+        Value::Array(vec![
+            Value::Array(vec![integer(1)]),
+            Value::Array(vec![integer(0)]),
+        ]),
+        "reordered input rules",
+    )?;
+    reject_d(
+        &[10, 2, 2],
+        Value::Array(vec![Value::Array(vec![integer(0)])]),
+        "a forward rule",
+    )?;
+    reject_d(
+        &[10, 1, 2, 1, 2],
+        integer(127),
+        "neighbour discovery to M/127",
+    )?;
+    reject_d(
+        &[10, 0, 0],
+        Value::Text("inputs".to_owned()),
+        "a chain named inputs",
+    )?;
+    // (d) the output rules reordered.
+    let reordered = local_released(KOE1_D, endpoints())?;
+    let mut rules = list_at(&unhex(KOE1_D)?, &readback_path(&[10, 1, 2]))?;
+    rules.swap(2, 3);
+    reordered
+        .koe1(&readback_path(&[10, 1, 2]), Value::Array(rules))?
+        .rejects("reordered output rules")?;
+    // Egress: each list is exactly the IPv4 endpoints.
+    reject_d(&[11], Value::Array(Vec::new()), "nothing allowed")?;
+    reject_d(&[12], Value::Array(Vec::new()), "nothing masqueraded")?;
+    for index in [11, 12] {
+        local_released(KOE1_C, Vec::new())?
+            .koe1(&readback_path(&[index]), Value::Array(vec![web.clone()]))?
+            .rejects(&format!("egress list {index} without a plan"))?;
+    }
+    Ok(())
+}
+
+/// R14 rule 2 and §4.6: launch failure 6 only in Local mode and 7 only in
+/// Replay mode, both at progress 0; codes 9 and 10, never a quarantine.
+#[test]
+fn r14_launch_failures_6_and_7_follow_their_modes() -> TestResult {
+    for (vector, mode, code) in [
+        (
+            TME1_G,
+            SandboxExecutionMode::Local,
+            TerminalCode::IpcFailure,
+        ),
+        (
+            TME1_H,
+            SandboxExecutionMode::Replay,
+            TerminalCode::ProtocolFailure,
+        ),
+    ] {
+        let mut fixture = Fixture::unstarted(unhex(vector)?)?;
+        fixture.mode = mode;
+        let (requested, observed, termination, _) = fixture.records()?;
+        fixture.accepts()?;
+        let classification = termination.facts(&requested, &observed).classify();
+        assert_eq!(classification.code(), Some(code));
+        assert!(!classification.quarantined());
+    }
+    for (vector, mode) in [
+        (TME1_G, SandboxExecutionMode::Replay),
+        (TME1_G, SandboxExecutionMode::AirGapped),
+        (TME1_G, SandboxExecutionMode::Fork),
+        (TME1_H, SandboxExecutionMode::Local),
+        (TME1_H, SandboxExecutionMode::AirGapped),
+        (TME1_H, SandboxExecutionMode::Fork),
+    ] {
+        let mut fixture = Fixture::unstarted(unhex(vector)?)?;
+        fixture.mode = mode;
+        fixture.rejects(&format!("{mode:?}"))?;
+    }
+    Ok(())
 }

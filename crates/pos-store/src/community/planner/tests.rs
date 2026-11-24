@@ -7,6 +7,7 @@
 use pos_core::community_lifecycle::{
     CommunityAuthorityEvidenceV1, CommunityAuthorityViewRowV1, CommunityClockLatchV1,
     CommunityCurrentViewV1, CommunityLifecycleErrorV1 as Error, CommunityProfileMemberV1,
+    CommunitySharedCountsV1,
 };
 use pos_core::trusted_clock::{
     GuardMonotonicSourceV1, TrustedClockReservationV1, TrustedWallSourceV1,
@@ -242,6 +243,7 @@ fn trust_rows_follow_plugin_order_with_the_scope_floors() -> TestResult {
                 crate::community_initialization_fixture::SCHEMA,
                 Hash::from_bytes([6; 32]),
                 roster.initializer(),
+                10,
             )?)
         })
         .collect::<Fallible<Vec<_>>>()?;
@@ -316,7 +318,12 @@ fn a_non_zero_inventory_generation_flows_into_every_record() -> TestResult {
         MemoryTrustedClockAuthorityV1::new(),
     )?;
     let (call, admission) = world.call_and_admit(planner.request(), LEAVES[0])?;
-    let records = planner.records(GENERATION, &admission, &ADDRESSES)?;
+    let records = planner.records(
+        GENERATION,
+        &admission,
+        &ADDRESSES,
+        CommunitySharedCountsV1::default(),
+    )?;
     let fake = Fake {
         inventory_generation: 7,
         ..Fake::new(&world.domain)
