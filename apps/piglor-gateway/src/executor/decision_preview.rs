@@ -12,14 +12,14 @@
 //! Each `pub(crate)` function runs inside one store command on the store
 //! worker, so a lookup and the appends it guards are one serialized step:
 //!
-//! - [`lookup_claim`] finds the claim of a key (step 5);
-//! - [`admit_inputs`] runs the profile gate, the room and the binding
+//! - `lookup_claim` finds the claim of a key (step 5);
+//! - `admit_inputs` runs the profile gate, the room and the binding
 //!   checks of a fresh request (steps 7 to 9);
-//! - [`commit_preview`] re-runs the lookup and either finishes an exact
+//! - `commit_preview` re-runs the lookup and either finishes an exact
 //!   retry (step 6.2) or re-validates, checks the per-minute quota and the
 //!   ceiling, opens the Timeline and appends the claim and its result
 //!   (step 12);
-//! - [`read_preview`] finds a claim by its preview ID and builds the state,
+//! - `read_preview` finds a claim by its preview ID and builds the state,
 //!   recomputing a computed Recommendation (section 7).
 //!
 //! The result payload carries no derived value (P16), so the read

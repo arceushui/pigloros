@@ -162,15 +162,30 @@ if [ "$needs_workspace" = true ] || [ "${#packages[@]}" -gt 5 ]; then
     echo "  (workspace-level clippy)"
     cargo clippy --workspace --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
 else
+    # --no-deps lints only the selected package. Without it clippy also lints
+    # every workspace path dependency it builds, and it builds those with only
+    # the features this package's dependency edge enables, not the features that
+    # unify under CI's --workspace run (for example pos-store without
+    # test-support). That reports lints in code the commit did not change that
+    # the --workspace run on main and the merge queue never reports, which
+    # blocks merging main into a branch. Pull request CI lints the changed
+    # packages and their dependents without --no-deps, so a changed package
+    # that depends on an unchanged pos-store built without test-support still
+    # lints pos-store there. After this change the hook is weaker than pull
+    # request CI in that case; that is accepted (CI stays strict, owner-approved
+    # 2026-11-25).
     for package in "${!packages[@]}"; do
         echo "  clippy: $package"
-        cargo clippy -p "$package" --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+        cargo clippy -p "$package" --all-features --all-targets --locked --no-deps -- -D warnings -W clippy::pedantic
     done
 fi
 
+# --no-deps keeps this call consistent with the per-package calls above. For
+# fuzz/Cargo.toml it is a no-op: that manifest is its own [workspace] and its
+# path dependencies are not workspace members, so clippy does not lint them.
 for manifest in "${!isolated_manifests[@]}"; do
     echo "  clippy: $manifest"
-    cargo clippy --manifest-path "$manifest" --all-targets --locked -- -D warnings -W clippy::pedantic
+    cargo clippy --manifest-path "$manifest" --all-targets --locked --no-deps -- -D warnings -W clippy::pedantic
 done
 
 echo "pre-commit: OK"
