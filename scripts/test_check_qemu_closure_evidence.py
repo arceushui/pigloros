@@ -405,6 +405,7 @@ def network_files() -> dict[str, bytes | str]:
         base = f"guest/network/{case}"
         files.update({
             f"{base}/sysctl": f"{value}\n", f"{base}/status": "0\n", f"{base}/netns": UNIT_NETNS + "\n",
+            f"{base}/stderr": "", f"{base}/journal": "Nov 25 piglor-network: Finished.\n",
             f"{base}/links": LINK_LO + (FALLBACKS if value == "0" else ""),
             f"{base}/addrs": ADDRESSES, f"{base}/routes4": ROUTES4, f"{base}/routes6": ROUTES6,
         })
@@ -1347,6 +1348,29 @@ class EvidenceTests(unittest.TestCase):
         addresses = ADDRESSES.replace("1: lo ", "1: lo@lo ", 1)
         self.assertEqual(self.verdict(change=lambda f: f.update({"guest/network/fb-1/addrs": addresses}))
                          ["private_network"]["fb-1"]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
+
+    def test_a_failed_probe_explains_itself(self):
+        """The first QEMU run failed with no probe files: the error must carry the unit's stderr."""
+        def failed(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-0/{name}")
+            files["guest/network/fb-0/status"] = "1\n"
+            files["guest/network/fb-0/stderr"] = "Failed to find executable bash\n"
+        with self.assertRaisesRegex(checker.EvidenceError, "status 1.*Failed to find executable bash"):
+            self.verdict(change=failed)
+
+        def silent(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-1/{name}")
+        with self.assertRaisesRegex(checker.EvidenceError, "wrote no probe files"):
+            self.verdict(change=silent)
+        with self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr"):
+            self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": "warning\n"}))
+        # A record with an unexpected file or partial probe files is named precisely.
+        with self.assertRaisesRegex(checker.EvidenceError, r"malformed network record fb-1: missing \['journal'\]"):
+            self.verdict(change=lambda f: f.pop("guest/network/fb-1/journal"))
+        with self.assertRaisesRegex(checker.EvidenceError, r"unexpected \['extra'\]"):
+            self.verdict(change=lambda f: f.update({"guest/network/fb-1/extra": ""}))
 
     def test_private_network_fabrication_fails_closed(self):
         base = "guest/network"
