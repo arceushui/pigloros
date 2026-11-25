@@ -13,6 +13,7 @@ mod launch;
 mod network;
 mod operations;
 mod policy;
+mod reconciliation;
 mod revocation;
 mod revocation_update;
 mod signing;
@@ -119,10 +120,15 @@ pub use operations::{
     SandboxCancellationResult, SandboxDescribeRequest, SandboxDescribeResponse,
     SandboxDescribeResponseFields, SandboxLocalError, SandboxLocalErrorCode,
     SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
-    SandboxReconcileResponse,
+    SandboxReconcileResponse, SandboxReconcileResponseFields,
+};
+pub use reconciliation::{
+    ReconciliationEvidence, ReconciliationEvidenceFields, RECONCILIATION_EVIDENCE_V1_BYTES,
+    RECONCILIATION_EVIDENCE_V1_DOMAIN,
 };
 pub use signing::{
-    Agr1, Rca1, Rls1, RuntimeSigned, Sau1, Scy1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Verified,
+    Agr1, Rca1, Rls1, RuntimeSigned, Sau1, Scy1, Sdy1, SelfDigested, Spe1, Spr1, Spy1, Sry1,
+    Verified,
 };
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,

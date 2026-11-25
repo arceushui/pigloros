@@ -8,8 +8,8 @@
 //! signing oracle.
 //!
 //! [`RuntimeSigned`] is sealed. Its kinds are a subset of the R9 §5 set, and
-//! a kind joins only when its encoder does: AGR1, RLS1, SDY1, SPE1, RCA1, SAU1,
-//! SPR1 and SPY1 now. RQE1, KOE1, TME1 and RDY1 never do.
+//! a kind joins only when its encoder does: AGR1, RLS1, SDY1, SCY1, SRY1,
+//! SPE1, RCA1, SAU1, SPR1 and SPY1 now. RQE1, KOE1, TME1 and RDY1 never do.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -105,6 +105,21 @@ impl runtime_signed_sealed::Sealed for Scy1 {}
 impl RuntimeSigned for Scy1 {
     const MAGIC: &'static str = "SCY1";
     type Body = super::SandboxCancelResponseFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// SRY1, the signed successful `reconcile` response (ADR-069 R15).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sry1 {}
+
+impl runtime_signed_sealed::Sealed for Sry1 {}
+
+impl RuntimeSigned for Sry1 {
+    const MAGIC: &'static str = "SRY1";
+    type Body = super::SandboxReconcileResponseFields;
 
     fn key_id(body: &Self::Body) -> &str {
         &body.runtime_attestation_key_id

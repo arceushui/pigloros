@@ -137,6 +137,14 @@ impl ReleaseOutcome {
             .and_then(|(observed, _)| observed.work())
     }
 
+    /// Take the `/work` handle for the terminal `work-after` reading, which
+    /// closes it before `StopUnit` (ADR-069 R15 §3.6 item 3, N9).
+    pub(crate) fn take_work(&mut self) -> Option<File> {
+        self.observed
+            .as_mut()
+            .and_then(|(observed, _)| observed.take_work())
+    }
+
     /// The `ReleaseV1` sent; its `observed_readback_digest` is the KOE1
     /// self-digest. `None` when the release was denied or never reached.
     #[must_use]
@@ -257,6 +265,12 @@ impl ResourceEvidence {
     #[must_use]
     pub const fn release(&self) -> &ReleaseOutcome {
         &self.0.release
+    }
+
+    /// Take the `/work` handle of the release, for the terminal reading
+    /// that closes it.
+    pub(crate) fn take_work(&mut self) -> Option<File> {
+        self.0.release.take_work()
     }
 
     /// The terminal evidence; `None` when no cgroup was bound, so nothing
