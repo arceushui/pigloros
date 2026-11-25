@@ -26,20 +26,21 @@
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
 //! re-validates only what is cheap to check: the pass state and the entry.
-//! A Reserve is refused when its identity is pending (`Conflict`) or when
-//! another reservation of the same T is pending (`PassUnresolved`, code 7,
-//! refused at the apply only, not at stage). A Commit or Abort is refused
-//! when its entry is gone or too small, which also refuses their replay.
+//! A Reserve is refused with `Conflict` when its identity is recorded in
+//! the CRI1 index (`pass_records`), resolved or not, or is pending, at stage
+//! and again at the apply. It is refused with `PassUnresolved` (code 7)
+//! at stage when T already has an unresolved pass. A second Reserve staged
+//! before the first was applied is invisible at stage, so only the apply
+//! refuses it (`PassUnresolved`, from T's pending entries). A Commit or
+//! Abort is refused when its entry is gone or too small, which also refuses
+//! their replay.
 //!
-//! The writer keeps no memory of resolved identities. A replay of a
-//! resolved or pending identity is answered from its original outcome by the
-//! pipeline's step 4a discovery (the Reserve index), which runs before the
-//! planner and the writer. A Reserve that reaches the writer anyway is not
-//! refused for being a replay: it creates an entry, so it applies again. A
-//! replay normally dies at stage with `StaleFrontier`; only a reuse Reserve
-//! replayed after an Abort passes both stage compares, because an Abort
-//! leaves the head and counters as the Reserve saw them. The A4c-3 Reserve
-//! index owns the test of that case.
+//! A Reserve replay is refused here as well as by the pipeline's step 4a
+//! discovery: `pass_records` keeps every pass with its status after it
+//! resolves, so a recorded identity, pending or resolved, is a `Conflict`
+//! at stage and at apply, before the head and counters are compared. The
+//! discovery still answers a replay from its original outcome first; this
+//! refusal is the backstop.
 //!
 //! No apply re-runs the budget, caps, head or counters compares; a token
 //! staged before another operation changed them is for the pipeline to
@@ -158,8 +159,9 @@ pub struct CommunityStagedAbortV1 {
 impl MemoryCommunityDomainV1 {
     /// Re-check a Reserve at the writer (R10.7 step 5j) and stage it.
     ///
-    /// Another pending reservation of T (`PassUnresolved`, code 7) is not
-    /// refused here, only at [`Self::apply_reserve`].
+    /// An unresolved pass of T is refused here (`PassUnresolved`, code 7). A
+    /// second reservation staged but not yet applied is invisible at stage
+    /// and is refused only at [`Self::apply_reserve`].
     ///
     /// # Errors
     /// Returns `InvalidBinding` when the minted rows exceed the pass rows or
@@ -277,8 +279,9 @@ impl MemoryCommunityDomainV1 {
     /// scope rows a reuse reads and one more control operation.
     ///
     /// # Errors
-    /// Returns `Conflict` when the reservation identity is pending already,
-    /// `PassUnresolved` (7) when another reservation of T is pending, and
+    /// Returns `Conflict` when the reservation identity is recorded already,
+    /// resolved or not, `PassUnresolved` (7) when another reservation of T is
+    /// pending, and
     /// `EvidenceUnavailable` when the Timeline has no pass state; the
     /// domain is unchanged.
     pub fn apply_reserve(

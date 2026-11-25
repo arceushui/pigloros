@@ -329,7 +329,7 @@ fn counters_add_field_by_field_and_saturate() {
 
 /// Composition preconditions come first: no pass state is unavailable
 /// evidence, a materialization binding more rows than the pass is a bad
-/// binding, and a reservation identity already pending is a conflict.
+/// binding, and a reservation identity already recorded is a conflict.
 #[test]
 fn a_reserve_needs_state_a_fitting_materialization_and_a_new_identity() -> TestResult {
     let mut domain = domain()?;
@@ -762,42 +762,57 @@ fn every_actor_of_the_scope_must_fit() -> TestResult {
     Ok(())
 }
 
-type Snapshot = (
-    Vec<(TimelineId, [u8; 16], u64, u64)>,
-    u64,
-    u64,
-    u64,
-    usize,
-    usize,
-);
+/// What a refused apply must leave alone. `CommunitySharedCountsV1` has no
+/// `Debug`, so the four counters are compared as a tuple.
+#[derive(Debug, PartialEq)]
+struct Snapshot {
+    pending: Vec<(TimelineId, [u8; 16], u64, u64)>,
+    records: Vec<(TimelineId, [u8; 16], CommunityPassStatusV1)>,
+    outcomes: u64,
+    control_operations: u64,
+    counters: (u64, u64, u64, u64),
+    observations: usize,
+    scope_rows: usize,
+}
 
-/// Everything a refused apply must leave alone: the pending ledger, the
-/// retained counts, the node counter and the observation and scope-row
-/// terms.
+/// The pending ledger, the pass-record index with every status, the
+/// retained counts, the four recorded-set counters and the observation and
+/// scope-row terms of T.
 fn snapshot(domain: &MemoryCommunityDomainV1) -> Result<Snapshot, Box<dyn std::error::Error>> {
     let state = domain.pass_states.get(&id(1)).ok_or("state")?;
-    Ok((
-        domain
+    let counters = domain.recorded_set_counters(id(1));
+    Ok(Snapshot {
+        pending: domain
             .pending_reservations
             .iter()
             .map(|((timeline, operation), entry)| {
                 (*timeline, *operation, entry.targets, entry.rows)
             })
             .collect(),
-        domain.retained_pass_outcomes(id(1), GENERATION),
-        domain.control_operations(id(1), GENERATION),
-        domain.recorded_set_counters(id(1)).nodes,
-        state.observations.len(),
-        state.scope_rows.len(),
-    ))
+        records: domain
+            .pass_records
+            .iter()
+            .map(|((timeline, operation), record)| (*timeline, *operation, record.status))
+            .collect(),
+        outcomes: domain.retained_pass_outcomes(id(1), GENERATION),
+        control_operations: domain.control_operations(id(1), GENERATION),
+        counters: (
+            counters.nodes,
+            counters.edges,
+            counters.declared_inputs,
+            counters.encoded_record_bytes,
+        ),
+        observations: state.observations.len(),
+        scope_rows: state.scope_rows.len(),
+    })
 }
 
 /// The composition preconditions are judged in a fixed order: a bad
-/// binding, then a pending identity, then a Timeline with no state.
+/// binding, then a recorded identity, then a Timeline with no state.
 #[test]
 fn the_preconditions_are_judged_in_order() -> TestResult {
     let mut domain = domain()?;
-    // T2 has no state, an identity already pending, and a minted row count
+    // T2 has no state, an identity already recorded, and a minted row count
     // above its pass rows.
     domain.pending_reservations.insert(
         (id(2), OPERATION),
