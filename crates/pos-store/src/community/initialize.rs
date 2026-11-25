@@ -573,7 +573,7 @@ impl MemoryCommunityDomainV1 {
     }
 
     /// Allocate and burn the next native producer ordinal (ADR-129 §4).
-    fn allocate_producer_ordinal(&mut self) -> Result<u64, Error> {
+    pub(super) fn allocate_producer_ordinal(&mut self) -> Result<u64, Error> {
         self.native_producer_ordinal
             .checked_add(1)
             .inspect(|ordinal| self.native_producer_ordinal = *ordinal)

@@ -555,3 +555,22 @@ fn head_roster_decode_borrows_exact_original_wire_rows() -> TestResult {
     assert!(original.as_input() == restored.as_input());
     Ok(())
 }
+
+#[test]
+fn the_cri1_digest_is_domain_separated_and_covers_every_field() -> TestResult {
+    let request = Request::new(request_input())?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.Community.CRI1.v1\0");
+    hasher.update(&request.to_canonical_cbor());
+    assert_eq!(
+        request.digest(),
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    );
+    let other = Request::new(RequestInput {
+        reservation_operation_id: [10; 16],
+        ..request_input()
+    })?;
+    assert_ne!(request.digest(), other.digest());
+    assert_eq!(request.digest(), Request::new(request_input())?.digest());
+    Ok(())
+}

@@ -272,6 +272,14 @@ fn the_commit_publishes_and_retains_the_whole_initialization() -> TestResult {
     assert!(floors[0]
         .selected_head
         .is_some_and(|head| head != Hash::zero()));
+    // The head a Reserve names, read from the CSI1 floor, is the head the
+    // pass state compares at the writer, and the floors agree.
+    let state = domain
+        .pass_states
+        .get(&target())
+        .ok_or("the pass state must be retained")?;
+    assert_eq!(floors[0].selected_head, Some(state.head));
+    assert_eq!(floors[0].highest_pass_ordinal, state.highest_pass_ordinal);
 
     let intent = metadata_key.intent().as_input();
     assert!(intent.parent_operation == CommunityArtifactOperationV1::Initialization(OPERATION));
@@ -855,6 +863,7 @@ fn a_second_pass_state_never_replaces_the_first() -> TestResult {
             observations: BTreeMap::new(),
             scope_rows: BTreeMap::new(),
             generations: BTreeMap::new(),
+            highest_pass_ordinal: 0,
             retained: BTreeMap::new(),
         },
     );
