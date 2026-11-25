@@ -61,6 +61,12 @@ Rules for managing ADR pages on the Redmine wiki at `redmine.piglor.com/projects
    distinguish section-level feedback from approval of the complete page. An
    earlier or partial approval does not approve a later amendment.
 
+   An authorized status-only publication is the exception: an approval receipt
+   may bind the reviewed candidate revision and complete decision body, followed
+   by a version-guarded change of its status to `Accepted`. Verify that status
+   metadata is the only change and record both the reviewed and stored versions
+   with the receipt. Any decision-text change requires a fresh review.
+
 8. **Pending amendments control page status.** If an accepted ADR gains an
    unapproved amendment, mark the page `Under Review` and identify which base
    decisions remain accepted. Restore `Accepted` only after the amended

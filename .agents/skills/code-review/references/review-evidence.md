@@ -5,9 +5,15 @@ authorization and repository policy.
 
 - **Use independent review within the authorized workflow.** Use the `code-review` skill when review is explicitly requested, with a fixed point and separate Standards and Spec axes. Address findings in a separate round and re-review the resulting exact head. Independent review is required before merge under the repository merge policy; implementation completion alone does not authorize spawning reviewers. A conflict-free PR or passing subset of checks is not merge readiness.
 
-- **Review the complete PR diff after rebases.** A review of only the newest commit can miss regressions introduced by earlier commits or by conflict resolution. Compare the final PR head with the latest `main`, and record the exact reviewed head.
+- **Review the complete PR diff after a head change.** A review of only the
+  newest commit can miss regressions from earlier commits or conflict resolution.
+  Pin the current PR base and final head, review their full merge-base diff, and
+  record both identities.
 
-- **Pin one review baseline before delegation.** Fetch the remote base and record its exact commit, feature head, merge-base, changed-file list, and full commit list; give every reviewer the same `base...HEAD` range. A rebase invalidates the old source-review evidence and requires a new explicitly pinned baseline.
+- **Pin one review baseline before delegation.** Fetch the remote base and
+  record its commit, feature head, merge-base, files, and complete commit list.
+  Give every reviewer the same `base...HEAD` range. Any changed head invalidates
+  the old source-review evidence and requires a newly pinned snapshot.
 
 - **Disposition the complete finding set.** Preserve Standards and Spec as separate axes, and show every item as accepted, rejected, or deferred with current evidence, ownership, merge impact, and the concrete reason. Previous findings are leads rather than evidence; verify them against current lines, omit stale defects, and explain whether a disagreement comes from a code misread, an over-literal rule, or valid debt outside the ticket.
 

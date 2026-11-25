@@ -1,28 +1,30 @@
 ---
 name: implement
-description: "Implement a piece of work based on a spec or set of tickets."
+description: "Implement authorized PiglorOS work from a specification or identified tickets, using the project workflow owners."
 disable-model-invocation: true
 ---
 
-Implement the work described by the user in the spec or tickets.
+# Implement
 
-Use /tdd where possible, at pre-agreed seams.
+Implement the requested specification through the accepted project boundaries.
+Use [using-git-worktrees](../using-git-worktrees/SKILL.md) to isolate the task and
+deliver coherent commits. For authorized Redmine ticket work, use
+[start-work](../start-work/SKILL.md); a generic task or PR reference does not
+authorize tracker mutation.
 
-## Quality gates (run after EVERY code change)
+Use TDD at pre-agreed seams when requested. For a new crate, plugin, binary,
+public contract, or other significant architecture choice, follow
+[prepare-adr](../prepare-adr/SKILL.md) before implementation.
 
-After every change — including after code review fixes — run the full suite:
+Use [rust-quality-gates](../rust-quality-gates/SKILL.md) for current hosted
+verification and coverage policy. Preserve hooks, remove uncoverable new code,
+and obtain fresh evidence after review fixes. Do not duplicate gate commands here
+or infer permission for manual local Cargo.
 
-```bash
-cargo test --workspace --locked -- --include-ignored    # all tests, 0 failures
-cargo clippy --workspace --all-targets --locked -- -D warnings -W clippy::pedantic
-RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
-  --fail-under-lines 99 --fail-under-regions 99 -- --include-ignored
-```
+Use [code-review](../code-review/SKILL.md) when independent review is requested.
+A merge requires a clean review of the final head and green required CI; neither
+result grants merge authority. Commit from the task worktree and publish within
+the user's authorized scope.
 
-If any gate fails, fix it before moving on. Do NOT skip gates — not even for "trivial" changes or after code review.
-
-**Coverage rule:** If new code cannot be covered by a test, **remove it** — do not leave dead code. Prefer deleting/simplifying untestable branches over exemptions or `coverage(off)`. The 1% tolerance is only for LLVM regions with no source mapping after a fresh non-root run; it never exempts tests or production code.
-
-Once done, use /code-review to review the work, then re-run gates after applying review fixes.
-
-Commit your work to the current branch.
+Before delivery, check the requested behavior, acceptance evidence, task-only
+diff, committed revision, and remaining gates. Report pending checks honestly.

@@ -9,9 +9,11 @@ authorization and repository policy.
 
 - **Close coverage gaps in material semantic batches.** Use the exact hosted artifact to group missed changed regions by file and behavior, then add public-boundary tests or remove unreachable branches in one coherent batch. Report per-file before/after counts; crossing the aggregate threshold alone does not prove changed code is adequately exercised.
 
-- **Run every applicable quality gate after each code change.** Include review fixes and restart gates from the new commit. Run the documented local format, test, lint, and coverage checks. When instrumentation exhausts local memory or a stated local resource constraint prohibits a run, use the unchanged hosted gate for that evidence, preserve thresholds, and inspect its logs. Report unavailable evidence explicitly; do not start a prohibited build to demonstrate the constraint.
-
-- **Choose Rust constructs deliberately when coverage evidence matters.** Equivalent macros and control-flow forms can create different LLVM regions; prefer the idiomatic form that keeps behavior clear and measurable.
+- **Bind quality gates to the changed head.** Include review fixes and use fresh
+  hosted format, test, lint, coverage, and mutation results for the new commit.
+  Preserve the repository hooks and the local-Cargo exception documented in
+  `AGENTS.md`; do not run manual local Cargo checks. Inspect the hosted logs,
+  retain thresholds, and report pending or unavailable evidence explicitly.
 
 - **Treat coverage and complexity as coupled constraints.** Helper extraction, error propagation, and decoder flattening can improve one metric while adding uncovered residual regions or pathological formatter work. Accept the refactor only when control flow remains linearly auditable and both machine-readable reports improve without weakened semantics.
 

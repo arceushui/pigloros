@@ -38,7 +38,9 @@ issuing a verdict. Git-only inventory requirements below apply to code mode.
 
 ### 1. Pin the review snapshot and mode
 
-Whatever the user said is the fixed point — a commit SHA, branch name, tag, `main`, `HEAD~5`, etc. If they didn't specify one, ask for it.
+Use the supplied fixed point or the target base of the identified PR. Resolve it
+to a commit before reviewing. Ask only when the available task context identifies
+neither a fixed point nor a PR base.
 
 Work in the authoritative task worktree. Record its absolute path, the resolved
 base SHA, feature-head SHA, merge-base SHA, changed-file list, and full commit
@@ -47,11 +49,17 @@ so the comparison is against the merge-base).
 
 Before going further, confirm the fixed point resolves and the diff is non-empty.
 Require each reviewer to repeat the worktree path and both SHAs before reporting.
-A rebase or remediation commit invalidates the snapshot and any closure verdict.
+Any changed head invalidates the snapshot and its closure verdict.
 
 Use immutable artifact identities for each snapshot. After a failed mutation,
 stop dependent snapshot commands and verify the intended head actually changed
 before creating a new receipt; never overwrite an earlier review's identity.
+
+Pin governing policy sources too: the worktree or provider, path or object ID,
+commit or revision, and content identity. Resolve normative quotes against that
+same tree or accepted external revision before accepting or rejecting a finding.
+Record higher-priority user overrides separately; another checkout's policy
+does not establish the contract future consumers of this PR will read.
 
 Use **final mode** by default. If the user explicitly asks for a quick review,
 use a bounded fast mode that still checks both axes but reports only verified,
@@ -62,7 +70,14 @@ fast mode as final approval.
 
 Look for the originating spec, in this order:
 
-1. Issue references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.) — fetch via the configured tracker above.
+The user's requirements and PR description are valid acceptance sources. Use
+available conversation context rather than asking for the same brief again.
+
+1. References in commit messages. Resolve explicit URLs and provider-qualified
+   identifiers through their originating provider. Use the configured Redmine
+   tracker for unqualified internal ticket references. A GitHub PR or issue
+   number and a GitLab merge request such as `!67` are not Redmine ticket IDs;
+   establish provenance before fetching an ambiguous reference.
 2. A path the user passed as an argument.
 3. A PRD/spec file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
 4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
@@ -164,7 +179,7 @@ End with a one-line summary: total findings per axis, and the worst issue _withi
 
 For closure, freeze one exact code-and-spec snapshot, require the relevant
 hosted gates on that SHA, and run both complete merge-base reviews. Any code,
-rebase, accepted-decision, or acceptance-evidence change requires a fresh
+accepted-decision, or acceptance-evidence change requires a fresh
 closure review. Review fixes must be the smallest behavioral changes with
 public-boundary regressions where possible and must not introduce unrelated
 coverage debt.

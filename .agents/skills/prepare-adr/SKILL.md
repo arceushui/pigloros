@@ -181,6 +181,8 @@ Before presenting the ADR, re-read it and verify:
       callback ownership, cleanup precedence, and failure variants agree.
 - [ ] The exact native decision revision has its own review receipt, separate
       from implementation review and delivery evidence.
+- [ ] Accepted publication names its approved revision or follows the explicit
+      status-only exception in `adr-wiki`, recording both provider versions.
 - [ ] Deterministic configurable policy is identity-bound, not only range-checked.
 - [ ] Risks include a mitigation or an explicit acceptance decision.
 - [ ] Redmine page is Markdown, parented under `ADR`, marked Proposed, and

@@ -128,6 +128,22 @@ in layers so any one catches what others miss:
 
 ## Editing skills — always start from the live file
 
+### Repository-maintained skills
+
+For PiglorOS skill changes, the authoritative source is the requested repository
+revision. Edit its task worktree and deliver the complete changed files through
+the requested PR. This is the review boundary; do not update an installed copy
+or require an installation ZIP for a repository-only change.
+
+The project skills form a suite under `.agents/skills`. Cross-skill links assume
+that layout. For a separately requested portable `.skill` export, verify every
+transitive dependency in the intended installation. Include the required suite
+or make the exported skill self-contained; copying one directory does not
+preserve sibling paths. The installation-staging procedure below applies to that
+export workflow.
+
+### Installed-skill updates
+
 1. The live file is the authoritative source: in Claude Code,
    `~/.claude/skills/{skill}/SKILL.md`; in Cowork, a read-only mount at
    `.claude/skills/{skill}/SKILL.md` (writes fail with EROFS by design).

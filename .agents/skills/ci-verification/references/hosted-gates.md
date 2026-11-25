@@ -19,7 +19,10 @@ authorization and repository policy.
 
 - **Keep sharded required gates disjoint and fail closed.** Lock the exact target inventory and shard partition in an executable policy test, retain all features and test targets, and expose one stable aggregate check that runs with `always()` and succeeds only when every shard succeeds. Update the live branch rules to require that aggregate rather than an individual shard; a workflow fan-in does not protect merges unless branch policy requires its exact status.
 
-- **Validate workflow changes through a canary pull request.** Inspect every hosted job, fix failures in the isolated worktree, require a clean ruleset, merge, and verify the post-merge `main` workflows.
+- **Validate workflow changes through a canary pull request.** Inspect hosted
+  jobs, fix failures in the isolated worktree, and verify required branch rules.
+  When merge is explicitly authorized, use the queue and verify post-merge
+  `main` workflows. A canary does not grant merge authority.
 
 - **Compile documentation explicitly with rustdoc warnings denied.** Compiler, test, and Clippy success do not validate rustdoc links.
 

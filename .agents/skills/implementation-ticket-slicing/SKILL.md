@@ -62,7 +62,14 @@ Before coding, re-read this checklist and confirm:
 
 During implementation, keep the diff aligned with the ticket. Never use `git add -A`; stage only files changed for this slice. Do not add placeholder code, speculative fields, dead branches, or lint suppressions merely to complete the shape of a future ticket.
 
-After each code change, run the quality gates applicable to the affected language, artifact, and scope. Pull requests recognized by `.github/rust-scope.yml` as documentation-only (for example, Markdown-only changes) skip Rust build, test, coverage, and cargo-crap jobs; retain applicable documentation and policy checks. For Rust-affecting changes, run formatting, workspace tests with ignored tests included, pedantic Clippy, and the 99% LLVM line/region coverage gate. If a new branch cannot be covered, simplify or remove it rather than exempting production code. If local resource constraints prevent a gate, record the limitation and use the repository’s equivalent hosted gate; do not weaken the threshold.
+After each change, verify the gates applicable to its language, artifact, and
+scope. Documentation-only paths selected by `.github/rust-scope.yml` skip Rust
+build, test, coverage, and cargo-crap jobs while retaining required documentation
+and policy checks. For Rust-affecting changes, use
+[rust-quality-gates](../rust-quality-gates/SKILL.md) for exact-head hosted
+evidence, ignored-test inclusion, and the 99% line/region floors. Keep repository
+hooks and do not run manual local Cargo validation. Simplify or remove
+uncoverable new code instead of exempting it.
 
 Before opening the PR, inspect `git diff --stat` and the full diff against the fixed point. Confirm that every changed file belongs to the ticket, the PR description names the delivered seam and follow-up tickets, and the acceptance evidence is reproducible. Commit from the isolated worktree before removing it. Use `code-review` for explicitly requested review with a fixed point and independent Standards and Spec axes; address findings and re-review the resulting exact head. Independent review is required before merge under repository policy. A conflict-free PR or passing subset of checks is not merge readiness.
 

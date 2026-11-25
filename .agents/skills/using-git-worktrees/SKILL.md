@@ -27,8 +27,10 @@ waits.
 
 ## Publish and clean up
 
-Stage explicit task paths, inspect the staged diff, and require successful checks
-before the dependent commit or push. Retain the repository hooks. Reconcile a
+Stage explicit task paths and inspect the staged diff. Run permitted local
+checks and retain the repository hooks before committing and pushing. Publish
+the authorized branch so hosted Cargo gates can run, then inspect exact-head
+results before declaring verification complete. Reconcile a
 shared remote tip without rewriting another worker's commits; never update a
 branch merely because `main` advanced. Resolve actual conflicts within repository
 policy.
@@ -37,12 +39,16 @@ For stacked PRs, verify live parent ancestry as well as hosted base names and
 native stack metadata. Source history and the hosting service's relationship
 graph are separate. Repair stale stack metadata only through supported lifecycle
 operations, preserving source identities; do not infer a Git conflict from a
-hosting eligibility error. Use `resolving-merge-conflicts` for actual conflicts.
+hosting eligibility error. Use
+[resolving-merge-conflicts](../resolving-merge-conflicts/SKILL.md) for actual conflicts.
 
 For an authorized PR request, push the task branch and open the PR with truthful
 scope, validation, and remaining checks. Opening a PR does not authorize queueing
-or merging. Merge only through Trunk, and add `ready-to-merge` only when the
-maintainer explicitly asks. See [merge policy](../../../docs/merge-queue.md).
+or merging. Merge only through Trunk. Add `ready-to-merge` only after independent
+review is clean and required CI is green, and only when a direct maintainer
+request or an explicit standing authorization covers that PR. Persistence or
+green checks alone confer no authority. See the
+[label process](../../../docs/merge-queue.md#merging-a-pull-request).
 
 Remove the task worktree only after its commits are preserved on the remote and
 its status is clean. Keep the remote PR branch available for review.
