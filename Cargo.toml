@@ -19,6 +19,7 @@ members = [
   "crates/pos-plugin-supervisor",
   "crates/pos-owner-bridge-windows",
   "crates/pos-owner-ctap",
+  "crates/pos-owner-adapter",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
