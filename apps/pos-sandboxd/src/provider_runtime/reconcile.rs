@@ -1,7 +1,10 @@
 //! Restart reconciliation before admission opens (ADR-069 R11 §5.1 steps 7
 //! and 9 to 11, §5.3).
 //!
-//! [`prepare_host`] runs step 7 before any socket exists: it connects the
+//! [`prepare_host`] runs step 7 before any socket exists. It first reads the
+//! fallback-tunnel sysctl `net.core.fb_tunnels_only_for_init_net` and
+//! refuses a host where it is below 1, because the unit network check
+//! (ADR-069 R14 N12) is sound only above that. Then it connects the
 //! single system bus, opens the exclusive [`SystemdAttemptRecovery`], which
 //! keeps the registry lock, opens or creates the input staging directory
 //! `/run/pigloros/sandbox/staging/` (UID 0, mode `0700`), and opens or
@@ -133,9 +136,9 @@ pub(super) struct HostReconciliation<N, P> {
 pub(super) type NetlinkReconciliation =
     HostReconciliation<NetlinkNamespaceControl, LocalEgressProbe<NetlinkNamespaceControl>>;
 
-/// R11 §5.1 step 7 on this host: the system bus, the netlink orphan sweep
-/// and the SPI1 egress probe through the Local network port of the SPI1
-/// attempt range.
+/// R11 §5.1 step 7 on this host: the fallback-tunnel sysctl probe (ADR-069
+/// R14 N12), the system bus, the netlink orphan sweep and the SPI1 egress
+/// probe through the Local network port of the SPI1 attempt range.
 ///
 /// # Errors
 /// [`ProviderRuntimeError::HostUnavailable`] for any step 7 failure.
