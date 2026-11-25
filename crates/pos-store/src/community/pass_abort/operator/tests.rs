@@ -31,10 +31,12 @@ use crate::community::{
     MemoryCommunityDomainV1,
 };
 use crate::community_initialization_fixture::{
-    hash, initial_head, initialize_target, metadata_authority, metadata_registry, profile_until,
-    target, Bootstrapped, Fallible, Roster, DATA_LEAF, EXPIRES, GENERATION, HORIZON,
-    INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW, SCHEMA,
+    authority_timeline, hash, initial_head, initialize_target, metadata_authority,
+    metadata_registry, profile_until, target, Bootstrapped, Fallible, Roster, DATA_LEAF, EXPIRES,
+    GENERATION, HORIZON, INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW, POLICY_REVISION,
+    REGISTRY, SCHEMA, TRUST_SCOPE,
 };
+use crate::plugin_trust_registry_fixtures::release_one;
 
 /// The trust-root seal of the test composition.
 const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
@@ -72,8 +74,13 @@ struct Case {
 impl Case {
     /// An initialized domain, as a Reserve finds it.
     fn new() -> Fallible<Self> {
+        Self::with_horizon(HORIZON)
+    }
+
+    /// An initialized domain under a metadata horizon of `horizon`.
+    fn with_horizon(horizon: u64) -> Fallible<Self> {
         let roster = Roster::release_one()?;
-        let mut domain = Bootstrapped::new(&SEAL, &roster, true, true)?;
+        let mut domain = Bootstrapped::until(&SEAL, &roster, true, true, horizon)?;
         let head = {
             let rows = roster.rows()?;
             let profile = profile_until(&rows, HORIZON, hash(1), domain.world.catalogue)?;
@@ -88,11 +95,10 @@ impl Case {
         })
     }
 
-    /// A domain with no initialization, under a metadata horizon of
-    /// `horizon`.
-    fn uninitialized(horizon: u64) -> Fallible<Self> {
+    /// A domain with no initialization: its CSI1 holds no floor for T.
+    fn uninitialized() -> Fallible<Self> {
         let roster = Roster::release_one()?;
-        let domain = Bootstrapped::until(&SEAL, &roster, true, true, horizon)?;
+        let domain = Bootstrapped::until(&SEAL, &roster, true, true, HORIZON)?;
         Ok(Self {
             roster,
             domain,
@@ -158,6 +164,7 @@ impl Case {
                 },
                 materialization: None,
                 status: CommunityPassStatusV1::Reserved,
+                sealed_result_digest: None,
                 live,
             },
         );
@@ -190,6 +197,42 @@ impl Case {
         .map(|request| self.domain.world.credential(request))
         .transpose()?
         .unwrap_or_default())
+    }
+
+    /// The Abort of `reason` whose FAE1 expires at `expires`.
+    fn abort_until(
+        &mut self,
+        expires: u64,
+    ) -> Fallible<Result<CommunityPassAbortReceiptV1, Error>> {
+        let request = CommunityAdministrativeRequestV1::derive(
+            &CommunityAdministrativeOperationV1::PassAbort {
+                timeline: target(),
+                reservation_operation_id: OPERATION,
+            },
+        )?;
+        let credential = self.domain.world.credential_until(request, expires)?;
+        self.with_credential(
+            &credential,
+            OPERATION,
+            Reason::AuthenticatedCancellation,
+            DATA_LEAF,
+            |domain, context, authority, metadata, call| {
+                domain.abort_pass(&SEAL, context, authority, metadata, call)
+            },
+        )
+    }
+
+    /// The Abort of `reason` on the pass whose administrative decision
+    /// comes from `leaf`.
+    fn abort_by(&mut self, leaf: Hash) -> Fallible<Result<CommunityPassAbortReceiptV1, Error>> {
+        self.with_call(
+            OPERATION,
+            Reason::AuthenticatedCancellation,
+            leaf,
+            |domain, context, authority, metadata, call| {
+                domain.abort_pass(&SEAL, context, authority, metadata, call)
+            },
+        )
     }
 
     /// Run `run` with the installed composition and the call of `reason`
@@ -397,8 +440,16 @@ fn an_abort_commits_its_records_in_one_transaction() -> TestResult {
     assert_eq!(read.inventory_generation, inventory);
     assert!(matches!(read.frontier, CommunityPassFrontierV1::Initial));
     assert_eq!(read.authority_rows.len(), 1);
+    let authority = &read.authority_rows[0];
+    assert_eq!(authority.authority_timeline, authority_timeline());
+    assert_eq!(authority.registry_digest, REGISTRY);
+    assert_eq!(authority.capability_policy_revision, POLICY_REVISION);
     assert_eq!(read.trust_rows.len(), 1);
+    assert_eq!(read.trust_rows[0].scope, TRUST_SCOPE);
+    assert_eq!(read.trust_rows[0].plugin_id, release_one().plugin_id);
     assert_eq!(read.key_rows.len(), 1);
+    let vault = case.domain().keys.get(&PASS_KEY_ID).ok_or("no key")?;
+    assert_eq!(read.key_rows[0].key_intent_digest, vault.intent().digest());
     let evidence = CommunityAuthorityEvidenceV1::from_canonical_cbor(&records[2])?;
     let cau1 = evidence.as_input();
     assert!(cau1.operation == CommunityArtifactOperationV1::Pass(pass_key()?));
@@ -413,6 +464,22 @@ fn an_abort_commits_its_records_in_one_transaction() -> TestResult {
         .collect();
     assert_eq!(leaves.len(), 2);
     assert!(leaves.contains(&DATA_LEAF) && leaves.contains(&METADATA_LEAF));
+    assert!(cau1.decision_rows.iter().all(|row| {
+        row.authority_timeline == authority_timeline()
+            && row.policy_revision == POLICY_REVISION
+            && row.head_seq == authority.head_seq
+            && row.revocation_epoch == authority.revocation_epoch
+            && row.request_digest != Hash::zero()
+            && row.decision_digest != Hash::zero()
+    }));
+    assert_ne!(
+        cau1.decision_rows[0].request_digest,
+        cau1.decision_rows[1].request_digest
+    );
+    assert_ne!(
+        cau1.decision_rows[0].decision_digest,
+        cau1.decision_rows[1].decision_digest
+    );
     Ok(())
 }
 
@@ -444,6 +511,16 @@ fn a_retry_returns_the_original_or_conflicts() -> TestResult {
     assert_eq!(
         case.abort(Reason::RetiringGeneration)?.err(),
         Some(Error::Conflict)
+    );
+    let original = case
+        .domain_mut()
+        .pass_aborts
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no committed Abort")?;
+    original.leaf_grant_id = hash(0x66);
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
     );
     let original = case
         .domain_mut()
@@ -577,10 +654,10 @@ fn an_authority_failure_gives_12_with_no_effect() -> TestResult {
     Ok(())
 }
 
-/// The generation (5) and head (6) fences, and a Sealed pass, whose CPS1
-/// digest the record does not carry yet (12).
+/// The generation (5) and head (6) fences, and the guard that the head is
+/// still the initialization head (12).
 #[test]
-fn a_moved_generation_or_head_and_a_sealed_pass_are_refused() -> TestResult {
+fn a_moved_generation_or_head_is_refused() -> TestResult {
     let mut case = Case::new()?;
     case.reserve(false)?;
     let record = case
@@ -613,9 +690,7 @@ fn a_moved_generation_or_head_and_a_sealed_pass_are_refused() -> TestResult {
         .get_mut(&(target(), OPERATION))
         .ok_or("no pass")?;
     record.reserved.reservation = reservation;
-    assert!(case
-        .domain_mut()
-        .set_pass_status(target(), OPERATION, CommunityPassStatusV1::Sealed));
+    case.domain_mut().initializations.clear();
     assert_eq!(
         case.abort(Reason::AuthenticatedCancellation)?.err(),
         Some(Error::EvidenceUnavailable)
@@ -623,15 +698,166 @@ fn a_moved_generation_or_head_and_a_sealed_pass_are_refused() -> TestResult {
     Ok(())
 }
 
-/// A decision bound after the metadata horizon is 13: the pass metadata key
-/// could not seal the CAB1 inside its metadata policy.
+/// A Sealed pass is aborted with its CPS1 digest in the CAB1 (I211). A
+/// Sealed pass whose call is live is 15 like a Reserved one.
 #[test]
-fn a_bound_after_the_metadata_horizon_gives_13() -> TestResult {
-    let mut case = Case::uninitialized(EXPIRES - 1)?;
+fn a_sealed_pass_is_aborted_with_its_cps1_digest() -> TestResult {
+    let mut case = Case::new()?;
     case.reserve(false)?;
+    assert!(case
+        .domain_mut()
+        .set_pass_status(target(), OPERATION, CommunityPassStatusV1::Sealed));
+    let record = case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    record.sealed_result_digest = Some(hash(0x71));
+    let receipt = case.abort(Reason::AuthenticatedCancellation)??;
+    let abort = CommunityAbortV1::from_canonical_cbor(receipt.abort())?;
+    assert_eq!(abort.as_input().sealed_result_digest, Some(hash(0x71)));
+    Ok(())
+}
+
+/// The decision bound is compared with the metadata horizon after the
+/// fences: a bound equal to it commits, one past it gives 13, and a stale
+/// head with a passed horizon gives 6, as A5.5 step 4 orders them. The FAE1
+/// of the later calls outlives the initialization's.
+#[test]
+fn a_bound_after_the_metadata_horizon_gives_13_after_the_fences() -> TestResult {
+    let mut case = Case::with_horizon(EXPIRES)?;
+    case.reserve(false)?;
+    assert_eq!(
+        case.abort_until(EXPIRES + 1_000)?.err(),
+        Some(Error::EvidenceExpired)
+    );
+    let record = case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    let reservation = record.reserved.reservation;
+    record.reserved.reservation = CommunityReservationInputV1 {
+        predecessor_head_digest: hash(0x99),
+        ..reservation
+    };
+    assert_eq!(
+        case.abort_until(EXPIRES + 1_000)?.err(),
+        Some(Error::StaleFrontier)
+    );
+    let record = case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    record.reserved.reservation = reservation;
+    case.abort(Reason::AuthenticatedCancellation)??;
+    Ok(())
+}
+
+/// A first Abort at or after the pass's `H_r` still commits its CAB1
+/// (N17); a retry at or after it is discovery of expired evidence (13),
+/// and one just before it returns the original (R15.2(3a), I213).
+#[test]
+fn a_retry_at_or_after_the_pass_horizon_gives_13() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    let record = case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    record.reserved.reservation.evidence_not_after_micros = NOW;
+    let receipt = case.abort(Reason::AuthenticatedCancellation)??;
+    let abort = CommunityAbortV1::from_canonical_cbor(receipt.abort())?;
+    assert_eq!(abort.as_input().evidence_not_after_micros, NOW);
     assert_eq!(
         case.abort(Reason::AuthenticatedCancellation)?.err(),
         Some(Error::EvidenceExpired)
+    );
+    case.domain_mut()
+        .pass_aborts
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no committed Abort")?
+        .evidence_not_after_micros = NOW + 1;
+    assert_eq!(case.abort(Reason::AuthenticatedCancellation)??, receipt);
+    Ok(())
+}
+
+/// The CAB1 binds a CPR1 the codec accepts: a reservation with a zero link
+/// is refused before anything is staged (3).
+#[test]
+fn a_malformed_reservation_gives_3() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    let record = case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    record.reserved.reservation.roster_digest = Hash::zero();
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+/// A domain that cannot read its CSI1, a Timeline with no floor in it and a
+/// pass whose metadata key is gone are each 12.
+#[test]
+fn a_missing_selection_floor_or_key_gives_12() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    case.domain_mut().keys.remove(&PASS_KEY_ID);
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    case.domain_mut().bootstrap = None;
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    let mut case = Case::uninitialized()?;
+    case.reserve(false)?;
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A caller without the administrative decision gets 12 and never learns
+/// whether the pass exists or is Committed (no existence oracle), and a
+/// retry without the metadata `write` decision is 12 as well.
+#[test]
+fn authority_comes_before_the_pass_lookup() -> TestResult {
+    let mut case = Case::new()?;
+    assert_eq!(
+        case.abort_by(hash(0x77))?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    case.reserve(false)?;
+    assert!(case.domain_mut().set_pass_status(
+        target(),
+        OPERATION,
+        CommunityPassStatusV1::Committed
+    ));
+    assert_eq!(
+        case.abort_by(hash(0x77))?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    case.abort(Reason::AuthenticatedCancellation)??;
+    let mut denied = metadata_authority(&SEAL, metadata_registry(&SEAL)?, 0)?;
+    std::mem::swap(&mut case.domain.metadata, &mut denied);
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
     );
     Ok(())
 }
@@ -709,6 +935,20 @@ fn a_refused_commit_leaves_the_pass_unresolved() -> TestResult {
         .domain()
         .pending_reservations
         .contains_key(&(target(), OPERATION)));
+    let mut moved = Case::new()?;
+    moved.reserve(false)?;
+    let staged = moved.staged()?;
+    moved
+        .domain_mut()
+        .bootstrap
+        .as_mut()
+        .ok_or("no bootstrap")?
+        .selection
+        .address = hash(1);
+    assert_eq!(
+        moved.domain_mut().commit_pass_abort(&SEAL, staged).err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }
 

@@ -607,12 +607,24 @@ impl World {
     /// # Errors
     /// Returns the signing or encoding error.
     pub fn credential(&self, request: CommunityAdministrativeRequestV1) -> Fallible<Vec<u8>> {
+        self.credential_until(request, EXPIRES)
+    }
+
+    /// A canonical FAE1 for `request` that expires at `expires_at`.
+    ///
+    /// # Errors
+    /// Returns the signing or encoding error.
+    pub fn credential_until(
+        &self,
+        request: CommunityAdministrativeRequestV1,
+        expires_at: u64,
+    ) -> Fallible<Vec<u8>> {
         let record = AuthenticatedPrincipalRecordV1 {
             principal: caller()?,
             adapter_id: ADAPTER.to_owned(),
             assurance: 2,
             issued_at: ISSUED,
-            expires_at: EXPIRES,
+            expires_at,
             registry_binding: FAP_BINDING,
             operation_nonce: oracle_nonce(
                 self.catalogue,

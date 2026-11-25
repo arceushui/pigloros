@@ -75,6 +75,12 @@ pub struct CommunityReservedPassV1 {
     pub members: Vec<CommunityPassMemberDigestsV1>,
     /// The protection ID of the pass's one metadata key, which seals the
     /// pass's CNE1 records, Abort's included (R13.2(1), R15.1(2)).
+    ///
+    /// The Reserve must leave it encryption-open: Abort and Commit seal
+    /// under it and then close it, so a key the Reserve closed makes every
+    /// Abort give 14. Every record is sealed under one CSM1 cover: the CMA1
+    /// anchor `(T, G)`, this protection ID, no scope members and the NMP1
+    /// `metadata_not_after_micros`.
     pub metadata_key: [u8; 16],
     /// The protection ID of the failure cohort key (R15.1(3)), provisioned
     /// with the Reserve's State keys.
@@ -94,6 +100,9 @@ pub(super) struct CommunityPassRecordV1 {
     /// The minted materialization's actual additions, if the pass minted one.
     pub(super) materialization: Option<CommunitySharedCountsV1>,
     pub(super) status: CommunityPassStatusV1,
+    /// `H(CPS1)` of the sealed result a Seal latched (R8.4): a later Seal
+    /// of the pass must be that result again.
+    pub(super) sealed_result_digest: Option<Hash>,
     /// Whether the `run_pass` call that reserved the pass is still running
     /// (R8.3(3): another call gets 15).
     pub(super) live: bool,
