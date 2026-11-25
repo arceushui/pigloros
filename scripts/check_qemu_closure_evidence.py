@@ -1360,7 +1360,7 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
     stderr = evidence.text(f"{base}/stderr").strip(" \t\r\n")
     present = sorted(probe for probe in NETWORK_PROBE_FILES if (evidence.root / base / probe).exists())
     if status != "0":
-        silent = "" if stderr else " (empty: --quiet systemd-run logs a start-job or unit failure only at debug level)"
+        silent = "" if stderr else " (empty: systemd-run printed nothing, so the failure is in the journal)"
         raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete (status {status}); "
                             f"stderr: {stderr[:400]!r}{silent}; probe files written: {present}; "
                             f"the explanation is in {base}/journal")

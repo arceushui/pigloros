@@ -305,9 +305,10 @@ network_probe() { # DIR
 # and with this script's own bash (${BASH}): a NixOS unit's default PATH holds
 # no bash, so `systemd-run bash` fails to find it. `stderr` holds systemd-run's
 # client-side errors (an executable that is not found, a bus error) and the
-# unit's own standard error. With --quiet systemd-run logs a start-job or unit
-# failure only at debug level, so such a failure can leave `stderr` empty: the
-# unit's `journal` is then the explanation.
+# unit's own standard error. A start-job or unit failure that systemd-run does
+# not print can leave `stderr` empty: the unit's `journal` is then the
+# explanation. (With --quiet systemd-run reports only what the client itself
+# fails on; whether it also prints job failures is not verified here.)
 network_case() { # NAME VALUE
   local dir="network/$1" status=0
   mkdir -p "${dir}"
