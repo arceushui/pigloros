@@ -1552,6 +1552,28 @@ class EvidenceTests(unittest.TestCase):
             # The executable that stands in for the provider.
             (lambda f: f.update({f"{base}/runtime-exe": "/nix/store/x-other\n"}), "not the staged provider binary"),
             (lambda f: f.update({f"{base}/launcher-sha256": "nothing\n"}), "launcher digest line is malformed"),
+            # One case per sub-check of the digest line (the rest of the line stays valid).
+            *[(lambda f, line=line: f.update({f"{base}/launcher-sha256": line + "\n"}),
+               "launcher digest line is malformed")
+              for line in (
+                  "c" * 63 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  "c" * 65 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  "g" * 64 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  "C" * 64 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /tmp/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd",
+                  LAUNCHER_DIGEST + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd  x",
+                  LAUNCHER_DIGEST + " /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd")],
+            # The ELF Type line: only an executable or a position-independent executable passes.
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "REL (Relocatable file)")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "  Type:                              EXEC (Executable file)\n", "")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace(
+                "EXEC (Executable file)", "CORE (Core file)")}),
+             "not a loadable statically linked"),
             (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS + "  INTERP  0x0\n"}),
              "not a loadable statically linked"),
             (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace("LOAD", "NOTE")}),
@@ -1659,6 +1681,14 @@ class EvidenceTests(unittest.TestCase):
         for change, message in changes:
             with self.subTest(change=change, message=message), self.assertRaisesRegex(checker.EvidenceError, message):
                 self.verdict(change=change)
+
+    def test_a_static_executable_or_a_static_pie_is_a_launcher(self):
+        base = "guest/daemon/start"
+        for kind in ("EXEC (Executable file)", "DYN (Position-Independent Executable file)",
+                     "DYN (Shared object file)"):
+            headers = LAUNCHER_HEADERS.replace("EXEC (Executable file)", kind)
+            with self.subTest(kind=kind):
+                self.verdict(change=lambda f, h=headers: f.update({f"{base}/launcher-program-headers": h}))
 
     def test_only_the_interp_segment_type_makes_the_launcher_dynamic(self):
         base = "guest/daemon/start"
