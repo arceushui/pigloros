@@ -178,6 +178,67 @@ driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   rm -rf /run/pigloros
 }
 
+# --- The composed provider runtime ------------------------------------------
+
+# The runtime unit, started with the property set that ADR-069 R11 §5.2 gives
+# the unit SystemdProviderLifecycle submits: Type=notify, NotifyAccess=main,
+# ExitType=main, KillMode=control-group, Restart=no, CollectMode=
+# inactive-or-failed, UMask=0077, StandardInput=null and a 30 s start bound,
+# with `provider-runtime` as its one argument.
+RUNTIME_UNIT=piglor-sandbox-runtime
+RUNTIME_KEY_FILE=runtime-attestation.ed25519
+
+# Start the runtime unit for the executable BINARY and wait for READY=1.
+start_runtime() { # BINARY
+  systemd-run --quiet --unit="${RUNTIME_UNIT}" --service-type=notify \
+    --property=NotifyAccess=main --property=ExitType=main --property=KillMode=control-group \
+    --property=Restart=no --property=TimeoutStartSec=30s \
+    --property=CollectMode=inactive-or-failed --property=UMask=0077 \
+    --property=StandardInput=null -- "$1" provider-runtime
+}
+
+# Stage the installation (the stager mode of the evidence driver), start the
+# composed runtime as the staged provider binary, record what the manager and
+# the kernel show of it, stop it, and unstage. The stager holds the staged
+# installation until its control FIFO closes. Part (c) and the execute
+# evidence run between start and stop.
+daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
+  local dir="daemon/$1" fifo=/run/piglor-evidence-stage control line binary pid status=0 start=0 stop=0
+  mkdir -p "${dir}"
+  provision_runtime
+  # The control FIFO lives on the guest's tmpfs, not on the 9p evidence share.
+  mkfifo -m 0600 "${fifo}"
+  pos-sandboxd-conformance stage "$2" "$3" "$4" "${images}/adapter" "${spi1}" "${RUNTIME_KEY_FILE}" \
+    "${launcher}" honest <"${fifo}" >"${dir}/stage-report" 2>"${dir}/stage-stderr" &
+  pid=$!
+  exec {control}>"${fifo}"
+  for _ in $(seq 600); do
+    if [[ -s ${dir}/stage-report ]] || ! kill -0 "${pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  line="$(head -n 1 "${dir}/stage-report")"
+  if [[ ${line} == staged$'\t'* ]]; then
+    binary="${line#*$'\t'}"
+    start_runtime "${binary}" || start=$?
+    systemctl show "${RUNTIME_UNIT}.service" \
+      --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,ExecStart \
+      >"${dir}/runtime-properties"
+    readlink "/proc/$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")/exe" >"${dir}/runtime-exe" || true
+    find /run/pigloros -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"
+    systemctl stop "${RUNTIME_UNIT}.service" || stop=$?
+    journalctl --boot --no-pager --output=short-monotonic --unit="${RUNTIME_UNIT}.service" >"${dir}/runtime-log"
+  fi
+  printf '%s\n' "${start}" >"${dir}/start-status"
+  printf '%s\n' "${stop}" >"${dir}/stop-status"
+  exec {control}>&-
+  wait "${pid}" || status=$?
+  rm -- "${fifo}"
+  printf '%s\n' "${status}" >"${dir}/stage-status"
+  rm -rf /run/pigloros
+}
+
 # One raw MountImage call with the provider's exact parameters, so that the
 # reply mountfsd sends is recorded verbatim. varlinkctl exits with the reply,
 # closing the returned mount descriptor; the devices must then go away.
@@ -346,6 +407,10 @@ namespaces 1 >pid1-namespaces
 # signed by a key no kernel trusts, first alone and then with that key's
 # certificate in /run/verity.d, which only userspace verification would read.
 images="${PIGLOR_EVIDENCE_IMAGES:?}"
+# The canonical SPI1 file of the staged provider installation.
+spi1="${PIGLOR_EVIDENCE_SPI1:?}"
+# The provider executable: the static pos-sandboxd the stager installs.
+launcher="${PIGLOR_EVIDENCE_LAUNCHER:?}"
 mkdir cases
 # The raw call runs first. Its first MountImage also loads what mountfsd's
 # probing needs, which under aarch64 TCG took longer than the provider's 60 s
@@ -363,6 +428,11 @@ rm -r -- /run/verity.d
 journalctl --dmesg --boot --no-pager --output=cat >cases/kernel-log
 # mountfsd's own log, with monotonic times, for reading each case's refusal.
 journalctl --boot --no-pager --output=short-monotonic --unit=systemd-mountfsd.service >cases/mountfsd-log
+
+# The composed provider runtime on the positive image: started as the staged
+# provider binary, READY, then stopped.
+mkdir daemon
+daemon_case start "${images}/positive.raw" "${images}/positive.der" "$(cat "${images}/positive.description")"
 
 # ADR-069 R14: the init namespace and its fallback tunnel devices, then the
 # unit namespace under each value of the fallback-tunnel sysctl. The modules

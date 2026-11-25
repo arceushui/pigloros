@@ -20,6 +20,8 @@
 //! kernel state and passes everything to the host checker, which owns every
 //! judgement. Nothing here creates a unit, a process or launch authority.
 
+mod stage;
+
 use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
@@ -37,6 +39,9 @@ use crate::{
     activate_admitted_root, ImageActivationError, PlannedAttemptIntent, PreparedAttemptDirectory,
     SystemdAttemptRegistry, SystemdAttemptRegistryError, VerifiedRootMount,
 };
+
+/// The first argument that selects the stager mode (see `stage`).
+const STAGE_MODE: &str = "stage";
 
 /// The fixed nonzero `AttemptId` of every evidence case.
 const ATTEMPT_ID: [u8; 16] = *b"pigloros-444-evd";
@@ -63,6 +68,14 @@ pub enum ConformanceError {
          [ADAPTER_ARGUMENT...]"
     )]
     Usage,
+    /// The stager's arguments are not `stage IMAGE CERTIFICATE_DER
+    /// KEY_DESCRIPTION ADAPTER SPI1 KEY_FILE_NAME PROVIDER_BINARY
+    /// [ADAPTER_ARGUMENT...]`.
+    #[error(
+        "usage: pos-sandboxd-conformance stage IMAGE CERTIFICATE_DER KEY_DESCRIPTION ADAPTER \
+         SPI1 KEY_FILE_NAME PROVIDER_BINARY [ADAPTER_ARGUMENT...]"
+    )]
+    StageUsage,
     /// An input file, the control input or the report failed.
     #[error("conformance I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -220,6 +233,10 @@ pub fn release(mount: VerifiedRootMount, directory: &PreparedAttemptDirectory) -
 /// `failed` or `none`) and the attempt directory's removal. A mounted root is
 /// held until `control` reaches end of input and then released by `release`.
 ///
+/// With `stage` as the first argument it runs the stager instead (see the
+/// `stage` module): it stages the installation for a composed provider runtime
+/// and holds it until `control` ends.
+///
 /// # Errors
 /// Returns the first [`ConformanceError`] that keeps the case from reaching
 /// activation, or from reading `control` and writing `report`.
@@ -238,6 +255,9 @@ where
         ) -> Release<'directory>
         + Send,
 {
+    if arguments.first().is_some_and(|mode| mode == STAGE_MODE) {
+        return stage::run_stage(&arguments[1..], control, report);
+    }
     let case = ConformanceCase::from_arguments(&arguments)?;
     let staged = case.stage()?;
     let ActivatedCase { directory, outcome } = activate(&staged).await?;

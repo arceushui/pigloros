@@ -164,7 +164,7 @@ GUEST_FILES = {
     "detect-virt-container", "container-markers", "proc-cmdline", "kernel-config",
     "kernel-log", "proc-keys", "builtin-trusted-keys", "verity-d", "mountfsd-units",
     "mountfsd-service-properties", "mountfsd-socket-properties", "manager-environment",
-    "pid1-namespaces", "cases", "network",
+    "pid1-namespaces", "cases", "network", "daemon",
 }
 DRIVER_CASES = ("positive", "tampered", "wrong-key", "verity-d")
 MOUNTED_CASES = ("positive", "tampered")
@@ -180,6 +180,17 @@ NETWORK_CASES = {"fb-0": "0", "fb-1": "1", "fb-2": "2"}
 NETWORK_ENTRIES = {"boot-sysctl", "init-netns", "init-links", "modules", *NETWORK_CASES}
 # Each case holds the run's own files; the probe's files exist only if its unit
 # got as far as writing them, so a failed case still has an explaining record.
+# The composed provider runtime: started as the staged provider binary, then stopped.
+DAEMON_CASES = ("start",)
+DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-status", "stop-status"}
+DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-exe", "runtime-tree", "runtime-log"}
+PROVIDER_BINARY_PATH = re.compile(r"/var/lib/pigloros/sandbox/providers/[0-9a-f]{64}")
+RUNTIME_UNIT_PROPERTIES = {
+    "Id": "piglor-sandbox-runtime.service", "ActiveState": "active", "SubState": "running",
+    "Type": "notify", "NotifyAccess": "main", "ExitType": "main", "KillMode": "control-group",
+    "Restart": "no", "CollectMode": "inactive-or-failed", "UMask": "0077", "StandardInput": "null",
+}
+RUNTIME_ENDPOINTS = ("provider-execute.sock", "provider-control.sock")
 NETWORK_RUN_FILES = {"sysctl", "status", "stderr", "journal"}
 NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
 LOOPBACK_ADDRESSES = {("lo", "inet", "127.0.0.1/8"), ("lo", "inet6", "::1/128")}
@@ -423,6 +434,7 @@ class Evidence:
                 raise EvidenceError(f"{name}/ files differ: missing {missing}, unexpected {extra}")
         self._inventory_cases()
         self._inventory_network()
+        self._inventory_daemon()
         found = {path.name for path in (self.root / "host" / "images").iterdir()}
         if found != HOST_IMAGE_FILES:
             raise EvidenceError(f"host/images/ differs: {sorted(found)}")
@@ -448,6 +460,18 @@ class Evidence:
                 raise EvidenceError(f"malformed case record: {name}: {sorted(found)}")
         if {path.name for path in (cases / "mountfsd-reply").iterdir()} != REPLY_FILES:
             raise EvidenceError("malformed case record: mountfsd-reply")
+
+    def _inventory_daemon(self) -> None:
+        daemon = self.root / "guest" / "daemon"
+        if {path.name for path in daemon.iterdir()} != set(DAEMON_CASES):
+            raise EvidenceError("guest/daemon/ does not hold exactly the composed runtime cases")
+        for name in DAEMON_CASES:
+            found = {path.name for path in (daemon / name).iterdir()}
+            if found not in (DAEMON_STAGE_FILES, DAEMON_STAGE_FILES | DAEMON_RUNTIME_FILES):
+                raise EvidenceError(
+                    f"malformed daemon record {name}: missing {sorted(DAEMON_STAGE_FILES - found)}, "
+                    f"unexpected {sorted(found - DAEMON_STAGE_FILES - DAEMON_RUNTIME_FILES)}, "
+                    f"runtime files {sorted(found & DAEMON_RUNTIME_FILES)}")
 
     def _inventory_network(self) -> None:
         network = self.root / "guest" / "network"
@@ -1323,6 +1347,43 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
             "routes6": require_loopback_routes(evidence, f"{base}/routes6", ROUTES6_ALLOWED)}
 
 
+def check_daemon_case(evidence: Evidence, name: str) -> dict:
+    """The composed runtime started as exactly the staged provider binary and was stopped."""
+    base = f"guest/daemon/{name}"
+    report = evidence.text(f"{base}/stage-report").splitlines()
+    fields = report[0].split("\t") if report else []
+    if evidence.line(f"{base}/stage-status") != "0" or len(fields) != 2 or fields[0] != "staged" \
+            or not PROVIDER_BINARY_PATH.fullmatch(fields[1]) or report[1:] != ["unstaged"]:
+        raise EvidenceError(f"the {name} stager did not stage and unstage the provider: {report}; "
+                            f"stderr: {evidence.text(f'{base}/stage-stderr').strip()[:400]!r}")
+    binary = fields[1]
+    if evidence.line(f"{base}/start-status") != "0" or evidence.line(f"{base}/stop-status") != "0":
+        log = evidence.text(f"{base}/runtime-log") if (evidence.root / base / "runtime-log").exists() else ""
+        raise EvidenceError(f"the {name} runtime unit did not start and stop cleanly; log: {log.strip()[-600:]!r}")
+    unit = properties(evidence, f"{base}/runtime-properties")
+    for key, expected in RUNTIME_UNIT_PROPERTIES.items():
+        if unit.get(key) != expected:
+            raise EvidenceError(f"the {name} runtime unit has {key}={unit.get(key)!r}, not {expected!r}")
+    if not unit.get("MainPID", "").isdigit() or int(unit["MainPID"]) == 0 \
+            or f"path={binary} ;" not in unit.get("ExecStart", "") \
+            or f"argv[]={binary} provider-runtime ;" not in unit["ExecStart"]:
+        raise EvidenceError(f"the {name} runtime unit does not run {binary} provider-runtime: {unit.get('ExecStart')!r}")
+    if evidence.line(f"{base}/runtime-exe") != binary:
+        raise EvidenceError(f"the {name} runtime process is not the staged provider binary")
+    tree = {}
+    for line in evidence.text(f"{base}/runtime-tree").splitlines():
+        path, kind, mode = tab_fields(line, 3, "runtime-tree")
+        tree[path] = (kind, mode)
+    for endpoint in RUNTIME_ENDPOINTS:
+        if tree.get(endpoint, ("", ""))[0] != "s":
+            raise EvidenceError(f"the {name} runtime bound no socket at /run/pigloros/{endpoint}")
+    return {"binary": binary, "properties": unit, "endpoints": {e: tree[e] for e in RUNTIME_ENDPOINTS}}
+
+
+def check_daemon(evidence: Evidence) -> dict:
+    return {name: check_daemon_case(evidence, name) for name in DAEMON_CASES}
+
+
 def check_network(evidence: Evidence) -> dict:
     """ADR-069 R14: the unit holds only lo whenever the sysctl is at least 1."""
     # The packaged default: the kernel's own 0, which R14 changes through
@@ -1407,6 +1468,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
         "mount_image_cases": check_cases(evidence, architecture, paths, (der, description), untrusted),
         "private_network": check_network(evidence),
+        "provider_runtime": check_daemon(evidence),
     }
 
 

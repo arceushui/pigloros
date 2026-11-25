@@ -382,6 +382,20 @@ class ProducerShellTests(unittest.TestCase):
         body = COLLECTOR.read_text().split("for value in 0 1 2; do", 1)[1]
         self.assertRegex(body, r"done\nrestore_fb_tunnels\n\nprintf 'complete")
 
+    def test_the_runtime_unit_is_started_with_the_r11_properties(self):
+        log = self.base / "argv"
+        self.shell.stub("systemd-run", f'printf "%s\\n" "$@" >"{log}"')
+        self.shell.out('start_runtime /var/lib/pigloros/sandbox/providers/abc', COLLECTOR)
+        arguments = log.read_text().splitlines()
+        self.assertEqual(arguments[-3:], ["--", "/var/lib/pigloros/sandbox/providers/abc", "provider-runtime"])
+        self.assertEqual(
+            sorted(argument for argument in arguments[:-3] if argument != "--quiet"),
+            sorted(["--unit=piglor-sandbox-runtime", "--service-type=notify",
+                    "--property=NotifyAccess=main", "--property=ExitType=main",
+                    "--property=KillMode=control-group", "--property=Restart=no",
+                    "--property=TimeoutStartSec=30s", "--property=CollectMode=inactive-or-failed",
+                    "--property=UMask=0077", "--property=StandardInput=null"]))
+
     def test_the_unit_runs_an_absolute_bash_because_a_unit_path_has_none(self):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")

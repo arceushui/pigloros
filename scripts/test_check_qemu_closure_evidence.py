@@ -211,6 +211,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
     files.update(case_files())
     files.update(executable_files(architecture))
     files.update(network_files())
+    files.update(daemon_files())
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
         ("311", WORKER, b"LANG=C.UTF-8\0MOUNTFS_FIXED_WORKER=1\0"),
@@ -410,6 +411,28 @@ def network_files() -> dict[str, bytes | str]:
             f"{base}/addrs": ADDRESSES, f"{base}/routes4": ROUTES4, f"{base}/routes6": ROUTES6,
         })
     return files
+
+
+PROVIDER_BINARY = "/var/lib/pigloros/sandbox/providers/" + "ab" * 32
+RUNTIME_PROPERTIES = (
+    "Id=piglor-sandbox-runtime.service\nActiveState=active\nSubState=running\nMainPID=412\n"
+    "Type=notify\nNotifyAccess=main\nExitType=main\nKillMode=control-group\nRestart=no\n"
+    "CollectMode=inactive-or-failed\nUMask=0077\nStandardInput=null\nTimeoutStartUSec=30s\n"
+    f"ExecStart={{ path={PROVIDER_BINARY} ; argv[]={PROVIDER_BINARY} provider-runtime ; ignore_errors=no ; "
+    "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+)
+
+
+def daemon_files() -> dict[str, bytes | str]:
+    base = "guest/daemon/start"
+    return {
+        f"{base}/stage-report": f"staged\t{PROVIDER_BINARY}\nunstaged\n", f"{base}/stage-stderr": "",
+        f"{base}/stage-status": "0\n", f"{base}/start-status": "0\n", f"{base}/stop-status": "0\n",
+        f"{base}/runtime-properties": RUNTIME_PROPERTIES, f"{base}/runtime-exe": PROVIDER_BINARY + "\n",
+        f"{base}/runtime-tree": "\td\t700\nsandbox\td\t700\nprovider-execute.sock\ts\t600\n"
+                               "provider-control.sock\ts\t600\n",
+        f"{base}/runtime-log": "[ 100.0] piglor-sandbox-runtime[412]: ready\n",
+    }
 
 
 def write(root: pathlib.Path, files: dict[str, bytes | str]) -> None:
@@ -1348,6 +1371,46 @@ class EvidenceTests(unittest.TestCase):
         addresses = ADDRESSES.replace("1: lo ", "1: lo@lo ", 1)
         self.assertEqual(self.verdict(change=lambda f: f.update({"guest/network/fb-1/addrs": addresses}))
                          ["private_network"]["fb-1"]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
+
+    def test_the_provider_runtime_is_the_staged_binary_started_as_the_selector_would(self):
+        daemon = self.verdict()["provider_runtime"]["start"]
+        self.assertEqual(daemon["binary"], PROVIDER_BINARY)
+        self.assertEqual(daemon["properties"]["Type"], "notify")
+        self.assertEqual(sorted(daemon["endpoints"]), ["provider-control.sock", "provider-execute.sock"])
+
+    def test_provider_runtime_fabrication_fails_closed(self):
+        base = "guest/daemon/start"
+        changes = [
+            (lambda f: f.pop(f"{base}/runtime-log"), "malformed daemon record start"),
+            (lambda f: f.update({f"{base}/extra": ""}), "unexpected"),
+            (lambda f: f.update({"guest/daemon/other/x": ""}), "does not hold exactly"),
+            (lambda f: f.update({f"{base}/stage-status": "1\n"}), "did not stage and unstage"),
+            (lambda f: f.update({f"{base}/stage-report": "staged\t/tmp/x\nunstaged\n"}), "did not stage"),
+            (lambda f: f.update({f"{base}/stage-report": f"staged\t{PROVIDER_BINARY}\n"}), "did not stage"),
+            (lambda f: f.update({f"{base}/stage-report": ""}), "did not stage"),
+            (lambda f: f.update({f"{base}/start-status": "1\n"}), "did not start and stop cleanly"),
+            (lambda f: f.update({f"{base}/stop-status": "1\n"}), "did not start and stop cleanly"),
+            (lambda f: f.update({f"{base}/runtime-properties": RUNTIME_PROPERTIES.replace("Type=notify", "Type=exec")}),
+             "Type='exec'"),
+            (lambda f: f.update({f"{base}/runtime-properties":
+                                 RUNTIME_PROPERTIES.replace("ActiveState=active", "ActiveState=failed")}),
+             "ActiveState='failed'"),
+            (lambda f: f.update({f"{base}/runtime-properties": RUNTIME_PROPERTIES.replace("MainPID=412", "MainPID=0")}),
+             "does not run"),
+            (lambda f: f.update({f"{base}/runtime-properties":
+                                 RUNTIME_PROPERTIES.replace(" provider-runtime ;", " recovery-peer ;")}),
+             "does not run"),
+            (lambda f: f.update({f"{base}/runtime-properties": RUNTIME_PROPERTIES + "Id=again\n"}), "malformed"),
+            (lambda f: f.update({f"{base}/runtime-exe": "/nix/store/x-other\n"}), "not the staged provider binary"),
+            (lambda f: f.update({f"{base}/runtime-tree": "\td\t700\nprovider-execute.sock\ts\t600\n"}),
+             "no socket at /run/pigloros/provider-control.sock"),
+            (lambda f: f.update({f"{base}/runtime-tree": "provider-execute.sock\tf\t600\n"
+                                                         "provider-control.sock\ts\t600\n"}),
+             "no socket at /run/pigloros/provider-execute.sock"),
+        ]
+        for change, message in changes:
+            with self.subTest(change=change), self.assertRaisesRegex(checker.EvidenceError, message):
+                self.verdict(change=change)
 
     def test_a_failed_probe_explains_itself(self):
         """The first QEMU run failed with no probe files: the error must carry the unit's stderr."""
