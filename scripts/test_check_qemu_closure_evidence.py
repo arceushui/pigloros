@@ -209,6 +209,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
     }
     files["host/kernel-config"] = files["guest/kernel-config"]
     files.update(case_files())
+    files.update(network_files())
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
         ("311", WORKER, b"LANG=C.UTF-8\0MOUNTFS_FIXED_WORKER=1\0"),
@@ -327,6 +328,44 @@ def case_files() -> dict[str, bytes | str]:
             })
         else:
             files[f"{base}/report"] = "activation\trefused\tMethodRejected\nrelease\tnone\nremoval\tremoved\n"
+    return files
+
+
+INIT_NETNS = "net:[4026531840]"
+UNIT_NETNS = "net:[4026532200]"
+LINK_LO = "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n"
+def link(index: int, name: str, kind: str) -> str:
+    return (f"{index}: {name}@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT group default "
+            f"qlen 1000\\    link/{kind} 0.0.0.0 brd 0.0.0.0\n")
+
+
+LINK_TUNL = link(2, "tunl0", "ipip")
+FALLBACKS = LINK_TUNL + link(3, "sit0", "sit") + link(4, "ip6tnl0", "tunnel6") + link(5, "gre0", "gre")
+MODULES = "".join(f"{name} 12288 0 - Live 0x0000000000000000\n" for name in ("ipip", "sit", "ip6_tunnel", "ip_gre"))
+ADDRESSES = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever\n"
+             "1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever\n")
+ROUTES4 = ("local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1\n"
+           "local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1\n"
+           "broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1\n")
+ROUTES6 = ("local ::1 dev lo table local proto kernel metric 0 pref medium\n"
+           "multicast ff00::/8 dev lo table local proto kernel metric 256 pref medium\n")
+
+
+def network_files() -> dict[str, bytes | str]:
+    files: dict[str, bytes | str] = {
+        "guest/network/boot-sysctl": "0\n",
+        "guest/network/init-netns": INIT_NETNS + "\n",
+        "guest/network/init-links": LINK_LO + FALLBACKS,
+        "guest/network/modules": MODULES,
+    }
+    for case, value in checker.NETWORK_CASES.items():
+        base = f"guest/network/{case}"
+        files.update({
+            f"{base}/sysctl": f"{value}\n", f"{base}/status": "0\n", f"{base}/netns": UNIT_NETNS + "\n",
+            f"{base}/stderr": "", f"{base}/journal": "Nov 25 piglor-network: Finished.\n",
+            f"{base}/links": LINK_LO + (FALLBACKS if value == "0" else ""),
+            f"{base}/addrs": ADDRESSES, f"{base}/routes4": ROUTES4, f"{base}/routes6": ROUTES6,
+        })
     return files
 
 
@@ -1181,6 +1220,178 @@ class EvidenceTests(unittest.TestCase):
         for change in changes:
             with self.subTest(change=change):
                 self.refuses(change)
+
+    def test_private_network_unit_holds_only_the_loopback_once_the_sysctl_is_set(self):
+        network = self.verdict()["private_network"]
+        self.assertEqual(network["boot_sysctl"], 0)
+        self.assertEqual(network["fb-0"]["links"], ["lo", "tunl0", "sit0", "ip6tnl0", "gre0"])
+        for case in ("fb-1", "fb-2"):
+            self.assertEqual(network[case]["links"], ["lo"])
+            self.assertEqual(network[case]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
+            self.assertEqual(network[case]["routes6"], ROUTES6.splitlines())
+
+    def test_private_network_main_table_loopback_route_is_accepted_deliberately(self):
+        main_table = "::1 dev lo proto kernel metric 256 pref medium\n"
+        # The kernel names a local-table route's kind, so the main table is the
+        # only place an unkinded ::1 route is accepted (explicit or implied).
+        for routes in (main_table, ROUTES6 + main_table, ROUTES6.replace("::1 ", "::1/128 "),
+                       "::1 dev lo table main proto kernel metric 256 pref medium\n"):
+            with self.subTest(routes=routes):
+                verdict = self.verdict(change=lambda f, r=routes: f.update({"guest/network/fb-1/routes6": r}))
+                self.assertEqual(verdict["private_network"]["fb-1"]["links"], ["lo"])
+
+    def test_private_network_linked_device_names_are_normalised(self):
+        addresses = ADDRESSES.replace("1: lo ", "1: lo@lo ", 1)
+        self.assertEqual(self.verdict(change=lambda f: f.update({"guest/network/fb-1/addrs": addresses}))
+                         ["private_network"]["fb-1"]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
+
+    def test_a_failed_probe_explains_itself(self):
+        """The first QEMU run failed with no probe files: the error must carry the unit's stderr."""
+        def failed(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-0/{name}")
+            files["guest/network/fb-0/status"] = "1\n"
+            files["guest/network/fb-0/stderr"] = "Failed to find executable bash\n"
+        with self.assertRaisesRegex(checker.EvidenceError,
+                                    r"status 1\); stderr: 'Failed to find executable bash'; "
+                                    r"probe files written: \[\]"):
+            self.verdict(change=failed)
+
+        # A failed `ip` leaves the files it had created: the case is still judged by its
+        # status and stderr first, and says which probe files exist.
+        def partial(files):
+            for name in ("addrs", "routes4", "routes6"):
+                files.pop(f"guest/network/fb-1/{name}")
+            files["guest/network/fb-1/status"] = "2\n"
+            files["guest/network/fb-1/stderr"] = "  RTNETLINK answers: Operation not permitted \n"
+        with self.assertRaisesRegex(checker.EvidenceError,
+                                    r"status 2\); stderr: 'RTNETLINK answers: Operation not permitted'; "
+                                    r"probe files written: \['links', 'netns'\]"):
+            self.verdict(change=partial)
+
+        def silent(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-1/{name}")
+        with self.assertRaisesRegex(checker.EvidenceError, r"completed but wrote only \[\]"):
+            self.verdict(change=silent)
+
+        def incomplete(files):
+            files.pop("guest/network/fb-1/routes6")
+        with self.assertRaisesRegex(checker.EvidenceError, r"completed but wrote only \['addrs', 'links'"):
+            self.verdict(change=incomplete)
+        with self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr: 'warning'"):
+            self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": "warning\n"}))
+        # ASCII whitespace alone is no output, but other Unicode whitespace is output.
+        self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": " \t\r\n"}))
+        for text in ("\u00a0", "\u001c", "\u001f", "\u2028", "\u3000"):
+            with self.subTest(stderr=text), self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr"):
+                self.verdict(change=lambda f, text=text: f.update({"guest/network/fb-2/stderr": text + "\n"}))
+        # A failure that systemd-run logged only to the journal leaves stderr empty; say so.
+        def logged_only(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-1/{name}")
+            files["guest/network/fb-1/status"] = "1\n"
+            files["guest/network/fb-1/stderr"] = ""
+        with self.assertRaisesRegex(checker.EvidenceError,
+                                    r"stderr: '' \(empty: systemd-run printed nothing\); "
+                                    r"probe files written: \[\]; "
+                                    r"look in guest/network/fb-1/journal"):
+            self.verdict(change=logged_only)
+        # A record with a missing run file or an unexpected file is named precisely, with the
+        # probe files that exist.
+        with self.assertRaisesRegex(
+                checker.EvidenceError,
+                r"malformed network record fb-1: missing \['journal'\], unexpected \[\], "
+                r"probe files \['addrs', 'links', 'netns', 'routes4', 'routes6'\]"):
+            self.verdict(change=lambda f: f.pop("guest/network/fb-1/journal"))
+        with self.assertRaisesRegex(checker.EvidenceError, r"unexpected \['extra'\]"):
+            self.verdict(change=lambda f: f.update({"guest/network/fb-1/extra": ""}))
+
+    def test_private_network_fabrication_fails_closed(self):
+        base = "guest/network"
+        changes = [
+            (lambda f: f.pop(f"{base}/modules"), "does not hold exactly"),
+            (lambda f: f.update({f"{base}/extra": ""}), "does not hold exactly"),
+            (lambda f: f.pop(f"{base}/fb-1/routes6"), "completed but wrote only"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "x\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "1\n"}), "does not boot"),
+            (lambda f: f.update({f"{base}/boot-sysctl": "7\n"}), "does not boot"),
+            # The modules, and the control: value 0 must show the host's fallback devices.
+            (lambda f: f.update({f"{base}/modules": ""}), "tunnel modules are not loaded"),
+            (lambda f: f.update({f"{base}/modules": MODULES.replace("ip_gre", "ip_gre2")}),
+             "tunnel modules are not loaded"),
+            (lambda f: f.update({f"{base}/init-links": LINK_LO}), "no fallback tunnel device"),
+            (lambda f: f.update({f"{base}/init-links": LINK_LO + LINK_TUNL}), "no fallback tunnel device"),
+            (lambda f: f.update({f"{base}/fb-0/links": LINK_LO}), "lacks the host's fallback"),
+            (lambda f: f.update({f"{base}/fb-0/links": LINK_LO + LINK_TUNL}), "lacks the host's fallback"),
+            (lambda f: f.update({f"{base}/fb-0/links": LINK_LO + FALLBACKS + link(6, "evil0", "ipip")}),
+             "lacks the host's fallback"),
+            (lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_TUNL}), "more than lo"),
+            (lambda f: f.update({f"{base}/fb-2/links": LINK_TUNL}), "lacks exactly one lo"),
+            (lambda f: f.update({f"{base}/fb-1/links": LINK_LO + LINK_LO}), "lacks exactly one lo"),
+            (lambda f: f.update({f"{base}/fb-1/links": "garbage\n"}), "malformed"),
+            (lambda f: f.update({f"{base}/fb-1/sysctl": "0\n"}), "did not run with"),
+            (lambda f: f.update({f"{base}/fb-1/status": "1\n"}), "did not complete"),
+            (lambda f: f.update({f"{base}/fb-1/netns": INIT_NETNS + "\n"}), "network namespace of its own"),
+            (lambda f: f.update({f"{base}/fb-1/netns": "net:[x]\n"}), "network namespace of its own"),
+            (lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES.split("\n")[0] + "\n"}), "lacks exactly one lo"),
+            (lambda f: f.update({f"{base}/fb-1/addrs": ADDRESSES + "2: eth0    inet 10.0.0.2/24 scope global eth0\n"}),
+             "more than lo"),
+            (lambda f: f.update({f"{base}/fb-1/addrs": "1: lo\n"}), "malformed"),
+            # Routes: empty, off lo, via a gateway, outside the allowlist.
+            (lambda f: f.update({f"{base}/fb-1/routes4": ""}), "lacks the loopback host route"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ""}), "lacks the loopback host route"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": "\n"}), "blank line"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "default via 10.0.0.1 dev eth0\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 via 127.0.0.2 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "local 10.0.0.0/8 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "127.0.0.0/8 dev lo\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "unreachable 127.0.0.1 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-1/routes4": "broadcast 127.255.255.255 dev lo table local\n"}),
+             "lacks the loopback host route"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev eth0 table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": "local ::1 dev\n"}), "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "fe80::/64 dev lo proto kernel\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "default via fe80::1 dev lo\n"}),
+             "other than the loopback's own"),
+            # An unkinded ::1 route in the local table is refused: the kernel
+            # always prints `local` for that table, so it is not what it printed.
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "::1 dev lo table local\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": ROUTES6 + "local ::1 dev lo table main\n"}),
+             "other than the loopback's own"),
+            # Fields beyond the first dev and table: a second device or table,
+            # a gateway, a nexthop id, encapsulation, a global scope or source.
+            *[(lambda f, tail=tail: f.update(
+                {f"{base}/fb-1/routes6": ROUTES6 + "local ::1 dev lo table local " + tail + "\n"}),
+               "other than the loopback's own")
+              for tail in ("dev eth0", "table main", "gateway fe80::1", "nhid 5", "encap ip id 1",
+                           "src 2001:db8::1", "scope global", "proto bgp", "metric x", "linkdown extra", "dev",
+                           # A repeated flag; a non-ASCII digit; an unbounded metric; the IPv4
+                           # loopback as an IPv6 source; an allowed value on the wrong key.
+                           "linkdown linkdown", "metric ٧", "metric " + "1" * 11, "src 127.0.0.1",
+                           "dev local", "table lo", "scope table", "pref kernel")],
+            (lambda f: f.update({f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 dev lo table local src ::1\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update(
+                {f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 dev lo table local metric 0 metric 1\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update(
+                {f"{base}/fb-1/routes4": ROUTES4 + "local 127.0.0.0/8 dev lo table local src 10.0.0.1\n"}),
+             "other than the loopback's own"),
+            (lambda f: f.update({f"{base}/fb-2/routes6": "multicast ff00::/8 dev lo table local\n"}),
+             "lacks the loopback host route"),
+        ]
+        for change, message in changes:
+            with self.subTest(change=change), self.assertRaisesRegex(checker.EvidenceError, message):
+                self.verdict(change=change)
 
     def test_cli_writes_one_verdict_and_refuses_bad_input(self):
         root = self.evidence()

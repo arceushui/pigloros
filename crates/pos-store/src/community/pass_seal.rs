@@ -382,13 +382,14 @@ impl MemoryCommunityDomainV1 {
     /// `replay_recording_digest` is the CRR1 the pipeline built from
     /// `planned`, the result of [`Self::plan_annotations`]. Seal plans again
     /// to verify `planned`, so the admission, which is quadratic in the item
-    /// count, runs twice in a pipeline. A Seal of a
-    /// Sealed pass is a replay: it stages the same result again and is
-    /// refused only for a different one. A replay is also a fresh read of
-    /// the store-wide live key count, so one that comes after the count
-    /// grew to its limit can be refused with `Conflict` (fail closed). The
-    /// clean fix is a flag on the pass record saying whether the trace key
-    /// was provisioned at Reserve (R11.1(6)).
+    /// count, runs twice in a pipeline.
+    ///
+    /// A Seal of a Sealed pass is a replay: it stages the same result again
+    /// and is refused only for a different one. A replay is also a fresh
+    /// read of the store-wide live key count, so one that comes after the
+    /// count grew to its limit can be refused with `Conflict` (fail
+    /// closed). The clean fix is a flag on the pass record saying whether
+    /// the trace key was provisioned at Reserve (R11.1(6)).
     ///
     /// # Errors
     /// Returns the errors of [`Self::plan_annotations`], `InvalidBinding`
