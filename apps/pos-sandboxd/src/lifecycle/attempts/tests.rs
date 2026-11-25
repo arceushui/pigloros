@@ -262,6 +262,8 @@ mod cases {
         Fails,
         /// The execution binds another cgroup than the one it returns.
         Substitutes,
+        /// The attempt completes, but its Local network could not be removed.
+        NetworkRemovalFails,
     }
 
     /// The fake execution over one fake systemd manager, and the real terminal
@@ -325,6 +327,7 @@ mod cases {
             async move {
                 if let Err(error) = ownership.claim().and_then(|()| ownership.submit()) {
                     return Err(ExecuteFailure {
+                        network_removal: None,
                         error,
                         unit: UnitState::NotStarted,
                         cgroup: None,
@@ -333,6 +336,7 @@ mod cases {
                     });
                 }
                 let cgroup = lock(&self.cgroup).take().ok_or_else(|| ExecuteFailure {
+                    network_removal: None,
                     error: ExecuteError::HostTimeout,
                     unit: UnitState::Unknown,
                     cgroup: None,
@@ -354,6 +358,7 @@ mod cases {
                     Behaviour::Hangs => std::future::pending().await,
                     Behaviour::Fails => {
                         return Err(ExecuteFailure {
+                            network_removal: None,
                             error: ExecuteError::HostTimeout,
                             unit: UnitState::Killed,
                             cgroup: Some(cgroup),
@@ -361,9 +366,12 @@ mod cases {
                             started: None,
                         })
                     }
-                    Behaviour::Completes | Behaviour::Substitutes => AttemptEnding::CgroupEmpty,
+                    Behaviour::Completes
+                    | Behaviour::Substitutes
+                    | Behaviour::NetworkRemovalFails => AttemptEnding::CgroupEmpty,
                 };
                 let adapter = crate::test_fixtures::adapter_io().ok_or_else(|| ExecuteFailure {
+                    network_removal: None,
                     error: ExecuteError::HostTimeout,
                     unit: UnitState::Unknown,
                     cgroup: None,
@@ -371,6 +379,8 @@ mod cases {
                     started: None,
                 })?;
                 Ok(AttemptExecution {
+                    network_removal: (self.behaviour == Behaviour::NetworkRemovalFails)
+                        .then(|| crate::NetworkRemovalFailure::new("the kernel refused")),
                     attempt_id,
                     started: (),
                     cgroup,
@@ -1230,6 +1240,29 @@ mod cases {
             Err(AttemptLifecycleError::CleanupFailed)
         ));
         Ok(ended)
+    }
+
+    /// ADR-069 R14 N7: a Local network that could not be removed leaves the
+    /// cleanup unproved (TME1 `cleanup.result` 1) and quarantines.
+    #[tokio::test(start_paused = true)]
+    async fn a_network_that_could_not_be_removed_leaves_the_cleanup_unproved() -> TestResult {
+        let runtime = Runtime::new()?;
+        let fixture = manager(1).await?;
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
+            .behaving(Behaviour::NetworkRemovalFails);
+        let ended = runtime.run(FakeInput::new(1), &steps).await?;
+        assert!(
+            matches!(
+                ended.cleanup(),
+                Err(AttemptLifecycleError::Cleanup(
+                    AttemptCleanupError::Network(_)
+                ))
+            ),
+            "{:?}",
+            ended.cleanup()
+        );
+        assert!(!runtime.admits()?);
+        Ok(())
     }
 
     #[tokio::test(start_paused = true)]
@@ -2469,6 +2502,7 @@ mod cases {
         fn a_release_outcome_joins_both_execution_results() {
             let executed: Result<AttemptExecution<(), (), ReleaseResources>, _> =
                 Err(ExecuteFailure {
+                    network_removal: None,
                     error: ExecuteError::HostTimeout,
                     unit: UnitState::Killed,
                     cgroup: Some(()),
@@ -2509,6 +2543,7 @@ mod cases {
                 fixture.bound.read_effective_limits()?,
             );
             let executed: Result<_, ExecuteFailure<(), ReleaseResources>> = Ok(AttemptExecution {
+                network_removal: None,
                 attempt_id: [1; 16],
                 started: (),
                 cgroup: (),

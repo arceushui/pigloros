@@ -472,6 +472,7 @@ mod cases {
                     Ok(Some(cgroup)) => cgroup,
                     Ok(None) => {
                         return Err(ExecuteFailure {
+                            network_removal: None,
                             error: ExecuteError::HostTimeout,
                             unit: UnitState::Unknown,
                             cgroup: None,
@@ -481,6 +482,7 @@ mod cases {
                     }
                     Err(error) => {
                         return Err(ExecuteFailure {
+                            network_removal: None,
                             error,
                             unit: UnitState::NotStarted,
                             cgroup: None,
@@ -500,6 +502,7 @@ mod cases {
                 };
                 self.world.reach(Boundary::ExecutionEnded);
                 let adapter = crate::test_fixtures::adapter_io().ok_or_else(|| ExecuteFailure {
+                    network_removal: None,
                     error: ExecuteError::HostTimeout,
                     unit: UnitState::Unknown,
                     cgroup: None,
@@ -507,6 +510,7 @@ mod cases {
                     started: None,
                 })?;
                 Ok(AttemptExecution {
+                    network_removal: None,
                     attempt_id,
                     started: (),
                     cgroup,

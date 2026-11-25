@@ -428,3 +428,8 @@ async fn a_failed_proxy_task_is_reported() -> TestResult {
     assert!(adapter.join().map_err(|_| "adapter thread")?.is_err());
     Ok(())
 }
+
+#[test]
+fn a_refusing_connector_removes_nothing() {
+    assert_eq!(RefusingConnector.remove(), Ok(()));
+}

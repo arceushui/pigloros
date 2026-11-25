@@ -84,11 +84,11 @@ use crate::{
     BoundAttemptCgroup, CancelSignal, CheckedRoot, CommittedPlannedAttempt,
     CompletedAttemptCleanup, ExecuteError, ExecuteFailure, ExecuteJob, ExecutionOwnership,
     ImageActivationError, LaunchBarrier, LocalNetworkPort, ModePlan, NetworkEvidence,
-    PlannedAttemptIntent, PreparedAttemptDirectory, ReconciledRestart, RecordedRoot,
-    RecoveredAttemptIntent, ReleaseOutcome, ReleaseResources, ResourceEvidence, StagingLedger,
-    SystemdAttemptRegistry, SystemdAttemptRegistryError, SystemdTransientUnitTransport,
-    SystemdVerifiedStart, TransientServiceUnitName, UnitState, VerifiedRootMount,
-    VerifiedStagedInput,
+    NetworkRemovalFailure, PlannedAttemptIntent, PreparedAttemptDirectory, ReconciledRestart,
+    RecordedRoot, RecoveredAttemptIntent, ReleaseOutcome, ReleaseResources, ResourceEvidence,
+    StagingLedger, SystemdAttemptRegistry, SystemdAttemptRegistryError,
+    SystemdTransientUnitTransport, SystemdVerifiedStart, TransientServiceUnitName, UnitState,
+    VerifiedRootMount, VerifiedStagedInput,
 };
 use crate::{AdmittedRuntimeKey, KeyFileRuntimeSigner, ResponseFault, RuntimeAttestationSigner};
 
@@ -662,6 +662,7 @@ where
                     with_release(executed, barrier.evidence())
                 }
                 Err(error) => Err(ExecuteFailure {
+                    network_removal: None,
                     error: ExecuteError::Barrier(Box::new(error)),
                     unit: UnitState::NotStarted,
                     cgroup: None,
@@ -701,6 +702,7 @@ fn with_release<S, C>(
 ) -> Executed<S, C> {
     match executed {
         Ok(execution) => Ok(AttemptExecution {
+            network_removal: execution.network_removal,
             attempt_id: execution.attempt_id,
             started: execution.started,
             cgroup: execution.cgroup,
@@ -710,6 +712,7 @@ fn with_release<S, C>(
             adapter: execution.adapter,
         }),
         Err(failure) => Err(ExecuteFailure {
+            network_removal: failure.network_removal,
             error: failure.error,
             unit: failure.unit,
             cgroup: failure.cgroup,
@@ -1698,6 +1701,7 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
     AttemptProgress<S::Started>,
     Option<S::Cgroup>,
     Option<I::Root>,
+    Option<NetworkRemovalFailure>,
 ) {
     let admitted = input.attempt(directory);
     let checker = input.checker();
@@ -1715,16 +1719,17 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
                 },
                 None,
                 None,
+                None,
             );
         }
     };
     let root = match input.activate(directory).await {
         Ok(root) => root,
-        Err(error) => return (AttemptProgress::NotActivated(error), None, None),
+        Err(error) => return (AttemptProgress::NotActivated(error), None, None, None),
     };
     let recheck = || checker(&root, directory);
     let executed = steps.execute(launch, attempt, &recheck, cancel).await;
-    let (progress, cgroup) = match executed {
+    let (progress, cgroup, removal) = match executed {
         Ok(execution) => (
             AttemptProgress::Executed {
                 started: execution.started,
@@ -1734,6 +1739,7 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
                 adapter: execution.adapter,
             },
             Some(execution.cgroup),
+            execution.network_removal,
         ),
         Err(failure) => (
             AttemptProgress::Failed {
@@ -1743,9 +1749,10 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
                 evidence: failure.evidence,
             },
             failure.cgroup,
+            failure.network_removal,
         ),
     };
-    (progress, cgroup, Some(root))
+    (progress, cgroup, Some(root), removal)
 }
 
 type Progressed<S> = (
@@ -1762,8 +1769,8 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
     cancel: CancelSignal,
     budget: CleanupBudget,
 ) -> Progressed<S::Started> {
-    let (mut progress, cgroup, root) = if cancel.is_requested() {
-        (AttemptProgress::CancelledBeforeActivation, None, None)
+    let (mut progress, cgroup, root, removal) = if cancel.is_requested() {
+        (AttemptProgress::CancelledBeforeActivation, None, None, None)
     } else {
         activate_and_execute(steps, launch, input, &directory, cancel).await
     };
@@ -1771,6 +1778,7 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
     let cleanup = steps
         .finish(&mut progress, directory, cgroup, root, deadlines)
         .await
+        .and_then(|completed| removal.map_or(Ok(completed), |failure| Err(failure.into())))
         .map_err(AttemptLifecycleError::from);
     (progress, cleanup)
 }

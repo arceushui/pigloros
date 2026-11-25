@@ -102,6 +102,10 @@ pub enum AttemptCleanupError {
     /// could not be removed.
     #[error(transparent)]
     Registry(#[from] SystemdAttemptRegistryError),
+    /// The attempt's Local network could not be removed (ADR-069 R14 N7 and
+    /// base §8): the cleanup is not proved.
+    #[error(transparent)]
+    Network(#[from] crate::NetworkRemovalFailure),
 }
 
 /// Finish one attempt's terminal cleanup within `deadlines`.

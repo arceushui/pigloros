@@ -742,11 +742,22 @@ impl LocalNetworkPort for BrokenNetwork {
 /// A connector whose drop is the namespace teardown the port contract asks for.
 struct TornDownConnector {
     torn_down: Arc<AtomicUsize>,
+    removal_fails: bool,
 }
 
 impl Drop for TornDownConnector {
     fn drop(&mut self) {
         self.torn_down.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl crate::RemoveNetwork for TornDownConnector {
+    fn remove(&mut self) -> Result<(), crate::NetworkRemovalFailure> {
+        if self.removal_fails {
+            Err(crate::NetworkRemovalFailure::new("the kernel refused"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -762,6 +773,7 @@ impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for Torn
 
 struct TornDownNetwork {
     torn_down: Arc<AtomicUsize>,
+    removal_fails: bool,
 }
 
 impl LocalNetworkPort for TornDownNetwork {
@@ -777,6 +789,7 @@ impl LocalNetworkPort for TornDownNetwork {
             attempt_id,
             TornDownConnector {
                 torn_down: Arc::clone(&self.torn_down),
+                removal_fails: self.removal_fails,
             },
         ))
     }
@@ -1691,9 +1704,19 @@ async fn teardowns(
     configure: impl FnOnce(&mut Scenario),
     network_attempt: [u8; 16],
 ) -> TestResult<(usize, ExecuteFailure<FakeCgroup, u64, String>)> {
+    teardowns_removing(configure, network_attempt, false).await
+}
+
+/// [`teardowns`] on a network whose removal fails when `removal_fails`.
+async fn teardowns_removing(
+    configure: impl FnOnce(&mut Scenario),
+    network_attempt: [u8; 16],
+    removal_fails: bool,
+) -> TestResult<(usize, ExecuteFailure<FakeCgroup, u64, String>)> {
     let torn_down = Arc::new(AtomicUsize::new(0));
     let network = TornDownNetwork {
         torn_down: Arc::clone(&torn_down),
+        removal_fails,
     };
     let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
     let mut scenario = Scenario::new()?;
@@ -1727,6 +1750,7 @@ async fn the_namespace_is_torn_down_when_the_recheck_fails() -> TestResult {
     let torn_down = Arc::new(AtomicUsize::new(0));
     let network = TornDownNetwork {
         torn_down: Arc::clone(&torn_down),
+        removal_fails: false,
     };
     let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
     let mut scenario = Scenario::new()?;
@@ -1759,6 +1783,110 @@ async fn the_namespace_is_torn_down_when_the_release_is_refused() -> TestResult 
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(torn_down, 1);
+    Ok(())
+}
+
+/// ADR-069 R14 N7: whichever way a Local attempt ends, a network whose
+/// removal failed is reported with the execution, never swallowed; a removal
+/// that worked reports nothing.
+#[tokio::test]
+async fn a_failed_network_removal_is_reported_on_every_ending() -> TestResult {
+    type Case = (&'static str, fn(&mut Scenario));
+    let cases: [Case; 3] = [
+        ("barrier take", |scenario| {
+            scenario.barrier.fault = BarrierFault::Take;
+        }),
+        ("release refused", |scenario| {
+            scenario.barrier.fault = BarrierFault::Release;
+        }),
+        ("cgroup unreadable", |scenario| {
+            scenario.host.faults.push(Fault::ReadCgroup);
+        }),
+    ];
+    for (name, configure) in cases {
+        for removal_fails in [false, true] {
+            let (torn_down, failed) = teardowns_removing(configure, ATTEMPT, removal_fails).await?;
+            assert_eq!(torn_down, 1, "{name}");
+            assert_eq!(failed.network_removal.is_some(), removal_fails, "{name}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_removal_after_a_normal_end_is_reported() -> TestResult {
+    for removal_fails in [false, true] {
+        let torn_down = Arc::new(AtomicUsize::new(0));
+        let network = TornDownNetwork {
+            torn_down: Arc::clone(&torn_down),
+            removal_fails,
+        };
+        let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+        let mut scenario = Scenario::new()?;
+        let job = scenario.job(
+            ATTEMPT,
+            SandboxExecutionMode::Local,
+            mode,
+            GENEROUS_WATCHDOG_MS,
+        )?;
+        let recheck = root_for(&scenario.log, &job.attempt);
+        let execution = scenario.run_on(&network, job, recheck).await;
+        let execution = execution.map_err(|failed| failed.error)?;
+        assert_eq!(torn_down.load(Ordering::SeqCst), 1);
+        assert_eq!(execution.network_removal.is_some(), removal_fails);
+    }
+    Ok(())
+}
+
+/// A port whose setup failed after it began installing, and whose removal
+/// failed too.
+struct UnremovedNetwork;
+
+#[derive(Debug, thiserror::Error)]
+#[error("injected failure with a failed removal")]
+struct InjectedUnremoved;
+
+impl crate::SetupError for InjectedUnremoved {
+    fn setup_class(&self) -> crate::SetupClass {
+        crate::SetupClass::Creation
+    }
+
+    fn removal(&self) -> Option<crate::NetworkRemovalFailure> {
+        Some(crate::NetworkRemovalFailure::new("the kernel refused"))
+    }
+}
+
+impl LocalNetworkPort for UnremovedNetwork {
+    type Connector = LoopbackConnector;
+    type Error = InjectedUnremoved;
+
+    fn establish(
+        &self,
+        _attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
+    ) -> Result<EstablishedNetwork<LoopbackConnector>, InjectedUnremoved> {
+        Err(InjectedUnremoved)
+    }
+}
+
+#[tokio::test]
+async fn a_setup_that_could_not_be_removed_is_reported_beside_its_launch_failure() -> TestResult {
+    let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    let job = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::Local,
+        mode,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let recheck = root_for(&scenario.log, &job.attempt);
+    let failed = failure(scenario.run_on(&UnremovedNetwork, job, recheck).await)?;
+    assert!(matches!(failed.error, ExecuteError::Network(_)));
+    assert_eq!(
+        failed.error.launch_failure(),
+        Some(pos_reference::sandbox_provider_protocol::LaunchFailure::NetworkSetupFailed)
+    );
+    assert!(failed.network_removal.is_some());
     Ok(())
 }
 
@@ -1838,6 +1966,12 @@ struct PanickingNetwork;
 
 struct PanickingConnector;
 
+impl crate::RemoveNetwork for PanickingConnector {
+    fn remove(&mut self) -> Result<(), crate::NetworkRemovalFailure> {
+        Ok(())
+    }
+}
+
 impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for PanickingConnector {
     fn connect(
         &mut self,
@@ -1903,6 +2037,12 @@ async fn an_unacknowledged_kill_after_a_protocol_violation_is_reported() -> Test
 struct KillAwareConnector {
     killed: Arc<AtomicBool>,
     saw_kill: Arc<AtomicBool>,
+}
+
+impl crate::RemoveNetwork for KillAwareConnector {
+    fn remove(&mut self) -> Result<(), crate::NetworkRemovalFailure> {
+        Ok(())
+    }
 }
 
 impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for KillAwareConnector {
@@ -1995,6 +2135,7 @@ async fn a_failed_proxy_task_terminates_the_unit() -> TestResult {
 #[test]
 fn the_failure_names_its_cause_and_the_unit_state() {
     let failure = ExecuteFailure::<FakeCgroup> {
+        network_removal: None,
         error: ExecuteError::ModeMismatch,
         unit: UnitState::KillFailed,
         cgroup: None,
