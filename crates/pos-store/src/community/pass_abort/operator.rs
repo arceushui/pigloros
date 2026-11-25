@@ -195,12 +195,11 @@ impl MemoryCommunityDomainV1 {
     /// # Errors
     /// In the A5.5 order: `InvalidBinding` for a reason other than 0 or 4 or
     /// a zero identity or reservation, and for a CDP1 other than the one the
-    /// pass was reserved under; `EvidenceUnavailable` for every
-    /// authority failure, a pass nobody reserved, an unbootstrapped domain, a
-    /// Timeline whose head is not its initialization head, a pass record
-    /// with no due member (there is no retained TPS1 digest to use), a
-    /// missing pass metadata key and a writer at or after the decision
-    /// bound; `Conflict`
+    /// pass was reserved under; `EvidenceUnavailable` for every authority
+    /// failure, a pass nobody reserved, an unbootstrapped domain, a Timeline
+    /// whose head is not its initialization head, a pass record with no due
+    /// member (there is no retained TPS1 digest to use), a missing pass
+    /// metadata key and a writer at or after the decision bound; `Conflict`
     /// for a Committed pass, a retry with other bound content or by another
     /// principal; `EvidenceExpired` for a retry at or after the pass's
     /// `H_r`; `OperationActive` while the pass's call is live;
