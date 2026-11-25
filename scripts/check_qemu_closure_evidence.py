@@ -22,10 +22,11 @@ packaged NixOS 26.05 closure and on both architectures:
 Part (b) runs the production admission, registry and activation path
 (`pos-sandboxd-conformance`) against the packaged mountfsd and kernel:
 
-- the executables: the image's /adapter and the launcher are real static ELF
-  executables of the architecture (no PT_INTERP, so they run inside a root
+- the adapter: the image's /adapter is a real, loadable static ELF
+  executable of the architecture (no PT_INTERP, so it runs inside a root
   that holds nothing else, and never the 7-byte stand-in), and the signed
-  positive image carries the adapter's bytes exactly once;
+  positive image carries its whole 4096-byte blocks exactly once, then its
+  tail, which mkfs.erofs stores inline beside the inode;
 - the images: wrong-key carries the positive image's root hash and salt,
   and tampered differs from positive in exactly one root data byte;
 - positive: an image signed by the trusted key mounts as read-only EROFS
@@ -149,10 +150,11 @@ HOST_FILES = {
 }
 # Part (b): the images the guest ran, copied from the recorded store path.
 HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-offset", "positive.der",
-                    "wrong-key.der", "root-hash.txt", "adapter", "launcher"}
+                    "wrong-key.der", "root-hash.txt", "adapter"}
 # The unit runs these inside a root that holds only the image's own files.
 ELF_MACHINES = {"x86_64": 62, "aarch64": 183}
-PT_INTERP = 3
+PT_LOAD, PT_INTERP = 1, 3
+EROFS_BLOCK = 4096
 # Far above any stand-in: a real static Rust executable is megabytes.
 MIN_EXECUTABLE_BYTES = 100_000
 ADAPTER_ARGUMENT = "honest"
@@ -185,9 +187,10 @@ FALLBACK_DEVICES = {"tunl0", "sit0", "ip6tnl0", "gre0"}
 ROUTE_KINDS = {"local", "broadcast", "multicast", "unicast", "unreachable", "blackhole", "prohibit", "throw"}
 ROUTES4_ALLOWED = {"kinds": {"local": {"127.0.0.0/8", "127.0.0.1"},
                              "broadcast": {"127.0.0.0", "127.255.255.255"}},
-                   "unicast": set(), "main": set(), "required": {"127.0.0.0/8"}}
+                   "unicast": set(), "main": set(), "required": {"127.0.0.0/8"}, "src": {"127.0.0.1"}}
 ROUTES6_ALLOWED = {"kinds": {"local": {"::1", "::1/128"}, "multicast": {"ff00::/8"}},
-                   "unicast": {"::1", "::1/128"}, "main": {"::1", "::1/128"}, "required": {"::1", "::1/128"}}
+                   "unicast": {"::1", "::1/128"}, "main": {"::1", "::1/128"}, "required": {"::1", "::1/128"},
+                   "src": {"::1"}}
 LINK_NAME = re.compile(r"[0-9]+: ([^\s:@]+)(?:@\S+)?: ")
 CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
@@ -970,35 +973,41 @@ def check_arguments(evidence: Evidence, case: str, images: str, signer: str, des
 
 
 def static_executable(data: bytes, architecture: str, name: str) -> None:
-    """Require a real static ELF executable of the architecture, not a stand-in."""
-    if len(data) < MIN_EXECUTABLE_BYTES or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+    """Require a real, loadable static ELF executable of the architecture."""
+    if len(data) < MIN_EXECUTABLE_BYTES or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1 \
+            or data[6] != 1:
         raise EvidenceError(f"the {name} is not a 64-bit little-endian ELF executable")
-    kind, machine = struct.unpack_from("<HH", data, 16)
-    if kind not in (2, 3) or machine != ELF_MACHINES[architecture]:
+    kind, machine, version = struct.unpack_from("<HHI", data, 16)
+    if kind not in (2, 3) or machine != ELF_MACHINES[architecture] or version != 1:
         raise EvidenceError(f"the {name} is not an executable for {architecture}")
     offset, = struct.unpack_from("<Q", data, 32)
     size, count = struct.unpack_from("<HH", data, 54)
     if size < 56 or offset + size * count > len(data):
         raise EvidenceError(f"the {name} has a malformed program header table")
-    if any(struct.unpack_from("<I", data, offset + index * size)[0] == PT_INTERP for index in range(count)):
+    kinds = [struct.unpack_from("<I", data, offset + index * size)[0] for index in range(count)]
+    if PT_LOAD not in kinds:
+        raise EvidenceError(f"the {name} has no loadable segment")
+    if PT_INTERP in kinds:
         raise EvidenceError(f"the {name} is dynamically linked, so it cannot run inside the image's root")
 
 
-def check_executables(evidence: Evidence, architecture: str, positive: bytes) -> dict:
-    """The image's /adapter and the launcher are the real static executables.
+def check_adapter(evidence: Evidence, architecture: str, positive: bytes) -> dict:
+    """The image's /adapter is the real static executable, and the image holds it.
 
-    The root is uncompressed EROFS, so the adapter's bytes occur verbatim in
-    the signed positive image exactly once. The staged SIM1 binds their
-    digest, and the positive case only mounts if activation read them back.
+    The root is uncompressed EROFS, whose whole blocks of a file are stored
+    contiguously but whose trailing partial block is stored inline next to
+    the inode (FLAT_INLINE). So the adapter is found as its whole 4096-byte
+    blocks exactly once, then its tail at least once. The staged SIM1 binds
+    the digest, and the positive case only mounts if activation read the
+    file back.
     """
     adapter = evidence.raw("host/images/adapter")
-    launcher = evidence.raw("host/images/launcher")
     static_executable(adapter, architecture, "adapter")
-    static_executable(launcher, architecture, "launcher")
-    if positive.count(adapter) != 1:
+    whole = len(adapter) - len(adapter) % EROFS_BLOCK
+    blocks, tail = adapter[:whole], adapter[whole:]
+    if positive.count(blocks) != 1 or tail not in positive:
         raise EvidenceError("the positive image does not carry the adapter exactly once")
-    return {"adapter_sha256": hashlib.sha256(adapter).hexdigest(), "adapter_bytes": len(adapter),
-            "launcher_sha256": hashlib.sha256(launcher).hexdigest()}
+    return {"adapter_sha256": hashlib.sha256(adapter).hexdigest(), "adapter_bytes": len(adapter)}
 
 
 def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]) -> dict:
@@ -1172,7 +1181,7 @@ def check_cases(evidence: Evidence, architecture: str, paths: dict, trusted: tup
                      evidence.text("guest/cases/kernel-log")):
         raise EvidenceError("the kernel log shows no dm-verity data block corruption")
     return {
-        "executables": check_executables(evidence, architecture, positive),
+        "adapter": check_adapter(evidence, architecture, positive),
         "root_hash": root_hash, "salt": salt, "tampered_offset": int(offset),
         **{case: check_mounted_case(evidence, case, verity) for case in MOUNTED_CASES},
         **{case: check_refused_case(evidence, case) for case in ("wrong-key", "verity-d")},
@@ -1203,26 +1212,36 @@ def address_set(evidence: Evidence, name: str) -> set[tuple[str, str, str]]:
 
 
 # The fields `ip route` prints after a loopback route's destination, with the
-# values each may take; `linkdown` stands alone. Anything else (`via`, `gateway`,
-# `nhid`, `encap`, `nexthop`, a global scope ...) is not the loopback's own.
+# values each may take; `linkdown` stands alone, `src` is the family's own
+# loopback address and `metric` is a short ASCII number. Anything else (`via`,
+# `gateway`, `nhid`, `encap`, `nexthop`, a global scope ...) is not the
+# loopback's own, and no field or flag may appear twice.
 ROUTE_FIELDS = {"dev": {"lo"}, "table": {"local", "main"}, "proto": {"kernel"}, "scope": {"host", "link"},
-                "src": {"127.0.0.1", "::1"}, "metric": None, "pref": {"medium"}}
+                "src": None, "metric": None, "pref": {"medium"}}
 ROUTE_FLAGS = {"linkdown"}
+METRIC_DIGITS = 10
 
 
-def route_fields(fields: list[str]) -> dict[str, str] | None:
-    """The `key value` pairs of a route's tail, or None if any field is foreign or repeated."""
+def route_fields(fields: list[str], src: set[str]) -> dict[str, str] | None:
+    """The `key value` pairs and flags of a route's tail, or None if any is foreign or repeated."""
     pairs, index = {}, 0
     while index < len(fields):
         key = fields[index]
+        if key in pairs:
+            return None
         if key in ROUTE_FLAGS:
+            pairs[key] = ""
             index += 1
             continue
-        if key not in ROUTE_FIELDS or key in pairs or index + 1 >= len(fields):
+        if key not in ROUTE_FIELDS or index + 1 >= len(fields):
             return None
         value = fields[index + 1]
-        allowed = ROUTE_FIELDS[key]
-        if (allowed is None and not value.isdigit()) or (allowed is not None and value not in allowed):
+        allowed = src if key == "src" else ROUTE_FIELDS[key]
+        if allowed is None:
+            valid = value.isascii() and value.isdigit() and len(value) <= METRIC_DIGITS
+        else:
+            valid = value in allowed
+        if not valid:
             return None
         pairs[key] = value
         index += 2
@@ -1247,7 +1266,7 @@ def require_loopback_routes(evidence: Evidence, name: str, family: dict) -> list
             raise EvidenceError(f"{name} holds a blank line")
         kind = fields[0] if fields[0] in ROUTE_KINDS else None
         destination = fields[1 if kind else 0] if len(fields) > 1 else ""
-        pairs = route_fields(fields[(2 if kind else 1):])
+        pairs = route_fields(fields[(2 if kind else 1):], family["src"])
         allowed = family["kinds"].get(kind, set()) if kind else family["unicast"]
         if kind:
             table_ok = pairs is not None and pairs.get("table") == "local"

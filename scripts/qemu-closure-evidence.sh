@@ -85,13 +85,13 @@ build() {
     >"${out}/host/toplevel-closure.json"
   cp -- "$(store_path trustedCertificate "${out}")" "${out}/host/system-trusted-keys.pem"
   # Part (b): the three signed images, the tampered byte's offset, both
-  # signer certificates and the static adapter and launcher the guest ran,
+  # signer certificates and the static adapter the guest ran,
   # for the checker's independent reading.
   mkdir "${out}/host/images"
   local images file
   images="$(store_path images "${out}")"
   for file in positive.raw tampered.raw wrong-key.raw tampered-offset positive.der wrong-key.der \
-    root-hash.txt adapter launcher; do
+    root-hash.txt adapter; do
     cp -- "${images}/${file}" "${out}/host/images/${file}"
   done
   cp -- "$(store_path kernelConfig "${out}")" "${out}/host/kernel-config"

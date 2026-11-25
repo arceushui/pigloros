@@ -70,26 +70,6 @@ pub enum After {
 }
 
 impl Fixture {
-    /// The mode argument that selects the fixture.
-    #[must_use]
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::FilesystemEscape => "filesystem-escape",
-            Self::ReadOnlyRootWrite => "read-only-root-write",
-            Self::WorkAreaExhaustion(_) => "work-area-exhaustion",
-            Self::NetworkEscape => "network-escape",
-            Self::ForeignSignals => "foreign-signals",
-            Self::OrphanedChild => "orphaned-child",
-            Self::TaskExhaustion(_) => "task-exhaustion",
-            Self::MemoryExhaustion(_) => "memory-exhaustion",
-            Self::WatchdogExpiry(_) => "watchdog-expiry",
-            Self::OversizedOutput(_) => "oversized-output",
-            Self::AdapterCrash => "adapter-crash",
-            Self::MalformedOutput => "malformed-output",
-            Self::Idle(_) => "idle",
-        }
-    }
-
     /// The fixture's bound, for the fixtures that take one.
     #[must_use]
     pub const fn bound(self) -> Option<u64> {
@@ -104,26 +84,38 @@ impl Fixture {
         }
     }
 
-    /// The fixture `id` names, given its optional bound: a bound is required
-    /// exactly by the fixtures that take one, and is never zero.
+    /// This fixture with the argument-vector bound: a bound is required
+    /// exactly by the fixtures that take one, and is never zero. The bound of
+    /// a table row is a placeholder that the parsed bound replaces.
     #[must_use]
-    pub fn parse(id: &str, bound: Option<u64>) -> Option<Self> {
-        let bounded = |build: fn(u64) -> Self| bound.filter(|value| *value != 0).map(build);
-        let unbounded = |fixture: Self| bound.is_none().then_some(fixture);
-        match id {
-            "filesystem-escape" => unbounded(Self::FilesystemEscape),
-            "read-only-root-write" => unbounded(Self::ReadOnlyRootWrite),
-            "network-escape" => unbounded(Self::NetworkEscape),
-            "foreign-signals" => unbounded(Self::ForeignSignals),
-            "orphaned-child" => unbounded(Self::OrphanedChild),
-            "adapter-crash" => unbounded(Self::AdapterCrash),
-            "malformed-output" => unbounded(Self::MalformedOutput),
-            "work-area-exhaustion" => bounded(Self::WorkAreaExhaustion),
-            "task-exhaustion" => bounded(Self::TaskExhaustion),
-            "memory-exhaustion" => bounded(Self::MemoryExhaustion),
-            "watchdog-expiry" => bounded(Self::WatchdogExpiry),
-            "oversized-output" => bounded(Self::OversizedOutput),
-            "idle" => bounded(Self::Idle),
+    pub const fn with_bound(self, bound: Option<u64>) -> Option<Self> {
+        match (self, bound) {
+            (Self::WorkAreaExhaustion(_), Some(value)) if value != 0 => {
+                Some(Self::WorkAreaExhaustion(value))
+            }
+            (Self::TaskExhaustion(_), Some(value)) if value != 0 => {
+                Some(Self::TaskExhaustion(value))
+            }
+            (Self::MemoryExhaustion(_), Some(value)) if value != 0 => {
+                Some(Self::MemoryExhaustion(value))
+            }
+            (Self::WatchdogExpiry(_), Some(value)) if value != 0 => {
+                Some(Self::WatchdogExpiry(value))
+            }
+            (Self::OversizedOutput(_), Some(value)) if value != 0 => {
+                Some(Self::OversizedOutput(value))
+            }
+            (Self::Idle(_), Some(value)) if value != 0 => Some(Self::Idle(value)),
+            (
+                Self::FilesystemEscape
+                | Self::ReadOnlyRootWrite
+                | Self::NetworkEscape
+                | Self::ForeignSignals
+                | Self::OrphanedChild
+                | Self::AdapterCrash
+                | Self::MalformedOutput,
+                None,
+            ) => Some(self),
             _ => None,
         }
     }

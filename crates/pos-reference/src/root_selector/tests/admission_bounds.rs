@@ -5,8 +5,7 @@ use crate::provider_admission::tests::request_for;
 use crate::provider_admission::ProviderImageSnapshot;
 use crate::sandbox_provider_protocol::PartitionDescriptor;
 use crate::selector::installation::fixture::{
-    admitted_state_with_arguments, admitted_state_with_salt, ddi_fixture, ddi_salt,
-    materialize_state, ImageSigning,
+    admitted_state_with_arguments, ddi_fixture, ddi_salt, materialize_state, ImageSigning,
 };
 use crate::selector::installation::tests::refresh_table_crc;
 use crate::selector::installation::{InstalledSelectorState, SANDBOX_ARTIFACT_ROOT};
@@ -61,12 +60,13 @@ fn held_image_admission_accepts_two_mib_signature_partition() -> TestResult {
     let padded = pad_signature_partition(image.clone(), partitions.clone())?;
     assert_eq!(padded.1[2].length_bytes, 2_097_152);
     for (image, partitions) in [(&image, &partitions), (&padded.0, &padded.1)] {
-        let state = admitted_state_with_salt(
+        let state = admitted_state_with_arguments(
             image,
             b"adapter",
             partitions,
             &ImageSigning::ddi("x86-64")?,
             ddi_salt("x86-64")?,
+            &[],
         )?;
         assert_public_admission(state, "signature partition length", |snapshot| {
             assert_eq!(snapshot.image().manifest().partitions, *partitions);
@@ -159,12 +159,13 @@ fn snapshot_open(
     for header in [SECTOR, backup] {
         refresh_table_crc(&mut image, header, SECTOR)?;
     }
-    let state = admitted_state_with_salt(
+    let state = admitted_state_with_arguments(
         &image,
         b"adapter",
         partitions,
         &ImageSigning::ddi(architecture)?,
         ddi_salt(architecture)?,
+        &[],
     )?;
     open_installed(state, |opened| {
         Ok(match opened {

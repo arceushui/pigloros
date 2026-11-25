@@ -29,28 +29,14 @@ use pos_sandbox_evidence_adapter::probe::{
     self, connect_tcp, connect_unix, contained, create_directory, create_file, create_socket,
     mount_tmpfs, open_read, open_write, remove_file, signal_foreign, udp_exchange,
 };
-use pos_sandbox_evidence_adapter::{apply, exit_code, run, AdapterRunError, After, Fixture, Mode};
+use pos_sandbox_evidence_adapter::{
+    apply, exit_code, run, AdapterRunError, After, Fixture, Mode, MODES,
+};
 use rustix::net::{AddressFamily, SocketType};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_pos-sandbox-evidence-adapter");
-
-const EVERY_FIXTURE: [Fixture; 13] = [
-    Fixture::FilesystemEscape,
-    Fixture::ReadOnlyRootWrite,
-    Fixture::WorkAreaExhaustion(7),
-    Fixture::NetworkEscape,
-    Fixture::ForeignSignals,
-    Fixture::OrphanedChild,
-    Fixture::TaskExhaustion(7),
-    Fixture::MemoryExhaustion(7),
-    Fixture::WatchdogExpiry(7),
-    Fixture::OversizedOutput(7),
-    Fixture::AdapterCrash,
-    Fixture::MalformedOutput,
-    Fixture::Idle(7),
-];
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn artifact(bytes: &[u8]) -> AttemptArtifact {
@@ -238,27 +224,51 @@ fn every_probe_fixture_lists_the_attempts_it_makes() -> TestResult {
 }
 
 #[test]
-fn fixtures_name_themselves_and_parse_back() {
-    let mut seen = Vec::new();
-    for fixture in EVERY_FIXTURE {
-        let id = fixture.id();
-        assert!(!seen.contains(&id));
-        seen.push(id);
-        assert_eq!(Fixture::parse(id, fixture.bound()), Some(fixture));
-        let mode = Mode::Fixture(fixture);
-        assert_eq!(mode.argument(), id);
-        assert_eq!(mode.bound(), fixture.bound());
-        match fixture.bound() {
-            Some(_) => {
-                assert_eq!(Fixture::parse(id, None), None);
-                assert_eq!(Fixture::parse(id, Some(0)), None);
-            }
-            None => assert_eq!(Fixture::parse(id, Some(1)), None),
+fn the_table_names_every_mode_once_and_marks_the_bounded_rows() -> TestResult {
+    let names: Vec<&str> = MODES.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names.len(), 14);
+    for (index, name) in names.iter().enumerate() {
+        assert!(!names[index + 1..].contains(name), "{name}");
+    }
+    assert_eq!(MODES[0], ("honest", Mode::Honest));
+    let bounded = [
+        "work-area-exhaustion",
+        "task-exhaustion",
+        "memory-exhaustion",
+        "watchdog-expiry",
+        "oversized-output",
+        "idle",
+    ];
+    for (name, mode) in MODES {
+        let Mode::Fixture(fixture) = mode else {
+            // The honest mode takes no bound.
+            let (result, _) = run_mode(&[*name, "1"])?;
+            assert_eq!(result, Err(AdapterRunError::Usage));
+            continue;
+        };
+        // A table row's bound is the placeholder zero, and the parser
+        // accepts a bound exactly where the row has one; none of these
+        // runs reaches an effect.
+        assert_eq!(
+            fixture.bound(),
+            bounded.contains(name).then_some(0),
+            "{name}"
+        );
+        let wrong: &[&str] = if bounded.contains(name) {
+            &[*name]
+        } else {
+            &[*name, "1"]
+        };
+        assert_eq!(run_mode(wrong)?.0, Err(AdapterRunError::Usage), "{name}");
+        if bounded.contains(name) {
+            assert_eq!(
+                run_mode(&[*name, "0"])?.0,
+                Err(AdapterRunError::Usage),
+                "{name}"
+            );
         }
     }
-    assert_eq!(Fixture::parse("honest", None), None);
-    assert_eq!(Fixture::parse("unknown", None), None);
-    assert_eq!(Mode::Honest.bound(), None);
+    Ok(())
 }
 
 #[test]

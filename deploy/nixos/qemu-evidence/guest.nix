@@ -58,42 +58,34 @@ let
     meta.mainProgram = "pos-sandboxd-conformance";
   };
 
-  # The two executables the unit runs inside the activated EROFS root, which
-  # holds nothing but the image's own files: statically linked, so that no
-  # loader or library is needed there. buildRustPackage always passes
-  # `--target`, so the flag reaches neither build scripts nor proc macros.
-  # build-images.sh refuses an executable that is not a static ELF file of
-  # the architecture.
-  staticExecutable =
-    { package, binary }:
-    rustPlatform.buildRustPackage {
-      pname = binary;
-      version = "0";
-      src = source;
-      cargoLock.lockFile = repository + "/Cargo.lock";
-      cargoBuildFlags = [
-        "--package"
-        package
-        "--bin"
-        binary
-      ];
-      buildInputs = [ pkgs.glibc.static ];
-      env.RUSTFLAGS = "-C target-feature=+crt-static";
-      auditable = false;
-      doCheck = false;
-      meta.mainProgram = binary;
-    };
   # The image's /adapter (#444 owner decision, 2026-11-25): its first mode,
-  # honest, reads one EAI1 attempt and writes one EAO1 observation.
-  adapter = staticExecutable {
-    package = "pos-sandbox-evidence-adapter";
-    binary = "pos-sandbox-evidence-adapter";
-  };
-  # The provider executable is the release launcher: the provider binds it
-  # into the unit as /.pigloros/release-launcher (`launch-barrier` mode).
-  launcher = staticExecutable {
-    package = "pos-sandboxd";
-    binary = "pos-sandboxd";
+  # honest, reads one EAI1 attempt and writes one EAO1 observation. It runs
+  # inside the activated EROFS root, which holds nothing but the image's own
+  # files, so it is linked statically and needs no loader or library there.
+  # glibc.static with crt-static (not pkgsStatic, which would build a musl
+  # rustc and std from source): the adapter only uses std, so the result has
+  # no PT_INTERP. buildRustPackage always passes `--target`, so RUSTFLAGS
+  # reaches neither build scripts nor proc macros; as an environment variable
+  # it replaces, not merges with, any rustflags in a cargo config. All of this
+  # is unverified until the first QEMU run: build-images.sh refuses an
+  # adapter that is not a loadable static ELF file of the architecture. The
+  # static pos-sandboxd launcher is built by the piece that uses it.
+  adapter = rustPlatform.buildRustPackage {
+    pname = "pos-sandbox-evidence-adapter";
+    version = "0";
+    src = source;
+    cargoLock.lockFile = repository + "/Cargo.lock";
+    cargoBuildFlags = [
+      "--package"
+      "pos-sandbox-evidence-adapter"
+      "--bin"
+      "pos-sandbox-evidence-adapter"
+    ];
+    buildInputs = [ pkgs.glibc.static ];
+    env.RUSTFLAGS = "-C target-feature=+crt-static";
+    auditable = false;
+    doCheck = false;
+    meta.mainProgram = "pos-sandbox-evidence-adapter";
   };
 
   # The part (b) SIM1 DDIs for this architecture, built offline from the
@@ -113,7 +105,6 @@ let
         UNTRUSTED_KEY = ../dev-trust/root-hash-untrusted-dev-test.key;
         UNTRUSTED_CERTIFICATE = ../dev-trust/root-hash-untrusted-dev-test.crt;
         ADAPTER = "${adapter}/bin/pos-sandbox-evidence-adapter";
-        LAUNCHER = "${launcher}/bin/pos-sandboxd";
       }
       ''
         bash ${./build-images.sh} ${

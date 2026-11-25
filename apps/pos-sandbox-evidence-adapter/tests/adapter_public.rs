@@ -5,7 +5,8 @@
 //! the pos-reference codec, as the DDI's `/adapter` does inside the unit.
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{self, Write};
+use std::os::unix::ffi::OsStringExt as _;
 use std::process::{Command, Stdio};
 
 use pos_reference::adapter_transport::{read_observation, write_attempt};
@@ -14,7 +15,7 @@ use pos_reference::evaluator::{
 };
 use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
 use pos_reference::profile::DeterministicBudget;
-use pos_sandbox_evidence_adapter::{exit_code, observe, run, AdapterRunError, Mode};
+use pos_sandbox_evidence_adapter::{exit_code, observe, run, AdapterRunError, Mode, MODES};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -128,30 +129,73 @@ fn a_bad_mode_or_argument_count_writes_nothing_and_exits_64() -> TestResult {
 }
 
 #[test]
-fn a_stream_that_is_not_eai1_writes_nothing_and_exits_2() -> TestResult {
-    let output = spawn(&["honest"], b"not an attempt")?;
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    Ok(())
+fn a_non_utf8_mode_is_a_usage_failure() {
+    let result = run([OsString::from_vec(vec![0xff])], io::empty(), io::sink());
+    assert_eq!(result, Err(AdapterRunError::Usage));
 }
 
 #[test]
-fn an_unwritable_output_is_an_output_failure() -> TestResult {
-    struct Closed;
-    impl Write for Closed {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::ErrorKind::BrokenPipe.into())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+fn the_table_starts_with_the_honest_mode() {
+    assert_eq!(MODES[0], ("honest", Mode::Honest));
+}
+
+#[test]
+fn a_stream_that_is_not_one_exact_eai1_attempt_writes_nothing_and_exits_2() -> TestResult {
+    let valid = encoded(b"payload")?;
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    for input in [
+        b"not an attempt".to_vec(),
+        Vec::new(),
+        trailing,
+        valid[..valid.len() - 1].to_vec(),
+    ] {
+        let output = spawn(&["honest"], &input)?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+    Ok(())
+}
+
+/// A writer that accepts nothing, or accepts everything and refuses to flush.
+struct Refusing {
+    accepted: Vec<u8>,
+    refuse_write: bool,
+}
+
+impl Write for Refusing {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.refuse_write {
+            Err(io::ErrorKind::BrokenPipe.into())
+        } else {
+            self.accepted.extend_from_slice(bytes);
+            Ok(bytes.len())
         }
     }
-    let result = run(
-        [OsString::from(Mode::Honest.argument())],
-        encoded(b"payload")?.as_slice(),
-        Closed,
-    );
-    assert_eq!(result, Err(AdapterRunError::Output));
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+#[test]
+fn an_unwritable_or_unflushable_output_is_an_output_failure() -> TestResult {
+    for refuse_write in [true, false] {
+        let mut writer = Refusing {
+            accepted: Vec::new(),
+            refuse_write,
+        };
+        let result = run(
+            ["honest"].map(OsString::from),
+            encoded(b"payload")?.as_slice(),
+            &mut writer,
+        );
+        assert_eq!(result, Err(AdapterRunError::Output));
+        // The stream is one write of the complete observation, never a part.
+        if !refuse_write {
+            assert!(read_observation(writer.accepted.as_slice(), 1 << 10).is_ok());
+        }
+    }
     Ok(())
 }
 
