@@ -25,7 +25,9 @@
 //!
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
-//! re-validates only what is cheap to check: the pass state and the entry.
+//! re-validates only what is cheap to check: the pass state, the recorded
+//! identity and the pending entries (a Reserve), or the entry (a Commit or
+//! Abort).
 //! A Reserve is refused with `Conflict` when its identity is recorded in
 //! the CRI1 index (`pass_records`), resolved or not, or is pending, at stage
 //! and again at the apply. It is refused with `PassUnresolved` (code 7)
@@ -282,7 +284,8 @@ impl MemoryCommunityDomainV1 {
 
     /// Apply a staged Reserve in the guarded step that published its records.
     ///
-    /// It adds one retained outcome and the pending entry and, for a minted
+    /// It adds one retained outcome, the pending entry and the pass record
+    /// (the CRI1 index entry, status Reserved) and, for a minted
     /// materialization, its additions to the counters, the closure terms and
     /// scope rows a reuse reads and one more control operation.
     ///
