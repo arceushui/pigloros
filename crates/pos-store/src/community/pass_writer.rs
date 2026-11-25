@@ -9,12 +9,15 @@
 //! materialization's ARD1 batch and the pass records, and then applies, so
 //! a refusal before the apply leaves no pass state behind.
 //!
-//! The re-checks are R10.7 step 5j in its order: the generation (5), the
-//! head and frontier, the counters and then the erasure budget (6), the
-//! quarantine (9), and the caps (14) before the recording horizon (19). The
-//! caps and the horizon are the planner's own check ([`admit_caps`]); the
-//! budget is its own bound ([`trace_room`]) with every other reservation
-//! pending (R13.1(4)).
+//! The re-checks are R10.7 step 5j in its order: the Logical Head and chain
+//! compare of the minted or reused cut (12), the decision bound (13), the
+//! generation (5), the head, the counters, the reuse horizon and then the
+//! erasure budget (6), the quarantine (9), and the caps (14) before the
+//! recording horizon (19). The writer recomputes `H_g` and `H_r` from the
+//! installed horizons and its sample (R13.4(2)) and refuses a record that
+//! differs. The caps and the horizon are the planner's own check
+//! ([`admit_caps`]); the budget is its own bound ([`trace_room`]) with
+//! every other reservation pending (R13.1(4)).
 //!
 //! Counted set (R14, RN.1(1)): a minted materialization adds one control
 //! operation in its Reserve transaction and stays counted when its pass
@@ -52,16 +55,27 @@ use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
     CommunityPassGraphTermsV1, CommunityScopeMemberV1, CommunitySharedCountsV1,
 };
-use pos_core::{AuthorityTrustRootSealV1, Hash, TimelineId};
+use pos_core::store::EventStore;
+use pos_core::{AuthorityTrustRootSealV1, Hash, Seq, TimelineId};
 
 use super::erasure_budget::{CommunityErasureBudgetPortV1, CommunityPendingReservationV1};
 use super::memory_domain::MemoryCommunityDomainV1;
+use super::observation::{fork_segments, EVENT_READ_BOUNDS};
+use super::pass_install::{reservation_horizons, CommunityReservationHorizonsV1};
 use super::pass_planner::{
-    admit_caps, trace_room, CommunityPassCapsV1, CommunityPassReadPortV1,
+    admit_caps, decision_bound, trace_room, CommunityPassCapsV1, CommunityPassReadPortV1,
     CommunityQuarantineIndexV1,
 };
 use super::pass_record::{CommunityPassRecordV1, CommunityPassStatusV1, CommunityReservedPassV1};
-use super::pass_state::CommunityPassStateV1;
+use super::pass_state::{CommunityPassStateV1, CommunityRetainedObservationV1};
+
+/// The horizons a Reserve is judged by: `H_g` and `H_r`, and the installed
+/// recording horizon (R10.4(3)).
+#[derive(Clone, Copy)]
+struct WriterHorizonsV1 {
+    horizons: CommunityReservationHorizonsV1,
+    recording_not_after_micros: u64,
+}
 
 /// The observation materialization a Reserve mints (R9.7), as its stage-1
 /// quote derived it.
@@ -81,6 +95,25 @@ pub struct CommunityMintedObservationV1 {
     pub scope_reference: Hash,
     /// Its scope rows (R11.4(3)).
     pub scope: Vec<CommunityScopeMemberV1>,
+    /// The earliest `evidence_not_after` of its records, kept for a later
+    /// reuse (R9.2).
+    pub not_after_micros: u64,
+    /// The cut its CPE1 observes: the writer compares it with the store
+    /// (R9.7 step 6) and keeps it with the observation for a later reuse.
+    pub cut: CommunityObservationCutV1,
+}
+
+/// The Event history a materialization's CPE1 observes (ADR-129 R9.3, R9.7).
+#[derive(Clone)]
+pub struct CommunityObservationCutV1 {
+    /// `through_seq`, which must still be T's Logical Head.
+    pub through_seq: u64,
+    /// The chain hash at each owning Timeline's cut: T at `through_seq` and
+    /// every Fork-prefix source at its immutable Fork cut. The writer
+    /// derives which are required from the topology, so a missing entry
+    /// refuses; an entry for any other Timeline or sequence is inert and is
+    /// never compared.
+    pub chain_heads: Vec<(TimelineId, u64, Hash)>,
 }
 
 /// One Reserve's writer inputs, from the planner's quote and the call.
@@ -98,17 +131,23 @@ pub struct CommunityReserveInputV1 {
     pub prior_shared_counts: CommunitySharedCountsV1,
     /// The CQK1 digest of every roster member, due or not (R10.6).
     pub roster_quarantine_keys: Vec<Hash>,
-    /// The installed CDP1 recording horizon (R10.4(3)).
-    pub recording_not_after_micros: u64,
     /// `t_r`, the call's trusted-clock reservation sample.
+    ///
+    /// The writer cannot check it. The pipeline that makes the domain's
+    /// clock reservation (A4c-3c-ii) must take the sample from it.
     pub reservation_sample_micros: u64,
-    /// The worst-case ARD1 rows of the pass: State, recording and the trace
-    /// rows planned, the materialization's included (R13.1(4)).
+    /// The worst-case ARD1 rows of the pass: State and recording rows, the
+    /// materialization's included, and no trace (R13.1(4), R15.5).
     pub pass_rows: u64,
-    /// `F_p`, the pass failure reserve in targets (R13.1(5)).
+    /// `F_p`, the pass failure reserve in targets: `2 * trace_rows`
+    /// (R13.1(5)).
     pub failure_reserve: u64,
     /// The materialization this call mints, or `None` for a reused one.
     pub minted: Option<CommunityMintedObservationV1>,
+    /// The Observation CPN1 this call reuses: `Some` exactly when no
+    /// materialization is minted. The domain holds its horizon and cut
+    /// from the Reserve that minted it (R9.2).
+    pub reused: Option<CommunityNativeNodeReferenceV1>,
     /// What the pass record keeps: the CPR1 fields, the quote and the
     /// horizons (R8.1(7)).
     pub pass: CommunityReservedPassV1,
@@ -167,18 +206,32 @@ impl MemoryCommunityDomainV1 {
     /// and is refused only at [`Self::apply_reserve`].
     ///
     /// # Errors
-    /// Returns `InvalidBinding` when the minted rows exceed the pass rows or
+    /// In order. `InvalidBinding` when the minted rows exceed the pass rows,
     /// when the record's CPK1 Timeline or generation, or its predecessor
-    /// head, differs from the call's T, G or `selected_head`; `Conflict` for
-    /// a reservation identity already recorded, resolved or not; and
-    /// `PassUnresolved` (7) for another unresolved pass of T. These come
-    /// first, as R10.7 steps 4a and 4c precede 5j; the byte-equal
-    /// bound-content compare of R8.1(7) is the call layer's. Then
-    /// `EvidenceUnavailable` for a Timeline with no pass state; then in the
-    /// step-5j order `StaleGeneration` (5), `StaleFrontier` (6) for a moved
-    /// head, moved counters or a budget the pending reservations now fill,
-    /// `Quarantined` (9), `CapacityExhausted` (14) and
-    /// `RecordingUnavailable` (19), and the budget read's error.
+    /// head, differs from the call's T, G or `selected_head`, or when the
+    /// pass facts disagree (members, trace rows, `F_p`, key IDs).
+    /// `EvidenceUnavailable` with no installed horizons. `InvalidBinding`
+    /// when the CPR1 profile is not the installed one, the roster keys or
+    /// member rows do not fit the installed roster, or the record's `H_g` or
+    /// `H_r` differs from the writer's own. `Conflict` for a reservation
+    /// identity already recorded, resolved or not, and `PassUnresolved` (7)
+    /// for another unresolved pass of T; these precede 5j, as R10.7 steps 4a
+    /// and 4c do, and the byte-equal bound-content compare of R8.1(7) is the
+    /// call layer's.
+    ///
+    /// Then `EvidenceUnavailable` for a Timeline with no pass state;
+    /// `InvalidBinding` when T was initialized under another profile than
+    /// the request names; and in the step-5j order `EvidenceUnavailable` for
+    /// a reused reference no Reserve minted and for a Logical Head or chain
+    /// that no longer matches the minted or the reused cut (12), with
+    /// `InvalidBinding` for a call that names both or neither of a minted
+    /// and a reused observation; `EvidenceExpired` (13) when `H_g` does not
+    /// outlast the decision bound; `StaleGeneration` (5); `StaleFrontier`
+    /// (6) for a moved head or counters, a reused observation of another
+    /// generation or one that outlives less than `H_g`, a minted observation
+    /// whose records end before `H_g`, or a budget the pending reservations
+    /// now fill (the budget read's error otherwise); `Quarantined` (9);
+    /// `CapacityExhausted` (14); `RecordingUnavailable` (19).
     pub fn stage_reserve(
         &self,
         input: CommunityReserveInputV1,
@@ -188,13 +241,121 @@ impl MemoryCommunityDomainV1 {
             return Err(Error::InvalidBinding);
         }
         let key = (input.timeline, input.reservation_operation_id);
-        self.check_identity(&input, key)?;
+        let horizons = self.check_identity(&input, key)?;
         let state = self
             .pass_states
             .get(&input.timeline)
             .ok_or(Error::EvidenceUnavailable)?;
-        check_frontier(state, &input)?;
-        self.check_reserve_budget(&input)?;
+        self.recheck_reserve(&input, state, horizons)?;
+        // The materialization's rows bind in the Reserve transaction; the
+        // entry holds only the rest and `F_p` (R13.1(4)).
+        Ok(CommunityStagedReserveV1 {
+            key,
+            entry: CommunityPendingReservationV1::for_pass(
+                input.pass_rows - bound,
+                input.failure_reserve,
+            ),
+            record: CommunityPassRecordV1 {
+                reserved: input.pass,
+                prior_shared_counts: input.prior_shared_counts,
+                materialization: input.minted.as_ref().map(|minted| minted.additions),
+                status: CommunityPassStatusV1::Reserved,
+                live: true,
+            },
+            minted: input.minted,
+        })
+    }
+
+    /// `H_g`, `H_r` and the recording horizon, the writer's own from its
+    /// sample and the installed horizons (R13.4(2)).
+    ///
+    /// The record's CPR1 must name the installed profile and carry exactly
+    /// these horizons. Neither the reservation sample nor the recording
+    /// horizon is read from the record: the pipeline must take the sample
+    /// from the domain clock reservation.
+    fn horizons_for(&self, input: &CommunityReserveInputV1) -> Result<WriterHorizonsV1, Error> {
+        let policy = self.pass_horizons.ok_or(Error::EvidenceUnavailable)?;
+        let horizons = reservation_horizons(
+            policy.retention,
+            policy.owners,
+            input.reservation_sample_micros,
+        );
+        let pass = &input.pass;
+        // One CQK1 per installed roster member and only installed roster rows
+        // (R10.6): a short list would skip the whole-roster refusal 9.
+        let roster = policy.roster_len;
+        if input.roster_quarantine_keys.len() != roster
+            || pass
+                .members
+                .iter()
+                .any(|member| member.roster_index >= roster)
+            || pass.reservation.profile_digest != policy.profile_digest
+            || pass.generation_horizon_micros != horizons.generation_micros
+            || pass.outcome_horizon_micros != horizons.outcome_micros
+            || pass.reservation.evidence_not_after_micros != horizons.outcome_micros
+        {
+            return Err(Error::InvalidBinding);
+        }
+        Ok(WriterHorizonsV1 {
+            horizons,
+            recording_not_after_micros: policy.retention.recording_not_after_micros,
+        })
+    }
+
+    /// The step-5j re-checks of a Reserve against T's state, in order: the
+    /// Logical Head and chain (12), the decision bound (13), the
+    /// generation (5), the head, counters and reuse horizon (6), the budget
+    /// (6), the quarantine (9) and the caps (14, 19).
+    fn recheck_reserve(
+        &self,
+        input: &CommunityReserveInputV1,
+        state: &CommunityPassStateV1,
+        writer: WriterHorizonsV1,
+    ) -> Result<(), Error> {
+        // T was initialized under the profile the request names.
+        if state.profile_digest != input.pass.reservation.profile_digest {
+            return Err(Error::InvalidBinding);
+        }
+        // The Logical Head and chain compare comes first, with the
+        // authority re-check (R10.7 step 5j: 12), for the cut a minted
+        // observation observed and for the cut a reused one observed. A call
+        // names exactly one.
+        let (cut, retained) = match (&input.minted, input.reused) {
+            (Some(minted), None) => (&minted.cut, None),
+            (None, Some(reference)) => {
+                let retained = state
+                    .retained
+                    .get(&reference)
+                    .ok_or(Error::EvidenceUnavailable)?;
+                (&retained.cut, Some(retained))
+            }
+            _ => return Err(Error::InvalidBinding),
+        };
+        self.check_cut(input.timeline, cut)?;
+        // The State records this pass writes live to `H_g` (R13.2(2)): it
+        // must outlast the pass's decision bound, as every selected record
+        // must (annex §4; R13.2(5), R10.7 note M10: 13 at 5j).
+        if writer.horizons.generation_micros <= decision_bound(input.reservation_sample_micros) {
+            return Err(Error::EvidenceExpired);
+        }
+        check_frontier(state, input)?;
+        // The reuse is of the same `(T, G)` and its records outlive `H_g`:
+        // the pass's State records depend on the reused Observation CPN1 and
+        // live to `H_g` (R9.2; R13.2(2), (4a); R10.7 steps 5c and 5j: 6).
+        let reuse_stale = retained.is_some_and(|retained| {
+            retained.generation != input.generation
+                || retained.not_after_micros < writer.horizons.generation_micros
+        });
+        // A minted observation's records end at `H_g` at the earliest too:
+        // the caller's horizon is judged, then kept for a later reuse.
+        let mint_short = input
+            .minted
+            .as_ref()
+            .is_some_and(|minted| minted.not_after_micros < writer.horizons.generation_micros);
+        if reuse_stale || mint_short {
+            return Err(Error::StaleFrontier);
+        }
+        self.check_reserve_budget(input)?;
         if input.roster_quarantine_keys.iter().any(|member| {
             self.quarantine_reasons(*member)
                 .is_some_and(|reasons| !reasons.is_empty())
@@ -205,56 +366,69 @@ impl MemoryCommunityDomainV1 {
             CommunityPassCapsV1 {
                 outcomes: self.retained_pass_outcomes(input.timeline, input.generation),
                 operations: self.control_operations(input.timeline, input.generation),
-                recording_not_after_micros: input.recording_not_after_micros,
+                recording_not_after_micros: writer.recording_not_after_micros,
                 reservation_sample_micros: input.reservation_sample_micros,
             },
             input.minted.is_some(),
         )
-        .map(|()| {
-            // The materialization's rows bind in the Reserve transaction;
-            // the entry holds only the rest and `F_p` (R13.1(4)).
-            CommunityStagedReserveV1 {
-                key,
-                entry: CommunityPendingReservationV1::for_pass(
-                    input.pass_rows - bound,
-                    input.failure_reserve,
-                ),
-                record: CommunityPassRecordV1 {
-                    reserved: input.pass,
-                    prior_shared_counts: input.prior_shared_counts,
-                    materialization: input.minted.as_ref().map(|minted| minted.additions),
-                    status: CommunityPassStatusV1::Reserved,
-                    live: true,
-                },
-                minted: input.minted,
+    }
+
+    /// R9.7 step 6: T's Logical Head is still the cut's `through_seq`, T's
+    /// chain hash at it and every Fork-prefix source's at its immutable
+    /// Fork cut are the ones observed. The required cuts come from the
+    /// topology, never from the caller.
+    fn check_cut(
+        &self,
+        timeline: TimelineId,
+        cut: &CommunityObservationCutV1,
+    ) -> Result<(), Error> {
+        let events: &dyn EventStore = &self.store;
+        let observed = |owner: TimelineId, seq: u64| {
+            cut.chain_heads.iter().any(|(entry, entry_seq, expected)| {
+                *entry == owner
+                    && *entry_seq == seq
+                    && events
+                        .chain_hash_at(owner, Seq::from_u64(seq))
+                        .is_ok_and(|hash| hash == *expected)
+            })
+        };
+        let head_holds = events
+            .logical_head(timeline)
+            .is_ok_and(|head| head.as_u64() == cut.through_seq);
+        fork_segments(events, timeline, EVENT_READ_BOUNDS.max_fork_depth()).and_then(|segments| {
+            // A segment starts one after its Fork cut, so a source's cut is
+            // the next segment's start less one.
+            let prefix_holds = segments
+                .iter()
+                .zip(segments.iter().skip(1))
+                .all(|(source, child)| observed(source.0, child.1 - 1));
+            if head_holds && observed(timeline, cut.through_seq) && prefix_holds {
+                Ok(())
+            } else {
+                Err(Error::EvidenceUnavailable)
             }
         })
     }
 
-    /// The record's binding to the call (`InvalidBinding`), then the identity
-    /// and T checks that R10.7 steps 4a and 4c put before 5j: a recorded
-    /// identity, resolved or not, is a replay (`Conflict`, R8.1(7)) and an
-    /// unresolved pass of T is `PassUnresolved`.
+    /// The record's binding to the call and the installed horizons
+    /// (`InvalidBinding`), then the identity and T checks that R10.7 steps 4a
+    /// and 4c put before 5j: a recorded identity, resolved or not, is a
+    /// replay (`Conflict`, R8.1(7)) and an unresolved pass of T is
+    /// `PassUnresolved`. It returns the horizons the Reserve is judged by.
     fn check_identity(
         &self,
         input: &CommunityReserveInputV1,
         key: (TimelineId, [u8; 16]),
-    ) -> Result<(), Error> {
-        let reservation = input.pass.reservation;
-        let pass_key = reservation.pass_key;
-        if pass_key.timeline() != input.timeline
-            || pass_key.generation() != input.generation
-            || reservation.predecessor_head_digest != input.selected_head
-        {
-            return Err(Error::InvalidBinding);
-        }
+    ) -> Result<WriterHorizonsV1, Error> {
+        check_binding(input)?;
+        let horizons = self.horizons_for(input)?;
         if self.pass_records.contains_key(&key) || self.pending_reservations.contains_key(&key) {
             return Err(Error::Conflict);
         }
         if self.unresolved_pass(input.timeline).is_some() {
             return Err(Error::PassUnresolved);
         }
-        Ok(())
+        Ok(horizons)
     }
 
     /// R13.1(4) at the writer: every actor of T's scope still fits the
@@ -287,7 +461,8 @@ impl MemoryCommunityDomainV1 {
     /// It adds one retained outcome, the pending entry and the pass record
     /// (the CRI1 index entry, status Reserved) and, for a minted
     /// materialization, its additions to the counters, the closure terms and
-    /// scope rows a reuse reads and one more control operation.
+    /// scope rows a reuse reads, the observation it retains for reuse and one
+    /// more control operation.
     ///
     /// # Errors
     /// Returns `Conflict` when the reservation identity is recorded already,
@@ -303,18 +478,9 @@ impl MemoryCommunityDomainV1 {
         let (timeline, _) = staged.key;
         self.pending_reservations.insert(staged.key, staged.entry);
         self.pass_records.insert(staged.key, staged.record);
-        self.pass_states.entry(timeline).and_modify(|state| {
-            let counts = state.generations.entry(state.generation).or_default();
-            counts.outcomes = counts.outcomes.saturating_add(1);
-            if let Some(minted) = staged.minted {
-                counts.materializations = counts.materializations.saturating_add(1);
-                state.counters = add_counts(state.counters, minted.additions);
-                state.observations.insert(minted.reference, minted.graph);
-                state
-                    .scope_rows
-                    .insert(minted.scope_reference, minted.scope);
-            }
-        });
+        self.pass_states
+            .entry(timeline)
+            .and_modify(|state| record_reserve(state, staged.minted));
         Ok(())
     }
 
@@ -460,6 +626,59 @@ impl MemoryCommunityDomainV1 {
             Some(entry) if rows <= entry.rows => Ok(()),
             _ => Err(Error::InvalidBinding),
         }
+    }
+}
+
+/// The record names the call's own T, G and head, and the pass facts agree
+/// with each other (R8.1(7), R15.3(2), R15.5): one member digest row per due
+/// member, ascending by roster index, `n_due + 1` trace rows, `F_p` of two
+/// targets each, and two distinct key IDs.
+fn check_binding(input: &CommunityReserveInputV1) -> Result<(), Error> {
+    let reservation = input.pass.reservation;
+    let pass_key = reservation.pass_key;
+    let facts = &input.pass;
+    let due = facts.members.len() as u64;
+    let ascending = facts
+        .members
+        .iter()
+        .zip(facts.members.iter().skip(1))
+        .all(|(earlier, later)| earlier.roster_index < later.roster_index);
+    if pass_key.timeline() != input.timeline
+        || pass_key.generation() != input.generation
+        || reservation.predecessor_head_digest != input.selected_head
+        || due == 0
+        || !ascending
+        || facts.trace_rows != due + 1
+        || input.failure_reserve != facts.trace_rows.saturating_mul(2)
+        || facts.metadata_key == facts.failure_cohort_key
+    {
+        Err(Error::InvalidBinding)
+    } else {
+        Ok(())
+    }
+}
+
+/// One more retained outcome and, for a minted materialization, its
+/// additions to the counters, its closure terms and scope rows, the
+/// observation it retains for reuse and one more control operation.
+fn record_reserve(state: &mut CommunityPassStateV1, minted: Option<CommunityMintedObservationV1>) {
+    let counts = state.generations.entry(state.generation).or_default();
+    counts.outcomes = counts.outcomes.saturating_add(1);
+    if let Some(minted) = minted {
+        counts.materializations = counts.materializations.saturating_add(1);
+        state.counters = add_counts(state.counters, minted.additions);
+        state.observations.insert(minted.reference, minted.graph);
+        state.retained.insert(
+            minted.reference,
+            CommunityRetainedObservationV1 {
+                generation: state.generation,
+                not_after_micros: minted.not_after_micros,
+                cut: minted.cut,
+            },
+        );
+        state
+            .scope_rows
+            .insert(minted.scope_reference, minted.scope);
     }
 }
 

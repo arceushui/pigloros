@@ -7,16 +7,16 @@ use std::sync::Arc;
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
-    CommunityPassGraphTermsV1, CommunityPassKeyV1, CommunityQuarantineReasonEvidenceV1,
-    CommunityQuarantineReasonV1, CommunityReservationInputV1, CommunityScopeMemberV1,
-    CommunitySharedCountsV1, COMMUNITY_CONTROL_OPERATIONS_V1,
+    CommunityPassGraphTermsV1, CommunityPassKeyV1, CommunityProfileRetentionV1,
+    CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1, CommunityReservationInputV1,
+    CommunityScopeMemberV1, CommunitySharedCountsV1, COMMUNITY_CONTROL_OPERATIONS_V1,
     COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_ROW_LIMIT_V1,
     COMMUNITY_ERASURE_TARGET_LINE_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
 };
 use pos_core::store::EventStore;
 use pos_core::{
-    AuthorityTrustRootSealV1, EntityId, ErasureContainmentGateV1, Hash, Seq, TimelineId,
-    TimelineMeta,
+    AuthorityTrustRootSealV1, CanonicalBytes, EntityId, ErasureContainmentGateV1, EventDraft, Hash,
+    Kind, Seq, TimelineId, TimelineMeta,
 };
 use ulid::Ulid;
 
@@ -25,12 +25,18 @@ use super::super::erasure_budget::{
     CommunityErasureActorV1, CommunityErasureBudgetV1, CommunityPendingErasureV1,
     CommunityPendingReservationV1,
 };
+use super::super::pass_install::{CommunityHorizonPolicyV1, CommunityOwnerHorizonsV1};
 use super::super::pass_planner::{trace_room, CommunityPassReadPortV1};
-use super::super::pass_record::{CommunityPassStatusV1, CommunityReservedPassV1};
-use super::super::pass_state::{CommunityGenerationCountsV1, CommunityPassStateV1};
+use super::super::pass_record::{
+    CommunityPassMemberDigestsV1, CommunityPassStatusV1, CommunityReservedPassV1,
+};
+use super::super::pass_state::{
+    CommunityGenerationCountsV1, CommunityPassStateV1, CommunityRetainedObservationV1,
+};
 use super::super::quarantine::QuarantineLedgerV1;
 use super::{
-    add_counts, CommunityCommitInputV1, CommunityMintedObservationV1, CommunityReserveInputV1,
+    add_counts, CommunityCommitInputV1, CommunityMintedObservationV1, CommunityObservationCutV1,
+    CommunityReserveInputV1,
 };
 use crate::community::MemoryCommunityDomainV1;
 use crate::memory::MemoryStore;
@@ -42,6 +48,12 @@ const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition
 const GENERATION: [u8; 16] = [0x20; 16];
 const OPERATION: [u8; 16] = [0x30; 16];
 const SAMPLE: u64 = 1_000;
+/// The recovery window: 60 s, so `H_r` is `SAMPLE` + 60 s.
+const WINDOW: u64 = 60_000_000;
+/// `generation_not_after`, and so `H_g`: 100 s.
+const GENERATION_HORIZON: u64 = 100_000_000;
+/// `H_r` at `SAMPLE`.
+const OUTCOME: u64 = SAMPLE + WINDOW;
 /// A recording horizon one microsecond past the decision bound.
 const RECORDING: u64 = SAMPLE + COMMUNITY_DECISION_DEADLINE_MICROS_V1 + 1;
 
@@ -68,7 +80,7 @@ const fn counts(base: u64) -> CommunitySharedCountsV1 {
 
 /// T (`id(1)`, the first actor's) with a Fork child (`id(2)`, the second
 /// actor's), both inside the first actor's affected scope.
-fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
+fn store() -> Result<MemoryStore, Box<dyn std::error::Error>> {
     let mut store = MemoryStore::new();
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     store.create_timeline_with_meta(TimelineMeta {
@@ -81,16 +93,108 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
         fork_point: Some((id(1), Seq::ZERO)),
         ..TimelineMeta::root("child")
     })?;
+    Ok(store)
+}
+
+/// The chain hash at sequence 0 of T, the genesis of its chain.
+fn genesis() -> Result<Hash, Box<dyn std::error::Error>> {
+    Ok(store()?.chain_hash_at(id(1), Seq::ZERO)?)
+}
+
+/// The cut of an observation of no Events: T and its Fork child at 0. A
+/// store that cannot be built gives no heads, which every test then refuses
+/// loudly.
+fn cut() -> CommunityObservationCutV1 {
+    let chain_heads = store()
+        .map(|store| {
+            [id(1), id(2)]
+                .map(|timeline| {
+                    let hash = store.chain_hash_at(timeline, Seq::ZERO);
+                    (timeline, 0, hash.unwrap_or(Hash::zero()))
+                })
+                .to_vec()
+        })
+        .unwrap_or_default();
+    CommunityObservationCutV1 {
+        through_seq: 0,
+        chain_heads,
+    }
+}
+
+/// The domain over [`store`], with T's state, the observation a Reserve
+/// minted earlier (`reference()`, retained to `GENERATION_HORIZON`) and installed
+/// horizons that make `H_g` `GENERATION_HORIZON` and `H_r` `OUTCOME` at
+/// `SAMPLE`.
+fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
     let mut domain =
-        MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
-    domain.pass_states.insert(id(1), pass_state());
+        MemoryCommunityDomainV1::new(store()?, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
+    let mut state = pass_state();
+    state.retained.insert(
+        reference(),
+        CommunityRetainedObservationV1 {
+            generation: GENERATION,
+            not_after_micros: GENERATION_HORIZON,
+            cut: cut(),
+        },
+    );
+    domain.pass_states.insert(id(1), state);
+    domain.pass_horizons = Some(domain_policy());
     Ok(domain)
+}
+
+/// The installed horizons of [`domain`].
+fn domain_policy() -> CommunityHorizonPolicyV1 {
+    CommunityHorizonPolicyV1 {
+        retention: CommunityProfileRetentionV1 {
+            generation_not_after_micros: GENERATION_HORIZON,
+            recovery_window_micros: WINDOW,
+            quarantine_not_after_micros: 2 * GENERATION_HORIZON,
+            metadata_not_after_micros: 2 * GENERATION_HORIZON,
+            recording_not_after_micros: RECORDING,
+        },
+        owners: CommunityOwnerHorizonsV1 {
+            recording_micros: RECORDING,
+            metadata_micros: 2 * GENERATION_HORIZON,
+            evidence_micros: 2 * GENERATION_HORIZON,
+        },
+        profile_digest: hash(83),
+        roster_len: 2,
+    }
+}
+
+/// Set the installed owner evidence horizon.
+fn set_evidence(
+    domain: &mut MemoryCommunityDomainV1,
+    micros: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    domain
+        .pass_horizons
+        .as_mut()
+        .ok_or("horizons")?
+        .owners
+        .evidence_micros = micros;
+    Ok(())
+}
+
+/// Set the installed recording horizon.
+fn set_recording(
+    domain: &mut MemoryCommunityDomainV1,
+    micros: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    domain
+        .pass_horizons
+        .as_mut()
+        .ok_or("horizons")?
+        .retention
+        .recording_not_after_micros = micros;
+    Ok(())
 }
 
 /// T's state: generation, head and counters the inputs name.
 fn pass_state() -> CommunityPassStateV1 {
     CommunityPassStateV1 {
         generation: GENERATION,
+        profile_digest: hash(83),
         head: hash(30),
         counters: counts(100),
         graph: CommunityGraphCountsV1 {
@@ -105,6 +209,7 @@ fn pass_state() -> CommunityPassStateV1 {
         observations: BTreeMap::new(),
         scope_rows: BTreeMap::new(),
         generations: BTreeMap::new(),
+        retained: BTreeMap::new(),
     }
 }
 
@@ -143,6 +248,8 @@ fn minted() -> CommunityMintedObservationV1 {
         rows: 6,
         scope_reference: hash(40),
         scope: vec![scope_row()],
+        not_after_micros: GENERATION_HORIZON,
+        cut: cut(),
     }
 }
 
@@ -155,11 +262,11 @@ fn input() -> Result<CommunityReserveInputV1, Error> {
         selected_head: hash(30),
         prior_shared_counts: counts(100),
         roster_quarantine_keys: vec![hash(50), hash(51)],
-        recording_not_after_micros: RECORDING,
         reservation_sample_micros: SAMPLE,
         pass_rows: 24,
         failure_reserve: 4,
         minted: Some(minted()),
+        reused: None,
         pass,
     })
 }
@@ -184,21 +291,30 @@ fn reserved_pass() -> Result<CommunityReservedPassV1, Error> {
         roster_digest: hash(81),
         prepared_input_set_digest: hash(82),
         profile_digest: hash(83),
-        evidence_not_after_micros: 9_000,
+        evidence_not_after_micros: OUTCOME,
     };
     Ok(CommunityReservedPassV1 {
         reservation,
         cbq1_digest: hash(84),
         quote_maxima: [1, 2, 3],
-        trace_rows: 6,
-        generation_horizon_micros: 9_000,
-        outcome_horizon_micros: 8_000,
+        trace_rows: 2,
+        members: vec![CommunityPassMemberDigestsV1 {
+            roster_index: 0,
+            cmb1_digest: hash(85),
+            cin1_digest: hash(86),
+            trust_policy_snapshot_digest: hash(87),
+        }],
+        metadata_key: [0x61; 16],
+        failure_cohort_key: [0x62; 16],
+        generation_horizon_micros: GENERATION_HORIZON,
+        outcome_horizon_micros: OUTCOME,
     })
 }
 
 fn reuse() -> Result<CommunityReserveInputV1, Error> {
     input().map(|call| CommunityReserveInputV1 {
         minted: None,
+        reused: Some(reference()),
         ..call
     })
 }
@@ -392,9 +508,9 @@ fn the_writer_refuses_in_the_step_5j_order() -> TestResult {
         selected_head: hash(99),
         prior_shared_counts: counts(7),
         pass_rows: u64::MAX / 4,
-        recording_not_after_micros: SAMPLE,
         ..input()?
     };
+    set_recording(&mut domain, SAMPLE)?;
     let refusal = |domain: &MemoryCommunityDomainV1, input: &CommunityReserveInputV1| {
         bound(input.clone()).map_or_else(Some, |call| domain.stage_reserve(call).err())
     };
@@ -413,7 +529,7 @@ fn the_writer_refuses_in_the_step_5j_order() -> TestResult {
         state.generations.clear();
     });
     assert_eq!(refusal(&domain, &every), Some(Error::RecordingUnavailable));
-    every.recording_not_after_micros = RECORDING;
+    set_recording(&mut domain, RECORDING)?;
     assert!(refusal(&domain, &every).is_none());
     Ok(())
 }
@@ -484,24 +600,6 @@ fn the_control_operation_cap_refuses_a_minting_reserve_at_the_cap() -> TestResul
         domain.stage_reserve(reuse()?).err(),
         Some(Error::CapacityExhausted)
     );
-    Ok(())
-}
-
-/// R10.4(3): the recording horizon must pass `t_r` plus the decision
-/// deadline; the writer shares the planner's check.
-#[test]
-fn the_recording_horizon_is_judged_at_the_writer() -> TestResult {
-    let domain = domain()?;
-    let base = input()?;
-    let at = |recording_not_after_micros| CommunityReserveInputV1 {
-        recording_not_after_micros,
-        ..base.clone()
-    };
-    assert_eq!(
-        domain.stage_reserve(at(RECORDING - 1)).err(),
-        Some(Error::RecordingUnavailable)
-    );
-    assert!(domain.stage_reserve(at(RECORDING)).is_ok());
     Ok(())
 }
 
@@ -893,6 +991,7 @@ fn a_token_staged_twice_applies_once() -> TestResult {
         prior_shared_counts: domain.recorded_set_counters(id(1)),
         selected_head: hash(31),
         minted: None,
+        reused: Some(reference()),
         ..input()?
     })?;
     let staged = domain.stage_reserve(next)?;
@@ -1266,4 +1365,505 @@ fn the_budget_sums_saturate() {
         ..budget(1)
     };
     assert_eq!(trace_room(&held, &fits, &none, id(1), 1, 0), None);
+}
+
+/// R9.7 step 6: a minting Reserve's Logical Head and chain compare gives 12
+/// with nothing committed, before the generation compare (R10.7 5j), and
+/// the writer derives the cuts it needs from the topology.
+#[test]
+fn the_writer_compares_the_logical_head_and_the_chains() -> TestResult {
+    let domain = domain()?;
+    let genesis = genesis()?;
+    let with_cut = |through_seq: u64,
+                    chain_heads: Vec<(TimelineId, u64, Hash)>|
+     -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
+        let mut call = input()?;
+        if let Some(minted) = call.minted.as_mut() {
+            minted.cut = CommunityObservationCutV1 {
+                through_seq,
+                chain_heads,
+            };
+        }
+        Ok(call)
+    };
+    let refused = |call: CommunityReserveInputV1| domain.stage_reserve(call).err();
+    // T's chain at its cut.
+    assert!(domain
+        .stage_reserve(with_cut(0, vec![(id(1), 0, genesis)])?)
+        .is_ok());
+    // An observation of one Event that T does not have: no head and no chain.
+    assert_eq!(
+        refused(with_cut(1, vec![(id(1), 1, genesis)])?),
+        Some(Error::EvidenceUnavailable)
+    );
+    // A chain hash that differs.
+    assert_eq!(
+        refused(with_cut(0, vec![(id(1), 0, hash(99))])?),
+        Some(Error::EvidenceUnavailable)
+    );
+    // No entry, an entry at another seq, and an entry of another Timeline
+    // are each no observation of T's cut.
+    for heads in [
+        Vec::new(),
+        vec![(id(1), 1, genesis)],
+        vec![(id(3), 0, genesis)],
+        vec![(id(9), 0, genesis)],
+    ] {
+        assert_eq!(
+            refused(with_cut(0, heads)?),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    // An entry beyond the required ones is inert: it is never compared.
+    assert!(domain
+        .stage_reserve(with_cut(
+            0,
+            vec![(id(1), 0, genesis), (id(9), 7, hash(99))]
+        )?)
+        .is_ok());
+    // The 12 comes before a stale generation (5), and nothing is recorded.
+    let mut both = with_cut(1, Vec::new())?;
+    both.generation = [0x21; 16];
+    assert_eq!(refused(bound(both)?), Some(Error::EvidenceUnavailable));
+    assert_eq!(domain.pass_status(id(1), OPERATION), None);
+    Ok(())
+}
+
+/// The Logical Head alone: T grew past the cut while its chain hash at the
+/// cut is still the observed one, so only the head compare can refuse. A
+/// minted cut and a reused cut are both judged.
+#[test]
+fn a_timeline_that_grew_past_the_cut_is_refused_by_the_head_alone() -> TestResult {
+    let mut domain = domain()?;
+    assert!(domain.stage_reserve(input()?).is_ok());
+    assert!(domain.stage_reserve(reuse()?).is_ok());
+    let draft = EventDraft::new(
+        EntityId::new(),
+        Kind::new("world.action"),
+        CanonicalBytes::from_vec(vec![0]),
+    );
+    domain.store.append(id(1), &[draft])?;
+    // The chain hash at seq 0 is unchanged.
+    assert_eq!(domain.store.chain_hash_at(id(1), Seq::ZERO)?, genesis()?);
+    assert_eq!(
+        domain.stage_reserve(input()?).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        domain.stage_reserve(reuse()?).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A Fork child's cut also observes its source Timeline at the Fork cut,
+/// which the writer finds from the topology (R9.7, R9.10).
+#[test]
+fn a_fork_prefix_source_must_be_observed() -> TestResult {
+    let mut domain = domain()?;
+    domain.pass_states.insert(id(2), pass_state());
+    let source = genesis()?;
+    let child = store()?.chain_hash_at(id(2), Seq::ZERO)?;
+    let with_heads = |chain_heads: Vec<(TimelineId, u64, Hash)>| {
+        let mut call = input()?;
+        call.timeline = id(2);
+        if let Some(minted) = call.minted.as_mut() {
+            minted.cut = CommunityObservationCutV1 {
+                through_seq: 0,
+                chain_heads,
+            };
+        }
+        bound(call).map_err(Box::<dyn std::error::Error>::from)
+    };
+    assert!(domain
+        .stage_reserve(with_heads(vec![(id(1), 0, source), (id(2), 0, child)])?)
+        .is_ok());
+    // Without the source's entry, or with its hash changed, the prefix is
+    // not observed.
+    assert_eq!(
+        domain
+            .stage_reserve(with_heads(vec![(id(2), 0, child)])?)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        domain
+            .stage_reserve(with_heads(vec![(id(1), 0, hash(99)), (id(2), 0, child)])?)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    // The child's own entry is required too.
+    assert_eq!(
+        domain
+            .stage_reserve(with_heads(vec![(id(1), 0, source)])?)
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A store with a chain of `forks` Forks below a root: the root is
+/// `id(100)`, each child `id(100 + i)` forks the previous at sequence 0.
+fn fork_chain(forks: u8) -> Result<MemoryStore, Box<dyn std::error::Error>> {
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    store.create_timeline_with_meta(TimelineMeta {
+        id: id(100),
+        ..TimelineMeta::root_owned("root", actor(10))
+    })?;
+    for index in 1..=forks {
+        store.create_timeline_with_meta(TimelineMeta {
+            id: id(100 + index),
+            owner: Some(actor(10)),
+            fork_point: Some((id(99 + index), Seq::ZERO)),
+            ..TimelineMeta::root("fork")
+        })?;
+    }
+    Ok(store)
+}
+
+/// The cut compare walks at most the history read bounds' Fork depth, the
+/// same bound the materialization reads under: 64 Forks pass, 65 refuse.
+#[test]
+fn the_cut_compare_walks_the_history_forks_depth() -> TestResult {
+    for (forks, holds) in [(64_u8, true), (65, false)] {
+        let store = fork_chain(forks)?;
+        let leaf = id(100 + forks);
+        let chain_heads = (0..=forks)
+            .map(|index| {
+                store
+                    .chain_hash_at(id(100 + index), Seq::ZERO)
+                    .map(|hash| (id(100 + index), 0, hash))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut domain =
+            MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
+        domain.pass_states.insert(leaf, pass_state());
+        domain.pass_horizons = Some(domain_policy());
+        let mut call = input()?;
+        call.timeline = leaf;
+        if let Some(minted) = call.minted.as_mut() {
+            minted.cut = CommunityObservationCutV1 {
+                through_seq: 0,
+                chain_heads,
+            };
+        }
+        let staged = domain.stage_reserve(bound(call)?);
+        if holds {
+            assert!(staged.is_ok());
+        } else {
+            assert_eq!(staged.err(), Some(Error::EvidenceUnavailable));
+        }
+    }
+    Ok(())
+}
+
+/// T's retained observation `reference()`, for a test to change.
+fn retained_of(
+    domain: &mut MemoryCommunityDomainV1,
+) -> Result<&mut CommunityRetainedObservationV1, &'static str> {
+    domain
+        .pass_states
+        .get_mut(&id(1))
+        .and_then(|state| state.retained.get_mut(&reference()))
+        .ok_or("retained")
+}
+
+/// R9.2, R10.7 5j: a reused observation is named by the call; the domain
+/// holds its cut and horizon. Its cut is compared with the store like a
+/// minted one (12), it is of the same generation, and its horizon must
+/// reach `H_g`, which the State records that depend on it live to: one
+/// microsecond short gives 6, equal passes.
+#[test]
+fn a_reused_observation_is_judged_from_what_the_domain_retained() -> TestResult {
+    let mut domain = domain()?;
+    assert!(domain.stage_reserve(reuse()?).is_ok());
+    // A reference no Reserve minted.
+    let mut unknown = reuse()?;
+    unknown.reused = Some(CommunityNativeNodeReferenceV1 {
+        producer_ordinal: 4,
+        ..reference()
+    });
+    assert_eq!(
+        domain.stage_reserve(unknown).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    retained_of(&mut domain)?.not_after_micros = GENERATION_HORIZON - 1;
+    assert_eq!(
+        domain.stage_reserve(reuse()?).err(),
+        Some(Error::StaleFrontier)
+    );
+    // Another generation's observation is not reused, whatever its horizon.
+    {
+        let observation = retained_of(&mut domain)?;
+        observation.not_after_micros = GENERATION_HORIZON;
+        observation.generation = [0x21; 16];
+    }
+    assert_eq!(
+        domain.stage_reserve(reuse()?).err(),
+        Some(Error::StaleFrontier)
+    );
+    {
+        let observation = retained_of(&mut domain)?;
+        observation.generation = GENERATION;
+        observation.cut.through_seq = 1;
+    }
+    // The cut moved on, so T's Logical Head is no longer where it was.
+    assert_eq!(
+        domain.stage_reserve(reuse()?).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// The writer computes `H_g` and `H_r` from its own sample and the installed
+/// owner horizons and refuses a record that differs (R13.4(2)); the CPR1
+/// names the installed profile; a reused observation is named exactly when
+/// none is minted.
+#[test]
+fn the_writer_recomputes_the_horizons_and_binds_the_observation_use() -> TestResult {
+    let mut domain = domain()?;
+    let refused = |domain: &MemoryCommunityDomainV1, call: CommunityReserveInputV1| {
+        domain.stage_reserve(call).err()
+    };
+    let mut generation = input()?;
+    generation.pass.generation_horizon_micros = GENERATION_HORIZON + 1;
+    assert_eq!(refused(&domain, generation), Some(Error::InvalidBinding));
+    let mut outcome = input()?;
+    outcome.pass.outcome_horizon_micros = OUTCOME - 1;
+    assert_eq!(refused(&domain, outcome), Some(Error::InvalidBinding));
+    let mut cpr1 = input()?;
+    cpr1.pass.reservation.evidence_not_after_micros = OUTCOME - 1;
+    assert_eq!(refused(&domain, cpr1), Some(Error::InvalidBinding));
+    let mut profile = input()?;
+    profile.pass.reservation.profile_digest = hash(99);
+    assert_eq!(refused(&domain, profile), Some(Error::InvalidBinding));
+    // A later sample moves `H_r`, so the record no longer matches.
+    let mut later = input()?;
+    later.reservation_sample_micros += 1;
+    assert_eq!(refused(&domain, later), Some(Error::InvalidBinding));
+
+    // A call that names both or neither of a minted and a reused
+    // observation.
+    let mut both = input()?;
+    both.reused = Some(reference());
+    assert_eq!(refused(&domain, both), Some(Error::InvalidBinding));
+    let mut neither = reuse()?;
+    neither.reused = None;
+    assert_eq!(refused(&domain, neither), Some(Error::InvalidBinding));
+
+    // Without installed horizons there is nothing to compute from.
+    domain.pass_horizons = None;
+    assert_eq!(refused(&domain, input()?), Some(Error::EvidenceUnavailable));
+    Ok(())
+}
+
+/// R13.2(5), annex §4: the State records of a pass live to `H_g`, which must
+/// outlast the pass's decision bound (`t_r` plus the 27 s deadline): equal
+/// gives 13, one microsecond more passes.
+#[test]
+fn the_state_horizon_must_outlast_the_decision_bound() -> TestResult {
+    let mut domain = domain()?;
+    let bound = SAMPLE + COMMUNITY_DECISION_DEADLINE_MICROS_V1;
+    // Both the call's horizons and the writer's follow the owner term.
+    set_evidence(&mut domain, bound)?;
+    let short = bound_input(bound)?;
+    assert_eq!(
+        domain.stage_reserve(short).err(),
+        Some(Error::EvidenceExpired)
+    );
+    set_evidence(&mut domain, bound + 1)?;
+    assert!(domain.stage_reserve(bound_input(bound + 1)?).is_ok());
+    Ok(())
+}
+
+/// A Reserve whose record carries `H_g` of `generation` (and `H_r` clamped
+/// to it), as the writer computes them at `SAMPLE`.
+fn bound_input(generation: u64) -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
+    let mut call = input()?;
+    let outcome = (SAMPLE + WINDOW).min(generation);
+    call.pass.generation_horizon_micros = generation;
+    call.pass.outcome_horizon_micros = outcome;
+    call.pass.reservation.evidence_not_after_micros = outcome;
+    Ok(call)
+}
+
+/// R10.4(3): the recording horizon the writer judges is the installed one,
+/// never the call's: it must pass `t_r` plus the decision deadline.
+#[test]
+fn the_recording_horizon_is_the_installed_one() -> TestResult {
+    let mut domain = domain()?;
+    set_recording(&mut domain, RECORDING - 1)?;
+    assert_eq!(
+        domain.stage_reserve(input()?).err(),
+        Some(Error::RecordingUnavailable)
+    );
+    set_recording(&mut domain, RECORDING)?;
+    assert!(domain.stage_reserve(input()?).is_ok());
+    Ok(())
+}
+
+/// R15.3(2), R15.5: the store re-checks every binding the pass facts hold:
+/// one digest row per due member in ascending roster order, `n_due + 1`
+/// trace rows, `F_p` of two targets each and two distinct key IDs.
+#[test]
+fn the_pass_facts_must_agree_with_each_other() -> TestResult {
+    let domain = domain()?;
+    let member = |roster_index: usize| CommunityPassMemberDigestsV1 {
+        roster_index,
+        cmb1_digest: hash(85),
+        cin1_digest: hash(86),
+        trust_policy_snapshot_digest: hash(87),
+    };
+    let with = |edit: &dyn Fn(&mut CommunityReserveInputV1)| {
+        let mut call = input()?;
+        edit(&mut call);
+        Ok::<_, Box<dyn std::error::Error>>(domain.stage_reserve(call).err())
+    };
+    // Two members in order agree with three trace rows and six targets.
+    let mut two = input()?;
+    two.pass.members = vec![member(0), member(1)];
+    two.pass.trace_rows = 3;
+    two.failure_reserve = 6;
+    assert!(domain.stage_reserve(two).is_ok());
+    assert_eq!(
+        with(&|call| call.pass.members.clear())?,
+        Some(Error::InvalidBinding)
+    );
+    // Three trace rows for one member, with the `F_p` three rows call for, so
+    // only the row count disagrees.
+    assert_eq!(
+        with(&|call| {
+            call.pass.trace_rows = 3;
+            call.failure_reserve = 6;
+        })?,
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(
+        with(&|call| call.failure_reserve = 5)?,
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(
+        with(&|call| call.pass.failure_cohort_key = call.pass.metadata_key)?,
+        Some(Error::InvalidBinding)
+    );
+    // No due member, even with the trace rows and `F_p` of an empty pass.
+    let mut empty = input()?;
+    empty.pass.members.clear();
+    empty.pass.trace_rows = 1;
+    empty.failure_reserve = 2;
+    assert_eq!(
+        domain.stage_reserve(empty).err(),
+        Some(Error::InvalidBinding)
+    );
+    // A member row beyond the installed roster, and a key list that is
+    // short or long for it.
+    let mut beyond = input()?;
+    beyond.pass.members = vec![member(2)];
+    assert_eq!(
+        domain.stage_reserve(beyond).err(),
+        Some(Error::InvalidBinding)
+    );
+    for keys in [1_usize, 3] {
+        let mut call = input()?;
+        call.roster_quarantine_keys = (0..keys).map(|_| hash(50)).collect();
+        assert_eq!(
+            domain.stage_reserve(call).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    for indices in [[1, 1], [2, 1]] {
+        let mut call = input()?;
+        call.pass.members = vec![member(indices[0]), member(indices[1])];
+        call.pass.trace_rows = 3;
+        call.failure_reserve = 6;
+        assert_eq!(
+            domain.stage_reserve(call).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    Ok(())
+}
+
+/// A minted observation is retained for reuse with its generation, horizon
+/// and cut, and stays retained when its Commit closes it into the selected
+/// closure.
+#[test]
+fn a_minted_observation_stays_reusable_after_its_commit() -> TestResult {
+    let mut domain = domain()?;
+    let mut call = input()?;
+    if let Some(minted) = call.minted.as_mut() {
+        minted.not_after_micros = GENERATION_HORIZON + 500;
+    }
+    let staged = domain.stage_reserve(call)?;
+    domain.apply_reserve(&SEAL, staged)?;
+    let commit = domain.stage_commit(commit_input())?;
+    domain.apply_commit(&SEAL, commit)?;
+    let state = domain.pass_states.get(&id(1)).ok_or("state")?;
+    let retained = state.retained.get(&reference()).ok_or("retained")?;
+    assert_eq!(retained.not_after_micros, GENERATION_HORIZON + 500);
+    assert_eq!(retained.generation, GENERATION);
+    assert_eq!(retained.cut.through_seq, 0);
+    assert!(!state.observations.contains_key(&reference()));
+    Ok(())
+}
+
+/// T was initialized under one profile, and a Reserve naming the installed
+/// profile of another is refused (3) whatever has been reinstalled since.
+#[test]
+fn a_reserve_names_the_profile_the_timeline_was_initialized_under() -> TestResult {
+    let mut domain = domain()?;
+    domain
+        .pass_states
+        .get_mut(&id(1))
+        .ok_or("state")?
+        .profile_digest = hash(99);
+    assert_eq!(
+        domain.stage_reserve(input()?).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+/// R10.7 5j order: a short `H_g` gives 13 before a stale generation (5), and
+/// a moved cut gives 12 before the 13.
+#[test]
+fn the_decision_bound_and_the_cut_come_before_the_generation_compare() -> TestResult {
+    let mut domain = domain()?;
+    let bound_micros = SAMPLE + COMMUNITY_DECISION_DEADLINE_MICROS_V1;
+    set_evidence(&mut domain, bound_micros)?;
+    let mut stale = bound_input(bound_micros)?;
+    stale.generation = [0x21; 16];
+    assert_eq!(
+        domain.stage_reserve(bound(stale.clone())?).err(),
+        Some(Error::EvidenceExpired)
+    );
+    if let Some(minted) = stale.minted.as_mut() {
+        minted.cut.through_seq = 1;
+    }
+    assert_eq!(
+        domain.stage_reserve(bound(stale)?).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A minted observation's records must reach `H_g`, like a reused one's:
+/// one microsecond short gives 6, equal passes.
+#[test]
+fn a_minted_observation_must_reach_the_state_horizon() -> TestResult {
+    let domain = domain()?;
+    let minting = |not_after_micros: u64| {
+        let mut call = input()?;
+        if let Some(minted) = call.minted.as_mut() {
+            minted.not_after_micros = not_after_micros;
+        }
+        Ok::<_, Box<dyn std::error::Error>>(call)
+    };
+    assert!(domain.stage_reserve(minting(GENERATION_HORIZON)?).is_ok());
+    assert_eq!(
+        domain.stage_reserve(minting(GENERATION_HORIZON - 1)?).err(),
+        Some(Error::StaleFrontier)
+    );
+    Ok(())
 }
