@@ -561,6 +561,9 @@ impl MemoryCommunityDomainV1 {
         let request = inputs.administrative.request();
         CommunityStoreDomainV1::authority_row(self, inputs.administrative.leaf_grant_id(), request)
             .and_then(|row| {
+                // The chain cannot move between the decision and this read
+                // inside one `&mut self` call, so the filter never refuses
+                // today; it pins the decision's head and epoch in the row.
                 Some(row)
                     .filter(|row| {
                         (row.head_seq, row.revocation_epoch)

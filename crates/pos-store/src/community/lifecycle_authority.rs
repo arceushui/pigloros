@@ -91,6 +91,13 @@ const ACTION_NAMES: [&str; 6] = [
 /// for the reservation operation of a pass Abort.
 const OPERATION_KINDS: [char; 6] = ['i', 'i', 'f', 'c', 'c', 'r'];
 
+// A new variant must extend both tables: indexing them by the variant would
+// otherwise panic at run time.
+const _: () = assert!(
+    CommunityAdministrativeActionV1::PassAbort as usize + 1 == ACTION_NAMES.len()
+        && ACTION_NAMES.len() == OPERATION_KINDS.len()
+);
+
 impl CommunityAdministrativeActionV1 {
     /// The exact authority action string.
     #[must_use]

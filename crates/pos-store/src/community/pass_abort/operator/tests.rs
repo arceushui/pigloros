@@ -249,15 +249,7 @@ impl Case {
             },
         )?;
         let credential = self.domain.world.credential_until(request, expires)?;
-        self.with_credential(
-            &credential,
-            OPERATION,
-            Reason::AuthenticatedCancellation,
-            DATA_LEAF,
-            |domain, context, authority, metadata, call| {
-                domain.abort_pass(&SEAL, context, authority, metadata, call)
-            },
-        )
+        self.abort_with_credential(&credential, Reason::AuthenticatedCancellation)
     }
 
     /// The Abort of `reason` on the pass with the FAE1 bytes `credential`.
@@ -277,9 +269,9 @@ impl Case {
         )
     }
 
-    /// Whether the pass metadata key still seals under the Reserve's CSM1
-    /// cover: the CMA1 anchor `(T, G)`, its protection ID, no scope members
-    /// and the metadata horizon.
+    /// Whether the pass metadata key is still open: it seals one probe
+    /// record under a CSM1 cover built like the Reserve's, and a closed key
+    /// refuses.
     fn key_seals(&mut self) -> Fallible<bool> {
         let scope = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
             store_incarnation: INCARNATION,
