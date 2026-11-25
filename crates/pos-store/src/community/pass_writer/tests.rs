@@ -6,15 +6,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pos_core::community_lifecycle::{
-    CommunityGenerationIdsV1, CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error,
-    CommunityNativeNodeReferenceV1, CommunityPassGraphTermsV1, CommunityPassKeyV1,
-    CommunityProfileRetentionV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
-    CommunityReservationInputV1, CommunityReservationRequestInputV1, CommunityReservationRequestV1,
-    CommunityScopeMemberV1, CommunitySelectionInputV1, CommunitySelectionV1,
-    CommunitySharedCountsV1, CommunityTimelineFloorV1, CommunityTimelineFloorsV1,
-    COMMUNITY_CONTROL_OPERATIONS_V1, COMMUNITY_DECISION_DEADLINE_MICROS_V1,
-    COMMUNITY_ERASURE_ROW_LIMIT_V1, COMMUNITY_ERASURE_TARGET_LINE_V1,
-    COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
+    community_prepared_input_set_digest_v1, CommunityGenerationIdsV1, CommunityGraphCountsV1,
+    CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1, CommunityPassGraphTermsV1,
+    CommunityPassKeyV1, CommunityProfileRetentionV1, CommunityQuarantineReasonEvidenceV1,
+    CommunityQuarantineReasonV1, CommunityReservationInputV1, CommunityReservationRequestInputV1,
+    CommunityReservationRequestV1, CommunityScopeMemberV1, CommunitySelectionInputV1,
+    CommunitySelectionV1, CommunitySharedCountsV1, CommunityTimelineFloorV1,
+    CommunityTimelineFloorsV1, COMMUNITY_CONTROL_OPERATIONS_V1,
+    COMMUNITY_DECISION_DEADLINE_MICROS_V1, COMMUNITY_ERASURE_ROW_LIMIT_V1,
+    COMMUNITY_ERASURE_TARGET_LINE_V1, COMMUNITY_RETAINED_PASS_OUTCOMES_V1,
 };
 use pos_core::store::EventStore;
 use pos_core::{
@@ -38,7 +38,7 @@ use super::super::quarantine::QuarantineLedgerV1;
 use super::{
     add_counts, community_reserve_selection_v1, CommunityCommitInputV1,
     CommunityMintedObservationV1, CommunityObservationCutV1, CommunityReserveInputV1,
-    CommunityReservePassFactsV1,
+    CommunityReservePassFactsV1, CommunityStagedReserveV1,
 };
 use crate::community::MemoryCommunityDomainV1;
 use crate::memory::MemoryStore;
@@ -137,6 +137,7 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
     domain.pass_states.insert(id(1), state);
     domain.pass_horizons = Some(domain_policy());
     domain.native_producer_ordinal = BURNED;
+    domain.burned_materialization = Some(BURNED);
     Ok(domain)
 }
 
@@ -280,6 +281,12 @@ fn pass_key(
     CommunityPassKeyV1::new(timeline, generation, ordinal)
 }
 
+/// The prepared input set identity of `[cmb1, cin1]` pairs; a zero digest,
+/// which no check accepts, if they are not a valid set.
+fn input_set(pairs: &[(Hash, Hash)]) -> Hash {
+    community_prepared_input_set_digest_v1(pairs).unwrap_or(Hash::zero())
+}
+
 /// The CRI1 fields of the pass `input()?` reserves.
 fn request_input() -> CommunityReservationRequestInputV1 {
     CommunityReservationRequestInputV1 {
@@ -287,7 +294,7 @@ fn request_input() -> CommunityReservationRequestInputV1 {
         generation: GENERATION,
         reservation_operation_id: OPERATION,
         expected_head_digest: hash(30),
-        prepared_input_set_digest: hash(82),
+        prepared_input_set_digest: input_set(&[(hash(85), hash(86))]),
         roster_digest: hash(81),
         profile_digest: hash(83),
         authority_request_digest: hash(88),
@@ -325,7 +332,7 @@ fn expected_reservation(
         native_producer_ordinal: native,
         predecessor_head_digest: hash(30),
         roster_digest: hash(81),
-        prepared_input_set_digest: hash(82),
+        prepared_input_set_digest: input_set(&[(hash(85), hash(86))]),
         profile_digest: hash(83),
         evidence_not_after_micros: OUTCOME,
     })
@@ -340,9 +347,9 @@ fn reuse() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
 }
 
 /// A second operation of T: another identity and pass key, over the head
-/// and counters the domain holds now.
+/// and counters the domain holds now, burning its materialization's ordinal.
 fn other_operation(
-    domain: &MemoryCommunityDomainV1,
+    domain: &mut MemoryCommunityDomainV1,
 ) -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
     let state = domain.pass_states.get(&id(1)).ok_or("state")?;
     let mut other = input()?;
@@ -350,10 +357,19 @@ fn other_operation(
     other.prior_shared_counts = state.counters;
     other.reservation_operation_id = [0x77; 16];
     // A new materialization carries the ordinal burned for it just now.
+    let burned = domain.burn_materialization_ordinal(&SEAL)?;
     if let Some(minted) = other.minted.as_mut() {
-        minted.reference.producer_ordinal = domain.native_producer_ordinal;
+        minted.reference.producer_ordinal = burned;
     }
     bound(other).map_err(Box::<dyn std::error::Error>::from)
+}
+
+/// Stage a second operation of T after burning its materialization's ordinal.
+fn stage_other(
+    domain: &mut MemoryCommunityDomainV1,
+) -> Result<Result<CommunityStagedReserveV1, Error>, Box<dyn std::error::Error>> {
+    let call = other_operation(domain)?;
+    Ok(domain.stage_reserve(call))
 }
 
 /// The record facts a caller binds to what it planned over: the input's
@@ -470,7 +486,7 @@ fn counters_add_field_by_field_and_saturate() {
 
 /// Composition preconditions come first: no pass state is unavailable
 /// evidence, a materialization binding more rows than the pass is a bad
-/// binding, and a reservation identity already pending is a conflict.
+/// binding, and a reservation identity already recorded is a conflict.
 #[test]
 fn a_reserve_needs_state_a_fitting_materialization_and_a_new_identity() -> TestResult {
     let mut domain = domain()?;
@@ -885,41 +901,57 @@ fn every_actor_of_the_scope_must_fit() -> TestResult {
     Ok(())
 }
 
-type Snapshot = (
-    Vec<(TimelineId, [u8; 16], u64, u64)>,
-    u64,
-    u64,
-    u64,
-    usize,
-    usize,
-);
+/// What a refused apply must leave alone. `CommunitySharedCountsV1` has no
+/// `Debug`, so the four counters are compared as a tuple.
+#[derive(Debug, PartialEq)]
+struct Snapshot {
+    pending: Vec<(TimelineId, [u8; 16], u64, u64)>,
+    records: Vec<(TimelineId, [u8; 16], CommunityPassStatusV1)>,
+    outcomes: u64,
+    control_operations: u64,
+    counters: (u64, u64, u64, u64),
+    observations: usize,
+    scope_rows: usize,
+}
 
-/// Everything a refused apply must leave alone: the pending ledger, the
-/// retained counts, the counters and the observation and scope-row terms.
+/// The pending ledger, the pass-record index with every status, the
+/// retained counts, the four recorded-set counters and the observation and
+/// scope-row terms of T.
 fn snapshot(domain: &MemoryCommunityDomainV1) -> Result<Snapshot, Box<dyn std::error::Error>> {
     let state = domain.pass_states.get(&id(1)).ok_or("state")?;
-    Ok((
-        domain
+    let counters = domain.recorded_set_counters(id(1));
+    Ok(Snapshot {
+        pending: domain
             .pending_reservations
             .iter()
             .map(|((timeline, operation), entry)| {
                 (*timeline, *operation, entry.targets, entry.rows)
             })
             .collect(),
-        domain.retained_pass_outcomes(id(1), GENERATION),
-        domain.control_operations(id(1), GENERATION),
-        domain.recorded_set_counters(id(1)).nodes,
-        state.observations.len(),
-        state.scope_rows.len(),
-    ))
+        records: domain
+            .pass_records
+            .iter()
+            .map(|((timeline, operation), record)| (*timeline, *operation, record.status))
+            .collect(),
+        outcomes: domain.retained_pass_outcomes(id(1), GENERATION),
+        control_operations: domain.control_operations(id(1), GENERATION),
+        counters: (
+            counters.nodes,
+            counters.edges,
+            counters.declared_inputs,
+            counters.encoded_record_bytes,
+        ),
+        observations: state.observations.len(),
+        scope_rows: state.scope_rows.len(),
+    })
 }
 
 /// The composition preconditions are judged in a fixed order: a bad
-/// binding, then a pending identity, then a Timeline with no state.
+/// binding, then a recorded identity, then a Timeline with no state.
 #[test]
 fn the_preconditions_are_judged_in_order() -> TestResult {
     let mut domain = domain()?;
-    // T2 has no state, an identity already pending, and a minted row count
+    // T2 has no state, an identity already recorded, and a minted row count
     // above its pass rows.
     domain.pending_reservations.insert(
         (id(2), OPERATION),
@@ -1169,16 +1201,10 @@ fn the_index_refuses_replays_and_a_second_unresolved_pass() -> TestResult {
 
     let staged = domain.stage_reserve(input()?)?;
     domain.apply_reserve(&SEAL, staged)?;
-    assert_eq!(
-        domain.stage_reserve(other_operation(&domain)?).err(),
-        Some(Error::PassUnresolved)
-    );
+    assert_eq!(stage_other(&mut domain)?.err(), Some(Error::PassUnresolved));
     // A Sealed pass is unresolved too.
     assert!(domain.set_pass_status(id(1), OPERATION, CommunityPassStatusV1::Sealed));
-    assert_eq!(
-        domain.stage_reserve(other_operation(&domain)?).err(),
-        Some(Error::PassUnresolved)
-    );
+    assert_eq!(stage_other(&mut domain)?.err(), Some(Error::PassUnresolved));
 
     let abort = domain.stage_abort(id(1), OPERATION, 0)?;
     domain.apply_abort(&SEAL, &abort)?;
@@ -1189,7 +1215,7 @@ fn the_index_refuses_replays_and_a_second_unresolved_pass() -> TestResult {
     assert!(!domain.pass_is_live(id(1), OPERATION));
     // The resolved identity is a replay; a new one reserves.
     assert_eq!(domain.stage_reserve(input()?).err(), Some(Error::Conflict));
-    assert!(domain.stage_reserve(other_operation(&domain)?).is_ok());
+    assert!(stage_other(&mut domain)?.is_ok());
     Ok(())
 }
 
@@ -1224,7 +1250,7 @@ fn a_commit_resolves_the_pass_and_statuses_only_move_forward() -> TestResult {
     }
     // The committed identity is a replay (4); a new one reserves.
     assert_eq!(domain.stage_reserve(input()?).err(), Some(Error::Conflict));
-    assert!(domain.stage_reserve(other_operation(&domain)?).is_ok());
+    assert!(stage_other(&mut domain)?.is_ok());
     Ok(())
 }
 
@@ -1566,6 +1592,7 @@ fn the_cut_compare_walks_the_history_forks_depth() -> TestResult {
         let mut domain =
             MemoryCommunityDomainV1::new(store, [0x5a; 16], MemoryTrustedClockAuthorityV1::new())?;
         domain.native_producer_ordinal = BURNED;
+        domain.burned_materialization = Some(BURNED);
         domain.pass_states.insert(leaf, pass_state());
         domain.pass_horizons = Some(domain_policy());
         let mut call = input()?;
@@ -1759,7 +1786,7 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
     let domain = domain()?;
     let member = |roster_index: usize| CommunityPassMemberDigestsV1 {
         roster_index,
-        cmb1_digest: hash(85),
+        cmb1_digest: hash(100 + u8::try_from(roster_index).unwrap_or(0)),
         cin1_digest: hash(86),
         trust_policy_snapshot_digest: hash(87),
     };
@@ -1771,6 +1798,8 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
     // Two members in order agree with three trace rows and six targets.
     let mut two = input()?;
     two.pass.members = vec![member(0), member(1)];
+    two.request.prepared_input_set_digest =
+        input_set(&[(hash(100), hash(86)), (hash(101), hash(86))]);
     two.pass.trace_rows = 3;
     two.failure_reserve = 6;
     assert!(domain.stage_reserve(two).is_ok());
@@ -1836,7 +1865,7 @@ fn a_minted_observation_stays_reusable_after_its_commit() -> TestResult {
     let mut domain = domain()?;
     let mut call = input()?;
     if let Some(minted) = call.minted.as_mut() {
-        minted.not_after_micros = OUTCOME + 500;
+        minted.not_after_micros = GENERATION_HORIZON + 500;
     }
     let staged = domain.stage_reserve(call)?;
     domain.apply_reserve(&SEAL, staged)?;
@@ -1844,7 +1873,7 @@ fn a_minted_observation_stays_reusable_after_its_commit() -> TestResult {
     domain.apply_commit(&SEAL, commit)?;
     let state = domain.pass_states.get(&id(1)).ok_or("state")?;
     let retained = state.retained.get(&reference()).ok_or("retained")?;
-    assert_eq!(retained.not_after_micros, OUTCOME + 500);
+    assert_eq!(retained.not_after_micros, GENERATION_HORIZON + 500);
     assert_eq!(retained.generation, GENERATION);
     assert_eq!(retained.cut.through_seq, 0);
     assert!(!state.observations.contains_key(&reference()));
@@ -1932,13 +1961,12 @@ fn a_reserve_allocates_both_ordinals_in_its_transaction() -> TestResult {
 
     let abort = domain.stage_abort(id(1), OPERATION, 0)?;
     domain.apply_abort(&SEAL, &abort)?;
-    let second = other_operation(&domain)?;
-    let staged = domain.stage_reserve(second)?;
+    let staged = stage_other(&mut domain)??;
     domain.apply_reserve(&SEAL, staged)?;
     let second = domain.pass_reservation(id(1), [0x77; 16]).ok_or("cpr1")?;
-    assert_eq!(second.native_producer_ordinal, burned + 2);
+    assert_eq!(second.native_producer_ordinal, burned + 3);
     assert_eq!(second.pass_key.ordinal(), 2);
-    assert_eq!(domain.native_producer_ordinal, burned + 2);
+    assert_eq!(domain.native_producer_ordinal, burned + 3);
     Ok(())
 }
 
@@ -1966,12 +1994,20 @@ fn a_refused_reserve_burns_nothing_and_a_burn_stays_burned() -> TestResult {
 }
 
 /// R10.7 5h: a minted materialization carries the ordinal the burn made
-/// last; a later burn, or an ordinal never burned, is refused (3). A reused
-/// observation names no new materialization and needs no check.
+/// last and nothing has consumed. The burned counter's value without a burn,
+/// a later burn's, an ordinal never burned and one already consumed are
+/// refused (3); a reused observation names no new materialization.
 #[test]
 fn a_minted_observation_carries_the_ordinal_just_burned() -> TestResult {
     let mut domain = domain()?;
+    // The fixture burned the ordinal 3, which the observation carries.
     assert!(domain.stage_reserve(input()?).is_ok());
+    // The counter stands at 3 but nothing is burned: not an allocation.
+    domain.burned_materialization = None;
+    assert_eq!(
+        domain.stage_reserve(input()?).err(),
+        Some(Error::InvalidBinding)
+    );
     let burned = domain.burn_materialization_ordinal(&SEAL)?;
     assert_eq!(
         domain.stage_reserve(input()?).err(),
@@ -1981,8 +2017,11 @@ fn a_minted_observation_carries_the_ordinal_just_burned() -> TestResult {
         domain.stage_reserve(minting(burned + 1)?).err(),
         Some(Error::InvalidBinding)
     );
-    assert!(domain.stage_reserve(minting(burned)?).is_ok());
     assert!(domain.stage_reserve(reuse()?).is_ok());
+    // The Reserve consumes the burn.
+    let staged = domain.stage_reserve(minting(burned)?)?;
+    domain.apply_reserve(&SEAL, staged)?;
+    assert_eq!(domain.burned_materialization, None);
     Ok(())
 }
 
@@ -2160,5 +2199,67 @@ fn the_selection_successor_carries_the_new_floors() -> TestResult {
         community_reserve_selection_v1(&current, id(1), [0x21; 16], 7, 5).err(),
         Some(Error::StaleGeneration)
     );
+    Ok(())
+}
+
+/// A minted observation's records must reach `H_g`, like a reused one's:
+/// one microsecond short gives 6, equal passes.
+#[test]
+fn a_minted_observation_must_reach_the_state_horizon() -> TestResult {
+    let domain = domain()?;
+    let minting = |not_after_micros: u64| {
+        let mut call = input()?;
+        if let Some(minted) = call.minted.as_mut() {
+            minted.not_after_micros = not_after_micros;
+        }
+        Ok::<_, Box<dyn std::error::Error>>(call)
+    };
+    assert!(domain.stage_reserve(minting(GENERATION_HORIZON)?).is_ok());
+    assert_eq!(
+        domain.stage_reserve(minting(GENERATION_HORIZON - 1)?).err(),
+        Some(Error::StaleFrontier)
+    );
+    Ok(())
+}
+
+/// The request names the pass facts' members: its prepared input set is the
+/// digest of their `[cmb1, cin1]` pairs strictly ordered by member digest,
+/// whatever their roster order (parent annex, prepared input set preimage).
+#[test]
+fn the_request_must_name_the_pass_members() -> TestResult {
+    let domain = domain()?;
+    let mut other = input()?;
+    other.request.prepared_input_set_digest = hash(1);
+    assert_eq!(
+        domain.stage_reserve(other).err(),
+        Some(Error::InvalidBinding)
+    );
+    let mut changed = input()?;
+    changed.pass.members = vec![CommunityPassMemberDigestsV1 {
+        cin1_digest: hash(99),
+        ..facts().members[0]
+    }];
+    assert_eq!(
+        domain.stage_reserve(changed).err(),
+        Some(Error::InvalidBinding)
+    );
+    // Roster order and digest order differ: the set is ordered by digest.
+    let member = |roster_index: usize, cmb1: u8| CommunityPassMemberDigestsV1 {
+        roster_index,
+        cmb1_digest: hash(cmb1),
+        cin1_digest: hash(86),
+        trust_policy_snapshot_digest: hash(87),
+    };
+    let mut two = input()?;
+    two.pass.members = vec![member(0, 120), member(1, 110)];
+    two.pass.trace_rows = 3;
+    two.failure_reserve = 6;
+    two.request.prepared_input_set_digest =
+        input_set(&[(hash(110), hash(86)), (hash(120), hash(86))]);
+    assert!(domain.stage_reserve(two.clone()).is_ok());
+    // The same digests in roster order are not the set's order.
+    two.request.prepared_input_set_digest =
+        input_set(&[(hash(120), hash(86)), (hash(110), hash(86))]);
+    assert_eq!(domain.stage_reserve(two).err(), Some(Error::InvalidBinding));
     Ok(())
 }

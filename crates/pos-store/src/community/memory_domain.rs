@@ -204,6 +204,10 @@ pub struct MemoryCommunityDomainV1 {
     /// The installed horizon inputs of the Reserve writer (R13.4(2)).
     #[cfg(target_os = "linux")]
     pub(super) pass_horizons: Option<CommunityHorizonPolicyV1>,
+    /// The ordinal the last step-5h burn made, until a minted Reserve
+    /// consumes it (R10.7 5h).
+    #[cfg(target_os = "linux")]
+    pub(super) burned_materialization: Option<u64>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -258,6 +262,8 @@ impl MemoryCommunityDomainV1 {
                 pass_records: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 pass_horizons: None,
+                #[cfg(target_os = "linux")]
+                burned_materialization: None,
             })
         }
     }

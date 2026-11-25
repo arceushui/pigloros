@@ -15,15 +15,15 @@
 //! identity and the kernel readback, with the attempt's own cancellation in
 //! its `AuthorityCheck`.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use pos_reference::evaluator_domain::ExecutionMode;
 use pos_reference::sandbox_provider_protocol::{
     NetworkCaptureStore, SandboxCancelRequest, SandboxCancelResponse, SandboxCancelResponseFields,
-    SandboxExecutionMode, SandboxProviderErrorCode, SandboxProviderResult,
+    SandboxExecutionMode, SandboxProviderErrorCode, SandboxReconcileRequest,
+    SandboxReconcileResponse, SandboxReconcileResponseFields,
 };
 use tokio::runtime::Runtime;
 
@@ -52,10 +52,6 @@ pub(super) struct ExecutePort {
     pub(super) budget: CleanupBudget,
     /// Execute admission closed after a provider signing fault (R9 §5).
     pub(super) closed: AtomicBool,
-    /// Each cancelled attempt's last SCQ1 digest and the SCY1 that answered
-    /// it, so an exact repeat gets the same result (base §4), while the
-    /// lifecycle still retains the attempt's response.
-    pub(super) cancelled: Mutex<BTreeMap<[u8; 16], CancelAnswer>>,
     // The bus connection is dropped before the runtime that drives it.
     /// The single system bus transport.
     pub(super) transport: SystemdTransientUnitTransport,
@@ -79,24 +75,22 @@ const fn mode_plan(mode: SandboxExecutionMode) -> ModePlan {
     }
 }
 
-/// The SCY1 that answered an attempt's last SCQ1, by that request's digest,
-/// and the AGR1 of the attempt it names.
-#[derive(Debug)]
-pub(super) struct CancelAnswer {
-    request_digest: [u8; 32],
-    agr1_digest: [u8; 32],
-    scy1: Vec<u8>,
-}
-
-/// The SPE1 code of a cancellation the lifecycle refused: an attempt this
-/// runtime does not hold under the named AGR1 is unknown (`15`), one whose
-/// cleanup was not proved `14`, and any other refusal `11`.
-pub(super) const fn cancel_code(error: &AttemptLifecycleError) -> SandboxProviderErrorCode {
+/// The SPE1 code of a cancel or reconcile the lifecycle refused (ADR-069
+/// R15 §3.3, N5, N7 and N11): an attempt this runtime does not hold under
+/// the named AGR1 is unknown (`15`); one still active, not proved clean or
+/// whose response faulted `14`; a request ID recorded with other bytes
+/// `16`; a further distinct request ID once the attempt holds four `12`;
+/// and a response still pending at the bound, or any other refusal, `11`.
+pub(super) const fn control_code(error: &AttemptLifecycleError) -> SandboxProviderErrorCode {
     match error {
         AttemptLifecycleError::UnknownAttempt | AttemptLifecycleError::GrantMismatch => {
             SandboxProviderErrorCode::UnknownAttempt
         }
-        AttemptLifecycleError::CleanupFailed => SandboxProviderErrorCode::CleanupFailed,
+        AttemptLifecycleError::AttemptActive
+        | AttemptLifecycleError::CleanupFailed
+        | AttemptLifecycleError::ResponseUnavailable => SandboxProviderErrorCode::CleanupFailed,
+        AttemptLifecycleError::RequestConflict => SandboxProviderErrorCode::RequestIdentityConflict,
+        AttemptLifecycleError::ControlRequestsExhausted => SandboxProviderErrorCode::AdmissionBusy,
         _ => SandboxProviderErrorCode::SandboxUnavailable,
     }
 }
@@ -167,129 +161,87 @@ impl ExecutePort {
         })
     }
 
-    /// Answer the authenticated SCQ1 `request` (base §4, §10): cancel the
-    /// attempt, wait until `until` for its stored response, and sign an
-    /// SCY1 that binds its terminal SPY1 digest, `0` when the attempt was
-    /// already terminal and `1` when this request cancelled it. An exact
-    /// repeat of the attempt's last SCQ1 gets the same SCY1 bytes.
+    /// Answer the authenticated SCQ1 `request` (base §4, §10; ADR-069 R15
+    /// §3.6 item 2(a)): cancel the attempt, wait for its signed terminal
+    /// response, holding no lock, and sign an SCY1 that binds its SPY1
+    /// digest: `0` when the attempt was already terminal and `1` when this
+    /// request cancelled it. The wait follows the attempt until it ended,
+    /// then waits for its response until `until`, or one control `interval`
+    /// after the end when it was still active. An exact repeat is answered
+    /// from the current state.
     ///
     /// # Errors
-    /// `Some` SPE1 code: the lifecycle's refusal (see [`cancel_code`]), or
-    /// `11` when no terminal SPY1 exists to bind: an attempt that awaited
-    /// its input, or one withdrawn before its run, which leave none yet (the
-    /// N6 question on the SRY1 draft), one that has none by `until`, or one
-    /// re-issued just before it could be bound. `None` when the SCY1 cannot
-    /// be built or signed under the admitted key: a provider fault, which
-    /// emits nothing and closes execute admission (R9 §5). The response it
-    /// would have bound stays delivered: no re-issue replaces it.
+    /// `Some` SPE1 code: the lifecycle's refusal (see [`control_code`]).
+    /// `None` when the SCY1 cannot be built or signed under the admitted
+    /// key: a provider fault, which emits nothing and closes execute
+    /// admission (R9 §5). The response it would have bound stays delivered:
+    /// no re-issue replaces it.
     pub(super) fn cancel(
         &self,
         request: &SandboxCancelRequest,
-        until: Instant,
+        (until, interval): (Instant, Duration),
         (signer, key): (&KeyFileRuntimeSigner, AdmittedRuntimeKey<'_>),
     ) -> Result<Vec<u8>, Option<SandboxProviderErrorCode>> {
-        self.prune_cancelled();
-        if let Some(repeated) = self.repeated_cancel(request) {
-            return Ok(repeated);
-        }
-        // A cancellation of an attempt still awaiting its input is recorded
-        // for its ending, which has no SPY1 yet: like a withdrawal, it is
-        // refused with 11 until the N6 decision, never bound to a fabricated
-        // SPY1.
-        let awaiting = self
-            .lifecycle
-            .awaits_input(request.attempt_id, request.agr1_digest);
-        let result = self
+        let (result, response) = self
             .runtime
-            .block_on(self.lifecycle.cancel(request))
-            .map_err(|error| Some(cancel_code(&error)))?;
-        if awaiting {
-            return Err(Some(SandboxProviderErrorCode::SandboxUnavailable));
-        }
-        // The SCY1 binds the stored response's SPY1, which it delivers: no
-        // re-issue may replace it after this.
-        let spy1 = self
-            .settled(request.attempt_id, request.agr1_digest, until)
-            .filter(|response| self.lifecycle.claim_delivery(request.attempt_id, response))
-            .and_then(|response| {
-                SandboxProviderResult::from_canonical_cbor(response.response().result).ok()
-            })
-            .map(|result| result.result_digest())
-            .ok_or(Some(SandboxProviderErrorCode::SandboxUnavailable))?;
+            .block_on(
+                self.lifecycle
+                    .cancel_and_bind(request, until.into(), interval),
+            )
+            .map_err(|error| Some(control_code(&error)))?;
         SandboxCancelResponse::self_digested(SandboxCancelResponseFields {
             request_id: request.request.request_id,
             attempt_id: request.attempt_id,
             result,
-            terminal_spy1_digest: spy1,
+            terminal_spy1_digest: response.terminal_digests().0,
             runtime_attestation_key_id: signer.runtime_attestation_key_id().to_owned(),
         })
         .ok()
         .and_then(|record| sign_verified(signer, key, record).ok())
         .and_then(|verified| SandboxCancelResponse::new(verified, key.key()).ok())
         .and_then(|response| response.to_canonical_cbor().ok())
-        .inspect(|bytes| {
-            self.cancelled
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(
-                    request.attempt_id,
-                    CancelAnswer {
-                        request_digest: request.request_digest,
-                        agr1_digest: request.agr1_digest,
-                        scy1: bytes.clone(),
-                    },
-                );
-        })
-        .ok_or_else(|| {
-            self.close();
-            None
-        })
+        .ok_or_else(|| self.fault())
     }
 
-    /// Forget the SCY1 of every attempt whose response the lifecycle no
-    /// longer retains: it was reconciled, so a repeat of its SCQ1 is `15`.
-    fn prune_cancelled(&self) {
-        self.cancelled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|attempt_id, answer| {
-                self.lifecycle
-                    .terminal_response(*attempt_id, answer.agr1_digest)
-                    .is_ok()
-            });
-    }
-
-    /// The SCY1 that answered `request` before, if it is an exact repeat of
-    /// the attempt's last SCQ1.
-    fn repeated_cancel(&self, request: &SandboxCancelRequest) -> Option<Vec<u8>> {
-        self.cancelled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&request.attempt_id)
-            .filter(|answer| answer.request_digest == request.request_digest)
-            .map(|answer| answer.scy1.clone())
-    }
-
-    /// The stored response of the attempt of `agr1_digest`, waiting until
-    /// `until` while the attempt is still active or its response pending:
-    /// the lifecycle wakes the wait when it settles.
-    fn settled(
+    /// Answer the authenticated SRQ1 `request` (ADR-069 R15 §3.3): reconcile
+    /// the attempt, waiting on a pending response until `until`, holding no
+    /// lock, and sign an SRY1 over the digest of its retained
+    /// `reconciliation-evidence-v1`. A repeated request for the same AGR1
+    /// gets the same digest, and an exact repeat the same bytes.
+    ///
+    /// # Errors
+    /// `Some` SPE1 code: the lifecycle's refusal (see [`control_code`]).
+    /// `None` when the SRY1 cannot be built or signed under the admitted
+    /// key: a provider fault, which emits nothing and closes execute
+    /// admission (R9 §5). The attempt stays reconciled.
+    pub(super) fn reconcile(
         &self,
-        attempt_id: [u8; 16],
-        agr1_digest: [u8; 32],
+        request: &SandboxReconcileRequest,
         until: Instant,
-    ) -> Option<Arc<RetainedResponse>> {
-        self.runtime
-            .block_on(async {
-                tokio::time::timeout_at(
-                    until.into(),
-                    self.lifecycle.settled_response(attempt_id, agr1_digest),
-                )
-                .await
-            })
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
+        (signer, key): (&KeyFileRuntimeSigner, AdmittedRuntimeKey<'_>),
+    ) -> Result<Vec<u8>, Option<SandboxProviderErrorCode>> {
+        let reconciled = self
+            .runtime
+            .block_on(self.lifecycle.reconcile_within(request, until.into()))
+            .map_err(|error| Some(control_code(&error)))?;
+        SandboxReconcileResponse::self_digested(SandboxReconcileResponseFields {
+            request_id: request.request.request_id,
+            attempt_id: request.attempt_id,
+            reconciliation_evidence_digest: reconciled.evidence_digest(),
+            runtime_attestation_key_id: signer.runtime_attestation_key_id().to_owned(),
+        })
+        .ok()
+        .and_then(|record| sign_verified(signer, key, record).ok())
+        .and_then(|verified| SandboxReconcileResponse::new(verified, key.key()).ok())
+        .and_then(|response| response.to_canonical_cbor().ok())
+        .ok_or_else(|| self.fault())
+    }
+
+    /// A provider fault answering a control request: nothing is emitted and
+    /// execute admission closes (R9 §5).
+    fn fault(&self) -> Option<SandboxProviderErrorCode> {
+        self.close();
+        None
     }
 
     /// Run the owned attempt admitted in `mode` to its end and retain its
@@ -373,88 +325,33 @@ mod tests {
         Ok(())
     }
 
-    /// Base §4 and the R11 repeat rule: only an exact repeat of the
-    /// attempt's last SCQ1 gets its SCY1 bytes again, from the stored
-    /// answer; an SCQ1 with another request ID and digest is a new request,
-    /// answered with its own SCY1.
     #[test]
-    fn only_an_exact_repeat_of_the_last_scq1_replays_its_scy1(
-    ) -> crate::provider_runtime::tests::TestResult {
-        use pos_reference::sandbox_provider_protocol::{
-            AdmissionGrant, RequestAuthority, SandboxCancellationResult,
-        };
-        let (_tree, port) = crate::provider_runtime::tests::test_port(crate::StagingLimits {
-            aggregate_bytes: 1024 * 1024,
-        })?;
-        let stored = port
-            .lifecycle
-            .completed_for_test()
-            .map_err(|error| error.to_string())?;
-        let grant = AdmissionGrant::from_canonical_cbor(stored.frames().next().ok_or("no AGR1")?)?;
-        let signing = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-        let public = signing.verifying_key();
-        let signer = KeyFileRuntimeSigner::from_signing_key(signing, "runtime".to_owned());
-        let key = AdmittedRuntimeKey::new("runtime", &public);
-        let request = |id: u8| SandboxCancelRequest {
-            request: RequestAuthority {
-                request_id: [id; 16],
-                apt1_digest: [1; 32],
-                policy_epoch: 1,
-                nonce: [id; 16],
-            },
-            attempt_id: grant.attempt_id,
-            agr1_digest: grant.grant_digest(),
-            request_digest: [id; 32],
-        };
-        let until = || Instant::now() + std::time::Duration::from_secs(5);
-        let cancel = |id| {
-            port.cancel(&request(id), until(), (&signer, key))
-                .map_err(|code| format!("{code:?}"))
-        };
-        let first = cancel(3)?;
-        assert_eq!(cancel(3)?, first);
-        // The repeat is answered from the stored SCY1, never signed again: a
-        // signer whose key ID is not the admitted one, which `sign_verified`
-        // refuses before signing, still replays it, and execute admission
-        // stays open.
-        let foreign = KeyFileRuntimeSigner::from_signing_key(
-            ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
-            "foreign".to_owned(),
-        );
-        assert_eq!(
-            port.cancel(&request(3), until(), (&foreign, key)),
-            Ok(first.clone())
-        );
-        assert!(port.open());
-        let next = cancel(4)?;
-        assert_ne!(next, first);
-        let answered = SandboxCancelResponse::from_canonical_cbor(&next)?;
-        assert_eq!(answered.request_id, [4; 16]);
-        assert_eq!(answered.result, SandboxCancellationResult::AlreadyTerminal);
-        Ok(())
-    }
-
-    #[test]
-    fn cancel_refusals_name_their_codes() {
+    fn control_refusals_name_their_codes() {
+        use SandboxProviderErrorCode as Code;
         for (error, code) in [
+            (AttemptLifecycleError::UnknownAttempt, Code::UnknownAttempt),
+            (AttemptLifecycleError::GrantMismatch, Code::UnknownAttempt),
+            (AttemptLifecycleError::AttemptActive, Code::CleanupFailed),
+            (AttemptLifecycleError::CleanupFailed, Code::CleanupFailed),
             (
-                AttemptLifecycleError::UnknownAttempt,
-                SandboxProviderErrorCode::UnknownAttempt,
+                AttemptLifecycleError::ResponseUnavailable,
+                Code::CleanupFailed,
             ),
             (
-                AttemptLifecycleError::GrantMismatch,
-                SandboxProviderErrorCode::UnknownAttempt,
+                AttemptLifecycleError::RequestConflict,
+                Code::RequestIdentityConflict,
             ),
             (
-                AttemptLifecycleError::CleanupFailed,
-                SandboxProviderErrorCode::CleanupFailed,
+                AttemptLifecycleError::ControlRequestsExhausted,
+                Code::AdmissionBusy,
             ),
             (
-                AttemptLifecycleError::Fenced,
-                SandboxProviderErrorCode::SandboxUnavailable,
+                AttemptLifecycleError::ResponsePending,
+                Code::SandboxUnavailable,
             ),
+            (AttemptLifecycleError::Fenced, Code::SandboxUnavailable),
         ] {
-            assert_eq!(cancel_code(&error), code, "{error:?}");
+            assert_eq!(control_code(&error), code, "{error:?}");
         }
     }
 }

@@ -29,29 +29,40 @@
 //! The pipeline is single-writer: it stages and then applies under one
 //! guard, so the stage re-checks still hold at the apply. An apply
 //! re-validates only what is cheap to check: the pass state and the entry.
-//! A Reserve is refused when its identity is pending (`Conflict`) or when
-//! another reservation of the same T is pending (`PassUnresolved`, code 7,
-//! refused at the apply only, not at stage). A Commit or Abort is refused
-//! when its entry is gone or too small, which also refuses their replay.
+//! A Reserve is refused with `Conflict` when its identity is recorded in
+//! the CRI1 index (`pass_records`), resolved or not, or is pending, at stage
+//! and again at the apply. It is refused with `PassUnresolved` (code 7)
+//! at stage when T already has an unresolved pass. A second Reserve staged
+//! before the first was applied is invisible at stage, so only the apply
+//! refuses it (`PassUnresolved`, from T's pending entries). A Commit or
+//! Abort is refused when its entry is gone or too small, which also refuses
+//! their replay.
 //!
 //! A Reserve allocates its native producer ordinal and its pass ordinal
 //! (annex §4): `stage_reserve` computes the next of each without changing
 //! anything, and `apply_reserve` refuses (`Conflict`) a token whose ordinals
 //! another burn or pass has moved since, then advances both. A minted
-//! materialization must carry the ordinal the step-5h burn made last.
+//! materialization must carry the ordinal the step-5h burn made last, which
+//! no Reserve has consumed yet.
 //!
-//! A resolved reservation identity stays in the CRI1 index, so a replay of
-//! it is refused (`Conflict`) at stage and at apply. The planner's step 4a
-//! still returns the original outcome first. Neither apply re-runs the
-//! budget, caps, head or counters compares; a token staged before another
-//! operation changed them is for the pipeline to discard.
+//! A Reserve replay is refused here as well as by the pipeline's step 4a
+//! discovery: `pass_records` keeps every pass with its status after it
+//! resolves, so a recorded identity, pending or resolved, is a `Conflict`
+//! at stage and at apply, before the head and counters are compared. The
+//! discovery still answers a replay from its original outcome first; this
+//! refusal is the backstop.
+//!
+//! Neither apply re-runs the budget, caps, head or counters compares; a
+//! token staged before another operation changed them is for the pipeline
+//! to discard.
 
 use pos_core::community_lifecycle::{
-    CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
-    CommunityPassGraphTermsV1, CommunityPassKeyV1, CommunityReservationInputV1,
-    CommunityReservationRequestInputV1, CommunityReservationRequestV1, CommunityReservationV1,
-    CommunityScopeMemberV1, CommunitySelectionInputV1, CommunitySelectionV1,
-    CommunitySharedCountsV1, CommunityTimelineFloorsV1,
+    community_prepared_input_set_digest_v1, CommunityGraphCountsV1,
+    CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1, CommunityPassGraphTermsV1,
+    CommunityPassKeyV1, CommunityReservationInputV1, CommunityReservationRequestInputV1,
+    CommunityReservationRequestV1, CommunityReservationV1, CommunityScopeMemberV1,
+    CommunitySelectionInputV1, CommunitySelectionV1, CommunitySharedCountsV1,
+    CommunityTimelineFloorsV1,
 };
 use pos_core::store::EventStore;
 use pos_core::{AuthorityTrustRootSealV1, Hash, Seq, TimelineId};
@@ -156,10 +167,8 @@ pub struct CommunityReserveInputV1 {
     /// ordinals it allocates; the requested evidence horizon is not
     /// compared, the writer's own `H_r` is the CPR1's.
     ///
-    /// Its `prepared_input_set_digest` is not checked against the pass
-    /// facts' member digests: the accepted text defines no preimage for it
-    /// (it says only that every CIN1 digest is in the prepared input set), and
-    /// the check follows once an erratum defines one.
+    /// Its `prepared_input_set_digest` must be the identity of the pass
+    /// facts' `[cmb1, cin1]` pairs, strictly ordered by member digest (3).
     pub request: CommunityReservationRequestInputV1,
     /// What the pass record keeps beyond the CPR1: the quote and the digests
     /// of its members (R8.1(7), R15.3(2)).
@@ -234,35 +243,39 @@ pub struct CommunityStagedAbortV1 {
 impl MemoryCommunityDomainV1 {
     /// Re-check a Reserve at the writer (R10.7 step 5j) and stage it.
     ///
-    /// Another pending reservation of T (`PassUnresolved`, code 7) is
-    /// refused here only against a recorded pass, and at
-    /// [`Self::apply_reserve`] against a pending one.
+    /// An unresolved pass of T is refused here (`PassUnresolved`, code 7). A
+    /// second reservation staged but not yet applied is invisible at stage
+    /// and is refused only at [`Self::apply_reserve`].
     ///
     /// # Errors
     /// Returns `InvalidBinding` when the minted rows exceed the pass rows;
     /// when the request's T, G, identity or expected head differs from the
     /// call's; when the pass facts disagree (members, trace rows, `F_p`,
     /// key IDs); when the request is not a valid CRI1 (3, also for a
-    /// requested horizon outside `1..=i64::MAX`) or names a profile other
-    /// than the installed one or the one T was initialized under; or when the
-    /// roster keys or member rows do not fit the installed roster. Then
-    /// `EvidenceUnavailable` with no
+    /// requested horizon outside `1..=i64::MAX`), carries a prepared input
+    /// set digest other than the facts' pairs' or names a profile other than
+    /// the installed one; or when the roster keys or member rows do not fit
+    /// the installed roster. Then `EvidenceUnavailable` with no
     /// installed horizons, `Conflict` for a reservation identity already
     /// recorded, resolved or not, and `PassUnresolved` (7) for another
     /// unresolved pass of T. These come first, as R10.7 steps 4a and 4c
     /// precede 5j; the byte-equal bound-content compare of R8.1(7) is the
     /// call layer's. Then `EvidenceUnavailable` for a Timeline with no pass
-    /// state, for a reused reference no Reserve minted, and for a Logical
+    /// state; `InvalidBinding` when T was initialized under another profile
+    /// than the request names; `EvidenceUnavailable` for a reused reference
+    /// no Reserve minted, and for a Logical
     /// Head or chain that no longer matches the minted or the reused cut
     /// (12); `EvidenceExpired` (13) when `H_g` does not outlast the
     /// decision bound; then in the step-5j order `StaleGeneration` (5),
     /// `StaleFrontier` (6) for a moved head or counters, a reused
     /// observation of another generation or one that outlives less than
-    /// `H_g`, or a budget the pending reservations now fill,
+    /// `H_g`, a minted observation whose records end before `H_g`, or a
+    /// budget the pending reservations now fill,
     /// `Quarantined` (9), `CapacityExhausted` (14) and
     /// `RecordingUnavailable` (19), and the budget read's error. A call that
-    /// names both or neither of a minted and a reused observation gives
-    /// `InvalidBinding` once the state is found.
+    /// names both or neither of a minted and a reused observation, or a
+    /// minted one whose nodes do not carry the ordinal the last 5h burn made
+    /// (not yet consumed), gives `InvalidBinding` once the state is found.
     pub fn stage_reserve(
         &self,
         input: CommunityReserveInputV1,
@@ -346,7 +359,9 @@ impl MemoryCommunityDomainV1 {
     /// Burn the next native producer ordinal for a minted materialization
     /// (R10.7 step 5h, R9.7 step 4). This is the only step that burns an
     /// ordinal on its own: a later refusal leaves it burned, and a reused
-    /// observation never calls it.
+    /// observation never calls it. A minted Reserve must carry the ordinal
+    /// burned last and not yet consumed (3), so its nodes cannot collide with
+    /// an earlier pass's producer ordinal.
     ///
     /// # Errors
     /// Returns `CapacityExhausted` when the counter has no next ordinal; the
@@ -355,7 +370,9 @@ impl MemoryCommunityDomainV1 {
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
     ) -> Result<u64, Error> {
-        self.allocate_producer_ordinal()
+        self.allocate_producer_ordinal().inspect(|ordinal| {
+            self.burned_materialization = Some(*ordinal);
+        })
     }
 
     /// `H_g`, `H_r` and the recording horizon, the writer's own from its
@@ -411,8 +428,8 @@ impl MemoryCommunityDomainV1 {
         let (cut, retained) = match (&input.minted, input.reused) {
             (Some(minted), None) => {
                 // R10.7 5h burned the ordinal the materialization's nodes
-                // carry just before this Reserve.
-                if minted.reference.producer_ordinal != self.native_producer_ordinal {
+                // carry just before this Reserve, and nothing consumed it.
+                if Some(minted.reference.producer_ordinal) != self.burned_materialization {
                     return Err(Error::InvalidBinding);
                 }
                 (&minted.cut, None)
@@ -443,9 +460,16 @@ impl MemoryCommunityDomainV1 {
             retained.generation != input.generation
                 || retained.not_after_micros < writer.horizons.generation_micros
         });
+        // A minted observation's records end at `H_g` at the earliest too:
+        // the caller's horizon is judged, then kept for a later reuse.
+        let mint_short = input
+            .minted
+            .as_ref()
+            .is_some_and(|minted| minted.not_after_micros < writer.horizons.generation_micros);
         if state.head != input.selected_head
             || state.counters != input.prior_shared_counts
             || reuse_stale
+            || mint_short
         {
             return Err(Error::StaleFrontier);
         }
@@ -537,11 +561,11 @@ impl MemoryCommunityDomainV1 {
     /// retains for reuse and one more control operation.
     ///
     /// # Errors
-    /// Returns `Conflict` when the reservation identity is pending already
-    /// or recorded, or when the ordinals staged are no longer the next ones
-    /// (another burn or pass moved them), `PassUnresolved` (7) when another
-    /// reservation of T is pending, and `EvidenceUnavailable` when the
-    /// Timeline has no pass state; the domain is unchanged.
+    /// Returns `Conflict` when the reservation identity is recorded already,
+    /// resolved or not, or when the ordinals staged are no longer the next
+    /// ones (another burn or pass moved them), `PassUnresolved` (7) when
+    /// another reservation of T is pending, and `EvidenceUnavailable` when
+    /// the Timeline has no pass state; the domain is unchanged.
     pub fn apply_reserve(
         &mut self,
         _seal: &'static AuthorityTrustRootSealV1,
@@ -574,6 +598,10 @@ impl MemoryCommunityDomainV1 {
             return Err(Error::Conflict);
         }
         self.native_producer_ordinal = staged.native_ordinal;
+        if staged.minted.is_some() {
+            // The burned ordinal is consumed by the materialization.
+            self.burned_materialization = None;
+        }
         self.pending_reservations.insert(staged.key, staged.entry);
         self.pass_records.insert(staged.key, staged.record);
         self.pass_states.entry(timeline).and_modify(|state| {
@@ -754,11 +782,25 @@ fn check_binding(input: &CommunityReserveInputV1) -> Result<CommunityReservation
         || facts.trace_rows != due + 1
         || input.failure_reserve != facts.trace_rows.saturating_mul(2)
         || facts.metadata_key == facts.failure_cohort_key
+        || !names_the_members(input)
     {
         Err(Error::InvalidBinding)
     } else {
         CommunityReservationRequestV1::new(request).map_err(|_| Error::InvalidBinding)
     }
+}
+
+/// The request's prepared input set is the pass facts' `[cmb1, cin1]` pairs
+/// ordered by member digest (parent annex, "prepared input set preimage").
+fn names_the_members(input: &CommunityReserveInputV1) -> bool {
+    let mut pairs: Vec<(Hash, Hash)> = input
+        .pass
+        .members
+        .iter()
+        .map(|member| (member.cmb1_digest, member.cin1_digest))
+        .collect();
+    pairs.sort_by_key(|pair| pair.0);
+    community_prepared_input_set_digest_v1(&pairs) == Ok(input.request.prepared_input_set_digest)
 }
 
 /// The CPR1 of a Reserve: the pass key and native producer ordinal it
@@ -787,6 +829,9 @@ fn mint_reservation(
             })
         })
         .map(|reservation| *reservation.as_input())
+        // A type-unifying conversion: `H_r <= H_g <= i64::MAX` is guaranteed
+        // by the installation checks, so this is reached only by writing the
+        // installed horizons directly.
         .map_err(|_| Error::InvalidBinding)
 }
 
