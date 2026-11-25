@@ -201,20 +201,25 @@ fn bracketed<T: NetlinkTransport>(
     session: &NetlinkSession<T>,
 ) -> Result<(u32, Dumps, u32), NetlinkError> {
     let [tables, chains, rules] = dumps();
-    let first = generation(session)?;
-    let tables = session.dump(tables)?;
-    let chains = session.dump(chains)?;
-    let rules = session.dump(rules)?;
-    let last = generation(session)?;
-    Ok((
-        first,
-        Dumps {
-            tables,
-            chains,
-            rules,
-        },
-        last,
-    ))
+    generation(session).and_then(|first| {
+        session.dump(tables).and_then(|tables| {
+            session.dump(chains).and_then(|chains| {
+                session.dump(rules).and_then(|rules| {
+                    generation(session).map(|last| {
+                        (
+                            first,
+                            Dumps {
+                                tables,
+                                chains,
+                                rules,
+                            },
+                            last,
+                        )
+                    })
+                })
+            })
+        })
+    })
 }
 
 /// Read every table, chain and rule of the namespace a session of `open`

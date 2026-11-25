@@ -137,9 +137,18 @@ pub enum ReadbackError {
 pub trait NetworkReadback {
     /// Read the namespace, veth pair, addresses, routes and firewall of the
     /// attempt back and canonicalize them, exactly as the verifier of the
-    /// record expects them. A read bounded by `deadline`, the attempt's
-    /// release deadline, fails as [`ReadbackError::Transport`] once it has
-    /// passed.
+    /// record expects them.
+    ///
+    /// `deadline` is the attempt's release deadline. Only the host-table
+    /// read checks it, before each of its reads, and fails as
+    /// [`ReadbackError::Transport`] once it has passed. The other steps wait
+    /// at most `RECEIVE_TIMEOUT` (10 s) per netlink datagram, and the host
+    /// read takes the change lock before it checks the deadline, so the
+    /// barrier's own remaining-time check bounds the whole readback.
+    ///
+    /// This port, its `deadline` and its `Sync` bound are not in ADR-069 R14
+    /// §7, which puts `fn readback(&self)` on the connector; they are
+    /// recorded for the ADR errata queue.
     ///
     /// # Errors
     /// Fails as the [`ReadbackError`] class of whatever went wrong.

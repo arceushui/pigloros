@@ -8,6 +8,8 @@ use netlink_packet_route::route::{
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 
+use rustix::io::Errno;
+
 use super::super::{IpPrefix, NamespaceRoute};
 use super::*;
 
@@ -211,6 +213,7 @@ fn transit_failures_are_transport_and_everything_else_is_a_change() {
         NetlinkError::Io(Errno::TIMEDOUT),
         NetlinkError::Io(Errno::INVAL),
         NetlinkError::Interrupted,
+        NetlinkError::Torn,
     ] {
         assert_eq!(classify(&error), UnitNetworkError::Transport, "{error:?}");
     }

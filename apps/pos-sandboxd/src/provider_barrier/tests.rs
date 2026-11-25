@@ -273,15 +273,13 @@ impl ObservedReadback for TestObserved {
         context: &ObservationContext<'_>,
     ) -> Result<ObservedUnit, ObservedReadbackUnavailable> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        // Only a Local attempt hands its network to the observation.
-        assert_eq!(
-            context.reads_network(),
-            self.behaviour == Observing::ReadsNetwork
-                || matches!(
-                    self.behaviour,
-                    Observing::NetworkFirst(_) | Observing::NetworkOnRecheck(_)
-                )
-        );
+        // A Local attempt hands its network to the observation.
+        if matches!(
+            self.behaviour,
+            Observing::ReadsNetwork | Observing::NetworkFirst(_) | Observing::NetworkOnRecheck(_)
+        ) {
+            assert!(context.reads_network());
+        }
         match (self.behaviour, call) {
             (Observing::NetworkFirst(class), 0) | (Observing::NetworkOnRecheck(class), 1..) => Err(
                 ObservedReadbackUnavailable(KernelObservationError::Network(class)),
@@ -488,6 +486,19 @@ fn check_authority(release: &ExecutionRelease) {
     assert_eq!(release.fields().policy_epoch, admitted.policy_epoch);
 }
 
+/// A network whose readback the observation fakes never ask for.
+struct Unasked;
+
+impl crate::NetworkReadback for Unasked {
+    fn readback(
+        &self,
+        _deadline: Instant,
+    ) -> Result<pos_reference::sandbox_provider_protocol::LocalNetworkReadback, crate::ReadbackError>
+    {
+        Err(crate::ReadbackError::Changed)
+    }
+}
+
 /// Release a correct `ReadyV1` and return what the launcher received.
 async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
     let (mut barrier, attempt) =
@@ -495,7 +506,7 @@ async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
     let launcher = launcher(&mut barrier)?;
     assert!(barrier.sent_release().is_none());
     barrier
-        .release(&active(attempt, GENEROUS_MS), cgroup_view(), None)
+        .release(&active(attempt, GENEROUS_MS), cgroup_view(), Some(&Unasked))
         .await?;
     let received = launcher.join().map_err(|_| "launcher thread")?;
     Ok((barrier, received))
@@ -1313,21 +1324,6 @@ mod kernel_observation {
         observed_over(observing, behaviour, milliseconds, None).await
     }
 
-    /// A network whose readback the observation fakes never ask for.
-    struct Unasked;
-
-    impl crate::NetworkReadback for Unasked {
-        fn readback(
-            &self,
-            _deadline: Instant,
-        ) -> Result<
-            pos_reference::sandbox_provider_protocol::LocalNetworkReadback,
-            crate::ReadbackError,
-        > {
-            Err(crate::ReadbackError::Changed)
-        }
-    }
-
     /// [`observed_within`], handing the release `network`.
     async fn observed_over(
         observing: Observing,
@@ -1964,8 +1960,6 @@ fn a_recheck_observation_that_found_other_state_is_a_change_and_the_rest_is_unav
 
     let refusal = |error| recheck_observation(ObservedReadbackUnavailable(error));
     for changed in [
-        KernelObservationError::IdentityChanged,
-        KernelObservationError::Namespace(Errno::NOENT),
         KernelObservationError::Network(crate::ReadbackError::Changed),
         KernelObservationError::UnitNetwork(UnitNetworkError::Changed),
     ] {
@@ -1974,7 +1968,11 @@ fn a_recheck_observation_that_found_other_state_is_a_change_and_the_rest_is_unav
             "{changed:?}"
         );
     }
+    // The unit's own `/proc` reads keep the class they had: a unit that
+    // exited or moved under the observation is unavailable, not changed.
     for unavailable in [
+        KernelObservationError::IdentityChanged,
+        KernelObservationError::Namespace(Errno::NOENT),
         KernelObservationError::Namespace(Errno::IO),
         KernelObservationError::Network(crate::ReadbackError::Transport),
         KernelObservationError::UnitNetwork(UnitNetworkError::Transport),
@@ -1985,4 +1983,19 @@ fn a_recheck_observation_that_found_other_state_is_a_change_and_the_rest_is_unav
             "{unavailable:?}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_attempt_is_never_released_without_its_network() -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::Local, Refusal::None, own_pid())?;
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view(), None)
+        .await
+        .err();
+    assert!(matches!(error, Some(BarrierError::LocalNetworkMissing)));
+    assert_eq!(error.and_then(|error| error.barrier_failure()), None);
+    // Nothing was consumed or sent.
+    assert!(barrier.sent_release().is_none());
+    Ok(())
 }

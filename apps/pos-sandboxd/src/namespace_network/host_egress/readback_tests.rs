@@ -9,7 +9,7 @@ use rustix::io::Errno;
 
 use super::tests::{as_dumped, attempt, two_attempts, ENDPOINT};
 use super::*;
-use crate::namespace_network::netfilter_fake::{kernel, session, Shared};
+use crate::namespace_network::netfilter_fake::{kernel, passed, session, Shared};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -249,9 +249,7 @@ fn a_foreign_change_is_retried_and_three_torn_reads_are_a_transport_failure() ->
 #[test]
 fn the_release_deadline_bounds_the_read_and_expiry_is_a_receive_timeout() -> TestResult {
     let first = attempt(1, 3, vec![ENDPOINT])?;
-    let past = Instant::now()
-        .checked_sub(Duration::from_secs(1))
-        .ok_or("no earlier instant")?;
+    let past = passed();
     // The real port opens no session once the deadline passed.
     let expired = HostEgress::new().readback_slice(&first, past);
     assert!(

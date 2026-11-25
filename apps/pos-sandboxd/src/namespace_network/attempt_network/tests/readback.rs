@@ -8,7 +8,9 @@ use pos_reference::sandbox_provider_protocol::{
     LocalNetworkReadback,
 };
 
-use super::super::readback::{assemble, egress_failure, identity, io_failure, netlink_failure};
+use super::super::readback::{
+    assemble, base, changed, egress_failure, identity, netlink_failure, rule,
+};
 use super::*;
 use crate::{KernelObservation, NetworkReadback, ReadbackError};
 
@@ -110,6 +112,7 @@ fn netlink_failures_are_transport_unless_the_object_is_missing_or_unreadable() {
         (NetlinkError::Io(Errno::IO), ReadbackError::Transport),
         (NetlinkError::Io(Errno::TIMEDOUT), ReadbackError::Transport),
         (NetlinkError::Torn, ReadbackError::Transport),
+        (NetlinkError::Interrupted, ReadbackError::Transport),
         (NetlinkError::Io(Errno::NOENT), ReadbackError::Changed),
         (NetlinkError::Kernel(-1), ReadbackError::Changed),
         (NetlinkError::Unexpected, ReadbackError::Changed),
@@ -122,8 +125,10 @@ fn netlink_failures_are_transport_unless_the_object_is_missing_or_unreadable() {
         let text = failure.to_string();
         assert_eq!(netlink_failure(&failure), class, "{text}");
     }
-    assert_eq!(io_failure(Errno::NOENT), ReadbackError::Changed);
-    assert_eq!(io_failure(Errno::IO), ReadbackError::Transport);
+    // Steps 1 and 6 know no transport class: whatever fails there is a
+    // change.
+    assert_eq!(changed(Errno::IO), ReadbackError::Changed);
+    assert_eq!(changed(NetlinkError::Torn), ReadbackError::Changed);
     for (failure, class) in [
         (
             HostEgressError::Netlink(NetlinkError::Io(Errno::TIMEDOUT)),
@@ -238,12 +243,25 @@ fn the_name_must_still_bind_the_descriptor_the_proxy_holds() -> TestResult {
         connector.readback(in_a_minute()),
         Err(ReadbackError::Changed)
     );
-    // A pin that cannot be examined is a transport failure.
+    // A pin that is no namespace file binds nothing (invariant 4, wrong
+    // `f_type`).
+    std::os::unix::fs::symlink("/", &pin)?;
+    assert_eq!(
+        connector.readback(in_a_minute()),
+        Err(ReadbackError::Changed)
+    );
+    // A pin that cannot be opened is a change too: R14 lists only steps 2
+    // to 5 as transport.
+    std::fs::remove_file(&pin)?;
     std::os::unix::fs::symlink(&pin, &pin)?;
     assert_eq!(
         connector.readback(in_a_minute()),
-        Err(ReadbackError::Transport)
+        Err(ReadbackError::Changed)
     );
+    // The pin of the held namespace is a match again.
+    std::fs::remove_file(&pin)?;
+    std::os::unix::fs::symlink("/proc/self/ns/net", &pin)?;
+    assert!(connector.readback(in_a_minute()).is_ok());
     Ok(())
 }
 
@@ -350,4 +368,51 @@ fn a_descriptor_whose_nsfs_identity_is_the_kernels_is_named_by_its_device_and_in
     assert_eq!(own.major, rustix::fs::major(status.st_dev));
     assert_eq!(own.minor, rustix::fs::minor(status.st_dev));
     Ok(())
+}
+
+#[test]
+fn every_firewall_code_has_its_record_code() {
+    use pos_reference::sandbox_provider_protocol::{
+        ReadbackFirewallBase, ReadbackFirewallHook, ReadbackFirewallPolicy, ReadbackFirewallRule,
+    };
+
+    use crate::namespace_network::{
+        FirewallBaseChain, FirewallHook, FirewallRule, FirewallVerdict,
+    };
+
+    for (hook, expected) in [
+        (FirewallHook::Input, ReadbackFirewallHook::Input),
+        (FirewallHook::Forward, ReadbackFirewallHook::Forward),
+        (FirewallHook::Output, ReadbackFirewallHook::Output),
+    ] {
+        for (policy, expected_policy) in [
+            (FirewallVerdict::Accept, ReadbackFirewallPolicy::Accept),
+            (FirewallVerdict::Drop, ReadbackFirewallPolicy::Drop),
+        ] {
+            assert_eq!(
+                base(FirewallBaseChain {
+                    hook,
+                    priority: -5,
+                    policy,
+                }),
+                ReadbackFirewallBase {
+                    hook: expected,
+                    priority: -5,
+                    policy: expected_policy,
+                }
+            );
+        }
+    }
+    assert_eq!(
+        rule(FirewallRule::AcceptEstablished),
+        ReadbackFirewallRule::AcceptEstablished
+    );
+    assert_eq!(
+        rule(FirewallRule::AcceptNeighbourDiscovery),
+        ReadbackFirewallRule::AcceptNeighbourDiscovery
+    );
+    assert_eq!(
+        rule(FirewallRule::AcceptTcp(ENDPOINT)),
+        ReadbackFirewallRule::AcceptTcp(ENDPOINT)
+    );
 }

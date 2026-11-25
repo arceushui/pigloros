@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use netlink_packet_core::{
     DoneMessage, NetlinkDeserializable, NetlinkHeader, NetlinkMessage, NetlinkPayload,
@@ -47,6 +48,16 @@ pub(super) enum Fault {
     NoId,
     /// The reply is a table, not a generation.
     NotAGeneration,
+    /// The reply names the process before it names the generation.
+    ProcessFirst,
+}
+
+/// An instant that has passed, whatever the host's uptime: taken, then left
+/// behind by a short sleep.
+pub(super) fn passed() -> Instant {
+    let at = Instant::now();
+    std::thread::sleep(Duration::from_millis(2));
+    at
 }
 
 /// A shared fake kernel.
@@ -140,6 +151,9 @@ impl Kernel {
                     }),
                     Fault::NotAGeneration => NfTablesMessage::NewTable(TableMessage {
                         attributes: Vec::new(),
+                    }),
+                    Fault::ProcessFirst => NfTablesMessage::NewGen(GenMessage {
+                        attributes: vec![GenAttribute::ProcPid(1), GenAttribute::Id(id)],
                     }),
                 };
                 let reply = NetfilterMessage::new(

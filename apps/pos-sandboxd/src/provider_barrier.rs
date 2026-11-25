@@ -50,7 +50,6 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use rustix::{
     fs::{statx, AtFlags, StatxFlags, CWD},
-    io::Errno,
     net::{
         socketpair,
         sockopt::{set_socket_timeout, Timeout},
@@ -248,13 +247,11 @@ fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefus
         KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
         // The unit's network namespace now holds more than `lo` (R14 N12), or
         // a Local network reads back as other state (R14 §3.2): barrier
-        // failure 7, as are a namespace that is gone and a unit whose
-        // identity moved under the observation (R14 §3.2, error classes). A
-        // transport failure is 6.
+        // failure 7. A transport failure is 6.
         KernelObservationError::UnitNetwork(UnitNetworkError::Changed)
-        | KernelObservationError::Network(ReadbackError::Changed)
-        | KernelObservationError::IdentityChanged
-        | KernelObservationError::Namespace(Errno::NOENT) => RecheckRefusal::ObservationChanged,
+        | KernelObservationError::Network(ReadbackError::Changed) => {
+            RecheckRefusal::ObservationChanged
+        }
         _ => RecheckRefusal::RecheckObservation(unavailable),
     }
 }
@@ -504,6 +501,11 @@ pub enum BarrierError {
     /// use and never retried.
     #[error("a release was already attempted")]
     AlreadyAttempted,
+    /// A Local attempt was handed no network to read back, so its KOE1
+    /// could not carry `network-readback` (ADR-069 R14 §3.1): nothing was
+    /// released.
+    #[error("a Local attempt was released without its network")]
+    LocalNetworkMissing,
     /// `ReleaseV1` was sent, and the attempt deadline passed before the
     /// barrier returned.
     #[error("the attempt deadline passed after the release")]
@@ -545,6 +547,7 @@ impl BarrierError {
             | Self::UnitEndTaken
             | Self::RuntimeFlavor
             | Self::AlreadyAttempted
+            | Self::LocalNetworkMissing
             | Self::ExpiredAfterRelease => None,
         }
     }
@@ -906,6 +909,11 @@ where
         self.require_attempt(attempt.admitted())?;
         if self.attempted {
             return Err(BarrierError::AlreadyAttempted);
+        }
+        // Local status 0 requires `network-readback` (R14 §3.1): a Local
+        // attempt is never released without the network that fills it.
+        if self.admitted.mode() == SandboxExecutionMode::Local && network.is_none() {
+            return Err(BarrierError::LocalNetworkMissing);
         }
         let main_pid = read_by(
             attempt.deadline(),

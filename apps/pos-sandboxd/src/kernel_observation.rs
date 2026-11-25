@@ -463,9 +463,12 @@ impl KernelObservation {
         self.work
     }
 
-    /// The Local network readback, for a Local attempt (ADR-069 R14).
-    #[must_use]
-    pub const fn network(&self) -> Option<&LocalNetworkReadback> {
+    /// The Local network readback, for a Local attempt (ADR-069 R14). The
+    /// observation hands it on through [`Self::evidence_state`]; only the
+    /// tests read it directly.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) const fn network(&self) -> Option<&LocalNetworkReadback> {
         self.network.as_ref()
     }
 
@@ -660,7 +663,8 @@ impl<'a> ObservationContext<'a> {
         }
     }
 
-    /// Whether the observation also reads a Local network back.
+    /// Whether the observation also reads a Local network back. Only the
+    /// barrier tests ask: the production observation just reads it.
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) const fn reads_network(&self) -> bool {

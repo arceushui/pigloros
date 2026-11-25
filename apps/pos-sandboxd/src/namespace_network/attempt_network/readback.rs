@@ -9,6 +9,24 @@
 //! [`ObservedNamespace`] must verify exactly against what the attempt was
 //! installed with, and only then is it canonicalized into
 //! `local-network-readback`.
+//!
+//! Steps 2 to 4 read the namespace through [`NamespaceControl::observe`],
+//! which opens it by name, not through the held descriptor. Step 6 closes
+//! that gap: the name must still bind the descriptor of step 1. It cannot
+//! tell a namespace that was re-pinned to another and back again (A, B, A)
+//! from one that never moved, which needs a privileged writer of the pin
+//! directory.
+//!
+//! The release deadline bounds the host slice (step 5): it is checked before
+//! each of its reads, but a read in flight waits at most `RECEIVE_TIMEOUT`
+//! (10 s) per datagram, and `HostEgress::readback_slice` takes the change
+//! lock before it checks the deadline, so the recheck's own remaining-time
+//! check is what bounds the whole readback. Steps 1 to 4 and 6 have no
+//! deadline of their own.
+//!
+//! The `NetworkReadback` port, its `deadline` parameter and its `Sync` bound
+//! are not in R14 §7, which writes `fn readback(&self)` on the connector;
+//! they are recorded for the ADR errata queue.
 
 use std::os::fd::{AsFd, BorrowedFd};
 use std::time::Instant;
@@ -19,7 +37,6 @@ use pos_reference::sandbox_provider_protocol::{
     ReadbackRoute, ReadbackVethEnd,
 };
 use rustix::fs::{fstat, fstatfs};
-use rustix::io::Errno;
 
 use super::{NamespaceConnector, NetworkNamespaces};
 use crate::namespace_network::host_egress::{EgressControl, EgressSlice, HostEgressError};
@@ -56,23 +73,21 @@ where
     }
 }
 
-/// The class of a netlink failure (R14 §3.2 error classes): transport for a
-/// socket failure other than a missing object, including a receive timeout
-/// and a failed `setns`, and for three torn reads; everything else is a
-/// change.
-pub(super) const fn netlink_failure(error: &NetlinkError) -> ReadbackError {
-    match error {
-        NetlinkError::Io(errno) if errno.raw_os_error() != Errno::NOENT.raw_os_error() => {
-            ReadbackError::Transport
-        }
-        NetlinkError::Torn => ReadbackError::Transport,
-        _ => ReadbackError::Changed,
+/// The class of a netlink failure in steps 2 to 5 (R14 §3.2 error classes,
+/// [`NetlinkError::is_transport`]).
+pub(super) fn netlink_failure(error: &NetlinkError) -> ReadbackError {
+    if error.is_transport() {
+        ReadbackError::Transport
+    } else {
+        ReadbackError::Changed
     }
 }
 
-/// The class of a failed system call: a socket failure.
-pub(super) const fn io_failure(errno: Errno) -> ReadbackError {
-    netlink_failure(&NetlinkError::Io(errno))
+/// The class of anything that fails in steps 1 and 6, which R14 lists as a
+/// change only: the namespace is gone, re-pinned or unreadable.
+pub(super) fn changed<E>(failure: E) -> ReadbackError {
+    drop(failure);
+    ReadbackError::Changed
 }
 
 /// The class of a host egress failure: its netlink failure's, or a change.
@@ -87,21 +102,25 @@ pub(super) fn egress_failure(error: HostEgressError) -> ReadbackError {
 /// `[major, minor]` of its `st_dev` and its inode.
 ///
 /// # Errors
-/// A descriptor that is no nsfs file, or whose device the kernel cannot have
-/// issued, is a change; a failed `fstat` or `fstatfs` is a netlink failure.
+/// A descriptor that is no nsfs file, whose device the kernel cannot have
+/// issued, or that cannot be examined, is a change (R14 lists only steps 2
+/// to 5 as transport).
 pub(super) fn identity(namespace: BorrowedFd<'_>) -> Result<NamespaceIdentity, ReadbackError> {
-    let filesystem = fstatfs(namespace).map_err(io_failure)?;
-    if i128::from(filesystem.f_type) != NSFS_MAGIC {
-        return Err(ReadbackError::Changed);
-    }
-    let status = fstat(namespace).map_err(io_failure)?;
-    KernelIdentity::of(status.st_dev, status.st_ino)
+    fstatfs(namespace)
+        .map_err(changed)
+        .and_then(|filesystem| {
+            (i128::from(filesystem.f_type) == NSFS_MAGIC)
+                .then_some(())
+                .ok_or(ReadbackError::Changed)
+        })
+        .and_then(|()| fstat(namespace).map_err(changed))
+        .and_then(|status| KernelIdentity::of(status.st_dev, status.st_ino).map_err(changed))
         .map(KernelIdentity::namespace)
-        .map_err(|_| ReadbackError::Changed)
 }
 
 /// Whether the pin `name` still names the namespace of identity `held` (R14
-/// §3.2 step 6).
+/// §3.2 step 6). A pin that is gone, is no namespace file, cannot be opened
+/// or names another namespace is a change.
 fn same_namespace(
     namespaces: &NetworkNamespaces,
     name: &NamespaceName,
@@ -109,9 +128,9 @@ fn same_namespace(
 ) -> Result<(), ReadbackError> {
     let pinned = namespaces
         .open(name)
-        .map_err(|error| netlink_failure(&error))?
+        .map_err(changed)?
         .ok_or(ReadbackError::Changed)?;
-    if identity(pinned.as_fd())? == held {
+    if identity(pinned.as_fd()) == Ok(held) {
         Ok(())
     } else {
         Err(ReadbackError::Changed)
@@ -209,7 +228,7 @@ fn chain(chain: &FirewallChain) -> ReadbackFirewallChain {
     }
 }
 
-const fn base(base: FirewallBaseChain) -> ReadbackFirewallBase {
+pub(super) const fn base(base: FirewallBaseChain) -> ReadbackFirewallBase {
     ReadbackFirewallBase {
         hook: match base.hook {
             FirewallHook::Input => ReadbackFirewallHook::Input,
@@ -224,7 +243,7 @@ const fn base(base: FirewallBaseChain) -> ReadbackFirewallBase {
     }
 }
 
-const fn rule(rule: FirewallRule) -> ReadbackFirewallRule {
+pub(super) const fn rule(rule: FirewallRule) -> ReadbackFirewallRule {
     match rule {
         FirewallRule::AcceptEstablished => ReadbackFirewallRule::AcceptEstablished,
         FirewallRule::AcceptNeighbourDiscovery => ReadbackFirewallRule::AcceptNeighbourDiscovery,

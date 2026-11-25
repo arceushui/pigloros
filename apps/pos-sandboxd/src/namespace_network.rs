@@ -541,7 +541,13 @@ pub trait NamespaceControl {
     fn install(&self, expected: &ExpectedNamespace) -> Result<(), Self::Error>;
 
     /// Read back the complete state of namespace `name` and of the host veth
-    /// end `host_link`.
+    /// end `host_link`, with the ruleset generation its firewall read settled
+    /// at.
+    ///
+    /// The namespace is opened by name, not through a descriptor the caller
+    /// holds: a caller that holds one (the attempt's connector) must check
+    /// afterwards that the name still binds it, which leaves only an
+    /// A-B-A re-pin undetected (ADR-069 R14 §3.2 step 6).
     ///
     /// # Errors
     /// Fails if any part cannot be read, or holds state these types cannot

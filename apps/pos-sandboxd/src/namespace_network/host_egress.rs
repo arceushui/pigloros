@@ -1020,7 +1020,13 @@ pub trait EgressControl {
     /// Read `attempt`'s slice of the host table (ADR-069 R14 §3.2 step 5),
     /// bracketed by `NFT_MSG_GETGEN` and under the change lock, so this
     /// provider changes no attempt's egress during the read. The lock is held
-    /// for this read only; the read gives up once `deadline` has passed.
+    /// for this read only; the read gives up once `deadline` has passed,
+    /// which it checks before each of its reads. The lock itself is taken
+    /// without a bound, and a read in flight waits at most `RECEIVE_TIMEOUT`
+    /// per datagram, so the caller's own remaining-time check bounds the
+    /// whole call. The `deadline` parameter is not in ADR-069 R14 §3.2, which
+    /// bounds the step by the release deadline without naming how; it is
+    /// recorded for the ADR errata queue.
     ///
     /// # Errors
     /// Fails if the read is torn three times, `deadline` passed, a netlink

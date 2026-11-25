@@ -8,7 +8,7 @@ use netlink_packet_netfilter::nftables::NfTablesMessageType;
 use rustix::io::Errno;
 
 use super::*;
-use crate::namespace_network::netfilter_fake::{kernel, session, Fault, Shared, Wire};
+use crate::namespace_network::netfilter_fake::{kernel, passed, session, Fault, Shared, Wire};
 use crate::namespace_network::{ExpectedNamespace, NetworkRange};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -126,9 +126,7 @@ fn any_other_failure_is_returned_at_once() {
 fn a_passed_deadline_fails_before_a_read_and_a_future_one_does_not() -> TestResult {
     let fake = kernel(&[3, 3]);
     holding_a_ruleset(&fake)?;
-    let past = Instant::now()
-        .checked_sub(Duration::from_secs(1))
-        .ok_or("no earlier instant")?;
+    let past = passed();
     let expired = settled(|| Ok(session(&fake)), Some(past));
     assert!(
         matches!(expired, Err(NetlinkError::Io(Errno::TIMEDOUT))),
@@ -144,7 +142,7 @@ fn a_passed_deadline_fails_before_a_read_and_a_future_one_does_not() -> TestResu
 
 #[test]
 fn a_generation_reply_must_be_a_generation_with_an_id() -> TestResult {
-    let fake = kernel(&[11, 12, 13]);
+    let fake = kernel(&[11, 12, 13, 14]);
     assert_eq!(generation(&session(&fake))?, 11);
     fake.borrow_mut().fault = Fault::NoId;
     let anonymous = generation(&session(&fake));
@@ -160,6 +158,9 @@ fn a_generation_reply_must_be_a_generation_with_an_id() -> TestResult {
         "{}",
         failure(&other)
     );
+    // Other attributes may come first: the id is found among them.
+    fake.borrow_mut().fault = Fault::ProcessFirst;
+    assert_eq!(generation(&session(&fake))?, 14);
     Ok(())
 }
 
