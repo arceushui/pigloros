@@ -114,7 +114,7 @@ fn cut() -> Result<CommunityObservationCutV1, Box<dyn std::error::Error>> {
 }
 
 /// The domain over [`store`], with T's state, the observation a Reserve
-/// minted earlier (`reference()`, retained to `OUTCOME`) and installed
+/// minted earlier (`reference()`, retained to `GENERATION_HORIZON`) and installed
 /// horizons that make `H_g` `GENERATION_HORIZON` and `H_r` `OUTCOME` at
 /// `SAMPLE`.
 fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
@@ -125,7 +125,7 @@ fn domain() -> Result<MemoryCommunityDomainV1, Box<dyn std::error::Error>> {
         reference(),
         CommunityRetainedObservationV1 {
             generation: GENERATION,
-            not_after_micros: OUTCOME,
+            not_after_micros: GENERATION_HORIZON,
             cut: cut()?,
         },
     );
@@ -224,7 +224,7 @@ fn minted() -> Result<CommunityMintedObservationV1, Box<dyn std::error::Error>> 
         rows: 6,
         scope_reference: hash(40),
         scope: vec![scope_row()],
-        not_after_micros: OUTCOME,
+        not_after_micros: GENERATION_HORIZON,
         cut: cut()?,
     })
 }
@@ -1532,8 +1532,8 @@ fn retained_of(
 /// R9.2, R10.7 5j: a reused observation is named by the call; the domain
 /// holds its cut and horizon. Its cut is compared with the store like a
 /// minted one (12), it is of the same generation, and its horizon must
-/// reach the exact reservation horizon: one microsecond short gives 6,
-/// equal passes.
+/// reach `H_g`, which the State records that depend on it live to: one
+/// microsecond short gives 6, equal passes.
 #[test]
 fn a_reused_observation_is_judged_from_what_the_domain_retained() -> TestResult {
     let mut domain = domain()?;
@@ -1548,7 +1548,7 @@ fn a_reused_observation_is_judged_from_what_the_domain_retained() -> TestResult 
         domain.stage_reserve(unknown).err(),
         Some(Error::EvidenceUnavailable)
     );
-    retained_of(&mut domain)?.not_after_micros = OUTCOME - 1;
+    retained_of(&mut domain)?.not_after_micros = GENERATION_HORIZON - 1;
     assert_eq!(
         domain.stage_reserve(reuse()?).err(),
         Some(Error::StaleFrontier)
@@ -1556,7 +1556,7 @@ fn a_reused_observation_is_judged_from_what_the_domain_retained() -> TestResult 
     // Another generation's observation is not reused, whatever its horizon.
     {
         let observation = retained_of(&mut domain)?;
-        observation.not_after_micros = OUTCOME;
+        observation.not_after_micros = GENERATION_HORIZON;
         observation.generation = [0x21; 16];
     }
     assert_eq!(

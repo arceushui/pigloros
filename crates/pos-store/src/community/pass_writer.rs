@@ -211,7 +211,7 @@ impl MemoryCommunityDomainV1 {
     /// decision bound; then in the step-5j order `StaleGeneration` (5),
     /// `StaleFrontier` (6) for a moved head or counters, a reused
     /// observation of another generation or one that outlives less than
-    /// `H_r`, or a budget the pending reservations now fill,
+    /// `H_g`, or a budget the pending reservations now fill,
     /// `Quarantined` (9), `CapacityExhausted` (14) and
     /// `RecordingUnavailable` (19), and the budget read's error. A call that
     /// names both or neither of a minted and a reused observation gives
@@ -321,11 +321,12 @@ impl MemoryCommunityDomainV1 {
         if state.generation != input.generation {
             return Err(Error::StaleGeneration);
         }
-        // The reuse is of the same `(T, G)` and its records outlive the exact
-        // reservation horizon (R9.2; R10.7 steps 5c and 5j: 6).
+        // The reuse is of the same `(T, G)` and its records outlive `H_g`:
+        // the pass's State records depend on the reused Observation CPN1 and
+        // live to `H_g` (R9.2; R13.2(2), (4a); R10.7 steps 5c and 5j: 6).
         let reuse_stale = retained.is_some_and(|retained| {
             retained.generation != input.generation
-                || retained.not_after_micros < writer.horizons.outcome_micros
+                || retained.not_after_micros < writer.horizons.generation_micros
         });
         if state.head != input.selected_head
             || state.counters != input.prior_shared_counts

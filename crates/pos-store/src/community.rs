@@ -70,7 +70,7 @@ pub use observation::{
     CommunityObservationRecordsV1, CommunityObservationSourcesV1,
 };
 pub use pass_install::{
-    community_reservation_horizons_v1, community_reuse_horizon_bound_v1,
+    community_reservation_horizons_v1, community_reuse_horizon_v1,
     community_roster_quarantine_keys_v1, install_community_pass_profile_v1,
     CommunityOwnerHorizonsV1, CommunityReservationHorizonsV1,
 };
