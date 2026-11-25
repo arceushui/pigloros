@@ -224,8 +224,8 @@ network_probe() { # DIR
 # client-side errors (an executable that is not found, a bus error) and the
 # unit's own standard error. A start-job or unit failure that systemd-run does
 # not print can leave `stderr` empty: the unit's `journal` is then the
-# explanation. (With --quiet systemd-run reports only what the client itself
-# fails on; whether it also prints job failures is not verified here.)
+# explanation. (--quiet suppresses informational output; whether it also hides
+# a start-job failure is not verified here.)
 network_case() { # NAME VALUE
   local dir="network/$1" status=0
   mkdir -p "${dir}"
