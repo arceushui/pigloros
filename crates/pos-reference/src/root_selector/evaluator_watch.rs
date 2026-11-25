@@ -18,13 +18,15 @@
 
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
-use rustix::io::Errno;
 
-use super::io_error;
+use super::recovery_pending::report_diagnostic;
+use super::{io_error, DiagnosticSink};
 use crate::selector::SelectorBoundaryError;
 
 /// The provider attempt of one request: whether its AGR1 was authenticated
@@ -33,6 +35,9 @@ use crate::selector::SelectorBoundaryError;
 pub(super) struct InFlightAttempt {
     state: Mutex<AttemptState>,
     changed: Condvar,
+    /// Watchers blocked on `changed`, so a test can wait for one to arrive.
+    #[cfg(test)]
+    waiting: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -52,6 +57,12 @@ impl InFlightAttempt {
         self.changed.notify_all();
     }
 
+    /// How many watchers wait for a grant right now.
+    #[cfg(test)]
+    pub(super) fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::Acquire)
+    }
+
     /// The execute exchange ended: nothing is left to cancel from here.
     pub(super) fn finish(&self) {
         self.state().finished = true;
@@ -63,10 +74,14 @@ impl InFlightAttempt {
     fn wait_for_running_grant(&self) -> Option<[u8; 32]> {
         let mut state = self.state();
         while state.agr1_digest.is_none() && !state.finished {
+            #[cfg(test)]
+            self.waiting.fetch_add(1, Ordering::Release);
             state = self
                 .changed
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
+            #[cfg(test)]
+            self.waiting.fetch_sub(1, Ordering::Release);
         }
         let running = (!state.finished).then_some(state.agr1_digest);
         drop(state);
@@ -94,14 +109,14 @@ fn wait_for_hang_up(
 }
 
 /// Cancel the attempt once the evaluator hung up while it runs; report a
-/// failed poll, which ends the watch.
+/// failed poll, which ends the watch, to `diagnostics`.
 fn watch_evaluator(
     evaluator: &UnixStream,
     wake: &UnixStream,
     timeout: Option<&Timespec>,
     in_flight: &InFlightAttempt,
     cancel: impl FnOnce([u8; 32]),
-    report: impl FnOnce(Errno),
+    diagnostics: &DiagnosticSink,
 ) {
     match wait_for_hang_up(evaluator, wake, timeout) {
         Ok(hung_up) => {
@@ -112,15 +127,21 @@ fn watch_evaluator(
                 cancel(agr1_digest);
             }
         }
-        Err(errno) => report(errno),
+        Err(errno) => report_diagnostic(diagnostics, "evaluator watch failed", &errno),
     }
 }
 
 /// Run `execute` while a scoped thread watches `evaluator`. If the evaluator
 /// hangs up while an attempt with an authenticated AGR1 runs, `cancel` is
 /// called with that AGR1 digest, concurrently with `execute`. A poll failure
-/// goes to `report`. The watcher is always woken and joined, also when
+/// goes to `diagnostics`. The watcher is always woken and joined, also when
 /// `execute` panics, which then continues to unwind.
+///
+/// A panic in the watcher thread (that is, in `cancel`) is raised by the
+/// scope after `execute` returned: the result of `execute` is discarded and
+/// the caller's later steps, including SRQ1, never run. That is fail-closed
+/// and fatal for the connection handler; the namespace lease held by
+/// `execute_ordered` is not released either (it is not on a panic path).
 ///
 /// # Errors
 /// Fails closed, before `execute` runs, when the wake pair or the watcher
@@ -129,7 +150,7 @@ pub(super) fn execute_watched<R>(
     evaluator: &UnixStream,
     in_flight: &InFlightAttempt,
     cancel: impl Fn([u8; 32]) + Sync,
-    report: impl Fn(Errno) + Sync,
+    diagnostics: &DiagnosticSink,
     execute: impl FnOnce() -> R,
 ) -> Result<R, SelectorBoundaryError> {
     UnixStream::pair()
@@ -138,10 +159,13 @@ pub(super) fn execute_watched<R>(
             thread::scope(|scope| {
                 thread::Builder::new()
                     .spawn_scoped(scope, || {
-                        watch_evaluator(evaluator, &woken, None, in_flight, &cancel, &report);
+                        watch_evaluator(evaluator, &woken, None, in_flight, &cancel, diagnostics);
                     })
                     .map_err(io_error)
                     .map(|_watcher| {
+                        // `AssertUnwindSafe` is sound here: after a panic `execute`
+                        // is never called again, and its captures are only
+                        // observed through the re-raised panic.
                         let outcome = catch_unwind(AssertUnwindSafe(execute));
                         in_flight.finish();
                         drop(wake);

@@ -12,6 +12,11 @@
 //! admission stays closed, the selector removes its own evaluator leaf and
 //! enters the same pending-recovery path.
 
+mod evaluator_watch;
+mod provider_control;
+mod recovery_pending;
+mod runtime_start;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
@@ -63,11 +68,6 @@ use crate::selector::recovery::{
 use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
 use crate::selector::SelectorBoundaryError;
 
-mod evaluator_watch;
-mod provider_control;
-mod recovery_pending;
-mod runtime_start;
-
 #[cfg(test)]
 use crate::selector_protocol::decode_request;
 use crate::selector_protocol::{
@@ -77,7 +77,7 @@ use crate::selector_protocol::{
 };
 use evaluator_watch::{execute_watched, InFlightAttempt};
 use provider_control::AttemptControl;
-use recovery_pending::{report_diagnostic, DiagnosticSink};
+use recovery_pending::DiagnosticSink;
 
 const CONTROL_LIMIT: u32 = 16 * 1024 * 1024;
 const CONTROL_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -1936,6 +1936,9 @@ impl EvaluationNamespaceBindings {
         Ok(())
     }
 
+    /// Run `execute` under the request's namespace lease and release the lease
+    /// with its outcome. A panic in `execute` does not release the lease; the
+    /// panic is fatal for the connection handler, so that case is moot.
     fn execute_ordered(
         &self,
         request: &crate::evaluator_protocol::EvaluationRequest,
@@ -2147,7 +2150,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             attempt_id: decoded.attempt_id,
             agr1_digest,
             timeout: provider_control::control_budget(provider),
-            active_wait: watchdog,
+            active_wait: provider_control::run_bound(provider, watchdog),
             diagnostics: &self.diagnostics,
         };
         let in_flight = InFlightAttempt::default();
@@ -2169,7 +2172,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                     stream,
                     &in_flight,
                     |agr1_digest| control(agr1_digest).cancel(),
-                    |errno| report_diagnostic(&self.diagnostics, "evaluator watch failed", &errno),
+                    &self.diagnostics,
                     || {
                         let mut provider_requests = SelectorProviderRequestAdmission::new(
                             &admission,
@@ -6065,13 +6068,14 @@ mod tests {
         let path = directory.path().join("provider.sock");
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
-        // A provider that reads each request and closes without answering.
-        let provider = thread::spawn(move || -> std::io::Result<()> {
+        // A provider that reads each request and closes without answering; it
+        // hands its listener back, still bound.
+        let provider = thread::spawn(move || -> std::io::Result<UnixListener> {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept()?;
                 stream.read_to_end(&mut Vec::new())?;
             }
-            Ok(())
+            Ok(listener)
         });
         let selected =
             SelectedProviderTransport::new(ProviderTransport::from_path_for_test(&path)?);
@@ -6105,7 +6109,7 @@ mod tests {
             forward(&selected),
             (unreachable.clone(), unreachable.clone())
         );
-        provider.join().map_err(|_| "provider panicked")??;
+        let listener = provider.join().map_err(|_| "provider panicked")??;
 
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = selected
@@ -6116,6 +6120,12 @@ mod tests {
         }))
         .is_err());
         assert_eq!(forward(&selected), (unreachable.clone(), unreachable));
+        // The listener is alive, and the poisoned selector never connected.
+        listener.set_nonblocking(true)?;
+        assert_eq!(
+            listener.accept().err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WouldBlock)
+        );
         Ok(())
     }
 
@@ -7563,6 +7573,8 @@ mod tests {
         eof_before_control: Vec<bool>,
         /// The bytes the evaluator received before each EOF.
         reply: Vec<u8>,
+        /// How many times the provider's execute ran.
+        executed: usize,
         /// Each SCQ1: the attempt ID and the AGR1 digest it named.
         cancelled: Vec<([u8; 16], [u8; 32])>,
         /// Each SRQ1: the attempt ID, the AGR1 digest it named and the
@@ -7612,6 +7624,10 @@ mod tests {
             watchdog: Duration,
             admission: &mut dyn ProviderRequestAdmission,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .executed += 1;
             self.inner.execute(
                 admitted, commitment, evaluation, spx1, input, watchdog, admission,
             )
@@ -7742,7 +7758,10 @@ mod tests {
         client.write_all(&encoded.attempt_stream)?;
         client.shutdown(std::net::Shutdown::Write)?;
         service.handle_connection(server)?;
-        let seen = std::mem::take(&mut *seen.lock().map_err(|_| "seen poisoned")?);
+        let mut seen = std::mem::take(&mut *seen.lock().map_err(|_| "seen poisoned")?);
+        // Whatever no control request consumed: the reply when none was sent.
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.read_to_end(&mut seen.reply)?;
         Ok((seen, sink.text()))
     }
 
@@ -7841,6 +7860,10 @@ mod tests {
             }),
         ] {
             let (seen, diagnostics) = control_with(result, true)?;
+            // The provider ran, the evaluator got its conflict reply, and no
+            // control request was sent.
+            assert_eq!(seen.executed, 1);
+            assert!(!seen.reply.is_empty());
             assert!(seen.calls.is_empty());
             assert!(diagnostics.is_empty());
         }

@@ -18,8 +18,9 @@
 //!   index): a second call repeats the same IDs, which the provider answers as
 //!   exact repeats, and a refusal adds no ledger entry.
 //! - A hung provider can occupy one selector connection handler for about the
-//!   attempt watchdog, plus the SCQ1 budget, plus the SRQ1 budget, plus the
-//!   pauses between retries.
+//!   attempt watchdog, plus two SCQ1 budgets (the evaluator watcher's and
+//!   `settle_exhausted`'s are separate calls), plus one SRQ1 budget. The
+//!   pauses between retries lie inside each budget.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -64,14 +65,26 @@ fn derive(
     identity
 }
 
+/// BHC1 limit 16 as the provider reads it: the interval a pending response
+/// is waited for. BHC1 always carries every limit ID, as the provider's own
+/// `control_interval` relies on.
+fn control_interval(admitted: &AdmittedSandboxProvider) -> Duration {
+    Duration::from_millis(admitted.broker_hard_caps()[usize::from(PENDING_WAIT_LIMIT_ID)].value)
+}
+
 /// The exchange budget of one control operation: the provider waits up to
 /// BHC1 limit 16 for a pending response, read here from the same installed
 /// caps, plus a fixed margin.
 pub(super) fn control_budget(admitted: &AdmittedSandboxProvider) -> Duration {
-    // BHC1 always carries every limit ID, as the provider's own
-    // `control_interval` relies on.
-    let wait = admitted.broker_hard_caps()[usize::from(PENDING_WAIT_LIMIT_ID)].value;
-    Duration::from_millis(wait).saturating_add(CONTROL_MARGIN)
+    control_interval(admitted).saturating_add(CONTROL_MARGIN)
+}
+
+/// How long a still running attempt may take to end: the attempt watchdog,
+/// plus the window of its input transfer. ELM1 limit 16 is that window, and
+/// BHC1 limit 16 is its hard cap, so the selector bounds it by the cap (R15
+/// §3.6 item 2(a): "input window, watchdog and cleanup budget").
+pub(super) fn run_bound(admitted: &AdmittedSandboxProvider, watchdog: Duration) -> Duration {
+    watchdog.saturating_add(control_interval(admitted))
 }
 
 /// One attempt of one admitted provider runtime.
@@ -82,9 +95,9 @@ pub(super) struct AttemptControl<'a, T: ProviderExecutor> {
     pub(super) agr1_digest: [u8; 32],
     /// The overall budget of SRQ1 (see [`control_budget`]).
     pub(super) timeout: Duration,
-    /// How long the attempt itself may still run: SCQ1 waits for it to end
-    /// before the provider's own interval starts (R15 §3.6 item 2(a)). The
-    /// selector bounds a run by the attempt watchdog.
+    /// How long the attempt itself may still run, [`run_bound`]: SCQ1 waits
+    /// for it to end before the provider's own interval starts (R15 §3.6
+    /// item 2(a)).
     pub(super) active_wait: Duration,
     pub(super) diagnostics: &'a DiagnosticSink,
 }
@@ -101,7 +114,7 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
     /// Reconcile the attempt whose terminal the selector accepted, and
     /// report what the evidence check could and could not prove.
     pub(super) fn reconcile(&self, accepted: Option<&ReconciliationEvidenceFields>) {
-        let result = retrying(self.timeout, |index, left| {
+        let result = retrying(self.timeout, thread::sleep, |index, left| {
             let (request_id, nonce) = self.identities(SandboxProviderOperation::Reconcile, index);
             self.admitted
                 .reconcile_request(request_id, nonce, self.attempt_id, self.agr1_digest)
@@ -131,8 +144,9 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
         self.reconcile(None);
     }
 
-    /// SCQ1 waits for a still running attempt to end (its watchdog, then the
-    /// forced-cleanup ceiling), then for the provider's own interval.
+    /// SCQ1 waits for a still running attempt to end (its input window and
+    /// watchdog, then the forced-cleanup ceiling), then for the provider's
+    /// own interval.
     const fn cancel_budget(&self) -> Duration {
         self.timeout
             .saturating_add(self.active_wait)
@@ -142,7 +156,7 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
     /// Cancel the attempt: its recovery was exhausted, or the evaluator hung
     /// up while it ran.
     pub(super) fn cancel(&self) {
-        let result = retrying(self.cancel_budget(), |index, left| {
+        let result = retrying(self.cancel_budget(), thread::sleep, |index, left| {
             let (request_id, nonce) = self.identities(SandboxProviderOperation::Cancel, index);
             self.admitted
                 .cancel_request(request_id, nonce, self.attempt_id, self.agr1_digest)
@@ -182,9 +196,11 @@ const fn is_transient(error: SelectorBoundaryError) -> bool {
 
 /// Send `attempt(index, left)` within one overall `budget`. A transient
 /// failure gets one exact repeat. A retryable refusal gets the next distinct
-/// request, up to the N11 bound.
+/// request, up to the N11 bound, after `pause` of at most [`RETRY_PAUSE`] and
+/// at most what remains of the budget.
 fn retrying<R>(
     budget: Duration,
+    pause: impl Fn(Duration),
     mut attempt: impl FnMut(u8, Duration) -> Result<R, ProviderControlError>,
 ) -> Result<R, ProviderControlError> {
     let started = Instant::now();
@@ -205,7 +221,7 @@ fn retrying<R>(
             {
                 index += 1;
                 // Bounded by what remains of the one overall budget.
-                thread::sleep(RETRY_PAUSE.min(budget.saturating_sub(started.elapsed())));
+                pause(RETRY_PAUSE.min(budget.saturating_sub(started.elapsed())));
             }
             outcome => return outcome,
         }

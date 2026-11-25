@@ -1,6 +1,8 @@
 use std::io::Write;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
+
+use rustix::io::Errno;
 
 use super::*;
 
@@ -12,6 +14,48 @@ fn no_wait() -> Timespec {
     Timespec {
         tv_sec: 0,
         tv_nsec: 0,
+    }
+}
+
+/// A diagnostics sink that discards everything.
+fn quiet() -> DiagnosticSink {
+    Mutex::new(Box::new(std::io::sink()))
+}
+
+/// A diagnostics sink whose lines the test can read back.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn sink(&self) -> DiagnosticSink {
+        Mutex::new(Box::new(self.clone()))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
+    }
+}
+
+impl Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Wait until a watcher blocks on the grant, so the caller can be sure the
+/// watcher reached `wait_for_running_grant` before the execute ends.
+fn wait_for_watcher(in_flight: &InFlightAttempt) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while in_flight.waiting() == 0 && Instant::now() < deadline {
+        thread::yield_now();
     }
 }
 
@@ -105,7 +149,7 @@ fn a_failed_poll_is_reported_and_cancels_nothing() -> TestResult {
         wait_for_hang_up(&evaluator, &woken, Some(&invalid)),
         Err(Errno::INVAL)
     );
-    let mut reported = Vec::new();
+    let capture = Capture::default();
     let mut cancelled = Vec::new();
     watch_evaluator(
         &evaluator,
@@ -113,9 +157,9 @@ fn a_failed_poll_is_reported_and_cancels_nothing() -> TestResult {
         Some(&invalid),
         &InFlightAttempt::default(),
         |digest| cancelled.push(digest),
-        |errno| reported.push(errno),
+        &capture.sink(),
     );
-    assert_eq!(reported, [Errno::INVAL]);
+    assert!(capture.text().contains("evaluator watch failed"));
     assert!(cancelled.is_empty());
     drop((peer, wake));
     Ok(())
@@ -150,7 +194,7 @@ fn cancelled(
         None,
         &in_flight,
         |digest| cancelled.push(digest),
-        |_| {},
+        &quiet(),
     );
     Ok(cancelled)
 }
@@ -181,7 +225,7 @@ fn a_hang_up_before_the_grant_cancels_once_the_grant_arrives() -> TestResult {
                 |digest| {
                     sender.send(digest).ok();
                 },
-                |_| {},
+                &quiet(),
             );
         });
         in_flight.granted(DIGEST);
@@ -208,7 +252,7 @@ fn a_finished_execute_ends_a_watch_that_waits_for_a_grant() -> TestResult {
                 |digest| {
                     sender.send(digest).ok();
                 },
-                |_| {},
+                &quiet(),
             );
         });
         in_flight.finish();
@@ -219,28 +263,54 @@ fn a_finished_execute_ends_a_watch_that_waits_for_a_grant() -> TestResult {
 }
 
 #[test]
-fn an_execute_with_a_live_evaluator_is_never_cancelled() -> TestResult {
+fn an_execute_with_a_live_evaluator_returns_its_result() -> TestResult {
     let (evaluator, peer) = UnixStream::pair()?;
     let in_flight = InFlightAttempt::default();
-    let (sender, receiver) = mpsc::channel();
     let result = execute_watched(
         &evaluator,
         &in_flight,
-        |digest| {
-            sender.send(digest).ok();
-        },
         |_| {},
+        &quiet(),
         || {
             in_flight.granted(DIGEST);
             7
         },
     )?;
     assert_eq!(result, 7);
-    assert!(receiver.try_recv().is_err());
-    // The watcher was joined: a later write shutdown cancels nothing.
-    peer.shutdown(std::net::Shutdown::Write)?;
-    evaluator.shutdown(std::net::Shutdown::Write)?;
-    assert!(receiver.try_recv().is_err());
+    drop(peer);
+    Ok(())
+}
+
+/// The hazard the module documents: a write shutdown of the selector's own
+/// end, after the peer's half-close, while the watcher runs, cancels the
+/// attempt. That is why the selector shuts down only after the join.
+#[test]
+fn a_write_shutdown_of_the_selectors_end_during_the_watch_cancels_the_attempt() -> TestResult {
+    let (evaluator, peer) = UnixStream::pair()?;
+    let in_flight = InFlightAttempt::default();
+    let (sender, receiver) = mpsc::channel();
+    let sender = Mutex::new(sender);
+    let attempt = &in_flight;
+    let watched = &evaluator;
+    let cancelled = execute_watched(
+        &evaluator,
+        &in_flight,
+        |digest| {
+            sender
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send(digest)
+                .ok();
+        },
+        &quiet(),
+        move || {
+            attempt.granted(DIGEST);
+            peer.shutdown(std::net::Shutdown::Write).ok();
+            watched.shutdown(std::net::Shutdown::Write).ok();
+            receiver.recv_timeout(Duration::from_secs(10))
+        },
+    )?;
+    assert_eq!(cancelled, Ok(DIGEST));
     Ok(())
 }
 
@@ -261,7 +331,7 @@ fn an_evaluator_that_drops_mid_execute_has_its_attempt_cancelled_while_it_runs()
                 .send(digest)
                 .ok();
         },
-        |_| {},
+        &quiet(),
         move || {
             attempt.granted(DIGEST);
             drop(peer);
@@ -278,7 +348,18 @@ fn an_execute_that_ends_with_a_hung_up_evaluator_and_no_grant_still_returns() ->
     drop(peer);
     assert!(finishes(move || {
         let in_flight = InFlightAttempt::default();
-        execute_watched(&evaluator, &in_flight, |_| {}, |_| {}, || ()).ok();
+        execute_watched(
+            &evaluator,
+            &in_flight,
+            |_| {},
+            &quiet(),
+            || {
+                // The watcher is blocked on the grant before the execute ends,
+                // so only `finish()` can release it.
+                wait_for_watcher(&in_flight);
+            },
+        )
+        .ok();
     }));
     Ok(())
 }
@@ -295,8 +376,11 @@ fn an_execute_that_panics_with_a_hung_up_evaluator_still_wakes_the_watcher() -> 
                 &evaluator,
                 &in_flight,
                 |_| {},
-                |_| {},
-                || resume_unwind(Box::new("the execute failed")),
+                &quiet(),
+                || {
+                    wait_for_watcher(&in_flight);
+                    resume_unwind(Box::new("the execute failed"))
+                },
             )
             .ok();
         }))
@@ -304,6 +388,42 @@ fn an_execute_that_panics_with_a_hung_up_evaluator_still_wakes_the_watcher() -> 
         outcome.send(panicked).ok();
     });
     // The panic reaches the caller; a watcher left waiting would hang it.
+    assert_eq!(receiver.recv_timeout(Duration::from_secs(10)), Ok(true));
+    Ok(())
+}
+
+#[test]
+fn a_panicking_cancel_discards_the_execute_result_and_unwinds_the_caller() -> TestResult {
+    let (evaluator, peer) = UnixStream::pair()?;
+    drop(peer);
+    let (outcome, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let in_flight = InFlightAttempt::default();
+        let (cancelled, cancel_ran) = mpsc::channel();
+        let cancelled = Mutex::new(cancelled);
+        let returned = catch_unwind(AssertUnwindSafe(|| {
+            execute_watched(
+                &evaluator,
+                &in_flight,
+                |_| {
+                    cancelled
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .send(())
+                        .ok();
+                    resume_unwind(Box::new("the cancel failed"))
+                },
+                &quiet(),
+                || {
+                    in_flight.granted(DIGEST);
+                    cancel_ran.recv_timeout(Duration::from_secs(10)).ok();
+                    7
+                },
+            )
+        }));
+        // The scope raised the watcher's panic; no result came back.
+        outcome.send(returned.is_err()).ok();
+    });
     assert_eq!(receiver.recv_timeout(Duration::from_secs(10)), Ok(true));
     Ok(())
 }

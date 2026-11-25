@@ -432,17 +432,31 @@ fn a_cancel_budget_adds_the_time_the_attempt_may_still_run() -> TestResult {
     Ok(())
 }
 
-fn count_calls(
-    budget: Duration,
-    failure: impl Fn() -> ProviderControlError,
-) -> (usize, Result<(), ProviderControlError>) {
+/// How `retrying` behaved for a failure that never ends: the calls made, the
+/// result, and the pauses it asked for (none are slept).
+struct Run {
+    calls: usize,
+    result: Result<(), ProviderControlError>,
+    paused: Vec<Duration>,
+}
+
+fn count_calls(budget: Duration, failure: impl Fn() -> ProviderControlError) -> Run {
     let mut calls = 0;
-    let result = retrying(budget, |_, left| {
-        calls += 1;
-        assert!(left <= budget);
-        Err(failure())
-    });
-    (calls, result)
+    let paused = std::cell::RefCell::new(Vec::new());
+    let result = retrying(
+        budget,
+        |pause| paused.borrow_mut().push(pause),
+        |_, left| {
+            calls += 1;
+            assert!(left <= budget);
+            Err(failure())
+        },
+    );
+    Run {
+        calls,
+        result,
+        paused: paused.into_inner(),
+    }
 }
 
 #[test]
@@ -452,46 +466,39 @@ fn a_retryable_refusal_is_sent_exactly_four_distinct_times_with_a_pause_between(
         ProviderControlRefusal::Busy12,
         ProviderControlRefusal::CleanupFailed14,
     ] {
-        let started = Instant::now();
-        let (calls, result) = count_calls(Duration::from_mins(1), || {
+        let run = count_calls(Duration::from_mins(1), || {
             ProviderControlError::Refused(refusal)
         });
-        assert_eq!(calls, usize::from(MAX_DISTINCT_REQUESTS));
-        assert_eq!(result, Err(ProviderControlError::Refused(refusal)));
-        // A pause follows each of the three refusals that are asked again.
-        assert!(started.elapsed() >= RETRY_PAUSE * 3);
+        assert_eq!(run.calls, usize::from(MAX_DISTINCT_REQUESTS));
+        assert_eq!(run.result, Err(ProviderControlError::Refused(refusal)));
+        // One pause follows each of the three refusals that are asked again.
+        assert_eq!(run.paused, [RETRY_PAUSE; 3]);
     }
 }
 
 #[test]
-fn the_pause_between_retries_never_outlasts_the_budget() {
-    // The pause is cut to what remains, so the budget is spent exactly when
-    // the first refusal has been paused for, and no second request is sent.
-    let budget = Duration::from_millis(30);
-    let (calls, result) = count_calls(budget, || {
-        ProviderControlError::Refused(ProviderControlRefusal::Busy12)
-    });
-    assert_eq!(calls, 1);
-    assert_eq!(
-        result,
-        Err(ProviderControlError::Boundary(
-            SelectorBoundaryError::SelectorUnavailable
-        ))
-    );
-}
-
-#[test]
-fn a_permanent_refusal_is_sent_once() {
+fn a_permanent_refusal_is_sent_once_without_a_pause() {
     for refusal in [
         ProviderControlRefusal::UnknownAttempt15,
         ProviderControlRefusal::RequestIdReuse16,
         ProviderControlRefusal::Other,
     ] {
-        let (calls, _) = count_calls(Duration::from_mins(1), || {
+        let run = count_calls(Duration::from_mins(1), || {
             ProviderControlError::Refused(refusal)
         });
-        assert_eq!(calls, 1);
+        assert_eq!(run.calls, 1);
+        assert!(run.paused.is_empty());
     }
+}
+
+#[test]
+fn the_pause_between_retries_never_exceeds_the_budget() {
+    let budget = Duration::from_millis(30);
+    let run = count_calls(budget, || {
+        ProviderControlError::Refused(ProviderControlRefusal::Busy12)
+    });
+    assert!(!run.paused.is_empty());
+    assert!(run.paused.iter().all(|pause| *pause <= budget));
 }
 
 #[test]
@@ -501,22 +508,23 @@ fn only_a_transient_failure_gets_one_exact_repeat() {
         (SelectorBoundaryError::Io, 2),
         (SelectorBoundaryError::ArtifactInvalid, 1),
     ] {
-        let (calls, result) = count_calls(Duration::from_mins(1), || {
+        let run = count_calls(Duration::from_mins(1), || {
             ProviderControlError::Boundary(error)
         });
-        assert_eq!(calls, expected);
-        assert_eq!(result, Err(ProviderControlError::Boundary(error)));
+        assert_eq!(run.calls, expected);
+        assert_eq!(run.result, Err(ProviderControlError::Boundary(error)));
+        assert!(run.paused.is_empty());
     }
 }
 
 #[test]
 fn a_spent_budget_sends_nothing() {
-    let (calls, result) = count_calls(Duration::ZERO, || {
+    let run = count_calls(Duration::ZERO, || {
         ProviderControlError::Refused(ProviderControlRefusal::Busy12)
     });
-    assert_eq!(calls, 0);
+    assert_eq!(run.calls, 0);
     assert_eq!(
-        result,
+        run.result,
         Err(ProviderControlError::Boundary(
             SelectorBoundaryError::SelectorUnavailable
         ))
@@ -553,5 +561,17 @@ fn a_request_that_cannot_be_built_is_reported_without_contacting_the_provider() 
     .reconcile(None);
     assert!(sink.text().contains("provider reconcile failed"));
     assert!(requests(idle)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_running_attempt_is_bounded_by_its_watchdog_and_the_input_window_cap() -> TestResult {
+    let fixture = authenticated_transport_fixture()?;
+    let caps = fixture.provider.broker_hard_caps();
+    let window = Duration::from_millis(caps[usize::from(PENDING_WAIT_LIMIT_ID)].value);
+    assert_eq!(
+        run_bound(&fixture.provider, Duration::from_secs(40)),
+        Duration::from_secs(40) + window
+    );
     Ok(())
 }
