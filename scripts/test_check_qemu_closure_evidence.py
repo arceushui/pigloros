@@ -321,6 +321,15 @@ BAD_ENTRY = "entry point is in no executable loadable segment"
 NOT_CARRIED = "does not carry the adapter exactly once"
 
 
+def table_at_end() -> bytes:
+    """The adapter with its program header table moved to the very end of the file."""
+    data = bytearray(X86_ADAPTER)
+    start = len(data) - 112
+    data[start:] = data[64:176]
+    struct.pack_into("<Q", data, 32, start)
+    return bytes(data)
+
+
 def elf_accepted() -> list[bytes]:
     """Valid static x86-64 executables at the edges of the rules."""
     total = len(X86_ADAPTER)
@@ -333,7 +342,14 @@ def elf_accepted() -> list[bytes]:
     bss = patched(104, struct.pack("<Q", total + 5000))
     bss = bss[:96] + struct.pack("<Q", total - 1000) + bss[104:]
     bss = bss[:24] + struct.pack("<Q", 0x400000 + total + 100) + bss[32:]
-    return [patched(24, struct.pack("<Q", 0x400000)), bss]
+    # The file's executable type as well as the position-independent one (e_type 2 and 3 are both
+    # accepted: a static glibc link is ET_DYN, a non-PIE one ET_EXEC); a segment that starts inside
+    # the file and ends exactly at its end; the program header table ending exactly at the end of
+    # the file; and a file of exactly the size floor.
+    offset_segment = patched(72, struct.pack("<Q", 100))
+    offset_segment = offset_segment[:96] + struct.pack("<Q", total - 100) + offset_segment[104:]
+    return [patched(24, struct.pack("<Q", 0x400000)), bss, patched(16, struct.pack("<H", 2)),
+            offset_segment, table_at_end(), static_elf(62, b"adapter", size=checker.MIN_EXECUTABLE_BYTES - 176)]
 
 
 def elf_defects() -> list[tuple[str, bytes]]:
@@ -362,8 +378,16 @@ def elf_defects() -> list[tuple[str, bytes]]:
         (NO_LOAD, patched(56, struct.pack("<H", 0))), (NO_LOAD, patched(64, struct.pack("<I", 4))),
         # A program header table beyond the file, or too small an entry.
         (BAD_HEADERS, patched(32, struct.pack("<Q", 10**9))), (BAD_HEADERS, patched(54, struct.pack("<H", 8))),
+        # One byte below the smallest entry, a table one byte past the end of the file, and a table
+        # of which only the first entry fits (so that the entry count matters).
+        (BAD_HEADERS, patched(54, struct.pack("<H", 55))),
+        (BAD_HEADERS, patched(32, struct.pack("<Q", len(X86_ADAPTER) - 111))),
+        (BAD_HEADERS, patched(32, struct.pack("<Q", len(X86_ADAPTER) - 56))),
         # Truncated above the size floor with the headers intact; and a segment larger than the file.
         (TRUNCATED, X86_ADAPTER[:150_000]), (TRUNCATED, patched(96, struct.pack("<Q", 300_000))),
+        # A file size that fits the file only from offset zero: with the segment's own offset it
+        # reaches 100 bytes past the end.
+        (TRUNCATED, patched(72, struct.pack("<Q", 100))),
         # A file size above the memory size while inside the file, with the entry point still inside
         # the memory size (176 < 200), so that no other rule refuses it.
         (SEGMENT_SIZES, patched(104, struct.pack("<Q", 200))),
@@ -1275,10 +1299,24 @@ class EvidenceTests(unittest.TestCase):
             self.verdict(change=lambda f: f.update({**executable_files("x86_64", constant),
                                                     "guest/cases/mountfsd-reply/reply": resized}))
 
+    def test_the_shell_scripts_parse(self):
+        # The Python in build-images.sh sits in a single-quoted shell string: an apostrophe in it
+        # ends the quote, which no test of the extracted Python can see.
+        for name in ("deploy/nixos/qemu-evidence/build-images.sh", "deploy/nixos/qemu-evidence/collect-evidence.sh",
+                     "scripts/qemu-closure-evidence.sh"):
+            with self.subTest(script=name):
+                parsed = subprocess.run(["bash", "-n", str(ROOT / name)], capture_output=True, text=True,
+                                        check=False)
+                self.assertEqual(parsed.returncode, 0, parsed.stderr)
+
     def test_build_images_applies_the_checkers_rules_to_the_adapter(self):
         text = (ROOT / "deploy/nixos/qemu-evidence/build-images.sh").read_text(encoding="utf-8")
-        start = text.index("python3 -I -c '", text.index("(static_executable)")) + len("python3 -I -c '")
-        code = text[start:text.index("' \"${architecture}\" \"${ADAPTER}\"", start)]
+        start = text.index("python3 -I -c '", text.index("(static_executable)"))
+        end = text.index('"${ADAPTER}"', start) + len('"${ADAPTER}"')
+        block = text[start:end]
+        # Between the shell's quotes there is no quote; run the block through bash as the script does.
+        self.assertNotIn("'", block[len("python3 -I -c '"):block.index("' \"${architecture}\"")])
+        script = 'architecture="$1"\nADAPTER="$2"\n' + block + "\n"
         aarch64 = static_elf(checker.ELF_MACHINES["aarch64"], b"adapter")
         names = {"x86-64": "x86_64", "arm64": "aarch64"}
         # Each case is accepted (no message) or refused by the rule whose message both copies give.
@@ -1291,15 +1329,15 @@ class EvidenceTests(unittest.TestCase):
             path = pathlib.Path(directory) / "adapter"
             for name, adapter, message in cases:
                 path.write_bytes(adapter)
-                script = subprocess.run([sys.executable, "-I", "-c", code, name, str(path)],
-                                        capture_output=True, text=True, check=False)
+                run = subprocess.run(["bash", "-c", script, "bash", name, str(path)],
+                                     capture_output=True, text=True, check=False)
                 with self.subTest(name=name, size=len(adapter), message=message):
                     if message is None:
-                        self.assertEqual(script.returncode, 0, script.stderr)
+                        self.assertEqual(run.returncode, 0, run.stderr)
                         checker.static_executable(adapter, names[name], "adapter")
                     else:
-                        self.assertNotEqual(script.returncode, 0)
-                        self.assertRegex(script.stderr, message)
+                        self.assertNotEqual(run.returncode, 0)
+                        self.assertRegex(run.stderr, message)
                         with self.assertRaisesRegex(checker.EvidenceError, message):
                             checker.static_executable(adapter, names[name], "adapter")
 
@@ -1490,7 +1528,7 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(checker.EvidenceError,
                                     r"stderr: '' \(empty: systemd-run printed nothing\); "
                                     r"probe files written: \[\]; "
-                                    r"the explanation is in guest/network/fb-1/journal"):
+                                    r"look in guest/network/fb-1/journal"):
             self.verdict(change=logged_only)
         # A record with a missing run file or an unexpected file is named precisely, with the
         # probe files that exist.
