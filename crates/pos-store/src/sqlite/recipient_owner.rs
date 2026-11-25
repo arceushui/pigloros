@@ -188,7 +188,7 @@ thread_local! {
     > = const { std::cell::Cell::new(None) };
     static RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
-    static RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED: std::cell::Cell<bool> =
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_ABORT_ARMED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID: std::cell::Cell<Option<[u8; 16]>> =
         const { std::cell::Cell::new(None) };
@@ -226,6 +226,7 @@ impl Drop for RecipientExportPublicationTestFaultGuard {
     fn drop(&mut self) {
         RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|fault| fault.set(None));
         RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(|export_id| export_id.set(None));
+        RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_ABORT_ARMED.with(|armed| armed.set(false));
     }
 }
 
@@ -286,41 +287,36 @@ fn recipient_export_publication_test_sync_fault(
     }
 }
 
+// A SQLite commit hook needs the connection mutably, which the fenced
+// publication steps only borrow shared. The gate is therefore installed once
+// per publication and the fenced steps arm it for the catalog commit.
 #[cfg(feature = "test-support")]
-fn install_recipient_export_publication_test_commit_abort(
+fn install_recipient_export_publication_test_commit_gate(
     connection: &mut Connection,
 ) -> Result<(), CoreError> {
-    if !take_recipient_export_publication_test_fault(
-        RecipientExportPublicationTestFaultV1::CatalogCommit,
-    ) {
-        return Ok(());
-    }
-    let abort_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let callback_abort_once = std::sync::Arc::clone(&abort_once);
     connection
-        .commit_hook(Some(move || {
-            callback_abort_once.swap(false, std::sync::atomic::Ordering::AcqRel)
+        .commit_hook(Some(|| {
+            RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_ABORT_ARMED.with(|armed| armed.replace(false))
         }))
         .map_err(storage_error)
-        .map(|()| {
-            RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED
-                .with(|installed| installed.set(true));
-        })
 }
 
 #[cfg(feature = "test-support")]
-fn clear_recipient_export_publication_test_commit_hook(
+fn arm_recipient_export_publication_test_commit_abort() {
+    if take_recipient_export_publication_test_fault(
+        RecipientExportPublicationTestFaultV1::CatalogCommit,
+    ) {
+        RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_ABORT_ARMED.with(|armed| armed.set(true));
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn clear_recipient_export_publication_test_commit_gate(
     connection: &mut Connection,
 ) -> Result<(), CoreError> {
-    let installed = RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED
-        .with(|installed| installed.replace(false));
-    if installed {
-        connection
-            .commit_hook::<fn() -> bool>(None)
-            .map_err(storage_error)
-    } else {
-        Ok(())
-    }
+    connection
+        .commit_hook::<fn() -> bool>(None)
+        .map_err(storage_error)
 }
 
 #[cfg(test)]
@@ -1045,6 +1041,8 @@ impl SqliteStore {
         // transaction, so establish the ADR-098 durability floor before the
         // writer reservation is taken.
         let previous_synchronous = ensure_recipient_export_durability(&self.conn)?;
+        #[cfg(feature = "test-support")]
+        install_recipient_export_publication_test_commit_gate(&mut self.conn)?;
         let mut result = Err(RecipientExportPublicationErrorV1::Store(
             CoreError::Storage("recipient export consent fence did not execute".to_owned()),
         ));
@@ -1075,6 +1073,10 @@ impl SqliteStore {
         )
         .map_err(RecipientExportPublicationErrorV1::Consent)
         .and(result);
+        #[cfg(feature = "test-support")]
+        let result = clear_recipient_export_publication_test_commit_gate(&mut self.conn)
+            .map_err(RecipientExportPublicationErrorV1::Store)
+            .and(result);
         finish_recipient_export_durability(&self.conn, previous_synchronous, result)
     }
 
@@ -1099,7 +1101,7 @@ impl SqliteStore {
     }
 
     fn publish_recipient_export_under_fences(
-        &mut self,
+        &self,
         owner: &RecipientKeyOwnerV1,
         request: &RecipientExportRequestV1<'_>,
         expected_logical_head: Seq,
@@ -1121,32 +1123,26 @@ impl SqliteStore {
             Ok(value) => value,
             Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
         };
-        let result =
-            match registry.with_encryption_authorization(identity, registered_digest, || {
-                // The registry authorization includes the commit itself. The
-                // SQLite writer reservation prevents a concurrent rotation or
-                // destruction from changing the active role-4 identity between
-                // this check and the catalog visibility marker.
-                let result = self.publish_recipient_export_with_registered_material(
-                    owner,
-                    request,
-                    registered_digest,
-                    export_id,
-                    logical_head,
-                );
-                finish_recipient_export_transaction(&self.conn, result)
-            }) {
-                Ok(publication) => publication,
-                Err(error) => finish_recipient_export_transaction(
-                    &self.conn,
-                    Err(RecipientExportPublicationErrorV1::Registry(error)),
-                ),
-            };
-        #[cfg(feature = "test-support")]
-        let result = clear_recipient_export_publication_test_commit_hook(&mut self.conn)
-            .map_err(RecipientExportPublicationErrorV1::Store)
-            .and(result);
-        result
+        match registry.with_encryption_authorization(identity, registered_digest, || {
+            // The registry authorization includes the commit itself. The
+            // SQLite writer reservation prevents a concurrent rotation or
+            // destruction from changing the active role-4 identity between
+            // this check and the catalog visibility marker.
+            let result = self.publish_recipient_export_with_registered_material(
+                owner,
+                request,
+                registered_digest,
+                export_id,
+                logical_head,
+            );
+            finish_recipient_export_transaction(&self.conn, result)
+        }) {
+            Ok(publication) => publication,
+            Err(error) => finish_recipient_export_transaction(
+                &self.conn,
+                Err(RecipientExportPublicationErrorV1::Registry(error)),
+            ),
+        }
     }
 
     fn pre_authorize_recipient_export_publication(
@@ -1233,7 +1229,7 @@ impl SqliteStore {
     }
 
     fn publish_recipient_export_with_registered_material(
-        &mut self,
+        &self,
         owner: &RecipientKeyOwnerV1,
         request: &RecipientExportRequestV1<'_>,
         registered_digest: pos_core::Hash,
@@ -1299,15 +1295,8 @@ impl SqliteStore {
                                 record_recipient_export_catalog(&self.conn, owner, &publication)?;
                                 remove_recipient_export_pending(&self.conn, export_id)?;
                                 #[cfg(feature = "test-support")]
-                                let publication =
-                                    install_recipient_export_publication_test_commit_abort(
-                                        &mut self.conn,
-                                    )
-                                    .map_err(RecipientExportPublicationErrorV1::Store)
-                                    .map(|()| publication);
-                                #[cfg(not(feature = "test-support"))]
-                                let publication = Ok(publication);
-                                publication
+                                arm_recipient_export_publication_test_commit_abort();
+                                Ok(publication)
                             })
                     })
             })
@@ -4554,7 +4543,7 @@ mod tests {
     #[test]
     fn recipient_publication_pre_authorization_rejects_wrong_owner_and_missing_registry(
     ) -> RecipientTestResult {
-        let mut fixture = recipient_publication_fixture()?;
+        let fixture = recipient_publication_fixture()?;
         let expected_logical_head =
             SqliteStore::logical_head_unchecked_on(&fixture.store.conn, fixture.timeline)?;
         let wrong_owner_token = fixture.authority.record_grant_on_timeline(
@@ -5071,7 +5060,7 @@ mod tests {
     #[test]
     fn recipient_export_publication_rejects_missing_or_mismatched_material() -> RecipientTestResult
     {
-        let mut fixture = recipient_publication_fixture()?;
+        let fixture = recipient_publication_fixture()?;
         let registry = fixture
             .store
             .load_key_registry()?
@@ -5137,7 +5126,7 @@ mod tests {
     #[test]
     fn recipient_export_publication_rejects_tampered_inventory_and_private_key(
     ) -> RecipientTestResult {
-        let mut fixture = recipient_publication_fixture()?;
+        let fixture = recipient_publication_fixture()?;
         let request = recipient_publication_request(
             fixture.timeline,
             fixture.descriptor,
@@ -5386,7 +5375,7 @@ mod tests {
     #[test]
     fn recipient_export_pre_authorization_rejects_lost_pending_reservation() -> RecipientTestResult
     {
-        let mut fixture = recipient_publication_fixture()?;
+        let fixture = recipient_publication_fixture()?;
         ensure_recipient_export_catalog(&fixture.store.conn)?;
         fixture.store.conn.execute_batch(
             "CREATE TRIGGER remove_recipient_export_reservation
@@ -5746,7 +5735,7 @@ mod tests {
 
     #[test]
     fn recipient_export_publication_maps_source_export_failure() -> RecipientTestResult {
-        let mut fixture = recipient_publication_fixture()?;
+        let fixture = recipient_publication_fixture()?;
         let registry = fixture
             .store
             .load_key_registry()?
