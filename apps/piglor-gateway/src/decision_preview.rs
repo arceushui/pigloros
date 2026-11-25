@@ -10,8 +10,8 @@
 //! outcomes. Each store step runs as one command on the store worker
 //! ([`crate::executor::decision_preview`]).
 //!
-//! The routes, the problem mapping and the JSON rendering belong to the
-//! route layer (#305 C3); nothing here names an HTTP type.
+//! The routes, the problem mapping and the JSON rendering are [`route`];
+//! nothing else here names an HTTP type.
 
 use std::{
     collections::HashMap,
@@ -35,6 +35,10 @@ use crate::{
     mode_profile::GatewayModeProfileIdV1,
     Gateway, GatewayError, GatewayOperationPermitV1,
 };
+
+// Public so its crate-only items satisfy `unreachable_pub` and
+// `clippy::redundant_pub_crate`, as the crate's other route modules.
+pub mod route;
 
 /// The derivation context of the `decision-previews` Timeline identity.
 const TIMELINE_CONTEXT: &str = "pigloros gateway decision previews timeline v1";
@@ -473,6 +477,8 @@ pub mod test_seam {
     }
 }
 
+// Public so the route tests share its fixtures, as
+// `executor::decision_preview::tests` is.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
+pub mod tests;

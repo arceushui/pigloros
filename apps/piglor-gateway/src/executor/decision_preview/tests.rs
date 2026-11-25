@@ -33,6 +33,8 @@ pub(crate) const ACTOR: &str = "01JC0GATEWAYF1XTVREACT0R00";
 const OTHER: &str = "01JC0GATEWAYQ0CA1ACT0R0000";
 const GOVERNANCE: &str = "01JC0GATEWAYW90G0VERN00001";
 const CONSENT: &str = "01JC0GATEWAYW90C0NSENT0001";
+/// The `privacy_export_ref` of the golden examples' room revision.
+const GOLDEN_CONSENT: &str = "01JC0GATEWAYW90PR1VACY0001";
 /// The installed profile of the fixture admissions.
 const PROFILE: &str = "deterministic-local-v1";
 const PROFILE_DIGEST: [u8; 32] = [1; 32];
@@ -441,7 +443,8 @@ pub(crate) fn interrupted(
     .map(|event| event.id)
 }
 
-fn erase(
+/// Erase the `kind` revision `reference` names, as #309 will.
+pub(crate) fn erase(
     host: &mut ErasureExecutionHostV1,
     kind: GatewayRevisionKindV1,
     reference: &PreviewRevisionRefV1,
@@ -1302,6 +1305,97 @@ fn the_provenance_record_is_deterministic_cbor() -> TestResult {
         assert_eq!(
             preview.provenance_digest,
             *blake3::hash(&expected).as_bytes()
+        );
+    }
+    Ok(())
+}
+
+/// ADR-140 section 9: every read golden example carries the derived
+/// `provenance.digest`. Its claim names the fixture Principal and actor, the
+/// golden room's consent and the example's inputs and profiles; its result
+/// is absent while `admitted`, `failed` with `input-deleted`, or `computed`.
+#[test]
+fn the_golden_examples_carry_the_derived_provenance_digest() -> TestResult {
+    for name in [
+        "committed",
+        "degraded",
+        "admitted-not-committed",
+        "failed",
+        "toss-up",
+        "insufficient-evidence",
+    ] {
+        let path = format!(
+            "{}/../../contracts/gateway/v1/examples/decision-preview-{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let example = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path)?)?;
+        let body = &example["response"]["body"];
+        let text = |pointer: &str| -> Result<String, String> {
+            body.pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| pointer.to_owned())
+        };
+        let reference = |member: &str| -> TestResult<PreviewRevisionRefV1> {
+            let revision = body["inputs"][member]["revision"]
+                .as_u64()
+                .and_then(NonZeroU64::new)
+                .ok_or("revision")?;
+            Ok(PreviewRevisionRefV1 {
+                id: Ulid::from_string(&text(&format!("/inputs/{member}/id"))?)?,
+                revision,
+                digest: digest_of(&text(&format!("/inputs/{member}/digest"))?)?,
+            })
+        };
+        let preview_id = EventId::from_ulid(Ulid::from_string(&text("/id")?)?);
+        let claim = PreviewClaimV1 {
+            principal_id: PRINCIPAL,
+            actor_entity_id: actor()?,
+            request: PreviewRequestV1 {
+                scenario_room: reference("scenario_room")?,
+                preference: reference("preference")?,
+                option_spec: reference("option_spec")?,
+                profile_id: text("/execution_profile/profile_id")?,
+            },
+            consent_ref: entity(GOLDEN_CONSENT)?,
+            profile_digest: digest_of(&text("/execution_profile/profile_digest")?)?,
+            mode_profile_digest: digest_of(&text("/mode_profile/mode_profile_digest")?)?,
+        };
+        let outcome = match text("/state")?.as_str() {
+            "admitted" => None,
+            "failed" => Some(PreviewOutcomeV1::Failed(PreviewFailureCodeV1::input_deleted())),
+            _ => Some(PreviewOutcomeV1::Computed),
+        };
+        let result = outcome.map(|outcome| StoredResultV1 {
+            event: DecisionPreviewResultEventV1 {
+                event_id: preview_id,
+                seq: Seq::from_u64(2),
+            },
+            payload: PreviewResultV1 {
+                preview_id,
+                outcome: outcome.clone(),
+            }
+            .to_payload(),
+            outcome,
+        });
+        let payload = claim.to_payload()?;
+        let claimed = ClaimedPreviewV1 {
+            preview_id,
+            seq: Seq::from_u64(1),
+            claim,
+            payload,
+            result,
+        };
+        assert_eq!(text("/mode_profile/mode_profile_digest")?, LOCAL_DIGEST);
+        let mode = DecisionPreviewModeV1 {
+            profile: GatewayModeProfileIdV1::Local,
+            digest: digest_of(LOCAL_DIGEST)?,
+            binding_epoch: NonZeroU64::MIN,
+        };
+        assert_eq!(
+            text("/provenance/digest")?,
+            hex(provenance_digest(&claimed, &mode)),
+            "{name}"
         );
     }
     Ok(())

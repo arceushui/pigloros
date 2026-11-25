@@ -1,6 +1,7 @@
 //! The Decision Preview admission and read on the production composition
 //! (ADR-140 C2): a bound `SQLite` store, a provisioned Local Principal with
-//! one consent, and the release or the seam installed-profile port.
+//! one consent, and the release or the seam installed-profile port. The
+//! fixtures are shared with the route tests of [`super::route`].
 
 use std::fmt::Debug;
 
@@ -37,16 +38,19 @@ use crate::{
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// The second actor of the fixture Principal, which admits no preview.
+pub(crate) const OTHER_ACTOR: &str = "01JC0GATEWAYQ0CA1ACT0R0000";
+
 /// A served Gateway over a bound `SQLite` store, its router and the
 /// `consent_ref` of its Principal's consent. The caller keeps the store's
 /// directory.
-struct Served {
-    gateway: Gateway,
-    app: Router,
-    consent: EntityId,
+pub(crate) struct Served {
+    pub(crate) gateway: Gateway,
+    pub(crate) app: Router,
+    pub(crate) consent: EntityId,
 }
 
-fn store_path(directory: &tempfile::TempDir) -> TestResult<String> {
+pub(crate) fn store_path(directory: &tempfile::TempDir) -> TestResult<String> {
     Ok(directory
         .path()
         .join("gateway.db")
@@ -80,16 +84,17 @@ async fn send(
     ))
 }
 
-/// The Local Principal of the fixture actor, with one consent the actor
-/// grants itself, and the operations the tests use: a stand-in for the
-/// Decision Preview grants, which the route layer adds (#305 C3).
+/// The Local Principal of the fixture actor and [`OTHER_ACTOR`], with one
+/// consent the fixture actor grants itself, the two Decision Preview grants,
+/// the Session read and consent revocation.
 fn provision() -> TestResult<LocalPrincipalProvisionV1> {
     let actor = actor()?;
     Ok(LocalPrincipalProvisionV1::try_new_provisioned(
         &PrincipalRefV1::try_new(PRINCIPAL, "local")?,
-        [actor],
+        [actor, entity(OTHER_ACTOR)?],
         [
-            GatewayOperationV1::READ_SCENARIO_ROOM,
+            GatewayOperationV1::CREATE_DECISION_PREVIEW,
+            GatewayOperationV1::READ_DECISION_PREVIEW,
             GatewayOperationV1::READ_SESSION,
             GatewayOperationV1::REVOKE_CONSENT,
         ],
@@ -106,7 +111,7 @@ fn provision() -> TestResult<LocalPrincipalProvisionV1> {
     )?)
 }
 
-async fn served(directory: &tempfile::TempDir) -> TestResult<Served> {
+pub(crate) async fn served(directory: &tempfile::TempDir) -> TestResult<Served> {
     let path = store_path(directory)?;
     bind_test_store(
         &mut SqliteStore::open(&path)?,
@@ -139,7 +144,7 @@ async fn served(directory: &tempfile::TempDir) -> TestResult<Served> {
 }
 
 /// Run `operation` on the Gateway's host as one store command.
-async fn on_host<T: Send + 'static>(
+pub(crate) async fn on_host<T: Send + 'static>(
     gateway: &Gateway,
     operation: impl FnOnce(&mut ErasureExecutionHostV1) -> Result<T, String> + Send + 'static,
 ) -> TestResult<T> {
@@ -152,13 +157,13 @@ async fn on_host<T: Send + 'static>(
 }
 
 /// The worked example's inputs over the Principal's consent.
-async fn seed(served: &Served) -> TestResult<PreviewRequestV1> {
+pub(crate) async fn seed(served: &Served) -> TestResult<PreviewRequestV1> {
     let consent = served.consent;
     on_host(&served.gateway, move |host| seeded(host, consent)).await
 }
 
 /// The Events of the `decision-previews` Timeline.
-async fn previews_events(gateway: &Gateway) -> TestResult<usize> {
+pub(crate) async fn previews_events(gateway: &Gateway) -> TestResult<usize> {
     on_host(gateway, |host| {
         host.read_sender()
             .and_then(|mut reads| {
@@ -179,7 +184,7 @@ async fn previews_events(gateway: &Gateway) -> TestResult<usize> {
 async fn permit(gateway: &Gateway) -> TestResult<GatewayOperationPermitV1> {
     Ok(gateway
         .authorize_operation(
-            GatewayOperationV1::READ_SCENARIO_ROOM,
+            GatewayOperationV1::CREATE_DECISION_PREVIEW,
             Some(actor()?),
             None,
             None,
@@ -197,7 +202,7 @@ fn admitted<T>(result: Result<T, DecisionPreviewErrorV1>) -> Result<T, String> {
     result.map_err(|error| format!("{error:?}"))
 }
 
-fn seam(gateway: &Gateway) -> Gateway {
+pub(crate) fn seam(gateway: &Gateway) -> Gateway {
     gateway
         .clone()
         .with_installed_profiles_for_test(Arc::new(SeamInstalledProfilesV1))
