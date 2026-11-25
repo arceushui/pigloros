@@ -225,8 +225,16 @@ impl<C: NamespaceControl, E: EgressControl> Drop for Teardown<C, E> {
 
 /// Opens every connection from a thread inside one attempt's namespace, and
 /// removes the namespace when dropped.
+///
+/// Nothing the connector holds refers to the namespace when its removal
+/// runs (ADR-069 R15 §3.6 item 4): each connection's `setns` thread is
+/// scoped, so it is joined before `connect` returns; the sockets it created
+/// belong to the caller, which drops them before the connector; and the
+/// fields drop in declaration order, so `namespace` is closed before
+/// `_teardown` removes the egress and the namespace.
 #[derive(Debug)]
 pub struct NamespaceConnector<C: NamespaceControl, E: EgressControl = HostEgress> {
+    // Declared first: closed before the teardown below runs.
     namespace: OwnedFd,
     _teardown: Teardown<C, E>,
 }

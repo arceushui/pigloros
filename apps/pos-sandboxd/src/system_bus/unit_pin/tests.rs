@@ -563,7 +563,7 @@ async fn an_exited_unit_is_measured_read_and_then_unpinned() -> TestResult {
             fixture.unit(),
             Some((&fixture.started, INVOCATION)),
             &fixture.cgroup,
-            Some(&work),
+            Some(work),
             settle_by,
         )
         .await;
