@@ -154,6 +154,7 @@ HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-o
 # The unit runs these inside a root that holds only the image's own files.
 ELF_MACHINES = {"x86_64": 62, "aarch64": 183}
 PT_LOAD, PT_INTERP = 1, 3
+PF_X = 1
 EROFS_BLOCK = 4096
 MIN_TAIL_BYTES = 64
 # Far above any stand-in: a real static Rust executable is megabytes.
@@ -1003,12 +1004,12 @@ def static_executable(data: bytes, architecture: str, name: str) -> None:
     if any(segment[0] == PT_INTERP for segment in segments):
         raise EvidenceError(f"the {name} is dynamically linked, so it cannot run inside the image's root")
     # A truncated file keeps its headers but loses what they map, and its
-    # entry point must lie in a segment that is mapped.
+    # entry point must lie in a segment that is mapped and executable.
     if any(segment[2] + segment[5] > len(data) or segment[5] > segment[6] for segment in loads):
         raise EvidenceError(f"the {name} is truncated: a loadable segment reaches beyond the file")
     entry, = struct.unpack_from("<Q", data, 24)
-    if not any(segment[3] <= entry < segment[3] + segment[6] for segment in loads):
-        raise EvidenceError(f"the {name}'s entry point is in no loadable segment")
+    if not any(segment[1] & PF_X and segment[3] <= entry < segment[3] + segment[6] for segment in loads):
+        raise EvidenceError(f"the {name}'s entry point is in no executable loadable segment")
 
 
 def check_adapter(evidence: Evidence, architecture: str, positive: bytes) -> dict:

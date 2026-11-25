@@ -57,8 +57,8 @@ if any(segment[0] == 3 for segment in segments):
 if any(segment[2] + segment[5] > len(data) or segment[5] > segment[6] for segment in loads):
     raise SystemExit(f"{path} is truncated")
 entry, = struct.unpack_from("<Q", data, 24)
-if not any(segment[3] <= entry < segment[3] + segment[6] for segment in loads):
-    raise SystemExit(f"{path} has an entry point outside its segments")
+if not any(segment[1] & 1 and segment[3] <= entry < segment[3] + segment[6] for segment in loads):
+    raise SystemExit(f"{path} has an entry point outside its executable segments")
 ' "${architecture}" "${ADAPTER}"
 cp -- "${ADAPTER}" "${out}/adapter"
 chmod 0755 "${out}/adapter"
