@@ -150,15 +150,19 @@ fn stale_cached_head_is_rejected_after_another_coordinator_advances_it(
 ) -> Result<(), ErasureErrorV1> {
     let port = PublicCoordinatorPort::new(config(Vec::new(), false));
     let request = request()?;
+    let unrelated = request_with(reference(101), reference(107))?;
     let mut first = ErasureCoordinatorStateMachineV1::new(port.clone(), COORDINATOR);
     let mut second = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     first.submit(request.clone(), request.provenance())?;
     second.submit(request.clone(), request.provenance())?;
+    second.submit(unrelated.clone(), unrelated.provenance())?;
     first.authorize(request.reference(), reference(21))?;
     assert_eq!(
         second.authorize(request.reference(), reference(22)),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    assert_eq!(second.existing(request.reference()), None);
+    assert!(second.existing(unrelated.reference()).is_some());
     Ok(())
 }
 
