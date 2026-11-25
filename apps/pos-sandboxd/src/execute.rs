@@ -65,7 +65,7 @@ use tokio::sync::watch;
 use zbus::OwnedFd;
 
 use crate::adapter_stdio::{open_channels, AdapterChannels};
-use crate::local_network::{OwnedConnector, RemovalReport};
+use crate::network_removal::{OwnedConnector, RemovalReport};
 use crate::{
     ActiveAttempt, AdapterIo, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
@@ -765,6 +765,11 @@ struct Prepared<C> {
 /// any other termination, so cancellation does not leave a released-looking
 /// unit running. A drop outside a runtime cannot spawn it; the lifecycle
 /// (#442) reconciles any unit left behind.
+///
+/// A Local network that could not be removed, on any path that dropped it,
+/// is returned as `network_removal` of the result, whether the execution
+/// completed or failed (ADR-069 R14 N7); a connector still owned when the
+/// execution returns counts as one that could not be removed.
 ///
 /// # Errors
 /// An [`ExecuteFailure`] names the error and what is known of the unit. Any

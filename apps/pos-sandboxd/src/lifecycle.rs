@@ -88,8 +88,10 @@ impl AttemptCleanupDeadlines {
 
 /// Why an attempt's terminal cleanup did not complete.
 ///
-/// Every variant leaves the durable intent in place and new registry commits
-/// closed; restart reconciliation must inspect the surviving state.
+/// Every variant closes new registry commits. All but [`Self::Network`] also
+/// leave the durable intent in place for restart reconciliation to inspect;
+/// the network variant is reported after the cleanup itself finished, so the
+/// intent is already removed and the port's own quarantine keeps the network.
 #[derive(Debug, thiserror::Error)]
 pub enum AttemptCleanupError {
     /// The unit could not be stopped and observed absent in time.

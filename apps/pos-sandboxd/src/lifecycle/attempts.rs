@@ -306,7 +306,9 @@ impl<S> EndedAttempt<S> {
     }
 
     /// The completed cleanup, or why it was not proved. An error leaves the
-    /// lifecycle quarantined and the intent for restart reconciliation.
+    /// lifecycle quarantined, and keeps the intent for restart reconciliation
+    /// unless the error is a Local network that could not be removed (the
+    /// cleanup had finished by then).
     #[must_use = "the cleanup decides whether the attempt may be reported clean"]
     pub const fn cleanup(&self) -> &AttemptCleanup {
         &self.cleanup
@@ -1778,6 +1780,10 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
     let cleanup = steps
         .finish(&mut progress, directory, cgroup, root, deadlines)
         .await
+        // A cleanup that failed on its own is the one error reported. A
+        // network removal failure beside it changes nothing observable: both
+        // leave `cleanup.result` 1 and quarantine, and the port quarantines
+        // the network's slot itself.
         .and_then(|completed| removal.map_or(Ok(completed), |failure| Err(failure.into())))
         .map_err(AttemptLifecycleError::from);
     (progress, cleanup)

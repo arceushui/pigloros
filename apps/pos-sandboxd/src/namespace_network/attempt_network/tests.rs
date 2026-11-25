@@ -891,7 +891,8 @@ fn a_setup_failure_names_the_removal_that_failed_after_it() -> TestResult {
     assert!(error.source().is_some());
     assert_eq!(
         error.to_string(),
-        "the attempt network could not be removed after its setup failed"
+        "the attempt network could not be removed after its setup failed: the Local \
+         network could not be removed: the host egress table read back differently"
     );
     // A failed setup whose removal worked, or an error that never installed,
     // owes nothing.

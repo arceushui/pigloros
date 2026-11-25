@@ -532,6 +532,54 @@ async fn captured_at(ending: Ending, expected: AttemptEnding) -> TestResult<Outp
     Ok(execution.adapter.output().capture())
 }
 
+/// ADR-069 R14 N7: a Local network whose removal failed is reported by each
+/// ending that serves the proxy: the watchdog, a protocol failure and a
+/// cancellation.
+#[tokio::test]
+async fn a_failed_removal_is_reported_on_every_ending_that_serves_the_proxy() -> TestResult {
+    let endings = [
+        (
+            "watchdog",
+            Ending {
+                local: Some(Fd3::Silent),
+                ..Ending::default()
+            },
+        ),
+        (
+            "protocol failure",
+            Ending {
+                local: Some(Fd3::Violation),
+                ..Ending::default()
+            },
+        ),
+        (
+            "cancellation",
+            Ending {
+                cancel: true,
+                local: Some(Fd3::Silent),
+                ..Ending::default()
+            },
+        ),
+    ];
+    for (name, ending) in endings {
+        for removal_fails in [false, true] {
+            let mut scenario = Scenario::new()?;
+            let (mode, plan) = ending.script(&mut scenario)?;
+            let job = hung_job(&scenario, mode, plan)?;
+            let recheck = root_for(&scenario.log, &job.attempt);
+            let torn_down = Arc::new(AtomicUsize::new(0));
+            let network = TornDownNetwork::new(&torn_down, removal_fails);
+            let execution = scenario
+                .run_on(&network, job, recheck)
+                .await
+                .map_err(|failed| failed.error)?;
+            assert_eq!(torn_down.load(Ordering::SeqCst), 1, "{name}");
+            assert_eq!(execution.network_removal.is_some(), removal_fails, "{name}");
+        }
+    }
+    Ok(())
+}
+
 const DRAINED: OutputCaptureRecord = capture_record(70, false, true);
 const ABORTED: OutputCaptureRecord = capture_record(70, false, false);
 
@@ -712,6 +760,10 @@ fn network_and_replay_setup_refusals_have_their_launch_failure() {
         fn setup_class(&self) -> SetupClass {
             self.0
         }
+
+        fn removal(&self) -> Option<crate::NetworkRemovalFailure> {
+            None
+        }
     }
     let network = |class| ExecuteError::Network(NetworkSetupFailure::new(Classified(class)));
     let setup = Some(LaunchFailure::NetworkSetupFailed);
@@ -811,6 +863,46 @@ async fn refused(payload: TestPayload) -> TestResult<ExecuteFailure<FakeCgroup, 
     // The unit is never started when the reservation is refused (I4).
     assert_eq!(run.scenario.entries(), ["take_unit_end", "recheck"]);
     failure(run.outcome)
+}
+
+/// The output reservation is refused after the network was established: the
+/// network is removed and a failed removal is reported with the launch
+/// failure (3 or 5).
+#[tokio::test]
+async fn a_failed_removal_is_reported_when_the_output_reservation_is_refused() -> TestResult {
+    for removal_fails in [false, true] {
+        let full = TestPayload {
+            ledger: StagingLedger::new(StagingLimits {
+                aggregate_bytes: 99,
+            }),
+            output: 100,
+            ..TestPayload::with_input(INPUT)
+        };
+        let closed = TestPayload::with_input(INPUT);
+        closed.ledger.close_for_reconciliation();
+        for payload in [full, closed] {
+            let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+            let mut scenario = Scenario::new()?;
+            let mut job = scenario.job(
+                ATTEMPT,
+                SandboxExecutionMode::Local,
+                mode,
+                GENEROUS_WATCHDOG_MS,
+            )?;
+            job.attempt = job
+                .attempt
+                .with_limits(limits(100, 1_000, GENEROUS_WATCHDOG_MS))
+                .with_payload(Arc::new(payload));
+            let recheck = root_for(&scenario.log, &job.attempt);
+            let torn_down = Arc::new(AtomicUsize::new(0));
+            let network = TornDownNetwork::new(&torn_down, removal_fails);
+            let failed = failure(scenario.run_on(&network, job, recheck).await)?;
+            assert!(matches!(failed.error, ExecuteError::OutputReservation(_)));
+            assert_eq!(torn_down.load(Ordering::SeqCst), 1);
+            assert_eq!(failed.network_removal.is_some(), removal_fails);
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]

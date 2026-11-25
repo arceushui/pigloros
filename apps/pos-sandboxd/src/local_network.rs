@@ -34,6 +34,7 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zbus::OwnedFd;
 
+use crate::network_removal::{OwnedConnector, RemovalReport};
 use crate::AdmittedAttempt;
 
 /// The provider end of one attempt's FD 3 socket pair.
@@ -76,14 +77,10 @@ pub struct EstablishedNetwork<C> {
 
 impl<C: RemoveNetwork> EstablishedNetwork<C> {
     /// The network with its removal result reported to `report`.
-    #[must_use]
-    pub fn owned_by(self, report: &RemovalReport) -> EstablishedNetwork<OwnedConnector<C>> {
+    pub(crate) fn owned_by(self, report: &RemovalReport) -> EstablishedNetwork<OwnedConnector<C>> {
         EstablishedNetwork {
             attempt_id: self.attempt_id,
-            connector: OwnedConnector {
-                connector: self.connector,
-                report: report.clone(),
-            },
+            connector: OwnedConnector::new(self.connector, report),
         }
     }
 }
@@ -119,9 +116,8 @@ pub trait SetupError: Error {
 
     /// Why the network the failed setup had begun could not be removed, if
     /// it could not (R14 N7): the attempt's `cleanup.result` is then 1.
-    fn removal(&self) -> Option<NetworkRemovalFailure> {
-        None
-    }
+    /// Every port says so, so none can forget a removal that failed.
+    fn removal(&self) -> Option<NetworkRemovalFailure>;
 }
 
 /// A Local network that could not be removed (ADR-069 R14 N7, base §8).
@@ -152,61 +148,13 @@ pub trait RemoveNetwork {
     fn remove(&mut self) -> Result<(), NetworkRemovalFailure>;
 }
 
-/// The first removal failure of one execution, collected from wherever its
-/// network was dropped.
-#[derive(Clone, Debug, Default)]
-pub struct RemovalReport(Arc<std::sync::Mutex<Option<NetworkRemovalFailure>>>);
-
-impl RemovalReport {
-    /// Keep `failure`, unless an earlier one is kept.
-    pub fn record(&self, failure: NetworkRemovalFailure) {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_or_insert(failure);
-    }
-
-    /// The kept failure, if any, leaving none.
-    #[must_use]
-    pub fn take(&self) -> Option<NetworkRemovalFailure> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-}
-
-/// A connector whose network is removed when it is dropped, with the result
-/// recorded in the execution's [`RemovalReport`]: no path that drops an
-/// established network loses its removal result (R14 N7).
-#[derive(Debug)]
-pub struct OwnedConnector<C: RemoveNetwork> {
-    connector: C,
-    report: RemovalReport,
-}
-
-impl<C: NetworkEndpointConnector + RemoveNetwork> NetworkEndpointConnector for OwnedConnector<C> {
-    fn connect(&mut self, endpoint: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
-        self.connector.connect(endpoint, timeout)
-    }
-}
-
-impl<C: RemoveNetwork> Drop for OwnedConnector<C> {
-    fn drop(&mut self) {
-        if let Err(failure) = self.connector.remove() {
-            self.report.record(failure);
-        }
-    }
-}
-
-impl SetupError for std::convert::Infallible {
+impl SetupError for io::Error {
     fn setup_class(&self) -> SetupClass {
-        // No value of this type exists, so the dereference is never run.
-        #[expect(
-            clippy::uninhabited_references,
-            reason = "an empty match on `Infallible`"
-        )]
-        match *self {}
+        SetupClass::Creation
+    }
+
+    fn removal(&self) -> Option<NetworkRemovalFailure> {
+        None
     }
 }
 
@@ -216,14 +164,16 @@ impl SetupError for std::convert::Infallible {
 /// nftables rules for the attempt and reads them back before it returns. The
 /// connector it hands out must honour the timeout it is given.
 ///
-/// Teardown is RAII: the returned [`EstablishedNetwork`], and the connector
-/// inside it, own the namespace, and dropping them removes it. The execute
-/// path establishes the network before the recheck and before the unit
-/// starts, so it drops the handle on every path that does not serve it: a
-/// refused admission, a failed barrier preparation, a failed recheck, a failed
-/// start, a refused release and a finished attempt. An implementation must
-/// therefore make its `Drop` (or its connector's) tear the namespace down, and
-/// must not rely on the caller to do it.
+/// Removal is the connector's [`RemoveNetwork::remove`], and its result is
+/// never lost (ADR-069 R14 N7). The execute path establishes the network
+/// before the recheck and before the unit starts, and wraps its connector so
+/// that every path that does not serve it, and the end of one that does,
+/// removes it and reports a failed removal with the execution: a refused
+/// admission, a failed barrier preparation, a failed recheck, a failed start,
+/// a refused release and a finished attempt. An implementation must also
+/// tear the namespace down when its connector is dropped without a removal
+/// (a cancelled execution), and must not rely on the caller to do it; that
+/// removal is only recorded by the port's own quarantine.
 pub trait LocalNetworkPort {
     /// The connector that operates inside the established namespace.
     type Connector: NetworkEndpointConnector + RemoveNetwork + Send + 'static;
@@ -252,13 +202,13 @@ pub struct FailClosedLocalNetwork;
 
 impl LocalNetworkPort for FailClosedLocalNetwork {
     type Connector = RefusingConnector;
-    type Error = std::convert::Infallible;
+    type Error = io::Error;
 
     fn establish(
         &self,
         attempt_id: [u8; 16],
         _endpoints: &[SocketAddr],
-    ) -> Result<EstablishedNetwork<RefusingConnector>, std::convert::Infallible> {
+    ) -> Result<EstablishedNetwork<RefusingConnector>, io::Error> {
         Ok(EstablishedNetwork::new(attempt_id, RefusingConnector))
     }
 }

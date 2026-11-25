@@ -6,13 +6,13 @@
 //! Every attempt also gets host egress (`host_egress`) to exactly its
 //! endpoints once its namespace is read back, and loses it first on teardown.
 //!
-//! Teardown is RAII, and its result is never lost. Removing the connector,
-//! explicitly or by dropping it, removes the namespace once and frees the
-//! slot; the result of that one removal is reported (ADR-069 R14 N7). A
-//! removal that fails quarantines the slot and closes the port: every later
-//! establishment fails, naming the slot, until restart
-//! reconciliation removes the remaining state (ADR-069 §1: an
-//! ineffective property closes admission).
+//! Teardown is the connector's removal (ADR-069 R14 N7). Removing the
+//! connector removes the namespace once, frees the slot and reports the
+//! result. Dropping a connector that was not removed does the same, but only
+//! the slot's quarantine records a failure then. A removal that fails
+//! quarantines the slot and closes the port: every later establishment fails,
+//! naming the slot, until restart reconciliation removes the remaining state
+//! (ADR-069 §1: an ineffective property closes admission).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -137,7 +137,7 @@ pub enum AttemptNetworkError {
     InUse,
     /// A setup failed after it began installing, and the network it had
     /// installed could not be removed (R14 N7).
-    #[error("the attempt network could not be removed after its setup failed")]
+    #[error("the attempt network could not be removed after its setup failed: {removal}")]
     Unremoved {
         /// Why the setup failed.
         #[source]
@@ -246,8 +246,8 @@ impl<C: NamespaceControl, E: EgressControl> Teardown<C, E> {
 
 impl<C: NamespaceControl, E: EgressControl> Drop for Teardown<C, E> {
     fn drop(&mut self) {
-        // The result of a removal that did not run before is lost with the
-        // owner; the quarantine it sets is the record.
+        // A connector dropped without a removal (a cancelled execution) has
+        // nobody to report to; the quarantine a failure sets is the record.
         drop(self.remove_once());
     }
 }

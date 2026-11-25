@@ -262,8 +262,6 @@ mod cases {
         Fails,
         /// The execution binds another cgroup than the one it returns.
         Substitutes,
-        /// The attempt completes, but its Local network could not be removed.
-        NetworkRemovalFails,
     }
 
     /// The fake execution over one fake systemd manager, and the real terminal
@@ -272,6 +270,8 @@ mod cases {
         transport: &'f crate::SystemdTransientUnitTransport,
         cgroup: std::sync::Mutex<Option<BoundAttemptCgroup>>,
         behaviour: Behaviour,
+        /// Whether the execution reports a Local network it could not remove.
+        network_removal: bool,
         executing: AtomicBool,
         /// Runs once the terminal cleanup finished, before the run ends.
         after_cleanup: Option<Box<dyn Fn() + Send + Sync + 'f>>,
@@ -292,14 +292,28 @@ mod cases {
                 transport,
                 cgroup: std::sync::Mutex::new(Some(cgroup)),
                 behaviour: Behaviour::Completes,
+                network_removal: false,
                 executing: AtomicBool::new(false),
                 after_cleanup: None,
             }
         }
 
+        /// Report a Local network that could not be removed, whatever the
+        /// execution's end.
+        const fn removing_badly(mut self) -> Self {
+            self.network_removal = true;
+            self
+        }
+
         const fn behaving(mut self, behaviour: Behaviour) -> Self {
             self.behaviour = behaviour;
             self
+        }
+
+        /// The removal failure this execution reports, if it reports one.
+        fn removal(&self) -> Option<crate::NetworkRemovalFailure> {
+            self.network_removal
+                .then(|| crate::NetworkRemovalFailure::new("the kernel refused"))
         }
 
         /// Wait until the execution bound its cgroup.
@@ -358,7 +372,7 @@ mod cases {
                     Behaviour::Hangs => std::future::pending().await,
                     Behaviour::Fails => {
                         return Err(ExecuteFailure {
-                            network_removal: None,
+                            network_removal: self.removal(),
                             error: ExecuteError::HostTimeout,
                             unit: UnitState::Killed,
                             cgroup: Some(cgroup),
@@ -366,9 +380,7 @@ mod cases {
                             started: None,
                         })
                     }
-                    Behaviour::Completes
-                    | Behaviour::Substitutes
-                    | Behaviour::NetworkRemovalFails => AttemptEnding::CgroupEmpty,
+                    Behaviour::Completes | Behaviour::Substitutes => AttemptEnding::CgroupEmpty,
                 };
                 let adapter = crate::test_fixtures::adapter_io().ok_or_else(|| ExecuteFailure {
                     network_removal: None,
@@ -379,8 +391,7 @@ mod cases {
                     started: None,
                 })?;
                 Ok(AttemptExecution {
-                    network_removal: (self.behaviour == Behaviour::NetworkRemovalFails)
-                        .then(|| crate::NetworkRemovalFailure::new("the kernel refused")),
+                    network_removal: self.removal(),
                     attempt_id,
                     started: (),
                     cgroup,
@@ -1243,25 +1254,29 @@ mod cases {
     }
 
     /// ADR-069 R14 N7: a Local network that could not be removed leaves the
-    /// cleanup unproved (TME1 `cleanup.result` 1) and quarantines.
+    /// cleanup unproved (TME1 `cleanup.result` 1) and quarantines, whether the
+    /// execution completed or failed.
     #[tokio::test(start_paused = true)]
     async fn a_network_that_could_not_be_removed_leaves_the_cleanup_unproved() -> TestResult {
-        let runtime = Runtime::new()?;
-        let fixture = manager(1).await?;
-        let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
-            .behaving(Behaviour::NetworkRemovalFails);
-        let ended = runtime.run(FakeInput::new(1), &steps).await?;
-        assert!(
-            matches!(
-                ended.cleanup(),
-                Err(AttemptLifecycleError::Cleanup(
-                    AttemptCleanupError::Network(_)
-                ))
-            ),
-            "{:?}",
-            ended.cleanup()
-        );
-        assert!(!runtime.admits()?);
+        for behaviour in [Behaviour::Completes, Behaviour::Fails] {
+            let runtime = Runtime::new()?;
+            let fixture = manager(1).await?;
+            let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
+                .behaving(behaviour)
+                .removing_badly();
+            let ended = runtime.run(FakeInput::new(1), &steps).await?;
+            assert!(
+                matches!(
+                    ended.cleanup(),
+                    Err(AttemptLifecycleError::Cleanup(
+                        AttemptCleanupError::Network(_)
+                    ))
+                ),
+                "{behaviour:?}: {:?}",
+                ended.cleanup()
+            );
+            assert!(!runtime.admits()?, "{behaviour:?}");
+        }
         Ok(())
     }
 
@@ -2502,7 +2517,7 @@ mod cases {
         fn a_release_outcome_joins_both_execution_results() {
             let executed: Result<AttemptExecution<(), (), ReleaseResources>, _> =
                 Err(ExecuteFailure {
-                    network_removal: None,
+                    network_removal: Some(crate::NetworkRemovalFailure::new("the kernel refused")),
                     error: ExecuteError::HostTimeout,
                     unit: UnitState::Killed,
                     cgroup: Some(()),
@@ -2511,6 +2526,10 @@ mod cases {
                 });
             let joined = with_release(executed, ReleaseOutcome::new(Some([3; 32]), None, None));
             let failure = joined.err();
+            // The removal failure survives the join.
+            assert!(failure
+                .as_ref()
+                .is_some_and(|failure| failure.network_removal.is_some()));
             let evidence = failure
                 .as_ref()
                 .and_then(|failure| failure.evidence.as_ref());
@@ -2543,7 +2562,7 @@ mod cases {
                 fixture.bound.read_effective_limits()?,
             );
             let executed: Result<_, ExecuteFailure<(), ReleaseResources>> = Ok(AttemptExecution {
-                network_removal: None,
+                network_removal: Some(crate::NetworkRemovalFailure::new("the kernel refused")),
                 attempt_id: [1; 16],
                 started: (),
                 cgroup: (),
@@ -2556,6 +2575,8 @@ mod cases {
                 .map_err(|failure| failure.error)?;
             let kept = joined.evidence.resources().ok_or("no resources")?;
             assert_eq!(kept.activated_monotonic_ns(), 5);
+            // The removal failure survives the join.
+            assert!(joined.network_removal.is_some());
             Ok(())
         }
 
