@@ -421,6 +421,7 @@ class ProducerShellTests(unittest.TestCase):
         log("systemd-run", 'echo "start-stderr line" >&2')
         log("systemctl", 'if [[ $1 == show && $* == *--value* ]]; then echo 1; fi')
         log("journalctl", 'echo "journal line"')
+        log("busctl", 'echo "{\\"type\\":\\"a(say)\\",\\"data\\":[]}"')
         script = "\n".join([
             f'images="{images}"; spi1="{spi1}"; launcher="{launcher}"',
             f'RUNTIME_ROOT="{self.base}/run-pigloros"; STAGE_FIFO="{self.base}/stage-fifo"',
@@ -441,6 +442,15 @@ class ProducerShellTests(unittest.TestCase):
         self.assertIn(str(installed), (case / "provider-sha256").read_text())
         self.assertIn("ELF Header", (case / "launcher-program-headers").read_text())
         self.assertEqual((case / "runtime-log").read_text(), "journal line\n")
+        # The credential lists come over the bus, one NAME<TAB>JSON line each, in the checker's order.
+        credentials = (case / "runtime-credentials").read_text().splitlines()
+        self.assertEqual([line.split("\t")[0] for line in credentials], list(checker.CREDENTIAL_PROPERTIES))
+        self.assertTrue(all(line.split("\t")[1] == '{"type":"a(say)","data":[]}' for line in credentials))
+        busctl = [line for line in calls.read_text().splitlines() if line.startswith("busctl ")]
+        self.assertEqual(len(busctl), len(checker.CREDENTIAL_PROPERTIES))
+        self.assertIn("--json=short get-property org.freedesktop.systemd1 "
+                      "/org/freedesktop/systemd1/unit/piglor_2dsandbox_2druntime_2eservice "
+                      "org.freedesktop.systemd1.Service SetCredential", busctl[0])
         # The `systemctl show` property list covers every row the checker judges.
         listed = {name for line in calls.read_text().splitlines() if line.startswith("systemctl show ")
                   and "--property=Id," in line

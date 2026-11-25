@@ -549,6 +549,17 @@ def runtime_properties(**changes: str | None) -> str:
 
 
 RUNTIME_PROPERTIES = runtime_properties()
+
+
+def runtime_credentials(**data: object) -> str:
+    """The collector's credential lines: one `NAME<TAB>JSON` each, empty lists unless given."""
+    types = {"SetCredential": "a(say)", "SetCredentialEncrypted": "a(say)", "LoadCredential": "a(ss)",
+             "LoadCredentialEncrypted": "a(ss)", "ImportCredential": "as"}
+    return "".join(f'{key}\t{json.dumps({"type": kind, "data": data.get(key, [])}, separators=(",", ":"))}\n'
+                   for key, kind in types.items())
+
+
+RUNTIME_CREDENTIALS = runtime_credentials()
 HOST = "piglor-qemu-evidence"
 STOPPING = f"[ 120.0] {HOST} systemd[1]: Stopping /var/lib/pigloros/sandbox/providers/ab provider-runtime...\n"
 DEACTIVATED = f"[ 121.0] {HOST} systemd[1]: piglor-sandbox-runtime.service: Deactivated successfully.\n"
@@ -575,6 +586,7 @@ def daemon_files() -> dict[str, bytes | str]:
         f"{base}/start-journal": RUNTIME_LOG.split("[ 120.0]")[0],
         f"{base}/launcher-program-headers": LAUNCHER_HEADERS,
         f"{base}/runtime-properties": RUNTIME_PROPERTIES, f"{base}/runtime-exe": PROVIDER_BINARY + "\n",
+        f"{base}/runtime-credentials": RUNTIME_CREDENTIALS,
         f"{base}/runtime-tree": RUNTIME_TREE, f"{base}/runtime-log": RUNTIME_LOG,
     }
 
@@ -1707,6 +1719,25 @@ class EvidenceTests(unittest.TestCase):
             # Properties R11 5.2 does not allow, or an environment of any kind.
             *[(lambda f, key=key: f.update({properties: RUNTIME_PROPERTIES + f"{key}=something\n"}), key)
               for key in checker.EMPTY_UNIT_PROPERTIES],
+            # The credential lists are read over the bus: all five must be there and empty.
+            *[(lambda f, key=key: f.update({f"{base}/runtime-credentials": runtime_credentials(
+                **{key: [["name", [1, 2, 3]]]})}), f"has credentials: \\['{key}'\\]")
+              for key in checker.CREDENTIAL_PROPERTIES],
+            (lambda f: f.update({f"{base}/runtime-credentials": ""}), "credential properties are \\[\\]"),
+            (lambda f: f.update({f"{base}/runtime-credentials":
+                                 "".join(RUNTIME_CREDENTIALS.splitlines(True)[1:])}),
+             "credential properties are"),
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS + RUNTIME_CREDENTIALS.splitlines(True)[0]}),
+             "credential line is malformed"),
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS + "Other\t{\"data\":[]}\n"}),
+             "credential properties are"),
+            (lambda f: f.update({f"{base}/runtime-credentials": "SetCredential\t[unprintable]\n"}),
+             "credential line is malformed"),
+            (lambda f: f.update({f"{base}/runtime-credentials": "SetCredential no tab\n"}),
+             "credential line is malformed"),
+            (lambda f: f.update({f"{base}/runtime-credentials": RUNTIME_CREDENTIALS.replace(
+                '"data":[]', '"data":"x"', 1)}),
+             "credential line is malformed"),
             (lambda f: f.update({properties: runtime_properties(Environment=None)}), "Environment=None"),
             (lambda f: f.update({properties: runtime_properties(PassEnvironment=None)}), "PassEnvironment=None"),
         ]

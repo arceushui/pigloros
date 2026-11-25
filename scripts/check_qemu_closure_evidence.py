@@ -195,13 +195,16 @@ DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-sta
                       "start-stderr", "launcher-sha256", "launcher-program-headers"}
 # `start-state` and `start-journal` are diagnostics: required to exist, and read only to explain
 # a failed start.
-DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-exe", "runtime-tree", "runtime-log",
-                        "provider-sha256", "start-state", "start-journal"}
+DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-credentials", "runtime-exe", "runtime-tree",
+                        "runtime-log", "provider-sha256", "start-state", "start-journal"}
 # R11 5.2 gives the unit no environment, no descriptor and no credential: each of these is
 # empty or omitted (systemctl show omits some empty lists). `ListenStream` belongs to socket
 # units, which the runtime unit has none of.
-EMPTY_UNIT_PROPERTIES = ("EnvironmentFiles", "Sockets", "OpenFile", "ExtraFileDescriptors",
-                         "SetCredential", "LoadCredential")
+EMPTY_UNIT_PROPERTIES = ("EnvironmentFiles", "Sockets", "OpenFile", "ExtraFileDescriptors")
+# The credential lists, which `systemctl show` cannot print: read over the bus as JSON, and
+# each must be an empty list.
+CREDENTIAL_PROPERTIES = ("SetCredential", "SetCredentialEncrypted", "LoadCredential",
+                         "LoadCredentialEncrypted", "ImportCredential")
 # The manager's own lines for the stop, as `journalctl -o short-monotonic` prints them: PID 1
 # says it is stopping the unit, and later that the unit deactivated successfully. A line a
 # daemon wrote, one for another unit, or one from before the stop does not count.
@@ -1426,6 +1429,7 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     for key in EMPTY_UNIT_PROPERTIES:
         if unit.get(key, "") != "":
             raise EvidenceError(f"the {name} runtime unit has {key}={unit[key]!r}")
+    check_credentials(evidence, f"{base}/runtime-credentials", name)
     # One ExecStart entry, for exactly the binary and argv, that does not ignore errors.
     exec_start = unit.get("ExecStart", "")
     if not unit.get("MainPID", "").isdigit() or int(unit["MainPID"]) == 0 \
@@ -1454,6 +1458,26 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     if loose:
         raise EvidenceError(f"the {name} runtime directories {loose} are not mode {DIRECTORY_MODE}")
     return {"binary": binary, "properties": unit, "endpoints": {e: tree[e] for e in RUNTIME_ENDPOINTS}}
+
+
+def check_credentials(evidence: Evidence, path: str, name: str) -> None:
+    """Each credential list of the runtime unit is present and empty (R11 5.2)."""
+    seen = {}
+    for line in evidence.text(path).splitlines():
+        key, tab, value = line.partition("\t")
+        try:
+            document = json.loads(value) if tab else None
+        except json.JSONDecodeError:
+            document = None
+        if key in seen or not isinstance(document, dict) or not isinstance(document.get("data"), list):
+            raise EvidenceError(f"the {name} runtime unit's credential line is malformed: {line!r}")
+        seen[key] = document["data"]
+    if sorted(seen) != sorted(CREDENTIAL_PROPERTIES):
+        raise EvidenceError(f"the {name} runtime unit's credential properties are {sorted(seen)}, "
+                            f"not {sorted(CREDENTIAL_PROPERTIES)}")
+    held = sorted(key for key, data in seen.items() if data)
+    if held:
+        raise EvidenceError(f"the {name} runtime unit has credentials: {held}")
 
 
 def check_launcher(evidence: Evidence, base: str, binary: str) -> None:

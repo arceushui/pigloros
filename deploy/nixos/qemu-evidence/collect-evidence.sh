@@ -192,6 +192,22 @@ driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
 RUNTIME_UNIT=piglor-sandbox-runtime
 RUNTIME_KEY_FILE=runtime-attestation.ed25519
 
+# The runtime unit's bus object path: sd_bus_path_encode escapes `-` as `_2d` and `.` as `_2e`.
+RUNTIME_UNIT_PATH=/org/freedesktop/systemd1/unit/piglor_2dsandbox_2druntime_2eservice
+
+# The unit's credential lists, one `NAME<TAB>JSON` line each. `systemctl show` prints the
+# a(say) and a(ss) credential properties as "[unprintable]", whatever they hold, so they are
+# read over the bus, where busctl prints them as JSON (`{"type":...,"data":[...]}`).
+runtime_credentials() {
+  local property
+  for property in SetCredential SetCredentialEncrypted LoadCredential LoadCredentialEncrypted \
+    ImportCredential; do
+    printf '%s\t' "${property}"
+    busctl --json=short get-property org.freedesktop.systemd1 "${RUNTIME_UNIT_PATH}" \
+      org.freedesktop.systemd1.Service "${property}"
+  done
+}
+
 # Start the runtime unit for the executable BINARY and wait for READY=1.
 start_runtime() { # BINARY
   systemd-run --quiet --unit="${RUNTIME_UNIT}" --service-type=notify \
@@ -244,8 +260,9 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
     journalctl --boot --no-pager --output=short-monotonic --unit="${RUNTIME_UNIT}.service" \
       >"${dir}/start-journal"
     systemctl show "${RUNTIME_UNIT}.service" \
-      --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,RuntimeMaxUSec,Environment,EnvironmentFiles,PassEnvironment,Sockets,OpenFile,ExtraFileDescriptors,SetCredential,LoadCredential,ExecStart \
+      --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,RuntimeMaxUSec,Environment,EnvironmentFiles,PassEnvironment,Sockets,OpenFile,ExtraFileDescriptors,ExecStart \
       >"${dir}/runtime-properties"
+    runtime_credentials >"${dir}/runtime-credentials"
     readlink "/proc/$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")/exe" >"${dir}/runtime-exe" || true
     find "${RUNTIME_ROOT}" -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"
     systemctl stop "${RUNTIME_UNIT}.service" || stop=$?
