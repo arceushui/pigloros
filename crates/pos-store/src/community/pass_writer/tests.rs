@@ -254,8 +254,8 @@ fn minted() -> CommunityMintedObservationV1 {
 }
 
 /// A Reserve of 24 pass rows with `F_p` of 4 targets, minting.
-fn input() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
-    Ok(CommunityReserveInputV1 {
+fn input() -> Result<CommunityReserveInputV1, Error> {
+    reserved_pass().map(|pass| CommunityReserveInputV1 {
         timeline: id(1),
         generation: GENERATION,
         reservation_operation_id: OPERATION,
@@ -267,7 +267,7 @@ fn input() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
         failure_reserve: 4,
         minted: Some(minted()),
         reused: None,
-        pass: reserved_pass()?,
+        pass,
     })
 }
 
@@ -311,11 +311,11 @@ fn reserved_pass() -> Result<CommunityReservedPassV1, Error> {
     })
 }
 
-fn reuse() -> Result<CommunityReserveInputV1, Box<dyn std::error::Error>> {
-    Ok(CommunityReserveInputV1 {
+fn reuse() -> Result<CommunityReserveInputV1, Error> {
+    input().map(|call| CommunityReserveInputV1 {
         minted: None,
         reused: Some(reference()),
-        ..input()?
+        ..call
     })
 }
 
