@@ -1003,9 +1003,9 @@ fn grant_matches_execute_request(
 /// R16 N13): none without plans, as every V1 execute of #1488-a.
 ///
 /// The check is mode-independent, so it is stricter than R16 requires for every
-/// non-Local mode, `Replay` with empty plans included. The R16 residual clause ("NXT1 empty unless
-/// `release1-digest` is non-null") is specified in R16 §3.3 change C, and
-/// 1492-b (R16 §7) owns the checks for non-empty plans.
+/// non-Local mode, `Replay` with empty plans included. The R16 residual clause
+/// ("NXT1 empty unless `release1-digest` is non-null") is specified in R16 §3.3
+/// change C, and 1492-b (R16 §7) owns the checks for non-empty plans.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
