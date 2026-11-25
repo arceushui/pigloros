@@ -6,10 +6,11 @@ use pos_core::community_lifecycle::{
     CommunityAnnotationItemV1 as Item, CommunityAnnotationManifestInputV1 as ManifestInput,
     CommunityAnnotationManifestV1 as Manifest, CommunityAnnotationRecordsV1 as Records,
     CommunityContentReferenceV1 as Content, CommunityDigestListV1 as Digests,
-    CommunityInputIndexV1 as Index, CommunityLifecycleErrorV1 as Error,
-    CommunityNativeNodeInputV1 as NodeInput, CommunityNativeNodeKindV1 as Kind,
-    CommunityNativeNodeReferenceV1 as Reference, CommunityNativeNodeV1 as Node,
-    CommunityPassKeyV1 as Pass, CommunityTypedInputRefV1 as Typed,
+    CommunityGraphCountsV1 as Graph, CommunityInputIndexV1 as Index,
+    CommunityLifecycleErrorV1 as Error, CommunityNativeNodeInputV1 as NodeInput,
+    CommunityNativeNodeKindV1 as Kind, CommunityNativeNodeReferenceV1 as Reference,
+    CommunityNativeNodeV1 as Node, CommunityPassGraphTermsV1 as Terms, CommunityPassKeyV1 as Pass,
+    CommunityProtectionSizesV1 as Sizes, CommunityTypedInputRefV1 as Typed,
     CommunityTypedInputRefsV1 as TypedRefs,
 };
 use pos_core::{Hash, RecordedDependencyClassV1, TimelineId};
@@ -77,7 +78,7 @@ const fn item<'a>(guest_index: u64, inputs: &'a [Typed<'a>]) -> Candidate<'a> {
 fn oracle(
     items: &[(u64, Vec<Typed<'static>>)],
     node_inputs: &[Typed<'static>],
-) -> Result<(usize, Hash, Reference), Box<dyn std::error::Error>> {
+) -> Result<(usize, usize, Hash, Reference), Box<dyn std::error::Error>> {
     let rows: Vec<Vec<Hash>> = items
         .iter()
         .map(|(_, inputs)| {
@@ -120,7 +121,8 @@ fn oracle(
         evidence_not_after_micros: HORIZON,
     })?;
     Ok((
-        manifest.to_canonical_cbor().len() + node.to_canonical_cbor().len(),
+        manifest.to_canonical_cbor().len(),
+        node.to_canonical_cbor().len(),
         manifest.digest(),
         node.reference(),
     ))
@@ -138,13 +140,14 @@ fn the_charge_and_digests_equal_independently_built_records() -> TestResult {
     let staged = Records::stage(&context()?, &[item(2, &inputs)])?.ok_or("records")?;
     let mut node_inputs = vec![Typed::Native(native(10))];
     node_inputs.extend(inputs.iter().copied());
-    let (bytes, manifest_digest, node) = oracle(&[(2, inputs.clone())], &node_inputs)?;
+    let (manifest_len, node_len, manifest_digest, node) =
+        oracle(&[(2, inputs.clone())], &node_inputs)?;
     let charge = staged.charge();
     assert_eq!(
         (charge.inputs, charge.nodes, charge.edges, charge.rows),
         (3, 1, 3, 2)
     );
-    assert_eq!(charge.bytes, bytes as u64);
+    assert_eq!(charge.bytes, (manifest_len + node_len) as u64);
     assert_eq!(staged.manifest_digest(), manifest_digest);
     assert!(staged.node() == node);
     Ok(())
@@ -203,6 +206,149 @@ fn an_input_that_does_not_precede_the_node_is_refused() -> TestResult {
     assert!(matches!(
         Records::stage(&context()?, &[item(0, &late)]),
         Err(Error::InvalidBinding)
+    ));
+    Ok(())
+}
+
+#[test]
+fn the_trace_closure_is_the_cat1_the_node_and_one_key() -> TestResult {
+    let inputs = refs(11..13);
+    let staged = Records::stage(&context()?, &[item(2, &inputs)])?.ok_or("records")?;
+    let mut node_inputs = vec![Typed::Native(native(10))];
+    node_inputs.extend(inputs.iter().copied());
+    let (manifest_len, node_len, _, _) = oracle(&[(2, inputs.clone())], &node_inputs)?;
+    let sizes = Sizes::new(pass()?.timeline(), pass()?.generation())?;
+    // The node's children: its CAT1, the step and the two inputs.
+    let expected = sizes
+        .record(manifest_len as u64, 0)
+        .plus(sizes.record(node_len as u64, 4))
+        .plus(Terms {
+            keys: 1,
+            ..Terms::default()
+        });
+    assert_eq!(staged.graph(), expected);
+    Ok(())
+}
+
+#[test]
+fn the_trace_closure_must_fit_every_graph_maximum() -> TestResult {
+    let inputs = refs(11..13);
+    let staged = Records::stage(&context()?, &[item(2, &inputs)])?.ok_or("records")?;
+    let added = staged.graph();
+    let base = Graph {
+        registrations: 1,
+        edges: 1,
+        keys: 1,
+        maximum_depth: 1,
+        registration_bytes: 1,
+        artifact_bytes: 1,
+    };
+    assert!(staged.fits_graph(base));
+    // The profile-1 maxima: 4,096 registrations, 8,192 edges, 4,096 keys,
+    // depth 4,096, 64 MiB of registrations and 256 MiB of artifacts.
+    let cases = [
+        (
+            Graph {
+                registrations: 4_096 - added.registrations,
+                ..base
+            },
+            Graph {
+                registrations: 4_097 - added.registrations,
+                ..base
+            },
+        ),
+        (
+            Graph {
+                edges: 8_192 - added.edges,
+                ..base
+            },
+            Graph {
+                edges: 8_193 - added.edges,
+                ..base
+            },
+        ),
+        (
+            Graph {
+                keys: 4_096 - added.keys,
+                ..base
+            },
+            Graph {
+                keys: 4_097 - added.keys,
+                ..base
+            },
+        ),
+        (
+            Graph {
+                maximum_depth: 4_095,
+                ..base
+            },
+            Graph {
+                maximum_depth: 4_096,
+                ..base
+            },
+        ),
+        (
+            Graph {
+                registration_bytes: 67_108_864 - added.registration_bytes,
+                ..base
+            },
+            Graph {
+                registration_bytes: 67_108_865 - added.registration_bytes,
+                ..base
+            },
+        ),
+        (
+            Graph {
+                artifact_bytes: 268_435_456 - added.artifact_bytes,
+                ..base
+            },
+            Graph {
+                artifact_bytes: 268_435_457 - added.artifact_bytes,
+                ..base
+            },
+        ),
+    ];
+    for (at_maximum, over) in cases {
+        assert!(staged.fits_graph(at_maximum));
+        assert!(!staged.fits_graph(over));
+    }
+    Ok(())
+}
+
+#[test]
+fn defects_of_the_trusted_input_are_never_a_budget() -> TestResult {
+    let inputs = refs(11..12);
+    for horizon in [0, u64::MAX] {
+        let context = Context {
+            evidence_not_after_micros: horizon,
+            ..context()?
+        };
+        assert!(matches!(
+            Records::stage(&context, &[item(0, &inputs)]),
+            Err(Error::InvalidBinding)
+        ));
+    }
+    assert!(matches!(
+        Records::stage(&context()?, &[item(64, &inputs)]),
+        Err(Error::InvalidBinding)
+    ));
+    // The ordering defect comes before the input cap.
+    let over = refs(11..267);
+    assert!(matches!(
+        Records::stage(&context()?, &[item(2, &inputs), item(1, &over)]),
+        Err(Error::InvalidBinding)
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_cat1_holds_at_most_1024_items() -> TestResult {
+    let inputs = refs(11..12);
+    let items: Vec<Candidate<'_>> = (0..1_025).map(|_| item(0, &inputs)).collect();
+    assert!(Records::stage(&context()?, &items[..1_024])?.is_some());
+    assert!(matches!(
+        Records::stage(&context()?, &items),
+        Err(Error::BoundsExceeded)
     ));
     Ok(())
 }

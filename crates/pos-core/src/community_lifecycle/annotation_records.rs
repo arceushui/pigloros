@@ -11,11 +11,13 @@
 use std::collections::BTreeMap;
 
 use super::{
-    CommunityAnnotationItemV1, CommunityAnnotationManifestInputV1, CommunityAnnotationManifestV1,
-    CommunityContentReferenceV1, CommunityDigestListV1, CommunityInputIndexV1,
-    CommunityLifecycleErrorV1 as Error, CommunityNativeNodeInputV1, CommunityNativeNodeKindV1,
-    CommunityNativeNodeReferenceV1, CommunityNativeNodeV1, CommunityPassKeyV1,
-    CommunityTypedInputRefV1, CommunityTypedInputRefsV1, Result, MAX_COMMUNITY_DIRECT_INPUTS_V1,
+    validate_horizon, CommunityAnnotationItemV1, CommunityAnnotationManifestInputV1,
+    CommunityAnnotationManifestV1, CommunityContentReferenceV1, CommunityDigestListV1,
+    CommunityGraphCountsV1, CommunityInputIndexV1, CommunityLifecycleErrorV1 as Error,
+    CommunityNativeNodeInputV1, CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1,
+    CommunityNativeNodeV1, CommunityPassGraphTermsV1, CommunityPassKeyV1,
+    CommunityProtectionSizesV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1, Result,
+    MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
 };
 use crate::{Hash, RecordedDependencyClassV1};
 
@@ -40,7 +42,8 @@ pub struct CommunityAnnotationContextV1 {
     pub member_binding_digest: Hash,
     /// The invocation's CPI1.
     pub invocation_step_digest: Hash,
-    /// The invocation's `InvocationStep` CPN1, the node's first input.
+    /// The invocation's `InvocationStep` CPN1. The Annotation CPN1 takes it
+    /// as one of its direct inputs, and its store incarnation is the node's.
     pub step: CommunityNativeNodeReferenceV1,
     /// The Annotation CPN1's producer ordinal.
     pub producer_ordinal: u64,
@@ -77,6 +80,7 @@ pub struct CommunityAnnotationRecordsV1 {
     charge: CommunityAnnotationChargeV1,
     manifest_digest: Hash,
     node: CommunityNativeNodeReferenceV1,
+    graph: CommunityPassGraphTermsV1,
 }
 
 impl CommunityAnnotationRecordsV1 {
@@ -87,11 +91,15 @@ impl CommunityAnnotationRecordsV1 {
     /// reference (R15.6(1)).
     ///
     /// # Errors
-    /// Returns `BoundsExceeded` for more than 256 distinct inputs, and the
-    /// CAT1 and CPN1 construction errors: `BoundsExceeded` for a CAT1 over
-    /// its item, byte or claim bounds, and `InvalidBinding` for a decreasing
-    /// guest index, a zero link, a native input that does not precede the
-    /// node, or two native inputs of one coordinate.
+    /// Returns `InvalidBinding` for a defect of the trusted input: an invalid
+    /// horizon, a guest index over 63 or below the previous item's, a zero
+    /// link, a native input that does not precede the node, or two native
+    /// inputs of one coordinate. These are checked before any bound, so a
+    /// defect is never mistaken for a budget misfit.
+    ///
+    /// Returns `BoundsExceeded` only for a budget: more than 256 distinct
+    /// inputs, more than 1,024 items, over 1 MiB of claim bytes or a CAT1
+    /// over 2 MiB.
     pub fn stage(
         context: &CommunityAnnotationContextV1,
         items: &[CommunityAnnotationCandidateV1<'_>],
@@ -99,25 +107,33 @@ impl CommunityAnnotationRecordsV1 {
         if items.is_empty() {
             return Ok(None);
         }
+        validate(context, items)?;
         let references = distinct_inputs(context, items);
         if references.len() > MAX_COMMUNITY_DIRECT_INPUTS_V1 {
             return Err(Error::BoundsExceeded);
         }
         let digests: Vec<Vec<Hash>> = items.iter().map(resolved_digests).collect();
         manifest(context, items, &digests).and_then(|manifest| {
-            let manifest_digest = manifest.digest();
-            node(context, manifest_digest, &references).map(|(node, node_len)| {
-                let inputs = references.len() as u64;
-                Some(Self {
-                    charge: CommunityAnnotationChargeV1 {
-                        inputs,
-                        nodes: 1,
-                        edges: inputs,
-                        bytes: (manifest.to_canonical_cbor().len() + node_len) as u64,
-                        rows: 2,
-                    },
-                    manifest_digest,
-                    node,
+            let (manifest_digest, manifest_len) = manifest.identity();
+            node(context, manifest_digest, &references).and_then(|(node, node_len)| {
+                CommunityProtectionSizesV1::new(
+                    context.pass_key.timeline(),
+                    context.pass_key.generation(),
+                )
+                .map(|sizes| {
+                    let inputs = references.len() as u64;
+                    Some(Self {
+                        charge: CommunityAnnotationChargeV1 {
+                            inputs,
+                            nodes: 1,
+                            edges: inputs,
+                            bytes: (manifest_len + node_len) as u64,
+                            rows: 2,
+                        },
+                        manifest_digest,
+                        node,
+                        graph: trace_graph(&sizes, manifest_len, node_len, &references),
+                    })
                 })
             })
         })
@@ -141,6 +157,88 @@ impl CommunityAnnotationRecordsV1 {
     pub const fn node(&self) -> CommunityNativeNodeReferenceV1 {
         self.node
     }
+
+    /// What the two records add to an ARD1 closure (R15.6(6)): the CAT1 with
+    /// no child, the Annotation CPN1 with its CAT1, its step and its other
+    /// mode-0 and mode-2 inputs, and the trace cohort's key.
+    #[must_use]
+    pub const fn graph(&self) -> CommunityPassGraphTermsV1 {
+        self.graph
+    }
+
+    /// Whether the closure of the two records on top of `selected` stays
+    /// within every graph maximum. The Annotation CPN1 is one level above its
+    /// step, which is at most as deep as the selected graph.
+    #[must_use]
+    pub fn fits_graph(&self, selected: CommunityGraphCountsV1) -> bool {
+        CommunityGraphCountsV1 {
+            registrations: selected
+                .registrations
+                .saturating_add(self.graph.registrations),
+            edges: selected.edges.saturating_add(self.graph.edges),
+            keys: selected.keys.saturating_add(self.graph.keys),
+            maximum_depth: selected.maximum_depth.saturating_add(1),
+            registration_bytes: selected
+                .registration_bytes
+                .saturating_add(self.graph.registration_bytes),
+            artifact_bytes: selected
+                .artifact_bytes
+                .saturating_add(self.graph.artifact_bytes),
+        }
+        .within_maxima()
+        .is_ok()
+    }
+}
+
+/// The trace closure's additions: the CAT1 has no ARD1 child, and the node's
+/// children are its CAT1, its step and its other registered inputs.
+fn trace_graph(
+    sizes: &CommunityProtectionSizesV1,
+    manifest_len: usize,
+    node_len: usize,
+    references: &[CommunityTypedInputRefV1<'_>],
+) -> CommunityPassGraphTermsV1 {
+    let registered = references
+        .iter()
+        .filter(|reference| {
+            matches!(
+                reference,
+                CommunityTypedInputRefV1::Native(_) | CommunityTypedInputRefV1::Artifact { .. }
+            )
+        })
+        .count() as u64;
+    // The step is one registered input and one child already.
+    sizes
+        .record(manifest_len as u64, 0)
+        .plus(sizes.record(node_len as u64, 1 + registered))
+        .plus(CommunityPassGraphTermsV1 {
+            keys: 1,
+            ..CommunityPassGraphTermsV1::default()
+        })
+}
+
+/// The trusted input's own defects: the horizon and the guest indices, which
+/// are never a budget.
+fn validate(
+    context: &CommunityAnnotationContextV1,
+    items: &[CommunityAnnotationCandidateV1<'_>],
+) -> Result<()> {
+    validate_horizon(context.evidence_not_after_micros)
+        .map_err(|_| Error::InvalidBinding)
+        .and_then(|()| {
+            items
+                .iter()
+                .try_fold(0, |floor, item| {
+                    if item.guest_index > MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1
+                        || item.guest_index < floor
+                    {
+                        Err(Error::InvalidBinding)
+                    } else {
+                        Ok(item.guest_index)
+                    }
+                })
+                .map(drop)
+        })
 }
 
 /// The step and every item's inputs, once each, in canonical input order.
