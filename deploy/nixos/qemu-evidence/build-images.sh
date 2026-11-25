@@ -33,6 +33,7 @@ printf 'ID=pigloros-444-evidence\nVERSION_ID=1\n' >"${work}/tree/usr/lib/os-rele
 # loadable static ELF executable of this architecture: a dynamic one has no
 # loader inside the root, and a script or stub is not an ELF at all. The same
 # rules, with the same size floor, are the host checker's (static_executable).
+# This is a shell single-quoted block: it must not contain a single quote.
 python3 -I -c '
 import struct
 import sys
@@ -60,7 +61,7 @@ if any(segment[5] > segment[6] for segment in loads):
     raise SystemExit(f"{path} has a loadable segment whose file size exceeds its memory size")
 entry, = struct.unpack_from("<Q", data, 24)
 if not any(segment[1] & 1 and segment[3] <= entry < segment[3] + segment[6] for segment in loads):
-    raise SystemExit(f"{path}'s entry point is in no executable loadable segment")
+    raise SystemExit(f"{path}: the entry point is in no executable loadable segment")
 ' "${architecture}" "${ADAPTER}"
 cp -- "${ADAPTER}" "${out}/adapter"
 chmod 0755 "${out}/adapter"
