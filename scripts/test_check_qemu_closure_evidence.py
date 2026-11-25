@@ -1483,6 +1483,16 @@ class EvidenceTests(unittest.TestCase):
              "installed provider executable is not the launcher"),
             (lambda f: f.update({f"{base}/provider-sha256": f"{LAUNCHER_DIGEST}  /tmp/other\n"}),
              "installed provider executable is not the launcher"),
+            # A well-formed path of another installed object, and a malformed line, are refused.
+            (lambda f: f.update({f"{base}/provider-sha256":
+                                 f"{LAUNCHER_DIGEST}  /var/lib/pigloros/sandbox/providers/{'cd' * 32}\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": "nothing\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": LAUNCHER_DIGEST + "\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": f"{LAUNCHER_DIGEST}  {PROVIDER_BINARY}  x\n"}),
+             "installed provider executable is not the launcher"),
             # How it stopped: the unit is collected, so the journal carries the Result. One
             # marker per case, each on a line that would otherwise be a good stop.
             *[(lambda f, marker=marker: f.update({f"{base}/runtime-log": RUNTIME_LOG + marker + "\n"}),
@@ -1504,6 +1514,17 @@ class EvidenceTests(unittest.TestCase):
             (lambda f: f.update({f"{base}/runtime-log": DEACTIVATED + RUNTIME_LOG.replace(DEACTIVATED, "")}),
              "no Stopping and Deactivated"),
             (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(STOPPING, "")}),
+             "no Stopping and Deactivated"),
+            # The line must start at the beginning of a journal line and end where it ends: text
+            # in front of it (a daemon writing a copy), or after it, does not count.
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                DEACTIVATED, "daemon wrote: " + DEACTIVATED)}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "Deactivated successfully.\n", "Deactivated successfully. (copied)\n")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                STOPPING, "x " + STOPPING)}),
              "no Stopping and Deactivated"),
             # Socket and directory modes (R11 5.2 O9).
             (lambda f: f.update({f"{base}/runtime-tree": RUNTIME_TREE.replace("provider-execute.sock\ts\t600", "provider-execute.sock\ts\t777")}),
@@ -1545,6 +1566,15 @@ class EvidenceTests(unittest.TestCase):
         for change, message in changes:
             with self.subTest(change=change, message=message), self.assertRaisesRegex(checker.EvidenceError, message):
                 self.verdict(change=change)
+
+    def test_only_the_interp_segment_type_makes_the_launcher_dynamic(self):
+        base = "guest/daemon/start"
+        # A word that merely contains INTERP is not the program interpreter segment.
+        accepted = LAUNCHER_HEADERS + "  NOTE           0x0 INTERPOSED-COMMENT\n"
+        self.verdict(change=lambda f: f.update({f"{base}/launcher-program-headers": accepted}))
+        with self.assertRaisesRegex(checker.EvidenceError, "not a loadable statically linked"):
+            self.verdict(change=lambda f: f.update(
+                {f"{base}/launcher-program-headers": LAUNCHER_HEADERS + "  INTERP         0x0\n"}))
 
     def test_a_failed_probe_explains_itself(self):
         """The first QEMU run failed with no probe files: the error must carry the unit's stderr."""

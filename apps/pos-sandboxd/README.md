@@ -150,8 +150,12 @@ guest only (`deploy/nixos/qemu-evidence`). The binary stages the dev/test
 installation around one image, admits it, registers and prepares one attempt,
 and calls `activate_admitted_root`. While its standard input stays open, it
 holds the mounted root so the guest can record the live kernel state. It then
-detaches the root and removes the directory. The feature is never enabled in
-deployable builds.
+detaches the root and removes the directory. With `stage` as its first argument
+the binary instead stages the installation around the real `pos-sandboxd`
+provider binary, an SPI1 file and the runtime key file, and holds it until its
+standard input closes, so that the composed `provider-runtime` can run as the
+staged binary; it activates nothing. The feature is never enabled in deployable
+builds.
 
 `/work`, the sole writable mount, is requested as
 `TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read

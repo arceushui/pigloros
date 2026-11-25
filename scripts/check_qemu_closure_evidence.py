@@ -192,6 +192,8 @@ NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
 DAEMON_CASES = ("start",)
 DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-status", "stop-status",
                       "start-stderr", "launcher-sha256", "launcher-program-headers"}
+# `start-state` and `start-journal` are diagnostics: required to exist, and read only to explain
+# a failed start.
 DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-exe", "runtime-tree", "runtime-log",
                         "provider-sha256", "start-state", "start-journal"}
 # R11 5.2 gives the unit no environment, no descriptor and no credential: each of these is
@@ -1412,7 +1414,7 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
                             f"state after the start: {start_state.split()!r}; "
                             f"journal after the start: {start_journal.strip()[-600:]!r}; "
                             f"log: {log.strip()[-600:]!r}")
-    check_launcher(evidence, base)
+    check_launcher(evidence, base, binary)
     unit = properties(evidence, f"{base}/runtime-properties")
     for key, expected in RUNTIME_UNIT_PROPERTIES.items():
         if unit.get(key) != expected:
@@ -1451,7 +1453,7 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     return {"binary": binary, "properties": unit, "endpoints": {e: tree[e] for e in RUNTIME_ENDPOINTS}}
 
 
-def check_launcher(evidence: Evidence, base: str) -> None:
+def check_launcher(evidence: Evidence, base: str, binary: str) -> None:
     """The provider executable is the statically linked pos-sandboxd the attempt units bind."""
     digest = evidence.line(f"{base}/launcher-sha256").split("  ")
     if len(digest) != 2 or not re.fullmatch(r"[0-9a-f]{64}", digest[0]) or not digest[1].startswith("/nix/store/"):
@@ -1462,8 +1464,7 @@ def check_launcher(evidence: Evidence, base: str) -> None:
         raise EvidenceError(f"the {base} launcher is not a loadable statically linked ELF file")
     # The copy the stager installed is the launcher, byte for byte.
     installed = evidence.line(f"{base}/provider-sha256").split("  ")
-    if len(installed) != 2 or installed[0] != digest[0] \
-            or not PROVIDER_BINARY_PATH.fullmatch(installed[1]):
+    if len(installed) != 2 or installed[0] != digest[0] or installed[1] != binary:
         raise EvidenceError(f"the {base} installed provider executable is not the launcher: {installed}")
 
 

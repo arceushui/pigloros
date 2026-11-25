@@ -1,7 +1,10 @@
 //! #444 packaged-closure conformance driver (feature `test-support`).
 //!
 //! Only the disposable QEMU TCG evidence guest runs it, through the
-//! `pos-sandboxd-conformance` binary. One run is one case:
+//! `pos-sandboxd-conformance` binary. With `stage` as its first argument a
+//! run is the stager (`stage`): it stages the installation for the composed
+//! provider runtime, holds it until its control input closes and removes it.
+//! Otherwise one run is one case:
 //!
 //! 1. `ConformanceCase::stage` stages the signed test installation around
 //!    one caller-built SIM1 DDI, its signer certificate and the exact bytes
