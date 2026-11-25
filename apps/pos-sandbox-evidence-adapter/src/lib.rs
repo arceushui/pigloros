@@ -2,16 +2,22 @@
 
 //! The adapter the #444 QEMU evidence DDI carries as `/adapter`.
 //!
-//! The one argument selects the behavior. [`Mode::Honest`] reads one EAI1
-//! attempt and reports the BLAKE3 digest of its payload member as the EAO1
-//! output, with the one resource counter it can know exactly: the output
-//! bytes. Every other counter is zero, as the adapter measures none of them.
-//! Further fixture modes are new [`Mode`] variants and new arms of
-//! [`observe`]; the argument vector is part of the signed SIM1.
+//! The one argument selects the behavior, from the [`MODES`] table.
+//! [`Mode::Honest`] reads one EAI1 attempt and reports the BLAKE3 digest of
+//! its payload member as the EAO1 output, with the one resource counter it can
+//! know exactly: the output bytes. Every other counter is zero, as the adapter
+//! measures none of them. The argument vector is part of the signed SIM1.
 //!
-//! Failures write no EAO1 byte and end the process with a distinct code.
+//! A further fixture mode is a new [`Mode`] variant, a [`MODES`] row and a new
+//! arm of [`observe`]. Modes that must misbehave on the wire (garbage, extra
+//! bytes, nothing, a hang, memory exhaustion) cannot go through [`observe`]
+//! and the validating `write_observation`, so they need their own seam in
+//! [`run`] before the observation is written.
+//!
+//! The EAO1 stream is built in memory and written once, so a failure writes
+//! no EAO1 byte at all, and ends the process with a distinct code.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
@@ -25,20 +31,16 @@ pub enum Mode {
     Honest,
 }
 
-impl Mode {
-    /// The argument that selects the mode.
-    #[must_use]
-    pub const fn argument(self) -> &'static str {
-        match self {
-            Self::Honest => "honest",
-        }
-    }
+/// Every mode and the argument that selects it: the one source of the
+/// parser.
+pub const MODES: &[(&str, Mode)] = &[("honest", Mode::Honest)];
 
-    fn parse(argument: &OsString) -> Option<Self> {
-        match argument.to_str() {
-            Some("honest") => Some(Self::Honest),
-            _ => None,
-        }
+impl Mode {
+    fn parse(argument: &OsStr) -> Option<Self> {
+        MODES
+            .iter()
+            .find(|(name, _)| argument.to_str() == Some(name))
+            .map(|(_, mode)| *mode)
     }
 }
 
@@ -46,7 +48,7 @@ impl Mode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AdapterRunError {
     /// The arguments are not exactly one known mode.
-    #[error("usage: pos-sandbox-evidence-adapter honest")]
+    #[error("usage: pos-sandbox-evidence-adapter MODE")]
     Usage,
     /// The EAI1 attempt stream does not decode.
     #[error("the EAI1 attempt stream is invalid")]
@@ -79,12 +81,13 @@ pub fn exit_code(result: Result<(), AdapterRunError>) -> ExitCode {
 ///
 /// # Errors
 /// [`AdapterRunError::Usage`] for anything but one known mode argument,
-/// [`AdapterRunError::Wire`] for an attempt that does not decode and
-/// [`AdapterRunError::Output`] when the observation cannot be written.
+/// [`AdapterRunError::Wire`] for an attempt that does not decode (a missing,
+/// truncated or extended stream included) and [`AdapterRunError::Output`]
+/// when the observation cannot be encoded or written.
 pub fn run(
     arguments: impl IntoIterator<Item = OsString>,
     reader: impl Read,
-    writer: impl Write,
+    mut writer: impl Write,
 ) -> Result<(), AdapterRunError> {
     let arguments: Vec<OsString> = arguments.into_iter().collect();
     match arguments.as_slice() {
@@ -97,7 +100,18 @@ pub fn run(
             .map(|attempt| observe(mode, &attempt))
     })
     .and_then(|observation| {
-        write_observation(writer, &observation).or(Err(AdapterRunError::Output))
+        // One buffer, one write: a failed write cannot leave a partial stream
+        // that the provider would capture as an incomplete EAO1.
+        let mut stream = Vec::new();
+        write_observation(&mut stream, &observation)
+            .or(Err(AdapterRunError::Output))
+            .map(|()| stream)
+    })
+    .and_then(|stream| {
+        writer
+            .write_all(&stream)
+            .and_then(|()| writer.flush())
+            .or(Err(AdapterRunError::Output))
     })
 }
 

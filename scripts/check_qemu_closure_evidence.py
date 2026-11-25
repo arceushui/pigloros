@@ -22,10 +22,11 @@ packaged NixOS 26.05 closure and on both architectures:
 Part (b) runs the production admission, registry and activation path
 (`pos-sandboxd-conformance`) against the packaged mountfsd and kernel:
 
-- the executables: the image's /adapter and the launcher are real static ELF
-  executables of the architecture (no PT_INTERP, so they run inside a root
+- the adapter: the image's /adapter is a real, loadable static ELF
+  executable of the architecture (no PT_INTERP, so it runs inside a root
   that holds nothing else, and never the 7-byte stand-in), and the signed
-  positive image carries the adapter's bytes exactly once;
+  positive image carries its whole 4096-byte blocks exactly once, then its
+  tail, which mkfs.erofs stores inline beside the inode;
 - the images: wrong-key carries the positive image's root hash and salt,
   and tampered differs from positive in exactly one root data byte;
 - positive: an image signed by the trusted key mounts as read-only EROFS
@@ -149,10 +150,11 @@ HOST_FILES = {
 }
 # Part (b): the images the guest ran, copied from the recorded store path.
 HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-offset", "positive.der",
-                    "wrong-key.der", "root-hash.txt", "adapter", "launcher"}
+                    "wrong-key.der", "root-hash.txt", "adapter"}
 # The unit runs these inside a root that holds only the image's own files.
 ELF_MACHINES = {"x86_64": 62, "aarch64": 183}
-PT_INTERP = 3
+PT_LOAD, PT_INTERP = 1, 3
+EROFS_BLOCK = 4096
 # Far above any stand-in: a real static Rust executable is megabytes.
 MIN_EXECUTABLE_BYTES = 100_000
 ADAPTER_ARGUMENT = "honest"
@@ -971,35 +973,41 @@ def check_arguments(evidence: Evidence, case: str, images: str, signer: str, des
 
 
 def static_executable(data: bytes, architecture: str, name: str) -> None:
-    """Require a real static ELF executable of the architecture, not a stand-in."""
-    if len(data) < MIN_EXECUTABLE_BYTES or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+    """Require a real, loadable static ELF executable of the architecture."""
+    if len(data) < MIN_EXECUTABLE_BYTES or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1 \
+            or data[6] != 1:
         raise EvidenceError(f"the {name} is not a 64-bit little-endian ELF executable")
-    kind, machine = struct.unpack_from("<HH", data, 16)
-    if kind not in (2, 3) or machine != ELF_MACHINES[architecture]:
+    kind, machine, version = struct.unpack_from("<HHI", data, 16)
+    if kind not in (2, 3) or machine != ELF_MACHINES[architecture] or version != 1:
         raise EvidenceError(f"the {name} is not an executable for {architecture}")
     offset, = struct.unpack_from("<Q", data, 32)
     size, count = struct.unpack_from("<HH", data, 54)
     if size < 56 or offset + size * count > len(data):
         raise EvidenceError(f"the {name} has a malformed program header table")
-    if any(struct.unpack_from("<I", data, offset + index * size)[0] == PT_INTERP for index in range(count)):
+    kinds = [struct.unpack_from("<I", data, offset + index * size)[0] for index in range(count)]
+    if PT_LOAD not in kinds:
+        raise EvidenceError(f"the {name} has no loadable segment")
+    if PT_INTERP in kinds:
         raise EvidenceError(f"the {name} is dynamically linked, so it cannot run inside the image's root")
 
 
-def check_executables(evidence: Evidence, architecture: str, positive: bytes) -> dict:
-    """The image's /adapter and the launcher are the real static executables.
+def check_adapter(evidence: Evidence, architecture: str, positive: bytes) -> dict:
+    """The image's /adapter is the real static executable, and the image holds it.
 
-    The root is uncompressed EROFS, so the adapter's bytes occur verbatim in
-    the signed positive image exactly once. The staged SIM1 binds their
-    digest, and the positive case only mounts if activation read them back.
+    The root is uncompressed EROFS, whose whole blocks of a file are stored
+    contiguously but whose trailing partial block is stored inline next to
+    the inode (FLAT_INLINE). So the adapter is found as its whole 4096-byte
+    blocks exactly once, then its tail at least once. The staged SIM1 binds
+    the digest, and the positive case only mounts if activation read the
+    file back.
     """
     adapter = evidence.raw("host/images/adapter")
-    launcher = evidence.raw("host/images/launcher")
     static_executable(adapter, architecture, "adapter")
-    static_executable(launcher, architecture, "launcher")
-    if positive.count(adapter) != 1:
+    whole = len(adapter) - len(adapter) % EROFS_BLOCK
+    blocks, tail = adapter[:whole], adapter[whole:]
+    if positive.count(blocks) != 1 or tail not in positive:
         raise EvidenceError("the positive image does not carry the adapter exactly once")
-    return {"adapter_sha256": hashlib.sha256(adapter).hexdigest(), "adapter_bytes": len(adapter),
-            "launcher_sha256": hashlib.sha256(launcher).hexdigest()}
+    return {"adapter_sha256": hashlib.sha256(adapter).hexdigest(), "adapter_bytes": len(adapter)}
 
 
 def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]) -> dict:
@@ -1173,7 +1181,7 @@ def check_cases(evidence: Evidence, architecture: str, paths: dict, trusted: tup
                      evidence.text("guest/cases/kernel-log")):
         raise EvidenceError("the kernel log shows no dm-verity data block corruption")
     return {
-        "executables": check_executables(evidence, architecture, positive),
+        "adapter": check_adapter(evidence, architecture, positive),
         "root_hash": root_hash, "salt": salt, "tampered_offset": int(offset),
         **{case: check_mounted_case(evidence, case, verity) for case in MOUNTED_CASES},
         **{case: check_refused_case(evidence, case) for case in ("wrong-key", "verity-d")},
