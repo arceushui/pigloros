@@ -316,6 +316,11 @@ pub struct NamespaceConnector<C: NamespaceControl, E: EgressControl = HostEgress
     // Declared first: closed before the teardown below runs. `None` once the
     // network was removed.
     namespace: Option<OwnedFd>,
+    /// What the attempt's readback is verified against (R14 §3.2 step 8).
+    expected: ExpectedNamespace,
+    /// Where the namespace is pinned, which names it again (R14 §3.2
+    /// step 6).
+    namespaces: NetworkNamespaces,
     teardown: Teardown<C, E>,
 }
 
@@ -414,22 +419,23 @@ where
             control: Arc::clone(&self.control),
             egress: Arc::clone(&self.egress),
             attempt: AttemptEgress {
-                namespace: expected.name,
-                host_link: expected.host_link,
+                namespace: expected.name.clone(),
+                host_link: expected.host_link.clone(),
                 endpoints: endpoints.to_vec(),
             },
             slot,
             removed: false,
         };
-        self.install_and_open(teardown)
+        self.install_and_open(teardown, expected)
     }
 
     /// Give the established namespace of `teardown` its host egress and open
-    /// it for the connector. A failure removes whatever was installed, and
-    /// says if it could not.
+    /// it for the connector, which verifies its readback against `expected`.
+    /// A failure removes whatever was installed, and says if it could not.
     fn install_and_open(
         &self,
         mut teardown: Teardown<C, E>,
+        expected: ExpectedNamespace,
     ) -> Result<NamespaceConnector<C, E>, AttemptNetworkError> {
         if let Err(error) = self.egress.install(&teardown.attempt) {
             let cause = AttemptNetworkError::Egress(error);
@@ -442,6 +448,8 @@ where
         match opened {
             Ok(namespace) => Ok(NamespaceConnector {
                 namespace: Some(namespace),
+                expected,
+                namespaces: self.namespaces.clone(),
                 teardown,
             }),
             Err(error) => {
@@ -453,6 +461,7 @@ where
 }
 
 mod probe;
+mod readback;
 
 pub(super) use probe::PROBE_HOST_LINK;
 pub use probe::{EgressProbe, EgressProbeError, InvalidEgressProbe, LocalEgressProbe};

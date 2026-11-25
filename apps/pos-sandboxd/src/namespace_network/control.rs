@@ -203,17 +203,17 @@ fn inner_view<T: NetlinkTransport>(
     })
 }
 
-/// Read every nftables table of the session's namespace.
+/// Read every nftables table of the namespace `open` opens sessions in,
+/// with the ruleset generation the read settled at (R14 §3.2 step 4).
+///
+/// A chain or rule that names a table or chain the settled dumps did not
+/// report is a contradiction, not a torn read.
 fn tables<T: NetlinkTransport>(
-    session: &NetlinkSession<T>,
-) -> Result<Vec<super::ObservedTable>, NetlinkError> {
-    let [tables, chains, rules] = firewall::dumps();
-    session.dump(tables).and_then(|tables| {
-        session.dump(chains).and_then(|chains| {
-            session
-                .dump(rules)
-                .and_then(|rules| firewall::observed_tables(tables, chains, rules))
-        })
+    open: impl Fn() -> Result<NetlinkSession<T>, NetlinkError>,
+) -> Result<(u32, Vec<super::ObservedTable>), NetlinkError> {
+    firewall::settled(open, None).and_then(|(generation, dumps)| {
+        firewall::observed_tables(dumps.tables, dumps.chains, dumps.rules)
+            .map(|tables| (generation, tables))
     })
 }
 
@@ -227,21 +227,25 @@ fn observe_from(
     consistent(|| with_session(ROUTE, |session| host_view(session, namespace, host_link))).and_then(
         |(host_link, host_addresses, namespace_netnsid)| {
             inside(namespace, || {
-                with_session(ROUTE, |session| inner_view(session, host))
-                    .and_then(|inner| with_session(NETFILTER, tables).map(|tables| (inner, tables)))
+                with_session(ROUTE, |session| inner_view(session, host)).and_then(|inner| {
+                    tables(|| NetlinkSession::open(NETFILTER)).map(|tables| (inner, tables))
+                })
             })
-            .map(|((links, addresses, routes, host_netnsid), tables)| {
-                ObservedNamespace {
-                    links,
-                    addresses,
-                    routes,
-                    tables,
-                    host_link,
-                    host_addresses,
-                    namespace_netnsid,
-                    host_netnsid,
-                }
-            })
+            .map(
+                |((links, addresses, routes, host_netnsid), (firewall_generation, tables))| {
+                    ObservedNamespace {
+                        links,
+                        addresses,
+                        routes,
+                        tables,
+                        host_link,
+                        host_addresses,
+                        namespace_netnsid,
+                        host_netnsid,
+                        firewall_generation,
+                    }
+                },
+            )
         },
     )
 }
@@ -465,6 +469,9 @@ impl NamespaceControl for NetlinkNamespaceControl {
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tables_tests;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

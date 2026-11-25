@@ -8,6 +8,8 @@ use netlink_packet_route::route::{
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 
+use rustix::io::Errno;
+
 use super::super::{IpPrefix, NamespaceRoute};
 use super::*;
 
@@ -211,6 +213,7 @@ fn transit_failures_are_transport_and_everything_else_is_a_change() {
         NetlinkError::Io(Errno::TIMEDOUT),
         NetlinkError::Io(Errno::INVAL),
         NetlinkError::Interrupted,
+        NetlinkError::Torn,
     ] {
         assert_eq!(classify(&error), UnitNetworkError::Transport, "{error:?}");
     }
@@ -346,4 +349,15 @@ fn the_shipped_sysctl_drop_in_sets_the_probed_key_to_one() -> TestResult {
         .collect();
     assert_eq!(settings, [format!("{key} = 1")]);
     Ok(())
+}
+
+#[test]
+fn the_calling_threads_namespace_is_read_through_the_real_route_session() {
+    // An environment that blocks netlink sockets refuses with an I/O error;
+    // otherwise the thread's own namespace holds a loopback link, so a view
+    // that is always empty is told apart from a real one.
+    match read_unit_view() {
+        Ok((links, _routes)) => assert!(links.iter().any(|link| link.kind == LinkKind::Loopback)),
+        Err(error) => assert!(matches!(error, NetlinkError::Io(_)), "{error:?}"),
+    }
 }
