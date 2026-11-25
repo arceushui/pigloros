@@ -76,30 +76,31 @@ pub enum CommunityAdministrativeActionV1 {
     PassAbort,
 }
 
+/// The exact authority action strings, in declaration order.
+const ACTION_NAMES: [&str; 6] = [
+    "community.initialize.v1",
+    "community.transition.v1",
+    "community.fork.v1",
+    "community.retire.v1",
+    "community.quarantine.reset.v1",
+    "community.pass.abort.v1",
+];
+
+/// The `<k>` of each action's operation constraint, in declaration order:
+/// `i` for CGI1 operations, `f` for Fork, `c` for control operations and `r`
+/// for the reservation operation of a pass Abort.
+const OPERATION_KINDS: [char; 6] = ['i', 'i', 'f', 'c', 'c', 'r'];
+
 impl CommunityAdministrativeActionV1 {
     /// The exact authority action string.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Initialize => "community.initialize.v1",
-            Self::Transition => "community.transition.v1",
-            Self::Fork => "community.fork.v1",
-            Self::Retire => "community.retire.v1",
-            Self::QuarantineReset => "community.quarantine.reset.v1",
-            Self::PassAbort => "community.pass.abort.v1",
-        }
+        ACTION_NAMES[self as usize]
     }
 
-    /// The `<k>` of the operation constraint: `i` for CGI1 operations, `f`
-    /// for Fork, `c` for control operations and `r` for the reservation
-    /// operation of a pass Abort.
+    /// The `<k>` of the operation constraint.
     const fn operation_kind(self) -> char {
-        match self {
-            Self::Initialize | Self::Transition => 'i',
-            Self::Fork => 'f',
-            Self::Retire | Self::QuarantineReset => 'c',
-            Self::PassAbort => 'r',
-        }
+        OPERATION_KINDS[self as usize]
     }
 
     /// Whether the operation reads or writes State (A5.2(2)–(4)).
@@ -180,10 +181,27 @@ impl CommunityAdministrativeRequestV1 {
     /// or a half-null prior; a `fork_current` without a Fork source or with a
     /// prior; and a zero Timeline or operation identity.
     pub fn derive(operation: &CommunityAdministrativeOperationV1) -> Result<Self, Error> {
+        Self::shape(operation)
+            .filter(|(_, timeline, operation_id)| {
+                timeline.inner().to_bytes() != [0; 16] && *operation_id != [0; 16]
+            })
+            .map(|(action, timeline, operation_id)| Self {
+                action,
+                timeline,
+                operation_id,
+            })
+            .ok_or(Error::InvalidBinding)
+    }
+
+    /// The A5.1 table row of `operation`: its action, resource Timeline and
+    /// operation identity, or `None` for a shape outside the table.
+    const fn shape(
+        operation: &CommunityAdministrativeOperationV1,
+    ) -> Option<(CommunityAdministrativeActionV1, TimelineId, [u8; 16])> {
         use CommunityAdministrativeActionV1 as Action;
         use CommunityAdministrativeOperationV1 as Operation;
         use CommunityInitializationSourceV1 as Source;
-        let derived = match *operation {
+        match *operation {
             Operation::Initialize {
                 timeline,
                 operation_id,
@@ -226,17 +244,7 @@ impl CommunityAdministrativeRequestV1 {
                 timeline,
                 reservation_operation_id,
             } => Some((Action::PassAbort, timeline, reservation_operation_id)),
-        };
-        derived
-            .filter(|(_, timeline, operation_id)| {
-                timeline.inner().to_bytes() != [0; 16] && *operation_id != [0; 16]
-            })
-            .map(|(action, timeline, operation_id)| Self {
-                action,
-                timeline,
-                operation_id,
-            })
-            .ok_or(Error::InvalidBinding)
+        }
     }
 
     /// The derived administrative action.

@@ -7,10 +7,12 @@ use std::time::Duration;
 use pos_core::community_lifecycle::{
     CommunityAbortReasonV1 as Reason, CommunityAbortV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityAuthorityEvidenceV1,
-    CommunityCurrentViewV1, CommunityKeyIntentInputV1, CommunityLifecycleErrorV1 as Error,
-    CommunityMemberSlotsV1, CommunityMetadataPolicyV1, CommunityPassFrontierV1, CommunityPassKeyV1,
-    CommunityProfileMemberV1, CommunityRecordKindsV1, CommunityReservationInputV1,
-    CommunityReservationV1, CommunitySharedCountsV1,
+    CommunityCurrentViewV1, CommunityDurableProfileV1, CommunityKeyIntentInputV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1, CommunityMetadataPolicyV1,
+    CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
+    CommunityPassFrontierV1, CommunityPassKeyV1, CommunityProfileMemberV1, CommunityRecordKindsV1,
+    CommunityReservationInputV1, CommunityReservationV1, CommunityScopeMembersV1,
+    CommunitySharedCountsV1,
 };
 use pos_core::{AuthorityTrustRootSealV1, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
@@ -33,8 +35,8 @@ use crate::community::{
 use crate::community_initialization_fixture::{
     authority_timeline, hash, initial_head, initialize_target, metadata_authority,
     metadata_registry, profile_until, target, Bootstrapped, Fallible, Roster, DATA_LEAF, EXPIRES,
-    GENERATION, HORIZON, INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW, POLICY_REVISION,
-    REGISTRY, SCHEMA, TRUST_SCOPE,
+    GENERATION, HORIZON, INCARNATION, INSTALLED_CATALOGUE, METADATA_LEAF, NATIVE_PROFILE, NOW,
+    POLICY_REVISION, REGISTRY, SCHEMA, TRUST_SCOPE,
 };
 use crate::plugin_trust_registry_fixtures::release_one;
 
@@ -60,6 +62,23 @@ const ENTRY: CommunityPendingReservationV1 = CommunityPendingReservationV1 {
 
 fn pass_key() -> Result<CommunityPassKeyV1, Error> {
     CommunityPassKeyV1::new(target(), GENERATION, 7)
+}
+
+/// Initialize T under the fixture's CDP1 and return its initialization head.
+fn initialize(domain: &mut Bootstrapped, roster: &Roster) -> Fallible<Hash> {
+    let rows = roster.rows()?;
+    let profile = profile_until(&rows, HORIZON, hash(1), domain.world.catalogue)?;
+    initialization_head(domain, roster, &profile)
+}
+
+/// The head the initialization under `profile` committed.
+fn initialization_head(
+    domain: &mut Bootstrapped,
+    roster: &Roster,
+    profile: &CommunityDurableProfileV1<'_>,
+) -> Fallible<Hash> {
+    let receipt = initialize_target(&SEAL, domain, roster, profile)??;
+    initial_head(&receipt)
 }
 
 /// The installed CDP1 roster: the fixture's two members, and a third of a
@@ -102,12 +121,7 @@ impl Case {
     fn with_horizon(horizon: u64) -> Fallible<Self> {
         let roster = Roster::release_one()?;
         let mut domain = Bootstrapped::until(&SEAL, &roster, true, true, horizon)?;
-        let head = {
-            let rows = roster.rows()?;
-            let profile = profile_until(&rows, HORIZON, hash(1), domain.world.catalogue)?;
-            let receipt = initialize_target(&SEAL, &mut domain, &roster, &profile)??;
-            initial_head(&receipt)?
-        };
+        let head = initialize(&mut domain, &roster)?;
         Ok(Self {
             roster,
             domain,
@@ -244,6 +258,45 @@ impl Case {
                 domain.abort_pass(&SEAL, context, authority, metadata, call)
             },
         )
+    }
+
+    /// The Abort of `reason` on the pass with the FAE1 bytes `credential`.
+    fn abort_with_credential(
+        &mut self,
+        credential: &[u8],
+        reason: Reason,
+    ) -> Fallible<Result<CommunityPassAbortReceiptV1, Error>> {
+        self.with_credential(
+            credential,
+            OPERATION,
+            reason,
+            DATA_LEAF,
+            |domain, context, authority, metadata, call| {
+                domain.abort_pass(&SEAL, context, authority, metadata, call)
+            },
+        )
+    }
+
+    /// Whether the pass metadata key still seals under the Reserve's CSM1
+    /// cover: the CMA1 anchor `(T, G)`, its protection ID, no scope members
+    /// and the metadata horizon.
+    fn key_seals(&mut self) -> Fallible<bool> {
+        let scope = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
+            store_incarnation: INCARNATION,
+            metadata_anchor_timeline: target(),
+            metadata_anchor_generation: GENERATION,
+            protection_operation_id: PASS_KEY_ID,
+            scope_members: CommunityScopeMembersV1::from_members(&[]),
+            metadata_not_after_micros: HORIZON,
+        })?;
+        let vault = self
+            .domain_mut()
+            .keys
+            .get_mut(&PASS_KEY_ID)
+            .ok_or("no pass key")?;
+        Ok(vault
+            .seal(&scope, CommunityMetadataSchemaV1::Cab1, b"probe")
+            .is_ok())
     }
 
     /// The Abort of `reason` on the pass whose administrative decision
@@ -413,7 +466,9 @@ fn an_abort_commits_its_records_in_one_transaction() -> TestResult {
         before.keys.len(),
     );
     let selection = before.selection.as_ref().map(|(_, sealed)| sealed.address);
+    assert!(case.key_seals()?);
     let receipt = case.abort(Reason::AuthenticatedCancellation)??;
+    assert!(!case.key_seals()?);
     let after = case.domain();
     assert_eq!(after.inventory_generation, inventory + 1);
     assert_eq!(after.native_producer_ordinal, ordinal);
@@ -616,6 +671,21 @@ fn a_shape_the_table_refuses_gives_3() -> TestResult {
         Reason::ProtectedUseRefused,
     ] {
         assert_eq!(case.abort(reason)?.err(), Some(Error::InvalidBinding));
+        // The shape is refused before any authority call: an unreadable
+        // FAE1 would otherwise give 12.
+        assert_eq!(
+            case.abort_with_credential(b"unreadable", reason)?.err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    for reason in [
+        Reason::AuthenticatedCancellation,
+        Reason::RetiringGeneration,
+    ] {
+        assert_eq!(
+            case.abort_with_credential(b"unreadable", reason)?.err(),
+            Some(Error::EvidenceUnavailable)
+        );
     }
     assert_eq!(
         case.abort_of([0; 16], Reason::AuthenticatedCancellation)?

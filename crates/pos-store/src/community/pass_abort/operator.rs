@@ -563,8 +563,8 @@ impl MemoryCommunityDomainV1 {
             .and_then(|row| {
                 Some(row)
                     .filter(|row| {
-                        row.head_seq == request.at_position().as_u64()
-                            && row.revocation_epoch == request.revocation_epoch()
+                        (row.head_seq, row.revocation_epoch)
+                            == (request.at_position().as_u64(), request.revocation_epoch())
                     })
                     .map(|row| vec![row])
                     .ok_or(Error::EvidenceUnavailable)
