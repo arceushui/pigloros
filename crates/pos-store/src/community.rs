@@ -93,9 +93,9 @@ pub use pass_seal::{
 };
 #[cfg(target_os = "linux")]
 pub use pass_writer::{
-    CommunityCommitInputV1, CommunityMintedObservationV1, CommunityObservationCutV1,
-    CommunityReserveInputV1, CommunityStagedAbortV1, CommunityStagedCommitV1,
-    CommunityStagedReserveV1,
+    community_reserve_selection_v1, CommunityCommitInputV1, CommunityMintedObservationV1,
+    CommunityObservationCutV1, CommunityReserveInputV1, CommunityReservePassFactsV1,
+    CommunityStagedAbortV1, CommunityStagedCommitV1, CommunityStagedReserveV1,
 };
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,
