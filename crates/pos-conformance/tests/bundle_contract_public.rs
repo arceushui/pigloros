@@ -115,6 +115,20 @@ fn staged_regular_files(directory: &Path) -> TestResult<Vec<PathBuf>> {
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn replace_staged_file(root: &Path, path: &Path, bytes: &[u8]) -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let replacement = root.join("staged-file-replacement");
+    fs::write(&replacement, bytes)?;
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600))?;
+    // Replacing the path keeps a resumed writer on its old inode, so it cannot
+    // overwrite the mutation through an already-open file descriptor.
+    fs::rename(replacement, path)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn staged_nested_directory(staging: &Path, files: &[PathBuf]) -> TestResult<PathBuf> {
     files
         .iter()
@@ -236,7 +250,7 @@ fn apply_staging_mutation(
         StagingMutation::CorruptFiles => {
             staged_files
                 .iter()
-                .try_for_each(|path| fs::write(path, b"corrupted staged bytes"))?;
+                .try_for_each(|path| replace_staged_file(root, path, b"corrupted staged bytes"))?;
         }
         StagingMutation::CorruptFileAtSameLength => {
             let path = staged_files
@@ -247,7 +261,7 @@ fn apply_staging_mutation(
                 .first_mut()
                 .ok_or("staged regular file is unexpectedly empty")?;
             *first ^= 0xff;
-            fs::write(path, bytes)?;
+            replace_staged_file(root, path, &bytes)?;
         }
         StagingMutation::RemoveFile => {
             let path = staged_files
