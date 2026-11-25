@@ -91,18 +91,23 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
     }
     let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../crates/pos-reference/tests/vectors/sim1-ddi/x86-64");
-    let image = Path::new("/tmp/conformance-image.raw");
+    // Private to this test and removed with it, unlike a fixed /tmp path.
+    let scratch = tempfile::tempdir()?;
+    let image = scratch.path().join("image.raw");
     let expanded = Command::new("gzip")
         .arg("-dc")
         .arg(vectors.join("image.raw.gz"))
-        .stdout(fs::File::create(image)?)
+        .stdout(fs::File::create(&image)?)
         .status()?;
     assert!(expanded.success());
+    let adapter = scratch.path().join("adapter");
+    fs::write(&adapter, b"adapter")?;
     let arguments = || -> Vec<OsString> {
         vec![
-            image.into(),
+            image.clone().into(),
             vectors.join("signer.der").into(),
             VECTOR_KEY_DESCRIPTION.into(),
+            adapter.clone().into(),
         ]
     };
 
@@ -162,7 +167,12 @@ async fn the_driver_reaches_production_activation_and_reports_its_refusal() -> T
     let output = Command::new(env!("CARGO_BIN_EXE_pos-sandboxd-conformance"))
         .args(arguments())
         // The child's coverage profile must not replace this process's.
-        .env("LLVM_PROFILE_FILE", "/tmp/conformance-binary-%p.profraw")
+        .env(
+            "LLVM_PROFILE_FILE",
+            // Cargo's own scratch directory, which outlives the test so that
+            // the coverage run can merge the profile.
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("conformance-binary-%p.profraw"),
+        )
         .stdin(Stdio::null())
         .output()?;
     assert!(output.status.success(), "{output:?}");
@@ -186,7 +196,7 @@ fn the_binary_fails_a_usage_error_with_a_diagnostic_and_no_report() -> TestResul
     assert_eq!(
         String::from_utf8(output.stderr)?,
         "pos-sandboxd-conformance: usage: pos-sandboxd-conformance IMAGE CERTIFICATE_DER \
-         KEY_DESCRIPTION\n"
+         KEY_DESCRIPTION ADAPTER [ADAPTER_ARGUMENT...]\n"
     );
     Ok(())
 }
