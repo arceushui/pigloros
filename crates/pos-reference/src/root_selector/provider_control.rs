@@ -10,7 +10,18 @@
 //! call sends at most 4 distinct requests, and all of them, with the exact
 //! repeat, share one overall budget: the provider holds a control-pool worker
 //! for each (R15 N13).
+//!
+//! Limits, by design:
+//! - The budget is per operation call. The watcher's SCQ1 and the recovery
+//!   path's SCQ1 are separate calls with separate budgets. The 4-entry ledger
+//!   still holds only because every ID is derived from (attempt, operation,
+//!   index): a second call repeats the same IDs, which the provider answers as
+//!   exact repeats, and a refusal adds no ledger entry.
+//! - A hung provider can occupy one selector connection handler for about the
+//!   attempt watchdog, plus the SCQ1 budget, plus the SRQ1 budget, plus the
+//!   pauses between retries.
 
+use std::thread;
 use std::time::{Duration, Instant};
 
 use super::recovery_pending::report_diagnostic;
@@ -29,6 +40,11 @@ const PENDING_WAIT_LIMIT_ID: u8 = 16;
 /// What the selector adds to the provider's own wait for framing, signing and
 /// scheduling.
 const CONTROL_MARGIN: Duration = Duration::from_secs(5);
+/// The forced-cleanup ceiling of ADR-069 section 9 (`released <= 5000` ms,
+/// R11 section 4 item 9): a cancelled attempt may still be in cleanup.
+const CLEANUP_CEILING: Duration = Duration::from_secs(5);
+/// The pause before a retryable refusal is asked again as a new request.
+const RETRY_PAUSE: Duration = Duration::from_millis(100);
 const REQUEST_ID_DOMAIN: &[u8] = b"PiglorOS.SelectorControlRequestId.v1\0";
 const NONCE_DOMAIN: &[u8] = b"PiglorOS.SelectorControlNonce.v1\0";
 
@@ -52,11 +68,9 @@ fn derive(
 /// BHC1 limit 16 for a pending response, read here from the same installed
 /// caps, plus a fixed margin.
 pub(super) fn control_budget(admitted: &AdmittedSandboxProvider) -> Duration {
-    let wait = admitted
-        .broker_hard_caps()
-        .iter()
-        .find(|limit| limit.limit_id == PENDING_WAIT_LIMIT_ID)
-        .map_or(0, |limit| limit.value);
+    // BHC1 always carries every limit ID, as the provider's own
+    // `control_interval` relies on.
+    let wait = admitted.broker_hard_caps()[usize::from(PENDING_WAIT_LIMIT_ID)].value;
     Duration::from_millis(wait).saturating_add(CONTROL_MARGIN)
 }
 
@@ -69,7 +83,8 @@ pub(super) struct AttemptControl<'a, T: ProviderExecutor> {
     /// The overall budget of SRQ1 (see [`control_budget`]).
     pub(super) timeout: Duration,
     /// How long the attempt itself may still run: SCQ1 waits for it to end
-    /// before the provider's own interval starts (R15 §3.6 item 2(a)).
+    /// before the provider's own interval starts (R15 §3.6 item 2(a)). The
+    /// selector bounds a run by the attempt watchdog.
     pub(super) active_wait: Duration,
     pub(super) diagnostics: &'a DiagnosticSink,
 }
@@ -116,10 +131,12 @@ impl<T: ProviderExecutor> AttemptControl<'_, T> {
         self.reconcile(None);
     }
 
-    /// SCQ1 waits for a still running attempt to end, then for the provider's
-    /// own interval.
+    /// SCQ1 waits for a still running attempt to end (its watchdog, then the
+    /// forced-cleanup ceiling), then for the provider's own interval.
     const fn cancel_budget(&self) -> Duration {
-        self.timeout.saturating_add(self.active_wait)
+        self.timeout
+            .saturating_add(self.active_wait)
+            .saturating_add(CLEANUP_CEILING)
     }
 
     /// Cancel the attempt: its recovery was exhausted, or the evaluator hung
@@ -187,6 +204,8 @@ fn retrying<R>(
                 if refusal.is_retryable() && index + 1 < MAX_DISTINCT_REQUESTS =>
             {
                 index += 1;
+                // Bounded by what remains of the one overall budget.
+                thread::sleep(RETRY_PAUSE.min(budget.saturating_sub(started.elapsed())));
             }
             outcome => return outcome,
         }

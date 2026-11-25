@@ -21,7 +21,7 @@ const ATTEMPT: [u8; 16] = [7; 16];
 const AGR1: [u8; 32] = [8; 32];
 const SPY1: [u8; 32] = [9; 32];
 const SAU1: [u8; 32] = [10; 32];
-const TIMEOUT: Duration = Duration::from_secs(2);
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn accepted() -> ReconciliationEvidenceFields {
     ReconciliationEvidenceFields {

@@ -154,10 +154,6 @@ fn execute_returns_the_authenticated_execution_and_its_verified_output() -> Test
         })?
         .ok_or("output missing")?;
     assert_eq!(output, b"output");
-    let (spy1, agr1) = execution
-        .with_verified_reply_output(|spy1, agr1, _, _, _, _| Ok((spy1.to_vec(), agr1.to_vec())))?
-        .ok_or("output missing")?;
-    assert_eq!((spy1, agr1), (fixture.spy1.clone(), fixture.agr1.clone()));
     join(served)
 }
 

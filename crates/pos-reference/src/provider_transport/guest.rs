@@ -4,6 +4,10 @@
 //! transport (execute, SCQ1 and SRQ1) without a second protocol
 //! implementation: the endpoint stays root-owned and every connection must
 //! come from the named provider process (ADR-069 R11 §5.0 step 8).
+//!
+//! [`GuestExecuteError`], [`GuestRefusal`] and [`GuestControlError`] mirror the
+//! crate-private transport enums by design: the transport types stay private,
+//! and only this feature exposes their closed classes.
 
 use std::io::{Read, Seek};
 use std::num::NonZeroU64;
@@ -201,24 +205,6 @@ impl GuestExecution {
         compose: impl FnOnce(&PayloadDescriptor, &mut dyn Read) -> Result<T, SelectorBoundaryError>,
     ) -> Result<Option<T>, SelectorBoundaryError> {
         self.0.with_verified_output(compose)
-    }
-
-    /// The evidence and the verified output stream together.
-    ///
-    /// # Errors
-    /// A closed I/O failure, or the failure `compose` returns.
-    pub fn with_verified_reply_output<T>(
-        &mut self,
-        compose: impl FnOnce(
-            &[u8],
-            &[u8],
-            &[u8],
-            &[Vec<u8>],
-            &PayloadDescriptor,
-            &mut dyn Read,
-        ) -> Result<T, SelectorBoundaryError>,
-    ) -> Result<Option<T>, SelectorBoundaryError> {
-        self.0.with_verified_reply_output(compose)
     }
 }
 

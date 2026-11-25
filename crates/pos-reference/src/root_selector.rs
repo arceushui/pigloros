@@ -66,11 +66,8 @@ use crate::selector::SelectorBoundaryError;
 mod evaluator_watch;
 mod provider_control;
 mod recovery_pending;
-
-use evaluator_watch::{execute_watched, InFlightAttempt};
-use provider_control::AttemptControl;
-use recovery_pending::DiagnosticSink;
 mod runtime_start;
+
 #[cfg(test)]
 use crate::selector_protocol::decode_request;
 use crate::selector_protocol::{
@@ -78,6 +75,9 @@ use crate::selector_protocol::{
     AuthenticatedSelectorReply, DecodedSelectorRequest, EncodedSelectorReply,
     SelectorProviderTerminal,
 };
+use evaluator_watch::{execute_watched, InFlightAttempt};
+use provider_control::AttemptControl;
+use recovery_pending::{report_diagnostic, DiagnosticSink};
 
 const CONTROL_LIMIT: u32 = 16 * 1024 * 1024;
 const CONTROL_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -2154,6 +2154,12 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         // The same EVR1 legitimately derives one ID per selected case and exact
         // retries remain provider-idempotent. Only a namespace bound to another
         // EVR1 digest is a conflict.
+        //
+        // One consequence of the owner decision to cancel on an evaluator
+        // drop: SCQ1 is keyed by the attempt. An evaluator that reconnects
+        // with the same request joins the same provider attempt, and the
+        // abandoned first connection's watcher then cancels that attempt. The
+        // retry receives the cancelled terminal.
         let namespace_execution = self
             .evaluation_namespaces
             .execute_ordered(&decoded.request, || {
@@ -2163,6 +2169,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                     stream,
                     &in_flight,
                     |agr1_digest| control(agr1_digest).cancel(),
+                    |errno| report_diagnostic(&self.diagnostics, "evaluator watch failed", &errno),
                     || {
                         let mut provider_requests = SelectorProviderRequestAdmission::new(
                             &admission,
@@ -2213,10 +2220,20 @@ struct PreparedExecution {
 /// outcome calls for (owner decisions on #1503): SRQ1 after an authenticated
 /// terminal, SCQ1 and SRQ1 after an exhausted or invalid post-AGR1 outcome.
 ///
-/// The recompute needs only that the selector authenticated the whole
-/// response (R15 §3.5 rule 2), not that the evaluator received it; so SRQ1
-/// follows an authenticated terminal even when forwarding it fell back to
-/// `EvidenceInvalid` or the evaluator write failed.
+/// The write shutdown must stay after `execute_watched` has joined its
+/// watcher (this function runs after it returned): the selector's own write
+/// shutdown, after the evaluator's half-close, raises the same `POLLHUP` as a
+/// close and would cancel every normal attempt.
+///
+/// SRQ1 follows an authenticated terminal even when forwarding it fell back
+/// to `EvidenceInvalid` or the evaluator write failed. R15 §3.5 rule 2 needs
+/// only that the selector authenticated the whole response (the SPY1 it
+/// holds is the one the provider retains, §3.5 and §3.6 item 1); R15 §3.4
+/// never makes delivery to the evaluator a precondition. Reconciling after a
+/// failed delivery releases the retained SPY1, so a later retry gets
+/// `UnknownAttempt` (15); not reconciling leaves a live slot and its ELM1[8]
+/// charge until the runtime is replaced (N12). The first costs a retry, the
+/// second costs capacity, and the decision is for the first.
 fn write_and_control<'a, T: ProviderExecutor + 'a>(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
@@ -6042,6 +6059,67 @@ mod tests {
     }
 
     #[test]
+    fn the_selected_transport_forwards_control_and_fails_closed_when_poisoned() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        // A provider that reads each request and closes without answering.
+        let provider = thread::spawn(move || -> std::io::Result<()> {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept()?;
+                stream.read_to_end(&mut Vec::new())?;
+            }
+            Ok(())
+        });
+        let selected =
+            SelectedProviderTransport::new(ProviderTransport::from_path_for_test(&path)?);
+        let (cancel, cancel_bytes) = fixture
+            .provider
+            .cancel_request([5; 16], [6; 16], [7; 16], [8; 32])?;
+        let (reconcile, reconcile_bytes) = fixture
+            .provider
+            .reconcile_request([5; 16], [6; 16], [7; 16], [8; 32])?;
+        let unreachable = Some(ProviderControlError::Boundary(
+            SelectorBoundaryError::SelectorUnavailable,
+        ));
+        let timeout = Duration::from_secs(30);
+        let forward = |selected: &SelectedProviderTransport| {
+            (
+                selected
+                    .cancel(&fixture.provider, &cancel, &cancel_bytes, None, timeout)
+                    .err(),
+                selected
+                    .reconcile(
+                        &fixture.provider,
+                        &reconcile,
+                        &reconcile_bytes,
+                        None,
+                        timeout,
+                    )
+                    .err(),
+            )
+        };
+        assert_eq!(
+            forward(&selected),
+            (unreachable.clone(), unreachable.clone())
+        );
+        provider.join().map_err(|_| "provider panicked")??;
+
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = selected
+                .0
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert_eq!(forward(&selected), (unreachable.clone(), unreachable));
+        Ok(())
+    }
+
+    #[test]
     fn selector_admission_retires_only_the_closed_current_provider() -> TestResult {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;
@@ -7485,6 +7563,11 @@ mod tests {
         eof_before_control: Vec<bool>,
         /// The bytes the evaluator received before each EOF.
         reply: Vec<u8>,
+        /// Each SCQ1: the attempt ID and the AGR1 digest it named.
+        cancelled: Vec<([u8; 16], [u8; 32])>,
+        /// Each SRQ1: the attempt ID, the AGR1 digest it named and the
+        /// digests the selector recomputed the tuple from.
+        reconciled: Vec<([u8; 16], [u8; 32], Option<ReconciliationEvidenceFields>)>,
     }
 
     /// Records which control requests the selector sent, observes the
@@ -7508,7 +7591,7 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(evaluator) = evaluator.as_mut() {
                 evaluator
-                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .set_read_timeout(Some(Duration::from_secs(5)))
                     .ok();
                 let mut bytes = Vec::new();
                 let eof = evaluator.read_to_end(&mut bytes).is_ok();
@@ -7543,6 +7626,11 @@ mod tests {
             timeout: Duration,
         ) -> Result<AuthenticatedCancellation, ProviderControlError> {
             self.observe("cancel");
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancelled
+                .push((request.attempt_id, request.agr1_digest));
             self.inner
                 .cancel(admitted, request, bytes, accepted_spy1_digest, timeout)
         }
@@ -7560,6 +7648,11 @@ mod tests {
             } else {
                 "reconcile-unverified"
             });
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .reconciled
+                .push((request.attempt_id, request.agr1_digest, accepted.copied()));
             self.inner
                 .reconcile(admitted, request, bytes, accepted, timeout)
         }
@@ -7600,8 +7693,32 @@ mod tests {
     fn control_after(
         result: Result<AuthenticatedProviderTerminal, ProviderTransportError>,
     ) -> TestResult<(Seen, String)> {
+        control_with(result, false)
+    }
+
+    /// As [`control_after`]; with `conflicting`, the request names a
+    /// namespace that another EVR1 already holds.
+    fn control_with(
+        result: Result<AuthenticatedProviderTerminal, ProviderTransportError>,
+        conflicting: bool,
+    ) -> TestResult<(Seen, String)> {
         let (request, admitted, resolved) =
             crate::selector::installation::tests::root_selector_fixture()?;
+        let namespaces = EvaluationNamespaceBindings::default();
+        let request = if conflicting {
+            namespaces.execute_ordered(&request, || {
+                Err(ProviderTransportError::AfterAdmission {
+                    agr1_digest: [93; 32],
+                    failure: PostAdmissionProviderFailure::TerminalUnavailable,
+                })
+            })?;
+            let mut other = request;
+            other.implementation.organization_id = Some("conflicting-owner".to_owned());
+            refresh_request_digest(&mut other)?;
+            other
+        } else {
+            request
+        };
         let seen = Arc::new(Mutex::new(Seen::default()));
         let sink = SharedSink::default();
         let encoded = encoded_request(&request, resolved.attempt())?;
@@ -7615,7 +7732,7 @@ mod tests {
                 evaluator: Mutex::new(Some(client.try_clone()?)),
             },
             peer_uid: fs::metadata(".")?.uid(),
-            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            evaluation_namespaces: namespaces,
             recovery_directory: test_recovery_directory()?,
             recovery_owner: fs::metadata(".")?.uid(),
             diagnostics: Mutex::new(Box::new(sink.clone())),
@@ -7643,6 +7760,27 @@ mod tests {
             control_after(Ok(AuthenticatedProviderTerminal::Execution(execution)))?;
         // One exact repeat after the unreachable provider, with the tuple recomputed.
         assert_eq!(seen.calls, ["reconcile-recomputed", "reconcile-recomputed"]);
+        // Each names the attempt and AGR1, and carries the digests that
+        // `from_test_frames` fixes.
+        let attempt = seen
+            .reconciled
+            .first()
+            .map(|sent| sent.0)
+            .ok_or("no SRQ1")?;
+        let accepted = ReconciliationEvidenceFields {
+            attempt_id: attempt,
+            agr1_digest: [7; 32],
+            terminal_spy1_digest: [8; 32],
+            final_sau1_digest: [9; 32],
+        };
+        assert_ne!(attempt, [0; 16]);
+        assert_eq!(
+            seen.reconciled,
+            [
+                (attempt, [7; 32], Some(accepted)),
+                (attempt, [7; 32], Some(accepted))
+            ]
+        );
         // The evaluator had its answer and its EOF before each control request.
         assert_eq!(seen.eof_before_control, [true, true]);
         assert!(!seen.reply.is_empty());
@@ -7672,8 +7810,39 @@ mod tests {
             );
             assert_eq!(seen.eof_before_control, [true; 4]);
             assert!(!seen.reply.is_empty());
+            // SCQ1 and SRQ1 name the same attempt and the AGR1 of the failure.
+            let attempt = seen.cancelled.first().map(|sent| sent.0).ok_or("no SCQ1")?;
+            assert_eq!(seen.cancelled, [(attempt, [91; 32]); 2]);
+            assert_eq!(
+                seen.reconciled,
+                [(attempt, [91; 32], None), (attempt, [91; 32], None)]
+            );
             assert!(diagnostics.contains("provider cancel failed"));
             assert!(diagnostics.contains("provider reconcile failed"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_selector_sends_no_control_request_for_a_conflicting_namespace() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let execution = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1,
+            fixture.spr1,
+            fixture.spy1,
+            fixture.sau1,
+            None,
+        );
+        for result in [
+            Ok(AuthenticatedProviderTerminal::Execution(execution)),
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest: [94; 32],
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
+            }),
+        ] {
+            let (seen, diagnostics) = control_with(result, true)?;
+            assert!(seen.calls.is_empty());
+            assert!(diagnostics.is_empty());
         }
         Ok(())
     }

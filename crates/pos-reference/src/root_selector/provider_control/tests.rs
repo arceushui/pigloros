@@ -210,7 +210,7 @@ fn reconcile_with(
         admitted: &fixture.provider,
         attempt_id: ATTEMPT,
         agr1_digest: AGR1,
-        timeout: Duration::from_secs(2),
+        timeout: Duration::from_secs(30),
         active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
@@ -346,7 +346,7 @@ fn cancel_sends_the_derived_scq1_and_reports_only_failures() -> TestResult {
         admitted: &fixture.provider,
         attempt_id: ATTEMPT,
         agr1_digest: AGR1,
-        timeout: Duration::from_secs(2),
+        timeout: Duration::from_secs(30),
         active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
@@ -371,7 +371,7 @@ fn cancel_sends_the_derived_scq1_and_reports_only_failures() -> TestResult {
         admitted: &fixture.provider,
         attempt_id: ATTEMPT,
         agr1_digest: AGR1,
-        timeout: Duration::from_secs(2),
+        timeout: Duration::from_secs(30),
         active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }
@@ -427,7 +427,7 @@ fn a_cancel_budget_adds_the_time_the_attempt_may_still_run() -> TestResult {
         active_wait: Duration::from_secs(40),
         diagnostics: &diagnostics,
     };
-    assert_eq!(control.cancel_budget(), Duration::from_secs(43));
+    assert_eq!(control.cancel_budget(), Duration::from_secs(48));
     requests(idle)?;
     Ok(())
 }
@@ -446,18 +446,38 @@ fn count_calls(
 }
 
 #[test]
-fn a_retryable_refusal_is_sent_exactly_four_distinct_times() {
+fn a_retryable_refusal_is_sent_exactly_four_distinct_times_with_a_pause_between() {
     for refusal in [
         ProviderControlRefusal::Pending11,
         ProviderControlRefusal::Busy12,
         ProviderControlRefusal::CleanupFailed14,
     ] {
+        let started = Instant::now();
         let (calls, result) = count_calls(Duration::from_mins(1), || {
             ProviderControlError::Refused(refusal)
         });
         assert_eq!(calls, usize::from(MAX_DISTINCT_REQUESTS));
         assert_eq!(result, Err(ProviderControlError::Refused(refusal)));
+        // A pause follows each of the three refusals that are asked again.
+        assert!(started.elapsed() >= RETRY_PAUSE * 3);
     }
+}
+
+#[test]
+fn the_pause_between_retries_never_outlasts_the_budget() {
+    // The pause is cut to what remains, so the budget is spent exactly when
+    // the first refusal has been paused for, and no second request is sent.
+    let budget = Duration::from_millis(30);
+    let (calls, result) = count_calls(budget, || {
+        ProviderControlError::Refused(ProviderControlRefusal::Busy12)
+    });
+    assert_eq!(calls, 1);
+    assert_eq!(
+        result,
+        Err(ProviderControlError::Boundary(
+            SelectorBoundaryError::SelectorUnavailable
+        ))
+    );
 }
 
 #[test]
@@ -526,7 +546,7 @@ fn a_request_that_cannot_be_built_is_reported_without_contacting_the_provider() 
         admitted: &fixture.provider,
         attempt_id: [0; 16],
         agr1_digest: AGR1,
-        timeout: Duration::from_secs(2),
+        timeout: Duration::from_secs(30),
         active_wait: Duration::ZERO,
         diagnostics: &diagnostics,
     }

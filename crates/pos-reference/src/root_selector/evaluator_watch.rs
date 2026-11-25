@@ -5,12 +5,24 @@
 //! full, and the evaluator waits for the reply. A peer that closed its end
 //! entirely raises `POLLHUP` on this end; a peer that only shut down its write
 //! side (the normal state) raises no `POLLHUP`, so `events = 0` is enough.
+//!
+//! Limits, by design:
+//! - An evaluator that times out and gives up is detected only when it closes
+//!   its socket. A silent evaluator that keeps the connection open is never
+//!   detected here; the provider attempt then ends under its own watchdog.
+//! - The watch is only sound while the selector keeps its own end open for
+//!   writing: shutting down the selector's write side after the peer's
+//!   half-close raises `POLLHUP` on the same socket and would cancel every
+//!   normal attempt. [`execute_watched`] joins the watcher before it returns,
+//!   and the selector shuts down only after that.
 
 use std::os::unix::net::UnixStream;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use rustix::io::Errno;
 
 use super::io_error;
 use crate::selector::SelectorBoundaryError;
@@ -64,12 +76,16 @@ impl InFlightAttempt {
 
 /// Whether `evaluator` closed its end entirely before `wake` became ready or
 /// closed. `timeout` bounds the wait; production waits indefinitely.
-fn wait_for_hang_up(evaluator: &UnixStream, wake: &UnixStream, timeout: Option<&Timespec>) -> bool {
+fn wait_for_hang_up(
+    evaluator: &UnixStream,
+    wake: &UnixStream,
+    timeout: Option<&Timespec>,
+) -> rustix::io::Result<bool> {
     let mut descriptors = [
         PollFd::new(evaluator, PollFlags::empty()),
         PollFd::new(wake, PollFlags::IN),
     ];
-    rustix::io::retry_on_intr(|| poll(&mut descriptors, timeout)).is_ok_and(|_| {
+    rustix::io::retry_on_intr(|| poll(&mut descriptors, timeout)).map(|_| {
         descriptors[1].revents().is_empty()
             && descriptors[0]
                 .revents()
@@ -77,42 +93,62 @@ fn wait_for_hang_up(evaluator: &UnixStream, wake: &UnixStream, timeout: Option<&
     })
 }
 
-/// Cancel the attempt once the evaluator hung up while it runs.
+/// Cancel the attempt once the evaluator hung up while it runs; report a
+/// failed poll, which ends the watch.
 fn watch_evaluator(
     evaluator: &UnixStream,
     wake: &UnixStream,
+    timeout: Option<&Timespec>,
     in_flight: &InFlightAttempt,
     cancel: impl FnOnce([u8; 32]),
+    report: impl FnOnce(Errno),
 ) {
-    let running = wait_for_hang_up(evaluator, wake, None)
-        .then(|| in_flight.wait_for_running_grant())
-        .flatten();
-    if let Some(agr1_digest) = running {
-        cancel(agr1_digest);
+    match wait_for_hang_up(evaluator, wake, timeout) {
+        Ok(hung_up) => {
+            let running = hung_up
+                .then(|| in_flight.wait_for_running_grant())
+                .flatten();
+            if let Some(agr1_digest) = running {
+                cancel(agr1_digest);
+            }
+        }
+        Err(errno) => report(errno),
     }
 }
 
 /// Run `execute` while a scoped thread watches `evaluator`. If the evaluator
 /// hangs up while an attempt with an authenticated AGR1 runs, `cancel` is
-/// called with that AGR1 digest, concurrently with `execute`.
+/// called with that AGR1 digest, concurrently with `execute`. A poll failure
+/// goes to `report`. The watcher is always woken and joined, also when
+/// `execute` panics, which then continues to unwind.
 ///
 /// # Errors
-/// Fails closed, before `execute` runs, when the watcher cannot be set up.
+/// Fails closed, before `execute` runs, when the wake pair or the watcher
+/// thread cannot be created.
 pub(super) fn execute_watched<R>(
     evaluator: &UnixStream,
     in_flight: &InFlightAttempt,
     cancel: impl Fn([u8; 32]) + Sync,
+    report: impl Fn(Errno) + Sync,
     execute: impl FnOnce() -> R,
 ) -> Result<R, SelectorBoundaryError> {
-    let watched = evaluator.try_clone().map_err(io_error)?;
-    let (wake, woken) = UnixStream::pair().map_err(io_error)?;
-    Ok(thread::scope(|scope| {
-        scope.spawn(|| watch_evaluator(&watched, &woken, in_flight, &cancel));
-        let result = execute();
-        in_flight.finish();
-        drop(wake);
-        result
-    }))
+    UnixStream::pair()
+        .map_err(io_error)
+        .and_then(|(wake, woken)| {
+            thread::scope(|scope| {
+                thread::Builder::new()
+                    .spawn_scoped(scope, || {
+                        watch_evaluator(evaluator, &woken, None, in_flight, &cancel, &report);
+                    })
+                    .map_err(io_error)
+                    .map(|_watcher| {
+                        let outcome = catch_unwind(AssertUnwindSafe(execute));
+                        in_flight.finish();
+                        drop(wake);
+                        outcome.unwrap_or_else(|panic| resume_unwind(panic))
+                    })
+            })
+        })
 }
 
 #[cfg(test)]

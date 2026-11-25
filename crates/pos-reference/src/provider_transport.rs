@@ -1378,11 +1378,13 @@ fn read_admitted_response(
         .and_then(|state| ensure_eof(stream, deadline).map(|()| state))
         .and_then(
             |(grant, audit_bytes, receipt_bytes, receipt, file, chunks, result_bytes, result)| {
+                // The authenticated chain ends at the digest the signed SPR1
+                // names, so this is the last SAU1's self-digest.
+                let final_sau1 = receipt.sau1_digest;
                 admitted
                     .authenticate_audit_chain(&audit_bytes, &receipt, &result)
                     .map_err(receive_invalid)
-                    .map(|records| {
-                        let final_sau1 = records.last().map_or([0; 32], |last| last.record_digest);
+                    .map(|_| {
                         (
                             grant,
                             audit_bytes,
