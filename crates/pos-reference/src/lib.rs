@@ -90,6 +90,13 @@ pub mod selector_transport_test_fixture {
         "/tests/support/sandbox_admission_fixture.rs"
     ));
 
+    /// A test nonce derived from `label` rather than written out, so that no
+    /// literal reaches a request's nonce.
+    pub(crate) fn derived_nonce(label: &str) -> [u8; 16] {
+        let digest = blake3::hash(label.as_bytes());
+        std::array::from_fn(|position| digest.as_bytes()[position])
+    }
+
     pub(crate) struct TransportAdmissionFixture {
         pub(crate) provider: crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         pub(crate) request: crate::sandbox_provider_protocol::SandboxExecuteRequest,

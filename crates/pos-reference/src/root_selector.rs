@@ -12,6 +12,11 @@
 //! admission stays closed, the selector removes its own evaluator leaf and
 //! enters the same pending-recovery path.
 
+mod evaluator_watch;
+mod provider_control;
+mod recovery_pending;
+mod runtime_start;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
@@ -34,14 +39,17 @@ use rustix::net::sockopt::socket_peercred;
 use crate::control_framing::{self, ControlFrameError};
 use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
-    ProviderRequestAdmission, ProviderTransport, ProviderTransportError, ReadSeek,
+    ProviderControlError, ProviderRequestAdmission, ProviderTransport, ProviderTransportError,
+    ReadSeek,
 };
 #[cfg(test)]
 use crate::sandbox_provider_protocol::SandboxExecuteRequest;
 use crate::sandbox_provider_protocol::{
-    AdmittedSandboxImage, LaunchPolicy, SandboxLocalError, SandboxLocalErrorCode,
+    AdmittedSandboxImage, AuthenticatedCancellation, AuthenticatedReconciliation, LaunchPolicy,
+    ReconciliationEvidenceFields, SandboxCancelRequest, SandboxLocalError, SandboxLocalErrorCode,
     SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderErrorCode,
-    SandboxProviderOperation, SignedImageManifest, VerifiedSandboxImageProof,
+    SandboxProviderOperation, SandboxReconcileRequest, SignedImageManifest,
+    VerifiedSandboxImageProof,
 };
 #[cfg(test)]
 use crate::selector::installation::authority::ProviderRuntimeSlot;
@@ -60,8 +68,6 @@ use crate::selector::recovery::{
 use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
 use crate::selector::SelectorBoundaryError;
 
-mod recovery_pending;
-mod runtime_start;
 #[cfg(test)]
 use crate::selector_protocol::decode_request;
 use crate::selector_protocol::{
@@ -69,6 +75,9 @@ use crate::selector_protocol::{
     AuthenticatedSelectorReply, DecodedSelectorRequest, EncodedSelectorReply,
     SelectorProviderTerminal,
 };
+use evaluator_watch::{execute_watched, InFlightAttempt};
+use provider_control::AttemptControl;
+use recovery_pending::DiagnosticSink;
 
 const CONTROL_LIMIT: u32 = 16 * 1024 * 1024;
 const CONTROL_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -942,6 +951,7 @@ impl RootSelectorComposition {
                             evaluation_namespaces: EvaluationNamespaceBindings::default(),
                             recovery_directory,
                             recovery_owner: ROOT_UID,
+                            diagnostics: recovery_pending::stderr_diagnostics(),
                         },
                         updates: Mutex::new(()),
                         live_update_timeout: LIVE_UPDATE_TIMEOUT,
@@ -1271,7 +1281,7 @@ fn fresh_synchronization_ids() -> Result<RevocationSynchronizationIds, SelectorB
     })
 }
 
-trait ProviderExecutor {
+trait ProviderExecutor: Sync {
     fn execute(
         &self,
         admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
@@ -1282,6 +1292,24 @@ trait ProviderExecutor {
         watchdog: Duration,
         admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError>;
+
+    fn cancel(
+        &self,
+        admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request: &SandboxCancelRequest,
+        bytes: &[u8],
+        accepted_spy1_digest: Option<[u8; 32]>,
+        timeout: Duration,
+    ) -> Result<AuthenticatedCancellation, ProviderControlError>;
+
+    fn reconcile(
+        &self,
+        admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request: &SandboxReconcileRequest,
+        bytes: &[u8],
+        accepted: Option<&ReconciliationEvidenceFields>,
+        timeout: Duration,
+    ) -> Result<AuthenticatedReconciliation, ProviderControlError>;
 }
 
 /// The transport of the runtime the selector admitted last. A timely live
@@ -1327,6 +1355,34 @@ impl ProviderExecutor for SelectedProviderTransport {
                 )
             })
     }
+
+    fn cancel(
+        &self,
+        admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request: &SandboxCancelRequest,
+        bytes: &[u8],
+        accepted_spy1_digest: Option<[u8; 32]>,
+        timeout: Duration,
+    ) -> Result<AuthenticatedCancellation, ProviderControlError> {
+        self.current()
+            .map_err(ProviderControlError::from)
+            .and_then(|current| {
+                current.cancel(admitted, request, bytes, accepted_spy1_digest, timeout)
+            })
+    }
+
+    fn reconcile(
+        &self,
+        admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request: &SandboxReconcileRequest,
+        bytes: &[u8],
+        accepted: Option<&ReconciliationEvidenceFields>,
+        timeout: Duration,
+    ) -> Result<AuthenticatedReconciliation, ProviderControlError> {
+        self.current()
+            .map_err(ProviderControlError::from)
+            .and_then(|current| current.reconcile(admitted, request, bytes, accepted, timeout))
+    }
 }
 
 impl ProviderExecutor for ProviderTransport {
@@ -1344,6 +1400,35 @@ impl ProviderExecutor for ProviderTransport {
             self, admitted, commitment, evaluation, spx1, input, watchdog, admission,
         )
     }
+
+    fn cancel(
+        &self,
+        admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request: &SandboxCancelRequest,
+        bytes: &[u8],
+        accepted_spy1_digest: Option<[u8; 32]>,
+        timeout: Duration,
+    ) -> Result<AuthenticatedCancellation, ProviderControlError> {
+        Self::cancel(
+            self,
+            admitted,
+            request,
+            bytes,
+            accepted_spy1_digest,
+            timeout,
+        )
+    }
+
+    fn reconcile(
+        &self,
+        admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request: &SandboxReconcileRequest,
+        bytes: &[u8],
+        accepted: Option<&ReconciliationEvidenceFields>,
+        timeout: Duration,
+    ) -> Result<AuthenticatedReconciliation, ProviderControlError> {
+        Self::reconcile(self, admitted, request, bytes, accepted, timeout)
+    }
 }
 
 struct RootSelectorService<T = ProviderTransport> {
@@ -1354,6 +1439,7 @@ struct RootSelectorService<T = ProviderTransport> {
     evaluation_namespaces: EvaluationNamespaceBindings,
     recovery_directory: Arc<File>,
     recovery_owner: u32,
+    diagnostics: DiagnosticSink,
 }
 
 struct SelectorAdmission {
@@ -1412,6 +1498,7 @@ struct SelectorProviderRequestAdmission<'a> {
     selected_image: SelectedSandboxImage,
     admission_time: fn() -> SystemTime,
     entry_proof: Option<VerifiedSandboxImageProof>,
+    in_flight: &'a InFlightAttempt,
 }
 
 struct SelectedSandboxImage {
@@ -1716,6 +1803,7 @@ impl<'a> SelectorProviderRequestAdmission<'a> {
         admission: &SelectorAdmissionLease<'a>,
         selected_image: SelectedSandboxImage,
         admission_time: fn() -> SystemTime,
+        in_flight: &'a InFlightAttempt,
     ) -> Self {
         Self {
             owner: admission.owner,
@@ -1724,6 +1812,7 @@ impl<'a> SelectorProviderRequestAdmission<'a> {
             selected_image,
             admission_time,
             entry_proof: None,
+            in_flight,
         }
     }
 
@@ -1763,6 +1852,10 @@ impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
         if self.entry_proof.take().is_some() {
             self.owner.finish_provider_entry(self.attempt_id, true);
         }
+    }
+
+    fn granted(&mut self, agr1_digest: [u8; 32]) {
+        self.in_flight.granted(agr1_digest);
     }
 }
 
@@ -1843,6 +1936,9 @@ impl EvaluationNamespaceBindings {
         Ok(())
     }
 
+    /// Run `execute` under the request's namespace lease and release the lease
+    /// with its outcome. A panic in `execute` does not release the lease; the
+    /// panic is fatal for the connection handler, so that case is moot.
     fn execute_ordered(
         &self,
         request: &crate::evaluator_protocol::EvaluationRequest,
@@ -2014,66 +2110,185 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         let Ok(spx1) = selector_execute_bytes(admitted, decoded, &resolved) else {
             return write_authority_mismatch(stream, decoded);
         };
+        self.execute_and_answer(
+            stream,
+            decoded,
+            input,
+            admission,
+            PreparedExecution {
+                image,
+                commitment,
+                spx1,
+                watchdog: Duration::from_millis(resolved.attempt().watchdog_ms),
+                negative_probe,
+            },
+        )
+    }
+
+    /// Run the provider exchange, watching the evaluator, then answer it and
+    /// settle the attempt with the provider.
+    fn execute_and_answer(
+        &self,
+        stream: &mut UnixStream,
+        decoded: &DecodedSelectorRequest,
+        input: &mut dyn ReadSeek,
+        admission: SelectorAdmissionLease<'_>,
+        prepared: PreparedExecution,
+    ) -> Result<(), SelectorBoundaryError> {
+        let PreparedExecution {
+            image,
+            commitment,
+            spx1,
+            watchdog,
+            negative_probe,
+        } = prepared;
+        let admitted_provider = Arc::clone(&admission.admitted);
+        let provider = admitted_provider.provider();
+        let control = |agr1_digest| AttemptControl {
+            transport: &self.transport,
+            admitted: provider,
+            attempt_id: decoded.attempt_id,
+            agr1_digest,
+            timeout: provider_control::control_budget(provider),
+            active_wait: provider_control::run_bound(provider, watchdog),
+            diagnostics: &self.diagnostics,
+        };
+        let in_flight = InFlightAttempt::default();
         // The same EVR1 legitimately derives one ID per selected case and exact
         // retries remain provider-idempotent. Only a namespace bound to another
         // EVR1 digest is a conflict.
+        //
+        // One consequence of the owner decision to cancel on an evaluator
+        // drop: SCQ1 is keyed by the attempt. An evaluator that reconnects
+        // with the same request joins the same provider attempt, and the
+        // abandoned first connection's watcher then cancels that attempt. The
+        // retry receives the cancelled terminal.
         let namespace_execution = self
             .evaluation_namespaces
             .execute_ordered(&decoded.request, || {
-                let mut provider_requests =
-                    SelectorProviderRequestAdmission::new(&admission, image, self.admission_time);
-                let result = self.transport.execute(
-                    admitted.provider(),
-                    &commitment,
-                    &decoded.request,
-                    &spx1,
-                    input,
-                    Duration::from_millis(resolved.attempt().watchdog_ms),
-                    &mut provider_requests,
-                );
-                result
+                // An evaluator that hangs up while the attempt runs has the
+                // attempt cancelled at once (owner decision on #1503).
+                execute_watched(
+                    stream,
+                    &in_flight,
+                    |agr1_digest| control(agr1_digest).cancel(),
+                    &self.diagnostics,
+                    || {
+                        let mut provider_requests = SelectorProviderRequestAdmission::new(
+                            &admission,
+                            image,
+                            self.admission_time,
+                            &in_flight,
+                        );
+                        self.transport.execute(
+                            provider,
+                            &commitment,
+                            &decoded.request,
+                            &spx1,
+                            input,
+                            watchdog,
+                            &mut provider_requests,
+                        )
+                    },
+                )
+                .unwrap_or(Err(ProviderTransportError::BeforeAdmission))
             })
             .and_then(|execution| {
                 admission.finish_provider_state(provider_retains_namespace(&execution.result))?;
                 Ok(execution)
             })?;
         drop(admission);
-        let terminal = match namespace_execution.result {
-            Ok(terminal) => terminal,
-            Err(ProviderTransportError::BeforeAdmission) => {
-                return write_provider_unavailable(stream, decoded);
-            }
-            Err(ProviderTransportError::AfterAdmission { agr1_digest, .. })
-                if namespace_execution.conflict =>
-            {
-                return write_post_admission_provider_failure(
-                    stream,
-                    decoded,
-                    agr1_digest,
-                    PostAdmissionProviderFailure::EvidenceInvalid,
-                );
-            }
-            Err(ProviderTransportError::AfterAdmission {
-                agr1_digest,
-                failure,
-            }) => {
-                return write_post_admission_provider_failure(
-                    stream,
-                    decoded,
-                    agr1_digest,
-                    failure,
-                );
-            }
-        };
-        write_provider_terminal(
+        write_and_control(
             stream,
             decoded,
             &spx1,
-            terminal,
-            namespace_execution.conflict,
             negative_probe,
+            namespace_execution,
+            &control,
         )
     }
+}
+
+/// What one provider exchange needs once the request was resolved.
+struct PreparedExecution {
+    image: SelectedSandboxImage,
+    commitment: crate::sandbox_provider_protocol::SelectorGrantCommitment,
+    spx1: Vec<u8>,
+    watchdog: Duration,
+    negative_probe: [u8; 32],
+}
+
+/// Write the evaluator's answer, close the write side so the evaluator sees
+/// EOF before any control exchange, then send the control requests the
+/// outcome calls for (owner decisions on #1503): SRQ1 after an authenticated
+/// terminal, SCQ1 and SRQ1 after an exhausted or invalid post-AGR1 outcome.
+///
+/// The write shutdown must stay after `execute_watched` has joined its
+/// watcher (this function runs after it returned): the selector's own write
+/// shutdown, after the evaluator's half-close, raises the same `POLLHUP` as a
+/// close and would cancel every normal attempt.
+///
+/// SRQ1 follows an authenticated terminal even when forwarding it fell back
+/// to `EvidenceInvalid` or the evaluator write failed. R15 §3.5 rule 2 needs
+/// only that the selector authenticated the whole response (the SPY1 it
+/// holds is the one the provider retains, §3.5 and §3.6 item 1); R15 §3.4
+/// never makes delivery to the evaluator a precondition. Reconciling after a
+/// failed delivery releases the retained SPY1, so a later retry gets
+/// `UnknownAttempt` (15); not reconciling leaves a live slot and its ELM1[8]
+/// charge until the runtime is replaced (N12). The first costs a retry, the
+/// second costs capacity, and the decision is for the first.
+fn write_and_control<'a, T: ProviderExecutor + 'a>(
+    stream: &mut UnixStream,
+    decoded: &DecodedSelectorRequest,
+    spx1: &[u8],
+    negative_probe: [u8; 32],
+    execution: EvaluationNamespaceExecution,
+    control: &impl Fn([u8; 32]) -> AttemptControl<'a, T>,
+) -> Result<(), SelectorBoundaryError> {
+    let terminal = match execution.result {
+        Ok(terminal) => terminal,
+        Err(ProviderTransportError::BeforeAdmission) => {
+            return write_provider_unavailable(stream, decoded);
+        }
+        Err(ProviderTransportError::AfterAdmission { agr1_digest, .. }) if execution.conflict => {
+            return write_post_admission_provider_failure(
+                stream,
+                decoded,
+                agr1_digest,
+                PostAdmissionProviderFailure::EvidenceInvalid,
+            );
+        }
+        Err(ProviderTransportError::AfterAdmission {
+            agr1_digest,
+            failure,
+        }) => {
+            let written =
+                write_post_admission_provider_failure(stream, decoded, agr1_digest, failure);
+            stream.shutdown(std::net::Shutdown::Write).ok();
+            control(agr1_digest).settle_exhausted();
+            return written;
+        }
+    };
+    let reconcile = match (&terminal, execution.conflict) {
+        (AuthenticatedProviderTerminal::Execution(execution), false) => Some((
+            execution.agr1_digest(),
+            execution.accepted_evidence(decoded.attempt_id),
+        )),
+        _ => None,
+    };
+    let written = write_provider_terminal(
+        stream,
+        decoded,
+        spx1,
+        terminal,
+        execution.conflict,
+        negative_probe,
+    );
+    if let Some((agr1_digest, accepted)) = reconcile {
+        stream.shutdown(std::net::Shutdown::Write).ok();
+        control(agr1_digest).reconcile(Some(&accepted));
+    }
+    written
 }
 
 /// `negative_probe` is the admitted HCP1's ordinal 7, which the SPR1 of an
@@ -2553,13 +2768,14 @@ mod tests {
             Ok(RootSelectorService {
                 admission_time: fixture_admission_time,
                 admission: SelectorAdmission::for_test(admitted)?,
-                transport: FixedProviderExecutor(RefCell::new(Some(Err(
+                transport: FixedProviderExecutor(Mutex::new(Some(Err(
                     ProviderTransportError::BeforeAdmission,
                 )))),
                 peer_uid: fs::metadata(".")?.uid(),
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
                 recovery_directory: test_recovery_directory()?,
                 recovery_owner: fs::metadata(".")?.uid(),
+                diagnostics: recovery_pending::stderr_diagnostics(),
             })
         }
 
@@ -2587,7 +2803,7 @@ mod tests {
                     resolved.attempt(),
                     SandboxLocalErrorCode::PolicyUnavailable,
                 )?;
-                assert!(service.transport.0.borrow().is_some());
+                assert!(service.transport.0.lock().is_ok_and(|slot| slot.is_some()));
             }
             Ok(())
         }
@@ -2610,7 +2826,7 @@ mod tests {
                     resolved.attempt(),
                     SandboxLocalErrorCode::PolicyUnavailable,
                 )?;
-                assert!(service.transport.0.borrow().is_some());
+                assert!(service.transport.0.lock().is_ok_and(|slot| slot.is_some()));
             }
             Ok(())
         }
@@ -2644,7 +2860,7 @@ mod tests {
             )?;
             // Reaching the executor proves content admission passed, even though this
             // fixture deliberately supplies no provider execution or mount evidence.
-            assert!(service.transport.0.borrow().is_none());
+            assert!(service.transport.0.lock().is_ok_and(|slot| slot.is_none()));
             for mut file in cursors {
                 assert_eq!(file.stream_position()?, 3);
             }
@@ -2695,7 +2911,7 @@ mod tests {
                         resolved.attempt(),
                         SandboxLocalErrorCode::PolicyUnavailable,
                     )?;
-                    assert!(service.transport.0.borrow().is_some());
+                    assert!(service.transport.0.lock().is_ok_and(|slot| slot.is_some()));
                 }
             }
             Ok(())
@@ -2724,7 +2940,7 @@ mod tests {
                     resolved.attempt(),
                     SandboxLocalErrorCode::PolicyUnavailable,
                 )?;
-                assert!(service.transport.0.borrow().is_some());
+                assert!(service.transport.0.lock().is_ok_and(|slot| slot.is_some()));
             }
             Ok(())
         }
@@ -2759,7 +2975,7 @@ mod tests {
                     resolved.attempt(),
                     SandboxLocalErrorCode::PolicyUnavailable,
                 )?;
-                assert!(service.transport.0.borrow().is_some());
+                assert!(service.transport.0.lock().is_ok_and(|slot| slot.is_some()));
             }
             Ok(())
         }
@@ -2778,7 +2994,10 @@ mod tests {
                 SandboxLocalErrorCode::PolicyUnavailable
             };
             assert_service_error(&service, &request, resolved.attempt(), expected)?;
-            assert_eq!(service.transport.0.borrow().is_none(), accepted);
+            assert_eq!(
+                service.transport.0.lock().is_ok_and(|slot| slot.is_none()),
+                accepted
+            );
             Ok(())
         }
 
@@ -2957,7 +3176,7 @@ mod tests {
                     SandboxLocalErrorCode::PolicyUnavailable,
                 )?;
                 assert!(fault.was_triggered()?);
-                assert!(service.transport.0.borrow().is_some());
+                assert!(service.transport.0.lock().is_ok_and(|slot| slot.is_some()));
             }
             Ok(())
         }
@@ -2974,7 +3193,6 @@ mod tests {
         }
     }
 
-    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -2991,6 +3209,7 @@ mod tests {
         CgroupPath, ObservationChallenge, ProviderLifecycleError, RuntimeSlotTarget,
         StaleUnitsObservation, StartedRuntimeObservation,
     };
+    use crate::selector_transport_test_fixture::derived_nonce;
 
     const FIXTURE_ADMISSION_TIME: u64 = 1_800_000_000;
 
@@ -2998,9 +3217,10 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(FIXTURE_ADMISSION_TIME)
     }
 
-    fn test_provider_request_admission<'a>(
+    fn test_request_admission<'a>(
         lease: &SelectorAdmissionLease<'a>,
         requirement: &crate::evaluator_protocol::SandboxRequirement,
+        in_flight: &'a InFlightAttempt,
     ) -> TestResult<SelectorProviderRequestAdmission<'a>> {
         let (selected, _) =
             selected_image_and_launch(&lease.admitted, requirement, FIXTURE_ADMISSION_TIME)?;
@@ -3008,6 +3228,7 @@ mod tests {
             lease,
             selected,
             fixture_admission_time,
+            in_flight,
         ))
     }
 
@@ -4029,6 +4250,37 @@ mod tests {
         })
     }
 
+    /// The provider's answer to the selector's SRQ1: an authenticated
+    /// refusal, which the selector reports and does not retry.
+    fn serve_reconcile_refusal(
+        stream: &mut UnixStream,
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request: &crate::sandbox_provider_protocol::SandboxReconcileRequest,
+    ) -> TestResult {
+        let integer = |value: u64| ciborium::value::Value::Integer(value.into());
+        let bytes = |value: &[u8]| ciborium::value::Value::Bytes(value.to_vec());
+        let refusal = fixture.sign_runtime_record(
+            "SPE1",
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text("SPE1".to_owned()),
+                integer(1),
+                integer(3),
+                bytes(&request.request.request_id),
+                bytes(&request.request_digest),
+                bytes(&request.attempt_id),
+                integer(15),
+                ciborium::value::Value::Null,
+                ciborium::value::Value::Text(
+                    provider.manifest().runtime_attestation_key_id.clone(),
+                ),
+            ]),
+        )?;
+        write_frame(stream, &refusal)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        Ok(())
+    }
+
     fn serve_execution_responses(
         listener: &UnixListener,
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
@@ -4036,13 +4288,34 @@ mod tests {
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
         responses: &[([u64; 3], bool)],
     ) -> TestResult {
-        for &(epochs, identity_conflict) in responses {
+        // The selector reconciles after every evaluation that was not an
+        // identity conflict; its SRQ1 can reach the provider before or after
+        // the next evaluation, so connections are told apart by their first
+        // frame.
+        let mut evaluations = responses.iter().copied();
+        let mut controls = responses
+            .iter()
+            .filter(|(_, identity_conflict)| !identity_conflict)
+            .count();
+        while controls > 0 || evaluations.len() > 0 {
             let mut stream = accept_test_connection(listener)?;
             stream.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
             stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT))?;
-            let evaluation = crate::evaluator_protocol::EvaluationRequest::from_canonical_cbor(
-                &read_frame(&mut stream)?,
-            )?;
+            let first = read_frame(&mut stream)?;
+            if let Ok(reconcile) =
+                crate::sandbox_provider_protocol::SandboxReconcileRequest::from_canonical_cbor(
+                    &first,
+                )
+            {
+                serve_reconcile_refusal(&mut stream, fixture, provider, &reconcile)?;
+                controls = controls
+                    .checked_sub(1)
+                    .ok_or("unexpected control request")?;
+                continue;
+            }
+            let (epochs, identity_conflict) = evaluations.next().ok_or("unexpected evaluation")?;
+            let evaluation =
+                crate::evaluator_protocol::EvaluationRequest::from_canonical_cbor(&first)?;
             let spx1 = read_frame(&mut stream)?;
             // The provider independently opens SIC1; no selector proof or FD is
             // transferred by SPX1. This is image admission, not activation.
@@ -5090,7 +5363,8 @@ mod tests {
             .sandbox_requirement
             .as_ref()
             .ok_or("requirement missing")?;
-        let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+        let in_flight = InFlightAttempt::default();
+        let mut request_admission = test_request_admission(&lease, requirement, &in_flight)?;
         let manifest = request_admission.selected_image.image.manifest();
         let identity = if kind == InstallationObjectKind::ROOT_IMAGE {
             manifest.root_image_blake3_digest
@@ -5191,7 +5465,8 @@ mod tests {
                 .sandbox_requirement
                 .as_ref()
                 .ok_or("requirement missing")?;
-            let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+            let in_flight = InFlightAttempt::default();
+            let mut request_admission = test_request_admission(&lease, requirement, &in_flight)?;
             request_admission.admission_time = clock;
             assert!(matches!(
                 transport.execute_staged(
@@ -5247,7 +5522,8 @@ mod tests {
             .sandbox_requirement
             .as_ref()
             .ok_or("requirement missing")?;
-        let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+        let in_flight = InFlightAttempt::default();
+        let mut request_admission = test_request_admission(&lease, requirement, &in_flight)?;
         let (request_entered_tx, request_entered_rx) = std::sync::mpsc::channel();
         let (release_provider_tx, release_provider_rx) = std::sync::mpsc::channel();
         let (execution_tx, execution_rx) = std::sync::mpsc::channel();
@@ -5310,7 +5586,7 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
         ));
         if let Some(current) = successor_lease {
-            let mut stale_request = test_provider_request_admission(&lease, requirement)?;
+            let mut stale_request = test_request_admission(&lease, requirement, &in_flight)?;
             assert!(matches!(
                 transport.execute_staged(
                     &transport_fixture.provider,
@@ -5330,7 +5606,7 @@ mod tests {
             drop(stale_request);
             drop(lease);
             // A stale request's drop must not release the successor's slot.
-            let mut current_request = test_provider_request_admission(&current, requirement)?;
+            let mut current_request = test_request_admission(&current, requirement, &in_flight)?;
             assert!(current_request.begin().is_ok());
             current_request.entered();
         }
@@ -5375,6 +5651,7 @@ mod tests {
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
                 recovery_directory: Arc::new(File::open(recovery)?),
                 recovery_owner: owner,
+                diagnostics: recovery_pending::stderr_diagnostics(),
             },
             updates: Mutex::new(()),
             live_update_timeout: LIVE_UPDATE_TIMEOUT,
@@ -5642,7 +5919,8 @@ mod tests {
             .sandbox_requirement
             .as_ref()
             .ok_or("requirement missing")?;
-        let mut provider_requests = test_provider_request_admission(&lease, requirement)?;
+        let in_flight = InFlightAttempt::default();
+        let mut provider_requests = test_request_admission(&lease, requirement, &in_flight)?;
         assert!(provider_requests.begin().is_ok());
         assert!(provider_requests.entry_proof.is_some());
         assert!(provider_requests.begin().is_err());
@@ -5783,6 +6061,80 @@ mod tests {
         assert_eq!(
             selected.replace(ProviderTransport::from_path_for_test(&first)?),
             Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_selected_transport_forwards_control_and_fails_closed_when_poisoned() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        // A provider that reads each request and closes without answering; it
+        // hands its listener back, still bound.
+        let provider = thread::spawn(move || -> std::io::Result<UnixListener> {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept()?;
+                stream.read_to_end(&mut Vec::new())?;
+            }
+            Ok(listener)
+        });
+        let selected =
+            SelectedProviderTransport::new(ProviderTransport::from_path_for_test(&path)?);
+        let (cancel, cancel_bytes) = fixture.provider.cancel_request(
+            [5; 16],
+            derived_nonce("selector tests"),
+            [7; 16],
+            [8; 32],
+        )?;
+        let (reconcile, reconcile_bytes) = fixture.provider.reconcile_request(
+            [5; 16],
+            derived_nonce("selector tests"),
+            [7; 16],
+            [8; 32],
+        )?;
+        let unreachable = Some(ProviderControlError::Boundary(
+            SelectorBoundaryError::SelectorUnavailable,
+        ));
+        let timeout = Duration::from_secs(30);
+        let forward = |selected: &SelectedProviderTransport| {
+            (
+                selected
+                    .cancel(&fixture.provider, &cancel, &cancel_bytes, None, timeout)
+                    .err(),
+                selected
+                    .reconcile(
+                        &fixture.provider,
+                        &reconcile,
+                        &reconcile_bytes,
+                        None,
+                        timeout,
+                    )
+                    .err(),
+            )
+        };
+        assert_eq!(
+            forward(&selected),
+            (unreachable.clone(), unreachable.clone())
+        );
+        let listener = provider.join().map_err(|_| "provider panicked")??;
+
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = selected
+                .0
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert_eq!(forward(&selected), (unreachable.clone(), unreachable));
+        // The listener is alive, and the poisoned selector never connected.
+        listener.set_nonblocking(true)?;
+        assert_eq!(
+            listener.accept().err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WouldBlock)
         );
         Ok(())
     }
@@ -5980,6 +6332,7 @@ mod tests {
                     evaluation_namespaces: EvaluationNamespaceBindings::default(),
                     recovery_directory: test_recovery_directory()?,
                     recovery_owner: ROOT_UID,
+                    diagnostics: recovery_pending::stderr_diagnostics(),
                 },
                 updates: Mutex::new(()),
                 live_update_timeout: LIVE_UPDATE_TIMEOUT,
@@ -6052,6 +6405,7 @@ mod tests {
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
                 recovery_directory: test_recovery_directory()?,
                 recovery_owner: owner,
+                diagnostics: recovery_pending::stderr_diagnostics(),
             },
             updates: Mutex::new(()),
             live_update_timeout: LIVE_UPDATE_TIMEOUT,
@@ -6095,6 +6449,7 @@ mod tests {
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
                 recovery_directory: test_recovery_directory()?,
                 recovery_owner: owner,
+                diagnostics: recovery_pending::stderr_diagnostics(),
             },
             updates: Mutex::new(()),
             live_update_timeout: LIVE_UPDATE_TIMEOUT,
@@ -6617,8 +6972,40 @@ mod tests {
         Ok(())
     }
 
+    /// The control half of a test double that scripts only `execute`: the
+    /// provider is unreachable.
+    macro_rules! unreachable_control {
+        () => {
+            fn cancel(
+                &self,
+                _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+                _request: &SandboxCancelRequest,
+                _bytes: &[u8],
+                _accepted_spy1_digest: Option<[u8; 32]>,
+                _timeout: Duration,
+            ) -> Result<AuthenticatedCancellation, ProviderControlError> {
+                Err(ProviderControlError::Boundary(
+                    SelectorBoundaryError::SelectorUnavailable,
+                ))
+            }
+
+            fn reconcile(
+                &self,
+                _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+                _request: &SandboxReconcileRequest,
+                _bytes: &[u8],
+                _accepted: Option<&ReconciliationEvidenceFields>,
+                _timeout: Duration,
+            ) -> Result<AuthenticatedReconciliation, ProviderControlError> {
+                Err(ProviderControlError::Boundary(
+                    SelectorBoundaryError::SelectorUnavailable,
+                ))
+            }
+        };
+    }
+
     struct FixedProviderExecutor(
-        RefCell<Option<Result<AuthenticatedProviderTerminal, ProviderTransportError>>>,
+        Mutex<Option<Result<AuthenticatedProviderTerminal, ProviderTransportError>>>,
     );
 
     impl ProviderExecutor for FixedProviderExecutor {
@@ -6635,10 +7022,13 @@ mod tests {
             admission.begin()?;
             admission.entered();
             self.0
-                .borrow_mut()
+                .lock()
+                .map_err(|_| ProviderTransportError::BeforeAdmission)?
                 .take()
                 .ok_or(ProviderTransportError::BeforeAdmission)?
         }
+
+        unreachable_control!();
     }
 
     struct SequencedProviderExecutor(
@@ -6664,6 +7054,8 @@ mod tests {
                 .pop_front()
                 .ok_or(ProviderTransportError::BeforeAdmission)?
         }
+
+        unreachable_control!();
     }
 
     struct OrderedProviderExecutor {
@@ -6709,6 +7101,8 @@ mod tests {
             }
             Err(ProviderTransportError::BeforeAdmission)
         }
+
+        unreachable_control!();
     }
 
     #[test]
@@ -6855,6 +7249,7 @@ mod tests {
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
             recovery_directory: test_recovery_directory()?,
             recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: recovery_pending::stderr_diagnostics(),
         };
 
         let mut without_requirement = request.clone();
@@ -6954,11 +7349,12 @@ mod tests {
             let service = RootSelectorService {
                 admission_time: fixture_admission_time,
                 admission: SelectorAdmission::for_test(admitted)?,
-                transport: FixedProviderExecutor(RefCell::new(Some(result))),
+                transport: FixedProviderExecutor(Mutex::new(Some(result))),
                 peer_uid: fs::metadata(".")?.uid(),
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
                 recovery_directory: test_recovery_directory()?,
                 recovery_owner: fs::metadata(".")?.uid(),
+                diagnostics: recovery_pending::stderr_diagnostics(),
             };
             assert_service_error(&service, &request, resolved.attempt(), expected)?;
         }
@@ -6987,6 +7383,7 @@ mod tests {
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
             recovery_directory: test_recovery_directory()?,
             recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: recovery_pending::stderr_diagnostics(),
         };
         assert_service_error(
             &service,
@@ -7024,6 +7421,7 @@ mod tests {
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
             recovery_directory: test_recovery_directory()?,
             recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: recovery_pending::stderr_diagnostics(),
         });
 
         std::thread::scope(|scope| -> TestResult {
@@ -7091,7 +7489,7 @@ mod tests {
         let service = RootSelectorService {
             admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
-            transport: FixedProviderExecutor(RefCell::new(Some(Err(
+            transport: FixedProviderExecutor(Mutex::new(Some(Err(
                 ProviderTransportError::AfterAdmission {
                     agr1_digest: [94; 32],
                     failure: PostAdmissionProviderFailure::TerminalUnavailable,
@@ -7101,6 +7499,7 @@ mod tests {
             evaluation_namespaces,
             recovery_directory: test_recovery_directory()?,
             recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: recovery_pending::stderr_diagnostics(),
         };
         assert_service_error(
             &service,
@@ -7126,13 +7525,14 @@ mod tests {
         let service = RootSelectorService {
             admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
-            transport: FixedProviderExecutor(RefCell::new(Some(Ok(
+            transport: FixedProviderExecutor(Mutex::new(Some(Ok(
                 AuthenticatedProviderTerminal::Execution(execution),
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
             recovery_directory: test_recovery_directory()?,
             recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: recovery_pending::stderr_diagnostics(),
         };
         assert_service_error(
             &service,
@@ -7151,13 +7551,14 @@ mod tests {
         let service = RootSelectorService {
             admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
-            transport: FixedProviderExecutor(RefCell::new(Some(Ok(
+            transport: FixedProviderExecutor(Mutex::new(Some(Ok(
                 AuthenticatedProviderTerminal::Error(fixture.spe1),
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
             recovery_directory: test_recovery_directory()?,
             recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: recovery_pending::stderr_diagnostics(),
         };
         let encoded = encoded_request(&request, resolved.attempt())?;
         let (mut client, server) = UnixStream::pair()?;
@@ -7171,6 +7572,461 @@ mod tests {
         let mut control = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
         client.read_exact(&mut control)?;
         assert!(!control.is_empty());
+        Ok(())
+    }
+
+    /// What the selector did toward the provider and the evaluator.
+    #[derive(Default)]
+    struct Seen {
+        calls: Vec<&'static str>,
+        /// Per control request: whether the evaluator already saw EOF.
+        eof_before_control: Vec<bool>,
+        /// The bytes the evaluator received before each EOF.
+        reply: Vec<u8>,
+        /// How many times the provider's execute ran.
+        executed: usize,
+        /// Each SCQ1: the attempt ID and the AGR1 digest it named.
+        cancelled: Vec<([u8; 16], [u8; 32])>,
+        /// Each SRQ1: the attempt ID, the AGR1 digest it named and the
+        /// digests the selector recomputed the tuple from.
+        reconciled: Vec<([u8; 16], [u8; 32], Option<ReconciliationEvidenceFields>)>,
+    }
+
+    /// Records which control requests the selector sent, observes the
+    /// evaluator's end at each, and answers each as an unreachable provider.
+    struct RecordingExecutor {
+        inner: FixedProviderExecutor,
+        seen: Arc<Mutex<Seen>>,
+        evaluator: Mutex<Option<UnixStream>>,
+    }
+
+    impl RecordingExecutor {
+        fn observe(&self, call: &'static str) {
+            let mut seen = self
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            seen.calls.push(call);
+            let mut evaluator = self
+                .evaluator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(evaluator) = evaluator.as_mut() {
+                evaluator
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .ok();
+                let mut bytes = Vec::new();
+                let eof = evaluator.read_to_end(&mut bytes).is_ok();
+                seen.reply.extend(bytes);
+                seen.eof_before_control.push(eof);
+            }
+        }
+    }
+
+    impl ProviderExecutor for RecordingExecutor {
+        fn execute(
+            &self,
+            admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            evaluation: &crate::evaluator_protocol::EvaluationRequest,
+            spx1: &[u8],
+            input: &mut dyn ReadSeek,
+            watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
+        ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .executed += 1;
+            self.inner.execute(
+                admitted, commitment, evaluation, spx1, input, watchdog, admission,
+            )
+        }
+
+        fn cancel(
+            &self,
+            admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            request: &SandboxCancelRequest,
+            bytes: &[u8],
+            accepted_spy1_digest: Option<[u8; 32]>,
+            timeout: Duration,
+        ) -> Result<AuthenticatedCancellation, ProviderControlError> {
+            self.observe("cancel");
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancelled
+                .push((request.attempt_id, request.agr1_digest));
+            self.inner
+                .cancel(admitted, request, bytes, accepted_spy1_digest, timeout)
+        }
+
+        fn reconcile(
+            &self,
+            admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            request: &SandboxReconcileRequest,
+            bytes: &[u8],
+            accepted: Option<&ReconciliationEvidenceFields>,
+            timeout: Duration,
+        ) -> Result<AuthenticatedReconciliation, ProviderControlError> {
+            self.observe(if accepted.is_some() {
+                "reconcile-recomputed"
+            } else {
+                "reconcile-unverified"
+            });
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .reconciled
+                .push((request.attempt_id, request.agr1_digest, accepted.copied()));
+            self.inner
+                .reconcile(admitted, request, bytes, accepted, timeout)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedSink {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_owned()
+        }
+    }
+
+    impl Write for SharedSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// One request through a service whose provider yields `result`, and what
+    /// the selector did toward the provider and the evaluator, and its
+    /// diagnostics.
+    fn control_after(
+        result: Result<AuthenticatedProviderTerminal, ProviderTransportError>,
+    ) -> TestResult<(Seen, String)> {
+        control_with(result, false)
+    }
+
+    /// As [`control_after`]; with `conflicting`, the request names a
+    /// namespace that another EVR1 already holds.
+    fn control_with(
+        result: Result<AuthenticatedProviderTerminal, ProviderTransportError>,
+        conflicting: bool,
+    ) -> TestResult<(Seen, String)> {
+        let (request, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let namespaces = EvaluationNamespaceBindings::default();
+        let request = if conflicting {
+            namespaces.execute_ordered(&request, || {
+                Err(ProviderTransportError::AfterAdmission {
+                    agr1_digest: [93; 32],
+                    failure: PostAdmissionProviderFailure::TerminalUnavailable,
+                })
+            })?;
+            let mut other = request;
+            other.implementation.organization_id = Some("conflicting-owner".to_owned());
+            refresh_request_digest(&mut other)?;
+            other
+        } else {
+            request
+        };
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let sink = SharedSink::default();
+        let encoded = encoded_request(&request, resolved.attempt())?;
+        let (mut client, server) = UnixStream::pair()?;
+        let service = RootSelectorService {
+            admission_time: fixture_admission_time,
+            admission: SelectorAdmission::for_test(admitted)?,
+            transport: RecordingExecutor {
+                inner: FixedProviderExecutor(Mutex::new(Some(result))),
+                seen: Arc::clone(&seen),
+                evaluator: Mutex::new(Some(client.try_clone()?)),
+            },
+            peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces: namespaces,
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: Mutex::new(Box::new(sink.clone())),
+        };
+        client.write_all(&u32::try_from(encoded.control.len())?.to_be_bytes())?;
+        client.write_all(&encoded.control)?;
+        client.write_all(&encoded.attempt_stream)?;
+        client.shutdown(std::net::Shutdown::Write)?;
+        service.handle_connection(server)?;
+        let mut seen = std::mem::take(&mut *seen.lock().map_err(|_| "seen poisoned")?);
+        // Whatever no control request consumed: the reply when none was sent.
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.read_to_end(&mut seen.reply)?;
+        Ok((seen, sink.text()))
+    }
+
+    #[test]
+    fn the_selector_reconciles_after_the_evaluator_saw_the_terminal_and_eof() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let execution = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1,
+            fixture.spr1,
+            fixture.spy1,
+            fixture.sau1,
+            None,
+        );
+        let (seen, diagnostics) =
+            control_after(Ok(AuthenticatedProviderTerminal::Execution(execution)))?;
+        // One exact repeat after the unreachable provider, with the tuple recomputed.
+        assert_eq!(seen.calls, ["reconcile-recomputed", "reconcile-recomputed"]);
+        // Each names the attempt and AGR1, and carries the digests that
+        // `from_test_frames` fixes.
+        let attempt = seen
+            .reconciled
+            .first()
+            .map(|sent| sent.0)
+            .ok_or("no SRQ1")?;
+        let accepted = ReconciliationEvidenceFields {
+            attempt_id: attempt,
+            agr1_digest: [7; 32],
+            terminal_spy1_digest: [8; 32],
+            final_sau1_digest: [9; 32],
+        };
+        assert_ne!(attempt, [0; 16]);
+        assert_eq!(
+            seen.reconciled,
+            [
+                (attempt, [7; 32], Some(accepted)),
+                (attempt, [7; 32], Some(accepted))
+            ]
+        );
+        // The evaluator had its answer and its EOF before each control request.
+        assert_eq!(seen.eof_before_control, [true, true]);
+        assert!(!seen.reply.is_empty());
+        assert!(diagnostics.contains("provider reconcile failed"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_selector_cancels_then_reconciles_after_a_failure_past_agr1() -> TestResult {
+        for failure in [
+            PostAdmissionProviderFailure::TerminalUnavailable,
+            PostAdmissionProviderFailure::EvidenceInvalid,
+        ] {
+            let (seen, diagnostics) = control_after(Err(ProviderTransportError::AfterAdmission {
+                agr1_digest: [91; 32],
+                failure,
+            }))?;
+            // SCQ1, then SRQ1 with no accepted terminal; each is repeated once.
+            assert_eq!(
+                seen.calls,
+                [
+                    "cancel",
+                    "cancel",
+                    "reconcile-unverified",
+                    "reconcile-unverified"
+                ]
+            );
+            assert_eq!(seen.eof_before_control, [true; 4]);
+            assert!(!seen.reply.is_empty());
+            // SCQ1 and SRQ1 name the same attempt and the AGR1 of the failure.
+            let attempt = seen.cancelled.first().map(|sent| sent.0).ok_or("no SCQ1")?;
+            assert_eq!(seen.cancelled, [(attempt, [91; 32]); 2]);
+            assert_eq!(
+                seen.reconciled,
+                [(attempt, [91; 32], None), (attempt, [91; 32], None)]
+            );
+            assert!(diagnostics.contains("provider cancel failed"));
+            assert!(diagnostics.contains("provider reconcile failed"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_selector_sends_no_control_request_for_a_conflicting_namespace() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let execution = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1,
+            fixture.spr1,
+            fixture.spy1,
+            fixture.sau1,
+            None,
+        );
+        for result in [
+            Ok(AuthenticatedProviderTerminal::Execution(execution)),
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest: [94; 32],
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
+            }),
+        ] {
+            let (seen, diagnostics) = control_with(result, true)?;
+            // The provider ran, the evaluator got its conflict reply, and no
+            // control request was sent.
+            assert_eq!(seen.executed, 1);
+            assert!(!seen.reply.is_empty());
+            assert!(seen.calls.is_empty());
+            assert!(diagnostics.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_selector_sends_no_control_request_without_an_admitted_attempt() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        for result in [
+            Err(ProviderTransportError::BeforeAdmission),
+            Ok(AuthenticatedProviderTerminal::Error(fixture.spe1)),
+        ] {
+            let (seen, diagnostics) = control_after(result)?;
+            // The provider was asked, the evaluator got its answer, and no
+            // control request followed.
+            assert_eq!(seen.executed, 1);
+            assert!(!seen.reply.is_empty());
+            assert!(seen.calls.is_empty());
+            assert!(diagnostics.is_empty());
+        }
+        Ok(())
+    }
+
+    /// Holds its execute, with the AGR1 authenticated, until it is cancelled.
+    struct HoldingExecutor {
+        granted: Mutex<std::sync::mpsc::Sender<()>>,
+        released: Mutex<std::sync::mpsc::Receiver<()>>,
+        release: Mutex<std::sync::mpsc::Sender<()>>,
+        running: std::sync::atomic::AtomicBool,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl ProviderExecutor for HoldingExecutor {
+        fn execute(
+            &self,
+            _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            _evaluation: &crate::evaluator_protocol::EvaluationRequest,
+            _spx1: &[u8],
+            _input: &mut dyn ReadSeek,
+            _watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
+        ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            admission.begin()?;
+            admission.entered();
+            admission.granted([61; 32]);
+            self.running.store(true, Ordering::SeqCst);
+            self.granted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send(())
+                .ok();
+            self.released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv_timeout(Duration::from_secs(10))
+                .ok();
+            self.running.store(false, Ordering::SeqCst);
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest: [61; 32],
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
+            })
+        }
+
+        fn cancel(
+            &self,
+            _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            _request: &SandboxCancelRequest,
+            _bytes: &[u8],
+            _accepted_spy1_digest: Option<[u8; 32]>,
+            _timeout: Duration,
+        ) -> Result<AuthenticatedCancellation, ProviderControlError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(if self.running.load(Ordering::SeqCst) {
+                    "cancel-while-running"
+                } else {
+                    "cancel"
+                });
+            self.release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send(())
+                .ok();
+            Err(ProviderControlError::Boundary(
+                SelectorBoundaryError::SelectorUnavailable,
+            ))
+        }
+
+        fn reconcile(
+            &self,
+            _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            _request: &SandboxReconcileRequest,
+            _bytes: &[u8],
+            _accepted: Option<&ReconciliationEvidenceFields>,
+            _timeout: Duration,
+        ) -> Result<AuthenticatedReconciliation, ProviderControlError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push("reconcile");
+            Err(ProviderControlError::Boundary(
+                SelectorBoundaryError::SelectorUnavailable,
+            ))
+        }
+    }
+
+    #[test]
+    fn an_evaluator_that_hangs_up_has_its_running_attempt_cancelled() -> TestResult {
+        let (request, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let (granted, granted_signal) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let service = RootSelectorService {
+            admission_time: fixture_admission_time,
+            admission: SelectorAdmission::for_test(admitted)?,
+            transport: HoldingExecutor {
+                granted: Mutex::new(granted),
+                released: Mutex::new(released),
+                release: Mutex::new(release),
+                running: std::sync::atomic::AtomicBool::new(false),
+                calls: Mutex::new(Vec::new()),
+            },
+            peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
+            diagnostics: recovery_pending::stderr_diagnostics(),
+        };
+        let encoded = encoded_request(&request, resolved.attempt())?;
+        let (mut client, server) = UnixStream::pair()?;
+        client.write_all(&u32::try_from(encoded.control.len())?.to_be_bytes())?;
+        client.write_all(&encoded.control)?;
+        client.write_all(&encoded.attempt_stream)?;
+        client.shutdown(std::net::Shutdown::Write)?;
+        let service_ref = &service;
+        thread::scope(|scope| -> TestResult {
+            let handler = scope.spawn(move || service_ref.handle_connection(server));
+            granted_signal.recv_timeout(Duration::from_secs(10))?;
+            // The evaluator closes its end entirely while the attempt runs.
+            drop(client);
+            handler.join().map_err(|_| "handler panicked")?.ok();
+            Ok(())
+        })?;
+        let calls = service
+            .transport
+            .calls
+            .lock()
+            .map_err(|_| "calls poisoned")?
+            .clone();
+        assert_eq!(calls.first(), Some(&"cancel-while-running"));
         Ok(())
     }
 
@@ -7189,6 +8045,7 @@ mod tests {
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
             recovery_directory: test_recovery_directory()?,
             recovery_owner: owner,
+            diagnostics: recovery_pending::stderr_diagnostics(),
         };
 
         let (client, server) = UnixStream::pair()?;
@@ -7392,7 +8249,7 @@ mod tests {
             &mut reply_writer,
             &decoded,
             &fixture.spx1,
-            AuthenticatedProviderTerminal::Error(fixture.spe1.clone()),
+            AuthenticatedProviderTerminal::Error(fixture.spe1),
             true,
             FIXTURE_NEGATIVE_PROBE,
         )?;
