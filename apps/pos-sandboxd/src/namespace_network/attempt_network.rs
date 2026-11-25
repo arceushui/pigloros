@@ -27,10 +27,10 @@ use super::host_egress::{AttemptEgress, EgressControl, HostEgress, HostEgressErr
 use super::netlink::{in_namespace, NetlinkError};
 use super::pinned::NetworkNamespaces;
 use super::{
-    establish_namespace, EstablishError, ExpectedNamespace, NamespaceControl, NetworkPlanError,
-    NetworkRange,
+    establish_namespace, EstablishError, EstablishFailure, ExpectedNamespace, NamespaceControl,
+    NetworkPlanError, NetworkRange,
 };
-use crate::{EstablishedNetwork, LocalNetworkPort};
+use crate::{EstablishedNetwork, LocalNetworkPort, SetupClass, SetupError};
 
 /// Which attempt holds each slot, and the first slot whose namespace could
 /// not be removed.
@@ -219,6 +219,33 @@ impl<C: NamespaceControl, E: EgressControl> Drop for Teardown<C, E> {
         };
         if let Err(reason) = removed {
             self.slot.quarantine(reason);
+        }
+    }
+}
+
+impl SetupError for AttemptNetworkError {
+    /// R14 §3.4: creation, transport and resource refusals are
+    /// [`SetupClass::Creation`]. A failed readback, an existing namespace
+    /// and a slot held twice contradict the provider's own state.
+    fn setup_class(&self) -> SetupClass {
+        match self {
+            Self::Exhausted
+            | Self::Plan(_)
+            | Self::Open(_)
+            | Self::Quarantined { .. }
+            | Self::Establish(EstablishError {
+                failure: EstablishFailure::Install(_),
+                ..
+            })
+            | Self::Egress(
+                HostEgressError::Netlink(_)
+                | HostEgressError::Ipv6Egress
+                | HostEgressError::State(_),
+            ) => SetupClass::Creation,
+            Self::Establish(_)
+            | Self::Egress(HostEgressError::Readback | HostEgressError::Forwarding)
+            | Self::InUse
+            | Self::Exists => SetupClass::Contradiction,
         }
     }
 }
