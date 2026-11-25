@@ -247,7 +247,7 @@ REPLY = json.dumps({
 
 
 def ddi(root_hash: str = ROOT_HASH, salt: str = SALT, version: int = 1, hash_type: int = 1,
-        salt_size: int = 32, adapter: bytes | None = None) -> bytes:
+        salt_size: int = 32, adapter: bytes | None = None, extra: bytes = b"") -> bytes:
     """A minimal three-partition GPT image: data, a verity superblock and the
     root-verity-sig JSON, at 512-byte sectors."""
     image = bytearray(512 * 8)
@@ -268,16 +268,22 @@ def ddi(root_hash: str = ROOT_HASH, salt: str = SALT, version: int = 1, hash_typ
     image[6 * 512:7 * 512] = superblock
     signature = json.dumps({"rootHash": root_hash, "signature": "AA=="}).encode()
     image[7 * 512:7 * 512 + len(signature)] = signature
-    # The adapter's bytes follow the partitions verbatim: the real image holds
-    # them uncompressed in its EROFS root, which the checker finds by content.
-    return bytes(image) + (X86_ADAPTER if adapter is None else adapter)
+    return bytes(image) + erofs_file(X86_ADAPTER if adapter is None else adapter) + extra
+
+
+def erofs_file(data: bytes) -> bytes:
+    """How mkfs.erofs stores an uncompressed file: whole blocks contiguously,
+    then the trailing partial block inline after the next inode, so the file
+    never occurs contiguously unless its size is a multiple of the block."""
+    whole = len(data) - len(data) % 4096
+    return data[:whole] + b"\0inode\0" + data[whole:]
 
 
 TAMPERED_OFFSET = 5 * 512 + 10
 
 
-def tampered_ddi(adapter: bytes | None = None) -> bytes:
-    image = bytearray(ddi(adapter=adapter))
+def tampered_ddi(adapter: bytes | None = None, extra: bytes = b"") -> bytes:
+    image = bytearray(ddi(adapter=adapter, extra=extra))
     image[TAMPERED_OFFSET] ^= 0x01
     return bytes(image)
 
@@ -286,29 +292,60 @@ def static_elf(machine: int, tag: bytes, *, interpreter: bool = False, size: int
     """A minimal 64-bit ELF header and two program headers, then tagged filler."""
     header = bytearray(64)
     header[:7] = b"\x7fELF\x02\x01\x01"
-    struct.pack_into("<HH", header, 16, 3, machine)
+    struct.pack_into("<HHI", header, 16, 3, machine, 1)
     struct.pack_into("<Q", header, 32, 64)
     struct.pack_into("<HH", header, 54, 56, 2)
     headers = bytearray(112)
-    struct.pack_into("<I", headers, 0, 1)
+    # One PT_LOAD that maps the whole file at 0x400000, with the entry point
+    # just after the headers.
+    total = 176 + size
+    struct.pack_into("<IIQQQQQQ", headers, 0, 1, 5, 0, 0x400000, 0x400000, total, total, 4096)
+    struct.pack_into("<Q", header, 24, 0x400000 + 176)
     # PT_INTERP names the loader of a dynamic executable; PT_NOTE does not.
     struct.pack_into("<I", headers, 56, 3 if interpreter else 4)
-    return bytes(header + headers) + tag.ljust(size, b".")
+    # Non-repeating filler, so that no part of the file occurs elsewhere.
+    return bytes(header + headers) + tag + hashlib.shake_256(tag).digest(size - len(tag))
 
 
 X86_ADAPTER = static_elf(62, b"adapter")
+
+
+def elf_defects() -> list[bytes]:
+    """Adapters that are not loadable static x86-64 executables, each wrong in one way."""
+    machine = checker.ELF_MACHINES["x86_64"]
+
+    def patched(offset: int, data: bytes) -> bytes:
+        return X86_ADAPTER[:offset] + data + X86_ADAPTER[offset + len(data):]
+
+    return [
+        # The 7-byte stand-in the staged SIM1 used to name, a script, and truncations: below the
+        # size floor, and above it with the headers intact.
+        b"adapter", b"#!/bin/sh\n" + bytes(200_000), X86_ADAPTER[:99_999], X86_ADAPTER[:150_000],
+        # A wrong class, byte order or ident version.
+        patched(4, b"\x01"), patched(5, b"\x02"), patched(6, b"\x09"),
+        # Another architecture, a relocatable object and a wrong ELF version.
+        static_elf(checker.ELF_MACHINES["aarch64"], b"adapter"), patched(16, struct.pack("<H", 1)),
+        patched(20, struct.pack("<I", 9)),
+        # Dynamically linked: no loader exists inside the image's root.
+        static_elf(machine, b"adapter", interpreter=True),
+        # Nothing to load: no program headers, or none of type PT_LOAD.
+        patched(56, struct.pack("<H", 0)), patched(64, struct.pack("<I", 4)),
+        # A program header table beyond the file, or too small an entry.
+        patched(32, struct.pack("<Q", 10**9)), patched(54, struct.pack("<H", 8)),
+        # An entry point outside every segment, and a segment larger than the file.
+        patched(24, struct.pack("<Q", 0x10)), patched(96, struct.pack("<Q", 300_000)),
+    ]
 # The raw reply's imageSize is the positive image's length, adapter included.
 IMAGE_SIZE = len(ddi())
 REPLY = REPLY.replace('"imageSize": 0', f'"imageSize": {IMAGE_SIZE}')
 
 
 def executable_files(architecture: str, adapter: bytes | None = None) -> dict[str, bytes]:
-    """The architecture's adapter and launcher, and the images that carry the adapter."""
+    """The architecture's adapter, and the images that carry it."""
     machine = checker.ELF_MACHINES[architecture]
     adapter = static_elf(machine, b"adapter") if adapter is None else adapter
     return {
         "host/images/adapter": adapter,
-        "host/images/launcher": static_elf(machine, b"launcher"),
         "host/images/positive.raw": ddi(adapter=adapter),
         "host/images/wrong-key.raw": ddi(adapter=adapter),
         "host/images/tampered.raw": tampered_ddi(adapter),
@@ -399,6 +436,7 @@ def network_files() -> dict[str, bytes | str]:
         base = f"guest/network/{case}"
         files.update({
             f"{base}/sysctl": f"{value}\n", f"{base}/status": "0\n", f"{base}/netns": UNIT_NETNS + "\n",
+            f"{base}/stderr": "", f"{base}/journal": "Nov 25 piglor-network: Finished.\n",
             f"{base}/links": LINK_LO + (FALLBACKS if value == "0" else ""),
             f"{base}/addrs": ADDRESSES, f"{base}/routes4": ROUTES4, f"{base}/routes6": ROUTES6,
         })
@@ -1144,55 +1182,80 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(verdict["positive"]["activation_seconds"], 12.5)
         self.assertEqual(verdict["positive"]["held"]["dm_device"], "253:0")
 
-    def test_the_adapter_and_launcher_are_real_static_executables(self):
+    def test_the_adapter_is_a_real_static_executable_the_image_carries(self):
         for architecture in ("x86_64", "aarch64"):
-            executables = self.verdict(architecture)["mount_image_cases"]["executables"]
-            adapter = executable_files(architecture)["host/images/adapter"]
-            self.assertEqual(executables["adapter_sha256"], hashlib.sha256(adapter).hexdigest())
-            self.assertEqual(executables["adapter_bytes"], len(adapter))
+            adapter = self.verdict(architecture)["mount_image_cases"]["adapter"]
+            expected = executable_files(architecture)["host/images/adapter"]
+            self.assertEqual(adapter["adapter_sha256"], hashlib.sha256(expected).hexdigest())
+            self.assertEqual(adapter["adapter_bytes"], len(expected))
+        # Like the real image, the file is not contiguous in it: its tail is inline.
+        self.assertEqual(len(X86_ADAPTER) % 4096 != 0, True)
+        self.assertEqual(ddi().count(X86_ADAPTER), 0)
 
-    def test_a_stand_in_adapter_or_launcher_fails_closed(self):
-        machine = checker.ELF_MACHINES["x86_64"]
-        other = checker.ELF_MACHINES["aarch64"]
-        def with_adapter(adapter):
+    def test_a_stand_in_or_broken_adapter_fails_closed(self):
+        def broken(adapter):
+            """An adapter carried by every image, so only it is wrong."""
             return lambda f: f.update(executable_files("x86_64", adapter))
-        stub = b"adapter"
-        stub_files = {**executable_files("x86_64", stub)}
-        changes = [
-            # The 7-byte stand-in the staged SIM1 used to name, in the file and in the image.
-            with_adapter(stub),
-            lambda f: f.update({"host/images/adapter": stub}),
-            lambda f: f.update({"host/images/launcher": stub}),
-            lambda f: f.update(stub_files),
-            # A script, a truncated ELF and a wrong class or byte order.
-            lambda f: f.update({"host/images/launcher": b"#!/bin/sh\n" + bytes(200_000)}),
-            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:99_999]}),
-            lambda f: f.update({"host/images/launcher": b"\x7fELF\x01" + f["host/images/launcher"][5:]}),
-            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:5] + b"\x02"
-                                + f["host/images/launcher"][6:]}),
-            # Another architecture, and a relocatable object.
-            with_adapter(static_elf(other, b"adapter")),
-            lambda f: f.update({"host/images/launcher": static_elf(other, b"launcher")}),
-            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:16]
-                                + struct.pack("<H", 1) + f["host/images/launcher"][18:]}),
-            # Dynamically linked: no loader exists inside the image's root.
-            with_adapter(static_elf(machine, b"adapter", interpreter=True)),
-            lambda f: f.update({"host/images/launcher": static_elf(machine, b"launcher", interpreter=True)}),
-            # A program header table beyond the file, or too small an entry.
-            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:32]
-                                + struct.pack("<Q", 10**9) + f["host/images/launcher"][40:]}),
-            lambda f: f.update({"host/images/launcher": f["host/images/launcher"][:54]
-                                + struct.pack("<H", 8) + f["host/images/launcher"][56:]}),
-            # The image does not carry the adapter exactly once.
-            lambda f: f.update({"host/images/positive.raw": ddi(adapter=b"other")}),
-            lambda f: f.update({"host/images/positive.raw": f["host/images/positive.raw"]
-                                + f["host/images/adapter"]}),
+
+        def carried(**image):
+            """Images built with `image`, all alike, so only the carrying is wrong."""
+            return lambda f: f.update({
+                "host/images/positive.raw": ddi(**image), "host/images/wrong-key.raw": ddi(**image),
+                "host/images/tampered.raw": tampered_ddi(**image)})
+
+        changes = [broken(defect) for defect in elf_defects()] + [
+            # The stand-in in the file alone.
+            lambda f: f.update({"host/images/adapter": b"adapter"}),
+            # The images do not carry the adapter's blocks exactly once, then its tail.
+            carried(adapter=b"other"),
+            carried(extra=erofs_file(X86_ADAPTER)),
+            carried(adapter=X86_ADAPTER[:-1] + b"X"),
+            carried(adapter=X86_ADAPTER[:196_608]),
             lambda f: f.pop("host/images/adapter"),
-            lambda f: f.pop("host/images/launcher"),
         ]
         for change in changes:
             with self.subTest(change=change):
                 self.refuses(change)
+
+    def test_a_tiny_or_constant_tail_is_not_a_positional_binding(self):
+        # A tail under MIN_TAIL_BYTES is left to the SIM1 digest; a longer one that is a single
+        # repeated byte would be found in any zero-filled block, so it is refused.
+        machine = checker.ELF_MACHINES["x86_64"]
+        blocks = 196_608 - 176
+        short = static_elf(machine, b"adapter", size=blocks + checker.MIN_TAIL_BYTES - 1)
+        resized = REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {len(ddi(adapter=short))}')
+        self.verdict(change=lambda f: f.update({**executable_files("x86_64", short),
+                                                "guest/cases/mountfsd-reply/reply": resized}))
+        constant = static_elf(machine, b"adapter", size=blocks + checker.MIN_TAIL_BYTES)
+        constant = constant[:-checker.MIN_TAIL_BYTES] + bytes(checker.MIN_TAIL_BYTES)
+        resized = REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {len(ddi(adapter=constant))}')
+        with self.assertRaisesRegex(checker.EvidenceError, "adapter's tail"):
+            self.verdict(change=lambda f: f.update({**executable_files("x86_64", constant),
+                                                    "guest/cases/mountfsd-reply/reply": resized}))
+
+    def test_build_images_applies_the_checkers_rules_to_the_adapter(self):
+        text = (ROOT / "deploy/nixos/qemu-evidence/build-images.sh").read_text(encoding="utf-8")
+        start = text.index("python3 -I -c '", text.index("(static_executable)")) + len("python3 -I -c '")
+        code = text[start:text.index("' \"${architecture}\" \"${ADAPTER}\"", start)]
+        aarch64 = static_elf(checker.ELF_MACHINES["aarch64"], b"adapter")
+        names = {"x86-64": "x86_64", "arm64": "aarch64"}
+        cases = [("x86-64", X86_ADAPTER, True), ("arm64", aarch64, True)]
+        cases += [("x86-64", defect, False) for defect in elf_defects()]
+        # Each architecture's adapter is wrong for the other.
+        cases += [("x86-64", aarch64, False), ("arm64", X86_ADAPTER, False)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "adapter"
+            for name, adapter, accepted in cases:
+                path.write_bytes(adapter)
+                script = subprocess.run([sys.executable, "-I", "-c", code, name, str(path)],
+                                        capture_output=True, text=True, check=False)
+                try:
+                    checker.static_executable(adapter, names[name], "adapter")
+                    checked = True
+                except checker.EvidenceError:
+                    checked = False
+                with self.subTest(name=name, size=len(adapter), accepted=accepted):
+                    self.assertEqual((script.returncode == 0, checked), (accepted, accepted), script.stderr)
 
     def test_mount_image_case_fabrication_fails_closed(self):
         positive, tampered = "guest/cases/positive", "guest/cases/tampered"
@@ -1330,6 +1393,29 @@ class EvidenceTests(unittest.TestCase):
         addresses = ADDRESSES.replace("1: lo ", "1: lo@lo ", 1)
         self.assertEqual(self.verdict(change=lambda f: f.update({"guest/network/fb-1/addrs": addresses}))
                          ["private_network"]["fb-1"]["addresses"], sorted(checker.LOOPBACK_ADDRESSES))
+
+    def test_a_failed_probe_explains_itself(self):
+        """The first QEMU run failed with no probe files: the error must carry the unit's stderr."""
+        def failed(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-0/{name}")
+            files["guest/network/fb-0/status"] = "1\n"
+            files["guest/network/fb-0/stderr"] = "Failed to find executable bash\n"
+        with self.assertRaisesRegex(checker.EvidenceError, "status 1.*Failed to find executable bash"):
+            self.verdict(change=failed)
+
+        def silent(files):
+            for name in checker.NETWORK_PROBE_FILES:
+                files.pop(f"guest/network/fb-1/{name}")
+        with self.assertRaisesRegex(checker.EvidenceError, "wrote no probe files"):
+            self.verdict(change=silent)
+        with self.assertRaisesRegex(checker.EvidenceError, "wrote to stderr"):
+            self.verdict(change=lambda f: f.update({"guest/network/fb-2/stderr": "warning\n"}))
+        # A record with an unexpected file or partial probe files is named precisely.
+        with self.assertRaisesRegex(checker.EvidenceError, r"malformed network record fb-1: missing \['journal'\]"):
+            self.verdict(change=lambda f: f.pop("guest/network/fb-1/journal"))
+        with self.assertRaisesRegex(checker.EvidenceError, r"unexpected \['extra'\]"):
+            self.verdict(change=lambda f: f.update({"guest/network/fb-1/extra": ""}))
 
     def test_private_network_fabrication_fails_closed(self):
         base = "guest/network"

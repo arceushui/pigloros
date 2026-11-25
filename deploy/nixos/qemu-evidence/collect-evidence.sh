@@ -218,14 +218,22 @@ network_probe() { # DIR
 
 # One transient PrivateNetwork=yes unit's network with the sysctl set to VALUE.
 # The kernel reads the sysctl when it creates a network namespace, so each
-# value governs the next unit. The unit runs with this script's PATH for `ip`.
+# value governs the next unit. The unit runs with this script's PATH for `ip`
+# and with this script's own bash (${BASH}): a NixOS unit's default PATH holds
+# no bash, so `systemd-run bash` fails to find it. systemd-run's own errors and
+# the unit's standard error go to `stderr`, and the unit's journal to `journal`,
+# so a failed case explains itself.
 network_case() { # NAME VALUE
   local dir="network/$1" status=0
   mkdir -p "${dir}"
   printf '%s\n' "$2" >"${FB_TUNNELS_SYSCTL}"
   cat "${FB_TUNNELS_SYSCTL}" >"${dir}/sysctl"
-  systemd-run --quiet --wait --collect --pipe --property=PrivateNetwork=yes --setenv=PATH \
-    bash -c "set -o errexit; $(declare -f network_probe); network_probe \"\$1\"" probe "${PWD}/${dir}" || status=$?
+  systemd-run --quiet --unit="piglor-network-$1" --wait --collect --pipe \
+    --property=PrivateNetwork=yes --setenv=PATH \
+    "${BASH}" -c "set -o errexit; $(declare -f network_probe); network_probe \"\$1\"" probe \
+    "${PWD}/${dir}" 2>"${dir}/stderr" || status=$?
+  journalctl --boot --no-pager --output=short-monotonic --unit="piglor-network-$1.service" \
+    >"${dir}/journal" || true
   printf '%s\n' "${status}" >"${dir}/status"
 }
 

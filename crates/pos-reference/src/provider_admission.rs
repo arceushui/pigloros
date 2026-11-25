@@ -1285,7 +1285,7 @@ pub mod tests {
     #[test]
     fn provider_rejects_a_non_erofs_root_before_activation() -> TestResult {
         use crate::selector::installation::tests::{
-            admitted_state_with_salt, ddi_fixture, ddi_partitions, ddi_salt, ImageSigning,
+            admitted_state_with_arguments, ddi_fixture, ddi_partitions, ddi_salt, ImageSigning,
         };
 
         let (mut image, partitions) = ddi_fixture("x86-64")?;
@@ -1293,12 +1293,13 @@ pub mod tests {
         image[magic..magic + 4].copy_from_slice(&[0; 4]);
         let partitions = ddi_partitions("x86-64", &image)?;
         assert!(ProviderImageSnapshot::from_installation(
-            admitted_state_with_salt(
+            admitted_state_with_arguments(
                 &image,
                 b"adapter",
                 &partitions,
                 &ImageSigning::ddi("x86-64")?,
-                ddi_salt("x86-64")?
+                ddi_salt("x86-64")?,
+                &[]
             )?,
             request_fixture()?,
             fixture_time
@@ -1310,7 +1311,7 @@ pub mod tests {
     #[test]
     fn provider_rejects_a_sim1_salt_other_than_the_held_superblock() -> TestResult {
         use crate::selector::installation::tests::{
-            admitted_state_with_salt, ddi_fixture, ddi_salt, ImageSigning,
+            admitted_state_with_arguments, ddi_fixture, ddi_salt, ImageSigning,
         };
 
         let (image, partitions) = ddi_fixture("x86-64")?;
@@ -1318,7 +1319,14 @@ pub mod tests {
         other_salt[0] ^= 1;
         let signing = ImageSigning::ddi("x86-64")?;
         assert!(ProviderImageSnapshot::from_installation(
-            admitted_state_with_salt(&image, b"adapter", &partitions, &signing, other_salt)?,
+            admitted_state_with_arguments(
+                &image,
+                b"adapter",
+                &partitions,
+                &signing,
+                other_salt,
+                &[]
+            )?,
             request_fixture()?,
             fixture_time
         )
@@ -1622,7 +1630,7 @@ pub mod tests {
     #[test]
     fn provider_rejects_a_signature_partition_other_than_sim1() -> TestResult {
         use crate::selector::installation::tests::{
-            admitted_state_with_salt, ddi_fixture, ddi_partitions, ddi_salt, ImageSigning,
+            admitted_state_with_arguments, ddi_fixture, ddi_partitions, ddi_salt, ImageSigning,
             IMAGE_PROOF,
         };
 
@@ -1636,7 +1644,8 @@ pub mod tests {
                     partitions: &[PartitionDescriptor; 3],
                     signing: &ImageSigning|
          -> TestResult<ProviderImageSnapshot> {
-            let state = admitted_state_with_salt(image, b"adapter", partitions, signing, salt)?;
+            let state =
+                admitted_state_with_arguments(image, b"adapter", partitions, signing, salt, &[])?;
             Ok(ProviderImageSnapshot::from_installation(
                 state,
                 request_fixture()?,

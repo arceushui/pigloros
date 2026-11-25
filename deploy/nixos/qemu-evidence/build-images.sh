@@ -12,13 +12,11 @@
 # signing (tampered). Every input is fixed, so the images are reproducible.
 #
 # The root also holds the real static adapter as /adapter, byte for byte the
-# ADAPTER file, which is copied to OUT/adapter beside the static LAUNCHER (the
-# pos-sandboxd binary, which the provider bind-mounts into the unit, so it
-# lives outside the image). The staged SIM1 binds the digest of OUT/adapter.
+# ADAPTER file, which is copied to OUT/adapter. The staged SIM1 binds the
+# digest of OUT/adapter.
 #
 # Environment: TRUSTED_KEY, TRUSTED_CERTIFICATE, UNTRUSTED_KEY and
-# UNTRUSTED_CERTIFICATE name the PEM key pairs; ADAPTER and LAUNCHER name the
-# executables.
+# UNTRUSTED_CERTIFICATE name the PEM key pairs; ADAPTER names the executable.
 set -euo pipefail
 
 architecture="$1"
@@ -31,28 +29,39 @@ work="$(mktemp -d)"
 # bytes independently.
 mkdir -p "${work}/tree/usr/lib" "${work}/tree/usr/share/pigloros" "${work}/repart.d"
 printf 'ID=pigloros-444-evidence\nVERSION_ID=1\n' >"${work}/tree/usr/lib/os-release"
-# Nothing in the image but the adapter may be needed to run it, so both
-# executables must be static ELF files of this architecture: a dynamic one has
-# no loader inside the root, and a script or stub is not an ELF at all.
+# Nothing in the image but the adapter may be needed to run it, so it must be a
+# loadable static ELF executable of this architecture: a dynamic one has no
+# loader inside the root, and a script or stub is not an ELF at all. The same
+# rules, with the same size floor, are the host checker's (static_executable).
 python3 -I -c '
 import struct
 import sys
+path = sys.argv[2]
 machine = {"x86-64": 62, "arm64": 183}[sys.argv[1]]
-for path in sys.argv[2:]:
-    data = open(path, "rb").read()
-    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
-        raise SystemExit(f"{path} is not a 64-bit little-endian ELF file")
-    kind, found = struct.unpack_from("<HH", data, 16)
-    if kind not in (2, 3) or found != machine:
-        raise SystemExit(f"{path} is not an executable for {sys.argv[1]}")
-    offset, = struct.unpack_from("<Q", data, 32)
-    size, count = struct.unpack_from("<HH", data, 54)
-    if any(struct.unpack_from("<I", data, offset + index * size)[0] == 3 for index in range(count)):
-        raise SystemExit(f"{path} is dynamically linked")
-' "${architecture}" "${ADAPTER}" "${LAUNCHER}"
+data = open(path, "rb").read()
+if len(data) < 100_000 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1 or data[6] != 1:
+    raise SystemExit(f"{path} is not a 64-bit little-endian ELF file")
+kind, found, version = struct.unpack_from("<HHI", data, 16)
+if kind not in (2, 3) or found != machine or version != 1:
+    raise SystemExit(f"{path} is not an executable for {sys.argv[1]}")
+offset, = struct.unpack_from("<Q", data, 32)
+size, count = struct.unpack_from("<HH", data, 54)
+if size < 56 or offset + size * count > len(data):
+    raise SystemExit(f"{path} has a malformed program header table")
+segments = [struct.unpack_from("<IIQQQQQQ", data, offset + index * size) for index in range(count)]
+loads = [segment for segment in segments if segment[0] == 1]
+if not loads:
+    raise SystemExit(f"{path} has nothing to load")
+if any(segment[0] == 3 for segment in segments):
+    raise SystemExit(f"{path} is dynamically linked")
+if any(segment[2] + segment[5] > len(data) or segment[5] > segment[6] for segment in loads):
+    raise SystemExit(f"{path} is truncated")
+entry, = struct.unpack_from("<Q", data, 24)
+if not any(segment[3] <= entry < segment[3] + segment[6] for segment in loads):
+    raise SystemExit(f"{path} has an entry point outside its segments")
+' "${architecture}" "${ADAPTER}"
 cp -- "${ADAPTER}" "${out}/adapter"
-cp -- "${LAUNCHER}" "${out}/launcher"
-chmod 0755 "${out}/adapter" "${out}/launcher"
+chmod 0755 "${out}/adapter"
 # The staged SIM1 names /adapter with the BLAKE3 of the bytes of OUT/adapter
 # (StagedInstallation::stage_image), and activation reads it back through
 # the mount. Any image the staged installation activates must carry it.
