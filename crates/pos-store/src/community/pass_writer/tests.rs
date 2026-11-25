@@ -1730,8 +1730,13 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
         with(&|call| call.pass.members.clear())?,
         Some(Error::InvalidBinding)
     );
+    // Three trace rows for one member, with the `F_p` three rows call for, so
+    // only the row count disagrees.
     assert_eq!(
-        with(&|call| call.pass.trace_rows = 3)?,
+        with(&|call| {
+            call.pass.trace_rows = 3;
+            call.failure_reserve = 6;
+        })?,
         Some(Error::InvalidBinding)
     );
     assert_eq!(
