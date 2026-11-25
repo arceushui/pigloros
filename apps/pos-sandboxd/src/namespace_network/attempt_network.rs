@@ -302,6 +302,33 @@ fn after_removal(cause: AttemptNetworkError, removal: Result<(), String>) -> Att
     }
 }
 
+impl SetupError for AttemptNetworkError {
+    /// R14 §3.4: creation, transport and resource refusals are
+    /// [`SetupClass::Creation`]. A failed readback, an existing namespace
+    /// and a slot held twice contradict the provider's own state.
+    fn setup_class(&self) -> SetupClass {
+        match self {
+            Self::Exhausted
+            | Self::Plan(_)
+            | Self::Open(_)
+            | Self::Quarantined { .. }
+            | Self::Establish(EstablishError {
+                failure: EstablishFailure::Install(_),
+                ..
+            })
+            | Self::Egress(
+                HostEgressError::Netlink(_)
+                | HostEgressError::Ipv6Egress
+                | HostEgressError::State(_),
+            ) => SetupClass::Creation,
+            Self::Establish(_)
+            | Self::Egress(HostEgressError::Readback | HostEgressError::Forwarding)
+            | Self::InUse
+            | Self::Exists => SetupClass::Contradiction,
+        }
+    }
+}
+
 /// Opens every connection from a thread inside one attempt's namespace, and
 /// removes the namespace when dropped.
 ///

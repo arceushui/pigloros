@@ -25,6 +25,8 @@ use super::erasure_budget::{CommunityErasureContextV1, CommunityPendingReservati
 use super::initialize::CommittedInitializationV1;
 use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 #[cfg(target_os = "linux")]
+use super::pass_install::CommunityHorizonPolicyV1;
+#[cfg(target_os = "linux")]
 use super::pass_record::CommunityPassRecordV1;
 #[cfg(target_os = "linux")]
 use super::pass_state::CommunityPassStateV1;
@@ -199,6 +201,9 @@ pub struct MemoryCommunityDomainV1 {
     /// (ADR-129 R8.1(7)): kept with its status after it resolves.
     #[cfg(target_os = "linux")]
     pub(super) pass_records: BTreeMap<(TimelineId, [u8; 16]), CommunityPassRecordV1>,
+    /// The installed horizon inputs of the Reserve writer (R13.4(2)).
+    #[cfg(target_os = "linux")]
+    pub(super) pass_horizons: Option<CommunityHorizonPolicyV1>,
 }
 
 impl MemoryCommunityDomainV1 {
@@ -251,6 +256,8 @@ impl MemoryCommunityDomainV1 {
                 pending_reservations: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 pass_records: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                pass_horizons: None,
             })
         }
     }

@@ -15,6 +15,7 @@ on:
       # The guest's part (b) driver and the crates it compiles.
       - Cargo.lock
       - Cargo.toml
+      - apps/pos-sandbox-evidence-adapter/**
       - apps/pos-sandboxd/**
       - crates/pos-reference/**
       - fixtures/conformance/**
