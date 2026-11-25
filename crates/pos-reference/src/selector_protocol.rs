@@ -1004,8 +1004,8 @@ fn grant_matches_execute_request(
 ///
 /// The check is mode-independent, so it is stricter for `AirGapped` and `Fork`
 /// than R16 requires. The R16 residual clause ("NXT1 empty unless
-/// `release1-digest` is non-null") is added by 1492-b (R16 §7, change C) once
-/// non-empty plans exist.
+/// `release1-digest` is non-null") is specified in R16 §3.3 change C, and
+/// 1492-b (R16 §7) owns the checks for non-empty plans.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
@@ -3241,6 +3241,19 @@ mod tests {
         Ok(())
     }
 
+    fn relations(
+        evidence: &AdmittedEvidence,
+        grant: &AdmissionGrant,
+        receipt: &SandboxProviderReceipt,
+        spx: &SandboxExecuteRequest,
+    ) -> bool {
+        evidence_relations_hold(
+            (&evidence.result, grant, receipt),
+            spx,
+            (&grant.authority, &receipt.authority),
+        )
+    }
+
     #[test]
     fn a_receipt_binds_at_most_one_transcript_per_plan() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
@@ -3248,21 +3261,15 @@ mod tests {
         let evidence = admitted_evidence(&control)?;
         let mut spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&evidence.fields[5])?)
             .map_err(|_| AdapterError::ProtocolFailure)?;
-        let mut receipt = evidence.receipt;
+        let mut receipt = evidence.receipt.clone();
+        let mut grant = evidence.grant.clone();
         // The relation helpers compare fields and do not verify the SPR1
         // digest, so an unsealed tamper isolates the guard in the chain.
-        let relations = |receipt: &SandboxProviderReceipt, spx: &SandboxExecuteRequest| {
-            evidence_relations_hold(
-                (&evidence.result, &evidence.grant, receipt),
-                spx,
-                (&evidence.grant.authority, &receipt.authority),
-            )
-        };
         assert!(transcripts_fit_plans(&receipt, &spx));
-        assert!(relations(&receipt, &spx));
+        assert!(relations(&evidence, &grant, &receipt, &spx));
         receipt.network_transcript_digests = vec![[1; 32]];
         assert!(!transcripts_fit_plans(&receipt, &spx));
-        assert!(!relations(&receipt, &spx));
+        assert!(!relations(&evidence, &grant, &receipt, &spx));
         spx.network_plans = vec![NetworkExchangePlan {
             exchange_id: [2; 16],
             occurrence: 0,
@@ -3274,8 +3281,9 @@ mod tests {
             retention_policy_digest: [5; 32],
             plan_digest: [6; 32],
         }];
+        grant.exchange_plan_digests = vec![[6; 32]];
         assert!(transcripts_fit_plans(&receipt, &spx));
-        assert!(relations(&receipt, &spx));
+        assert!(relations(&evidence, &grant, &receipt, &spx));
         receipt.network_transcript_digests.clear();
         assert!(transcripts_fit_plans(&receipt, &spx));
         receipt.network_transcript_digests = vec![[1; 32], [7; 32]];
