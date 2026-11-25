@@ -730,7 +730,7 @@ fn the_quote_names_the_due_rows_limits_and_guarded_counts() -> TestResult {
     let quoted = due.quote(&port, &steps, reused)?;
     let quote = quoted.quote();
     // No actor bounds T's budget in the fake.
-    assert_eq!(quoted.trace_rows(), u64::MAX);
+    assert_eq!(quoted.trace_headroom_rows(), u64::MAX);
     let members: Vec<_> = [(1, hash(2)), (2, hash(3))]
         .into_iter()
         .zip(&steps)
