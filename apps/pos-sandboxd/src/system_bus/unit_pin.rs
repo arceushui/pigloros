@@ -103,11 +103,14 @@ impl SystemdTransientUnitTransport {
         unit: &TransientServiceUnitName,
         started: Option<(&SystemdVerifiedStart, [u8; 16])>,
         cgroup: &BoundAttemptCgroup,
-        work: Option<&File>,
+        work: Option<File>,
         settle_by: Instant,
     ) -> TerminalResources {
         let terminal = cgroup.capture_limit_events();
-        let work_after = work.map(WorkUsage::observe);
+        // The `/work` handle is consumed by `work-after` and closed here,
+        // before the result read, the unpin and the later `StopUnit`
+        // (ADR-069 R15 §3.6 item 3, N9).
+        let work_after = work.map(|work| WorkUsage::observe(&work));
         let service = self.settled_result(started, settle_by).await;
         let unpinned = self.unpin(unit).await;
         TerminalResources::new(terminal, work_after, service, unpinned)

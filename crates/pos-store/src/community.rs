@@ -21,7 +21,11 @@ mod native_graph;
 mod observation;
 mod pass_planner;
 #[cfg(target_os = "linux")]
+mod pass_record;
+#[cfg(target_os = "linux")]
 mod pass_state;
+#[cfg(target_os = "linux")]
+mod pass_writer;
 mod planner;
 mod private_hash;
 mod protection;
@@ -68,6 +72,13 @@ pub use pass_planner::{
     plan_community_pass_v1, CommunityPassDueV1, CommunityPassInstallationV1,
     CommunityPassMemberViewV1, CommunityPassObservationUseV1, CommunityPassPlanV1,
     CommunityPassQuotedV1, CommunityPassRequestV1, CommunityPassStepInputsV1, CommunityPassViewV1,
+};
+#[cfg(target_os = "linux")]
+pub use pass_record::{CommunityPassCountsV1, CommunityPassStatusV1, CommunityReservedPassV1};
+#[cfg(target_os = "linux")]
+pub use pass_writer::{
+    CommunityCommitInputV1, CommunityMintedObservationV1, CommunityReserveInputV1,
+    CommunityStagedAbortV1, CommunityStagedCommitV1, CommunityStagedReserveV1,
 };
 pub use planner::{
     CommunityInitializationAuthorityV1, CommunityInitializationBindingsV1,

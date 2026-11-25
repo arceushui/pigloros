@@ -85,8 +85,16 @@ fn request(
     scope: ErasureScopeV1,
     selectors: Vec<ErasureReferenceV1>,
 ) -> Result<ErasureRequestV1, ErasureErrorV1> {
+    request_with_reference(reference(1), scope, selectors)
+}
+
+fn request_with_reference(
+    request_reference: ErasureReferenceV1,
+    scope: ErasureScopeV1,
+    selectors: Vec<ErasureReferenceV1>,
+) -> Result<ErasureRequestV1, ErasureErrorV1> {
     fixture_request(erasure_support::RequestFixtureInput {
-        request: reference(1),
+        request: request_reference,
         subject: reference(2),
         scope,
         selectors,
@@ -437,7 +445,17 @@ fn complete_receipt_input(
 const COORDINATOR: ErasureReferenceV1 = reference(200);
 
 fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    request(ErasureScopeV1::PrivateSubjectData, vec![reference(20)])
+    coordinator_request_for(reference(1))
+}
+
+fn coordinator_request_for(
+    request_reference: ErasureReferenceV1,
+) -> Result<ErasureRequestV1, ErasureErrorV1> {
+    request_with_reference(
+        request_reference,
+        ErasureScopeV1::PrivateSubjectData,
+        vec![reference(20)],
+    )
 }
 
 fn sequence_reference(seed: usize) -> ErasureReferenceV1 {
@@ -1536,6 +1554,29 @@ fn coordinator_retries_delivery_after_durable_dispatch_commit() -> Result<(), Er
             .ok_or(ErasureErrorV1::ProvenanceMissing)?
     );
     assert_eq!(adapter.dispatch_call_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn coordinator_keeps_cached_requests_independent_after_an_update() -> Result<(), ErasureErrorV1> {
+    let first = coordinator_request_for(reference(201))?;
+    let second = coordinator_request_for(reference(202))?;
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(coordinator_port(Vec::new(), None), COORDINATOR);
+
+    coordinator.submit(first.clone(), first.provenance())?;
+    let second_submitted = coordinator.submit(second.clone(), second.provenance())?;
+    let first_authorized = coordinator.authorize(first.reference(), reference(203))?;
+
+    assert_eq!(
+        coordinator.existing(first.reference()),
+        Some(&first_authorized)
+    );
+    assert_eq!(
+        coordinator.existing(second.reference()),
+        Some(&second_submitted)
+    );
+    assert_eq!(coordinator.existing(reference(204)), None);
     Ok(())
 }
 

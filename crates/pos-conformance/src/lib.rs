@@ -40,6 +40,7 @@ mod non_interference;
 mod non_interference_report;
 mod plugin_trust_bridge;
 mod profile_contract;
+mod provider_conformance;
 mod provider_contract;
 mod report_attestation;
 pub mod run_evidence_archive;
@@ -164,6 +165,12 @@ pub use profile_contract::{
     SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
     CONFORMANCE_PROFILE_MAGIC_V1, DETERMINISTIC_BUDGET_HARD_CAPS_V1, EVALUATOR_REQUEST_MAGIC_V1,
 };
+pub use provider_conformance::{
+    evaluate, run_suite, verify_gate, CaseRecord, CaseVerdict, ExpectedPublicOutcome,
+    FailureReason, GateError, ObservedAttempt, ObservedPublic, ProviderConformanceCase,
+    ProviderRun, ProviderRunError, ProviderUnderTest, ReportArchitecture, SuiteReport,
+    CONCURRENT_ATTEMPTS_V1,
+};
 pub use provider_contract::{
     ArtifactDescriptorV1, FixtureFamilyV1, FixtureProviderEntryV1, FixtureProviderKeyV1,
     FixtureProviderPackageV1, FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1,
@@ -183,8 +190,8 @@ pub use sandbox_provider_contract::{
     AdmissionAuthorityV1, AdmissionGrantV1, LaunchPolicyV1, NetworkCapabilityV1,
     NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1, PayloadDescriptorV1,
     PayloadDirectionV1, PayloadStreamValidatorV1, Pkcs7ProofV1, ProviderCapabilityV1,
-    ReceiptAuthorityV1, RequestAuthorityV1, SandboxArchitectureV1, SandboxCancelRequestV1,
-    SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
+    ReceiptAuthorityV1, ReconciliationEvidenceV1, RequestAuthorityV1, SandboxArchitectureV1,
+    SandboxCancelRequestV1, SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
     SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1, SandboxLimitV1,
     SandboxLocalErrorCodeV1, SandboxLocalErrorPhaseV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
     SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
