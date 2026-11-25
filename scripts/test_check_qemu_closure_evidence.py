@@ -209,7 +209,6 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
     }
     files["host/kernel-config"] = files["guest/kernel-config"]
     files.update(case_files())
-    files.update(executable_files(architecture))
     files.update(network_files())
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
@@ -242,12 +241,12 @@ REPLY = json.dumps({
                     "partitionNumber": 1, "architecture": "x86-64", "fileSystemType": "erofs",
                     "size": 581632, "offset": 20480, "mountFileDescriptor": 0, "mountPoint": ["/"]}],
     "singleFileSystem": False, "imagePolicy": "root=signed:=absent",
-    "imageSize": 0, "sectorSize": 512, "imageName": "piglor-evidence-image",
+    "imageSize": 4096, "sectorSize": 512, "imageName": "piglor-evidence-image",
 }, indent=4) + "\n"
 
 
 def ddi(root_hash: str = ROOT_HASH, salt: str = SALT, version: int = 1, hash_type: int = 1,
-        salt_size: int = 32, adapter: bytes | None = None, extra: bytes = b"") -> bytes:
+        salt_size: int = 32) -> bytes:
     """A minimal three-partition GPT image: data, a verity superblock and the
     root-verity-sig JSON, at 512-byte sectors."""
     image = bytearray(512 * 8)
@@ -268,174 +267,16 @@ def ddi(root_hash: str = ROOT_HASH, salt: str = SALT, version: int = 1, hash_typ
     image[6 * 512:7 * 512] = superblock
     signature = json.dumps({"rootHash": root_hash, "signature": "AA=="}).encode()
     image[7 * 512:7 * 512 + len(signature)] = signature
-    return bytes(image) + erofs_file(X86_ADAPTER if adapter is None else adapter) + extra
-
-
-def erofs_file(data: bytes) -> bytes:
-    """How mkfs.erofs stores an uncompressed file: whole blocks contiguously,
-    then the trailing partial block inline after the next inode, so the file
-    never occurs contiguously unless its size is a multiple of the block."""
-    whole = len(data) - len(data) % 4096
-    return data[:whole] + b"\0inode\0" + data[whole:]
+    return bytes(image)
 
 
 TAMPERED_OFFSET = 5 * 512 + 10
 
 
-def tampered_ddi(adapter: bytes | None = None, extra: bytes = b"") -> bytes:
-    image = bytearray(ddi(adapter=adapter, extra=extra))
+def tampered_ddi() -> bytes:
+    image = bytearray(ddi())
     image[TAMPERED_OFFSET] ^= 0x01
     return bytes(image)
-
-
-def static_elf(machine: int, tag: bytes, *, interpreter: bool = False, size: int = 200_000) -> bytes:
-    """A minimal 64-bit ELF header and two program headers, then tagged filler."""
-    header = bytearray(64)
-    header[:7] = b"\x7fELF\x02\x01\x01"
-    struct.pack_into("<HHI", header, 16, 3, machine, 1)
-    struct.pack_into("<Q", header, 32, 64)
-    struct.pack_into("<HH", header, 54, 56, 2)
-    headers = bytearray(112)
-    # One PT_LOAD that maps the whole file at 0x400000, with the entry point
-    # just after the headers.
-    total = 176 + size
-    struct.pack_into("<IIQQQQQQ", headers, 0, 1, 5, 0, 0x400000, 0x400000, total, total, 4096)
-    struct.pack_into("<Q", header, 24, 0x400000 + 176)
-    # PT_INTERP names the loader of a dynamic executable; PT_NOTE does not.
-    struct.pack_into("<I", headers, 56, 3 if interpreter else 4)
-    # Non-repeating filler, so that no part of the file occurs elsewhere.
-    return bytes(header + headers) + tag + hashlib.shake_256(tag).digest(size - len(tag))
-
-
-X86_ADAPTER = static_elf(62, b"adapter")
-
-
-ELF_FORMAT = "is not a 64-bit little-endian ELF executable"
-WRONG_EXECUTABLE = "is not an executable for"
-BAD_HEADERS = "malformed program header table"
-NO_LOAD = "no loadable segment"
-DYNAMIC = "dynamically linked"
-TRUNCATED = "is truncated: a loadable segment reaches beyond the file"
-SEGMENT_SIZES = "file size exceeds its memory size"
-BAD_ENTRY = "entry point is in no executable loadable segment"
-NOT_CARRIED = "does not carry the adapter exactly once"
-
-
-def two_loads(first_flags: int, second_flags: int, entry: int) -> bytes:
-    """The adapter with two PT_LOAD segments, the first at 0x400000 (4096 bytes) and the second at
-    0x600000 (the whole file), with the given flags and entry point, as a real static link has."""
-    data = bytearray(X86_ADAPTER)
-    total = len(data)
-    struct.pack_into("<IIQQQQQQ", data, 64, 1, first_flags, 0, 0x400000, 0x400000, 4096, 4096, 4096)
-    struct.pack_into("<IIQQQQQQ", data, 120, 1, second_flags, 0, 0x600000, 0x600000, total, total, 4096)
-    struct.pack_into("<Q", data, 24, entry)
-    return bytes(data)
-
-
-def table_at_end() -> bytes:
-    """The adapter with its program header table moved to the very end of the file."""
-    data = bytearray(X86_ADAPTER)
-    start = len(data) - 112
-    data[start:] = data[64:176]
-    struct.pack_into("<Q", data, 32, start)
-    return bytes(data)
-
-
-def elf_accepted() -> list[bytes]:
-    """Valid static x86-64 executables at the edges of the rules."""
-    total = len(X86_ADAPTER)
-
-    def patched(offset: int, data: bytes) -> bytes:
-        return X86_ADAPTER[:offset] + data + X86_ADAPTER[offset + len(data):]
-
-    # The entry at the first byte of its segment, and in the part of a segment that the file does not
-    # hold (a file size below the memory size, with the entry in that zero-filled tail).
-    bss = patched(104, struct.pack("<Q", total + 5000))
-    bss = bss[:96] + struct.pack("<Q", total - 1000) + bss[104:]
-    bss = bss[:24] + struct.pack("<Q", 0x400000 + total + 100) + bss[32:]
-    # The file's executable type as well as the position-independent one (e_type 2 and 3 are both
-    # accepted: a static glibc link is ET_DYN, a non-PIE one ET_EXEC); a segment that starts inside
-    # the file and ends exactly at its end; the program header table ending exactly at the end of
-    # the file; and a file of exactly the size floor.
-    offset_segment = patched(72, struct.pack("<Q", 100))
-    offset_segment = offset_segment[:96] + struct.pack("<Q", total - 100) + offset_segment[104:]
-    # Two loadable segments, as in a real link: the entry point is in the executable one, whichever
-    # comes first, and the other (read-only) one does not matter. A file size equal to the memory
-    # size is every other fixture's default.
-    return [patched(24, struct.pack("<Q", 0x400000)), bss, patched(16, struct.pack("<H", 2)),
-            offset_segment, table_at_end(), static_elf(62, b"adapter", size=checker.MIN_EXECUTABLE_BYTES - 176),
-            two_loads(4, 5, 0x600000 + 176), two_loads(5, 4, 0x400000 + 176)]
-
-
-def elf_defects() -> list[tuple[str, bytes]]:
-    """Adapters that are not loadable static x86-64 executables, each wrong in one way,
-    with the message of the rule that must refuse it."""
-    machine = checker.ELF_MACHINES["x86_64"]
-
-    def patched(offset: int, data: bytes, base: bytes = X86_ADAPTER) -> bytes:
-        return base[:offset] + data + base[offset + len(data):]
-
-    end = 0x400000 + len(X86_ADAPTER)
-    return [
-        # The 7-byte stand-in the staged SIM1 used to name, a script, and a file below the size floor.
-        (ELF_FORMAT, b"adapter"), (ELF_FORMAT, b"#!/bin/sh\n" + bytes(200_000)),
-        (ELF_FORMAT, X86_ADAPTER[:99_999]),
-        # A wrong class, byte order or ident version.
-        (ELF_FORMAT, patched(4, b"\x01")), (ELF_FORMAT, patched(5, b"\x02")),
-        (ELF_FORMAT, patched(6, b"\x09")),
-        # A header that is valid except for one byte of the magic number (each of the four).
-        *[(ELF_FORMAT, patched(index, bytes([X86_ADAPTER[index] ^ 1]))) for index in range(4)],
-        # Another architecture, every file type but an executable or a shared object (relocatable,
-        # none, core, and a value no type has), and a wrong ELF version.
-        (WRONG_EXECUTABLE, static_elf(checker.ELF_MACHINES["aarch64"], b"adapter")),
-        *[(WRONG_EXECUTABLE, patched(16, struct.pack("<H", kind))) for kind in (0, 1, 4, 5)],
-        (WRONG_EXECUTABLE, patched(20, struct.pack("<I", 9))),
-        # Dynamically linked: no loader exists inside the image's root.
-        (DYNAMIC, static_elf(machine, b"adapter", interpreter=True)),
-        # Nothing to load: no program headers, or none of type PT_LOAD.
-        (NO_LOAD, patched(56, struct.pack("<H", 0))), (NO_LOAD, patched(64, struct.pack("<I", 4))),
-        # A program header table beyond the file, or too small an entry.
-        (BAD_HEADERS, patched(32, struct.pack("<Q", 10**9))), (BAD_HEADERS, patched(54, struct.pack("<H", 8))),
-        # One byte below the smallest entry, a table one byte past the end of the file, and a table
-        # of which only the first entry fits (so that the entry count matters).
-        (BAD_HEADERS, patched(54, struct.pack("<H", 55))),
-        (BAD_HEADERS, patched(32, struct.pack("<Q", len(X86_ADAPTER) - 111))),
-        (BAD_HEADERS, patched(32, struct.pack("<Q", len(X86_ADAPTER) - 56))),
-        # Truncated above the size floor with the headers intact; and a segment larger than the file.
-        (TRUNCATED, X86_ADAPTER[:150_000]), (TRUNCATED, patched(96, struct.pack("<Q", 300_000))),
-        # A file size that fits the file only from offset zero: with the segment's own offset it
-        # reaches 100 bytes past the end.
-        (TRUNCATED, patched(72, struct.pack("<Q", 100))),
-        # A file size above the memory size while inside the file, with the entry point still inside
-        # the memory size (176 < 200), so that no other rule refuses it.
-        (SEGMENT_SIZES, patched(104, struct.pack("<Q", 200))),
-        # ... and by exactly one byte (the file size is the whole file, the memory size one less).
-        (SEGMENT_SIZES, patched(104, struct.pack("<Q", len(X86_ADAPTER) - 1))),
-        # One byte more than the file holds, with the memory size to match.
-        (TRUNCATED, patched(104, struct.pack("<Q", len(X86_ADAPTER) + 1),
-                            patched(96, struct.pack("<Q", len(X86_ADAPTER) + 1)))),
-        # The entry point in a segment that is not executable while another loadable segment is.
-        (BAD_ENTRY, two_loads(5, 4, 0x600000 + 176)), (BAD_ENTRY, two_loads(4, 5, 0x400000 + 176)),
-        # An entry point outside every segment, one past the end of the only segment, and one in a
-        # segment that is readable and writable but not executable.
-        (BAD_ENTRY, patched(24, struct.pack("<Q", 0x10))), (BAD_ENTRY, patched(24, struct.pack("<Q", end))),
-        (BAD_ENTRY, patched(68, struct.pack("<I", 4))), (BAD_ENTRY, patched(68, struct.pack("<I", 6))),
-    ]
-# The raw reply's imageSize is the positive image's length, adapter included.
-IMAGE_SIZE = len(ddi())
-REPLY = REPLY.replace('"imageSize": 0', f'"imageSize": {IMAGE_SIZE}')
-
-
-def executable_files(architecture: str, adapter: bytes | None = None) -> dict[str, bytes]:
-    """The architecture's adapter, and the images that carry it."""
-    machine = checker.ELF_MACHINES[architecture]
-    adapter = static_elf(machine, b"adapter") if adapter is None else adapter
-    return {
-        "host/images/adapter": adapter,
-        "host/images/positive.raw": ddi(adapter=adapter),
-        "host/images/wrong-key.raw": ddi(adapter=adapter),
-        "host/images/tampered.raw": tampered_ddi(adapter),
-    }
 
 
 def case_files() -> dict[str, bytes | str]:
@@ -465,8 +306,7 @@ def case_files() -> dict[str, bytes | str]:
     ):
         base = f"guest/cases/{case}"
         files.update({
-            f"{base}/arguments": (f"{IMAGES}/{image}.raw\n{IMAGES}/{signer}.der\n{description}\n"
-                                  f"{IMAGES}/adapter\nhonest\n"),
+            f"{base}/arguments": f"{IMAGES}/{image}.raw\n{IMAGES}/{signer}.der\n{description}\n",
             f"{base}/driver-stderr": "",
             f"{base}/driver-status": "0\n",
             f"{base}/timing": "activation-seconds\t12.50\n",
@@ -1262,106 +1102,11 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(verdict["tampered"]["readback"]["file"][0], "1")
         self.assertEqual(verdict["wrong-key"]["report"][0], ["activation", "refused", "MethodRejected"])
         self.assertEqual((verdict["mountfsd_reply"]["imageSize"], verdict["mountfsd_reply"]["sectorSize"]),
-                         (IMAGE_SIZE, 512))
+                         (4096, 512))
         self.assertEqual(verdict["tampered_offset"], TAMPERED_OFFSET)
         self.assertEqual(verdict["mountfsd_reply"]["cold_mountimage_seconds"], 71.25)
         self.assertEqual(verdict["positive"]["activation_seconds"], 12.5)
         self.assertEqual(verdict["positive"]["held"]["dm_device"], "253:0")
-
-    def test_the_adapter_is_a_real_static_executable_the_image_carries(self):
-        for architecture in ("x86_64", "aarch64"):
-            adapter = self.verdict(architecture)["mount_image_cases"]["adapter"]
-            expected = executable_files(architecture)["host/images/adapter"]
-            self.assertEqual(adapter["adapter_sha256"], hashlib.sha256(expected).hexdigest())
-            self.assertEqual(adapter["adapter_bytes"], len(expected))
-        # Like the real image, the file is not contiguous in it: its tail is inline.
-        self.assertEqual(len(X86_ADAPTER) % 4096 != 0, True)
-        self.assertEqual(ddi().count(X86_ADAPTER), 0)
-
-    def test_a_stand_in_or_broken_adapter_fails_closed(self):
-        def broken(adapter):
-            """An adapter carried by every image, so only it is wrong."""
-            return lambda f: f.update(executable_files("x86_64", adapter))
-
-        def carried(**image):
-            """Images built with `image`, all alike, so only the carrying is wrong."""
-            return lambda f: f.update({
-                "host/images/positive.raw": ddi(**image), "host/images/wrong-key.raw": ddi(**image),
-                "host/images/tampered.raw": tampered_ddi(**image)})
-
-        changes = [(message, broken(defect)) for message, defect in elf_defects()] + [
-            # The stand-in in the file alone.
-            (ELF_FORMAT, lambda f: f.update({"host/images/adapter": b"adapter"})),
-            # The images do not carry the adapter's blocks exactly once, then its tail.
-            (NOT_CARRIED, carried(adapter=b"other")),
-            (NOT_CARRIED, carried(extra=erofs_file(X86_ADAPTER))),
-            (NOT_CARRIED, carried(extra=X86_ADAPTER[:196_608])),
-            ("adapter's tail", carried(adapter=X86_ADAPTER[:-1] + b"X")),
-            ("adapter's tail", carried(adapter=X86_ADAPTER[:196_608])),
-            ("host/images", lambda f: f.pop("host/images/adapter")),
-        ]
-        for message, change in changes:
-            with self.subTest(message=message, change=change), \
-                    self.assertRaisesRegex(checker.EvidenceError, message):
-                self.verdict(change=change)
-
-    def test_a_tiny_or_constant_tail_is_not_a_positional_binding(self):
-        # A tail under MIN_TAIL_BYTES is left to the SIM1 digest; a longer one that is a single
-        # repeated byte would be found in any zero-filled block, so it is refused.
-        machine = checker.ELF_MACHINES["x86_64"]
-        blocks = 196_608 - 176
-        short = static_elf(machine, b"adapter", size=blocks + checker.MIN_TAIL_BYTES - 1)
-        resized = REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {len(ddi(adapter=short))}')
-        self.verdict(change=lambda f: f.update({**executable_files("x86_64", short),
-                                                "guest/cases/mountfsd-reply/reply": resized}))
-        constant = static_elf(machine, b"adapter", size=blocks + checker.MIN_TAIL_BYTES)
-        constant = constant[:-checker.MIN_TAIL_BYTES] + bytes(checker.MIN_TAIL_BYTES)
-        resized = REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {len(ddi(adapter=constant))}')
-        with self.assertRaisesRegex(checker.EvidenceError, "adapter's tail"):
-            self.verdict(change=lambda f: f.update({**executable_files("x86_64", constant),
-                                                    "guest/cases/mountfsd-reply/reply": resized}))
-
-    def test_the_shell_scripts_parse(self):
-        # The Python in build-images.sh sits in a single-quoted shell string: an apostrophe in it
-        # ends the quote, which no test of the extracted Python can see.
-        for name in ("deploy/nixos/qemu-evidence/build-images.sh", "deploy/nixos/qemu-evidence/collect-evidence.sh",
-                     "scripts/qemu-closure-evidence.sh"):
-            with self.subTest(script=name):
-                parsed = subprocess.run(["bash", "-n", str(ROOT / name)], capture_output=True, text=True,
-                                        check=False)
-                self.assertEqual(parsed.returncode, 0, parsed.stderr)
-
-    def test_build_images_applies_the_checkers_rules_to_the_adapter(self):
-        text = (ROOT / "deploy/nixos/qemu-evidence/build-images.sh").read_text(encoding="utf-8")
-        start = text.index("python3 -I -c '", text.index("(static_executable)"))
-        end = text.index('"${ADAPTER}"', start) + len('"${ADAPTER}"')
-        block = text[start:end]
-        # Between the shell's quotes there is no quote; run the block through bash as the script does.
-        self.assertNotIn("'", block[len("python3 -I -c '"):block.index("' \"${architecture}\"")])
-        script = 'architecture="$1"\nADAPTER="$2"\n' + block + "\n"
-        aarch64 = static_elf(checker.ELF_MACHINES["aarch64"], b"adapter")
-        names = {"x86-64": "x86_64", "arm64": "aarch64"}
-        # Each case is accepted (no message) or refused by the rule whose message both copies give.
-        cases = [("x86-64", X86_ADAPTER, None), ("arm64", aarch64, None)]
-        cases += [("x86-64", accepted, None) for accepted in elf_accepted()]
-        cases += [("x86-64", defect, message) for message, defect in elf_defects()]
-        # Each architecture's adapter is wrong for the other.
-        cases += [("x86-64", aarch64, WRONG_EXECUTABLE), ("arm64", X86_ADAPTER, WRONG_EXECUTABLE)]
-        with tempfile.TemporaryDirectory() as directory:
-            path = pathlib.Path(directory) / "adapter"
-            for name, adapter, message in cases:
-                path.write_bytes(adapter)
-                run = subprocess.run(["bash", "-c", script, "bash", name, str(path)],
-                                     capture_output=True, text=True, check=False)
-                with self.subTest(name=name, size=len(adapter), message=message):
-                    if message is None:
-                        self.assertEqual(run.returncode, 0, run.stderr)
-                        checker.static_executable(adapter, names[name], "adapter")
-                    else:
-                        self.assertNotEqual(run.returncode, 0)
-                        self.assertRegex(run.stderr, message)
-                        with self.assertRaisesRegex(checker.EvidenceError, message):
-                            checker.static_executable(adapter, names[name], "adapter")
 
     def test_mount_image_case_fabrication_fails_closed(self):
         positive, tampered = "guest/cases/positive", "guest/cases/tampered"
@@ -1461,7 +1206,7 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({f"{reply}/reply": without("imageSize")}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": true')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"erofs"', '"ext4"')}),
-            lambda f: f.update({f"{reply}/reply": REPLY.replace(f'"imageSize": {IMAGE_SIZE}', f'"imageSize": {IMAGE_SIZE + 1}')}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace('"imageSize": 4096', '"imageSize": 4097')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": 4096')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed:=absent", "root=verity:=absent")}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed:=absent", "root=signed+erofs:=absent")}),

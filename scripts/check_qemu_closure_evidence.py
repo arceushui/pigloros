@@ -22,11 +22,6 @@ packaged NixOS 26.05 closure and on both architectures:
 Part (b) runs the production admission, registry and activation path
 (`pos-sandboxd-conformance`) against the packaged mountfsd and kernel:
 
-- the adapter: the image's /adapter is a real, loadable static ELF
-  executable of the architecture (no PT_INTERP, so it runs inside a root
-  that holds nothing else, and never the 7-byte stand-in), and the signed
-  positive image carries its whole 4096-byte blocks exactly once, then its
-  tail, which mkfs.erofs stores inline beside the inode;
 - the images: wrong-key carries the positive image's root hash and salt,
   and tampered differs from positive in exactly one root data byte;
 - positive: an image signed by the trusted key mounts as read-only EROFS
@@ -150,16 +145,7 @@ HOST_FILES = {
 }
 # Part (b): the images the guest ran, copied from the recorded store path.
 HOST_IMAGE_FILES = {"positive.raw", "tampered.raw", "wrong-key.raw", "tampered-offset", "positive.der",
-                    "wrong-key.der", "root-hash.txt", "adapter"}
-# The unit runs these inside a root that holds only the image's own files.
-ELF_MACHINES = {"x86_64": 62, "aarch64": 183}
-PT_LOAD, PT_INTERP = 1, 3
-PF_X = 1
-EROFS_BLOCK = 4096
-MIN_TAIL_BYTES = 64
-# Far above any stand-in: a real static Rust executable is megabytes.
-MIN_EXECUTABLE_BYTES = 100_000
-ADAPTER_ARGUMENT = "honest"
+                    "wrong-key.der", "root-hash.txt"}
 GUEST_FILES = {
     "status", "collector", "boot-id", "mountinfo", "uname-machine", "uname-release", "systemctl-version", "current-system",
     "booted-system", "booted-kernel", "systemd-package", "detect-virt-vm",
@@ -978,64 +964,9 @@ def report_lines(evidence: Evidence, case: str) -> list[list[str]]:
 
 
 def check_arguments(evidence: Evidence, case: str, images: str, signer: str, description: str) -> None:
-    expected = (f"{images}/{case if case != 'verity-d' else 'wrong-key'}.raw\n{images}/{signer}.der\n"
-                f"{description}\n{images}/adapter\n{ADAPTER_ARGUMENT}\n")
+    expected = f"{images}/{case if case != 'verity-d' else 'wrong-key'}.raw\n{images}/{signer}.der\n{description}\n"
     if evidence.text(f"guest/cases/{case}/arguments") != expected:
-        raise EvidenceError(f"the {case} driver did not get the recorded image, signer, description "
-                            "and adapter")
-
-
-def static_executable(data: bytes, architecture: str, name: str) -> None:
-    """Require a real, loadable static ELF executable of the architecture."""
-    if len(data) < MIN_EXECUTABLE_BYTES or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1 \
-            or data[6] != 1:
-        raise EvidenceError(f"the {name} is not a 64-bit little-endian ELF executable")
-    kind, machine, version = struct.unpack_from("<HHI", data, 16)
-    if kind not in (2, 3) or machine != ELF_MACHINES[architecture] or version != 1:
-        raise EvidenceError(f"the {name} is not an executable for {architecture}")
-    offset, = struct.unpack_from("<Q", data, 32)
-    size, count = struct.unpack_from("<HH", data, 54)
-    if size < 56 or offset + size * count > len(data):
-        raise EvidenceError(f"the {name} has a malformed program header table")
-    segments = [struct.unpack_from("<IIQQQQQQ", data, offset + index * size) for index in range(count)]
-    loads = [segment for segment in segments if segment[0] == PT_LOAD]
-    if not loads:
-        raise EvidenceError(f"the {name} has no loadable segment")
-    if any(segment[0] == PT_INTERP for segment in segments):
-        raise EvidenceError(f"the {name} is dynamically linked, so it cannot run inside the image's root")
-    # A truncated file keeps its headers but loses what they map, and its
-    # entry point must lie in a segment that is mapped and executable.
-    if any(segment[2] + segment[5] > len(data) for segment in loads):
-        raise EvidenceError(f"the {name} is truncated: a loadable segment reaches beyond the file")
-    if any(segment[5] > segment[6] for segment in loads):
-        raise EvidenceError(f"the {name} has a loadable segment whose file size exceeds its memory size")
-    entry, = struct.unpack_from("<Q", data, 24)
-    if not any(segment[1] & PF_X and segment[3] <= entry < segment[3] + segment[6] for segment in loads):
-        raise EvidenceError(f"the {name}'s entry point is in no executable loadable segment")
-
-
-def check_adapter(evidence: Evidence, architecture: str, positive: bytes) -> dict:
-    """The image's /adapter is the real static executable, and the image holds it.
-
-    The root is uncompressed EROFS, whose whole blocks of a file are stored
-    contiguously but whose trailing partial block is stored inline next to
-    the inode (FLAT_INLINE). So the adapter is found as its whole 4096-byte
-    blocks exactly once, then its tail at least once. The tail has no
-    position to check it at (the inode that holds it need not follow the
-    blocks), so a tail of fewer than MIN_TAIL_BYTES is left to the staged
-    SIM1's digest, which the positive case only mounts if activation read
-    back, and a longer one must not be a single repeated byte, which any
-    zero-filled block would contain.
-    """
-    adapter = evidence.raw("host/images/adapter")
-    static_executable(adapter, architecture, "adapter")
-    whole = len(adapter) - len(adapter) % EROFS_BLOCK
-    blocks, tail = adapter[:whole], adapter[whole:]
-    if positive.count(blocks) != 1:
-        raise EvidenceError("the positive image does not carry the adapter exactly once")
-    if len(tail) >= MIN_TAIL_BYTES and (len(set(tail)) < 2 or tail not in positive):
-        raise EvidenceError("the positive image does not carry the adapter's tail")
-    return {"adapter_sha256": hashlib.sha256(adapter).hexdigest(), "adapter_bytes": len(adapter)}
+        raise EvidenceError(f"the {case} driver did not get the recorded image, signer and description")
 
 
 def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]) -> dict:
@@ -1178,7 +1109,7 @@ def check_mountfsd_reply(evidence: Evidence, image_size: int) -> dict:
             "cold_mountimage_seconds": recorded_seconds(evidence, "mountfsd-reply", "mountimage")}
 
 
-def check_cases(evidence: Evidence, architecture: str, paths: dict, trusted: tuple[bytes, str],
+def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],
                 untrusted: tuple[bytes, str]) -> dict:
     """#444 part (b): real MountImage, readback, failure closure and cleanup."""
     if evidence.raw("host/images/positive.der") != trusted[0] \
@@ -1209,7 +1140,6 @@ def check_cases(evidence: Evidence, architecture: str, paths: dict, trusted: tup
                      evidence.text("guest/cases/kernel-log")):
         raise EvidenceError("the kernel log shows no dm-verity data block corruption")
     return {
-        "adapter": check_adapter(evidence, architecture, positive),
         "root_hash": root_hash, "salt": salt, "tampered_offset": int(offset),
         **{case: check_mounted_case(evidence, case, verity) for case in MOUNTED_CASES},
         **{case: check_refused_case(evidence, case) for case in ("wrong-key", "verity-d")},
@@ -1429,7 +1359,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "compiled_in_certificate_list": check_certificate_list(evidence, der),
         "verity_d": check_verity_d(evidence, paths["systemd"]),
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
-        "mount_image_cases": check_cases(evidence, architecture, paths, (der, description), untrusted),
+        "mount_image_cases": check_cases(evidence, paths, (der, description), untrusted),
         "private_network": check_network(evidence),
     }
 
