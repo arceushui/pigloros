@@ -177,6 +177,13 @@ impl CommunityReservationV1 {
         out
     }
 
+    /// `BLAKE3("PiglorOS.Community.CPR1.v1\0" || CPR1)`, the identity CPS1's
+    /// `reservation_digest` names.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        super::digest(b"PiglorOS.Community.CPR1.v1\0", &self.to_canonical_cbor())
+    }
+
     /// Decode one whole preferred CPR1 as retained data, never as a permit.
     ///
     /// # Errors
