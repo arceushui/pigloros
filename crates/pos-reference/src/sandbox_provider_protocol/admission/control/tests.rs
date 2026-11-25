@@ -121,8 +121,8 @@ fn requests_refuse_each_zero_identity() -> TestResult {
     let fixture = authenticated_transport_fixture()?;
     let provider = &fixture.provider;
     let zero_inputs = [
-        (<[u8; 16]>::default(), nonce(), ATTEMPT, AGR1),
-        (REQUEST_ID, <[u8; 16]>::default(), ATTEMPT, AGR1),
+        ([0; 16], nonce(), ATTEMPT, AGR1),
+        (REQUEST_ID, nonce().map(|byte| byte ^ byte), ATTEMPT, AGR1),
         (REQUEST_ID, nonce(), [0; 16], AGR1),
         (REQUEST_ID, nonce(), ATTEMPT, [0; 32]),
     ];

@@ -54,10 +54,18 @@ impl Write for Capture {
 /// watcher reached `wait_for_running_grant` before the execute ends.
 fn wait_for_watcher(in_flight: &InFlightAttempt) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while in_flight.waiting() == 0 && Instant::now() < deadline {
+    // The condition is read once per turn and kept, so a spurious wake-up of
+    // the watcher after it was seen cannot turn into a failure.
+    let arrived = loop {
+        if in_flight.waiting() > 0 {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
         thread::yield_now();
-    }
-    assert!(in_flight.waiting() > 0, "no watcher arrived");
+    };
+    assert!(arrived, "no watcher arrived");
 }
 
 /// Whether `run` finished within ten seconds. A watcher that is never woken
