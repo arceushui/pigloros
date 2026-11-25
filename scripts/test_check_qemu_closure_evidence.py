@@ -463,14 +463,18 @@ def runtime_properties(**changes: str | None) -> str:
 
 
 RUNTIME_PROPERTIES = runtime_properties()
-RUNTIME_LOG = ("[ 100.0] systemd[1]: Starting piglor-sandbox-runtime.service...\n"
-               "[ 120.0] systemd[1]: Stopping piglor-sandbox-runtime.service...\n"
-               "[ 121.0] systemd[1]: piglor-sandbox-runtime.service: Deactivated successfully.\n")
+HOST = "piglor-qemu-evidence"
+STOPPING = f"[ 120.0] {HOST} systemd[1]: Stopping /var/lib/pigloros/sandbox/providers/ab provider-runtime...\n"
+DEACTIVATED = f"[ 121.0] {HOST} systemd[1]: piglor-sandbox-runtime.service: Deactivated successfully.\n"
+RUNTIME_LOG = (f"[ 100.0] {HOST} systemd[1]: Starting /var/lib/pigloros/sandbox/providers/ab provider-runtime...\n"
+               f"[ 101.0] {HOST} systemd[1]: Started /var/lib/pigloros/sandbox/providers/ab provider-runtime.\n"
+               + STOPPING + DEACTIVATED)
 RUNTIME_TREE = ("\td\t700\nsandbox\td\t700\nsandbox/staging\td\t700\nsandbox/registry\td\t700\n"
                 "provider-execute.sock\ts\t600\nprovider-control.sock\ts\t600\n")
 LAUNCHER_HEADERS = ("ELF Header:\n  Type:                              EXEC (Executable file)\n"
                     "Program Headers:\n  Type           Offset   VirtAddr\n  LOAD           0x000000 0x400000\n"
-                    "  GNU_STACK      0x000000 0x000000\n")
+                    "  GNU_STACK      0x000000 0x000000\n\nThere is no dynamic section in this file.\n")
+LAUNCHER_DIGEST = "c" * 64
 
 
 def daemon_files() -> dict[str, bytes | str]:
@@ -479,7 +483,10 @@ def daemon_files() -> dict[str, bytes | str]:
         f"{base}/stage-report": f"staged\t{PROVIDER_BINARY}\nunstaged\n", f"{base}/stage-stderr": "",
         f"{base}/stage-status": "0\n", f"{base}/start-status": "0\n", f"{base}/stop-status": "0\n",
         f"{base}/start-stderr": "",
-        f"{base}/launcher-sha256": "c" * 64 + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd\n",
+        f"{base}/launcher-sha256": LAUNCHER_DIGEST + "  /nix/store/" + "a" * 32 + "-pos-sandboxd/bin/pos-sandboxd\n",
+        f"{base}/provider-sha256": f"{LAUNCHER_DIGEST}  {PROVIDER_BINARY}\n",
+        f"{base}/start-state": "ActiveState=active\nSubState=running\nResult=success\nExecMainStatus=0\n",
+        f"{base}/start-journal": RUNTIME_LOG.split("[ 120.0]")[0],
         f"{base}/launcher-program-headers": LAUNCHER_HEADERS,
         f"{base}/runtime-properties": RUNTIME_PROPERTIES, f"{base}/runtime-exe": PROVIDER_BINARY + "\n",
         f"{base}/runtime-tree": RUNTIME_TREE, f"{base}/runtime-log": RUNTIME_LOG,
@@ -1465,13 +1472,39 @@ class EvidenceTests(unittest.TestCase):
              "not a loadable statically linked"),
             (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace("LOAD", "NOTE")}),
              "not a loadable statically linked"),
-            # How it stopped: the unit is collected, so the journal carries the Result.
-            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace("Deactivated successfully.", "Failed with result 'exit-code'.")}),
-             "Result=success"),
-            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG + "systemd[1]: Killing process 412 (pos-sandboxd) with signal SIGKILL.\n"}),
-             "Result=success"),
+            # DOWNLOAD is not a LOAD segment, and a dynamic section that NEEDs a library is not static.
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS.replace("LOAD", "DOWNLOAD")}),
+             "not a loadable statically linked"),
+            (lambda f: f.update({f"{base}/launcher-program-headers": LAUNCHER_HEADERS
+                                 + " 0x0001 (NEEDED)  Shared library: [libc.so.6]\n"}),
+             "not a loadable statically linked"),
+            # The installed copy must be the launcher, byte for byte.
+            (lambda f: f.update({f"{base}/provider-sha256": f"{'d' * 64}  {PROVIDER_BINARY}\n"}),
+             "installed provider executable is not the launcher"),
+            (lambda f: f.update({f"{base}/provider-sha256": f"{LAUNCHER_DIGEST}  /tmp/other\n"}),
+             "installed provider executable is not the launcher"),
+            # How it stopped: the unit is collected, so the journal carries the Result. One
+            # marker per case, each on a line that would otherwise be a good stop.
+            *[(lambda f, marker=marker: f.update({f"{base}/runtime-log": RUNTIME_LOG + marker + "\n"}),
+               "Result=success")
+              for marker in ("systemd[1]: piglor-sandbox-runtime.service: Failed with result 'exit-code'.",
+                             "systemd[1]: piglor-sandbox-runtime.service: Main process exited, killed with SIGKILL",
+                             "systemd[1]: piglor-sandbox-runtime.service: Stopping timed out. Terminating.",
+                             "systemd[1]: piglor-sandbox-runtime.service: Killing process 412 (pos-sandboxd)")],
             (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace("Deactivated successfully.", "Stopped.")}),
-             "no Deactivated successfully line"),
+             "no Stopping and Deactivated"),
+            # Only PID 1's line counts: not the daemon's own, not another unit's, not a stale one.
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                f"{HOST} systemd[1]: piglor-sandbox-runtime.service:",
+                f"{HOST} piglor-sandbox-runtime[412]: Deactivated successfully.\n[ 0.0] x y:")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(
+                "piglor-sandbox-runtime.service: Deactivated", "other.service: Deactivated")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": DEACTIVATED + RUNTIME_LOG.replace(DEACTIVATED, "")}),
+             "no Stopping and Deactivated"),
+            (lambda f: f.update({f"{base}/runtime-log": RUNTIME_LOG.replace(STOPPING, "")}),
+             "no Stopping and Deactivated"),
             # Socket and directory modes (R11 5.2 O9).
             (lambda f: f.update({f"{base}/runtime-tree": RUNTIME_TREE.replace("provider-execute.sock\ts\t600", "provider-execute.sock\ts\t777")}),
              "provider-execute.sock has mode 777"),
@@ -1487,11 +1520,16 @@ class EvidenceTests(unittest.TestCase):
                 f"path={PROVIDER_BINARY} ;", "path=/nix/store/x-other ;"))}), "does not run"),
             (lambda f: f.update({properties: runtime_properties(MainPID="0")}), "does not run"),
             (lambda f: f.update({properties: runtime_properties(ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"].replace(
+                "ignore_errors=no", "ignore_errors=yes"))}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(
+                ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"] + " { path=/bin/true ; argv[]=/bin/true ; "
+                                                               "ignore_errors=no ; }")}), "does not run"),
+            (lambda f: f.update({properties: runtime_properties(ExecStart=RUNTIME_PROPERTY_ROWS["ExecStart"].replace(
                 " provider-runtime ;", " recovery-peer ;"))}), "does not run"),
             (lambda f: f.update({properties: RUNTIME_PROPERTIES + "Id=again\n"}), "malformed"),
             # Properties R11 5.2 does not allow, or an environment of any kind.
-            (lambda f: f.update({properties: runtime_properties(EnvironmentFiles="/etc/secret")}),
-             "EnvironmentFiles"),
+            *[(lambda f, key=key: f.update({properties: RUNTIME_PROPERTIES + f"{key}=something\n"}), key)
+              for key in checker.EMPTY_UNIT_PROPERTIES],
             (lambda f: f.update({properties: runtime_properties(Environment=None)}), "Environment=None"),
             (lambda f: f.update({properties: runtime_properties(PassEnvironment=None)}), "PassEnvironment=None"),
         ]

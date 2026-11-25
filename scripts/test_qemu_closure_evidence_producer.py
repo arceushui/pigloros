@@ -396,6 +396,69 @@ class ProducerShellTests(unittest.TestCase):
                     "--property=TimeoutStartSec=30s", "--property=CollectMode=inactive-or-failed",
                     "--property=UMask=0077", "--property=StandardInput=null"]))
 
+    def test_daemon_case_records_what_the_checker_judges_in_order(self):
+        import check_qemu_closure_evidence as checker
+        calls = self.base / "calls"
+        out = self.base / "out"
+        out.mkdir()
+        images = self.base / "images"
+        images.mkdir()
+        (images / "adapter").write_text("adapter")
+        launcher, spi1 = self.base / "launcher", self.base / "spi1"
+        launcher.write_text("launcher")
+        spi1.write_text("spi1")
+        installed = self.base / "installed"
+        installed.write_text("installed")
+
+        def log(name: str, body: str = "") -> None:
+            self.shell.stub(name, f'printf "%s %s\\n" "{name}" "$*" >>"{calls}"\n{body}')
+
+        # The stager reports the installed path, holds until its control FIFO closes, unstages.
+        log("pos-sandboxd-conformance",
+            f'printf "staged\\t{installed}\\n"\ncat >/dev/null\nprintf "unstaged\\n"')
+        log("sha256sum", 'printf "%s  %s\\n" "$(printf %064d 7)" "$1"')
+        log("readelf", 'printf "ELF Header:\\n  Type:  EXEC\\n"')
+        log("systemd-run", 'echo "start-stderr line" >&2')
+        log("systemctl", 'if [[ $1 == show && $* == *--value* ]]; then echo 1; fi')
+        log("journalctl", 'echo "journal line"')
+        script = "\n".join([
+            f'images="{images}"; spi1="{spi1}"; launcher="{launcher}"',
+            f'RUNTIME_ROOT="{self.base}/run-pigloros"; STAGE_FIFO="{self.base}/stage-fifo"',
+            f'cd "{out}"; mkdir daemon',
+            'daemon_case start image.raw signer.der "CN: 01"',
+        ])
+        self.shell.out(script, COLLECTOR)
+        case = out / "daemon" / "start"
+        recorded = {path.name for path in case.iterdir()}
+        # Every file the checker's inventory expects after a successful stage is written.
+        self.assertEqual(recorded, checker.DAEMON_STAGE_FILES | checker.DAEMON_RUNTIME_FILES)
+        self.assertEqual((case / "start-stderr").read_text(), "start-stderr line\n")
+        self.assertEqual((case / "stage-report").read_text(), f"staged\t{installed}\nunstaged\n")
+        self.assertEqual((case / "stage-status").read_text(), "0\n")
+        self.assertEqual((case / "start-status").read_text(), "0\n")
+        self.assertEqual((case / "stop-status").read_text(), "0\n")
+        self.assertIn(str(launcher), (case / "launcher-sha256").read_text())
+        self.assertIn(str(installed), (case / "provider-sha256").read_text())
+        self.assertIn("ELF Header", (case / "launcher-program-headers").read_text())
+        self.assertEqual((case / "runtime-log").read_text(), "journal line\n")
+        # The `systemctl show` property list covers every row the checker judges.
+        listed = {name for line in calls.read_text().splitlines() if line.startswith("systemctl show ")
+                  and "--property=Id," in line
+                  for name in line.split("--property=Id,")[1].split()[0].split(",")}
+        judged = set(checker.RUNTIME_UNIT_PROPERTIES) | set(checker.EMPTY_UNIT_PROPERTIES) | {"MainPID", "ExecStart"}
+        self.assertLessEqual(judged, listed | {"Id"})
+        # Order: the journal is flushed after the stop and before the judged read; the unit's
+        # start state and journal are taken before the properties.
+        steps = [line.split()[0] + " " + " ".join(line.split()[1:3]) for line in calls.read_text().splitlines()]
+        stop = next(i for i, step in enumerate(steps) if step.startswith("systemctl stop"))
+        self.assertTrue(steps[stop + 1].startswith("journalctl --sync"), steps)
+        self.assertTrue(steps[stop + 2].startswith("journalctl --boot"), steps)
+        start = next(i for i, step in enumerate(steps) if step.startswith("systemd-run"))
+        self.assertTrue(steps[start + 1].startswith("systemctl show"), steps)
+        self.assertTrue(steps[start + 2].startswith("journalctl --sync"), steps)
+        # The runtime root is removed again.
+        self.assertFalse((self.base / "run-pigloros").exists())
+
     def test_the_unit_runs_an_absolute_bash_because_a_unit_path_has_none(self):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")

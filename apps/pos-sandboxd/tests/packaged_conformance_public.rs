@@ -17,8 +17,9 @@ use std::{
     fs,
     io::{self, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
@@ -193,18 +194,35 @@ impl io::Read for BrokenControl {
     }
 }
 
-#[tokio::test]
-async fn the_stager_stages_the_provider_holds_it_and_unstages_it() -> TestResult {
-    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
-        return run_isolated("the_stager_stages_the_provider_holds_it_and_unstages_it");
+/// A control input that observes the held installation at its first read and
+/// then ends.
+///
+/// The stager holds the staged installation until its control input ends, so
+/// exactly one provider executable must be installed while this is read.
+struct ObservingControl {
+    seen: Arc<Mutex<Option<PathBuf>>>,
+}
+
+impl io::Read for ObservingControl {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        let mut providers = fs::read_dir("/var/lib/pigloros/sandbox/providers")?;
+        let installed = providers
+            .next()
+            .ok_or_else(|| io::Error::other("no provider executable is installed"))??;
+        if providers.next().is_some() {
+            return Err(io::Error::other("more than one provider executable"));
+        }
+        *self.seen.lock().map_err(|_| io::Error::other("poisoned"))? = Some(installed.path());
+        Ok(0)
     }
-    if fs::metadata("/proc/self")?.uid() != 0 {
-        return Err("the isolated conformance child is not root".into());
-    }
+}
+
+/// The stager's arguments over the DDI vector and small stand-in files in
+/// `scratch`.
+fn stager_arguments(scratch: &Path) -> Result<Vec<OsString>, Box<dyn Error>> {
     let vectors = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../crates/pos-reference/tests/vectors/sim1-ddi/x86-64");
-    let scratch = tempfile::tempdir()?;
-    let image = scratch.path().join("image.raw");
+    let image = scratch.join("image.raw");
     let expanded = Command::new("gzip")
         .arg("-dc")
         .arg(vectors.join("image.raw.gz"))
@@ -212,52 +230,82 @@ async fn the_stager_stages_the_provider_holds_it_and_unstages_it() -> TestResult
         .status()?;
     assert!(expanded.success());
     let (adapter, spi1, provider) = (
-        scratch.path().join("adapter"),
-        scratch.path().join("spi1"),
-        scratch.path().join("provider"),
+        scratch.join("adapter"),
+        scratch.join("spi1"),
+        scratch.join("provider"),
     );
     fs::write(&adapter, b"adapter")?;
     fs::write(&spi1, b"spi1 bytes")?;
     fs::write(&provider, b"provider bytes")?;
-    let arguments = || -> Vec<OsString> {
-        vec![
-            "stage".into(),
-            image.clone().into(),
-            vectors.join("signer.der").into(),
-            VECTOR_KEY_DESCRIPTION.into(),
-            adapter.clone().into(),
-            spi1.clone().into(),
-            "runtime.key".into(),
-            provider.clone().into(),
-            "honest".into(),
-        ]
+    Ok(vec![
+        "stage".into(),
+        image.into(),
+        vectors.join("signer.der").into(),
+        VECTOR_KEY_DESCRIPTION.into(),
+        adapter.into(),
+        spi1.into(),
+        "runtime.key".into(),
+        provider.into(),
+        "honest".into(),
+    ])
+}
+
+/// One staging and one gzip per container, as `staged_provider_public.rs`
+/// does, since the isolated runner bounds each test at 30 s.
+#[tokio::test]
+async fn the_stager_holds_the_installation_until_its_control_ends() -> TestResult {
+    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
+        return run_isolated("the_stager_holds_the_installation_until_its_control_ends");
+    }
+    if fs::metadata("/proc/self")?.uid() != 0 {
+        return Err("the isolated conformance child is not root".into());
+    }
+    let scratch = tempfile::tempdir()?;
+    let seen = Arc::new(Mutex::new(None));
+    let control = ObservingControl {
+        seen: Arc::clone(&seen),
     };
-
-    // The report names the installed provider executable, then the removal.
     let mut report = Vec::new();
-    run(arguments(), io::empty(), &mut report, describe, release).await?;
-    let report = String::from_utf8(report)?;
-    let lines: Vec<&str> = report.lines().collect();
-    assert_eq!(lines.len(), 2, "{report}");
-    assert!(
-        lines[0].starts_with("staged\t/var/lib/pigloros/sandbox/providers/"),
-        "{report}"
-    );
-    assert_eq!(lines[1], "unstaged");
-    assert!(!Path::new("/var/lib/pigloros").exists());
+    let arguments = stager_arguments(scratch.path())?;
+    run(arguments, control, &mut report, describe, release).await?;
 
-    // A report or control input that fails still removes the installation.
-    let unreported = run(arguments(), io::empty(), &mut Broken, describe, release).await;
-    assert!(matches!(unreported, Err(ConformanceError::Io(_))));
+    // The control input saw the one installed provider executable, which is
+    // the one the report names, and the installation is gone after the run.
+    let installed = seen
+        .lock()
+        .map_err(|_| "poisoned")?
+        .clone()
+        .ok_or("the control input was never read")?;
+    assert!(installed.starts_with("/var/lib/pigloros/sandbox/providers"));
+    assert_eq!(
+        String::from_utf8(report)?,
+        format!("staged\t{}\nunstaged\n", installed.display())
+    );
     assert!(!Path::new("/var/lib/pigloros").exists());
-    let uncontrolled = run(
-        arguments(),
-        BrokenControl,
-        &mut Vec::new(),
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failing_report_or_control_input_still_removes_the_installation() -> TestResult {
+    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
+        return run_isolated("a_failing_report_or_control_input_still_removes_the_installation");
+    }
+    if fs::metadata("/proc/self")?.uid() != 0 {
+        return Err("the isolated conformance child is not root".into());
+    }
+    let scratch = tempfile::tempdir()?;
+    let arguments = stager_arguments(scratch.path())?;
+    let unreported = run(
+        arguments.clone(),
+        io::empty(),
+        &mut Broken,
         describe,
         release,
     )
     .await;
+    assert!(matches!(unreported, Err(ConformanceError::Io(_))));
+    assert!(!Path::new("/var/lib/pigloros").exists());
+    let uncontrolled = run(arguments, BrokenControl, &mut Vec::new(), describe, release).await;
     assert!(matches!(uncontrolled, Err(ConformanceError::Io(_))));
     assert!(!Path::new("/var/lib/pigloros").exists());
     Ok(())

@@ -40,16 +40,15 @@ const FIXED: &str = "/var/lib/pigloros";
 
 /// Run `name` again as root in the isolated container and report whether
 /// this process already is that run.
-fn require_isolated_root(name: &str) -> Result<bool, String> {
+fn require_isolated_root(name: &str) -> Result<bool, Box<dyn Error>> {
     if std::env::var_os("PIGLOROS_PRIVILEGED_COMPOSITION_TEST").is_some() {
         return Ok(true);
     }
     let runner = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-isolated-test.sh");
     let output = Command::new(runner)
-        .arg(std::env::current_exe().map_err(|error| error.to_string())?)
+        .arg(std::env::current_exe()?)
         .arg(name)
-        .output()
-        .map_err(|error| error.to_string())?;
+        .output()?;
     if output.status.success() {
         return Ok(false);
     }
@@ -58,7 +57,8 @@ fn require_isolated_root(name: &str) -> Result<bool, String> {
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    ))
+    )
+    .into())
 }
 
 fn hex(text: &str) -> Vec<u8> {

@@ -125,11 +125,15 @@ settled_devices() { # FILE
   done
 }
 
+# The provider's runtime root, and the guest-tmpfs FIFO that holds the stager.
+RUNTIME_ROOT=/run/pigloros
+STAGE_FIFO=/run/piglor-evidence-stage
+
 # The provider's empty private runtime directories, as its startup leaves them.
 provision_runtime() {
   local directory
-  for directory in /run/pigloros /run/pigloros/sandbox /run/pigloros/sandbox/registry \
-    /run/pigloros/sandbox/attempts; do
+  for directory in "${RUNTIME_ROOT}" "${RUNTIME_ROOT}/sandbox" "${RUNTIME_ROOT}/sandbox/registry" \
+    "${RUNTIME_ROOT}/sandbox/attempts"; do
     mkdir -m 0700 "${directory}"
   done
 }
@@ -174,8 +178,8 @@ driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   rm -- "${fifo}"
   printf '%s\n' "${status}" >"${dir}/driver-status"
   settled_devices "${dir}/devices-after"
-  find /run/pigloros -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-after"
-  rm -rf /run/pigloros
+  find "${RUNTIME_ROOT}" -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-after"
+  rm -rf "${RUNTIME_ROOT}"
 }
 
 # --- The composed provider runtime ------------------------------------------
@@ -205,12 +209,12 @@ start_runtime() { # BINARY
 # installation until its control FIFO closes. Part (c) and the execute
 # evidence run between start and stop.
 daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
-  local dir="daemon/$1" fifo=/run/piglor-evidence-stage control line binary pid status=0 start=0 stop=0
+  local dir="daemon/$1" fifo="${STAGE_FIFO}" control line binary pid status=0 start=0 stop=0
   mkdir -p "${dir}"
   # The provider executable the stager installs: its digest, and its program
   # headers, which show a loadable statically linked ELF file (no INTERP).
   sha256sum "${launcher}" >"${dir}/launcher-sha256"
-  readelf -hlW "${launcher}" >"${dir}/launcher-program-headers"
+  readelf -hldW "${launcher}" >"${dir}/launcher-program-headers"
   : >"${dir}/start-stderr"
   provision_runtime
   # The control FIFO lives on the guest's tmpfs, not on the 9p evidence share.
@@ -228,13 +232,24 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   line="$(head -n 1 "${dir}/stage-report")"
   if [[ ${line} == staged$'\t'* ]]; then
     binary="${line#*$'\t'}"
+    # The installed copy is byte for byte the launcher the guest built.
+    sha256sum "${binary}" >"${dir}/provider-sha256"
     start_runtime "${binary}" 2>"${dir}/start-stderr" || start=$?
+    # A start failure (timeout, notify protocol, exec) is logged by the manager at
+    # debug level only, so record the unit's state and journal right after the start.
+    systemctl show "${RUNTIME_UNIT}.service" --property=ActiveState,SubState,Result,ExecMainStatus \
+      >"${dir}/start-state"
+    journalctl --sync
+    journalctl --boot --no-pager --output=short-monotonic --unit="${RUNTIME_UNIT}.service" \
+      >"${dir}/start-journal"
     systemctl show "${RUNTIME_UNIT}.service" \
-      --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,RuntimeMaxUSec,Environment,EnvironmentFiles,PassEnvironment,ExecStart \
+      --property=Id,ActiveState,SubState,MainPID,Type,NotifyAccess,ExitType,KillMode,Restart,CollectMode,UMask,StandardInput,TimeoutStartUSec,RuntimeMaxUSec,Environment,EnvironmentFiles,PassEnvironment,Sockets,OpenFile,ExtraFileDescriptors,SetCredential,LoadCredential,ExecStart \
       >"${dir}/runtime-properties"
     readlink "/proc/$(systemctl show --property=MainPID --value "${RUNTIME_UNIT}.service")/exe" >"${dir}/runtime-exe" || true
-    find /run/pigloros -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"
+    find "${RUNTIME_ROOT}" -printf '%P\t%y\t%m\n' | sort >"${dir}/runtime-tree"
     systemctl stop "${RUNTIME_UNIT}.service" || stop=$?
+    # PID 1's stop lines may not have reached the journal yet.
+    journalctl --sync
     journalctl --boot --no-pager --output=short-monotonic --unit="${RUNTIME_UNIT}.service" >"${dir}/runtime-log"
   fi
   printf '%s\n' "${start}" >"${dir}/start-status"
@@ -243,7 +258,7 @@ daemon_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
   wait "${pid}" || status=$?
   rm -- "${fifo}"
   printf '%s\n' "${status}" >"${dir}/stage-status"
-  rm -rf /run/pigloros
+  rm -rf "${RUNTIME_ROOT}"
 }
 
 # One raw MountImage call with the provider's exact parameters, so that the

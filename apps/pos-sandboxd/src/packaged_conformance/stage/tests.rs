@@ -109,6 +109,46 @@ async fn the_stage_argument_selects_the_stager() {
 }
 
 #[test]
+fn the_stager_reports_nothing_when_staging_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let mut paths = Vec::new();
+    for (name, bytes) in [
+        ("image", "not a disk image"),
+        ("certificate", ""),
+        ("adapter", "adapter"),
+        ("spi1", "s"),
+        ("provider", "provider"),
+    ] {
+        let path = directory.path().join(name);
+        std::fs::write(&path, bytes)?;
+        paths.push(path.into_os_string());
+    }
+    let [image, certificate, adapter, spi1, provider] = &paths[..] else {
+        return Err("five paths".into());
+    };
+    let mut report = Vec::new();
+    let refused = run_stage(
+        &[
+            image.clone(),
+            certificate.clone(),
+            "CN: 01".into(),
+            adapter.clone(),
+            spi1.clone(),
+            "runtime.key".into(),
+            provider.clone(),
+        ],
+        io::empty(),
+        &mut report,
+    );
+    assert!(
+        matches!(&refused, Err(ConformanceError::Stage(reason)) if reason.contains("GPT")),
+        "{refused:?}"
+    );
+    assert!(report.is_empty());
+    Ok(())
+}
+
+#[test]
 fn an_image_that_is_not_a_ddi_is_refused_before_anything_is_staged() -> TestResult {
     let directory = tempfile::tempdir()?;
     let binary = directory.path().join("provider");

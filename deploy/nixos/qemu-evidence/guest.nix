@@ -107,8 +107,10 @@ let
       "--bin"
       "pos-sandboxd"
     ];
-    buildInputs = [ pkgs.glibc.static ];
-    env.RUSTFLAGS = "-C target-feature=+crt-static";
+    # As for the adapter: not buildInputs, because the wrapper would then put
+    # the static libc.a ahead of libc.so for the dynamically linked build
+    # scripts (proc-macro2, quote), which crash. Only the final link gets the path.
+    env.RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=-L${pkgs.glibc.static}/lib";
     auditable = false;
     doCheck = false;
     meta.mainProgram = "pos-sandboxd";

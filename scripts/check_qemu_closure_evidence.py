@@ -192,7 +192,20 @@ NETWORK_PROBE_FILES = {"netns", "links", "addrs", "routes4", "routes6"}
 DAEMON_CASES = ("start",)
 DAEMON_STAGE_FILES = {"stage-report", "stage-stderr", "stage-status", "start-status", "stop-status",
                       "start-stderr", "launcher-sha256", "launcher-program-headers"}
-DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-exe", "runtime-tree", "runtime-log"}
+DAEMON_RUNTIME_FILES = {"runtime-properties", "runtime-exe", "runtime-tree", "runtime-log",
+                        "provider-sha256", "start-state", "start-journal"}
+# R11 5.2 gives the unit no environment, no descriptor and no credential: each of these is
+# empty or omitted (systemctl show omits some empty lists). `ListenStream` belongs to socket
+# units, which the runtime unit has none of.
+EMPTY_UNIT_PROPERTIES = ("EnvironmentFiles", "Sockets", "OpenFile", "ExtraFileDescriptors",
+                         "SetCredential", "LoadCredential")
+# The manager's own lines for the stop, as `journalctl -o short-monotonic` prints them: PID 1
+# says it is stopping the unit, and later that the unit deactivated successfully. A line a
+# daemon wrote, one for another unit, or one from before the stop does not count.
+RUNTIME_STOPPED = re.compile(
+    r"^\[[^\]]+\] \S+ systemd\[1\]: Stopping [^\n]*\n(?:[^\n]*\n)*?"
+    r"\[[^\]]+\] \S+ systemd\[1\]: piglor-sandbox-runtime\.service: Deactivated successfully\.$",
+    re.M)
 PROVIDER_BINARY_PATH = re.compile(r"/var/lib/pigloros/sandbox/providers/[0-9a-f]{64}")
 RUNTIME_UNIT_PROPERTIES = {
     "Id": "piglor-sandbox-runtime.service", "ActiveState": "active", "SubState": "running",
@@ -1389,28 +1402,39 @@ def check_daemon_case(evidence: Evidence, name: str) -> dict:
     binary = fields[1]
     if evidence.line(f"{base}/start-status") != "0" or evidence.line(f"{base}/stop-status") != "0":
         log = evidence.text(f"{base}/runtime-log") if (evidence.root / base / "runtime-log").exists() else ""
+        start_journal = evidence.text(f"{base}/start-journal") \
+            if (evidence.root / base / "start-journal").exists() else ""
+        start_stderr = evidence.text(f"{base}/start-stderr").strip(" \t\r\n")[:400]
+        start_state = evidence.text(f"{base}/start-state") \
+            if (evidence.root / base / "start-state").exists() else ""
         raise EvidenceError(f"the {name} runtime unit did not start and stop cleanly; "
-                            f"start stderr: {evidence.text(f'{base}/start-stderr').strip()[:400]!r}; "
+                            f"start stderr: {start_stderr!r}; "
+                            f"state after the start: {start_state.split()!r}; "
+                            f"journal after the start: {start_journal.strip()[-600:]!r}; "
                             f"log: {log.strip()[-600:]!r}")
     check_launcher(evidence, base)
     unit = properties(evidence, f"{base}/runtime-properties")
     for key, expected in RUNTIME_UNIT_PROPERTIES.items():
         if unit.get(key) != expected:
             raise EvidenceError(f"the {name} runtime unit has {key}={unit.get(key)!r}, not {expected!r}")
-    # systemctl show omits an empty EnvironmentFiles= list instead of printing it.
-    if unit.get("EnvironmentFiles", "") != "":
-        raise EvidenceError(f"the {name} runtime unit has EnvironmentFiles={unit['EnvironmentFiles']!r}")
+    # systemctl show omits some empty lists instead of printing them.
+    for key in EMPTY_UNIT_PROPERTIES:
+        if unit.get(key, "") != "":
+            raise EvidenceError(f"the {name} runtime unit has {key}={unit[key]!r}")
+    # One ExecStart entry, for exactly the binary and argv, that does not ignore errors.
+    exec_start = unit.get("ExecStart", "")
     if not unit.get("MainPID", "").isdigit() or int(unit["MainPID"]) == 0 \
-            or f"path={binary} ;" not in unit.get("ExecStart", "") \
-            or f"argv[]={binary} provider-runtime ;" not in unit["ExecStart"]:
+            or exec_start.count("path=") != 1 \
+            or f"path={binary} ; argv[]={binary} provider-runtime ; ignore_errors=no ;" not in exec_start:
         raise EvidenceError(f"the {name} runtime unit does not run {binary} provider-runtime: {unit.get('ExecStart')!r}")
     if evidence.line(f"{base}/runtime-exe") != binary:
         raise EvidenceError(f"the {name} runtime process is not the staged provider binary")
     log = evidence.text(f"{base}/runtime-log")
     failures = [marker for marker in STOP_FAILURES if marker in log]
-    if "Deactivated successfully" not in log or failures:
+    if not RUNTIME_STOPPED.search(log) or failures:
         raise EvidenceError(f"the {name} runtime unit did not stop with Result=success: "
-                            f"{failures or 'no Deactivated successfully line'}; log: {log.strip()[-600:]!r}")
+                            f"{failures or 'no Stopping and Deactivated successfully lines from systemd[1]'}; "
+                            f"log: {log.strip()[-600:]!r}")
     tree = {}
     for line in evidence.text(f"{base}/runtime-tree").splitlines():
         path, kind, mode = tab_fields(line, 3, "runtime-tree")
@@ -1433,8 +1457,14 @@ def check_launcher(evidence: Evidence, base: str) -> None:
     if len(digest) != 2 or not re.fullmatch(r"[0-9a-f]{64}", digest[0]) or not digest[1].startswith("/nix/store/"):
         raise EvidenceError(f"the {base} launcher digest line is malformed")
     headers = evidence.text(f"{base}/launcher-program-headers")
-    if not re.search(r"^\s*Type:\s+(EXEC|DYN) ", headers, re.M) or "INTERP" in headers or "LOAD" not in headers:
+    if not re.search(r"^\s*Type:\s+(EXEC|DYN) ", headers, re.M) or re.search(r"\bINTERP\b", headers) \
+            or not re.search(r"^\s*LOAD\s", headers, re.M) or "(NEEDED)" in headers:
         raise EvidenceError(f"the {base} launcher is not a loadable statically linked ELF file")
+    # The copy the stager installed is the launcher, byte for byte.
+    installed = evidence.line(f"{base}/provider-sha256").split("  ")
+    if len(installed) != 2 or installed[0] != digest[0] \
+            or not PROVIDER_BINARY_PATH.fullmatch(installed[1]):
+        raise EvidenceError(f"the {base} installed provider executable is not the launcher: {installed}")
 
 
 def check_daemon(evidence: Evidence) -> dict:
