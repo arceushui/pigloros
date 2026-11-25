@@ -171,10 +171,7 @@ pub fn match_score_v1(
     let refusal = input_checks(weights, options)
         .into_iter()
         .find_map(|(holds, error)| (!holds).then_some(error));
-    match refusal {
-        Some(error) => Err(error),
-        None => Ok(recommend(weights, options)),
-    }
+    refusal.map_or_else(|| Ok(recommend(weights, options)), Err)
 }
 
 /// Every bound of ADR-140 section 1, in refusal order.
@@ -315,10 +312,8 @@ impl PreviewClaimKeyV1 {
         actor_entity_id: EntityId,
         idempotency_key: &str,
     ) -> Self {
-        let mut material = Vec::with_capacity(32 + idempotency_key.len());
-        material.extend_from_slice(&principal_id);
-        material.extend_from_slice(&actor_entity_id.inner().to_bytes());
-        material.extend_from_slice(idempotency_key.as_bytes());
+        let actor = actor_entity_id.inner().to_bytes();
+        let material = [&principal_id[..], &actor[..], idempotency_key.as_bytes()].concat();
         Self(blake3::derive_key(CLAIM_KEY_CONTEXT, &material))
     }
 
@@ -642,13 +637,12 @@ impl<'a> CborReader<'a> {
     }
 
     /// Consume the next item when it is a null.
-    fn null(&mut self) -> bool {
-        match self.rest.split_first() {
-            Some((&CBOR_NULL, rest)) => {
-                self.rest = rest;
-                true
-            }
-            _ => false,
+    const fn null(&mut self) -> bool {
+        if let [CBOR_NULL, rest @ ..] = self.rest {
+            self.rest = rest;
+            true
+        } else {
+            false
         }
     }
 

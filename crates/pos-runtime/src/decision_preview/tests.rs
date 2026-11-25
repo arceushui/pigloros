@@ -341,7 +341,7 @@ fn every_error_has_a_distinct_message() {
 struct Draws(u64);
 
 impl Draws {
-    fn draw(&mut self) -> u64 {
+    const fn draw(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
