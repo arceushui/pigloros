@@ -1004,8 +1004,8 @@ fn grant_matches_execute_request(
 ///
 /// The check is mode-independent, so it is stricter for `AirGapped` and `Fork`
 /// than R16 requires. The R16 residual clause ("NXT1 empty unless
-/// `release1-digest` is non-null") is added by 1488-b or 1492 once non-empty
-/// plans exist.
+/// `release1-digest` is non-null") is added by 1492-b (R16 §7, change C) once
+/// non-empty plans exist.
 const fn transcripts_fit_plans(
     receipt: &SandboxProviderReceipt,
     spx: &SandboxExecuteRequest,
@@ -3249,9 +3249,20 @@ mod tests {
         let mut spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&evidence.fields[5])?)
             .map_err(|_| AdapterError::ProtocolFailure)?;
         let mut receipt = evidence.receipt;
+        // The relation helpers compare fields and do not verify the SPR1
+        // digest, so an unsealed tamper isolates the guard in the chain.
+        let relations = |receipt: &SandboxProviderReceipt, spx: &SandboxExecuteRequest| {
+            evidence_relations_hold(
+                (&evidence.result, &evidence.grant, receipt),
+                spx,
+                (&evidence.grant.authority, &receipt.authority),
+            )
+        };
         assert!(transcripts_fit_plans(&receipt, &spx));
+        assert!(relations(&receipt, &spx));
         receipt.network_transcript_digests = vec![[1; 32]];
         assert!(!transcripts_fit_plans(&receipt, &spx));
+        assert!(!relations(&receipt, &spx));
         spx.network_plans = vec![NetworkExchangePlan {
             exchange_id: [2; 16],
             occurrence: 0,
@@ -3264,6 +3275,7 @@ mod tests {
             plan_digest: [6; 32],
         }];
         assert!(transcripts_fit_plans(&receipt, &spx));
+        assert!(relations(&receipt, &spx));
         receipt.network_transcript_digests.clear();
         assert!(transcripts_fit_plans(&receipt, &spx));
         receipt.network_transcript_digests = vec![[1; 32], [7; 32]];
@@ -3338,7 +3350,9 @@ mod tests {
             );
         }
 
-        // A transcript with no plan to bind it.
+        // A transcript with no plan to bind it: refused as a whole, belt and
+        // braces over the isolated guard test above (the tamper breaks the SPR1
+        // digest too).
         let mut receipt = evidence.receipt.clone();
         receipt.network_transcript_digests = vec![[99; 32]];
         assert_eq!(
