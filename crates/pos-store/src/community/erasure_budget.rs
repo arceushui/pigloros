@@ -70,6 +70,31 @@ pub struct CommunityPendingErasureV1 {
     pub rows: BTreeMap<TimelineId, u64>,
 }
 
+/// One unresolved reservation's worst-case demand (R13.1(4)): the pass
+/// rows and `F_p` it still holds, in targets and in rows bound to its
+/// Timeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CommunityPendingReservationV1 {
+    pub(super) targets: u64,
+    pub(super) rows: u64,
+}
+
+impl CommunityPendingReservationV1 {
+    /// The demand of `rows` ARD1 rows at two targets each, holding `reserve`
+    /// targets of `F_p` (R13.1(4)-(5)) and half of them as rows. `F_p` is
+    /// `2(n + 1)` targets, always even; an odd `reserve` would round its
+    /// rows down.
+    ///
+    /// The planner's budget check and the Reserve writer's ledger entry use
+    /// this one formula.
+    pub(super) const fn for_pass(rows: u64, reserve: u64) -> Self {
+        Self {
+            targets: rows.saturating_mul(2).saturating_add(reserve),
+            rows: rows.saturating_add(reserve / 2),
+        }
+    }
+}
+
 /// One initialized Timeline's quarantine reserve inputs: the roster
 /// members of its contexts and its active `(member, reason)` pairs.
 #[cfg(target_os = "linux")]

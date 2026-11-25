@@ -1467,7 +1467,8 @@ class EvidenceTests(unittest.TestCase):
             files["guest/network/fb-1/status"] = "1\n"
             files["guest/network/fb-1/stderr"] = ""
         with self.assertRaisesRegex(checker.EvidenceError,
-                                    r"stderr: '' \(empty: --quiet systemd-run logs .*; probe files written: \[\]; "
+                                    r"stderr: '' \(empty: systemd-run printed nothing, so the failure is in the journal\); "
+                                    r"probe files written: \[\]; "
                                     r"the explanation is in guest/network/fb-1/journal"):
             self.verdict(change=logged_only)
         # A record with a missing run file or an unexpected file is named precisely, with the

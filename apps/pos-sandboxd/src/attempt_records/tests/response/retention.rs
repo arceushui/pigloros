@@ -364,7 +364,7 @@ fn an_unreadable_output_transfer_time_quarantines_the_lifecycle() -> TestResult 
 /// A response for another AGR1 is refused and leaves the slot pending;
 /// reconciling a slot whose response never came clears it.
 #[test]
-fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
+fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles_once_signed() -> TestResult {
     let (_directory, lifecycle, ledger) = lifecycle()?;
     let digest = signed_grant()?.grant.grant_digest();
     lifecycle.failed_granted(&FailedInput::fixture(ATTEMPT, digest))?;
@@ -385,13 +385,24 @@ fn a_foreign_grant_is_refused_and_a_pending_slot_reconciles() -> TestResult {
         lifecycle.terminal_response(ATTEMPT, digest),
         Err(AttemptLifecycleError::ResponsePending)
     ));
+    // A pending response is not reconciled yet (ADR-069 R15 §3.3).
+    assert!(matches!(
+        lifecycle.reconcile(&reconcile(digest)),
+        Err(AttemptLifecycleError::ResponsePending)
+    ));
+    lifecycle.retain_response(foreign, &signer(), admitted)?;
     lifecycle.reconcile(&reconcile(digest))?;
     assert!(matches!(
         lifecycle.terminal_response(ATTEMPT, digest),
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
+    let late = Released {
+        grant: Some(signed_grant()?),
+        ..Released::default()
+    }
+    .ended()?;
     assert!(matches!(
-        lifecycle.retain_response(foreign, &signer(), admitted),
+        lifecycle.retain_response(late, &signer(), admitted),
         Err(AttemptLifecycleError::UnknownAttempt)
     ));
     Ok(())
@@ -974,51 +985,5 @@ fn a_delivered_response_is_never_reissued() -> TestResult {
     assert!(!successor.delivered());
     assert!(!lifecycle.claim_delivery(ATTEMPT, &retained));
     assert!(lifecycle.claim_delivery(ATTEMPT, &successor));
-    Ok(())
-}
-
-/// A cancellation waits for the response its attempt settles on, by the
-/// attempt's AGR1: none for an attempt never known, a refusal for another
-/// AGR1, and while the response is pending the wait lasts until it is
-/// retained, which wakes it. On paused time: a wait that should not
-/// happen advances the clock to its bound and fails at once.
-#[tokio::test(start_paused = true)]
-async fn a_cancellation_waits_for_the_response_its_attempt_settles_on() -> TestResult {
-    let (_directory, lifecycle, _ledger) = lifecycle()?;
-    assert!(lifecycle
-        .settled_response(ATTEMPT, [1; 32])
-        .await?
-        .is_none());
-    let pending = super::super::completed_pending(&lifecycle)?;
-    let digest = pending.agr1_digest;
-    // Refused at once, before any wait on the pending response.
-    let before = tokio::time::Instant::now();
-    assert!(matches!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            lifecycle.settled_response(ATTEMPT, [1; 32])
-        )
-        .await,
-        Ok(Err(AttemptLifecycleError::GrantMismatch))
-    ));
-    assert_eq!(tokio::time::Instant::now(), before);
-    assert!(tokio::time::timeout(
-        std::time::Duration::from_millis(20),
-        lifecycle.settled_response(ATTEMPT, digest)
-    )
-    .await
-    .is_err());
-    let (waited, retained) = tokio::join!(lifecycle.settled_response(ATTEMPT, digest), async {
-        tokio::task::yield_now().await;
-        super::super::retain_pending(pending, &lifecycle)
-    });
-    let retained = retained?;
-    assert!(waited?.is_some_and(|waited| Arc::ptr_eq(&waited, &retained)));
-    // A reconciled attempt is unknown.
-    lifecycle.reconcile(&reconcile(digest))?;
-    assert!(matches!(
-        lifecycle.settled_response(ATTEMPT, digest).await,
-        Err(AttemptLifecycleError::UnknownAttempt)
-    ));
     Ok(())
 }

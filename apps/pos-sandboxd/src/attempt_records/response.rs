@@ -53,6 +53,9 @@ pub struct RetainedResponse {
     chain: Vec<SandboxAuditRecord>,
     encoded: Encoded,
     output: Option<RetainedOutput>,
+    // The SPY1 self-digest and the final SAU1 digest SPR1 binds, which the
+    // reconciliation evidence and SCY1 bind (ADR-069 R15 §3.2).
+    terminal: ([u8; 32], [u8; 32]),
     // Set, under the lifecycle's attempts lock, once a connection writes
     // its SPY1 or an SCY1 binds it: no re-issue may then replace it.
     delivered: std::sync::atomic::AtomicBool,
@@ -70,6 +73,13 @@ impl RetainedResponse {
     /// Whether this response was delivered whole, so a re-issue must keep it.
     pub(crate) fn delivered(&self) -> bool {
         self.delivered.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The self-digest of its SPY1 and the digest of its last SAU1, which
+    /// its SPR1 binds (ADR-069 R15 §3.2).
+    #[must_use]
+    pub const fn terminal_digests(&self) -> ([u8; 32], [u8; 32]) {
+        self.terminal
     }
 
     /// The self-digest of the AGR1 the response answers.
@@ -616,6 +626,7 @@ fn assemble<R: RuntimeAttestationSigner>(
             chain,
             encoded,
             output,
+            terminal: (result.result_digest(), receipt.sau1_digest),
             delivered: std::sync::atomic::AtomicBool::new(false),
         })
         .map_err(Into::into)
