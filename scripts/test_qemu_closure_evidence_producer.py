@@ -408,6 +408,20 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual((case / "status").read_text(), "1\n")
         self.assertEqual((case / "journal").read_text(), "")
 
+    def test_a_start_failure_that_systemd_run_does_not_print_leaves_stderr_empty(self):
+        sysctl = self.base / "fb_tunnels"
+        sysctl.write_text("0\n")
+        # --quiet: the manager logs a start-job failure at debug level, so the client prints nothing.
+        self.shell.stub("systemd-run", "exit 1")
+        self.shell.stub("journalctl", 'echo "piglor-network-fb-1.service: Failed with result exec-condition"')
+        script = f'FB_TUNNELS_SYSCTL="{sysctl}"\ncd "{self.base}"\nnetwork_case fb-1 1'
+        self.shell.out(script, COLLECTOR)
+        case = self.base / "network/fb-1"
+        self.assertEqual((case / "stderr").read_text(), "")
+        self.assertEqual((case / "status").read_text(), "1\n")
+        self.assertIn("Failed with result", (case / "journal").read_text())
+        self.assertFalse((case / "netns").exists())
+
     def test_a_failed_ip_command_fails_the_case_even_when_the_last_one_succeeds(self):
         sysctl = self.base / "fb_tunnels"
         sysctl.write_text("0\n")
