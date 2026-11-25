@@ -62,6 +62,27 @@ fn pass_key() -> Result<CommunityPassKeyV1, Error> {
     CommunityPassKeyV1::new(target(), GENERATION, 7)
 }
 
+/// The installed CDP1 roster: the fixture's two members, and a third of a
+/// Plugin the registry holds no release of when `extra` names it.
+fn profile_rows<'a>(
+    roster: &'a Roster,
+    extra: Option<&'a ImplementationKeyV1>,
+) -> Fallible<Vec<CommunityProfileMemberV1<'a>>> {
+    let mut rows = roster.rows()?;
+    if let Some(implementation) = extra {
+        rows.push(CommunityProfileMemberV1::new(
+            "Entry-C_1",
+            implementation,
+            hash(0x55),
+            SCHEMA,
+            hash(6),
+            roster.initializer(),
+            10,
+        )?);
+    }
+    Ok(rows)
+}
+
 /// One initialized domain, and a pass that may be reserved on it.
 struct Case {
     roster: Roster,
@@ -118,7 +139,10 @@ impl Case {
             predecessor_head_digest: self.head,
             roster_digest: hash(81),
             prepared_input_set_digest: hash(82),
-            profile_digest: hash(83),
+            profile_digest: {
+                let rows = profile_rows(&self.roster, self.extra_plugin.as_ref())?;
+                profile_until(&rows, HORIZON, hash(1), self.domain.world.catalogue)?.digest()
+            },
             evidence_not_after_micros: PASS_HORIZON,
         };
         let vault = VaultKeyV1::provision(CommunityKeyIntentInputV1 {
@@ -269,18 +293,7 @@ impl Case {
             CommunityPassAbortCallV1<'_>,
         ) -> T,
     ) -> Fallible<T> {
-        let mut rows = self.roster.rows()?;
-        if let Some(implementation) = &self.extra_plugin {
-            rows.push(CommunityProfileMemberV1::new(
-                "Entry-C_1",
-                implementation,
-                hash(0x55),
-                SCHEMA,
-                hash(6),
-                self.roster.initializer(),
-                10,
-            )?);
-        }
+        let rows = profile_rows(&self.roster, self.extra_plugin.as_ref())?;
         let profile = profile_until(&rows, HORIZON, hash(1), self.domain.world.catalogue)?;
         let policy = CommunityMetadataPolicyV1::new(*self.domain.policy.as_input())?;
         let context = CommunityQuarantineContextV1 {
@@ -959,9 +972,9 @@ fn a_refused_commit_leaves_the_pass_unresolved() -> TestResult {
 #[test]
 fn a_plugin_with_no_active_release_has_its_reserve_time_row() -> TestResult {
     let mut case = Case::new()?;
-    case.reserve(false)?;
     let missing = ImplementationKeyV1::new("no.release".into(), "host-v1".into(), hash(0x56))?;
     case.extra_plugin = Some(missing);
+    case.reserve(false)?;
     case.abort(Reason::AuthenticatedCancellation)??;
     let records = case.records()?;
     let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
@@ -987,5 +1000,70 @@ fn a_plugin_with_no_active_release_has_its_reserve_time_row() -> TestResult {
         .find(|row| row.plugin_id != "no.release")
         .ok_or("no registry row")?;
     assert_ne!(current.active_manifest_digest, hash(0x55));
+    Ok(())
+}
+
+/// A due member of the Plugin itself gives the retained policy digest, not
+/// the first member's.
+#[test]
+fn the_retained_row_takes_its_own_members_policy_digest() -> TestResult {
+    let mut case = Case::new()?;
+    let missing = ImplementationKeyV1::new("no.release".into(), "host-v1".into(), hash(0x56))?;
+    case.extra_plugin = Some(missing);
+    case.reserve(false)?;
+    case.domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?
+        .reserved
+        .members
+        .push(CommunityPassMemberDigestsV1 {
+            roster_index: 2,
+            cmb1_digest: hash(88),
+            cin1_digest: hash(89),
+            trust_policy_snapshot_digest: hash(90),
+        });
+    case.abort(Reason::AuthenticatedCancellation)??;
+    let records = case.records()?;
+    let view = CommunityCurrentViewV1::from_canonical_cbor(&records[1])?;
+    let retained = view
+        .as_input()
+        .trust_rows
+        .iter()
+        .find(|row| row.plugin_id == "no.release")
+        .ok_or("no retained row")?;
+    assert_eq!(retained.policy_digest, hash(90));
+    Ok(())
+}
+
+/// The Abort reads its CAV1 trust rows from the CDP1 the call installs, so
+/// it must be the one the pass was reserved under (3); a pass without a due
+/// member records nothing to retain and is refused (12).
+#[test]
+fn the_installed_profile_must_be_the_reserves() -> TestResult {
+    let mut case = Case::new()?;
+    case.reserve(false)?;
+    let record = case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    let profile_digest = record.reserved.reservation.profile_digest;
+    record.reserved.reservation.profile_digest = hash(0x99);
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::InvalidBinding)
+    );
+    let record = case
+        .domain_mut()
+        .pass_records
+        .get_mut(&(target(), OPERATION))
+        .ok_or("no pass")?;
+    record.reserved.reservation.profile_digest = profile_digest;
+    record.reserved.members.clear();
+    assert_eq!(
+        case.abort(Reason::AuthenticatedCancellation)?.err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }

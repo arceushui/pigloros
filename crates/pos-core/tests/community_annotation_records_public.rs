@@ -6,14 +6,16 @@ use pos_core::community_lifecycle::{
     CommunityAnnotationItemV1 as Item, CommunityAnnotationManifestInputV1 as ManifestInput,
     CommunityAnnotationManifestV1 as Manifest, CommunityAnnotationRecordsV1 as Records,
     CommunityContentReferenceV1 as Content, CommunityDigestListV1 as Digests,
-    CommunityGraphCountsV1 as Graph, CommunityInputIndexV1 as Index,
-    CommunityLifecycleErrorV1 as Error, CommunityNativeNodeInputV1 as NodeInput,
+    CommunityFactualNodeReferenceV1 as FactualNode, CommunityGraphCountsV1 as Graph,
+    CommunityInputIndexV1 as Index, CommunityLifecycleErrorV1 as Error,
+    CommunityLocatorProducerV1 as LocatorProducer, CommunityMetadataLocatorV1 as Locator,
+    CommunityMetadataSchemaV1 as Schema, CommunityNativeNodeInputV1 as NodeInput,
     CommunityNativeNodeKindV1 as Kind, CommunityNativeNodeReferenceV1 as Reference,
     CommunityNativeNodeV1 as Node, CommunityPassGraphTermsV1 as Terms, CommunityPassKeyV1 as Pass,
     CommunityProtectionSizesV1 as Sizes, CommunityTypedInputRefV1 as Typed,
     CommunityTypedInputRefsV1 as TypedRefs,
 };
-use pos_core::{Hash, RecordedDependencyClassV1, TimelineId};
+use pos_core::{ErasureArtifactClassV1, Hash, RecordedDependencyClassV1, TimelineId};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -148,6 +150,14 @@ fn the_charge_and_digests_equal_independently_built_records() -> TestResult {
         (3, 1, 3, 2)
     );
     assert_eq!(charge.bytes, (manifest_len + node_len) as u64);
+    // The retained encodings are the records the digests name.
+    assert_eq!(staged.manifest_bytes().len(), manifest_len);
+    assert_eq!(staged.node_bytes().len(), node_len);
+    assert_eq!(
+        Manifest::from_canonical_cbor(staged.manifest_bytes())?.digest(),
+        staged.manifest_digest()
+    );
+    assert!(Node::from_canonical_cbor(staged.node_bytes())?.reference() == staged.node());
     assert_eq!(staged.manifest_digest(), manifest_digest);
     assert!(staged.node() == node);
     Ok(())
@@ -350,5 +360,83 @@ fn a_cat1_holds_at_most_1024_items() -> TestResult {
         Records::stage(&context()?, &items),
         Err(Error::BoundsExceeded)
     ));
+    Ok(())
+}
+
+const fn artifact_ref() -> Typed<'static> {
+    Typed::Artifact {
+        owner_reference: hash(0x50),
+        artifact_class: ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: hash(0x51),
+        registration_address: hash(0x52),
+        source_scope_binding_digest: hash(0x53),
+    }
+}
+
+const fn metadata_ref() -> Typed<'static> {
+    Typed::Metadata {
+        schema: Schema::Cmb1,
+        locator: Locator {
+            timeline: TimelineId::from_ulid(ulid::Ulid::from_bytes([1; 16])),
+            generation: [2; 16],
+            producer: LocatorProducer::Native(9),
+            record_role: 2,
+            slot: 3,
+        },
+        envelope_address: hash(0x54),
+        private_record_digest: hash(0x55),
+    }
+}
+
+const fn factual_ref() -> Typed<'static> {
+    Typed::Factual {
+        timeline: TimelineId::from_ulid(ulid::Ulid::from_bytes([1; 16])),
+        node: FactualNode {
+            tick: 1,
+            scheduler_position: 0,
+            owner_id: "owner",
+            output_ordinal: 0,
+            schema_id: 1,
+            artifact_digest: hash(0x56),
+        },
+        record_digest: hash(0x57),
+    }
+}
+
+#[test]
+fn only_native_and_artifact_inputs_are_ard1_children_of_the_node() -> TestResult {
+    let sizes = Sizes::new(pass()?.timeline(), pass()?.generation())?;
+    let native_only = [Typed::Native(native(11))];
+    let with_artifact = [Typed::Native(native(11)), artifact_ref()];
+    let others = [
+        Typed::Native(native(11)),
+        artifact_ref(),
+        factual_ref(),
+        metadata_ref(),
+    ];
+    // The node's children are its CAT1, the step and each other registered
+    // input: modes 1 and 3 are inputs of the node but not ARD1 children.
+    for (inputs, children) in [
+        (&native_only[..], 3),
+        (&with_artifact[..], 4),
+        (&others[..], 4),
+    ] {
+        let staged = Records::stage(&context()?, &[item(0, inputs)])?.ok_or("records")?;
+        let expected = sizes
+            .record(staged.manifest_bytes().len() as u64, 0)
+            .plus(sizes.record(staged.node_bytes().len() as u64, children))
+            .plus(Terms {
+                keys: 1,
+                ..Terms::default()
+            });
+        assert_eq!(staged.graph(), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn the_last_guest_index_is_admitted() -> TestResult {
+    let inputs = refs(11..12);
+    assert!(Records::stage(&context()?, &[item(63, &inputs)])?.is_some());
     Ok(())
 }

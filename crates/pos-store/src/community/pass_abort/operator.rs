@@ -192,7 +192,8 @@ impl MemoryCommunityDomainV1 {
     ///
     /// # Errors
     /// In the A5.5 order: `InvalidBinding` for a reason other than 0 or 4 or
-    /// a zero identity or reservation; `EvidenceUnavailable` for every
+    /// a zero identity or reservation, and for a CDP1 other than the one the
+    /// pass was reserved under; `EvidenceUnavailable` for every
     /// authority failure, a pass nobody reserved, an unbootstrapped domain, a
     /// Timeline whose head is not its initialization head, a missing pass
     /// metadata key and a writer at or after the decision bound; `Conflict`
@@ -340,9 +341,10 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
-    /// The fences of a first Abort and its CAB1: the generation (5), the
-    /// head (6) and the initialization-head guard (12), then the metadata
-    /// horizon (13), as A5.5 step 4 and A4e-1 order them.
+    /// The fences of a first Abort and its CAB1: the installed CDP1 must be
+    /// the Reserve's (3), then the generation (5), the head (6) and the
+    /// initialization-head guard (12), then the metadata horizon (13), as
+    /// A5.5 step 4 and A4e-1 order them.
     ///
     /// A first Abort at or after the pass's `H_r` still commits its CAB1
     /// (R15.2(3a), N17).
@@ -354,6 +356,9 @@ impl MemoryCommunityDomainV1 {
         inputs: &StageInputsV1<'_>,
     ) -> Result<StagedPassAbortV1, Error> {
         let reservation = record.reserved.reservation;
+        if context.profile.digest() != reservation.profile_digest {
+            return Err(Error::InvalidBinding);
+        }
         let (anchor, selection, selection_address) = self.read_selection(context)?;
         let (generation, head) = current_floor(&selection, inputs.call.timeline)?;
         if generation != reservation.pass_key.generation() {
@@ -587,6 +592,7 @@ impl MemoryCommunityDomainV1 {
                 .or_insert(row);
         }
         let members = &record.reserved.members;
+        let first = members.first().ok_or(Error::EvidenceUnavailable)?;
         CommunityStoreDomainV1::plugin_trust_policy(self, scope).and_then(|policy| {
             u64::try_from(policy.highest_trusted_utc_second().unwrap_or(0))
                 .ok()
@@ -611,11 +617,8 @@ impl MemoryCommunityDomainV1 {
                                                         },
                                                     )
                                                 })
-                                                .or_else(|| members.first())
-                                                .map_or_else(
-                                                    || Hash::from_bytes(policy.tps1_digest()),
-                                                    |member| member.trust_policy_snapshot_digest,
-                                                ),
+                                                .unwrap_or(first)
+                                                .trust_policy_snapshot_digest,
                                             policy_floor: 0,
                                             release_floor: 0,
                                             highest_trusted_utc_second: 0,
@@ -668,15 +671,7 @@ impl MemoryCommunityDomainV1 {
         seal: &'static AuthorityTrustRootSealV1,
         mut staged: StagedPassAbortV1,
     ) -> Result<CommunityPassAbortReceiptV1, Error> {
-        let current = self
-            .selection
-            .as_ref()
-            .map(|(_, sealed)| sealed.address)
-            .or_else(|| {
-                self.bootstrap
-                    .as_ref()
-                    .map(|record| record.selection.address)
-            });
+        let current = self.selection.as_ref().map(|(_, sealed)| sealed.address);
         if self.inventory_generation != staged.inventory_generation
             || current != Some(staged.read_selection)
         {

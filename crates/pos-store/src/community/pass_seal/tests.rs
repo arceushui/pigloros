@@ -7,16 +7,17 @@ use std::sync::Arc;
 use pos_core::community_lifecycle::{
     CommunityAnnotationCandidateV1 as Candidate, CommunityAnnotationContextV1 as Context,
     CommunityAnnotationOmissionV1 as Omission, CommunityAnnotationOmissionsV1 as Omissions,
-    CommunityAnnotationRecordsV1 as Records, CommunityDependencyBundleInputV1,
-    CommunityDependencyBundleV1, CommunityDigestListV1 as Digests, CommunityEvidenceRootsV1,
-    CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error,
-    CommunityNativeNodeReferenceV1 as Reference, CommunityPassKeyV1, CommunityReservationInputV1,
-    CommunityReservationV1, CommunitySealedResultInputV1, CommunitySealedResultV1,
-    CommunitySharedCountsV1, CommunityTypedInputRefV1 as Typed, COMMUNITY_CONTROL_OPERATIONS_V1,
-    COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1, COMMUNITY_MAXIMUM_ROSTER_V1,
-    COMMUNITY_MAXIMUM_STORE_KEYS_V1, COMMUNITY_SHARED_RECORD_LIMITS_V1,
-    MAX_COMMUNITY_DIRECT_INPUTS_V1, MAX_COMMUNITY_EXPANDED_INPUTS_V1,
-    MAX_COMMUNITY_OBJECT_BINDINGS_V1,
+    CommunityAnnotationRecordsV1 as Records, CommunityArtifactKindV1, CommunityArtifactOperationV1,
+    CommunityArtifactPurposeV1, CommunityDependencyBundleInputV1, CommunityDependencyBundleV1,
+    CommunityDigestListV1 as Digests, CommunityEvidenceRootsV1, CommunityGraphCountsV1,
+    CommunityKeyIntentInputV1, CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1,
+    CommunityNativeNodeReferenceV1 as Reference, CommunityPassKeyV1, CommunityRecordKindsV1,
+    CommunityReservationInputV1, CommunityReservationV1, CommunitySealedResultInputV1,
+    CommunitySealedResultV1, CommunitySharedCountsV1, CommunityTypedInputRefV1 as Typed,
+    COMMUNITY_CONTROL_OPERATIONS_V1, COMMUNITY_CUMULATIVE_RECORD_LIMITS_V1,
+    COMMUNITY_MAXIMUM_ROSTER_V1, COMMUNITY_MAXIMUM_STORE_KEYS_V1,
+    COMMUNITY_SHARED_RECORD_LIMITS_V1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
+    MAX_COMMUNITY_EXPANDED_INPUTS_V1, MAX_COMMUNITY_OBJECT_BINDINGS_V1,
 };
 use pos_core::store::EventStore;
 use pos_core::{
@@ -30,7 +31,11 @@ use super::super::pass_record::{
     CommunityReservedPassV1,
 };
 use super::super::pass_state::{CommunityGenerationCountsV1, CommunityPassStateV1};
-use super::{CommunitySealCandidateV1, CommunitySealInputV1, CommunitySealInvocationV1, SealRoom};
+use super::super::vault::VaultKeyV1;
+use super::{
+    CommunityAnnotationPlanV1, CommunitySealCandidateV1, CommunitySealInputV1,
+    CommunitySealInvocationV1, CommunityStagedSealV1, SealRoom,
+};
 use crate::community::MemoryCommunityDomainV1;
 use crate::memory::MemoryStore;
 use crate::MemoryTrustedClockAuthorityV1;
@@ -158,6 +163,16 @@ fn record(trace_rows: u64) -> Result<CommunityPassRecordV1, Error> {
     })
 }
 
+/// Plan, then Seal once with a CRR1 digest, as the pipeline does.
+fn seal(
+    domain: &MemoryCommunityDomainV1,
+    input: &CommunitySealInputV1<'_>,
+) -> Result<CommunityStagedSealV1, Error> {
+    domain
+        .plan_annotations(input)
+        .and_then(|plan| domain.stage_seal(input, hash(0x63), &plan))
+}
+
 fn candidate() -> CommunitySealCandidateV1<'static> {
     CommunitySealCandidateV1 {
         invocation_step_digests: Digests::from_digests(&STEPS),
@@ -166,7 +181,6 @@ fn candidate() -> CommunitySealCandidateV1<'static> {
         new_revision_digests: Digests::from_digests(&REVISIONS),
         new_member_progress_digests: Digests::from_digests(&PROGRESS),
         candidate_head_digest: hash(0x62),
-        replay_recording_digest: hash(0x63),
         graph_root_digest: hash(0x64),
         factual_binding: None,
         required_node_digests: Digests::from_digests(&REQUIRED),
@@ -204,12 +218,22 @@ const fn native(producer: u64) -> Reference {
     }
 }
 
+/// The invocation step: a node of the pass's producer, before the
+/// Annotation CPN1s (node ordinals 1 and 2).
+const fn step() -> Reference {
+    Reference {
+        producer_ordinal: 1_000,
+        node_ordinal: 0,
+        ..native(10)
+    }
+}
+
 fn context(member: u8) -> Result<Context, Error> {
     Ok(Context {
         pass_key: pass_key()?,
         member_binding_digest: hash(member),
         invocation_step_digest: hash(0x70 + member),
-        step: native(10),
+        step: step(),
         producer_ordinal: 1_000,
         node_ordinal: u32::from(member),
         scope_binding_digest: hash(6),
@@ -251,7 +275,7 @@ const fn only(reason: Omission) -> Omissions {
 #[test]
 fn a_pass_without_annotations_seals_and_latches_its_result() -> TestResult {
     let mut domain = domain(1)?;
-    let staged = domain.stage_seal(&input(Vec::new()))?;
+    let staged = seal(&domain, &input(Vec::new()))?;
     let sealed = staged.sealed().clone();
     assert!(sealed.annotation_manifest_digest.is_none() && sealed.trace_root.is_none());
     assert!(sealed.shared_counts == counts(1_000));
@@ -272,16 +296,16 @@ fn a_pass_without_annotations_seals_and_latches_its_result() -> TestResult {
 #[test]
 fn a_replayed_seal_is_the_same_result_and_a_different_one_conflicts() -> TestResult {
     let mut domain = domain(1)?;
-    let original = domain.stage_seal(&input(Vec::new()))?;
+    let original = seal(&domain, &input(Vec::new()))?;
     let digest = original.sealed().result_digest;
     let mut other = input(Vec::new());
     other.candidate.candidate_head_digest = hash(0x66);
-    let different = domain.stage_seal(&other)?;
+    let different = seal(&domain, &other)?;
     domain.apply_seal(&SEAL, &original)?;
-    let replay = domain.stage_seal(&input(Vec::new()))?;
+    let replay = seal(&domain, &input(Vec::new()))?;
     assert_eq!(replay.sealed().result_digest, digest);
     domain.apply_seal(&SEAL, &replay)?;
-    assert!(matches!(domain.stage_seal(&other), Err(Error::Conflict)));
+    assert!(matches!(seal(&domain, &other), Err(Error::Conflict)));
     assert!(matches!(
         domain.apply_seal(&SEAL, &different),
         Err(Error::Conflict)
@@ -292,16 +316,16 @@ fn a_replayed_seal_is_the_same_result_and_a_different_one_conflicts() -> TestRes
 #[test]
 fn only_a_recorded_unresolved_pass_seals() -> TestResult {
     let mut domain = domain(1)?;
-    let staged = domain.stage_seal(&input(Vec::new()))?;
+    let staged = seal(&domain, &input(Vec::new()))?;
     let mut unknown = input(Vec::new());
     unknown.reservation_operation_id = [0x31; 16];
     assert!(matches!(
-        domain.stage_seal(&unknown),
+        seal(&domain, &unknown),
         Err(Error::EvidenceUnavailable)
     ));
     assert!(domain.set_pass_status(id(), OPERATION, CommunityPassStatusV1::Aborted));
     assert!(matches!(
-        domain.stage_seal(&input(Vec::new())),
+        seal(&domain, &input(Vec::new())),
         Err(Error::InvalidBinding)
     ));
     assert!(matches!(
@@ -328,13 +352,13 @@ fn the_totals_without_annotations_are_at_most_the_quote() -> TestResult {
     let totals = [1_010, 1_012, 1_016];
     let mut domain = domain(1)?;
     quoted(&mut domain, totals, counts(100));
-    assert!(domain.stage_seal(&input(Vec::new())).is_ok());
+    assert!(seal(&domain, &input(Vec::new())).is_ok());
     for position in [0_usize, 1, 2] {
         let mut under = totals;
         under[position] -= 1;
         quoted(&mut domain, under, counts(100));
         assert!(matches!(
-            domain.stage_seal(&input(Vec::new())),
+            seal(&domain, &input(Vec::new())),
             Err(Error::InvalidBinding)
         ));
     }
@@ -352,14 +376,11 @@ fn the_totals_are_within_p() -> TestResult {
     let mut over_bytes = input(Vec::new());
     over_bytes.candidate.additions.encoded_record_bytes = bytes - 12;
     for over in [over_nodes, over_edges, over_bytes] {
-        assert!(matches!(
-            domain.stage_seal(&over),
-            Err(Error::InvalidBinding)
-        ));
+        assert!(matches!(seal(&domain, &over), Err(Error::InvalidBinding)));
     }
     let mut at_nodes = input(Vec::new());
     at_nodes.candidate.additions.nodes = nodes - 10;
-    assert!(domain.stage_seal(&at_nodes).is_ok());
+    assert!(seal(&domain, &at_nodes).is_ok());
     Ok(())
 }
 
@@ -399,7 +420,7 @@ fn the_counters_are_within_c() -> TestResult {
         ),
     ] {
         quoted(&mut domain, [u64::MAX; 3], prior);
-        assert_eq!(domain.stage_seal(&input(Vec::new())).is_ok(), within);
+        assert_eq!(seal(&domain, &input(Vec::new())).is_ok(), within);
     }
     Ok(())
 }
@@ -410,7 +431,7 @@ fn an_annotation_is_staged_charged_and_bound_in_both_records() -> TestResult {
     let inputs = refs(11..13);
     let items = vec![item(&inputs)];
     let expected = Records::stage(&context(1)?, &items)?.ok_or("records")?;
-    let staged = domain.stage_seal(&input(vec![invocation(1, items)?]))?;
+    let staged = seal(&domain, &input(vec![invocation(1, items)?]))?;
     let sealed = staged.sealed();
     let charge = expected.charge();
     assert_eq!(sealed.annotation, charge);
@@ -427,7 +448,7 @@ fn an_annotation_is_staged_charged_and_bound_in_both_records() -> TestResult {
         sealed.shared_counts.encoded_record_bytes,
         1_003 + charge.bytes
     );
-    let plain = domain.stage_seal(&input(Vec::new()))?;
+    let plain = seal(&domain, &input(Vec::new()))?;
     assert_ne!(plain.sealed().result_digest, sealed.result_digest);
     assert_ne!(
         plain.sealed().dependency_bundle_digest,
@@ -447,7 +468,7 @@ fn the_control_operation_cap_omits_annotations_and_the_pass_still_seals() -> Tes
         (COMMUNITY_CONTROL_OPERATIONS_V1, false),
     ] {
         let domain = domain(operations)?;
-        let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+        let staged = seal(&domain, &input(vec![invocation(1, vec![item(&inputs)])?]))?;
         let sealed = staged.sealed();
         assert_eq!(sealed.trace_root.is_some(), retained);
         let expected = if retained {
@@ -469,7 +490,7 @@ fn the_trace_room_is_the_held_share_of_rows() -> TestResult {
             .pass_records
             .entry((id(), OPERATION))
             .and_modify(|record| record.reserved.trace_rows = rows);
-        let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+        let staged = seal(&domain, &input(vec![invocation(1, vec![item(&inputs)])?]))?;
         assert_eq!(staged.sealed().trace_root.is_some(), retained);
     }
     Ok(())
@@ -483,7 +504,7 @@ fn a_misfit_is_omitted_and_selection_continues() -> TestResult {
     let too_many = refs(11..267);
     let small = refs(11..12);
     let mut call = input(vec![invocation(1, vec![item(&too_many), item(&small)])?]);
-    let staged = domain.stage_seal(&call)?;
+    let staged = seal(&domain, &call)?;
     let expected = Records::stage(&context(1)?, &[item(&small)])?.ok_or("records")?;
     assert_eq!(
         staged.sealed().annotation_manifest_digest,
@@ -494,7 +515,7 @@ fn a_misfit_is_omitted_and_selection_continues() -> TestResult {
     let larger = refs(11..15);
     call = input(vec![invocation(1, vec![item(&larger), item(&small)])?]);
     call.candidate.additions.edges = edges - 11 - 2;
-    let staged = domain.stage_seal(&call)?;
+    let staged = seal(&domain, &call)?;
     assert_eq!(
         staged.sealed().annotation_manifest_digest,
         Some(expected.manifest_digest())
@@ -508,10 +529,13 @@ fn only_the_first_annotating_invocation_keeps_its_items() -> TestResult {
     let domain = domain(1)?;
     let first = refs(11..12);
     let second = refs(12..13);
-    let staged = domain.stage_seal(&input(vec![
-        invocation(1, vec![item(&first)])?,
-        invocation(2, vec![item(&second)])?,
-    ]))?;
+    let staged = seal(
+        &domain,
+        &input(vec![
+            invocation(1, vec![item(&first)])?,
+            invocation(2, vec![item(&second)])?,
+        ]),
+    )?;
     let expected = Records::stage(&context(1)?, &[item(&first)])?.ok_or("records")?;
     let sealed = staged.sealed();
     assert_eq!(
@@ -529,10 +553,13 @@ fn a_later_invocation_keeps_its_items_when_the_first_keeps_none() -> TestResult 
     let domain = domain(1)?;
     let too_many = refs(11..267);
     let second = refs(12..13);
-    let staged = domain.stage_seal(&input(vec![
-        invocation(1, vec![item(&too_many)])?,
-        invocation(2, vec![item(&second)])?,
-    ]))?;
+    let staged = seal(
+        &domain,
+        &input(vec![
+            invocation(1, vec![item(&too_many)])?,
+            invocation(2, vec![item(&second)])?,
+        ]),
+    )?;
     let expected = Records::stage(&context(2)?, &[item(&second)])?.ok_or("records")?;
     let sealed = staged.sealed();
     assert_eq!(
@@ -549,7 +576,7 @@ fn earlier_omission_reasons_are_kept() -> TestResult {
     let domain = domain(1)?;
     let mut first = invocation(1, Vec::new())?;
     first.omissions = only(Omission::InvalidClaim);
-    let staged = domain.stage_seal(&input(vec![first]))?;
+    let staged = seal(&domain, &input(vec![first]))?;
     assert!(staged.sealed().omissions == [only(Omission::InvalidClaim)]);
     assert!(staged.sealed().trace_root.is_none());
     Ok(())
@@ -569,7 +596,10 @@ fn an_item_that_is_not_an_annotation_of_its_invocation_is_refused() -> TestResul
         ..backwards
     };
     assert!(matches!(
-        domain.stage_seal(&input(vec![invocation(1, vec![after, backwards])?])),
+        seal(
+            &domain,
+            &input(vec![invocation(1, vec![after, backwards])?])
+        ),
         Err(Error::InvalidBinding)
     ));
     Ok(())
@@ -581,13 +611,13 @@ fn the_dependency_bundle_and_the_reservation_must_be_valid() -> TestResult {
     let mut no_nodes = input(Vec::new());
     no_nodes.candidate.required_node_digests = Digests::from_digests(&[]);
     assert!(matches!(
-        domain.stage_seal(&no_nodes),
+        seal(&domain, &no_nodes),
         Err(Error::BoundsExceeded)
     ));
     let mut no_head = input(Vec::new());
     no_head.candidate.candidate_head_digest = Hash::zero();
     assert!(matches!(
-        domain.stage_seal(&no_head),
+        seal(&domain, &no_head),
         Err(Error::InvalidBinding)
     ));
     domain
@@ -595,7 +625,7 @@ fn the_dependency_bundle_and_the_reservation_must_be_valid() -> TestResult {
         .entry((id(), OPERATION))
         .and_modify(|record| record.reserved.reservation.roster_digest = Hash::zero());
     assert!(matches!(
-        domain.stage_seal(&input(Vec::new())),
+        seal(&domain, &input(Vec::new())),
         Err(Error::InvalidBinding)
     ));
     Ok(())
@@ -635,22 +665,28 @@ fn the_trace_closure_must_fit_the_graph_maxima() -> TestResult {
     ] {
         let mut call = input(vec![invocation(1, vec![item(&inputs)])?]);
         call.candidate.graph_counts.edges = edges;
-        let staged = domain.stage_seal(&call)?;
+        let staged = seal(&domain, &call)?;
         assert_eq!(staged.sealed().trace_root.is_some(), retained);
     }
     Ok(())
 }
 
 #[test]
-fn the_trace_objects_stay_below_the_object_maximum() {
+fn the_trace_objects_stay_below_the_object_maximum() -> TestResult {
     // The largest roster, each member with its 7 State objects and 2 per
     // `InputIndex` group at the most groups, CED1 and CEB1, the `2n + 1`
-    // recording objects and the two trace objects (R11.4(4)).
+    // recording objects and the staged trace records (R11.4(4)).
+    let inputs = refs(11..12);
+    let trace = Records::stage(&context(1)?, &[item(&inputs)])?
+        .ok_or("records")?
+        .charge()
+        .rows;
     let groups = (MAX_COMMUNITY_EXPANDED_INPUTS_V1 / MAX_COMMUNITY_DIRECT_INPUTS_V1) as u64;
     let roster = COMMUNITY_MAXIMUM_ROSTER_V1 as u64;
-    let objects = roster * (7 + 2 * groups) + 2 + (2 * roster + 1) + 2;
+    let objects = roster * (7 + 2 * groups) + 2 + (2 * roster + 1) + trace;
     assert_eq!(objects, 128);
     assert!(objects <= MAX_COMMUNITY_OBJECT_BINDINGS_V1 as u64);
+    Ok(())
 }
 
 /// CPD1 and CPS1 rebuilt from the record and the candidate through the
@@ -696,7 +732,7 @@ fn expected_digests(
 #[test]
 fn the_sealed_digests_equal_independently_built_records() -> TestResult {
     let domain = domain(1)?;
-    let plain = domain.stage_seal(&input(Vec::new()))?;
+    let plain = seal(&domain, &input(Vec::new()))?;
     let (bundle, result) = expected_digests(&domain, counts(1_000), None, None)?;
     assert_eq!(plain.sealed().dependency_bundle_digest, bundle);
     assert_eq!(plain.sealed().result_digest, result);
@@ -704,7 +740,7 @@ fn the_sealed_digests_equal_independently_built_records() -> TestResult {
     let items = vec![item(&inputs)];
     let records = Records::stage(&context(1)?, &items)?.ok_or("records")?;
     let charge = records.charge();
-    let annotated = domain.stage_seal(&input(vec![invocation(1, items)?]))?;
+    let annotated = seal(&domain, &input(vec![invocation(1, items)?]))?;
     let (bundle, result) = expected_digests(
         &domain,
         CommunitySharedCountsV1 {
@@ -727,7 +763,7 @@ fn annotations_beyond_the_quote_slack_still_seal() -> TestResult {
     // The quote holds exactly the totals without annotations.
     quoted(&mut domain, [1_010, 1_012, 1_016], counts(100));
     let inputs = refs(11..13);
-    let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+    let staged = seal(&domain, &input(vec![invocation(1, vec![item(&inputs)])?]))?;
     assert!(staged.sealed().trace_root.is_some());
     Ok(())
 }
@@ -746,7 +782,7 @@ fn a_reused_observation_counts_no_materialization_in_the_cap() -> TestResult {
             .pass_records
             .entry((id(), OPERATION))
             .and_modify(|record| record.materialization = None);
-        let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+        let staged = seal(&domain, &input(vec![invocation(1, vec![item(&inputs)])?]))?;
         assert_eq!(staged.sealed().trace_root.is_some(), retained);
     }
     Ok(())
@@ -757,7 +793,7 @@ fn a_cat1_keeps_1024_items_and_omits_the_next_with_reason_3() -> TestResult {
     let domain = domain(1)?;
     let inputs = refs(11..12);
     let items: Vec<Candidate<'_>> = (0..1_025).map(|_| item(&inputs)).collect();
-    let staged = domain.stage_seal(&input(vec![invocation(1, items)?]))?;
+    let staged = seal(&domain, &input(vec![invocation(1, items)?]))?;
     assert_eq!(
         staged.sealed().retained[0],
         (0..1_024).collect::<Vec<usize>>()
@@ -772,9 +808,14 @@ fn an_abort_after_seal_still_fits_the_pending_entry() -> TestResult {
     let entry = CommunityPendingReservationV1::for_pass(10, 4);
     domain.pending_reservations.insert((id(), OPERATION), entry);
     let inputs = refs(11..13);
-    let staged = domain.stage_seal(&input(vec![invocation(1, vec![item(&inputs)])?]))?;
+    let before = domain.pending_reservations.get(&(id(), OPERATION)).copied();
+    let staged = seal(&domain, &input(vec![invocation(1, vec![item(&inputs)])?]))?;
     domain.apply_seal(&SEAL, &staged)?;
     // Seal leaves the entry as the Reserve held it: pass rows plus `F_p`.
+    assert_eq!(
+        domain.pending_reservations.get(&(id(), OPERATION)).copied(),
+        before
+    );
     assert!(domain.stage_abort(id(), OPERATION, 12).is_ok());
     assert!(matches!(
         domain.stage_abort(id(), OPERATION, 13),
@@ -809,10 +850,22 @@ fn an_invocation_context_must_match_the_pass() -> TestResult {
             invocation_step_digest: hash(0x79),
             ..base
         },
+        // Another member's CPI1, which is in the candidate.
+        Context {
+            invocation_step_digest: hash(0x72),
+            ..base
+        },
         Context {
             step: Reference {
                 store_incarnation: [1; 16],
-                ..native(10)
+                ..step()
+            },
+            ..base
+        },
+        Context {
+            step: Reference {
+                producer_ordinal: 999,
+                ..step()
             },
             ..base
         },
@@ -821,7 +874,7 @@ fn an_invocation_context_must_match_the_pass() -> TestResult {
         let mut call = invocation(1, vec![item(&inputs)])?;
         call.context = context;
         assert!(matches!(
-            domain.stage_seal(&input(vec![call])),
+            seal(&domain, &input(vec![call])),
             Err(Error::InvalidBinding)
         ));
     }
@@ -837,7 +890,7 @@ fn the_invocations_must_be_in_roster_order() -> TestResult {
             .map(|member| invocation(member, Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
         assert!(matches!(
-            domain.stage_seal(&input(calls)),
+            seal(&domain, &input(calls)),
             Err(Error::InvalidBinding)
         ));
     }
@@ -869,9 +922,73 @@ fn a_defect_of_the_trusted_input_refuses_the_seal_and_is_not_a_budget() -> TestR
         invocation(1, vec![high, low])?,
     ] {
         assert!(matches!(
-            domain.stage_seal(&input(vec![call])),
+            seal(&domain, &input(vec![call])),
             Err(Error::InvalidBinding)
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn the_plan_is_what_seal_binds_and_a_different_plan_is_refused() -> TestResult {
+    let domain = domain(1)?;
+    let inputs = refs(11..13);
+    let call = input(vec![invocation(1, vec![item(&inputs)])?]);
+    let plan = domain.plan_annotations(&call)?;
+    assert_eq!(plan.retained, [vec![0]]);
+    assert!(plan.omissions == [Omissions::none()]);
+    let staged = domain.stage_seal(&call, hash(0x63), &plan)?;
+    assert_eq!(staged.sealed().retained, plan.retained);
+    assert!(staged.sealed().omissions == plan.omissions);
+    // The recording digest is bound into the result.
+    let other_recording = domain.stage_seal(&call, hash(0x64), &plan)?;
+    assert_ne!(
+        other_recording.sealed().result_digest,
+        staged.sealed().result_digest
+    );
+    assert_ne!(
+        other_recording.sealed().dependency_bundle_digest,
+        staged.sealed().dependency_bundle_digest
+    );
+    let mut changed: CommunityAnnotationPlanV1 = plan;
+    changed.omissions[0] = only(Omission::AnnotationBudget);
+    assert!(matches!(
+        domain.stage_seal(&call, hash(0x63), &changed),
+        Err(Error::InvalidBinding)
+    ));
+    let none = domain.plan_annotations(&input(Vec::new()))?;
+    assert!(none.records.is_none());
+    assert!(matches!(
+        domain.stage_seal(&call, hash(0x63), &none),
+        Err(Error::InvalidBinding)
+    ));
+    Ok(())
+}
+
+/// A provisioned Control key, as bootstrap makes one.
+fn provisioned_key(byte: u8) -> Result<VaultKeyV1, Error> {
+    VaultKeyV1::provision(CommunityKeyIntentInputV1 {
+        protection_operation_id: [byte; 16],
+        parent_operation: CommunityArtifactOperationV1::Control([0x50; 16]),
+        timeline: id(),
+        generation: GENERATION,
+        purpose: CommunityArtifactPurposeV1::LifecycleControl,
+        scope_set_digest: hash(0x42),
+        evidence_not_after_micros: HORIZON,
+        allowed_record_kinds: CommunityRecordKindsV1::empty()
+            .with(CommunityArtifactKindV1::LifecycleControl),
+        member_slots: CommunityMemberSlotsV1::empty(),
+        material_fingerprint: Hash::zero(),
+        authority_request_digest: hash(0x43),
+    })
+}
+
+#[test]
+fn the_room_reads_the_store_wide_live_key_count() -> TestResult {
+    let mut domain = domain(1)?;
+    domain.keys.insert([0x40; 16], provisioned_key(0x40)?);
+    domain.keys.insert([0x41; 16], provisioned_key(0x41)?);
+    let record = domain.pass_record(id(), OPERATION).ok_or("record")?;
+    assert_eq!(domain.seal_room(record, graph_counts()).keys, 2);
     Ok(())
 }
