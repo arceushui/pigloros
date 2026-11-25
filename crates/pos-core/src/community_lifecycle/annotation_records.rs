@@ -20,6 +20,7 @@ use super::{
     MAX_COMMUNITY_ANNOTATION_GUEST_INDEX_V1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
 };
 use crate::{Hash, RecordedDependencyClassV1};
+use zeroize::Zeroizing;
 
 /// One validated annotation item: its GCA1 and the typed references its
 /// resolved inputs encode (R15.6(1)).
@@ -75,13 +76,28 @@ pub struct CommunityAnnotationChargeV1 {
 }
 
 /// The staged CAT1 and Annotation CPN1 of one invocation's included items.
-#[derive(Clone, Copy, Eq, PartialEq)]
+///
+/// Equality compares the charge, the digests and the graph terms: the
+/// digests bind the encodings.
+#[derive(Clone)]
 pub struct CommunityAnnotationRecordsV1 {
     charge: CommunityAnnotationChargeV1,
     manifest_digest: Hash,
     node: CommunityNativeNodeReferenceV1,
     graph: CommunityPassGraphTermsV1,
+    manifest_bytes: Zeroizing<Vec<u8>>,
+    node_bytes: Zeroizing<Vec<u8>>,
 }
+
+impl PartialEq for CommunityAnnotationRecordsV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.charge == other.charge
+            && self.manifest_digest == other.manifest_digest
+            && self.node == other.node
+            && self.graph == other.graph
+    }
+}
+impl Eq for CommunityAnnotationRecordsV1 {}
 
 impl CommunityAnnotationRecordsV1 {
     /// Stage the records of `items`, or none for no item.
@@ -91,11 +107,12 @@ impl CommunityAnnotationRecordsV1 {
     /// reference (R15.6(1)).
     ///
     /// # Errors
-    /// Returns `InvalidBinding` for a defect of the trusted input: an invalid
-    /// horizon, a guest index over 63 or below the previous item's, a zero
-    /// link, a native input that does not precede the node, or two native
-    /// inputs of one coordinate. These are checked before any bound, so a
-    /// defect is never mistaken for a budget misfit.
+    /// Returns `InvalidBinding` for a defect of the trusted input. The
+    /// horizon and the guest indices (over 63 or decreasing) are checked
+    /// before any bound, so those defects are never mistaken for a budget
+    /// misfit. A zero link, a native input that does not precede the node
+    /// and two native inputs of one coordinate are found when the CAT1 and
+    /// the CPN1 are built, after the budgets below.
     ///
     /// Returns `BoundsExceeded` only for a budget: more than 256 distinct
     /// inputs, more than 1,024 items, over 1 MiB of claim bytes or a CAT1
@@ -114,8 +131,8 @@ impl CommunityAnnotationRecordsV1 {
         }
         let digests: Vec<Vec<Hash>> = items.iter().map(resolved_digests).collect();
         manifest(context, items, &digests).and_then(|manifest| {
-            let (manifest_digest, manifest_len) = manifest.identity();
-            node(context, manifest_digest, &references).and_then(|(node, node_len)| {
+            let (manifest_digest, manifest_bytes) = manifest.identity();
+            node(context, manifest_digest, &references).and_then(|(node, node_bytes)| {
                 CommunityProtectionSizesV1::new(
                     context.pass_key.timeline(),
                     context.pass_key.generation(),
@@ -127,12 +144,19 @@ impl CommunityAnnotationRecordsV1 {
                             inputs,
                             nodes: 1,
                             edges: inputs,
-                            bytes: (manifest_len + node_len) as u64,
+                            bytes: (manifest_bytes.len() + node_bytes.len()) as u64,
                             rows: 2,
                         },
                         manifest_digest,
                         node,
-                        graph: trace_graph(&sizes, manifest_len, node_len, &references),
+                        graph: trace_graph(
+                            &sizes,
+                            manifest_bytes.len(),
+                            node_bytes.len(),
+                            &references,
+                        ),
+                        manifest_bytes,
+                        node_bytes,
                     })
                 })
             })
@@ -156,6 +180,18 @@ impl CommunityAnnotationRecordsV1 {
     #[must_use]
     pub const fn node(&self) -> CommunityNativeNodeReferenceV1 {
         self.node
+    }
+
+    /// The exact CAT1 encoding, for Commit to publish.
+    #[must_use]
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
+    }
+
+    /// The exact Annotation CPN1 encoding, for Commit to publish.
+    #[must_use]
+    pub fn node_bytes(&self) -> &[u8] {
+        &self.node_bytes
     }
 
     /// What the two records add to an ARD1 closure (R15.6(6)): the CAT1 with
@@ -303,12 +339,12 @@ fn manifest<'a>(
     })
 }
 
-/// The Annotation CPN1 over the CAT1 and its plaintext length.
+/// The Annotation CPN1 over the CAT1 and its encoding.
 fn node(
     context: &CommunityAnnotationContextV1,
     manifest_digest: Hash,
     references: &[CommunityTypedInputRefV1<'_>],
-) -> Result<(CommunityNativeNodeReferenceV1, usize)> {
+) -> Result<(CommunityNativeNodeReferenceV1, Zeroizing<Vec<u8>>)> {
     CommunityNativeNodeV1::new(CommunityNativeNodeInputV1 {
         store_incarnation: context.step.store_incarnation,
         timeline: context.pass_key.timeline(),
@@ -329,5 +365,5 @@ fn node(
         provenance_digest: context.provenance_digest,
         evidence_not_after_micros: context.evidence_not_after_micros,
     })
-    .map(|node| (node.reference(), node.to_canonical_cbor().len()))
+    .map(|node| (node.reference(), node.to_canonical_cbor()))
 }

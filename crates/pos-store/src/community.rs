@@ -88,8 +88,8 @@ pub use pass_record::{
 };
 #[cfg(target_os = "linux")]
 pub use pass_seal::{
-    CommunitySealCandidateV1, CommunitySealInputV1, CommunitySealInvocationV1,
-    CommunitySealedPassV1, CommunityStagedSealV1,
+    CommunityAnnotationPlanV1, CommunitySealCandidateV1, CommunitySealInputV1,
+    CommunitySealInvocationV1, CommunitySealedPassV1, CommunityStagedSealV1,
 };
 #[cfg(target_os = "linux")]
 pub use pass_writer::{
