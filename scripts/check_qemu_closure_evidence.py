@@ -1320,7 +1320,7 @@ def check_network_case(evidence: Evidence, name: str, value: str, init: tuple[st
         silent = "" if stderr else " (empty: systemd-run printed nothing)"
         raise EvidenceError(f"the {name} PrivateNetwork= unit did not complete (status {status}); "
                             f"stderr: {stderr[:400]!r}{silent}; probe files written: {present}; "
-                            f"the explanation is in {base}/journal")
+                            f"look in {base}/journal")
     if stderr:
         raise EvidenceError(f"the {name} PrivateNetwork= unit wrote to stderr: {stderr[:400]!r}")
     if present != sorted(NETWORK_PROBE_FILES):
