@@ -244,7 +244,8 @@ fn parse_refusal(body: &Value) -> TestResult<Value> {
         .err()
         .ok_or("the body is refused")?
         .into_response();
-    Ok(problem_of(&problem)?.0["code"].clone())
+    let (body, _) = problem_of(&problem)?;
+    Ok(body["code"].clone())
 }
 
 /// ADR-140 section 6 step 2 and P26: the body is the closed
@@ -858,9 +859,11 @@ async fn a_full_store_refuses_a_fresh_request_for_good() -> TestResult {
     let directory = tempfile::tempdir()?;
     let served = served(&directory).await?;
     let body = body_of(&seed(&served).await?);
-    let mut gateway = seam(&served.gateway);
-    gateway.limits.max_events_per_timeline = 3;
-    let app = app_of(gateway);
+    let app = {
+        let mut gateway = seam(&served.gateway);
+        gateway.limits.max_events_per_timeline = 3;
+        app_of(gateway)
+    };
     let admitted = post_preview(&app, "k-1", &body).await?;
     assert_eq!(admitted.status, StatusCode::ACCEPTED, "{}", admitted.body);
     let full = post_preview(&app, "k-2", &body).await?;
