@@ -960,9 +960,9 @@ pub mod tests {
 
     use super::authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap};
     pub(crate) use super::fixture::{
-        admitted_state, admitted_state_with_salt, ddi_fixture, ddi_salt, digest, encode_manifest,
-        held_artifact, integer, materialize_state, sidecar_partitions, sign_record,
-        signed_record_digest, ImageSigning, TestResult,
+        admitted_state, admitted_state_with_arguments, ddi_fixture, ddi_salt, digest,
+        encode_manifest, held_artifact, integer, materialize_state, sidecar_partitions,
+        sign_record, signed_record_digest, ImageSigning, TestResult,
     };
     use super::*;
 
@@ -1317,12 +1317,13 @@ pub mod tests {
         partitions: &[PartitionDescriptor; 3],
         proof: &[u8],
     ) -> TestResult<InstalledSelectorState> {
-        admitted_state_with_salt(
+        admitted_state_with_arguments(
             root_image,
             executable,
             partitions,
             &ImageSigning::synthetic(proof),
             image_verity_salt(),
+            &[],
         )
     }
 
