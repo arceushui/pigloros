@@ -345,6 +345,8 @@ fn the_history_seeds_the_quote_and_the_pass_state() -> TestResult {
     );
     // R10.5: the state names T's active generation.
     assert_eq!(state.generation, receipt.generation());
+    // The state names the profile T was initialized under.
+    assert_eq!(state.profile_digest, profile.digest());
     // The graph's own additions agree with the CBQ1's `2n` maxima.
     let maxima = quote.as_input();
     assert_eq!(counters.nodes - prior.nodes, maxima.maximum_required_nodes);
@@ -848,6 +850,7 @@ fn a_second_pass_state_never_replaces_the_first() -> TestResult {
         target(),
         CommunityPassStateV1 {
             generation: staged.pass_state.generation,
+            profile_digest: staged.pass_state.profile_digest,
             head: staged.pass_state.head,
             counters: CommunitySharedCountsV1::default(),
             graph: staged.pass_state.graph,

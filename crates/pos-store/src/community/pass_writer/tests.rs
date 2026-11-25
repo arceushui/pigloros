@@ -150,7 +150,22 @@ fn domain_policy() -> CommunityHorizonPolicyV1 {
             evidence_micros: 2 * GENERATION_HORIZON,
         },
         profile_digest: hash(83),
+        roster_len: 2,
     }
+}
+
+/// Set the installed owner evidence horizon.
+fn set_evidence(
+    domain: &mut MemoryCommunityDomainV1,
+    micros: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    domain
+        .pass_horizons
+        .as_mut()
+        .ok_or("horizons")?
+        .owners
+        .evidence_micros = micros;
+    Ok(())
 }
 
 /// Set the installed recording horizon.
@@ -171,6 +186,7 @@ fn set_recording(
 fn pass_state() -> CommunityPassStateV1 {
     CommunityPassStateV1 {
         generation: GENERATION,
+        profile_digest: hash(83),
         head: hash(30),
         counters: counts(100),
         graph: CommunityGraphCountsV1 {
@@ -1626,20 +1642,13 @@ fn the_state_horizon_must_outlast_the_decision_bound() -> TestResult {
     let mut domain = domain()?;
     let bound = SAMPLE + COMMUNITY_DECISION_DEADLINE_MICROS_V1;
     // Both the call's horizons and the writer's follow the owner term.
-    let owner = |domain: &mut MemoryCommunityDomainV1, evidence: u64| {
-        domain
-            .pass_horizons
-            .as_mut()
-            .map(|policy| policy.owners.evidence_micros = evidence)
-            .ok_or("horizons")
-    };
-    owner(&mut domain, bound)?;
+    set_evidence(&mut domain, bound)?;
     let short = bound_input(bound)?;
     assert_eq!(
         domain.stage_reserve(short).err(),
         Some(Error::EvidenceExpired)
     );
-    owner(&mut domain, bound + 1)?;
+    set_evidence(&mut domain, bound + 1)?;
     assert!(domain.stage_reserve(bound_input(bound + 1)?).is_ok());
     Ok(())
 }
@@ -1689,7 +1698,7 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
     };
     // Two members in order agree with three trace rows and six targets.
     let mut two = input()?;
-    two.pass.members = vec![member(0), member(2)];
+    two.pass.members = vec![member(0), member(1)];
     two.pass.trace_rows = 3;
     two.failure_reserve = 6;
     assert!(domain.stage_reserve(two).is_ok());
@@ -1709,6 +1718,31 @@ fn the_pass_facts_must_agree_with_each_other() -> TestResult {
         with(&|call| call.pass.failure_cohort_key = call.pass.metadata_key)?,
         Some(Error::InvalidBinding)
     );
+    // No due member, even with the trace rows and `F_p` of an empty pass.
+    let mut empty = input()?;
+    empty.pass.members.clear();
+    empty.pass.trace_rows = 1;
+    empty.failure_reserve = 2;
+    assert_eq!(
+        domain.stage_reserve(empty).err(),
+        Some(Error::InvalidBinding)
+    );
+    // A member row beyond the installed roster, and a key list that is
+    // short or long for it.
+    let mut beyond = input()?;
+    beyond.pass.members = vec![member(2)];
+    assert_eq!(
+        domain.stage_reserve(beyond).err(),
+        Some(Error::InvalidBinding)
+    );
+    for keys in [1_usize, 3] {
+        let mut call = input()?;
+        call.roster_quarantine_keys = (0..keys).map(|_| hash(50)).collect();
+        assert_eq!(
+            domain.stage_reserve(call).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
     for indices in [[1, 1], [2, 1]] {
         let mut call = input()?;
         call.pass.members = vec![member(indices[0]), member(indices[1])];
@@ -1742,5 +1776,45 @@ fn a_minted_observation_stays_reusable_after_its_commit() -> TestResult {
     assert_eq!(retained.generation, GENERATION);
     assert_eq!(retained.cut.through_seq, 0);
     assert!(!state.observations.contains_key(&reference()));
+    Ok(())
+}
+
+/// T was initialized under one profile, and a Reserve naming the installed
+/// profile of another is refused (3) whatever has been reinstalled since.
+#[test]
+fn a_reserve_names_the_profile_the_timeline_was_initialized_under() -> TestResult {
+    let mut domain = domain()?;
+    domain
+        .pass_states
+        .get_mut(&id(1))
+        .ok_or("state")?
+        .profile_digest = hash(99);
+    assert_eq!(
+        domain.stage_reserve(input()?).err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+/// R10.7 5j order: a short `H_g` gives 13 before a stale generation (5), and
+/// a moved cut gives 12 before the 13.
+#[test]
+fn the_decision_bound_and_the_cut_come_before_the_generation_compare() -> TestResult {
+    let mut domain = domain()?;
+    let bound_micros = SAMPLE + COMMUNITY_DECISION_DEADLINE_MICROS_V1;
+    set_evidence(&mut domain, bound_micros)?;
+    let mut stale = bound_input(bound_micros)?;
+    stale.generation = [0x21; 16];
+    assert_eq!(
+        domain.stage_reserve(bound(stale.clone())?).err(),
+        Some(Error::EvidenceExpired)
+    );
+    if let Some(minted) = stale.minted.as_mut() {
+        minted.cut.through_seq = 1;
+    }
+    assert_eq!(
+        domain.stage_reserve(bound(stale)?).err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }
