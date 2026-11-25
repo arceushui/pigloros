@@ -772,7 +772,8 @@ type Snapshot = (
 );
 
 /// Everything a refused apply must leave alone: the pending ledger, the
-/// retained counts, the counters and the observation and scope-row terms.
+/// retained counts, the node counter and the observation and scope-row
+/// terms.
 fn snapshot(domain: &MemoryCommunityDomainV1) -> Result<Snapshot, Box<dyn std::error::Error>> {
     let state = domain.pass_states.get(&id(1)).ok_or("state")?;
     Ok((

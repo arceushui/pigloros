@@ -31,12 +31,19 @@
 //! refused at the apply only, not at stage). A Commit or Abort is refused
 //! when its entry is gone or too small, which also refuses their replay.
 //!
-//! A Reserve replayed after its reservation resolved is not refused here:
-//! it creates an entry, so it applies again. Refusing it, and the same
-//! identity under 4a's original outcome, is the planner's step 4a, which
-//! the pipeline runs first. Neither apply re-runs the budget, caps, head or
-//! counters compares; a token staged before another operation changed them
-//! is for the pipeline to discard.
+//! The writer keeps no memory of resolved identities. A replay of a
+//! resolved or pending identity is answered from its original outcome by the
+//! pipeline's step 4a discovery (the Reserve index), which runs before the
+//! planner and the writer. A Reserve that reaches the writer anyway is not
+//! refused for being a replay: it creates an entry, so it applies again. A
+//! replay normally dies at stage with `StaleFrontier`; only a reuse Reserve
+//! replayed after an Abort passes both stage compares, because an Abort
+//! leaves the head and counters as the Reserve saw them. The A4c-3 Reserve
+//! index owns the test of that case.
+//!
+//! No apply re-runs the budget, caps, head or counters compares; a token
+//! staged before another operation changed them is for the pipeline to
+//! discard.
 
 use pos_core::community_lifecycle::{
     CommunityGraphCountsV1, CommunityLifecycleErrorV1 as Error, CommunityNativeNodeReferenceV1,
