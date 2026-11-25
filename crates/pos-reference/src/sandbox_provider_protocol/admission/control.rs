@@ -1,5 +1,6 @@
 //! Selector-side SCQ1 and SRQ1 requests and the authentication of their
-//! signed SCY1 and SRY1 answers (ADR-069 R15 §3.5, N8).
+//! signed SCY1 and SRY1 answers. The SRY1 rules are ADR-069 R15 §3.5 and N8.
+//! The SCY1 comparison with an accepted SPY1 digest is an addition to them.
 
 use super::{AdmittedSandboxProvider, SandboxAdmissionError};
 use crate::sandbox_provider_protocol::{
@@ -9,15 +10,16 @@ use crate::sandbox_provider_protocol::{
     SandboxReconcileResponse,
 };
 
-/// How far the selector could check an answer against the terminal response
-/// it accepted.
+/// How far an answer was checked against the terminal response the caller
+/// supplied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalEvidenceCheck {
-    /// The selector compared the answer with its accepted terminal response
-    /// and they agree: for SRY1 the recomputed tuple digest (R15 §3.5 rule 2),
-    /// for SCY1 the bound SPY1 digest.
+    /// The caller supplied an accepted terminal response and the answer
+    /// agrees with it: for SRY1 the recomputed tuple digest equals the signed
+    /// one (R15 §3.5 rule 2), for SCY1 the bound SPY1 digest equals the
+    /// supplied one.
     Compared,
-    /// The selector holds no accepted terminal response, so only the
+    /// The caller supplied no accepted terminal response, so only the key,
     /// signature and identities were checked (R15 §3.5 rule 3).
     Unverified,
 }
@@ -129,9 +131,12 @@ impl AdmittedSandboxProvider {
     /// binds. R15 §3.5 guarantees that equality on the provider side ("also
     /// equals every SCY1 SPY1 digest"); the selector check is an addition,
     /// not a prescribed rule, and refuses with `InconsistentFields` by
-    /// analogy with SRY1. The production selector sends SCQ1 only before it
-    /// holds a terminal and passes `None`; the optional digest is kept for
-    /// the test-support guest client, which cancels after its execute.
+    /// analogy with SRY1. The production selector sends SCQ1 only when it
+    /// holds no accepted terminal (exhausted recovery, rejected evidence, a
+    /// hung-up evaluator) and always passes `None`, and it never reads
+    /// `AuthenticatedCancellation::check`. The optional digest is a
+    /// test-only surface, kept for the test-support guest client, which
+    /// cancels an attempt it has just executed.
     ///
     /// # Errors
     /// Rejects a malformed, foreign-keyed, forged, unbound or contradicting
