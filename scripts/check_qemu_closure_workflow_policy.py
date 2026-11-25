@@ -42,7 +42,7 @@ PRODUCER_SHA256 = {
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
     "scripts/qemu-kernel-cache.sh": "9fabec0f9d07827bdf60ae6ea2ca245c24637929590c2256fb14a264aef78eb9",
     "scripts/qemu-closure-evidence.sh": "7f9dc68a4fb67e20e21f8bd40cf36b4c0c0335fa4e0c6d69416194941f73c091",
-    "scripts/check_qemu_closure_evidence.py": "88c18d5c215529da18809d6bd7a108de4fc7cb88f2b10070bd7bd1dd196d710e",
+    "scripts/check_qemu_closure_evidence.py": "e3d83f967b100445a461bd8856eafd5cb27ce0e920c4e20d7bf17ae092a67f8c",
     "deploy/nixos/flake.nix": "cfd9e71e22b18412dab4e3bc4d8a10ff702dcab3284f41c542a83947bce85e69",
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
