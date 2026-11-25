@@ -1293,7 +1293,7 @@ class EvidenceTests(unittest.TestCase):
             files["guest/network/fb-1/status"] = "1\n"
             files["guest/network/fb-1/stderr"] = ""
         with self.assertRaisesRegex(checker.EvidenceError,
-                                    r"stderr: '' \(empty: systemd-run printed nothing, so the failure is in the journal\); "
+                                    r"stderr: '' \(empty: systemd-run printed nothing\); "
                                     r"probe files written: \[\]; "
                                     r"the explanation is in guest/network/fb-1/journal"):
             self.verdict(change=logged_only)
