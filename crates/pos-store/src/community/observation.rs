@@ -386,7 +386,7 @@ fn recheck_history(
 /// `(segment Timeline, first owned seq)` from the Fork chain's root down to
 /// T. A chain of more than `max_depth` Forks, which includes any cyclic
 /// ancestry, is refused.
-fn fork_segments(
+pub(super) fn fork_segments(
     events: &dyn EventStore,
     timeline: TimelineId,
     max_depth: usize,

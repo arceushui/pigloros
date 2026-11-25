@@ -52,7 +52,7 @@ use super::erasure_budget::{
 #[cfg(target_os = "linux")]
 use super::memory_domain::MemoryCommunityDomainV1;
 use super::observation::{CommunityObservationQuoteV1, CommunityObservationSourcesV1};
-use super::pass_install::community_roster_quarantine_keys_v1;
+use super::pass_install::roster_quarantine_keys;
 
 /// The domain's quarantine index read (R10.6(2)).
 ///
@@ -295,16 +295,17 @@ fn quarantine<Q: CommunityQuarantineIndexV1>(
     installation: CommunityPassInstallationV1<'_>,
     timeline: TimelineId,
 ) -> Result<(), Error> {
-    community_roster_quarantine_keys_v1(installation.profile, timeline).and_then(|keys| {
-        if keys.iter().any(|key| {
-            index
-                .quarantine_reasons(*key)
+    roster_quarantine_keys(installation.profile, timeline).try_for_each(|key| {
+        key.and_then(|key| {
+            if index
+                .quarantine_reasons(key)
                 .is_some_and(|reasons| !reasons.is_empty())
-        }) {
-            Err(Error::Quarantined)
-        } else {
-            Ok(())
-        }
+            {
+                Err(Error::Quarantined)
+            } else {
+                Ok(())
+            }
+        })
     })
 }
 
@@ -334,7 +335,7 @@ const fn deadline(request: CommunityPassRequestV1) -> u64 {
 }
 
 /// `t_r` plus the decision deadline, for a reservation sample `t_r`.
-const fn decision_bound(reservation_sample_micros: u64) -> u64 {
+pub(super) const fn decision_bound(reservation_sample_micros: u64) -> u64 {
     reservation_sample_micros.saturating_add(COMMUNITY_DECISION_DEADLINE_MICROS_V1)
 }
 
